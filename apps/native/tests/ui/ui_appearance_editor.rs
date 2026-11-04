@@ -302,8 +302,10 @@ fn editor_tab_walks_the_same_stops_as_settings(cx: &mut TestAppContext) {
     // The theme, the UI font, its text size and weight are the app's alone: no
     // session's editor shows them. The accent and background rows are a
     // session's, repo's or workspace's alone: the app's colours are its theme's.
+    // Settings' footer is its own: the editor ends on its Close instead.
     ring.retain(|stop| {
-        !stop.starts_with("appearance-ui-family")
+        *stop != "settings-cancel"
+            && !stop.starts_with("appearance-ui-family")
             && !stop.starts_with("appearance-ui-text-size")
             && !stop.starts_with("appearance-ui-weight")
             && *stop != "appearance-theme"
@@ -1118,7 +1120,7 @@ fn ctrl_comma_opens_settings_and_app_level_font_changes_persist_locally_without_
     assert_eq!(saved["terminal_font"]["size"], 13.0);
     assert_eq!(appearance_sends(&h.sent()), 0);
 
-    h.click_on("settings-footer-close");
+    h.click_on("settings-cancel");
     assert!(!h.root(|root, _| root.settings_open()));
     h.click_on("settings-open");
     assert!(

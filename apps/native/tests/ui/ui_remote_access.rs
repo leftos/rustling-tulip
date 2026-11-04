@@ -21,7 +21,7 @@ const HOST: &str = "box.tail1234.ts.net";
 const TAB: &str = "settings-tab-remote-access";
 const TOGGLE: &str = "settings-remote-toggle";
 const PORT: &str = "settings-remote-port-input";
-const APPLY: &str = "settings-remote-port-apply";
+const APPLY: &str = "settings-apply";
 const AUTOSTART: &str = "settings-remote-autostart-toggle";
 const NOT_CONNECTED: &str = "(daemon not connected)";
 
@@ -325,6 +325,7 @@ fn enable_sends_configure_remote(cx: &mut TestAppContext) {
     open_page(&mut h);
     assert_eq!(toggle(&mut h), (false, true));
     h.click_on(TOGGLE);
+    h.click_on("settings-apply");
     assert_eq!(configures(&mut h), [(true, None)]);
     assert_eq!(toggle(&mut h), (false, true), "it follows the status only");
 
@@ -345,6 +346,7 @@ fn disable_sends_configure_remote_off(cx: &mut TestAppContext) {
     h.send(status(true, 8787, serving(8787)));
     open_page(&mut h);
     h.click_on(TOGGLE);
+    h.click_on("settings-apply");
     assert_eq!(configures(&mut h), [(false, None)]);
 }
 
@@ -358,26 +360,32 @@ fn port_apply_sends_the_port_with_the_current_switch(cx: &mut TestAppContext) {
         h.root(|root, _| root.remote_port()),
         Some("8787".to_owned())
     );
-    assert!(!h.root(|root, _| root.remote_port_apply()), "unchanged");
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "unchanged"
+    );
 
     h.click_on(PORT);
     h.keys("ctrl-a backspace");
     type_text(&mut h, "9000");
-    assert!(h.root(|root, _| root.remote_port_apply()));
+    assert!(h.root(|root, _| root.settings_apply_enabled()));
     h.click_on(APPLY);
     assert_eq!(configures(&mut h), [(true, Some(9000))]);
 
     h.send(status(true, 9000, RemoteState::Starting));
-    assert!(!h.root(|root, _| root.remote_port_apply()), "applied");
+    assert!(!h.root(|root, _| root.settings_apply_enabled()), "applied");
     h.click_on(PORT);
     h.keys("ctrl-a backspace");
     type_text(&mut h, "9100");
     h.keys("enter");
-    assert_eq!(configures(&mut h), [(true, Some(9100))], "Enter applies");
+    assert_eq!(configures(&mut h), [], "Enter applies nothing");
+    h.click_on("settings-apply");
+    assert_eq!(configures(&mut h), [(true, Some(9100))], "Apply sends it");
 
+    h.click_on(PORT);
     h.keys("ctrl-a backspace");
     type_text(&mut h, "0");
-    assert!(!h.root(|root, _| root.remote_port_apply()));
+    assert!(!h.root(|root, _| root.settings_apply_enabled()));
     assert_eq!(
         h.root(|root, _| root.remote_port_error()),
         Some("Enter a port from 1 to 65535.".to_owned())
@@ -460,23 +468,35 @@ fn tab_walks_the_remote_access_controls(cx: &mut TestAppContext) {
     open_page(&mut h);
     assert_eq!(settings_focus(&mut h), Some("list"));
     let mut walk = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..5 {
         h.keys("tab");
         walk.push(settings_focus(&mut h));
     }
     assert_eq!(
         walk,
-        [Some(TOGGLE), Some(PORT), Some(AUTOSTART), Some("list")],
-        "Apply is out of the ring while the port is unchanged"
+        [
+            Some(TOGGLE),
+            Some(PORT),
+            Some(AUTOSTART),
+            Some("settings-cancel"),
+            Some("list")
+        ],
+        "OK and Apply are out of the ring while the port is unchanged"
     );
     let mut back = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..5 {
         h.keys("shift-tab");
         back.push(settings_focus(&mut h));
     }
     assert_eq!(
         back,
-        [Some(AUTOSTART), Some(PORT), Some(TOGGLE), Some("list")]
+        [
+            Some("settings-cancel"),
+            Some(AUTOSTART),
+            Some(PORT),
+            Some(TOGGLE),
+            Some("list")
+        ]
     );
 
     h.keys("tab tab");
@@ -496,9 +516,19 @@ fn tab_walks_the_remote_access_controls(cx: &mut TestAppContext) {
     h.keys("ctrl-a backspace");
     type_text(&mut h, "9000");
     h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some(APPLY), "a changed port joins");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some(AUTOSTART),
+        "the port row has no Apply of its own"
+    );
     h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some(AUTOSTART));
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-ok"),
+        "a changed port brings the footer's OK and Apply into the ring"
+    );
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some(APPLY));
 }
 
 #[gpui::test]
@@ -511,19 +541,23 @@ fn apply_that_the_echo_removes_keeps_the_keyboard(cx: &mut TestAppContext) {
     assert_eq!(settings_focus(&mut h), Some(PORT));
     h.keys("ctrl-a backspace");
     type_text(&mut h, "9000");
-    h.keys("tab");
+    h.keys("tab tab tab");
     assert_eq!(settings_focus(&mut h), Some(APPLY));
     h.keys("enter");
     assert_eq!(configures(&mut h), [(false, Some(9000))]);
     h.send(status(false, 9000, RemoteState::Off));
-    assert!(!h.root(|root, _| root.remote_port_apply()), "applied");
-    // The page's full order is the switch, the port, Apply, the login
-    // launch: the stop after Apply is the login launch.
+    assert!(!h.root(|root, _| root.settings_apply_enabled()), "applied");
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "the footer's Apply dims with nothing left to apply"
+    );
+    // The footer's order is OK, Apply, Cancel: the stop after Apply is
+    // Cancel.
     let focus = settings_focus(&mut h);
-    assert_ne!(focus, Some("list"), "the keyboard stays on the page");
+    assert_ne!(focus, Some("list"), "the keyboard stays in Settings");
     assert_eq!(
         focus,
-        Some(AUTOSTART),
+        Some("settings-cancel"),
         "the keyboard moves to the stop after Apply"
     );
 }
@@ -818,4 +852,137 @@ fn devices_section_hidden_without_the_device_block_feature(cx: &mut TestAppConte
     fold_devices(&mut h, vec![device("d1", "phone", 0, None)]);
     assert!(!painted(&mut h, DEVICES));
     assert!(!painted(&mut h, "settings-device-d1"));
+}
+
+#[gpui::test]
+fn an_invalid_port_disables_apply_and_ok(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(status(true, 8787, RemoteState::Starting));
+    open_page(&mut h);
+    h.click_on(PORT);
+    h.keys("ctrl-a backspace");
+    type_text(&mut h, "0");
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "Apply and OK are disabled"
+    );
+    assert_eq!(
+        h.root(|root, _| root.remote_port_error()),
+        Some("Enter a port from 1 to 65535.".to_owned()),
+        "the error line shows"
+    );
+    h.click_on("settings-ok");
+    assert!(h.root(|root, _| root.settings_open()), "OK does nothing");
+    assert!(configures(&mut h).is_empty(), "nothing is sent");
+}
+
+/// Settings open on the Remote access page with the port field holding
+/// `port` instead of the daemon's 8787, which serves.
+fn typed_port<'a>(cx: &'a mut TestAppContext, dir: &TestDir, port: &str) -> Harness<'a> {
+    let mut h = opened(cx, dir);
+    h.send(status(true, 8787, serving(8787)));
+    open_page(&mut h);
+    h.click_on(PORT);
+    h.keys("ctrl-a backspace");
+    type_text(&mut h, port);
+    h
+}
+
+#[gpui::test]
+fn a_cancelled_port_draft_is_gone_on_reopen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = typed_port(cx, &dir, "9999");
+    h.click_on("settings-cancel");
+    assert!(!h.root(|root, _| root.settings_open()), "Cancel closes");
+    h.keys("ctrl-,");
+    assert_eq!(shown_tab(&mut h), "General");
+    h.sent();
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "nothing is pending on reopen"
+    );
+    h.click_on("settings-ok");
+    assert_eq!(configures(&mut h), [], "OK sends no ConfigureRemote");
+}
+
+#[gpui::test]
+fn a_port_draft_survives_a_tab_switch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = typed_port(cx, &dir, "9999");
+    h.click_on("settings-tab-general");
+    h.click_on(TAB);
+    assert_eq!(
+        h.root(|root, _| root.remote_port()),
+        Some("9999".to_owned()),
+        "the typed port is still there"
+    );
+    assert!(
+        h.root(|root, _| root.settings_apply_enabled()),
+        "and pending"
+    );
+}
+
+#[gpui::test]
+fn an_untagged_error_while_ok_waits_keeps_settings_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = typed_port(cx, &dir, "9000");
+    h.click_on("settings-ok");
+    assert_eq!(configures(&mut h), [(true, Some(9000))]);
+    assert!(h.root(|root, _| root.settings_ok_waiting()));
+    h.send(DaemonMessage::Error {
+        message: "remote access could not be configured".to_owned(),
+        request_id: None,
+        code: None,
+    });
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "the refusal keeps it open"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_ok_waiting()),
+        "OK no longer waits"
+    );
+    h.send(status(true, 9000, serving(9000)));
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "a later status does not close it"
+    );
+}
+
+#[gpui::test]
+fn ok_waits_past_a_starting_remote_status_and_stays_open_on_failed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = typed_port(cx, &dir, "9000");
+    h.click_on("settings-ok");
+    assert_eq!(configures(&mut h), [(true, Some(9000))]);
+    h.send(status(true, 9000, RemoteState::Starting));
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Starting is no echo"
+    );
+    assert!(
+        h.root(|root, _| root.settings_ok_waiting()),
+        "OK still waits"
+    );
+    h.send(status(true, 9000, RemoteState::PortInUse));
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "a failed state keeps it open"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_ok_waiting()),
+        "and ends the wait"
+    );
+
+    h.click_on(PORT);
+    h.keys("ctrl-a backspace");
+    type_text(&mut h, "9100");
+    h.click_on("settings-ok");
+    assert_eq!(configures(&mut h), [(true, Some(9100))]);
+    h.send(status(true, 9100, serving(9100)));
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "a final serving state is the echo"
+    );
 }

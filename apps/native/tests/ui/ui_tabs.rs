@@ -422,6 +422,7 @@ fn count_mode(h: &mut Harness, mode: &str) {
     h.keys("ctrl-,");
     h.click_on("settings-tab-app-title");
     h.click_on(&format!("settings-count-{mode}"));
+    h.click_on("settings-apply");
     h.keys("escape");
 }
 

@@ -130,6 +130,7 @@ fn an_option_edit_on_the_chosen_host_goes_to_that_host_only(cx: &mut TestAppCont
     );
     h.click_on("settings-claude-permission-mode-accept-edits");
 
+    h.click_on("settings-apply");
     assert_eq!(
         settings_sets(&h.host(&remote()).sent()),
         [(
@@ -189,7 +190,7 @@ fn a_launch_command_edit_on_the_chosen_host_goes_to_that_host_only(cx: &mut Test
     h.click_on("settings-agent-program");
     h.keys("ctrl-a");
     type_line(&mut h, "wrapper");
-    h.keys("enter");
+    h.click_on("settings-apply");
 
     assert_eq!(
         command_sets(&h.host(&remote()).sent()),
@@ -413,7 +414,7 @@ fn the_worktrees_page_shows_and_saves_the_chosen_hosts_root(cx: &mut TestAppCont
     h.click_on("settings-worktrees-root-input");
     h.keys("ctrl-a");
     type_line(&mut h, "boxroot");
-    h.click_on("settings-worktrees-root-save");
+    h.click_on("settings-apply");
 
     assert_eq!(
         root_sets(&h.host(&remote()).sent()),
@@ -427,16 +428,19 @@ fn the_worktrees_page_shows_and_saves_the_chosen_hosts_root(cx: &mut TestAppCont
     );
 
     h.send(root_changed("C:\\other"));
-    assert_eq!(
-        h.root(|root, _| root.worktrees_save_button()),
-        ("Save", true),
-        "This PC's echo does not answer box's save"
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "This PC's echo does not answer box's save, which still waits"
     );
     h.host(&remote()).send(root_changed("boxroot"));
     assert_eq!(
-        h.root(|root, _| root.worktrees_save_button()),
-        ("Saved", false),
+        h.root(|root, _| root.worktrees_path()).as_deref(),
+        Some("boxroot"),
         "box's echo answers box's save"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "and leaves nothing pending"
     );
 }
 
@@ -611,6 +615,7 @@ fn keep_awake_follows_the_chosen_host(cx: &mut TestAppContext) {
     h.click_on(&remote_row());
     assert_eq!(mode(&mut h), Some(KeepAwakeMode::Off), "box's mode shows");
     h.click_on("settings-keep-awake-when-busy");
+    h.click_on("settings-apply");
     assert_eq!(
         keep_awake_sets(&h.host(&remote()).sent()),
         [KeepAwakeMode::WhenBusy],
@@ -645,4 +650,94 @@ fn one_host_held_draws_no_selector(cx: &mut TestAppContext) {
     let mut host = h.host(&remote());
     host.connect();
     assert!(drawn(&mut h, "settings-host-row"), "a second host adds it");
+}
+
+#[gpui::test]
+fn apply_batches_per_host_when_two_hosts_have_pending_edits(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.send(keep_awake(KeepAwakeMode::Off));
+    h.host(&remote()).send(keep_awake(KeepAwakeMode::Off));
+    h.keys("ctrl-,");
+    h.click_on("settings-keep-awake-always");
+    h.click_on(&remote_row());
+    h.click_on("settings-keep-awake-when-busy");
+    assert!(
+        keep_awake_sets(&h.sent()).is_empty(),
+        "nothing sent before Apply"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(keep_awake_sets(&h.sent()), [KeepAwakeMode::Always]);
+    assert_eq!(
+        keep_awake_sets(&h.host(&remote()).sent()),
+        [KeepAwakeMode::WhenBusy],
+        "each host gets only its own"
+    );
+}
+
+#[gpui::test]
+fn host_switch_keeps_pending_edits(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.send(keep_awake(KeepAwakeMode::Off));
+    h.host(&remote()).send(keep_awake(KeepAwakeMode::Off));
+    h.keys("ctrl-,");
+    let mode = |h: &mut Harness<'_>| h.root(|root, _| root.keep_awake_mode());
+    h.click_on("settings-keep-awake-always");
+    h.click_on(&remote_row());
+    assert_eq!(mode(&mut h), Some(KeepAwakeMode::Off), "box's own mode");
+    h.click_on("settings-keep-awake-when-busy");
+    h.click_on(LOCAL_ROW);
+    assert_eq!(
+        mode(&mut h),
+        Some(KeepAwakeMode::Always),
+        "This PC's edit kept"
+    );
+    h.click_on(&remote_row());
+    assert_eq!(
+        mode(&mut h),
+        Some(KeepAwakeMode::WhenBusy),
+        "box's edit kept"
+    );
+    assert!(h.root(|root, _| root.settings_apply_enabled()));
+}
+
+/// The Dashboard tab's cap field as the shown host's tab holds it.
+fn cap_draft(h: &mut Harness<'_>) -> Option<String> {
+    h.root(rustling_tulip_native::RootView::dashboard_cap_draft)
+}
+
+fn type_cap(h: &mut Harness<'_>, cap: &str) {
+    h.click_on("settings-dashboard-cap");
+    h.keys("ctrl-a");
+    type_line(h, cap);
+}
+
+#[gpui::test]
+fn a_dashboard_draft_survives_a_host_switch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    let summarizer = || {
+        support::summarizer_status()
+            .offers("cli", "CLI model", false, "Runs on your account.")
+            .chosen("cli")
+            .build()
+    };
+    h.send(summarizer());
+    h.host(&remote()).send(summarizer());
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-dashboard");
+    type_cap(&mut h, "3");
+    h.click_on(&remote_row());
+    assert_eq!(shown_tab(&mut h), "Dashboard");
+    type_cap(&mut h, "4");
+    h.click_on(LOCAL_ROW);
+    assert_eq!(
+        cap_draft(&mut h).as_deref(),
+        Some("3"),
+        "This PC's cap draft kept"
+    );
+    h.click_on(&remote_row());
+    assert_eq!(cap_draft(&mut h).as_deref(), Some("4"), "box's kept");
+    assert!(h.root(|root, _| root.settings_apply_enabled()));
 }

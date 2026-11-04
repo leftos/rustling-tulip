@@ -279,10 +279,22 @@ fn settings_escape_closes_from_its_fields(cx: &mut TestAppContext) {
         Some("settings-worktrees-root-input"),
         "the path field has the keyboard"
     );
+    h.keys("x");
+    h.sent();
     h.keys("escape");
     assert!(
         !h.root(|root, _| root.settings_open()),
         "Esc closes Settings from the path field"
+    );
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::SetWorktreesRoot { .. }
+                | ClientMessage::SetAgentSettings { .. }
+                | ClientMessage::SetAgentCommand { .. }
+        )),
+        "Esc sends no setting: {sent:?}"
     );
     h.keys("a");
     assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard");

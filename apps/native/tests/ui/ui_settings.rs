@@ -32,9 +32,11 @@ fn the_toast_style_row_sets_the_choice(cx: &mut TestAppContext) {
 
     h.scroll_into_view("settings-content", "settings-toast-style-app");
     h.click_on("settings-toast-style-app");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["notifications"]["toast_style"], "app");
 
     h.click_on("settings-toast-style-os");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["notifications"]["toast_style"], "os");
 }
 
@@ -56,6 +58,7 @@ fn the_finished_grace_row_sets_the_choice(cx: &mut TestAppContext) {
             "{selector} is painted"
         );
         h.click_on(selector);
+        h.click_on("settings-apply");
         assert_eq!(
             saved_ui(&dir)["notifications"]["finished_grace_secs"],
             serde_json::json!(secs)
@@ -363,10 +366,10 @@ fn settings_takes_the_dialog_frames_sizes(cx: &mut TestAppContext) {
         );
     }
     let panel = h.bounds("settings-panel");
-    let footer_close = h.bounds("settings-footer-close");
+    let footer_cancel = h.bounds("settings-cancel");
     assert!(
-        footer_close.right() < panel.right() && footer_close.bottom() < panel.bottom(),
-        "Close sits in the footer: {footer_close:?} in {panel:?}"
+        footer_cancel.right() < panel.right() && footer_cancel.bottom() < panel.bottom(),
+        "Cancel sits in the footer: {footer_cancel:?} in {panel:?}"
     );
 }
 
@@ -459,6 +462,7 @@ fn keep_awake_choice_sends_the_mode(cx: &mut TestAppContext) {
         Some(KeepAwakeMode::Off)
     );
     h.click_on("settings-keep-awake-when-busy");
+    h.click_on("settings-apply");
     let modes: Vec<KeepAwakeMode> = h
         .sent()
         .iter()
@@ -549,6 +553,7 @@ fn copy_on_select_setting_saved_and_honoured(cx: &mut TestAppContext) {
     h.keys("ctrl-,");
     h.scroll_into_view("settings-content", "settings-terminal-copy-on-selection");
     h.click_on("settings-terminal-copy-on-selection");
+    h.click_on("settings-apply");
     assert_eq!(
         saved_ui(&dir)["general"]["copy_on_select"],
         false,
@@ -601,6 +606,7 @@ fn app_title_preview_follows_toggles(cx: &mut TestAppContext) {
     assert_eq!(preview(&mut h), "Tab name");
     h.click_on("settings-title-count");
     assert_eq!(preview(&mut h), "Tab name");
+    h.click_on("settings-apply");
 
     let saved = saved_ui(&dir);
     assert_eq!(saved["title"]["show_count"], true);
@@ -737,6 +743,7 @@ fn the_badge_follows_the_title_count_choice(cx: &mut TestAppContext) {
     h.keys("ctrl-,");
     h.click_on("settings-tab-app-title");
     h.click_on("settings-count-busy");
+    h.click_on("settings-apply");
     h.advance(Duration::from_millis(400));
     assert_eq!(pill(&mut h), Some(TabBadge::Busy { busy: 2, total: 2 }));
     let busy = shown_badge(&mut h).expect("a busy badge");
@@ -744,15 +751,17 @@ fn the_badge_follows_the_title_count_choice(cx: &mut TestAppContext) {
         (busy.text.as_str(), busy.description.as_str()),
         ("2", "2 busy")
     );
-    assert_eq!(saved_ui(&dir)["title"]["count"], "busy", "saved at once");
+    assert_eq!(saved_ui(&dir)["title"]["count"], "busy", "saved on Apply");
 
     h.click_on("settings-count-idle");
+    h.click_on("settings-apply");
     h.advance(Duration::from_millis(400));
     assert_eq!(pill(&mut h), Some(TabBadge::Idle { idle: 0, total: 2 }));
     assert_eq!(shown_badge(&mut h), None, "no idle terminal: no badge");
     assert_eq!(saved_ui(&dir)["title"]["count"], "idle");
 
     h.click_on("settings-count-needs-you");
+    h.click_on("settings-apply");
     h.advance(Duration::from_millis(400));
     assert_eq!(pill(&mut h), Some(TabBadge::NeedsYou(1)));
     assert_eq!(
@@ -762,6 +771,7 @@ fn the_badge_follows_the_title_count_choice(cx: &mut TestAppContext) {
     assert_eq!(saved_ui(&dir)["title"]["count"], "needs_you");
 
     h.click_on("settings-title-count");
+    h.click_on("settings-apply");
     h.advance(Duration::from_millis(400));
     assert_eq!(
         shown_badge(&mut h),
@@ -881,6 +891,7 @@ fn leaf_density_choice_switches_the_leaves_saves_and_is_reached_by_tab(cx: &mut 
 
     h.keys("ctrl-,");
     h.click_on("settings-leaf-density-compact");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["general"]["leaf_density"], "compact");
     assert_eq!(leaf_height(&mut h), px(26.0), "one line");
     h.keys("escape");
@@ -894,13 +905,24 @@ fn leaf_density_choice_switches_the_leaves_saves_and_is_reached_by_tab(cx: &mut 
         "after the two Default view choices"
     );
     h.keys("space");
-    assert_eq!(saved_ui(&dir)["general"]["leaf_density"], "comfortable");
-    assert!(leaf_height(&mut h) > px(26.0), "two lines again");
+    assert!(
+        h.root(|root, _| root.settings_have_pending_edits()),
+        "the choice pends"
+    );
+    assert_eq!(
+        saved_ui(&dir)["general"]["leaf_density"],
+        "compact",
+        "nothing saved before Apply"
+    );
+    assert_eq!(leaf_height(&mut h), px(26.0), "the leaves wait for Apply");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-leaf-density-compact")
     );
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["general"]["leaf_density"], "comfortable");
+    assert!(leaf_height(&mut h) > px(26.0), "two lines again");
 }
 
 #[gpui::test]
@@ -910,6 +932,7 @@ fn sessions_under_repos_choice_saves_and_is_reached_by_tab(cx: &mut TestAppConte
 
     h.keys("ctrl-,");
     h.click_on("settings-sessions-under-repos-busy");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["general"]["sessions_under_repos"], "busy");
     h.keys("escape");
 
@@ -930,8 +953,10 @@ fn repo_sort_choice_saves_and_is_reached_by_tab(cx: &mut TestAppContext) {
 
     h.keys("ctrl-,");
     h.click_on("settings-repo-sort-active");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["general"]["repo_sort"], "active");
     h.click_on("settings-repo-sort-manual");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["general"]["repo_sort"], "manual");
     h.keys("escape");
 
@@ -946,6 +971,7 @@ fn repo_sort_choice_saves_and_is_reached_by_tab(cx: &mut TestAppContext) {
     h.keys("tab tab");
     assert_eq!(settings_focus(&mut h), Some("settings-repo-sort-needs-you"));
     h.keys("space");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["general"]["repo_sort"], "needs_you");
 }
 
@@ -966,13 +992,14 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     );
     h.keys("space");
     assert!(
-        h.sent().iter().any(|msg| matches!(
-            msg,
-            ClientMessage::SetKeepAwakeMode {
-                mode: KeepAwakeMode::WhenBusy
-            }
-        )),
+        h.root(|root, _| root.settings_have_pending_edits()),
         "Space presses the keep-awake choice"
+    );
+    assert!(
+        !h.sent()
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::SetKeepAwakeMode { .. })),
+        "the choice waits for Apply"
     );
 
     h.keys("tab tab tab tab tab tab tab tab tab tab tab tab");
@@ -983,13 +1010,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
          and the three Sort repos choices"
     );
     h.keys("space");
-    assert_eq!(saved_ui(&dir)["general"]["copy_on_select"], false);
     h.keys("enter");
-    assert_eq!(
-        saved_ui(&dir)["general"]["copy_on_select"],
-        true,
-        "Enter presses it too"
-    );
 
     h.keys("tab");
     assert_eq!(
@@ -998,9 +1019,17 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     );
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-general-check-now"));
+    for stop in ["settings-ok", "settings-apply", "settings-cancel"] {
+        h.keys("tab");
+        assert_eq!(
+            settings_focus(&mut h),
+            Some(stop),
+            "the footer's OK, Apply and Cancel end the ring while an edit pends"
+        );
+    }
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"), "back to the tab list");
-    h.keys("shift-tab shift-tab shift-tab");
+    h.keys("shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-terminal-copy-on-selection"),
@@ -1026,14 +1055,33 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     h.keys("tab tab tab");
     assert_eq!(settings_focus(&mut h), Some("settings-title-count"));
     h.keys("space");
-    assert_eq!(saved_ui(&dir)["title"]["show_count"], false);
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-title-product-suffix")
     );
-    h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("list"));
+    for stop in ["settings-ok", "settings-apply", "settings-cancel", "list"] {
+        h.keys("tab");
+        assert_eq!(settings_focus(&mut h), Some(stop));
+    }
+
+    h.sent();
+    h.click_on("settings-apply");
+    assert!(
+        h.sent().iter().any(|msg| matches!(
+            msg,
+            ClientMessage::SetKeepAwakeMode {
+                mode: KeepAwakeMode::WhenBusy
+            }
+        )),
+        "Apply sends the keep-awake choice Space pressed"
+    );
+    assert_eq!(
+        saved_ui(&dir)["general"]["copy_on_select"],
+        true,
+        "Space then Enter pressed copy-on-select off and on again"
+    );
+    assert_eq!(saved_ui(&dir)["title"]["show_count"], false);
 }
 
 #[gpui::test]
@@ -1052,7 +1100,8 @@ fn general_default_view_row_switches_the_open_sidebar_and_saves(cx: &mut TestApp
     assert!(h.bounds("settings-sidebar-view-repos").origin.x >= px(0.0));
 
     h.click_on("settings-sidebar-view-tabs");
-    assert_eq!(saved_ui(&dir)["sidebar_view"], "tabs", "saved at once");
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["sidebar_view"], "tabs", "saved on Apply");
     assert_eq!(
         h.root(|root, _| root.sidebar_view()),
         SidebarView::Tabs,
@@ -1061,6 +1110,12 @@ fn general_default_view_row_switches_the_open_sidebar_and_saves(cx: &mut TestApp
     assert_eq!(tags(&mut h), ["TAB", "TAB"]);
 
     h.click_on("settings-sidebar-view-repos");
+    assert_eq!(
+        h.root(|root, _| root.sidebar_view()),
+        SidebarView::Tabs,
+        "the sidebar waits for Apply"
+    );
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["sidebar_view"], "repos");
     assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Repos);
     assert!(!tags(&mut h).contains(&"TAB"));
@@ -1079,8 +1134,15 @@ fn general_tab_ring_includes_the_default_view_choices(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-sidebar-view-tabs"));
     h.keys("space");
-    assert_eq!(saved_ui(&dir)["sidebar_view"], "tabs");
-    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Tabs);
+    assert!(
+        h.root(|root, _| root.settings_have_pending_edits()),
+        "Space pends the choice"
+    );
+    assert_eq!(
+        h.root(|root, _| root.sidebar_view()),
+        SidebarView::Repos,
+        "the sidebar waits for Apply"
+    );
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
@@ -1094,7 +1156,14 @@ fn general_tab_ring_includes_the_default_view_choices(cx: &mut TestAppContext) {
         "Shift+Tab walks back"
     );
     h.keys("enter");
-    assert_eq!(saved_ui(&dir)["sidebar_view"], "repos");
+    assert!(
+        !h.root(|root, _| root.settings_have_pending_edits()),
+        "Enter presses the saved choice back"
+    );
+    h.keys("tab space");
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["sidebar_view"], "tabs");
+    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Tabs);
 }
 
 #[gpui::test]
@@ -1132,6 +1201,7 @@ fn spawn_defaults_tab_shows_choices_and_saves(cx: &mut TestAppContext) {
     }
     h.sent();
     h.click_on("settings-claude-permission-mode-accept-edits");
+    h.click_on("settings-apply");
     let accept_edits = options(&[("permission_mode", text("accept_edits"))]);
     assert_eq!(
         sent_agent_settings(&mut h),
@@ -1148,6 +1218,7 @@ fn spawn_defaults_tab_shows_choices_and_saves(cx: &mut TestAppContext) {
 
     h.click_on("settings-tab-spawn-defaults");
     h.click_on("settings-spawn-trusted");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["spawn"]["trusted"], true);
     assert!(
         !saves_spawn_key(&dir, "permission_mode"),
@@ -1204,8 +1275,9 @@ fn the_claude_page_rows_come_from_the_descriptor(cx: &mut TestAppContext) {
     }
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
-        "no other field is on the page before the daemon reports its command"
+        Some("settings-cancel"),
+        "no other field is on the page before the daemon reports its command: the footer's \
+         Cancel follows"
     );
 }
 
@@ -1220,12 +1292,13 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
-        "trusted launch is the page's only control"
+        Some("settings-cancel"),
+        "trusted launch is the page's only control: the footer's Cancel follows"
     );
 
     broadcast_claude(&mut h, options(&[("permission_mode", text("plan"))]));
     h.click_on("settings-spawn-trusted");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["spawn"]["trusted"], true);
 
     h.click_on("settings-tab-claude");
@@ -1262,6 +1335,7 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
         "a click on it sends nothing"
     );
     h.click_on("settings-claude-provider-deepseek");
+    h.click_on("settings-apply");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -1287,15 +1361,19 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
         Some("settings-claude-provider-deepseek")
     );
     h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-cancel"));
+    h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
 
     h.click_on("settings-tab-spawn-defaults");
     h.click_on("settings-spawn-trusted");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["spawn"]["trusted"], false);
     h.click_on("settings-tab-claude");
     broadcast_claude(&mut h, options(&[("permission_mode", text("plan"))]));
     h.sent();
     h.click_on("settings-claude-permission-mode-accept-edits");
+    h.click_on("settings-apply");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -1317,6 +1395,7 @@ fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
     h.sent();
     tab_to(&mut h, "settings-claude-provider-deepseek");
     h.keys("enter");
+    h.click_on("settings-apply");
     let deepseek = options(&[("provider", text("deepseek"))]);
     assert_eq!(
         sent_agent_settings(&mut h),
@@ -1330,6 +1409,7 @@ fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
     broadcast_claude(&mut h, deepseek);
     assert_eq!(provider_choice(&mut h).as_deref(), Some("DeepSeek"));
     h.click_on("settings-claude-provider-anthropic");
+    h.click_on("settings-apply");
     let anthropic = options(&[("provider", text("anthropic"))]);
     assert_eq!(
         sent_agent_settings(&mut h),
@@ -1338,6 +1418,7 @@ fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
     broadcast_claude(&mut h, anthropic);
     assert_eq!(provider_choice(&mut h).as_deref(), Some("Anthropic"));
     h.click_on("settings-claude-provider-deepseek");
+    h.click_on("settings-apply");
     let deepseek = options(&[("provider", text("deepseek"))]);
     assert_eq!(
         sent_agent_settings(&mut h),
@@ -1370,6 +1451,7 @@ fn a_settings_row_keeps_the_other_claude_settings(cx: &mut TestAppContext) {
     h.click_on("settings-tab-claude");
     h.sent();
     h.click_on("settings-claude-permission-mode-plan");
+    h.click_on("settings-apply");
     let plan = options(&[
         ("permission_mode", text("plan")),
         ("provider", text("deepseek")),
@@ -1382,6 +1464,7 @@ fn a_settings_row_keeps_the_other_claude_settings(cx: &mut TestAppContext) {
     broadcast_claude(&mut h, plan);
     assert_eq!(approval_choice(&mut h).as_deref(), Some("Plan"));
     h.click_on("settings-claude-permission-mode-cli-default");
+    h.click_on("settings-apply");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -1405,6 +1488,7 @@ fn two_quick_settings_clicks_keep_both_keys(cx: &mut TestAppContext) {
     h.click_on("settings-claude-permission-mode-plan");
     h.click_on("settings-claude-provider-deepseek");
     let plan = options(&[("permission_mode", text("plan"))]);
+    h.click_on("settings-apply");
     let both = options(&[
         ("permission_mode", text("plan")),
         ("provider", text("deepseek")),
@@ -1421,6 +1505,7 @@ fn two_quick_settings_clicks_keep_both_keys(cx: &mut TestAppContext) {
     );
     broadcast_claude(&mut h, both);
     h.click_on("settings-claude-permission-mode-default");
+    h.click_on("settings-apply");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -1517,6 +1602,7 @@ fn the_claude_rows_wait_for_agent_settings(cx: &mut TestAppContext) {
 
     broadcast_claude(&mut h, options(&[("provider", text("deepseek"))]));
     h.click_on("settings-claude-permission-mode-plan");
+    h.click_on("settings-apply");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -1542,8 +1628,8 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
-        "the page's one control is done"
+        Some("settings-cancel"),
+        "the page's one control is done: the footer's Cancel follows"
     );
 
     h.send(agent_commands("", "", None));
@@ -1565,13 +1651,12 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
     );
     h.sent();
     h.keys("space");
-    let accept_edits = options(&[("permission_mode", text("accept_edits"))]);
     assert_eq!(
-        sent_agent_settings(&mut h),
-        vec![(claude(), accept_edits.clone())]
+        approval_choice(&mut h).as_deref(),
+        Some("Accept edits"),
+        "the row shows the pending choice"
     );
-    broadcast_claude(&mut h, accept_edits);
-    assert_eq!(approval_choice(&mut h).as_deref(), Some("Accept edits"));
+    assert_eq!(sent_agent_settings(&mut h), Vec::new(), "nothing sent yet");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
@@ -1599,15 +1684,27 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
-        "Extra arguments is the page's last row"
+        Some("settings-ok"),
+        "Extra arguments is the page's last row: the footer follows"
     );
-    h.keys("shift-tab");
+    for stop in ["settings-apply", "settings-cancel", "list"] {
+        h.keys("tab");
+        assert_eq!(settings_focus(&mut h), Some(stop));
+    }
+    h.keys("shift-tab shift-tab shift-tab shift-tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-agent-args"),
         "Shift+Tab walks back"
     );
+    h.click_on("settings-apply");
+    let accept_edits = options(&[("permission_mode", text("accept_edits"))]);
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(claude(), accept_edits.clone())]
+    );
+    broadcast_claude(&mut h, accept_edits);
+    assert_eq!(approval_choice(&mut h).as_deref(), Some("Accept edits"));
 
     h.click_on("settings-tab-spawn-defaults");
     h.click_on("settings-spawn-trusted");
@@ -1778,8 +1875,8 @@ fn launch_command_rows_hidden_until_agent_commands_arrive(cx: &mut TestAppContex
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
-        "the ring holds no launch rows before the daemon reports"
+        Some("settings-cancel"),
+        "the ring holds no launch rows before the daemon reports: the footer's Cancel follows"
     );
 
     h.send(agent_commands("wrapper", "verbose", None));
@@ -1813,7 +1910,7 @@ fn launch_command_rows_disabled_without_the_feature(cx: &mut TestAppContext) {
     );
     h.click_on("settings-agent-args");
     type_line(&mut h, "verbose");
-    h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(
         launch_sets(&h.sent()),
         Vec::<(String, String)>::new(),
@@ -1823,8 +1920,20 @@ fn launch_command_rows_disabled_without_the_feature(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
-        "Tab skips the disabled launch rows"
+        Some("settings-ok"),
+        "Tab skips the disabled launch rows to the footer, whose OK takes the pending provider"
+    );
+    h.click_on("settings-apply");
+    let sent = h.sent();
+    assert_eq!(
+        settings_sets(&sent),
+        vec![(claude(), options(&[("provider", text("deepseek"))]))],
+        "Apply sends the provider"
+    );
+    assert_eq!(
+        launch_sets(&sent),
+        Vec::<(String, String)>::new(),
+        "and still no launch command"
     );
 
     h.welcome_with_features();
@@ -1832,7 +1941,7 @@ fn launch_command_rows_disabled_without_the_feature(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn enter_in_program_sends_both_drafts_trimmed(cx: &mut TestAppContext) {
+fn apply_sends_both_launch_drafts_trimmed(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
     h.click_on("settings-agent-program");
@@ -1848,17 +1957,23 @@ fn enter_in_program_sends_both_drafts_trimmed(cx: &mut TestAppContext) {
     h.keys("enter");
     assert_eq!(
         launch_sets(&h.sent()),
+        Vec::<(String, String)>::new(),
+        "Enter sends nothing"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(
+        launch_sets(&h.sent()),
         [("wrapper".to_owned(), "verbose".to_owned())]
     );
 }
 
 #[gpui::test]
-fn enter_in_args_sends_both_drafts(cx: &mut TestAppContext) {
+fn apply_sends_the_untyped_program_with_the_args(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = claude_page(cx, &dir, agent_commands("wrapper", "", None));
     h.click_on("settings-agent-args");
     type_line(&mut h, "verbose");
-    h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(
         launch_sets(&h.sent()),
         [("wrapper".to_owned(), "verbose".to_owned())],
@@ -1874,11 +1989,11 @@ fn clearing_both_rows_sends_a_blank_pair(cx: &mut TestAppContext) {
     h.keys("ctrl-a backspace");
     h.click_on("settings-agent-args");
     h.keys("ctrl-a backspace");
-    h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(
         launch_sets(&h.sent()),
         [(String::new(), String::new())],
-        "Enter on empty rows clears the command"
+        "Apply on empty rows clears the command"
     );
     h.send(agent_commands("", "", None));
     assert!(h.root(|root, _| root.launch_saved()));
@@ -1894,7 +2009,7 @@ fn saved_shows_after_the_echo(cx: &mut TestAppContext) {
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
-    h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(launch_sets(&h.sent()).len(), 1);
     assert!(
         !h.root(|root, _| root.launch_saved()),
@@ -1903,6 +2018,7 @@ fn saved_shows_after_the_echo(cx: &mut TestAppContext) {
     h.send(agent_commands("wrapper", "", None));
     assert!(h.root(|root, _| root.launch_saved()));
     assert!(drawn(&mut h, "settings-agent-saved"));
+    h.click_on("settings-agent-program");
     type_line(&mut h, "x");
     assert!(
         !h.root(|root, _| root.launch_saved()),
@@ -1916,7 +2032,7 @@ fn program_refusal_shows_under_program_and_skips_the_toast(cx: &mut TestAppConte
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
-    h.keys("enter");
+    h.click_on("settings-apply");
     let id = refuse_last_command(&mut h, PROGRAM_REFUSAL);
     assert_eq!(
         refusal(&mut h),
@@ -1942,9 +2058,10 @@ fn program_refusal_shows_under_program_and_skips_the_toast(cx: &mut TestAppConte
 fn args_refusal_shows_under_extra_arguments(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
-    h.click_on("settings-agent-args");
     for text in [UNCLOSED_QUOTE, RESERVED_FLAG, ARGS_CONTROL] {
-        h.keys("enter");
+        h.click_on("settings-agent-args");
+        type_line(&mut h, "x");
+        h.click_on("settings-apply");
         refuse_last_command(&mut h, text);
         assert_eq!(
             refusal(&mut h),
@@ -1962,9 +2079,10 @@ fn refusal_clears_on_the_next_edit(cx: &mut TestAppContext) {
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
     h.click_on("settings-agent-args");
     type_line(&mut h, "open");
-    h.keys("enter");
+    h.click_on("settings-apply");
     refuse_last_command(&mut h, UNCLOSED_QUOTE);
     assert!(refusal(&mut h).is_some());
+    h.click_on("settings-agent-args");
     type_line(&mut h, "x");
     assert_eq!(refusal(&mut h), None, "the edit clears the refusal");
 }
@@ -1975,7 +2093,7 @@ fn unrelated_error_while_pending_still_toasts(cx: &mut TestAppContext) {
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
-    h.keys("enter");
+    h.click_on("settings-apply");
     let id = last_command_id(&h.sent());
     refuse(&mut h, None, "worktree delete failed");
     assert_eq!(
@@ -1999,7 +2117,7 @@ fn reselecting_the_claude_tab_keeps_drafts_and_pending_apply(cx: &mut TestAppCon
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
-    h.keys("enter");
+    h.click_on("settings-apply");
     h.click_on("settings-agent-args");
     type_line(&mut h, "verbose");
     h.click_on("settings-tab-claude");
@@ -2025,7 +2143,7 @@ fn refusal_after_switching_tabs_shows_on_return(cx: &mut TestAppContext) {
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
-    h.keys("enter");
+    h.click_on("settings-apply");
     h.click_on("settings-tab-general");
     refuse_last_command(&mut h, PROGRAM_REFUSAL);
     assert_eq!(toast_titles(&mut h), Vec::<String>::new());
@@ -2044,7 +2162,7 @@ fn a_failed_apply_with_another_error_does_not_count_the_next_broadcast(cx: &mut 
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
-    h.keys("enter");
+    h.click_on("settings-apply");
     refuse_last_command(&mut h, "worktree delete failed");
     assert_eq!(
         toast_titles(&mut h).len(),
@@ -2139,11 +2257,14 @@ fn launch_command_drafts_are_kept_per_agent(cx: &mut TestAppContext) {
     h.click_on("settings-agent-args");
     type_line(&mut h, "verbose");
     h.sent();
-    h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(
         command_sets(&h.sent()),
-        [("test-agent".to_owned(), String::new(), "verbose".to_owned())],
-        "Apply sends the shown page's agent's command only"
+        [
+            ("claude".to_owned(), "wrapper".to_owned(), String::new()),
+            ("test-agent".to_owned(), String::new(), "verbose".to_owned())
+        ],
+        "Apply sends each page's pending command, each to its own agent"
     );
     h.click_on("settings-tab-claude");
     assert_eq!(
@@ -2207,6 +2328,7 @@ fn a_second_agents_page_lists_its_settings_fields(cx: &mut TestAppContext) {
     );
     h.sent();
     h.click_on("settings-test-sandbox");
+    h.click_on("settings-apply");
     let sandboxed = options(&[("sandbox", OptionValue::Bool(true))]);
     assert_eq!(
         sent_agent_settings(&mut h),
@@ -2245,20 +2367,20 @@ fn a_field_a_when_rule_hides_keeps_the_keyboard(cx: &mut TestAppContext) {
     );
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-test-mode-fast"),
+        Some("settings-cancel"),
         "the keyboard moves to the stop after profile in the full order: past the launch rows \
-         the daemon has not reported, round to the first"
+         the daemon has not reported and the disabled OK and Apply, to Cancel"
     );
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-test-mode-slow"),
+        Some("list"),
         "Tab walks on from there"
     );
 }
 
 #[gpui::test]
-fn a_text_setting_applies_on_enter_and_on_blur(cx: &mut TestAppContext) {
+fn a_text_row_edit_sends_nothing_until_apply(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     list_agents(&mut h, test_agent());
@@ -2274,34 +2396,45 @@ fn a_text_setting_applies_on_enter_and_on_blur(cx: &mut TestAppContext) {
         "typing alone sends nothing"
     );
     h.keys("enter");
-    let work = options(&[("profile", text("work"))]);
     assert_eq!(
         sent_agent_settings(&mut h),
-        vec![(test_agent_id(), work.clone())],
-        "Enter applies the field"
+        Vec::new(),
+        "Enter sends nothing"
     );
-    h.send(DaemonMessage::AgentSettings {
-        settings: std::collections::BTreeMap::from([(test_agent_id(), work)]),
-    });
-    type_line(&mut h, "s");
-    h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("list"));
-    assert_eq!(
-        sent_agent_settings(&mut h),
-        vec![(test_agent_id(), options(&[("profile", text("works"))]))],
-        "leaving the field applies it"
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Enter in a text row does not close Settings"
     );
-    h.click_on("settings-test-profile");
     h.keys("tab");
     assert_eq!(
         sent_agent_settings(&mut h),
         Vec::new(),
-        "leaving an unedited field sends nothing"
+        "leaving the field sends nothing"
+    );
+    h.click_on("settings-apply");
+    let work = options(&[("profile", text("work"))]);
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(test_agent_id(), work.clone())],
+        "Apply sends the field"
+    );
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Apply keeps Settings open"
+    );
+    h.send(DaemonMessage::AgentSettings {
+        settings: std::collections::BTreeMap::from([(test_agent_id(), work)]),
+    });
+    h.click_on("settings-apply");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        Vec::new(),
+        "a second Apply has nothing left to send"
     );
 }
 
 #[gpui::test]
-fn an_edited_text_setting_applies_when_settings_closes(cx: &mut TestAppContext) {
+fn closing_settings_no_longer_applies_edited_agent_text(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     list_agents(&mut h, test_agent());
@@ -2310,12 +2443,246 @@ fn an_edited_text_setting_applies_when_settings_closes(cx: &mut TestAppContext) 
     h.click_on("settings-test-profile");
     type_line(&mut h, "work");
     h.sent();
-    h.keys("escape");
+    h.click_on("settings-close");
     assert!(!h.root(|root, _| root.settings_open()));
     assert_eq!(
         sent_agent_settings(&mut h),
+        Vec::new(),
+        "closing Settings sends nothing"
+    );
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.click_on("settings-apply");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        Vec::new(),
+        "the reopened page holds the saved value, so nothing is pending"
+    );
+}
+
+/// The harness on [`opened`] with the test agent listed beside Claude and
+/// both agents' launch commands empty, Settings open on the test agent's
+/// page, nothing sent yet.
+fn two_agent_pages<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = opened(cx, dir);
+    list_agents(&mut h, test_agent());
+    h.send(DaemonMessage::AgentCommands {
+        commands: vec![
+            command_entry("claude", "", ""),
+            command_entry("test-agent", "", ""),
+        ],
+    });
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.sent();
+    h
+}
+
+#[gpui::test]
+fn apply_sends_every_pending_edit_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_agent_pages(cx, &dir);
+    h.click_on("settings-test-profile");
+    type_line(&mut h, "work");
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "verbose");
+    h.click_on("settings-tab-claude");
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    no_setting_sent(&mut h, "editing sends nothing");
+
+    h.click_on("settings-apply");
+    let sent = h.sent();
+    assert_eq!(
+        settings_sets(&sent),
         vec![(test_agent_id(), options(&[("profile", text("work"))]))],
-        "closing Settings applies the edited field as Enter would"
+        "the text row goes once"
+    );
+    assert_eq!(
+        command_sets(&sent),
+        [
+            ("claude".to_owned(), "wrapper".to_owned(), String::new()),
+            ("test-agent".to_owned(), String::new(), "verbose".to_owned())
+        ],
+        "each launch command goes once"
+    );
+    h.click_on("settings-apply");
+    no_setting_sent(
+        &mut h,
+        "a second Apply before the echoes sends nothing again",
+    );
+}
+
+#[gpui::test]
+fn apply_stays_disabled_with_nothing_pending(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_agent_pages(cx, &dir);
+    h.click_on("settings-apply");
+    h.click_on("settings-ok");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "a disabled OK does not close"
+    );
+    no_setting_sent(&mut h, "a disabled Apply sends nothing");
+
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "x");
+    h.keys("backspace");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-cancel"),
+        "Tab passes over the disabled OK and Apply"
+    );
+    h.click_on("settings-apply");
+    no_setting_sent(
+        &mut h,
+        "an edit typed back to the saved value is not pending",
+    );
+}
+
+/// Asserts the client sent no agent's Settings values and no launch
+/// command since the last look.
+fn no_setting_sent(h: &mut Harness<'_>, why: &str) {
+    let sent = h.sent();
+    assert_eq!(settings_sets(&sent), Vec::new(), "{why}");
+    assert_eq!(
+        command_sets(&sent),
+        Vec::<(String, String, String)>::new(),
+        "{why}"
+    );
+}
+
+#[gpui::test]
+fn ok_applies_then_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_agent_pages(cx, &dir);
+    h.click_on("settings-test-profile");
+    type_line(&mut h, "work");
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "verbose");
+    h.click_on("settings-ok");
+    let sent = h.sent();
+    assert_eq!(
+        settings_sets(&sent),
+        vec![(test_agent_id(), options(&[("profile", text("work"))]))]
+    );
+    assert_eq!(
+        command_sets(&sent),
+        [("test-agent".to_owned(), String::new(), "verbose".to_owned())]
+    );
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "OK waits for the daemon's echoes"
+    );
+    h.send(DaemonMessage::AgentSettings {
+        settings: [(test_agent_id(), options(&[("profile", text("work"))]))]
+            .into_iter()
+            .collect(),
+    });
+    h.send(DaemonMessage::AgentCommands {
+        commands: vec![AgentCommandEntry {
+            agent: test_agent_id(),
+            program: String::new(),
+            args: "verbose".to_owned(),
+            program_env: None,
+        }],
+    });
+    assert!(!h.root(|root, _| root.settings_open()), "OK closes");
+}
+
+#[gpui::test]
+fn cancel_discards_pending_edits_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_agent_pages(cx, &dir);
+    for close in ["settings-cancel", "settings-close"] {
+        h.click_on("settings-test-profile");
+        type_line(&mut h, "work");
+        h.click_on("settings-agent-args");
+        type_line(&mut h, "verbose");
+        h.click_on(close);
+        assert!(!h.root(|root, _| root.settings_open()), "{close} closes");
+        no_setting_sent(&mut h, &format!("{close} sends nothing"));
+
+        h.keys("ctrl-,");
+        h.click_on("settings-tab-test");
+        assert_eq!(
+            launch_fields(&mut h),
+            (Some(String::new()), Some(String::new())),
+            "{close} put the launch rows back to the saved command"
+        );
+        h.click_on("settings-apply");
+        no_setting_sent(&mut h, &format!("{close} left nothing pending"));
+    }
+}
+
+#[gpui::test]
+fn escape_closes_and_discards_pending_edits(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_agent_pages(cx, &dir);
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "verbose");
+    h.click_on("settings-test-profile");
+    type_line(&mut h, "work");
+    h.keys("escape");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "Esc in a text row closes"
+    );
+    no_setting_sent(&mut h, "Esc sends nothing");
+
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "verbose");
+    h.click_on("settings-tab-general");
+    h.keys("escape");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "Esc off a text row closes too"
+    );
+    no_setting_sent(&mut h, "nothing is sent");
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    assert_eq!(
+        launch_fields(&mut h),
+        (Some(String::new()), Some(String::new())),
+        "the drafts went with the Esc"
+    );
+}
+
+#[gpui::test]
+fn tab_ring_ends_on_ok_apply_cancel(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_agent_pages(cx, &dir);
+    tab_to(&mut h, "settings-agent-args");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-cancel"),
+        "with nothing pending the ring ends on Cancel"
+    );
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("list"));
+
+    h.keys("shift-tab shift-tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-agent-args"));
+    type_line(&mut h, "verbose");
+    for stop in ["settings-ok", "settings-apply", "settings-cancel", "list"] {
+        h.keys("tab");
+        assert_eq!(settings_focus(&mut h), Some(stop));
+    }
+    tab_to(&mut h, "settings-apply");
+    h.keys("enter");
+    assert_eq!(
+        command_sets(&h.sent()),
+        [("test-agent".to_owned(), String::new(), "verbose".to_owned())],
+        "Enter on Apply applies"
+    );
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-cancel"),
+        "Apply, disabled once nothing is pending, hands the keyboard on to Cancel"
     );
 }
 
@@ -2328,7 +2695,7 @@ fn a_refused_setting_does_not_consume_the_launch_command_apply(cx: &mut TestAppC
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
-    h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(
         launch_sets(&h.sent()),
         [("wrapper".to_owned(), String::new())]
@@ -2359,7 +2726,7 @@ fn a_refused_setting_shows_unsaved_and_is_not_resent(cx: &mut TestAppContext) {
     h.click_on("settings-test-profile");
     type_line(&mut h, "work");
     h.sent();
-    h.keys("enter");
+    h.click_on("settings-apply");
     let first = last_settings_id(&h.sent());
     refuse(&mut h, first.as_deref(), PROFILE_REFUSAL);
     assert_eq!(
@@ -2368,23 +2735,26 @@ fn a_refused_setting_shows_unsaved_and_is_not_resent(cx: &mut TestAppContext) {
         "the refusal shows where Settings errors show"
     );
 
-    h.keys("tab");
+    h.click_on("settings-apply");
     let sent = h.sent();
     assert_eq!(
         settings_sets(&sent),
         vec![(test_agent_id(), options(&[("profile", text("work"))]))],
-        "the field still holds the refused text, unsaved, so leaving it applies it again"
+        "the field still holds the refused text, unsaved, so Apply sends it again"
     );
     refuse(&mut h, last_settings_id(&sent).as_deref(), PROFILE_REFUSAL);
 
+    h.click_on("settings-test-profile");
+    h.keys("ctrl-a backspace");
     h.click_on("settings-test-sandbox");
+    h.click_on("settings-apply");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
             test_agent_id(),
             options(&[("sandbox", OptionValue::Bool(true))])
         )],
-        "a later press does not carry the refused value"
+        "once the refused text is cleared, a later press does not carry the refused value"
     );
 }
 
@@ -2398,7 +2768,7 @@ fn a_refusal_after_an_unrelated_broadcast_still_reaches_its_field(cx: &mut TestA
     h.click_on("settings-test-profile");
     type_line(&mut h, "work");
     h.sent();
-    h.keys("enter");
+    h.click_on("settings-apply");
     let refused = last_settings_id(&h.sent());
     let slow = options(&[("mode", text("slow"))]);
     h.send(DaemonMessage::AgentSettings {
@@ -2406,7 +2776,7 @@ fn a_refusal_after_an_unrelated_broadcast_still_reaches_its_field(cx: &mut TestA
     });
     refuse(&mut h, refused.as_deref(), PROFILE_REFUSAL);
 
-    h.keys("tab");
+    h.click_on("settings-apply");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -2427,6 +2797,7 @@ fn a_refusal_keeps_an_earlier_applys_pending_values(cx: &mut TestAppContext) {
     h.sent();
     h.click_on("settings-test-mode-slow");
     h.click_on("settings-test-sandbox");
+    h.click_on("settings-apply");
     let sent = h.sent();
     assert_eq!(
         settings_sets(&sent),
@@ -2442,7 +2813,7 @@ fn a_refusal_keeps_an_earlier_applys_pending_values(cx: &mut TestAppContext) {
 
     h.click_on("settings-test-profile");
     type_line(&mut h, "work");
-    h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -2468,12 +2839,12 @@ fn refusals_route_to_the_right_agents_page(cx: &mut TestAppContext) {
     h.click_on("settings-tab-test");
     h.click_on("settings-agent-args");
     type_line(&mut h, "verbose");
-    h.keys("enter");
+    h.click_on("settings-apply");
     h.click_on("settings-tab-claude");
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
     h.sent();
-    h.keys("enter");
+    h.click_on("settings-apply");
     let claude_apply = last_command_id(&h.sent());
 
     refuse(&mut h, claude_apply.as_deref(), PROGRAM_REFUSAL);
@@ -2643,29 +3014,33 @@ fn tab_from_a_text_field_follows_its_field_when_an_earlier_one_hides(cx: &mut Te
         Some("settings-agent-program"),
         "Tab leaves the focused field for the control after it"
     );
+    assert_eq!(sent_agent_settings(&mut h), Vec::new(), "Tab sends nothing");
+    h.click_on("settings-apply");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
             test_agent_id(),
             options(&[("sandbox", OptionValue::Bool(true)), ("second", text("x"))])
         )],
-        "Tab applies the focused field's own value"
+        "Apply sends the field's own value"
     );
 }
 
 #[gpui::test]
-fn typing_after_enter_survives_the_echo(cx: &mut TestAppContext) {
+fn typing_after_apply_survives_the_echo(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = claude_page(cx, &dir, agent_commands("", "", None));
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
-    h.keys("enter");
+    h.click_on("settings-apply");
+    h.click_on("settings-agent-program");
+    h.keys("end");
     type_line(&mut h, "x");
     h.send(agent_commands("wrapper", "", None));
     assert_eq!(
         launch_fields(&mut h).0.as_deref(),
         Some("wrapperx"),
-        "the echo keeps what was typed after Enter"
+        "the echo keeps what was typed after Apply"
     );
     assert!(!h.root(|root, _| root.launch_saved()));
 }
@@ -2710,7 +3085,7 @@ fn program_env_locks_the_program_row_and_names_the_variable(cx: &mut TestAppCont
         "Tab skips the read-only Program row"
     );
     type_line(&mut h, "verbose");
-    h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(
         launch_sets(&h.sent()),
         [("wrapper".to_owned(), "verbose".to_owned())],
@@ -2731,6 +3106,7 @@ fn trusted_launch_leaves_the_launch_rows_in_the_ring(cx: &mut TestAppContext) {
     h.keys("ctrl-,");
     h.click_on("settings-tab-spawn-defaults");
     h.click_on("settings-spawn-trusted");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["spawn"]["trusted"], true);
     h.click_on("settings-tab-claude");
     h.keys("tab");
@@ -2753,10 +3129,12 @@ fn trusted_launch_leaves_the_launch_rows_in_the_ring(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-agent-args"));
     h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-cancel"));
+    h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
     tab_to(&mut h, "settings-agent-program");
     type_line(&mut h, "wrapper");
-    h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(
         launch_sets(&h.sent()),
         [("wrapper".to_owned(), String::new())],
@@ -2882,7 +3260,15 @@ fn tab_walks_the_appearance_stops_and_shift_tab_walks_back(cx: &mut TestAppConte
         assert_eq!(settings_focus(&mut h), Some(stop));
     }
     h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-cancel"),
+        "the footer's Cancel ends the ring"
+    );
+    h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"), "back to the tab list");
+    h.keys("shift-tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-cancel"));
     for stop in ring.iter().rev() {
         h.keys("shift-tab");
         assert_eq!(settings_focus(&mut h), Some(*stop), "Shift+Tab walks back");
@@ -2940,10 +3326,10 @@ fn settings_footer_stays_visible_on_a_short_window(cx: &mut TestAppContext) {
     let height = 420.0;
     h.cx.simulate_resize(gpui::size(px(1000.0), px(height)));
     h.cx.run_until_parked();
-    let close = h.bounds("settings-footer-close");
+    let close = h.bounds("settings-cancel");
     assert!(
         close.bottom() <= px(height),
-        "Close ends at {:?}, below the {height}px window",
+        "Cancel ends at {:?}, below the {height}px window",
         close.bottom()
     );
     let content = h.bounds("settings-content");
@@ -3126,20 +3512,17 @@ fn ui_text_size_plus_raises_every_ui_text_and_saves(cx: &mut TestAppContext) {
 fn a_dialog_button_grows_with_the_ui_text_size(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = appearance_tab(cx, &dir);
-    let base = h.bounds("settings-footer-close").size.height;
+    let base = h.bounds("settings-cancel").size.height;
 
     h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
     assert_eq!(
-        h.bounds("settings-footer-close").size.height,
+        h.bounds("settings-cancel").size.height,
         base + px(3.0),
-        "the Close button is three pixels taller at +3"
+        "the Cancel button is three pixels taller at +3"
     );
 
     h.root_update(|root, _, cx| root.set_ui_text_size(-2, cx));
-    assert_eq!(
-        h.bounds("settings-footer-close").size.height,
-        base - px(2.0)
-    );
+    assert_eq!(h.bounds("settings-cancel").size.height, base - px(2.0));
 }
 
 #[gpui::test]
@@ -3365,12 +3748,15 @@ fn window_title_without_suffix(cx: &mut TestAppContext) {
     h.click_on("settings-tab-app-title");
     h.click_on("settings-count-busy");
     h.click_on("settings-title-product-suffix");
+    h.click_on("settings-apply");
     h.advance(Duration::from_millis(360));
     assert_eq!(title(&mut h), "work");
     h.click_on("settings-title-count");
+    h.click_on("settings-apply");
     h.advance(Duration::from_millis(360));
     assert_eq!(title(&mut h), "work");
     h.click_on("settings-title-product-suffix");
+    h.click_on("settings-apply");
     h.advance(Duration::from_millis(360));
     assert_eq!(title(&mut h), "work — rustling-tulip");
 }
@@ -3403,7 +3789,7 @@ fn a_refused_worktrees_save_stops_waiting(cx: &mut TestAppContext) {
     h.click_on("settings-worktrees-root-input");
     type_text(&mut h, "X:/nope");
     h.sent();
-    h.click_on("settings-worktrees-root-save");
+    h.click_on("settings-apply");
     assert_eq!(worktrees_root_sets(&h.sent()), [Some("X:/nope".to_owned())]);
     refuse(&mut h, None, WORKTREES_ROOT_REFUSAL);
     assert_eq!(toast_titles(&mut h).len(), 1, "the refusal still toasts");
@@ -3417,10 +3803,9 @@ fn a_refused_worktrees_save_stops_waiting(cx: &mut TestAppContext) {
         Some("X:/nope"),
         "a refused apply is not another client's change to overwrite"
     );
-    assert_eq!(
-        h.root(|root, _| root.worktrees_save_button()).0,
-        "Save",
-        "the save the daemon refused never shows Saved"
+    assert!(
+        h.root(|root, _| root.settings_apply_enabled()),
+        "the path the daemon refused is pending again"
     );
     assert_eq!(
         h.root(|root, _| root.worktrees_active_line()),
@@ -3579,10 +3964,72 @@ fn summaries_toggle_sends_set_summarizer_settings(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
     h.click_on("settings-dashboard-enabled");
+    h.click_on("settings-apply");
     let sets = summarizer_sets(&h.sent());
     assert_eq!(sets.len(), 1, "{sets:?}");
     assert!(!sets[0].enabled, "the toggle turns summaries off");
     assert_eq!(sets[0].provider, "cli", "the rest is as the daemon has it");
+}
+
+/// Whether Settings holds a pending edit, and whether OK and Apply can be
+/// pressed.
+fn apply_gate(h: &mut Harness<'_>) -> (bool, bool) {
+    h.root(|root, _| {
+        (
+            root.settings_have_pending_edits(),
+            root.settings_apply_enabled(),
+        )
+    })
+}
+
+#[gpui::test]
+fn a_pending_toggle_opens_the_apply_gate(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-notifications");
+    assert_eq!(apply_gate(&mut h), (false, false), "nothing is pending");
+    h.click_on("settings-notify-finished");
+    assert_eq!(apply_gate(&mut h), (true, true), "the toggle pends");
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["notifications"]["finished"], false);
+    assert_eq!(apply_gate(&mut h), (false, false), "Apply took it");
+}
+
+#[gpui::test]
+fn a_pending_worktrees_path_opens_the_apply_gate(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(DaemonMessage::WorktreesRootChanged {
+        root: "C:/default".to_owned(),
+        is_override: false,
+    });
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-worktrees");
+    assert_eq!(apply_gate(&mut h), (false, false), "nothing is pending");
+    h.click_on("settings-worktrees-root-input");
+    type_text(&mut h, "D:/wt");
+    assert_eq!(apply_gate(&mut h), (true, true), "the path pends");
+    h.sent();
+    h.click_on("settings-apply");
+    assert_eq!(worktrees_root_sets(&h.sent()), [Some("D:/wt".to_owned())]);
+}
+
+#[gpui::test]
+fn a_pending_dashboard_row_opens_the_apply_gate(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
+    assert_eq!(apply_gate(&mut h), (false, false), "nothing is pending");
+    h.click_on("settings-dashboard-cap");
+    h.keys("ctrl-a");
+    type_text(&mut h, "2.5");
+    assert_eq!(apply_gate(&mut h), (true, true), "the cap pends");
+    h.click_on("settings-apply");
+    let caps: Vec<f64> = summarizer_sets(&h.sent())
+        .iter()
+        .map(|settings| settings.daily_cap_usd)
+        .collect();
+    assert_eq!(caps, [2.5]);
 }
 
 #[gpui::test]
@@ -3596,6 +4043,7 @@ fn provider_choice_sends_set_summarizer_settings_and_shows_its_privacy_line(
         Some(CLI_PRIVACY)
     );
     h.click_on("settings-dashboard-provider-keyed");
+    h.click_on("settings-apply");
     let sets = summarizer_sets(&h.sent());
     assert_eq!(
         sets.iter().map(|s| s.provider.as_str()).collect::<Vec<_>>(),
@@ -3617,7 +4065,7 @@ fn deepseek_save_sends_set_summarizer_key_and_clears_the_field(cx: &mut TestAppC
     let mut h = dashboard_tab(cx, &dir, status);
     h.click_on("settings-dashboard-key-field");
     type_text(&mut h, "sk-123");
-    h.click_on("settings-dashboard-key-save");
+    h.click_on("settings-apply");
     assert_eq!(
         key_sets(&h.sent()),
         [("keyed".to_owned(), Some("sk-123".to_owned()))]
@@ -3692,6 +4140,7 @@ fn env_source_sends_the_variable_name(cx: &mut TestAppContext) {
     h.click_on("settings-dashboard-env-variable");
     type_text(&mut h, "MY_KEY");
     h.keys("enter");
+    h.click_on("settings-apply");
     let sets = summarizer_sets(&h.sent());
     assert_eq!(
         sets.iter()
@@ -3707,6 +4156,7 @@ fn env_source_sends_the_variable_name(cx: &mut TestAppContext) {
         "the daemon reads the variable"
     );
     h.click_on("settings-dashboard-key-source-stored");
+    h.click_on("settings-apply");
     assert_eq!(
         summarizer_sets(&h.sent())
             .iter()
@@ -3734,6 +4184,7 @@ fn cap_field_sends_a_valid_cap_and_refuses_a_bad_one(cx: &mut TestAppContext) {
     h.keys("ctrl-a");
     type_text(&mut h, "2.5");
     h.keys("enter");
+    h.click_on("settings-apply");
     let sent = h.sent();
     let caps: Vec<f64> = summarizer_sets(&sent)
         .iter()
@@ -3901,20 +4352,14 @@ fn an_unsaved_key_is_dropped_when_settings_closes(cx: &mut TestAppContext) {
     h.click_on("settings-dashboard-key-field");
     type_text(&mut h, "sk-unsaved");
     h.click_on("settings-tab-general");
-    assert_eq!(
-        key_draft(&mut h),
-        None,
-        "leaving the tab drops the typed key"
-    );
     h.click_on("settings-tab-dashboard");
     assert_eq!(
         key_draft(&mut h).as_deref(),
-        Some(""),
-        "and it comes back empty"
+        Some("sk-unsaved"),
+        "a tab switch keeps the typed key, pending until Apply or OK"
     );
 
     h.click_on("settings-dashboard-key-field");
-    type_text(&mut h, "sk-unsaved");
     h.keys("escape");
     assert!(
         !h.root(|root, _| root.settings_open()),
@@ -3943,7 +4388,9 @@ fn a_toggle_right_after_a_cap_change_keeps_the_new_cap(cx: &mut TestAppContext) 
     h.keys("ctrl-a");
     type_text(&mut h, "2.50");
     h.keys("enter");
+    h.click_on("settings-apply");
     h.click_on("settings-dashboard-enabled");
+    h.click_on("settings-apply");
     let sets: Vec<(bool, f64)> = summarizer_sets(&h.sent())
         .iter()
         .map(|s| (s.enabled, s.daily_cap_usd))
@@ -3989,6 +4436,7 @@ fn the_key_source_follows_the_daemon_after_env_applies(cx: &mut TestAppContext) 
     assert_eq!(shown_source(&mut h), "Environment variable");
 
     h.send(dashboard_status("keyed").build());
+    h.click_on("settings-apply");
     assert_eq!(
         shown_source(&mut h),
         "Stored key",
@@ -4022,4 +4470,241 @@ fn the_cap_field_follows_a_cap_set_elsewhere_after_a_local_edit(cx: &mut TestApp
         Some("3.00"),
         "a cap set elsewhere replaces the one this field sent"
     );
+}
+
+const COPY: &str = "settings-terminal-copy-on-selection";
+
+/// Settings open on General, This PC's keep-awake reported as Off.
+fn general_with_keep_awake<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = opened(cx, dir);
+    h.send(keep_awake_status(KeepAwakeMode::Off, false));
+    h.keys("ctrl-,");
+    h.sent();
+    h
+}
+
+/// Copy on selection as `native-ui.json` holds it; `None` before any save.
+fn copy_saved(dir: &TestDir) -> Option<bool> {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).ok()?;
+    let saved: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    saved["general"]["copy_on_select"].as_bool()
+}
+
+fn keep_awake_sends(sent: &[ClientMessage]) -> Vec<KeepAwakeMode> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetKeepAwakeMode { mode } => Some(*mode),
+            _ => None,
+        })
+        .collect()
+}
+
+fn applies(h: &mut Harness<'_>) -> bool {
+    h.root(|root, _| root.settings_apply_enabled())
+}
+
+fn press_copy(h: &mut Harness<'_>) {
+    h.scroll_into_view("settings-content", COPY);
+    h.click_on(COPY);
+}
+
+#[gpui::test]
+fn a_toggle_is_pending_until_apply(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    let before = copy_saved(&dir);
+    h.click_on("settings-keep-awake-always");
+    press_copy(&mut h);
+    assert_eq!(copy_saved(&dir), before, "no native-ui.json write");
+    assert!(keep_awake_sends(&h.sent()).is_empty(), "no message");
+    assert_eq!(
+        h.root(|root, _| root.keep_awake_mode()),
+        Some(KeepAwakeMode::Always),
+        "the pending choice is drawn"
+    );
+    assert!(applies(&mut h), "Apply and OK open");
+}
+
+#[gpui::test]
+fn a_toggle_pressed_back_is_not_pending(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    press_copy(&mut h);
+    press_copy(&mut h);
+    assert!(!applies(&mut h), "the toggle is back to its saved value");
+    h.scroll_into_view("settings-content", "settings-keep-awake-always");
+    h.click_on("settings-keep-awake-always");
+    h.click_on("settings-keep-awake-off");
+    assert!(!applies(&mut h), "the choice is back to the daemon's");
+}
+
+#[gpui::test]
+fn apply_writes_a_pending_toggle_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    let before = copy_saved(&dir).unwrap_or(false);
+    h.click_on("settings-keep-awake-always");
+    press_copy(&mut h);
+    h.click_on("settings-apply");
+    assert_eq!(copy_saved(&dir), Some(!before), "written on Apply");
+    assert_eq!(keep_awake_sends(&h.sent()), [KeepAwakeMode::Always]);
+    assert!(!applies(&mut h), "nothing is pending after Apply");
+    h.click_on("settings-apply");
+    assert!(keep_awake_sends(&h.sent()).is_empty(), "sent once");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Apply keeps Settings open"
+    );
+}
+
+#[gpui::test]
+fn ok_with_local_edits_closes_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    let before = copy_saved(&dir).unwrap_or(false);
+    press_copy(&mut h);
+    h.click_on("settings-ok");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "OK closed Settings"
+    );
+    assert_eq!(copy_saved(&dir), Some(!before));
+}
+
+#[gpui::test]
+fn ok_closes_after_every_daemon_echo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    let before = copy_saved(&dir).unwrap_or(false);
+    h.click_on("settings-keep-awake-always");
+    press_copy(&mut h);
+    h.click_on("settings-ok");
+    assert_eq!(keep_awake_sends(&h.sent()), [KeepAwakeMode::Always]);
+    assert_eq!(copy_saved(&dir), Some(!before), "the local write is made");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "OK waits for the echo"
+    );
+    assert!(h.root(|root, _| root.settings_ok_waiting()));
+    h.send(keep_awake_status(KeepAwakeMode::Always, false));
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "the echo closes it"
+    );
+}
+
+#[gpui::test]
+fn a_daemon_refusal_on_apply_keeps_the_dialog_open_and_marks_the_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    let before = copy_saved(&dir).unwrap_or(false);
+    press_copy(&mut h);
+    h.click_on("settings-tab-worktrees");
+    h.click_on("settings-worktrees-root-input");
+    type_text(&mut h, "X:/nope");
+    h.click_on("settings-ok");
+    assert_eq!(worktrees_root_sets(&h.sent()), [Some("X:/nope".to_owned())]);
+    refuse(&mut h, None, WORKTREES_ROOT_REFUSAL);
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "the refusal keeps it open"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_ok_waiting()),
+        "OK no longer waits"
+    );
+    assert_eq!(toast_titles(&mut h).len(), 1, "the refusal is shown");
+    assert_eq!(
+        h.root(|root, _| root.worktrees_path()).as_deref(),
+        Some("X:/nope"),
+        "the refused row keeps its draft"
+    );
+    assert!(applies(&mut h), "and is pending again");
+    assert_eq!(copy_saved(&dir), Some(!before), "the other row was applied");
+}
+
+#[gpui::test]
+fn ok_stays_open_when_the_host_drops_before_the_echo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    h.click_on("settings-keep-awake-always");
+    h.click_on("settings-tab-worktrees");
+    h.click_on("settings-worktrees-root-input");
+    type_text(&mut h, "X:/kept");
+    h.click_on("settings-ok");
+    let mut dropped = welcomed();
+    dropped.on_closed("the daemon went away".to_owned());
+    h.event(NetEvent::State(dropped));
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Settings stays open"
+    );
+    assert!(!h.root(|root, _| root.settings_ok_waiting()));
+    assert_eq!(
+        h.root(|root, _| root.worktrees_path()).as_deref(),
+        Some("X:/kept"),
+        "the drafts are kept"
+    );
+}
+
+#[gpui::test]
+fn an_edit_made_while_ok_waits_is_kept(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    let before = copy_saved(&dir);
+    h.click_on("settings-keep-awake-always");
+    h.click_on("settings-ok");
+    assert!(h.root(|root, _| root.settings_ok_waiting()));
+    press_copy(&mut h);
+    h.send(keep_awake_status(KeepAwakeMode::Always, false));
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "the edit made while OK waited keeps Settings open"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_ok_waiting()),
+        "the wait ends"
+    );
+    assert!(applies(&mut h), "the new edit stays pending");
+    assert_eq!(copy_saved(&dir), before, "and unsaved");
+}
+
+#[gpui::test]
+fn a_dashboard_draft_survives_a_tab_switch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
+    h.click_on("settings-dashboard-cap");
+    h.keys("ctrl-a");
+    type_text(&mut h, "3");
+    h.click_on("settings-tab-general");
+    h.click_on("settings-tab-dashboard");
+    assert_eq!(
+        h.root(rustling_tulip_native::RootView::dashboard_cap_draft)
+            .as_deref(),
+        Some("3"),
+        "the typed cap is still there"
+    );
+    assert!(applies(&mut h), "and pending");
+}
+
+#[gpui::test]
+fn a_worktrees_draft_survives_a_tab_switch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(DaemonMessage::WorktreesRootChanged {
+        root: "C:/default".to_owned(),
+        is_override: false,
+    });
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-worktrees");
+    h.click_on("settings-worktrees-root-input");
+    type_text(&mut h, "X:/kept");
+    h.click_on("settings-tab-general");
+    h.click_on("settings-tab-worktrees");
+    assert_eq!(
+        h.root(|root, _| root.worktrees_path()).as_deref(),
+        Some("X:/kept"),
+        "the typed path is still there"
+    );
+    assert!(applies(&mut h), "and pending");
 }

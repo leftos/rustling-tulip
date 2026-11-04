@@ -38,6 +38,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A remote repo's menu, Launch last, presets, Stop and the delete-worktree dialog now act on that host even when This PC has a repo or session of the same name.
 - An SSH connection that starts the background service now closes as soon as it ends, and `rustling-tulipd` output redirected to a file is no longer lost.
 
+### Changed
+
+- Settings now has OK, Apply and Cancel: your changes wait until you press OK or Apply, and Cancel or Esc discards them.
+
 ## v0.8.1-alpha
 
 ### Fixed

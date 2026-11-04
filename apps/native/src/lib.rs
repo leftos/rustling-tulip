@@ -966,6 +966,9 @@ pub struct RootView {
     /// The agent pages' launch-command and text fields, each kept per host
     /// and agent once its page was shown, while Settings is open.
     agent_tabs: settings_view::AgentTabs,
+    /// Settings' toggles and choices waiting for Apply, and what OK waits
+    /// for.
+    settings_pending: settings_view::PendingSettings,
     /// The host whose agent pages Settings shows: This PC each time
     /// Settings opens, and again once the shown host's connection closes.
     settings_host: HostKey,
@@ -1210,8 +1213,9 @@ pub struct RootView {
     /// Each host's Dashboard summarizer status, its Test and its refused
     /// cap, as the Settings Dashboard tab reads them.
     summarizer_settings: summarizer_settings::SummarizerSettingsState,
-    /// The Settings Dashboard tab's key, variable and cap fields, once shown.
-    dashboard_settings_tab: Option<settings_view::DashboardSettingsTab>,
+    /// The Settings Dashboard tab's key, variable and cap fields, kept per
+    /// host once its tab was shown, while Settings is open.
+    dashboard_settings_tabs: HashMap<HostKey, settings_view::DashboardSettingsTab>,
     /// The Manage worktrees modal, while open.
     worktrees_manager: Option<worktrees_manager::WorktreesManager>,
     /// The Manage worktrees modal's keyboard focus.
@@ -1530,6 +1534,7 @@ impl RootView {
             settings_ring_control: None,
             remote_access_tab: None,
             agent_tabs: settings_view::AgentTabs::default(),
+            settings_pending: settings_view::PendingSettings::default(),
             settings_host: HostKey::Local,
             autostart,
             window_title: String::new(),
@@ -1637,7 +1642,7 @@ impl RootView {
             cwd_workspace_scans: HashMap::new(),
             worktrees_tabs: HashMap::new(),
             summarizer_settings: summarizer_settings::SummarizerSettingsState::default(),
-            dashboard_settings_tab: None,
+            dashboard_settings_tabs: HashMap::new(),
             worktrees_manager: None,
             worktrees_focus: cx.focus_handle(),
             session_history: recover::HostHistories::default(),
@@ -4275,6 +4280,7 @@ impl RootView {
         {
             return;
         }
+        self.settings_ok_hears(host, &msg, window, cx);
         // The sidebar takes the message before the panes do, so what a
         // snapshot changed is read from the old one.
         let (moved, exit_discard, finished) = self.before_fold(host, &msg);

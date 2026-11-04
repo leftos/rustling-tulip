@@ -63,8 +63,9 @@ fn path(h: &mut Harness<'_>) -> Option<String> {
     h.root(|root, _| root.worktrees_path())
 }
 
-fn save(h: &mut Harness<'_>) -> (&'static str, bool) {
-    h.root(|root, _| root.worktrees_save_button())
+/// Whether Settings holds an edit Apply would send.
+fn save(h: &mut Harness<'_>) -> bool {
+    h.root(|root, _| root.settings_apply_enabled())
 }
 
 fn active_line(h: &mut Harness<'_>) -> String {
@@ -173,16 +174,19 @@ fn worktrees_tab_saves_override_and_shows_saved_after_echo(cx: &mut TestAppConte
         Some(""),
         "the field holds the override only"
     );
-    assert_eq!(save(&mut h), ("Save", false));
+    assert!(!save(&mut h), "nothing is pending");
     h.click_on("settings-worktrees-root-input");
     type_text(&mut h, "D:/wt");
     assert_eq!(path(&mut h).as_deref(), Some("D:/wt"));
-    assert_eq!(save(&mut h), ("Save", true));
-    h.click_on("settings-worktrees-root-save");
+    assert!(save(&mut h), "the path is pending");
+    h.click_on("settings-apply");
     assert_eq!(root_sets(&h.sent()), [Some("D:/wt".to_owned())]);
-    assert_eq!(save(&mut h).0, "Save", "not Saved before the echo");
+    assert!(
+        !save(&mut h),
+        "a sent path is not pending again before its echo"
+    );
     root_changed(&mut h, "D:/wt", true);
-    assert_eq!(save(&mut h), ("Saved", false));
+    assert!(!save(&mut h), "the echo settled the path");
     assert_eq!(active_line(&mut h), "Active: D:/wt — user override");
     assert!(h.root(|root, _| root.worktrees_reset_enabled()));
 }
@@ -198,9 +202,10 @@ fn empty_draft_saves_none(cx: &mut TestAppContext) {
     h.keys("ctrl-a backspace");
     assert_eq!(path(&mut h).as_deref(), Some(""));
     h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(root_sets(&h.sent()), [None], "Enter saves; empty clears");
     root_changed(&mut h, "C:/default", false);
-    assert_eq!(save(&mut h), ("Saved", false));
+    assert!(!save(&mut h), "the echo settled the path");
     assert_eq!(path(&mut h).as_deref(), Some(""));
 }
 
@@ -232,33 +237,38 @@ fn reset_disabled_without_override(cx: &mut TestAppContext) {
     );
     root_changed(&mut h, "D:/wt", true);
     h.click_on("settings-worktrees-root-reset");
+    h.click_on("settings-apply");
     assert_eq!(root_sets(&h.sent()), [None]);
     assert_eq!(path(&mut h).as_deref(), Some(""));
 }
 
 #[gpui::test]
-fn save_that_the_echo_disables_keeps_the_keyboard(cx: &mut TestAppContext) {
+fn apply_that_the_echo_disables_keeps_the_keyboard(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     root_changed(&mut h, "C:/default", false);
     worktrees_tab(&mut h);
     h.click_on("settings-worktrees-root-input");
     type_text(&mut h, "D:/wt");
-    h.keys("tab tab");
-    assert_eq!(settings_focus(&mut h), Some("settings-worktrees-root-save"));
+    h.keys("tab tab tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-apply"),
+        "past Browse, Manage worktrees and OK"
+    );
     h.keys("enter");
     assert_eq!(root_sets(&h.sent()), [Some("D:/wt".to_owned())]);
     root_changed(&mut h, "D:/wt", true);
-    assert_eq!(save(&mut h), ("Saved", false));
+    assert!(!save(&mut h), "the echo settled the path");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-worktrees-root-reset"),
-        "the keyboard moves to the stop after Save: the Reset the override enabled"
+        Some("settings-cancel"),
+        "the keyboard moves to the stop after the dimmed Apply: Cancel"
     );
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-worktrees-open-manager"),
+        Some("list"),
         "Tab walks on from there"
     );
 }
@@ -271,11 +281,14 @@ fn a_removed_stop_with_focus_elsewhere_moves_nothing(cx: &mut TestAppContext) {
     worktrees_tab(&mut h);
     h.click_on("settings-worktrees-root-input");
     type_text(&mut h, "D:/wt");
-    h.keys("tab tab");
-    assert_eq!(settings_focus(&mut h), Some("settings-worktrees-root-save"));
+    h.keys("tab tab tab tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-apply"));
     h.click_on("settings-worktrees-root-input");
     root_changed(&mut h, "D:/wt", true);
-    assert!(!save(&mut h).1, "the echo took Save out");
+    assert!(
+        !save(&mut h),
+        "the echo took the path out of the pending set"
+    );
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-worktrees-root-input"),
@@ -293,7 +306,7 @@ fn browse_fills_the_path_from_the_picker(cx: &mut TestAppContext) {
     h.click_on("settings-worktrees-root-browse");
     assert_eq!(h.folder_asks(), 1);
     assert_eq!(path(&mut h).as_deref(), Some("E:/trees"));
-    assert_eq!(save(&mut h), ("Save", true));
+    assert!(save(&mut h), "the path is pending");
 }
 
 #[gpui::test]
@@ -305,19 +318,21 @@ fn two_quick_saves_show_saved_only_after_the_last_echo(cx: &mut TestAppContext) 
     h.click_on("settings-worktrees-root-input");
     type_text(&mut h, "D:/one");
     h.keys("enter");
+    h.click_on("settings-apply");
     h.click_on("settings-worktrees-root-input");
     h.keys("ctrl-a backspace");
     type_text(&mut h, "D:/two");
     h.keys("enter");
+    h.click_on("settings-apply");
     assert_eq!(
         root_sets(&h.sent()),
         [Some("D:/one".to_owned()), Some("D:/two".to_owned())]
     );
     root_changed(&mut h, "D:/one", true);
-    assert_eq!(save(&mut h).0, "Save", "one save still owes its echo");
+    assert!(!save(&mut h), "one save still owes its echo");
     assert_eq!(path(&mut h).as_deref(), Some("D:/two"), "the field keeps B");
     root_changed(&mut h, "D:/two", true);
-    assert_eq!(save(&mut h), ("Saved", false));
+    assert!(!save(&mut h), "the echo settled the path");
     assert_eq!(path(&mut h).as_deref(), Some("D:/two"));
     assert_eq!(active_line(&mut h), "Active: D:/two — user override");
 }
@@ -339,10 +354,9 @@ fn another_clients_root_change_does_not_overwrite_an_edited_field(cx: &mut TestA
     type_text(&mut h, "D:/mine");
     root_changed(&mut h, "E:/other", true);
     assert_eq!(path(&mut h).as_deref(), Some("D:/mine"), "the edit stands");
-    assert_eq!(
-        save(&mut h).0,
-        "Save",
-        "no Saved for a change it did not send"
+    assert!(
+        save(&mut h),
+        "the edit stays pending over another client's change"
     );
     assert_eq!(active_line(&mut h), "Active: E:/other — user override");
     assert!(root_sets(&h.sent()).is_empty(), "nothing was sent");
@@ -709,4 +723,23 @@ fn manager_closes_on_welcome(cx: &mut TestAppContext) {
     assert!(manager_open(&mut h), "Enter reopens it");
     h.send_welcome(PROTOCOL);
     assert!(!manager_open(&mut h));
+}
+
+#[gpui::test]
+fn worktrees_reset_is_pending_until_apply(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    root_changed(&mut h, "D:/mine", true);
+    worktrees_tab(&mut h);
+    h.sent();
+    h.click_on("settings-worktrees-root-reset");
+    assert_eq!(
+        path(&mut h).as_deref(),
+        Some(""),
+        "the field shows the default"
+    );
+    assert!(root_sets(&h.sent()).is_empty(), "nothing sent before Apply");
+    assert!(save(&mut h), "the reset is pending");
+    h.click_on("settings-apply");
+    assert_eq!(root_sets(&h.sent()), [None], "Apply sends no override");
 }

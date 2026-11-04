@@ -451,10 +451,17 @@ impl RootView {
             // The Worktrees tab lives with Settings: dropping it here means
             // a picker answer arriving later finds nothing to fill.
             self.worktrees_tabs.clear();
-            self.apply_edited_texts();
+            // Closing discards every host's pending agent-page edits: the
+            // pages go, so reopening shows the saved values. Only OK or
+            // Apply sends them.
             self.agent_tabs = crate::settings_view::AgentTabs::default();
-            // The Dashboard tab holds a typed key: it goes with Settings.
-            self.dashboard_settings_tab = None;
+            // So do the pending toggles and choices, and what OK waited
+            // for: a send already made stays made.
+            self.settings_pending = crate::settings_view::PendingSettings::default();
+            // Every host's Dashboard tab holds typed drafts and a key, and
+            // the Remote access page a typed port: they go with Settings.
+            self.dashboard_settings_tabs.clear();
+            self.remote_access_tab = None;
             self.settings_control = None;
             self.focus_active_pane(window, cx);
             cx.notify();

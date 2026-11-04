@@ -337,6 +337,7 @@ fn notifications_tab_has_needs_you_and_finished_toggles(cx: &mut TestAppContext)
     }
 
     h.click_on("settings-notify-needs-you");
+    h.click_on("settings-apply");
     let saved = saved_ui(&dir);
     assert_eq!(saved["notifications"]["awaiting_input"], false);
     assert_eq!(
@@ -347,11 +348,16 @@ fn notifications_tab_has_needs_you_and_finished_toggles(cx: &mut TestAppContext)
     assert!(saved["notifications"].get("error").is_none());
 
     h.click_on("settings-notify-finished");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["notifications"]["finished"], false);
 
     h.send(attention("s2", AttentionReason::AwaitingInput));
-    assert!(h.notified().is_empty(), "the toggle took effect at once");
+    assert!(h.notified().is_empty(), "the toggle took effect on Apply");
 
+    // A press and a press back pend nothing, and put the keyboard back on
+    // the toggle that Apply took it from.
+    h.click_on("settings-notify-finished");
+    h.click_on("settings-notify-finished");
     assert_eq!(settings_focus(&mut h), Some("settings-notify-finished"));
     for stop in [
         "settings-finished-sound-field",
@@ -367,14 +373,15 @@ fn notifications_tab_has_needs_you_and_finished_toggles(cx: &mut TestAppContext)
         h.keys("tab");
         assert_eq!(settings_focus(&mut h), Some(stop), "each choice is a stop");
     }
-    h.keys("tab tab");
+    h.keys("tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-open-windows-notifications"),
-        "past the tab list, round to the link"
+        "past the footer's Cancel and the tab list, round to the link"
     );
     h.keys("tab space");
     assert_eq!(settings_focus(&mut h), Some("settings-notify-needs-you"));
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["notifications"]["awaiting_input"], true);
 }
 
@@ -398,6 +405,7 @@ fn skip_choice_is_saved(cx: &mut TestAppContext) {
         );
     }
     h.click_on("settings-notify-skip-focused");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["notifications"]["skip_when"], "focused");
 }
 
@@ -1422,6 +1430,7 @@ fn choosing_a_sound_writes_it_and_play_previews_it(cx: &mut TestAppContext) {
         NEEDS_YOU_FIELD,
         "settings-sound-option-bell_rising_fifth",
     );
+    h.click_on("settings-apply");
     assert_eq!(
         saved_ui(&dir)["notifications"]["needs_you_sound"],
         serde_json::json!({ "bundled": "bell_rising_fifth" })
@@ -1443,9 +1452,8 @@ fn the_sound_list_is_walked_by_keys(cx: &mut TestAppContext) {
     h.keys("enter");
     assert_eq!(open_list(&mut h), Some(NotifyKind::Finished));
     h.keys("down enter");
-    assert_eq!(
-        saved_ui(&dir)["notifications"]["finished_sound"],
-        serde_json::json!({ "bundled": "mallet_rising_third" }),
+    assert!(
+        h.root(|root, _| root.settings_have_pending_edits()),
         "Down moves off the chosen entry and Enter chooses"
     );
     assert_eq!(open_list(&mut h), None);
@@ -1455,10 +1463,16 @@ fn the_sound_list_is_walked_by_keys(cx: &mut TestAppContext) {
         "the field keeps the keyboard"
     );
     h.keys("space up enter");
+    assert!(
+        !h.root(|root, _| root.settings_have_pending_edits()),
+        "Space opens the list and Up moves back to the row's default, the saved sound"
+    );
+    h.keys("space down enter");
+    h.click_on("settings-apply");
     assert_eq!(
         saved_ui(&dir)["notifications"]["finished_sound"],
-        "default",
-        "Space opens the list and Up moves back to the row's default"
+        serde_json::json!({ "bundled": "mallet_rising_third" }),
+        "Apply saves the entry Down and Enter chose"
     );
 }
 
@@ -1475,12 +1489,14 @@ fn choosing_the_default_entry_writes_default(cx: &mut TestAppContext) {
         FINISHED_FIELD,
         "settings-sound-option-mallet_falling_fifth",
     );
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["notifications"]["finished_sound"], "default");
     choose_sound(
         &mut h,
         NEEDS_YOU_FIELD,
         "settings-sound-option-mallet_falling_fifth",
     );
+    h.click_on("settings-apply");
     assert_eq!(
         saved_ui(&dir)["notifications"]["needs_you_sound"],
         serde_json::json!({ "bundled": "mallet_falling_fifth" }),
@@ -1525,10 +1541,9 @@ fn a_held_key_neither_opens_nor_closes_a_sound_list(cx: &mut TestAppContext) {
         "a held Enter chooses nothing"
     );
     h.keys("enter");
-    assert_eq!(
-        saved_ui(&dir)["notifications"]["needs_you_sound"],
-        serde_json::json!({ "bundled": "mallet_falling_fifth" }),
-        "a held Down still moves, and only the press chose"
+    assert!(
+        h.root(|root, _| root.settings_have_pending_edits()),
+        "the press chose"
     );
 
     h.keys("enter");
@@ -1544,6 +1559,12 @@ fn a_held_key_neither_opens_nor_closes_a_sound_list(cx: &mut TestAppContext) {
     assert!(
         h.root(|root, _| root.settings_open()),
         "the repeat of the Esc that closed the list leaves Settings open"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        serde_json::json!({ "bundled": "mallet_falling_fifth" }),
+        "a held Down still moves, and only the press chose"
     );
 }
 
@@ -1592,10 +1613,9 @@ fn up_and_down_stop_at_the_ends_of_the_sound_list(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = on_notifications_tab(cx, &dir);
     h.keys("tab tab tab enter up up up enter");
-    assert_eq!(
-        saved_ui(&dir)["notifications"]["needs_you_sound"],
-        "off",
-        "Up stops on the first entry"
+    assert!(
+        h.bounds(&format!("{NEEDS_YOU_FIELD}-text=Off")).origin.x >= px(0.0),
+        "Up stops on the first entry, which the field shows pending"
     );
     let chosen = dir.path().join("ding.wav");
     h.set_picked_file(chosen.to_str());
@@ -1603,6 +1623,7 @@ fn up_and_down_stop_at_the_ends_of_the_sound_list(cx: &mut TestAppContext) {
     h.keys("down ".repeat(20).trim_end());
     h.keys("enter");
     h.cx.run_until_parked();
+    h.click_on("settings-apply");
     assert_eq!(
         saved_ui(&dir)["notifications"]["needs_you_sound"],
         serde_json::json!({ "custom": chosen }),
@@ -1632,6 +1653,7 @@ fn a_short_window_keeps_the_whole_sound_list_on_screen(cx: &mut TestAppContext) 
     h.set_picked_file(chosen.to_str());
     h.click_on(CUSTOM_OPTION);
     h.cx.run_until_parked();
+    h.click_on("settings-apply");
     assert_eq!(
         saved_ui(&dir)["notifications"]["needs_you_sound"],
         serde_json::json!({ "custom": chosen }),
@@ -1661,7 +1683,6 @@ fn choosing_off_default_and_custom_writes_the_sound_key(cx: &mut TestAppContext)
     let dir = TestDir::new();
     let mut h = on_notifications_tab(cx, &dir);
     choose_sound(&mut h, NEEDS_YOU_FIELD, "settings-sound-option-off");
-    assert_eq!(saved_ui(&dir)["notifications"]["needs_you_sound"], "off");
     // gpui keeps a selector's last bounds once it stops being drawn, so the
     // Tab ring says whether Play is there.
     h.keys("tab");
@@ -1670,12 +1691,15 @@ fn choosing_off_default_and_custom_writes_the_sound_key(cx: &mut TestAppContext)
         Some("settings-notify-finished"),
         "no Play to preview while the sound is off"
     );
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["notifications"]["needs_you_sound"], "off");
 
     choose_sound(
         &mut h,
         NEEDS_YOU_FIELD,
         "settings-sound-option-mallet_rising_fifth",
     );
+    h.click_on("settings-apply");
     assert_eq!(
         saved_ui(&dir)["notifications"]["needs_you_sound"],
         "default"
@@ -1684,6 +1708,7 @@ fn choosing_off_default_and_custom_writes_the_sound_key(cx: &mut TestAppContext)
     let chosen = dir.path().join("ding.wav");
     h.set_picked_file(chosen.to_str());
     choose_sound(&mut h, NEEDS_YOU_FIELD, CUSTOM_OPTION);
+    h.click_on("settings-apply");
     assert_eq!(
         h.file_filters()
             .last()
@@ -1734,7 +1759,6 @@ fn choosing_off_default_and_custom_writes_the_finished_sound_key(cx: &mut TestAp
     let dir = TestDir::new();
     let mut h = on_notifications_tab(cx, &dir);
     choose_sound(&mut h, FINISHED_FIELD, "settings-sound-option-off");
-    assert_eq!(saved_ui(&dir)["notifications"]["finished_sound"], "off");
     // gpui keeps a selector's last bounds once it stops being drawn, so the
     // Tab ring says whether Play is there.
     h.keys("tab");
@@ -1743,17 +1767,21 @@ fn choosing_off_default_and_custom_writes_the_finished_sound_key(cx: &mut TestAp
         Some("settings-finished-grace-0"),
         "no Play to preview while the sound is off, so the grace row follows"
     );
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["notifications"]["finished_sound"], "off");
 
     choose_sound(
         &mut h,
         FINISHED_FIELD,
         "settings-sound-option-mallet_falling_fifth",
     );
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["notifications"]["finished_sound"], "default");
 
     let chosen = dir.path().join("done.wav");
     h.set_picked_file(chosen.to_str());
     choose_sound(&mut h, FINISHED_FIELD, CUSTOM_OPTION);
+    h.click_on("settings-apply");
     assert_eq!(
         h.file_filters()
             .last()

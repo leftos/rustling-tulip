@@ -95,6 +95,7 @@ fn press_in_settings(h: &mut Harness<'_>, selector: &str) {
     }
     h.scroll_into_view("settings-content", selector);
     h.click_on(selector);
+    h.click_on("settings-apply");
 }
 
 fn shutdowns(h: &mut Harness<'_>) -> usize {

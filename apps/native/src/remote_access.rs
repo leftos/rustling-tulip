@@ -110,17 +110,9 @@ pub fn parse_port(text: &str) -> Result<u16, PortError> {
     }
 }
 
-/// The switch's press: the opposite of the persisted switch, the port kept.
-#[must_use]
-pub fn toggle_message(status: &RemoteStatusView) -> ClientMessage {
-    ClientMessage::ConfigureRemote {
-        enabled: !status.enabled,
-        port: None,
-    }
-}
-
-/// Apply's press: the port in `draft` with the switch as it is, only when
-/// the draft is a valid port other than the configured one.
+/// The port in `draft` with the persisted switch, only when the draft is a
+/// valid port other than the configured one: the port Settings' Apply
+/// sends.
 #[must_use]
 pub fn apply_port_message(status: &RemoteStatusView, draft: &str) -> Option<ClientMessage> {
     let port = parse_port(draft).ok()?;
@@ -186,7 +178,7 @@ mod tests {
 
     use super::{
         PortError, RemoteStatusView, address, apply_port_message, cert_line, controls_enabled,
-        parse_port, state_line, toggle_message,
+        parse_port, state_line,
     };
 
     const DAY: u64 = 86_400;
@@ -342,14 +334,6 @@ mod tests {
             ClientMessage::ConfigureRemote { enabled, port } => Some((enabled, port)),
             _ => None,
         }
-    }
-
-    #[test]
-    fn toggle_sends_the_opposite_switch_and_keeps_the_port() {
-        let off = status(false, 9000, RemoteState::Off);
-        assert_eq!(configure(Some(toggle_message(&off))), Some((true, None)));
-        let on = status(true, 9000, RemoteState::NotInstalled);
-        assert_eq!(configure(Some(toggle_message(&on))), Some((false, None)));
     }
 
     #[test]

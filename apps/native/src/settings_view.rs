@@ -24,7 +24,7 @@ use protocol::{
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
 use crate::agent_options_view::{LOCKED, UPDATE_CLIENT};
 use crate::appearance_stops::{AppearanceStop, after_lost};
-use crate::appearance_view::{Level, close_footer};
+use crate::appearance_view::Level;
 use crate::assets::SIDEBAR_CHEVRON_DOWN_ICON;
 use crate::buttons::{field_frame, focus_ring};
 use crate::combobox::list_placement;
@@ -34,7 +34,6 @@ use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::remote_access::{
     PortError, RemoteStatusView, address, apply_port_message, autostart_failure_line,
     autostart_read_failure_line, cert_line, controls_enabled, parse_port, state_line,
-    toggle_message,
 };
 use crate::scrollbar::{Scrollbar, Thumb};
 use crate::section::section;
@@ -46,7 +45,7 @@ use crate::sidebar::{
 use crate::sound::{self, BundledSound, NotifyKind, SOUND_EXTENSIONS};
 use crate::spawn_view::{
     DISABLED_OPACITY, Look, SEGMENT_RADIUS, checkbox_row, choice_button, close_button, dialog_card,
-    dialog_title_bar, field, labelled_text, muted, popup_panel, segmented,
+    dialog_footer, dialog_title_bar, field, labelled_text, muted, popup_panel, segmented,
 };
 use crate::summarizer_settings::{SummarizerStatus, TestOutcome, parse_cap};
 use crate::target::HostKey;
@@ -414,12 +413,10 @@ pub(crate) enum SettingsControl {
     },
     WorktreesPath,
     WorktreesBrowse,
-    WorktreesSave,
     WorktreesReset,
     WorktreesManage,
     RemoteToggle,
     RemotePort,
-    RemotePortApply,
     RemoteAutostart,
     AgentProgram,
     AgentArgs,
@@ -433,12 +430,24 @@ pub(crate) enum SettingsControl {
     },
     DashboardKeySource(KeySourceChoice),
     DashboardKey,
-    DashboardKeySave,
     DashboardKeyClear,
     DashboardEnvVariable,
     DashboardCap,
     DashboardTest,
+    /// The footer's OK: Apply, then close.
+    FooterOk,
+    /// The footer's Apply: sends every host's pending edits.
+    FooterApply,
+    /// The footer's Cancel: discards every pending edit and closes.
+    FooterCancel,
 }
+
+/// The footer's buttons, in the order they show and Tab reaches them.
+const FOOTER_CONTROLS: [SettingsControl; 3] = [
+    SettingsControl::FooterOk,
+    SettingsControl::FooterApply,
+    SettingsControl::FooterCancel,
+];
 
 /// Where the Dashboard tab reads the summarizer's key from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,12 +517,10 @@ impl SettingsControl {
             | Self::DashboardProvider { selector, .. } => selector,
             Self::WorktreesPath => "settings-worktrees-root-input",
             Self::WorktreesBrowse => "settings-worktrees-root-browse",
-            Self::WorktreesSave => "settings-worktrees-root-save",
             Self::WorktreesReset => "settings-worktrees-root-reset",
             Self::WorktreesManage => "settings-worktrees-open-manager",
             Self::RemoteToggle => "settings-remote-toggle",
             Self::RemotePort => "settings-remote-port-input",
-            Self::RemotePortApply => "settings-remote-port-apply",
             Self::RemoteAutostart => "settings-remote-autostart-toggle",
             Self::AgentProgram => "settings-agent-program",
             Self::AgentArgs => "settings-agent-args",
@@ -524,11 +531,13 @@ impl SettingsControl {
             }
             Self::DashboardKeySource(KeySourceChoice::Env) => "settings-dashboard-key-source-env",
             Self::DashboardKey => "settings-dashboard-key-field",
-            Self::DashboardKeySave => "settings-dashboard-key-save",
             Self::DashboardKeyClear => "settings-dashboard-key-clear",
             Self::DashboardEnvVariable => "settings-dashboard-env-variable",
             Self::DashboardCap => "settings-dashboard-cap",
             Self::DashboardTest => "settings-dashboard-test",
+            Self::FooterOk => "settings-ok",
+            Self::FooterApply => "settings-apply",
+            Self::FooterCancel => "settings-cancel",
         }
     }
 
@@ -548,10 +557,10 @@ pub(crate) struct WorktreesTab {
     focus: FocusHandle,
     /// The field's text, kept as it changes.
     draft: String,
-    /// How many Save or Reset sends still owe the daemon's echo.
+    /// How many sends of the path still owe the daemon's echo.
     awaiting: u32,
-    /// The daemon echoed the last save.
-    saved: bool,
+    /// The trimmed path the last send carried, empty for no override.
+    sent: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -577,10 +586,8 @@ enum DashboardField {
     Cap,
 }
 
-/// The Dashboard tab's key, variable and cap fields for the host Settings
-/// showed when the tab was built.
+/// One host's Dashboard tab key, variable and cap fields.
 pub(crate) struct DashboardSettingsTab {
-    host: HostKey,
     key: Entity<TextInput>,
     key_focus: FocusHandle,
     variable: Entity<TextInput>,
@@ -591,11 +598,6 @@ pub(crate) struct DashboardSettingsTab {
     key_draft: String,
     variable_draft: String,
     cap_draft: String,
-    /// Environment variable was chosen while the daemon still reads the
-    /// stored key: nothing is sent until a variable is named.
-    env_chosen: bool,
-    /// Why the cap field's text was not sent.
-    cap_problem: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -625,9 +627,6 @@ impl DashboardSettingsTab {
             self.cap.update(cx, |input, cx| input.set_text(text, cx));
         }
         let (old_variable, new_variable) = (env_variable(old), env_variable(new));
-        if new_variable.is_some() {
-            self.env_chosen = false;
-        }
         let untouched = self.variable_draft.trim().is_empty()
             || old_variable.as_deref() == Some(self.variable_draft.as_str());
         if untouched && let Some(variable) = new_variable {
@@ -1067,6 +1066,30 @@ impl RootView {
     /// described it and broadcast its values; `None` while that daemon
     /// lists no such agent.
     fn agent_page(&self, host: &HostKey, id: &AgentId) -> Option<AgentPage> {
+        let mut page = self.saved_agent_page(host, id)?;
+        for view in &mut page.fields {
+            let pending = self
+                .settings_pending
+                .host(host)
+                .iter()
+                .find_map(|value| match value {
+                    HostPending::AgentField {
+                        agent,
+                        field,
+                        value,
+                    } if agent == id && *field == view.id => Some(value.clone()),
+                    _ => None,
+                });
+            if let Some(value) = pending {
+                view.value = value;
+            }
+        }
+        Some(page)
+    }
+
+    /// The page as [`Self::agent_page`] draws it, without the toggles and
+    /// choices pending on it.
+    fn saved_agent_page(&self, host: &HostKey, id: &AgentId) -> Option<AgentPage> {
         let descriptor = descriptor_for(self.sidebar.agents(host), id)?;
         let values = self
             .mirrors_of(host)
@@ -1076,7 +1099,7 @@ impl RootView {
             id: descriptor.id.clone(),
             tag: descriptor.tag.clone(),
             label: descriptor.label.clone(),
-            fields: options.settings_fields(self.sidebar.ui_state().spawn.trusted),
+            fields: options.settings_fields(self.shown_local().trusted),
         })
     }
 
@@ -1131,9 +1154,9 @@ impl RootView {
     }
 
     /// The selector moves to `host`: the shown tab stays while `host`
-    /// offers it, else General; a shown agent or Worktrees page holds
-    /// `host`'s page state, built as selecting the tab would when `host`
-    /// has none. Every host's drafts stay.
+    /// offers it, else General; a shown agent, Worktrees or Dashboard page
+    /// holds `host`'s page state, built as selecting the tab would when
+    /// `host` has none. Every host's drafts stay.
     fn show_settings_host(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_host = host;
         self.keep_offered_tab();
@@ -1144,17 +1167,18 @@ impl RootView {
                 self.hold_agent_tab(agent, window, cx);
             }
             if self.settings_tab == SettingsTab::Worktrees {
-                self.hold_worktrees_tab(true, window, cx);
+                self.hold_worktrees_tab(window, cx);
             }
-            self.dashboard_settings_tab = (self.settings_tab == SettingsTab::Dashboard)
-                .then(|| self.new_dashboard_tab(window, cx));
+            if self.settings_tab == SettingsTab::Dashboard {
+                self.hold_dashboard_tab(window, cx);
+            }
         }
         cx.notify();
     }
 
-    /// `host`'s connection closed: a remote host's agent and Worktrees
-    /// pages and their drafts go, and the selector returns to This PC when
-    /// it showed `host`.
+    /// `host`'s connection closed: a remote host's agent, Worktrees and
+    /// Dashboard pages and their drafts go, and the selector returns to
+    /// This PC when it showed `host`.
     pub(crate) fn settings_host_closed(
         &mut self,
         host: &HostKey,
@@ -1164,6 +1188,19 @@ impl RootView {
         if *host != HostKey::Local {
             self.agent_tabs.drop_host(host);
             self.worktrees_tabs.remove(host);
+            self.dashboard_settings_tabs.remove(host);
+            self.settings_pending.take_host(host);
+        }
+        // OK no longer hears the closed host's echoes: Settings stays open,
+        // its drafts kept.
+        if self
+            .settings_pending
+            .ok_wait
+            .as_ref()
+            .is_some_and(|wait| wait.iter().any(|owed| owed.host == *host))
+        {
+            tracing::info!(?host, "settings: a host OK waited on closed; OK stays open");
+            self.settings_pending.ok_wait = None;
         }
         let shown = settings_host_after_close(&self.settings_host, host);
         if shown != self.settings_host {
@@ -1355,7 +1392,17 @@ impl RootView {
     /// reported one and the choices are locked.
     #[must_use]
     pub fn keep_awake_mode(&self) -> Option<KeepAwakeMode> {
-        self.settings_mirrors().keep_awake.map(|state| state.mode)
+        let pending = self
+            .settings_pending
+            .host(&self.settings_host)
+            .iter()
+            .find_map(|value| match value {
+                HostPending::KeepAwake(mode) => Some(*mode),
+                _ => None,
+            });
+        self.settings_mirrors()
+            .keep_awake
+            .map(|state| pending.unwrap_or(state.mode))
     }
 
     /// The keep-awake status line of the host Settings shows.
@@ -1367,7 +1414,7 @@ impl RootView {
     /// The App title tab's preview: the title for a tab named "Tab name".
     #[must_use]
     pub fn title_preview(&self) -> String {
-        let preview = compute_title(Some("Tab name"), &self.sidebar.ui_state().title);
+        let preview = compute_title(Some("Tab name"), &self.shown_local().title);
         if preview.is_empty() {
             "(empty)".to_owned()
         } else {
@@ -1392,9 +1439,22 @@ impl RootView {
             .map(AppearanceStop::selector)
     }
 
-    /// The shown tab's controls Tab reaches, in order; a disabled one is
-    /// left out.
+    /// The shown tab's controls Tab reaches, in order, then the footer's
+    /// buttons; a disabled one is left out.
     fn settings_controls(&self, cx: &App) -> Vec<SettingsControl> {
+        let applies = self.settings_apply_enabled();
+        let mut controls = self.tab_controls(cx);
+        controls.extend(
+            FOOTER_CONTROLS
+                .into_iter()
+                .filter(|control| applies || *control == SettingsControl::FooterCancel),
+        );
+        controls
+    }
+
+    /// The shown tab's own controls Tab reaches, in order; a disabled one
+    /// is left out.
+    fn tab_controls(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
             SettingsTab::General => general_controls(self.settings_mirrors().keep_awake.is_some()),
             SettingsTab::AppTitle => COUNT_MODE_CHOICES
@@ -1410,9 +1470,6 @@ impl RootView {
                 let mut controls = vec![SettingsControl::WorktreesPath];
                 if self.worktrees_browses() {
                     controls.push(SettingsControl::WorktreesBrowse);
-                }
-                if self.worktrees_save_enabled() {
-                    controls.push(SettingsControl::WorktreesSave);
                 }
                 if self.worktrees_override().is_some() {
                     controls.push(SettingsControl::WorktreesReset);
@@ -1431,14 +1488,21 @@ impl RootView {
         }
     }
 
-    /// The shown tab's stops in the order Tab walks them, each one there
-    /// whether the ring holds it now or not.
+    /// The shown tab's stops in the order Tab walks them, then the
+    /// footer's, each one there whether the ring holds it now or not.
     fn settings_stop_order(&self, cx: &App) -> Vec<SettingsControl> {
+        let mut order = self.tab_stop_order(cx);
+        order.extend(FOOTER_CONTROLS);
+        order
+    }
+
+    /// The shown tab's own stops in the order Tab walks them.
+    fn tab_stop_order(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
             SettingsTab::General => general_controls(true),
             SettingsTab::Dashboard => self.dashboard_controls(true),
             SettingsTab::AppTitle | SettingsTab::Notifications | SettingsTab::SpawnDefaults => {
-                self.settings_controls(cx)
+                self.tab_controls(cx)
             }
             SettingsTab::Agent(_) => {
                 let Some(agent) = self.settings_tab.agent() else {
@@ -1449,7 +1513,7 @@ impl RootView {
                 };
                 let options =
                     AgentOptions::new(descriptor.clone(), self.agent_settings().get(&agent));
-                let trusted = self.sidebar.ui_state().spawn.trusted;
+                let trusted = self.shown_local().trusted;
                 // The indices are places among every field, not among those
                 // shown: only the selectors are compared with the ring.
                 options
@@ -1463,14 +1527,12 @@ impl RootView {
             SettingsTab::Worktrees => vec![
                 SettingsControl::WorktreesPath,
                 SettingsControl::WorktreesBrowse,
-                SettingsControl::WorktreesSave,
                 SettingsControl::WorktreesReset,
                 SettingsControl::WorktreesManage,
             ],
             SettingsTab::RemoteAccess => vec![
                 SettingsControl::RemoteToggle,
                 SettingsControl::RemotePort,
-                SettingsControl::RemotePortApply,
                 SettingsControl::RemoteAutostart,
             ],
             SettingsTab::Appearance => self
@@ -1673,16 +1735,15 @@ impl RootView {
             (&program, LaunchCommandRow::Program),
             (&args, LaunchCommandRow::Args),
         ] {
-            let submitter = (host.clone(), agent.clone());
+            // Enter applies nothing: the rows wait for Apply or OK. Esc is
+            // Cancel.
             subscriptions.push(cx.subscribe_in(
                 input,
                 window,
-                move |this, _, event: &TextInputEvent, window, cx| match event {
-                    TextInputEvent::Submit => {
-                        this.apply_launch_command(&submitter.0, &submitter.1);
-                        cx.notify();
+                |this, _, event: &TextInputEvent, window, cx| {
+                    if matches!(event, TextInputEvent::Cancel) {
+                        this.close_appearance_editor(window, cx);
                     }
-                    TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
                 },
             ));
             let editor = (host.clone(), agent.clone());
@@ -1756,11 +1817,10 @@ impl RootView {
             .collect()
     }
 
-    /// Enter in, or leaving, the input of `host`'s agent `agent`'s text
-    /// field `field`: an edited value is sent to `host` as the field's
-    /// Settings value, an empty one as no value. Nothing is sent for a
-    /// field that is locked or hidden, or while the agent's rows are
-    /// disabled.
+    /// Apply reaching `host`'s agent `agent`'s pending text field `field`:
+    /// an edited value is sent to `host` as the field's Settings value, an
+    /// empty one as no value. Nothing is sent for a field that is locked
+    /// or hidden, or while the agent's rows are disabled.
     fn apply_setting_text(&mut self, host: &HostKey, agent: &AgentId, field: &str) {
         let Some(setting) = self
             .agent_tabs
@@ -1792,39 +1852,311 @@ impl RootView {
         self.set_agent_setting(host, agent, field, value, true);
     }
 
-    /// Tab leaving the field with id `field` on the shown agent page
-    /// applies it, as any other way of leaving the input does.
-    fn leave_agent_text(&mut self, field: &str) {
-        if let Some(agent) = self.settings_tab.agent() {
-            let host = self.settings_host.clone();
-            self.apply_setting_text(&host, &agent, field);
+    /// `host`'s pending edits on its agent pages, in the order Apply sends
+    /// them: each page's text fields, then its launch command, page by
+    /// page. A text field is pending while it takes a value now and its
+    /// edited draft differs from the value its page shows; the launch
+    /// command while its rows take input and a draft differs from the
+    /// daemon's command, unless that is the very command an apply still
+    /// waiting sent.
+    fn host_pending_edits(&self, host: &HostKey) -> Vec<PendingEdit> {
+        let mut pending = Vec::new();
+        let Some(tabs) = self.agent_tabs.of(host) else {
+            return pending;
+        };
+        for (agent, tab) in &tabs.tabs {
+            pending.extend(self.text_pending_rows(host, agent, tab));
+            if self.launch_pending(host, agent, tab) {
+                pending.push(PendingEdit {
+                    row: PendingRow::Launch {
+                        agent: agent.clone(),
+                    },
+                    valid: true,
+                });
+            }
         }
+        pending
     }
 
-    /// Settings closing: every text field the user edited, on any host's
-    /// pages, is applied to its host, as Enter in it would apply it.
-    pub(crate) fn apply_edited_texts(&mut self) {
-        let edited: Vec<(HostKey, AgentId, String)> = self
-            .agent_tabs
-            .all()
-            .flat_map(|(host, tabs)| {
-                tabs.tabs.iter().flat_map(move |(agent, tab)| {
-                    tab.texts
-                        .iter()
-                        .filter(|setting| setting.edited)
-                        .map(move |setting| (host.clone(), agent.clone(), setting.field.clone()))
-                })
+    /// `host`'s agent `agent`'s pending text fields, in the page's order:
+    /// none while the agent's rows are disabled.
+    fn text_pending_rows(
+        &self,
+        host: &HostKey,
+        agent: &AgentId,
+        tab: &AgentTab,
+    ) -> Vec<PendingEdit> {
+        if !self.agent_rows_live(host, agent) {
+            return Vec::new();
+        }
+        let Some(page) = self.agent_page(host, agent) else {
+            return Vec::new();
+        };
+        tab.texts
+            .iter()
+            .filter(|setting| {
+                page.fields
+                    .iter()
+                    .find(|view| view.id == setting.field)
+                    .is_some_and(|view| {
+                        !view.disabled
+                            && text_pending(
+                                setting.edited,
+                                &setting.draft,
+                                &setting_text(&view.value),
+                            )
+                    })
             })
-            .collect();
-        for (host, agent, field) in edited {
-            self.apply_setting_text(&host, &agent, &field);
+            .map(|setting| PendingEdit {
+                row: PendingRow::Text {
+                    agent: agent.clone(),
+                    field: setting.field.clone(),
+                },
+                valid: true,
+            })
+            .collect()
+    }
+
+    /// Whether `host`'s agent `agent`'s launch rows hold an edit Apply
+    /// would send.
+    fn launch_pending(&self, host: &HostKey, agent: &AgentId, tab: &AgentTab) -> bool {
+        if !self.launch_rows_live(host, agent) {
+            return false;
+        }
+        let Some(stored) = self.agent_command(host, agent) else {
+            return false;
+        };
+        let (program, args) = (tab.program_draft.trim(), tab.args_draft.trim());
+        let in_flight = tab.awaiting > 0
+            && tab.sent.as_ref().is_some_and(|(sent_program, sent_args)| {
+                sent_program == program && sent_args == args
+            });
+        (program != stored.program || args != stored.args) && !in_flight
+    }
+
+    /// `host`'s every pending edit: its agent pages' rows, its toggles and
+    /// choices, its Worktrees path, This PC's remote access and settings,
+    /// and its Dashboard rows.
+    fn all_host_pending_edits(&self, host: &HostKey) -> Vec<PendingEdit> {
+        let mut pending = self.host_pending_edits(host);
+        let toggle = PendingEdit {
+            row: PendingRow::Toggle,
+            valid: true,
+        };
+        let daemon_toggles = self
+            .settings_pending
+            .host(host)
+            .iter()
+            .filter(|value| {
+                matches!(
+                    value,
+                    HostPending::KeepAwake(_)
+                        | HostPending::AgentField { .. }
+                        | HostPending::RemoteEnabled(_)
+                )
+            })
+            .count();
+        pending.extend(std::iter::repeat_n(toggle.clone(), daemon_toggles));
+        if self.worktrees_pending(host) {
+            pending.push(PendingEdit {
+                row: PendingRow::WorktreesRoot,
+                valid: true,
+            });
+        }
+        if *host == HostKey::Local {
+            if let Some(valid) = self.remote_port_pending() {
+                pending.push(PendingEdit {
+                    row: PendingRow::RemotePort,
+                    valid,
+                });
+            }
+            let local = self.settings_pending.local.len();
+            pending.extend(std::iter::repeat_n(toggle, local));
+        }
+        pending.extend(self.dashboard_pending_rows(host));
+        pending
+    }
+
+    /// Every host's pending edits, hosts without any left out.
+    fn pending_edits(&self) -> HashMap<HostKey, Vec<PendingEdit>> {
+        let mut hosts: Vec<HostKey> = vec![HostKey::Local];
+        hosts.extend(self.agent_tabs.all().map(|(host, _)| host.clone()));
+        hosts.extend(self.worktrees_tabs.keys().cloned());
+        hosts.extend(self.settings_pending.hosts.keys().cloned());
+        hosts.extend(self.dashboard_settings_tabs.keys().cloned());
+        hosts
+            .into_iter()
+            .map(|host| {
+                let edits = self.all_host_pending_edits(&host);
+                (host, edits)
+            })
+            .filter(|(_, edits)| !edits.is_empty())
+            .collect()
+    }
+
+    /// Whether any host holds an edit Apply would send.
+    #[must_use]
+    pub fn settings_have_pending_edits(&self) -> bool {
+        !self.pending_edits().is_empty()
+    }
+
+    /// Whether Settings' OK and Apply can be pressed, as [`apply_enabled`]
+    /// says over every host's pending edits.
+    #[must_use]
+    pub fn settings_apply_enabled(&self) -> bool {
+        self.settings_open() && apply_enabled(&self.pending_edits())
+    }
+
+    /// Apply: every host's pending edits are sent to that host, one message
+    /// per pending row (a host's remote access, and its Dashboard rows, as
+    /// one message each), and This PC's pending settings are saved, while
+    /// [`apply_enabled`] says so; nothing otherwise. Returns the echoes the
+    /// sends owe, `None` when nothing was applied.
+    fn apply_pending_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<OwedEcho>> {
+        let pending = self.pending_edits();
+        if !apply_enabled(&pending) {
+            return None;
+        }
+        self.settings_pending.log = Some(Vec::new());
+        for (host, edits) in pending {
+            self.apply_host_edits(&host, &edits, cx);
+        }
+        for value in std::mem::take(&mut self.settings_pending.local) {
+            self.commit_local(value, window, cx);
+        }
+        cx.notify();
+        self.settings_pending.log.take()
+    }
+
+    /// Apply reaching `host`, whose pending rows are `edits`: its agent
+    /// pages' rows, its held toggles and choices, its Worktrees path, This
+    /// PC's remote access, and its Dashboard rows, each sent.
+    fn apply_host_edits(&mut self, host: &HostKey, edits: &[PendingEdit], cx: &mut Context<Self>) {
+        for edit in edits {
+            match &edit.row {
+                PendingRow::Text { agent, field } => self.apply_setting_text(host, agent, field),
+                PendingRow::Launch { agent } => self.apply_launch_command(host, agent),
+                _ => {}
+            }
+        }
+        let (remote, dashboard) = self.apply_held_settings(host);
+        self.save_worktrees_root(host);
+        if *host == HostKey::Local {
+            self.apply_remote_access(remote);
+        }
+        self.apply_dashboard(host, dashboard, edits, cx);
+    }
+
+    /// `host`'s held keep-awake mode and agent toggles, sent; returns its
+    /// held remote access switch and Dashboard values, which go out in one
+    /// message each.
+    fn apply_held_settings(&mut self, host: &HostKey) -> (Option<bool>, Vec<HostPending>) {
+        let mut remote = None;
+        let mut dashboard = Vec::new();
+        for value in self.settings_pending.take_host(host) {
+            match value {
+                HostPending::KeepAwake(mode) => {
+                    tracing::info!(?host, ?mode, "settings: applying the keep-awake mode");
+                    self.send_setting(host, ClientMessage::SetKeepAwakeMode { mode });
+                }
+                HostPending::AgentField {
+                    agent,
+                    field,
+                    value,
+                } => self.set_agent_setting(host, &agent, &field, value, false),
+                HostPending::RemoteEnabled(on) => remote = Some(on),
+                other => dashboard.push(other),
+            }
+        }
+        (remote, dashboard)
+    }
+
+    /// `msg` to `host` as a send of Apply, whose echo OK waits for.
+    fn send_setting(&mut self, host: &HostKey, msg: ClientMessage) {
+        if let (Some(log), Some(owed)) =
+            (self.settings_pending.log.as_mut(), OwedEcho::of(host, &msg))
+        {
+            log.push(owed);
+        }
+        self.send_to(host, msg);
+    }
+
+    /// OK: Apply, then close at once when it sent nothing to a daemon, or
+    /// once every daemon echoed what it sent.
+    fn press_settings_ok(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sent) = self.apply_pending_settings(window, cx) else {
+            return;
+        };
+        if sent.is_empty() {
+            self.close_appearance_editor(window, cx);
+        } else {
+            tracing::info!(
+                sends = sent.len(),
+                "settings: OK waits for the daemons' echoes"
+            );
+            self.settings_pending.ok_wait = Some(sent);
         }
     }
 
-    /// Enter in either launch-command row of `host`'s agent `agent`'s page:
-    /// both fields, trimmed, as the agent's command on `host`; two empty
-    /// fields clear it. Nothing is sent before the daemon reported the
-    /// agent's command.
+    /// Whether OK waits for a daemon's echo before Settings closes.
+    #[must_use]
+    pub fn settings_ok_waiting(&self) -> bool {
+        self.settings_pending.ok_wait.is_some()
+    }
+
+    /// `msg` from `host` while OK waits: an echo it owes in a final state is
+    /// crossed off, and the wait ends once the last is, after `msg` has
+    /// been folded; a refusal of one of its sends ends the wait at once,
+    /// leaving Settings open with the refusal shown.
+    pub(crate) fn settings_ok_hears(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(wait) = self.settings_pending.ok_wait.as_mut() else {
+            return;
+        };
+        if hear_owed_echo(wait, host, msg) {
+            tracing::info!(?host, "settings: a daemon refused an Apply; OK stays open");
+            self.settings_pending.ok_wait = None;
+            cx.notify();
+        } else if wait.is_empty() {
+            // The echo is folded after this: what is still pending is read
+            // once it is.
+            cx.defer_in(window, Self::end_ok_wait);
+        }
+    }
+
+    /// Every echo OK waited for came: Settings closes, unless edits made
+    /// while it waited are pending, which keep it open.
+    fn end_ok_wait(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self
+            .settings_pending
+            .ok_wait
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            return;
+        }
+        self.settings_pending.ok_wait = None;
+        if self.settings_have_pending_edits() {
+            tracing::info!("settings: edits made while OK waited are pending; OK stays open");
+            cx.notify();
+        } else {
+            self.close_appearance_editor(window, cx);
+        }
+    }
+
+    /// Apply reaching `host`'s agent `agent`'s pending launch command: both
+    /// fields, trimmed, as the agent's command on `host`; two empty fields
+    /// clear it. Nothing is sent before the daemon reported the agent's
+    /// command.
     fn apply_launch_command(&mut self, host: &HostKey, agent: &AgentId) {
         if !self.launch_rows_live(host, agent) {
             return;
@@ -1844,7 +2176,7 @@ impl RootView {
         let request_id = crate::new_request_id();
         tabs.applies.push_back((request_id.clone(), agent.clone()));
         tracing::info!(agent = %agent.0, ?host, %program, %args, %request_id, "settings: applying an agent's launch command");
-        self.send_to(
+        self.send_setting(
             host,
             ClientMessage::SetAgentCommand {
                 agent: agent.clone(),
@@ -2015,7 +2347,6 @@ impl RootView {
             return;
         };
         tab.awaiting = tab.awaiting.saturating_sub(1);
-        tab.saved = false;
         cx.notify();
     }
 
@@ -2119,18 +2450,15 @@ impl RootView {
             }
             SettingsControl::AgentArgs => self.shown_agent_tab().map(|tab| tab.args_focus.clone()),
             SettingsControl::AgentText { field, .. } => self.agent_text_focus(field),
-            SettingsControl::DashboardKey => self
-                .dashboard_settings_tab
-                .as_ref()
-                .map(|tab| tab.key_focus.clone()),
+            SettingsControl::DashboardKey => {
+                self.shown_dashboard_tab().map(|tab| tab.key_focus.clone())
+            }
             SettingsControl::DashboardEnvVariable => self
-                .dashboard_settings_tab
-                .as_ref()
+                .shown_dashboard_tab()
                 .map(|tab| tab.variable_focus.clone()),
-            SettingsControl::DashboardCap => self
-                .dashboard_settings_tab
-                .as_ref()
-                .map(|tab| tab.cap_focus.clone()),
+            SettingsControl::DashboardCap => {
+                self.shown_dashboard_tab().map(|tab| tab.cap_focus.clone())
+            }
             _ => None,
         }
     }
@@ -2256,11 +2584,6 @@ impl RootView {
     /// shown tab's controls make, backwards with `back`. From anywhere off
     /// the ring it goes to the tab list.
     fn step_settings_focus(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(SettingsControl::AgentText { field, .. }) =
-            self.focused_settings_control(window, cx)
-        {
-            self.leave_agent_text(field);
-        }
         let controls = self.settings_controls(cx);
         let at = if self.settings_tabs_focus.is_focused(window) {
             Some(0)
@@ -2292,20 +2615,15 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.move_settings_focus(control, window, cx);
+        if let Some(value) = self.local_pending_of(control) {
+            self.pend_local(value);
+            cx.notify();
+            return;
+        }
         match control {
             SettingsControl::KeepAwake(mode) => self.choose_keep_awake_mode(mode),
-            SettingsControl::SidebarView(view) => self.set_sidebar_view(view, cx),
-            SettingsControl::LeafDensity(density) => self.set_leaf_density(density, cx),
-            SettingsControl::SessionsUnderRepos(mode) => self.set_sessions_under_repos(mode, cx),
-            SettingsControl::RepoSort(sort) => self.set_repo_sort(sort, cx),
-            SettingsControl::CopyOnSelect => self.toggle_copy_on_select(cx),
-            SettingsControl::CheckUpdates => self.toggle_check_updates(cx),
             SettingsControl::CheckNow => self.check_for_updates_now(cx),
-            SettingsControl::CountMode(mode) => self.set_count_mode(mode, window, cx),
-            SettingsControl::TitleCount => self.toggle_title_count(window, cx),
-            SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
             SettingsControl::NotifySettingsLink => self.open_windows_notification_settings(cx),
-            SettingsControl::NotifyNeedsYou => self.toggle_notification(cx),
             SettingsControl::NeedsYouSoundField => {
                 self.toggle_sound_list(NotifyKind::NeedsYou, cx);
             }
@@ -2314,11 +2632,6 @@ impl RootView {
                 self.toggle_sound_list(NotifyKind::Finished, cx);
             }
             SettingsControl::FinishedSoundPlay => self.play_finished_sound(cx),
-            SettingsControl::NotifyFinished => self.toggle_finished_notification(cx),
-            SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
-            SettingsControl::FinishedGrace(secs) => self.set_finished_grace(secs, cx),
-            SettingsControl::ToastStyle(style) => self.set_toast_style(style, cx),
-            SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
             SettingsControl::AgentChoice {
                 field,
                 choice,
@@ -2327,6 +2640,8 @@ impl RootView {
             SettingsControl::AgentToggle { field, selector } => {
                 self.press_agent_field(field, None, selector);
             }
+            // A text field takes keys, not presses; a This PC toggle or
+            // choice was held above.
             SettingsControl::WorktreesPath
             | SettingsControl::RemotePort
             | SettingsControl::AgentProgram
@@ -2334,28 +2649,70 @@ impl RootView {
             | SettingsControl::AgentText { .. }
             | SettingsControl::DashboardKey
             | SettingsControl::DashboardEnvVariable
-            | SettingsControl::DashboardCap => {}
+            | SettingsControl::DashboardCap
+            | SettingsControl::SidebarView(_)
+            | SettingsControl::LeafDensity(_)
+            | SettingsControl::SessionsUnderRepos(_)
+            | SettingsControl::RepoSort(_)
+            | SettingsControl::CopyOnSelect
+            | SettingsControl::CheckUpdates
+            | SettingsControl::CountMode(_)
+            | SettingsControl::TitleCount
+            | SettingsControl::TitleSuffix
+            | SettingsControl::NotifyNeedsYou
+            | SettingsControl::NotifyFinished
+            | SettingsControl::NotifySkip(_)
+            | SettingsControl::FinishedGrace(_)
+            | SettingsControl::ToastStyle(_)
+            | SettingsControl::SpawnTrusted => {}
             SettingsControl::DashboardEnabled => self.toggle_summaries(),
             SettingsControl::DashboardProvider { index, .. } => {
                 self.choose_summarizer_provider(index);
             }
             SettingsControl::DashboardKeySource(choice) => self.choose_key_source(choice),
-            SettingsControl::DashboardKeySave => self.save_summarizer_key(cx),
             SettingsControl::DashboardKeyClear => self.clear_summarizer_key(),
             SettingsControl::DashboardTest => self.run_summary_test(),
             SettingsControl::WorktreesBrowse => self.browse_worktrees_root(cx),
-            SettingsControl::WorktreesSave => self.save_worktrees_root(),
             SettingsControl::WorktreesReset => self.reset_worktrees_root(cx),
             SettingsControl::WorktreesManage => self.open_worktrees_manager(window, cx),
             SettingsControl::RemoteToggle => self.toggle_remote_access(),
-            SettingsControl::RemotePortApply => self.apply_remote_port(),
             SettingsControl::RemoteAutostart => self.toggle_autostart(),
             SettingsControl::Appearance(stop) => {
                 self.press_appearance_stop(stop, window, cx);
                 self.keep_keyboard_after_press(stop, window, cx);
             }
+            SettingsControl::FooterOk => self.press_settings_ok(window, cx),
+            SettingsControl::FooterApply => {
+                self.apply_pending_settings(window, cx);
+            }
+            SettingsControl::FooterCancel => self.close_appearance_editor(window, cx),
         }
         cx.notify();
+    }
+
+    /// The This PC setting a press on `control` holds for Apply: a choice's
+    /// value, or a toggle's opposite as shown; `None` for any other control.
+    fn local_pending_of(&self, control: SettingsControl) -> Option<LocalPending> {
+        let shown = self.shown_local();
+        let (general, title, notes) = (&shown.general, &shown.title, &shown.notifications);
+        Some(match control {
+            SettingsControl::SidebarView(view) => LocalPending::SidebarView(view),
+            SettingsControl::LeafDensity(density) => LocalPending::LeafDensity(density),
+            SettingsControl::SessionsUnderRepos(mode) => LocalPending::SessionsUnderRepos(mode),
+            SettingsControl::RepoSort(sort) => LocalPending::RepoSort(sort),
+            SettingsControl::CopyOnSelect => LocalPending::CopyOnSelect(!general.copy_on_select),
+            SettingsControl::CheckUpdates => LocalPending::CheckUpdates(!general.check_updates),
+            SettingsControl::CountMode(mode) => LocalPending::CountMode(mode),
+            SettingsControl::TitleCount => LocalPending::TitleCount(!title.show_count),
+            SettingsControl::TitleSuffix => LocalPending::TitleSuffix(!title.suffix),
+            SettingsControl::NotifyNeedsYou => LocalPending::NotifyNeedsYou(!notes.awaiting_input),
+            SettingsControl::NotifyFinished => LocalPending::NotifyFinished(!notes.finished),
+            SettingsControl::NotifySkip(skip) => LocalPending::NotifySkip(skip),
+            SettingsControl::FinishedGrace(secs) => LocalPending::FinishedGrace(secs),
+            SettingsControl::ToastStyle(style) => LocalPending::ToastStyle(style),
+            SettingsControl::SpawnTrusted => LocalPending::SpawnTrusted(!shown.trusted),
+            _ => return None,
+        })
     }
 
     /// After a press of Appearance stop `stop`: when the press disabled it,
@@ -2395,10 +2752,21 @@ impl RootView {
         self.worktrees_tabs.get(&self.settings_host)
     }
 
-    /// Whether the path field differs from the override (empty when none).
-    fn worktrees_save_enabled(&self) -> bool {
-        self.shown_worktrees_tab()
-            .is_some_and(|tab| tab.draft.trim() != self.worktrees_override().unwrap_or(""))
+    /// Whether `host`'s path field is pending: it differs from the override
+    /// (empty when none), and no save of it still waits for its echo.
+    fn worktrees_pending(&self, host: &HostKey) -> bool {
+        let saved = match self
+            .mirrors_of(host)
+            .and_then(|mirrors| mirrors.worktrees_root.as_ref())
+        {
+            Some((root, true)) => root.as_str(),
+            _ => "",
+        };
+        self.worktrees_tabs.get(host).is_some_and(|tab| {
+            let draft = tab.draft.trim();
+            let in_flight = tab.awaiting > 0 && tab.sent.as_deref() == Some(draft);
+            draft != saved && !in_flight
+        })
     }
 
     /// The Worktrees tab's line on the root in use.
@@ -2409,14 +2777,6 @@ impl RootView {
             Some((root, false)) => format!("Active: {root} — default (env or platform fallback)"),
             None => format!("Active: {NOT_CONNECTED} — default (env or platform fallback)"),
         }
-    }
-
-    /// The Save button's label and whether it can be pressed.
-    #[must_use]
-    pub fn worktrees_save_button(&self) -> (&'static str, bool) {
-        let enabled = self.worktrees_save_enabled();
-        let saved = self.shown_worktrees_tab().is_some_and(|tab| tab.saved);
-        (if saved && !enabled { "Saved" } else { "Save" }, enabled)
     }
 
     /// Whether Reset to default can be pressed.
@@ -2454,11 +2814,11 @@ impl RootView {
         self.shown_worktrees_tab().map(|tab| tab.draft.clone())
     }
 
-    /// The shown host's Worktrees tab, built afresh unless `keep` and it is
-    /// held.
-    fn hold_worktrees_tab(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// The shown host's Worktrees tab, built afresh unless held: held, it
+    /// keeps its draft until Settings closes.
+    fn hold_worktrees_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.settings_host.clone();
-        if keep && self.worktrees_tabs.contains_key(&host) {
+        if self.worktrees_tabs.contains_key(&host) {
             return;
         }
         let tab = self.new_worktrees_tab(host.clone(), window, cx);
@@ -2484,11 +2844,12 @@ impl RootView {
         let keys = cx.subscribe_in(
             &input,
             window,
-            |this, _, event: &TextInputEvent, window, cx| match event {
-                TextInputEvent::Submit => {
-                    this.press_settings_control(SettingsControl::WorktreesSave, window, cx);
+            // Enter applies nothing: the path waits for Apply or OK. Esc is
+            // Cancel.
+            |this, _, event: &TextInputEvent, window, cx| {
+                if matches!(event, TextInputEvent::Cancel) {
+                    this.close_appearance_editor(window, cx);
                 }
-                TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
             },
         );
         let edits = cx.subscribe_in(
@@ -2507,41 +2868,39 @@ impl RootView {
             focus,
             draft,
             awaiting: 0,
-            saved: false,
+            sent: None,
             _subscriptions: vec![keys, edits],
         }
     }
 
-    /// Save: the field as the override, or none when it is empty.
-    fn save_worktrees_root(&mut self) {
-        if !self.worktrees_save_enabled() {
+    /// Apply reaching `host`'s pending path field: the field as the
+    /// override, or none when it is empty.
+    fn save_worktrees_root(&mut self, host: &HostKey) {
+        if !self.worktrees_pending(host) {
             return;
         }
-        let host = self.settings_host.clone();
-        let Some(tab) = self.worktrees_tabs.get_mut(&host) else {
+        let Some(tab) = self.worktrees_tabs.get_mut(host) else {
             return;
         };
         let trimmed = tab.draft.trim();
         let path = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+        tab.sent = Some(trimmed.to_owned());
         tab.awaiting += 1;
-        tab.saved = false;
         tracing::info!(?path, ?host, "settings: saving the worktrees root");
-        self.send_to(&host, ClientMessage::SetWorktreesRoot { path });
+        self.send_setting(host, ClientMessage::SetWorktreesRoot { path });
     }
 
+    /// Reset to default empties the path field: a pending edit, which
+    /// Apply or OK sends as no override.
     fn reset_worktrees_root(&mut self, cx: &mut Context<Self>) {
         if self.worktrees_override().is_none() {
             return;
         }
         let host = self.settings_host.clone();
         if let Some(tab) = self.worktrees_tabs.get_mut(&host) {
-            tab.awaiting += 1;
-            tab.saved = false;
             tab.draft.clear();
             tab.input.update(cx, |input, cx| input.set_text("", cx));
         }
-        tracing::info!(?host, "settings: resetting the worktrees root");
-        self.send_to(&host, ClientMessage::SetWorktreesRoot { path: None });
     }
 
     /// Browse: the folder picked fills the path field, if the field is
@@ -2612,9 +2971,6 @@ impl RootView {
             let settles = mine && tab.awaiting == 0;
             let untouched = !mine && tab.draft == previous;
             if settles || untouched {
-                if settles {
-                    tab.saved = true;
-                }
                 tab.draft = if is_override {
                     root.to_owned()
                 } else {
@@ -2698,8 +3054,16 @@ impl RootView {
     #[must_use]
     pub fn remote_toggle(&self) -> (bool, bool) {
         let status = self.mirrors().remote_status.as_ref();
+        let pending = self
+            .settings_pending
+            .host(&HostKey::Local)
+            .iter()
+            .find_map(|value| match value {
+                HostPending::RemoteEnabled(on) => Some(*on),
+                _ => None,
+            });
         (
-            status.is_some_and(|status| status.enabled),
+            status.is_some_and(|status| pending.unwrap_or(status.enabled)),
             controls_enabled(status),
         )
     }
@@ -2737,18 +3101,13 @@ impl RootView {
         self.remote_access_tab.as_ref().map(|tab| tab.draft.clone())
     }
 
-    /// What Apply sends: the field's port with the switch as it is, once
-    /// the daemon has reported and only for a valid port other than its own.
+    /// The port field's port as a `ConfigureRemote`, once the daemon has
+    /// reported and only for a valid port other than its own; Apply takes
+    /// the port from it.
     fn remote_apply_message(&self) -> Option<ClientMessage> {
         let status = self.mirrors().remote_status.as_ref()?;
         let tab = self.remote_access_tab.as_ref()?;
         apply_port_message(status, &tab.draft)
-    }
-
-    /// Whether the port's Apply can be pressed.
-    #[must_use]
-    pub fn remote_port_apply(&self) -> bool {
-        self.remote_apply_message().is_some()
     }
 
     /// Why the port field's text is no port, while it holds some.
@@ -2785,20 +3144,32 @@ impl RootView {
     }
 
     /// The Remote access page's controls in drawing order: the switch and
-    /// the port once the daemon has reported, Apply for a changed valid
-    /// port, and the login launch once it was read.
+    /// the port field once the daemon has reported, and the login launch
+    /// once it was read. The footer's OK and Apply send a changed port.
     fn remote_access_controls(&self) -> Vec<SettingsControl> {
         let mut controls = Vec::new();
         if controls_enabled(self.mirrors().remote_status.as_ref()) {
             controls.extend([SettingsControl::RemoteToggle, SettingsControl::RemotePort]);
         }
-        if self.remote_port_apply() {
-            controls.push(SettingsControl::RemotePortApply);
-        }
         if self.remote_autostart().is_some() {
             controls.push(SettingsControl::RemoteAutostart);
         }
         controls
+    }
+
+    /// The Remote access page, built afresh unless held: held, it keeps its
+    /// port draft until Settings closes, and the login launch is read
+    /// again.
+    fn hold_remote_access_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote_access_tab.is_none() {
+            self.remote_access_tab = Some(self.new_remote_access_tab(window, cx));
+            return;
+        }
+        let autostart = self.read_autostart();
+        if let Some(tab) = &mut self.remote_access_tab {
+            tab.autostart = autostart;
+            tab.autostart_error = None;
+        }
     }
 
     /// The page afresh: the port field holding the daemon's port, and the
@@ -2818,12 +3189,12 @@ impl RootView {
         let keys = cx.subscribe_in(
             &input,
             window,
-            |this, _, event: &TextInputEvent, window, cx| match event {
-                TextInputEvent::Submit => {
-                    this.apply_remote_port();
-                    cx.notify();
+            // Enter applies nothing: the port waits for Apply or OK. Esc is
+            // Cancel.
+            |this, _, event: &TextInputEvent, window, cx| {
+                if matches!(event, TextInputEvent::Cancel) {
+                    this.close_appearance_editor(window, cx);
                 }
-                TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
             },
         );
         let edits = cx.subscribe_in(&input, window, |this, input, _: &TextChanged, _, cx| {
@@ -2850,21 +3221,55 @@ impl RootView {
             .inspect_err(|err| tracing::warn!("settings: reading the login launch failed: {err}"))
     }
 
-    fn toggle_remote_access(&self) {
+    /// The switch's press: the opposite of the switch as shown, pending
+    /// until Apply.
+    fn toggle_remote_access(&mut self) {
         if let Some(status) = &self.mirrors().remote_status {
-            tracing::info!(
-                enabled = !status.enabled,
-                "settings: switching remote access"
+            let saved = HostPending::RemoteEnabled(status.enabled);
+            let shown = self.remote_toggle().0;
+            self.settings_pending.set_host(
+                &HostKey::Local,
+                HostPending::RemoteEnabled(!shown),
+                Some(&saved),
             );
-            self.send_to(&HostKey::Local, toggle_message(status));
         }
     }
 
-    fn apply_remote_port(&self) {
-        if let Some(message) = self.remote_apply_message() {
-            tracing::info!("settings: applying the remote access port");
-            self.send_to(&HostKey::Local, message);
+    /// Whether This PC's port field is pending, and whether it holds a
+    /// port: a draft other than the daemon's port, an empty one not.
+    fn remote_port_pending(&self) -> Option<bool> {
+        let status = self.mirrors().remote_status.as_ref()?;
+        let draft = &self.remote_access_tab.as_ref()?.draft;
+        if draft.trim().is_empty() {
+            return None;
         }
+        match parse_port(draft) {
+            Ok(port) => (port != status.port).then_some(true),
+            Err(_) => Some(false),
+        }
+    }
+
+    /// Apply reaching This PC's remote access: one message with the switch
+    /// as shown and the port field's port when it is pending.
+    fn apply_remote_access(&mut self, enabled: Option<bool>) {
+        let Some(status) = self.mirrors().remote_status.clone() else {
+            return;
+        };
+        let port = self
+            .remote_apply_message()
+            .and_then(|message| match message {
+                ClientMessage::ConfigureRemote { port, .. } => port,
+                _ => None,
+            });
+        if enabled.is_none() && port.is_none() {
+            return;
+        }
+        let enabled = enabled.unwrap_or(status.enabled);
+        tracing::info!(enabled, ?port, "settings: applying remote access");
+        self.send_setting(
+            &HostKey::Local,
+            ClientMessage::ConfigureRemote { enabled, port },
+        );
     }
 
     /// Switches the login launch and reads it back; a failed switch leaves
@@ -2932,16 +3337,18 @@ impl RootView {
             self.check_needs_you_sound(cx);
             self.check_finished_sound(cx);
         }
+        // A page holding drafts is built once per opening, and per host
+        // where it is per host: selecting it again keeps what was typed.
         if tab == SettingsTab::Worktrees {
-            self.hold_worktrees_tab(false, window, cx);
+            self.hold_worktrees_tab(window, cx);
         }
         if tab == SettingsTab::RemoteAccess {
-            self.remote_access_tab = Some(self.new_remote_access_tab(window, cx));
+            self.hold_remote_access_tab(window, cx);
             self.on_devices_page_selected();
         }
-        // The Dashboard tab holds a typed key only while it is shown.
-        self.dashboard_settings_tab =
-            (tab == SettingsTab::Dashboard).then(|| self.new_dashboard_tab(window, cx));
+        if tab == SettingsTab::Dashboard {
+            self.hold_dashboard_tab(window, cx);
+        }
         if let Some(agent) = tab.agent() {
             self.hold_agent_tab(agent, window, cx);
         }
@@ -3015,7 +3422,8 @@ impl RootView {
     /// with its own sound field and Play, then the skip choices and, on
     /// Windows, the toast style choices.
     fn notifications_controls(&self) -> Vec<SettingsControl> {
-        let settings = &self.sidebar.ui_state().notifications;
+        let shown = self.shown_local();
+        let settings = &shown.notifications;
         let mut controls = vec![
             SettingsControl::NotifySettingsLink,
             SettingsControl::NotifyNeedsYou,
@@ -3045,11 +3453,11 @@ impl RootView {
     }
 
     /// The sound chosen on `kind`'s row.
-    fn sound_of(&self, kind: NotifyKind) -> &ToastSound {
-        let settings = &self.sidebar.ui_state().notifications;
+    fn sound_of(&self, kind: NotifyKind) -> ToastSound {
+        let settings = self.shown_local().notifications;
         match kind {
-            NotifyKind::NeedsYou => &settings.needs_you_sound,
-            NotifyKind::Finished => &settings.finished_sound,
+            NotifyKind::NeedsYou => settings.needs_you_sound,
+            NotifyKind::Finished => settings.finished_sound,
         }
     }
 
@@ -3059,7 +3467,7 @@ impl RootView {
         if self.open_sound_list() == Some(kind) {
             self.notifications.sound_list = None;
         } else {
-            let chosen = SoundEntry::of(self.sound_of(kind), kind);
+            let chosen = SoundEntry::of(&self.sound_of(kind), kind);
             let highlight = SoundEntry::ALL
                 .iter()
                 .position(|entry| *entry == chosen)
@@ -3204,7 +3612,7 @@ impl RootView {
     /// The sound plays on this PC, so the picker is always this PC's, even
     /// when the window is on another host.
     fn pick_needs_you_sound(&mut self, cx: &mut Context<Self>) {
-        let start = match &self.sidebar.ui_state().notifications.needs_you_sound {
+        let start = match &self.shown_local().notifications.needs_you_sound {
             ToastSound::Custom(path) => path.parent().map(std::path::Path::to_path_buf),
             ToastSound::Off | ToastSound::Default | ToastSound::Bundled(_) => None,
         };
@@ -3223,9 +3631,17 @@ impl RootView {
         .detach();
     }
 
-    /// Records `sound`, saving it when it changed, and checks its file; Off
-    /// drops the clip waiting to play, and the one playing ends on its own.
+    /// Chooses `sound`, pending until Apply, and checks its file.
     fn set_needs_you_sound(&mut self, sound: ToastSound, cx: &mut Context<Self>) {
+        self.pend_local(LocalPending::NeedsYouSound(sound));
+        self.check_needs_you_sound(cx);
+        cx.notify();
+    }
+
+    /// Apply reaching a pending Needs you sound: records `sound`, saving it
+    /// when it changed; Off drops the clip waiting to play, and the one
+    /// playing ends on its own.
+    fn commit_needs_you_sound(&mut self, sound: ToastSound) {
         if sound == ToastSound::Off {
             self.notifications
                 .sounder
@@ -3234,20 +3650,13 @@ impl RootView {
         if self.sidebar.set_needs_you_sound(sound) {
             self.save_ui();
         }
-        self.check_needs_you_sound(cx);
-        cx.notify();
     }
 
     /// Checks the chosen custom sound file on a background thread; the tab
     /// shows what is wrong with it once the check is back, unless the
     /// choice changed meanwhile.
     fn check_needs_you_sound(&mut self, cx: &mut Context<Self>) {
-        let choice = self
-            .sidebar
-            .ui_state()
-            .notifications
-            .needs_you_sound
-            .clone();
+        let choice = self.shown_local().notifications.needs_you_sound;
         self.notifications.sound_problem = None;
         let checked = choice.clone();
         let check = cx
@@ -3257,7 +3666,7 @@ impl RootView {
             let problem = check.await;
             // Fails only when the view is gone, and Settings with it.
             this.update(cx, |this, cx| {
-                if this.sidebar.ui_state().notifications.needs_you_sound == choice {
+                if this.shown_local().notifications.needs_you_sound == choice {
                     this.notifications.sound_problem = problem;
                     cx.notify();
                 }
@@ -3271,7 +3680,7 @@ impl RootView {
     /// The sound plays on this PC, so the picker is always this PC's, even
     /// when the window is on another host.
     fn pick_finished_sound(&mut self, cx: &mut Context<Self>) {
-        let start = match &self.sidebar.ui_state().notifications.finished_sound {
+        let start = match &self.shown_local().notifications.finished_sound {
             ToastSound::Custom(path) => path.parent().map(std::path::Path::to_path_buf),
             ToastSound::Off | ToastSound::Default | ToastSound::Bundled(_) => None,
         };
@@ -3290,9 +3699,17 @@ impl RootView {
         .detach();
     }
 
-    /// Records `sound`, saving it when it changed, and checks its file; Off
-    /// drops the clip waiting to play, and the one playing ends on its own.
+    /// Chooses `sound`, pending until Apply, and checks its file.
     fn set_finished_sound(&mut self, sound: ToastSound, cx: &mut Context<Self>) {
+        self.pend_local(LocalPending::FinishedSound(sound));
+        self.check_finished_sound(cx);
+        cx.notify();
+    }
+
+    /// Apply reaching a pending Finished sound: records `sound`, saving it
+    /// when it changed; Off drops the clip waiting to play, and the one
+    /// playing ends on its own.
+    fn commit_finished_sound(&mut self, sound: ToastSound) {
         if sound == ToastSound::Off {
             self.notifications
                 .sounder
@@ -3301,15 +3718,13 @@ impl RootView {
         if self.sidebar.set_finished_sound(sound) {
             self.save_ui();
         }
-        self.check_finished_sound(cx);
-        cx.notify();
     }
 
     /// Checks the chosen custom sound file on a background thread; the tab
     /// shows what is wrong with it once the check is back, unless the
     /// choice changed meanwhile.
     fn check_finished_sound(&mut self, cx: &mut Context<Self>) {
-        let choice = self.sidebar.ui_state().notifications.finished_sound.clone();
+        let choice = self.shown_local().notifications.finished_sound;
         self.notifications.finished_sound_problem = None;
         let checked = choice.clone();
         let check = cx
@@ -3319,7 +3734,7 @@ impl RootView {
             let problem = check.await;
             // Fails only when the view is gone, and Settings with it.
             this.update(cx, |this, cx| {
-                if this.sidebar.ui_state().notifications.finished_sound == choice {
+                if this.shown_local().notifications.finished_sound == choice {
                     this.notifications.finished_sound_problem = problem;
                     cx.notify();
                 }
@@ -3327,52 +3742,6 @@ impl RootView {
             .ok();
         })
         .detach();
-    }
-
-    fn toggle_notification(&mut self, cx: &mut Context<Self>) {
-        let on = !self.sidebar.ui_state().notifications.awaiting_input;
-        self.sidebar.set_notification(on);
-        self.save_ui();
-        cx.notify();
-    }
-
-    fn toggle_finished_notification(&mut self, cx: &mut Context<Self>) {
-        let on = !self.sidebar.ui_state().notifications.finished;
-        self.sidebar.set_finished_notification(on);
-        self.save_ui();
-        cx.notify();
-    }
-
-    /// Sets when a notification for a session on screen is skipped, saving
-    /// it when it changed.
-    fn set_notify_skip(&mut self, skip: NotifySkip, cx: &mut Context<Self>) {
-        if self.sidebar.set_notify_skip(skip) {
-            self.save_ui();
-        }
-        cx.notify();
-    }
-
-    /// Sets how long a Finished toast is held, saving it when it changed.
-    fn set_finished_grace(&mut self, secs: u32, cx: &mut Context<Self>) {
-        if self.sidebar.set_finished_grace(secs) {
-            self.save_ui();
-        }
-        cx.notify();
-    }
-
-    /// Sets whose toasts the client raises, saving it when it changed.
-    fn set_toast_style(&mut self, style: ToastStyle, cx: &mut Context<Self>) {
-        if self.sidebar.set_toast_style(style) {
-            self.save_ui();
-        }
-        cx.notify();
-    }
-
-    fn toggle_spawn_trusted(&mut self, cx: &mut Context<Self>) {
-        let on = !self.sidebar.ui_state().spawn.trusted;
-        self.sidebar.set_spawn_trusted(on);
-        self.save_ui();
-        cx.notify();
     }
 
     /// A press on field `field` of the shown agent page, made on the
@@ -3410,7 +3779,17 @@ impl RootView {
             return;
         };
         let host = self.settings_host.clone();
-        self.set_agent_setting(&host, &page.id, &view.id, value, false);
+        let pending = |value| HostPending::AgentField {
+            agent: page.id.clone(),
+            field: view.id.clone(),
+            value,
+        };
+        let saved = self
+            .saved_agent_page(&host, &page.id)
+            .and_then(|saved| saved.fields.into_iter().find(|field| field.id == view.id))
+            .map(|field| pending(field.value));
+        self.settings_pending
+            .set_host(&host, pending(value), saved.as_ref());
     }
 
     /// Sends `host`'s agent `agent`'s Settings values with `key` set to
@@ -3448,7 +3827,7 @@ impl RootView {
         while mirrors.agent_setting_applies.len() > WAITING_SETTING_APPLIES {
             mirrors.agent_setting_applies.pop_front();
         }
-        self.send_to(
+        self.send_setting(
             host,
             ClientMessage::SetAgentSettings {
                 agent: agent.clone(),
@@ -3571,75 +3950,118 @@ impl RootView {
         }
     }
 
-    /// Asks the daemon for `mode`; the choice follows its echo. Nothing is
-    /// sent while the daemon is not connected.
+    /// Chooses `mode` on the shown host, pending until Apply. Nothing is
+    /// chosen while the daemon has not reported its mode.
     fn choose_keep_awake_mode(&mut self, mode: KeepAwakeMode) {
-        if self.settings_mirrors().keep_awake.is_some() {
-            self.send_to(
-                &self.settings_host,
-                ClientMessage::SetKeepAwakeMode { mode },
+        if let Some(state) = self.settings_mirrors().keep_awake {
+            let host = self.settings_host.clone();
+            self.settings_pending.set_host(
+                &host,
+                HostPending::KeepAwake(mode),
+                Some(&HostPending::KeepAwake(state.mode)),
             );
         }
     }
 
-    /// Sets how much room each session leaf takes, saving it when it
-    /// changed.
-    fn set_leaf_density(&mut self, density: LeafDensity, cx: &mut Context<Self>) {
-        if self.sidebar.set_leaf_density(density) {
+    /// Apply reaching a pending This PC setting: it is recorded and saved,
+    /// and what it changes follows now.
+    fn commit_local(&mut self, value: LocalPending, window: &mut Window, cx: &mut Context<Self>) {
+        let saves = match value {
+            LocalPending::SidebarView(view) => {
+                self.set_sidebar_view(view, cx);
+                false
+            }
+            LocalPending::CountMode(_)
+            | LocalPending::TitleCount(_)
+            | LocalPending::TitleSuffix(_) => {
+                self.commit_title(&value, window, cx);
+                false
+            }
+            LocalPending::NotifyNeedsYou(_)
+            | LocalPending::NeedsYouSound(_)
+            | LocalPending::NotifyFinished(_)
+            | LocalPending::FinishedSound(_)
+            | LocalPending::NotifySkip(_)
+            | LocalPending::FinishedGrace(_)
+            | LocalPending::ToastStyle(_) => self.commit_notification(value),
+            other => self.commit_general(&other, cx),
+        };
+        if saves {
             self.save_ui();
         }
         cx.notify();
     }
 
-    /// Sets how many of a repo or workspace's sessions show under its row,
-    /// saving it when it changed.
-    fn set_sessions_under_repos(&mut self, mode: SessionsUnderRepos, cx: &mut Context<Self>) {
-        if self.sidebar.set_sessions_under_repos(mode) {
-            self.save_ui();
-        }
-        cx.notify();
-    }
-
-    /// Sets how the repos view orders its repo and workspace rows, saving it
-    /// when it changed.
-    fn set_repo_sort(&mut self, sort: RepoSort, cx: &mut Context<Self>) {
-        if self.sidebar.set_repo_sort(sort) {
-            self.save_ui();
-        }
-        cx.notify();
-    }
-
-    fn toggle_copy_on_select(&mut self, cx: &mut Context<Self>) {
-        let on = !self.sidebar.ui_state().general.copy_on_select;
-        self.sidebar.set_copy_on_select(on);
-        cx.set_global(CopyOnSelect(on));
-        self.save_ui();
-        cx.notify();
-    }
-
-    fn toggle_check_updates(&mut self, cx: &mut Context<Self>) {
-        let on = !self.sidebar.ui_state().general.check_updates;
-        self.sidebar.set_check_updates(on);
-        self.save_ui();
-        cx.notify();
-    }
-
-    fn set_count_mode(&mut self, mode: CountMode, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar.set_count_mode(mode) {
-            self.after_title_setting(window, cx);
+    /// Apply reaching a pending App title setting: recorded, saved, and the
+    /// window's title and badge follow.
+    fn commit_title(&mut self, value: &LocalPending, window: &mut Window, cx: &mut Context<Self>) {
+        match *value {
+            LocalPending::CountMode(mode) => {
+                if self.sidebar.set_count_mode(mode) {
+                    self.after_title_setting(window, cx);
+                }
+            }
+            LocalPending::TitleCount(on) => {
+                self.sidebar.set_title_show_count(on);
+                self.after_title_setting(window, cx);
+            }
+            LocalPending::TitleSuffix(on) => {
+                self.sidebar.set_title_suffix(on);
+                self.after_title_setting(window, cx);
+            }
+            _ => {}
         }
     }
 
-    fn toggle_title_count(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let on = !self.sidebar.ui_state().title.show_count;
-        self.sidebar.set_title_show_count(on);
-        self.after_title_setting(window, cx);
+    /// Apply reaching a pending Notifications setting: recorded; returns
+    /// whether it is left to the caller to save.
+    fn commit_notification(&mut self, value: LocalPending) -> bool {
+        match value {
+            LocalPending::NotifyNeedsYou(on) => {
+                self.sidebar.set_notification(on);
+                true
+            }
+            LocalPending::NeedsYouSound(sound) => {
+                self.commit_needs_you_sound(sound);
+                false
+            }
+            LocalPending::NotifyFinished(on) => {
+                self.sidebar.set_finished_notification(on);
+                true
+            }
+            LocalPending::FinishedSound(sound) => {
+                self.commit_finished_sound(sound);
+                false
+            }
+            LocalPending::NotifySkip(skip) => self.sidebar.set_notify_skip(skip),
+            LocalPending::FinishedGrace(secs) => self.sidebar.set_finished_grace(secs),
+            LocalPending::ToastStyle(style) => self.sidebar.set_toast_style(style),
+            _ => false,
+        }
     }
 
-    fn toggle_title_suffix(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let on = !self.sidebar.ui_state().title.suffix;
-        self.sidebar.set_title_suffix(on);
-        self.after_title_setting(window, cx);
+    /// Apply reaching a pending General or Spawn defaults setting:
+    /// recorded; returns whether it is left to the caller to save.
+    fn commit_general(&mut self, value: &LocalPending, cx: &mut Context<Self>) -> bool {
+        match *value {
+            LocalPending::LeafDensity(density) => self.sidebar.set_leaf_density(density),
+            LocalPending::SessionsUnderRepos(mode) => self.sidebar.set_sessions_under_repos(mode),
+            LocalPending::RepoSort(sort) => self.sidebar.set_repo_sort(sort),
+            LocalPending::CopyOnSelect(on) => {
+                self.sidebar.set_copy_on_select(on);
+                cx.set_global(CopyOnSelect(on));
+                true
+            }
+            LocalPending::CheckUpdates(on) => {
+                self.sidebar.set_check_updates(on);
+                true
+            }
+            LocalPending::SpawnTrusted(on) => {
+                self.sidebar.set_spawn_trusted(on);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn after_title_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3748,8 +4170,37 @@ impl RootView {
             &theme(cx),
         ))
         .child(body)
-        .child(close_footer("settings-footer-close", false, cx));
+        .child(self.settings_footer(window, cx));
         Some(backdrop("settings", panel, &theme(cx)))
+    }
+
+    /// The footer: OK, Apply and Cancel, right-aligned. OK and Apply are
+    /// disabled while [`Self::settings_apply_enabled`] says no.
+    fn settings_footer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let focused = self.focused_settings_control(window, cx);
+        let applies = self.settings_apply_enabled();
+        dialog_footer(&theme(cx))
+            .child(settings_button(
+                SettingsControl::FooterOk,
+                "OK",
+                applies,
+                focused,
+                cx,
+            ))
+            .child(settings_button(
+                SettingsControl::FooterApply,
+                "Apply",
+                applies,
+                focused,
+                cx,
+            ))
+            .child(settings_button(
+                SettingsControl::FooterCancel,
+                "Cancel",
+                true,
+                focused,
+                cx,
+            ))
     }
 
     /// The tab list on the raised ground; the shown tab is filled and bold,
@@ -3974,17 +4425,9 @@ impl RootView {
             .driver_id(|| "settings-worktrees-active".to_owned())
             .text_color(gpui::rgb(t.text_2))
             .child(self.worktrees_active_line());
-        let (save_label, save_enabled) = self.worktrees_save_button();
         let buttons = div()
             .flex()
             .gap(px(8.0))
-            .child(settings_button(
-                SettingsControl::WorktreesSave,
-                save_label,
-                save_enabled,
-                focused,
-                cx,
-            ))
             .child(settings_button(
                 SettingsControl::WorktreesReset,
                 "Reset to default",
@@ -4067,7 +4510,7 @@ impl RootView {
         .children(cert)
         .children(self.waiting_devices_section(cx))
         .children(self.devices_section(cx))
-        .child(self.remote_port_row(tab, enabled, focused, cx))
+        .child(Self::remote_port_row(tab, enabled, focused, cx))
         .children(port_error)
         .child(hint(crate::fonts::ui_text_size(cx), REMOTE_PORT_HINT, &t))
         .child(hint(crate::fonts::ui_text_size(cx), REMOTE_RUN_HINT, &t))
@@ -4075,10 +4518,9 @@ impl RootView {
         vec![section.into_any_element()]
     }
 
-    /// The port field and its Apply; before the daemon reports, the field
-    /// is a dimmed placeholder that takes no keys.
+    /// The port field; before the daemon reports, it is a dimmed
+    /// placeholder that takes no keys.
     fn remote_port_row(
-        &self,
         tab: &RemoteAccessTab,
         enabled: bool,
         focused: Option<SettingsControl>,
@@ -4104,20 +4546,12 @@ impl RootView {
                 .text_color(gpui::rgb(t.subtle))
                 .child(DEFAULT_PORT_TEXT)
         };
-        let apply = settings_button(
-            SettingsControl::RemotePortApply,
-            "Apply",
-            self.remote_port_apply(),
-            focused,
-            cx,
-        );
         div()
             .flex()
             .items_center()
             .gap(px(8.0))
             .child("Port")
             .child(field)
-            .child(apply)
     }
 
     /// The login-launch toggle, its hint, and why its last switch or read
@@ -4164,7 +4598,7 @@ impl RootView {
         let trusted = toggle(
             SettingsControl::SpawnTrusted,
             ToggleState {
-                checked: self.sidebar.ui_state().spawn.trusted,
+                checked: self.shown_local().trusted,
                 enabled: true,
             },
             "Trusted launch by default",
@@ -4373,7 +4807,8 @@ impl RootView {
             .gap(px(10.0))
             .child(state)
             .child(open);
-        let settings = &self.sidebar.ui_state().notifications;
+        let shown = self.shown_local();
+        let settings = &shown.notifications;
         let needs_you = toggle(
             SettingsControl::NotifyNeedsYou,
             ToggleState {
@@ -4495,7 +4930,8 @@ impl RootView {
     ) -> Div {
         let t = theme(cx);
         let size = crate::fonts::ui_text_size(cx);
-        let sound = &self.sidebar.ui_state().notifications.needs_you_sound;
+        let shown = self.shown_local();
+        let sound = &shown.notifications.needs_you_sound;
         let dropdown = self.sound_dropdown(NotifyKind::NeedsYou, "Needs you sound", focused, cx);
         let play = (*sound != ToastSound::Off).then(|| {
             settings_button(
@@ -4539,7 +4975,8 @@ impl RootView {
     fn finished_sound_rows(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
         let size = crate::fonts::ui_text_size(cx);
-        let sound = &self.sidebar.ui_state().notifications.finished_sound;
+        let shown = self.shown_local();
+        let sound = &shown.notifications.finished_sound;
         let dropdown = self.sound_dropdown(NotifyKind::Finished, "Finished sound", focused, cx);
         let play = (*sound != ToastSound::Off).then(|| {
             settings_button(
@@ -4595,7 +5032,7 @@ impl RootView {
         let t = theme(cx);
         let control = sound_field(kind);
         let selector = control.selector();
-        let shown = SoundEntry::of(self.sound_of(kind), kind);
+        let shown = SoundEntry::of(&self.sound_of(kind), kind);
         let chosen = labelled_text(format!("{selector}-text"), shown.text(kind))
             .flex_1()
             .min_w(px(0.0))
@@ -4686,7 +5123,7 @@ impl RootView {
         let copy = toggle(
             SettingsControl::CopyOnSelect,
             ToggleState {
-                checked: self.sidebar.ui_state().general.copy_on_select,
+                checked: self.shown_local().general.copy_on_select,
                 enabled: true,
             },
             "Copy selection to clipboard automatically",
@@ -4721,7 +5158,7 @@ impl RootView {
         let check = toggle(
             SettingsControl::CheckUpdates,
             ToggleState {
-                checked: self.sidebar.ui_state().general.check_updates,
+                checked: self.shown_local().general.check_updates,
                 enabled: true,
             },
             "Check for updates",
@@ -4768,7 +5205,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let view = self.sidebar.sidebar_view();
+        let view = self.shown_local().sidebar_view;
         let choices = SIDEBAR_VIEW_CHOICES.map(|choice| {
             let text = match choice {
                 SidebarView::Repos => "Repos",
@@ -4776,7 +5213,7 @@ impl RootView {
             };
             (SettingsControl::SidebarView(choice), text, choice == view)
         });
-        let density = self.sidebar.leaf_density();
+        let density = self.shown_local().general.leaf_density;
         let densities = LEAF_DENSITY_CHOICES.map(|choice| {
             let text = match choice {
                 LeafDensity::Comfortable => "Comfortable",
@@ -4788,8 +5225,9 @@ impl RootView {
                 choice == density,
             )
         });
-        let under = sessions_under_repos_choices(self.sidebar.sessions_under_repos());
-        let sorts = repo_sort_choices(self.sidebar.repo_sort());
+        let general = self.shown_local().general;
+        let under = sessions_under_repos_choices(general.sessions_under_repos);
+        let sorts = repo_sort_choices(general.repo_sort);
         section(
             crate::fonts::ui_text_size(cx),
             crate::fonts::ui_weight_shift(cx),
@@ -4826,7 +5264,8 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let t = theme(cx);
-        let title = &self.sidebar.ui_state().title;
+        let shown = self.shown_local();
+        let title = &shown.title;
         let modes = count_mode_choices(title.count);
         let count = toggle(
             SettingsControl::TitleCount,
@@ -4902,10 +5341,8 @@ impl RootView {
 
 const SUMMARIES_INTRO: &str = "Short summaries of what each session is doing, for the Dashboard and its notifications. \
      Off until you turn them on: each summary uses the chosen provider's account.";
-const VARIABLE_HINT: &str =
-    "The daemon reads this variable from its own environment. Press Enter to apply.";
-const CAP_HINT: &str =
-    "Summaries stop for the day once today's spend reaches the cap. Press Enter to apply.";
+const VARIABLE_HINT: &str = "The daemon reads this variable from its own environment.";
+const CAP_HINT: &str = "Summaries stop for the day once today's spend reaches the cap.";
 const TEST_HINT: &str = "Summarizes a fixed sample with the settings above.";
 const NEWER_DAEMON: &str =
     "This host's daemon is newer than this app; update the app to change these settings.";
@@ -4935,11 +5372,7 @@ impl RootView {
             .summarizer_settings
             .status(host)
             .map(|s| s.settings.clone());
-        if let Some(tab) = self
-            .dashboard_settings_tab
-            .as_mut()
-            .filter(|tab| tab.host == *host)
-        {
+        if let Some(tab) = self.dashboard_settings_tabs.get_mut(host) {
             tab.follow(old.as_ref(), new.as_ref(), cx);
         }
         cx.notify();
@@ -4970,11 +5403,6 @@ impl RootView {
         self.summarizer_settings.status(&self.settings_host)
     }
 
-    fn shown_summarizer_settings(&self) -> Option<SummarizerSettings> {
-        self.shown_summarizer()
-            .map(|status| status.settings.clone())
-    }
-
     /// Whether the shown host's daemon reads its key from a source this
     /// app cannot name: its settings cannot be sent back whole, so the tab
     /// changes none of them.
@@ -4983,53 +5411,24 @@ impl RootView {
             .is_some_and(|status| status.settings.key_source == SummarizerKeySource::Unknown)
     }
 
-    /// The settings the next change on the shown host builds on: the ones
-    /// last sent, else its daemon's; none while the tab is locked.
-    fn next_summarizer_settings(&self) -> Option<SummarizerSettings> {
-        if self.summarizer_locked() {
-            return None;
-        }
-        self.summarizer_settings
-            .next_settings(&self.settings_host)
-            .cloned()
-    }
-
     fn shown_dashboard_tab(&self) -> Option<&DashboardSettingsTab> {
-        self.dashboard_settings_tab
-            .as_ref()
-            .filter(|tab| tab.host == self.settings_host)
+        self.dashboard_settings_tabs.get(&self.settings_host)
     }
 
-    fn shown_dashboard_tab_mut(&mut self) -> Option<&mut DashboardSettingsTab> {
-        self.dashboard_settings_tab
-            .as_mut()
-            .filter(|tab| tab.host == self.settings_host)
-    }
-
-    /// The key source the tab shows: the daemon's, or Environment variable
-    /// while it was chosen and no variable is named yet.
+    /// The key source the tab shows: the one pending, else the daemon's.
     fn shown_key_source(&self) -> KeySourceChoice {
-        let env = self
-            .shown_summarizer()
-            .is_some_and(|s| matches!(s.settings.key_source, SummarizerKeySource::Env { .. }));
-        if env || self.shown_dashboard_tab().is_some_and(|tab| tab.env_chosen) {
-            KeySourceChoice::Env
-        } else {
-            KeySourceChoice::Stored
-        }
+        self.pending_key_source(&self.settings_host)
     }
 
+    /// Whether the provider shown as chosen takes a key.
     fn summarizer_needs_key(&self) -> bool {
-        self.shown_summarizer()
-            .and_then(SummarizerStatus::provider)
-            .is_some_and(|provider| provider.needs_key)
-    }
-
-    fn key_save_enabled(&self) -> bool {
-        !self.summarizer_locked()
-            && self
-                .shown_dashboard_tab()
-                .is_some_and(|tab| !tab.key_draft.trim().is_empty())
+        self.shown_summarizer().is_some_and(|status| {
+            let id = self.shown_provider_id(status);
+            status
+                .providers
+                .iter()
+                .any(|provider| provider.id == id && provider.needs_key)
+        })
     }
 
     /// Clear deletes a stored key: one the daemon holds, rejected or not.
@@ -5083,7 +5482,6 @@ impl RootView {
         if every {
             return vec![
                 SettingsControl::DashboardKey,
-                SettingsControl::DashboardKeySave,
                 SettingsControl::DashboardKeyClear,
                 SettingsControl::DashboardEnvVariable,
             ];
@@ -5092,35 +5490,47 @@ impl RootView {
             return vec![SettingsControl::DashboardEnvVariable];
         }
         let mut controls = vec![SettingsControl::DashboardKey];
-        if self.key_save_enabled() {
-            controls.push(SettingsControl::DashboardKeySave);
-        }
         if self.key_clear_enabled() {
             controls.push(SettingsControl::DashboardKeyClear);
         }
         controls
     }
 
-    /// The tab afresh for the shown host: an empty masked key field, and
-    /// the variable and cap fields holding the daemon's values.
+    /// The shown host's Dashboard tab, built afresh unless held: held, it
+    /// keeps its drafts until Settings closes.
+    fn hold_dashboard_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.settings_host.clone();
+        if !self.dashboard_settings_tabs.contains_key(&host) {
+            let tab = self.new_dashboard_tab(&host, window, cx);
+            self.dashboard_settings_tabs.insert(host, tab);
+        }
+    }
+
+    /// `host`'s tab afresh: an empty masked key field, and the variable and
+    /// cap fields holding the daemon's values.
     fn new_dashboard_tab(
         &self,
+        host: &HostKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> DashboardSettingsTab {
-        let settings = self.shown_summarizer_settings();
+        let settings = self
+            .summarizer_settings
+            .status(host)
+            .map(|status| status.settings.clone());
         let cap_draft = settings
             .as_ref()
             .map_or_else(String::new, |settings| usd(settings.daily_cap_usd));
         let variable_draft = env_variable(settings.as_ref()).unwrap_or_default();
-        let (key, key_subs) = Self::dashboard_input(DashboardField::Key, String::new(), window, cx);
+        let input = |field, text, window: &mut Window, cx: &mut Context<Self>| {
+            Self::dashboard_input(host.clone(), field, text, window, cx)
+        };
+        let (key, key_subs) = input(DashboardField::Key, String::new(), window, cx);
         key.update(cx, |input, cx| input.set_masked(true, cx));
         let (variable, variable_subs) =
-            Self::dashboard_input(DashboardField::Variable, variable_draft.clone(), window, cx);
-        let (cap, cap_subs) =
-            Self::dashboard_input(DashboardField::Cap, cap_draft.clone(), window, cx);
+            input(DashboardField::Variable, variable_draft.clone(), window, cx);
+        let (cap, cap_subs) = input(DashboardField::Cap, cap_draft.clone(), window, cx);
         DashboardSettingsTab {
-            host: self.settings_host.clone(),
             key_focus: key.read(cx).focus_handle(cx),
             variable_focus: variable.read(cx).focus_handle(cx),
             cap_focus: cap.read(cx).focus_handle(cx),
@@ -5130,8 +5540,6 @@ impl RootView {
             key_draft: String::new(),
             variable_draft,
             cap_draft,
-            env_chosen: false,
-            cap_problem: None,
             _subscriptions: [key_subs, variable_subs, cap_subs]
                 .into_iter()
                 .flatten()
@@ -5139,9 +5547,10 @@ impl RootView {
         }
     }
 
-    /// A Dashboard field's input holding `text`: Enter applies it, Escape
-    /// closes Settings, and an edit keeps its draft.
+    /// A field of `host`'s Dashboard tab, its input holding `text`: an edit
+    /// keeps its draft, which waits for Apply or OK; Escape is Cancel.
     fn dashboard_input(
+        host: HostKey,
         field: DashboardField,
         text: String,
         window: &mut Window,
@@ -5156,12 +5565,12 @@ impl RootView {
         let keys = cx.subscribe_in(
             &input,
             window,
-            move |this, _, event: &TextInputEvent, window, cx| match event {
-                TextInputEvent::Submit => {
-                    this.submit_dashboard_field(field, cx);
-                    cx.notify();
+            // Enter applies nothing: the field waits for Apply or OK. Esc
+            // is Cancel.
+            move |this, _, event: &TextInputEvent, window, cx| {
+                if matches!(event, TextInputEvent::Cancel) {
+                    this.close_appearance_editor(window, cx);
                 }
-                TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
             },
         );
         let edits = cx.subscribe_in(
@@ -5169,10 +5578,7 @@ impl RootView {
             window,
             move |this, input, _: &TextChanged, _, cx| {
                 let text = input.read(cx).text().to_owned();
-                if let Some(tab) = &mut this.dashboard_settings_tab {
-                    if field == DashboardField::Cap {
-                        tab.cap_problem = None;
-                    }
+                if let Some(tab) = this.dashboard_settings_tabs.get_mut(&host) {
                     *tab.draft_mut(field) = text;
                 }
                 cx.notify();
@@ -5181,147 +5587,218 @@ impl RootView {
         (input, [keys, edits])
     }
 
-    fn submit_dashboard_field(&mut self, field: DashboardField, cx: &mut Context<Self>) {
-        match field {
-            DashboardField::Key => self.save_summarizer_key(cx),
-            DashboardField::Variable => self.apply_env_variable(),
-            DashboardField::Cap => self.apply_cap(),
+    /// A Dashboard toggle or choice on the shown host: `value`, pending
+    /// until Apply unless it is `saved`. Nothing is chosen while the tab is
+    /// locked.
+    fn pend_dashboard(&mut self, value: HostPending, saved: &HostPending) {
+        if self.summarizer_locked() || self.shown_summarizer().is_none() {
+            return;
+        }
+        let host = self.settings_host.clone();
+        self.settings_pending.set_host(&host, value, Some(saved));
+    }
+
+    /// The shown host's summarizer pending `pick` reads, if any.
+    fn dashboard_pending<R>(&self, pick: impl Fn(&HostPending) -> Option<R>) -> Option<R> {
+        self.settings_pending
+            .host(&self.settings_host)
+            .iter()
+            .find_map(pick)
+    }
+
+    /// Whether summaries show as on: pending, else the daemon's.
+    fn shown_summaries_on(&self, status: &SummarizerStatus) -> bool {
+        self.dashboard_pending(|value| match value {
+            HostPending::Summaries(on) => Some(*on),
+            _ => None,
+        })
+        .unwrap_or(status.settings.enabled)
+    }
+
+    /// The provider shown as chosen: pending, else the daemon's.
+    fn shown_provider_id(&self, status: &SummarizerStatus) -> String {
+        self.dashboard_pending(|value| match value {
+            HostPending::SummaryProvider(id) => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| status.settings.provider.clone())
+    }
+
+    fn toggle_summaries(&mut self) {
+        let Some(status) = self.shown_summarizer() else {
+            return;
+        };
+        let (on, saved) = (self.shown_summaries_on(status), status.settings.enabled);
+        self.pend_dashboard(HostPending::Summaries(!on), &HostPending::Summaries(saved));
+    }
+
+    fn choose_summarizer_provider(&mut self, index: usize) {
+        let Some(status) = self.shown_summarizer() else {
+            return;
+        };
+        let Some(provider) = status.providers.get(index).map(|p| p.id.clone()) else {
+            return;
+        };
+        let saved = HostPending::SummaryProvider(status.settings.provider.clone());
+        self.pend_dashboard(HostPending::SummaryProvider(provider), &saved);
+    }
+
+    /// The key source, pending until Apply; Environment variable sends
+    /// once a variable is named, and until then shows the variable field.
+    fn choose_key_source(&mut self, choice: KeySourceChoice) {
+        let saved = self.saved_key_source(&self.settings_host);
+        self.pend_dashboard(
+            HostPending::SummaryKeySource(choice),
+            &HostPending::SummaryKeySource(saved),
+        );
+    }
+
+    /// The key source `host`'s daemon reads.
+    fn saved_key_source(&self, host: &HostKey) -> KeySourceChoice {
+        let env = self
+            .summarizer_settings
+            .status(host)
+            .is_some_and(|s| matches!(s.settings.key_source, SummarizerKeySource::Env { .. }));
+        if env {
+            KeySourceChoice::Env
+        } else {
+            KeySourceChoice::Stored
         }
     }
 
-    /// Sends `settings` to the shown host, and keeps them for the next
-    /// change to build on; returns the request's id.
-    fn send_summarizer_settings(&mut self, settings: SummarizerSettings) -> String {
+    /// `host`'s pending Dashboard rows: its toggles and choices, and, while
+    /// the Dashboard tab is `host`'s, a named variable, a cap and a key
+    /// that differ from the daemon's. A cap that is no number of dollars,
+    /// and Environment variable with no variable named, fail validation.
+    fn dashboard_pending_rows(&self, host: &HostKey) -> Vec<PendingEdit> {
+        let Some(status) = self.summarizer_settings.status(host) else {
+            return Vec::new();
+        };
+        if status.settings.key_source == SummarizerKeySource::Unknown {
+            return Vec::new();
+        }
+        let tab = self.dashboard_settings_tabs.get(host);
+        let variable = tab.map_or("", |tab| tab.variable_draft.trim());
+        let mut rows = self.dashboard_toggle_rows(host, variable);
+        if let Some(tab) = tab {
+            let source = self.pending_key_source(host);
+            rows.extend(dashboard_draft_rows(&status.settings, source, tab));
+        }
+        rows
+    }
+
+    /// `host`'s pending Dashboard toggles and choices, as rows: Environment
+    /// variable fails validation while `variable` names none.
+    fn dashboard_toggle_rows(&self, host: &HostKey, variable: &str) -> Vec<PendingEdit> {
+        self.settings_pending
+            .host(host)
+            .iter()
+            .filter_map(|value| {
+                let valid = match value {
+                    HostPending::SummaryKeySource(KeySourceChoice::Env) => !variable.is_empty(),
+                    HostPending::Summaries(_)
+                    | HostPending::SummaryProvider(_)
+                    | HostPending::SummaryKeySource(KeySourceChoice::Stored) => true,
+                    _ => return None,
+                };
+                Some(PendingEdit {
+                    row: PendingRow::Toggle,
+                    valid,
+                })
+            })
+            .collect()
+    }
+
+    /// The key source `host`'s Dashboard shows: the one pending, else the
+    /// daemon's.
+    fn pending_key_source(&self, host: &HostKey) -> KeySourceChoice {
+        self.settings_pending
+            .host(host)
+            .iter()
+            .find_map(|value| match value {
+                HostPending::SummaryKeySource(choice) => Some(*choice),
+                _ => None,
+            })
+            .unwrap_or_else(|| self.saved_key_source(host))
+    }
+
+    /// Apply reaching `host`'s Dashboard: its pending toggles, choices,
+    /// variable and cap as one settings message, then a typed key, sent as
+    /// the key Save sent before and the field emptied.
+    fn apply_dashboard(
+        &mut self,
+        host: &HostKey,
+        held: Vec<HostPending>,
+        rows: &[PendingEdit],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut settings) = self.summarizer_settings.next_settings(host).cloned() else {
+            return;
+        };
+        let has = |row: PendingRow| rows.iter().any(|edit| edit.row == row);
+        let mut changed = !held.is_empty();
+        for value in held {
+            take_dashboard_value(&mut settings, value);
+        }
+        let tab = self.dashboard_settings_tabs.get(host);
+        let variable = tab
+            .map(|tab| tab.variable_draft.trim().to_owned())
+            .filter(|_| has(PendingRow::DashboardVariable));
+        let cap = tab
+            .and_then(|tab| parse_cap(&tab.cap_draft))
+            .filter(|_| has(PendingRow::DashboardCap));
+        if let Some(variable) = variable {
+            settings.key_source = SummarizerKeySource::Env { variable };
+            changed = true;
+        }
+        if let Some(cap) = cap {
+            settings.daily_cap_usd = cap;
+            changed = true;
+        }
+        let provider = settings.provider.clone();
+        if changed {
+            self.send_summarizer_settings(host, settings, cap.is_some());
+        }
+        if has(PendingRow::DashboardKey) {
+            self.send_summarizer_key(host, provider, cx);
+        }
+    }
+
+    /// `settings` to `host` as Apply's summarizer send, kept for the next
+    /// change to build on; `cap` when it carries a changed cap, whose
+    /// refusal the cap field shows.
+    fn send_summarizer_settings(
+        &mut self,
+        host: &HostKey,
+        settings: SummarizerSettings,
+        cap: bool,
+    ) {
         let request_id = crate::new_request_id();
-        self.send_to(
-            &self.settings_host,
+        tracing::info!(?host, "settings: applying the summarizer's settings");
+        self.send_setting(
+            host,
             ClientMessage::SetSummarizerSettings {
                 settings: settings.clone(),
                 request_id: Some(request_id.clone()),
             },
         );
-        self.summarizer_settings
-            .sent_settings(&self.settings_host, settings);
-        request_id
-    }
-
-    fn toggle_summaries(&mut self) {
-        let Some(mut settings) = self.next_summarizer_settings() else {
-            return;
-        };
-        settings.enabled = !settings.enabled;
-        tracing::info!(
-            enabled = settings.enabled,
-            "settings: switching Dashboard summaries"
-        );
-        self.send_summarizer_settings(settings);
-    }
-
-    fn choose_summarizer_provider(&mut self, index: usize) {
-        let Some(mut settings) = self.next_summarizer_settings() else {
-            return;
-        };
-        let Some(provider) = self
-            .shown_summarizer()
-            .and_then(|status| status.providers.get(index))
-            .map(|provider| provider.id.clone())
-        else {
-            return;
-        };
-        if provider == settings.provider {
-            return;
+        self.summarizer_settings.sent_settings(host, settings);
+        if cap {
+            self.summarizer_settings.sent_cap(host, request_id);
         }
-        tracing::info!(%provider, "settings: choosing the summarizer provider");
-        settings.provider = provider;
-        self.send_summarizer_settings(settings);
     }
 
-    /// Stored key applies at once; Environment variable applies once a
-    /// variable is named, and until then only shows the variable field.
-    fn choose_key_source(&mut self, choice: KeySourceChoice) {
-        let Some(mut settings) = self.next_summarizer_settings() else {
-            return;
-        };
-        let Some(tab) = self.shown_dashboard_tab_mut() else {
-            return;
-        };
-        tab.env_chosen = choice == KeySourceChoice::Env;
-        let variable = tab.variable_draft.trim().to_owned();
-        let source = match choice {
-            KeySourceChoice::Stored => SummarizerKeySource::Stored,
-            KeySourceChoice::Env if variable.is_empty() => return,
-            KeySourceChoice::Env => SummarizerKeySource::Env { variable },
-        };
-        if settings.key_source == source {
-            return;
-        }
-        settings.key_source = source;
-        tracing::info!(?choice, "settings: choosing the summarizer key source");
-        self.send_summarizer_settings(settings);
-    }
-
-    fn apply_env_variable(&mut self) {
-        let Some(mut settings) = self.next_summarizer_settings() else {
-            return;
-        };
-        let Some(variable) = self
-            .shown_dashboard_tab()
-            .map(|tab| tab.variable_draft.trim().to_owned())
-            .filter(|variable| !variable.is_empty())
-        else {
-            return;
-        };
-        let source = SummarizerKeySource::Env { variable };
-        if settings.key_source == source {
-            return;
-        }
-        settings.key_source = source;
-        tracing::info!("settings: reading the summarizer key from an environment variable");
-        self.send_summarizer_settings(settings);
-    }
-
-    /// Sends the cap field's cap when it is a number of dollars, zero or
-    /// more; otherwise says so under the field and sends nothing.
-    fn apply_cap(&mut self) {
-        let Some(mut settings) = self.next_summarizer_settings() else {
-            return;
-        };
-        let Some(tab) = self.shown_dashboard_tab_mut() else {
-            return;
-        };
-        let Some(cap) = parse_cap(&tab.cap_draft) else {
-            tab.cap_problem = Some(CAP_PROBLEM.to_owned());
-            return;
-        };
-        tab.cap_problem = None;
-        settings.daily_cap_usd = cap;
-        tracing::info!(cap, "settings: setting the summarizer's daily cap");
-        let request_id = self.send_summarizer_settings(settings);
-        self.summarizer_settings
-            .sent_cap(&self.settings_host, request_id);
-    }
-
-    /// Sends the key field's key for the chosen provider and empties the
-    /// field; an empty field sends nothing.
-    fn save_summarizer_key(&mut self, cx: &mut Context<Self>) {
-        let Some(provider) = self.shown_summarizer().map(|s| s.settings.provider.clone()) else {
-            return;
-        };
-        if self.summarizer_locked() {
-            return;
-        }
-        let Some(tab) = self.shown_dashboard_tab_mut() else {
+    /// `host`'s typed key to `host` for `provider`, the key field emptied.
+    fn send_summarizer_key(&mut self, host: &HostKey, provider: String, cx: &mut Context<Self>) {
+        let Some(tab) = self.dashboard_settings_tabs.get_mut(host) else {
             return;
         };
         let key = tab.key_draft.trim().to_owned();
-        if key.is_empty() {
-            return;
-        }
         tab.key_draft.clear();
         tab.key.update(cx, |input, cx| input.set_text("", cx));
         tracing::info!(%provider, "settings: saving the summarizer key");
-        self.send_to(
-            &self.settings_host,
+        self.send_setting(
+            host,
             ClientMessage::SetSummarizerKey {
                 provider,
                 key: Some(Secret(key)),
@@ -5427,7 +5904,8 @@ impl RootView {
     #[must_use]
     pub fn dashboard_cap_error(&self) -> Option<String> {
         self.shown_dashboard_tab()
-            .and_then(|tab| tab.cap_problem.clone())
+            .filter(|tab| !tab.cap_draft.trim().is_empty() && parse_cap(&tab.cap_draft).is_none())
+            .map(|_| CAP_PROBLEM.to_owned())
             .or_else(|| {
                 self.summarizer_settings
                     .cap_error(&self.settings_host)
@@ -5459,7 +5937,7 @@ impl RootView {
         let enabled = toggle(
             SettingsControl::DashboardEnabled,
             ToggleState {
-                checked: status.settings.enabled,
+                checked: self.shown_summaries_on(status),
                 enabled: !locked,
             },
             "Summarize sessions",
@@ -5522,6 +6000,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let chosen = self.shown_provider_id(status);
         let choices: Vec<(SettingsControl, &'static str, bool)> = self
             .provider_controls()
             .into_iter()
@@ -5530,7 +6009,7 @@ impl RootView {
                 (
                     control,
                     intern(provider.name.clone()),
-                    provider.id == status.settings.provider,
+                    provider.id == chosen,
                 )
             })
             .collect();
@@ -5587,13 +6066,6 @@ impl RootView {
                     focused,
                     cx,
                 );
-                let save = settings_button(
-                    SettingsControl::DashboardKeySave,
-                    "Save",
-                    self.key_save_enabled(),
-                    focused,
-                    cx,
-                );
                 let clear = settings_button(
                     SettingsControl::DashboardKeyClear,
                     "Clear",
@@ -5601,12 +6073,7 @@ impl RootView {
                     focused,
                     cx,
                 );
-                rows.push(
-                    labelled_row("Key", field)
-                        .child(save)
-                        .child(clear)
-                        .into_any_element(),
-                );
+                rows.push(labelled_row("Key", field).child(clear).into_any_element());
             }
             KeySourceChoice::Env => {
                 let field = self.dashboard_field(
@@ -5859,6 +6326,440 @@ fn setting_text(value: &OptionValue) -> String {
     }
 }
 
+/// A row whose draft Apply would send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingRow {
+    /// Text or model field `field` of agent `agent`'s page.
+    Text {
+        agent: AgentId,
+        field: String,
+    },
+    /// Agent `agent`'s launch command, both rows at once.
+    Launch {
+        agent: AgentId,
+    },
+    /// A toggle or choice held in [`PendingSettings`].
+    Toggle,
+    /// The Worktrees tab's path.
+    WorktreesRoot,
+    /// This PC's remote access port.
+    RemotePort,
+    /// The Dashboard tab's variable, cap and key.
+    DashboardVariable,
+    DashboardCap,
+    DashboardKey,
+}
+
+/// A This PC setting a Settings control changed, waiting for Apply; held
+/// once, not per host, as `native-ui.json` holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LocalPending {
+    SidebarView(SidebarView),
+    LeafDensity(LeafDensity),
+    SessionsUnderRepos(SessionsUnderRepos),
+    RepoSort(RepoSort),
+    CopyOnSelect(bool),
+    CheckUpdates(bool),
+    CountMode(CountMode),
+    TitleCount(bool),
+    TitleSuffix(bool),
+    NotifyNeedsYou(bool),
+    NeedsYouSound(ToastSound),
+    NotifyFinished(bool),
+    FinishedSound(ToastSound),
+    NotifySkip(NotifySkip),
+    FinishedGrace(u32),
+    ToastStyle(ToastStyle),
+    SpawnTrusted(bool),
+}
+
+/// A host daemon's setting a Settings control changed, waiting for Apply.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum HostPending {
+    KeepAwake(KeepAwakeMode),
+    /// Toggle or choice field `field` of agent `agent`'s page.
+    AgentField {
+        agent: AgentId,
+        field: String,
+        value: OptionValue,
+    },
+    /// The remote access switch; This PC only.
+    RemoteEnabled(bool),
+    Summaries(bool),
+    SummaryProvider(String),
+    SummaryKeySource(KeySourceChoice),
+}
+
+impl HostPending {
+    /// Whether `other` sets the same setting, whatever its value.
+    fn same_slot(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::AgentField { agent, field, .. },
+                Self::AgentField {
+                    agent: other_agent,
+                    field: other_field,
+                    ..
+                },
+            ) => agent == other_agent && field == other_field,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+}
+
+/// The daemon message that echoes a send of Apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EchoKind {
+    AgentSettings,
+    AgentCommands,
+    WorktreesRoot,
+    KeepAwake,
+    Remote,
+    Summarizer,
+}
+
+/// A send of Apply to `host`, owing its echo; a refusal of it carries
+/// `request_id` when the send had one, else no id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwedEcho {
+    host: HostKey,
+    kind: EchoKind,
+    request_id: Option<String>,
+}
+
+impl OwedEcho {
+    /// What `msg` to `host` owes, when it is a settings send.
+    fn of(host: &HostKey, msg: &ClientMessage) -> Option<Self> {
+        let (kind, request_id) = match msg {
+            ClientMessage::SetAgentSettings { request_id, .. } => {
+                (EchoKind::AgentSettings, request_id.clone())
+            }
+            ClientMessage::SetAgentCommand { request_id, .. } => {
+                (EchoKind::AgentCommands, request_id.clone())
+            }
+            ClientMessage::SetWorktreesRoot { .. } => (EchoKind::WorktreesRoot, None),
+            ClientMessage::SetKeepAwakeMode { .. } => (EchoKind::KeepAwake, None),
+            ClientMessage::ConfigureRemote { .. } => (EchoKind::Remote, None),
+            ClientMessage::SetSummarizerSettings { request_id, .. }
+            | ClientMessage::SetSummarizerKey { request_id, .. } => {
+                (EchoKind::Summarizer, request_id.clone())
+            }
+            _ => return None,
+        };
+        Some(Self {
+            host: host.clone(),
+            kind,
+            request_id,
+        })
+    }
+}
+
+/// How far an echo says its send went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EchoState {
+    /// The send took effect.
+    Done,
+    /// Still under way: a later message says how it ended.
+    InProgress,
+    /// It ended without taking effect.
+    Failed,
+}
+
+/// The send of Apply `msg` echoes, if it echoes one, and how far it went.
+const fn echo_kind(msg: &DaemonMessage) -> Option<(EchoKind, EchoState)> {
+    let kind = match msg {
+        DaemonMessage::AgentSettings { .. } => EchoKind::AgentSettings,
+        DaemonMessage::AgentCommands { .. } => EchoKind::AgentCommands,
+        DaemonMessage::WorktreesRootChanged { .. } => EchoKind::WorktreesRoot,
+        DaemonMessage::KeepAwakeStatus { .. } => EchoKind::KeepAwake,
+        DaemonMessage::RemoteStatus { state, .. } => {
+            return Some((EchoKind::Remote, remote_echo(state)));
+        }
+        DaemonMessage::SummarizerStatus { .. } => EchoKind::Summarizer,
+        _ => return None,
+    };
+    Some((kind, EchoState::Done))
+}
+
+/// How far a `ConfigureRemote` went, as the status `state` its echo
+/// carries says: off or serving took effect, starting is still under way,
+/// and every other state (one this app cannot read included) ended with
+/// remote access not serving.
+const fn remote_echo(state: &RemoteState) -> EchoState {
+    match state {
+        RemoteState::Off | RemoteState::Serving { .. } => EchoState::Done,
+        RemoteState::Starting => EchoState::InProgress,
+        RemoteState::NotInstalled
+        | RemoteState::NotRunning
+        | RemoteState::OtherWindowsUser
+        | RemoteState::NotConnected
+        | RemoteState::TailscaleError { .. }
+        | RemoteState::HttpsDisabled
+        | RemoteState::HostTagged
+        | RemoteState::CertFailed { .. }
+        | RemoteState::PortInUse
+        | RemoteState::BindFailed { .. }
+        | RemoteState::Unknown => EchoState::Failed,
+    }
+}
+
+/// `msg` from `host` against the echoes OK still waits for: an echo in a
+/// final state crosses off the first owed send of its kind to `host`.
+/// Returns whether `msg` refuses one of `host`'s sends: an error carrying
+/// one's request id, any error with no id (echoes carry none to match),
+/// or an echo whose send failed.
+fn hear_owed_echo(wait: &mut Vec<OwedEcho>, host: &HostKey, msg: &DaemonMessage) -> bool {
+    match msg {
+        DaemonMessage::Error {
+            request_id: Some(id),
+            ..
+        } => wait
+            .iter()
+            .any(|owed| owed.host == *host && owed.request_id.as_deref() == Some(id.as_str())),
+        DaemonMessage::Error {
+            request_id: None, ..
+        } => wait.iter().any(|owed| owed.host == *host),
+        other => {
+            let Some((kind, state)) = echo_kind(other) else {
+                return false;
+            };
+            let Some(at) = wait
+                .iter()
+                .position(|owed| owed.host == *host && owed.kind == kind)
+            else {
+                return false;
+            };
+            match state {
+                EchoState::Done => {
+                    wait.remove(at);
+                    false
+                }
+                EchoState::InProgress => false,
+                EchoState::Failed => true,
+            }
+        }
+    }
+}
+
+/// Settings' toggles and choices waiting for Apply, beside the text rows'
+/// drafts: This PC's settings once, each host's daemon settings per host.
+/// A value pressed back to the saved one is not held. Also what OK waits
+/// for. Runtime only; Settings closing drops it.
+#[derive(Debug, Default)]
+pub(crate) struct PendingSettings {
+    local: Vec<LocalPending>,
+    hosts: HashMap<HostKey, Vec<HostPending>>,
+    /// The sends of the Apply now running.
+    log: Option<Vec<OwedEcho>>,
+    /// The echoes OK waits for before Settings closes.
+    ok_wait: Option<Vec<OwedEcho>>,
+}
+
+impl PendingSettings {
+    /// Holds `value` in place of any earlier value of its setting, or
+    /// nothing for it when it is `saved`.
+    fn set_local(&mut self, value: LocalPending, saved: &LocalPending) {
+        let slot = std::mem::discriminant(&value);
+        self.local
+            .retain(|held| std::mem::discriminant(held) != slot);
+        if value != *saved {
+            self.local.push(value);
+        }
+    }
+
+    /// Holds `value` for `host` in place of any earlier value of its
+    /// setting, or nothing for it when it is `saved`.
+    fn set_host(&mut self, host: &HostKey, value: HostPending, saved: Option<&HostPending>) {
+        let held = self.hosts.entry(host.clone()).or_default();
+        held.retain(|old| !old.same_slot(&value));
+        if saved != Some(&value) {
+            held.push(value);
+        }
+        if held.is_empty() {
+            self.hosts.remove(host);
+        }
+    }
+
+    /// `host`'s held values.
+    fn host(&self, host: &HostKey) -> &[HostPending] {
+        self.hosts.get(host).map_or(&[], Vec::as_slice)
+    }
+
+    /// `host`'s held values, no longer held.
+    fn take_host(&mut self, host: &HostKey) -> Vec<HostPending> {
+        self.hosts.remove(host).unwrap_or_default()
+    }
+}
+
+/// This PC's settings as Settings draws them: saved, with the pending
+/// values over them.
+pub(crate) struct ShownLocal {
+    pub(crate) general: crate::sidebar::GeneralSettings,
+    pub(crate) title: crate::sidebar::TitleSettings,
+    pub(crate) notifications: crate::sidebar::NotificationSettings,
+    pub(crate) trusted: bool,
+    pub(crate) sidebar_view: SidebarView,
+}
+
+impl ShownLocal {
+    /// `value` drawn over these settings.
+    fn take(&mut self, value: &LocalPending) {
+        match value.clone() {
+            LocalPending::SidebarView(view) => self.sidebar_view = view,
+            LocalPending::LeafDensity(density) => self.general.leaf_density = density,
+            LocalPending::SessionsUnderRepos(mode) => self.general.sessions_under_repos = mode,
+            LocalPending::RepoSort(sort) => self.general.repo_sort = sort,
+            LocalPending::CopyOnSelect(on) => self.general.copy_on_select = on,
+            LocalPending::CheckUpdates(on) => self.general.check_updates = on,
+            LocalPending::CountMode(mode) => self.title.count = mode,
+            LocalPending::TitleCount(on) => self.title.show_count = on,
+            LocalPending::TitleSuffix(on) => self.title.suffix = on,
+            LocalPending::NotifyNeedsYou(on) => self.notifications.awaiting_input = on,
+            LocalPending::NeedsYouSound(sound) => self.notifications.needs_you_sound = sound,
+            LocalPending::NotifyFinished(on) => self.notifications.finished = on,
+            LocalPending::FinishedSound(sound) => self.notifications.finished_sound = sound,
+            LocalPending::NotifySkip(skip) => self.notifications.skip_when = skip,
+            LocalPending::FinishedGrace(secs) => self.notifications.finished_grace_secs = secs,
+            LocalPending::ToastStyle(style) => self.notifications.toast_style = style,
+            LocalPending::SpawnTrusted(on) => self.trusted = on,
+        }
+    }
+
+    /// The value these settings hold for `like`'s setting.
+    fn value_like(&self, like: &LocalPending) -> LocalPending {
+        let (general, title, notes) = (&self.general, &self.title, &self.notifications);
+        match like {
+            LocalPending::SidebarView(_) => LocalPending::SidebarView(self.sidebar_view),
+            LocalPending::LeafDensity(_) => LocalPending::LeafDensity(general.leaf_density),
+            LocalPending::SessionsUnderRepos(_) => {
+                LocalPending::SessionsUnderRepos(general.sessions_under_repos)
+            }
+            LocalPending::RepoSort(_) => LocalPending::RepoSort(general.repo_sort),
+            LocalPending::CopyOnSelect(_) => LocalPending::CopyOnSelect(general.copy_on_select),
+            LocalPending::CheckUpdates(_) => LocalPending::CheckUpdates(general.check_updates),
+            LocalPending::CountMode(_) => LocalPending::CountMode(title.count),
+            LocalPending::TitleCount(_) => LocalPending::TitleCount(title.show_count),
+            LocalPending::TitleSuffix(_) => LocalPending::TitleSuffix(title.suffix),
+            LocalPending::NotifyNeedsYou(_) => LocalPending::NotifyNeedsYou(notes.awaiting_input),
+            LocalPending::NeedsYouSound(_) => {
+                LocalPending::NeedsYouSound(notes.needs_you_sound.clone())
+            }
+            LocalPending::NotifyFinished(_) => LocalPending::NotifyFinished(notes.finished),
+            LocalPending::FinishedSound(_) => {
+                LocalPending::FinishedSound(notes.finished_sound.clone())
+            }
+            LocalPending::NotifySkip(_) => LocalPending::NotifySkip(notes.skip_when),
+            LocalPending::FinishedGrace(_) => {
+                LocalPending::FinishedGrace(notes.finished_grace_secs)
+            }
+            LocalPending::ToastStyle(_) => LocalPending::ToastStyle(notes.toast_style),
+            LocalPending::SpawnTrusted(_) => LocalPending::SpawnTrusted(self.trusted),
+        }
+    }
+}
+
+impl RootView {
+    /// This PC's settings saved, with `pending` over them.
+    fn local_with(&self, pending: &[LocalPending]) -> ShownLocal {
+        let ui = self.sidebar.ui_state();
+        let mut shown = ShownLocal {
+            general: ui.general.clone(),
+            title: ui.title.clone(),
+            notifications: ui.notifications.clone(),
+            trusted: ui.spawn.trusted,
+            sidebar_view: ui.sidebar_view,
+        };
+        for value in pending {
+            shown.take(value);
+        }
+        shown
+    }
+
+    /// This PC's settings as Settings draws them; the app itself keeps
+    /// acting on the saved ones until Apply.
+    pub(crate) fn shown_local(&self) -> ShownLocal {
+        self.local_with(&self.settings_pending.local)
+    }
+
+    /// A This PC toggle or choice pressed: `value` pending until Apply, or
+    /// not pending once it is the saved value again.
+    fn pend_local(&mut self, value: LocalPending) {
+        let saved = self.local_with(&[]).value_like(&value);
+        self.settings_pending.set_local(value, &saved);
+    }
+}
+
+/// A pending row, and whether its draft passes the row's local
+/// validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingEdit {
+    row: PendingRow,
+    valid: bool,
+}
+
+/// Whether OK and Apply can be pressed over every host's `pending` edits:
+/// some host holds one, and none fails its local validation.
+fn apply_enabled(pending: &HashMap<HostKey, Vec<PendingEdit>>) -> bool {
+    let mut edits = pending.values().flatten().peekable();
+    edits.peek().is_some() && edits.all(|edit| edit.valid)
+}
+
+/// Whether a text field's `draft` is pending: the user `edited` it since it
+/// was last applied or filled, and it reads otherwise than the `saved`
+/// value its page shows.
+fn text_pending(edited: bool, draft: &str, saved: &str) -> bool {
+    edited && draft.trim() != saved.trim()
+}
+
+/// A Dashboard tab's pending drafts over the daemon's `settings`, with
+/// `source` the key source shown: a named variable other than the one read,
+/// a cap other than the daemon's (failing validation when it is no number
+/// of dollars), and a typed key for the stored key.
+fn dashboard_draft_rows(
+    settings: &SummarizerSettings,
+    source: KeySourceChoice,
+    tab: &DashboardSettingsTab,
+) -> Vec<PendingEdit> {
+    let mut rows = Vec::new();
+    let variable = tab.variable_draft.trim();
+    if source == KeySourceChoice::Env
+        && !variable.is_empty()
+        && env_variable(Some(settings)).as_deref() != Some(variable)
+    {
+        rows.push(PendingEdit {
+            row: PendingRow::DashboardVariable,
+            valid: true,
+        });
+    }
+    let cap = tab.cap_draft.trim();
+    if !cap.is_empty() && parse_cap(cap) != Some(settings.daily_cap_usd) {
+        rows.push(PendingEdit {
+            row: PendingRow::DashboardCap,
+            valid: parse_cap(cap).is_some(),
+        });
+    }
+    if source == KeySourceChoice::Stored && !tab.key_draft.trim().is_empty() {
+        rows.push(PendingEdit {
+            row: PendingRow::DashboardKey,
+            valid: true,
+        });
+    }
+    rows
+}
+
+/// A pending Dashboard toggle or choice drawn over `settings`; Environment
+/// variable is drawn by its named variable instead.
+fn take_dashboard_value(settings: &mut SummarizerSettings, value: HostPending) {
+    match value {
+        HostPending::Summaries(on) => settings.enabled = on,
+        HostPending::SummaryProvider(id) => settings.provider = id,
+        HostPending::SummaryKeySource(KeySourceChoice::Stored) => {
+            settings.key_source = SummarizerKeySource::Stored;
+        }
+        _ => {}
+    }
+}
+
 /// The value a text field's typed `text` stores: no value when blank.
 fn typed_value(text: &str) -> OptionValue {
     let text = text.trim();
@@ -5880,8 +6781,8 @@ fn text_placeholder(view: &FieldView) -> Option<String> {
 }
 
 /// The input of `host`'s agent `agent`'s text field `seed` names, and its
-/// subscriptions: typing keeps the draft, and Enter or leaving the input
-/// applies it to `host`.
+/// subscriptions: typing keeps the draft, which waits for Apply or OK;
+/// Enter applies nothing, and Esc is Cancel.
 fn new_setting_text(
     host: &HostKey,
     agent: &AgentId,
@@ -5891,16 +6792,13 @@ fn new_setting_text(
 ) -> (SettingText, Vec<Subscription>) {
     let input = cx.new(|cx| TextInput::new(seed.draft.clone(), seed.placeholder.clone(), cx));
     let focus = input.read(cx).focus_handle(cx);
-    let (submit_host, submitter, submitted) = (host.clone(), agent.clone(), seed.field.clone());
     let keys = cx.subscribe_in(
         &input,
         window,
-        move |this, _, event: &TextInputEvent, window, cx| match event {
-            TextInputEvent::Submit => {
-                this.apply_setting_text(&submit_host, &submitter, &submitted);
-                cx.notify();
+        |this, _, event: &TextInputEvent, window, cx| {
+            if matches!(event, TextInputEvent::Cancel) {
+                this.close_appearance_editor(window, cx);
             }
-            TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
         },
     );
     let (edit_host, editor, edited) = (host.clone(), agent.clone(), seed.field.clone());
@@ -5916,11 +6814,6 @@ fn new_setting_text(
             cx.notify();
         },
     );
-    let (leave_host, leaver, left) = (host.clone(), agent.clone(), seed.field.clone());
-    let blur = cx.on_blur(&focus, window, move |this, _, cx| {
-        this.apply_setting_text(&leave_host, &leaver, &left);
-        cx.notify();
-    });
     let text = SettingText {
         field: seed.field,
         input,
@@ -5929,7 +6822,7 @@ fn new_setting_text(
         edited: false,
         placeholder: seed.placeholder,
     };
-    (text, vec![keys, edits, blur])
+    (text, vec![keys, edits])
 }
 
 /// What an agent page's rows draw from: the agent's tag, whether its rows
@@ -6332,14 +7225,15 @@ fn choice_row(
     reason = "a test fails with the message of the precondition it lost"
 )]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
 
     use gpui::{AppContext as _, TestAppContext};
-    use protocol::{AgentDescriptor, AgentId, OptionValue, SpawnPlacement};
+    use protocol::{AgentDescriptor, AgentId, KeepAwakeMode, OptionValue, SpawnPlacement};
 
     use super::{
-        AgentTab, AgentTabs, HostAgentTabs, SettingsTab, control_matches, intern, row_tabs,
-        settings_host_after_close, tab_kept, tab_rows,
+        AgentTab, AgentTabs, HostAgentTabs, HostPending, LocalPending, PendingEdit, PendingRow,
+        PendingSettings, SettingsTab, apply_enabled, control_matches, intern, row_tabs,
+        settings_host_after_close, tab_kept, tab_rows, text_pending,
     };
     use crate::agent_options::{FieldEditor, FieldView};
     use crate::target::HostKey;
@@ -6596,6 +7490,155 @@ mod tests {
             ("wrapper", "-v"),
             "the drafts stay"
         );
+    }
+
+    /// A pending text row of Claude's page, passing its local validation
+    /// when `valid`.
+    fn pending_text(valid: bool) -> PendingEdit {
+        PendingEdit {
+            row: PendingRow::Text {
+                agent: id("claude"),
+                field: "profile".to_owned(),
+            },
+            valid,
+        }
+    }
+
+    /// The hosts' pending edits as the gate reads them.
+    fn pending(hosts: Vec<(HostKey, Vec<PendingEdit>)>) -> HashMap<HostKey, Vec<PendingEdit>> {
+        hosts.into_iter().collect()
+    }
+
+    #[test]
+    fn the_gate_is_shut_with_nothing_pending() {
+        assert!(!apply_enabled(&pending(Vec::new())));
+        assert!(
+            !apply_enabled(&pending(vec![(HostKey::Local, Vec::new())])),
+            "a host listed with no edit holds nothing pending"
+        );
+    }
+
+    #[test]
+    fn the_gate_opens_on_one_valid_pending_row_on_the_chosen_host() {
+        assert!(apply_enabled(&pending(vec![(
+            HostKey::Local,
+            vec![pending_text(true)]
+        )])));
+    }
+
+    #[test]
+    fn a_row_failing_local_validation_shuts_the_gate_on_any_host() {
+        assert!(!apply_enabled(&pending(vec![(
+            HostKey::Local,
+            vec![pending_text(true), pending_text(false)]
+        )])));
+        assert!(
+            !apply_enabled(&pending(vec![
+                (HostKey::Local, vec![pending_text(true)]),
+                (box_host(), vec![pending_text(false)]),
+            ])),
+            "an invalid row on another host shuts it too"
+        );
+    }
+
+    #[test]
+    fn the_gate_opens_on_pending_only_on_another_host() {
+        assert!(
+            apply_enabled(&pending(vec![(box_host(), vec![pending_text(true)])])),
+            "box's edit is pending while This PC is chosen"
+        );
+    }
+
+    #[test]
+    fn an_edit_typed_back_to_the_saved_value_is_not_pending() {
+        assert!(text_pending(true, "work", ""));
+        assert!(
+            !text_pending(true, "work", "work"),
+            "typed back to the saved value"
+        );
+        assert!(
+            !text_pending(true, " work ", "work"),
+            "Apply sends the text trimmed, so spaces around it change nothing"
+        );
+        assert!(
+            !text_pending(false, "work", ""),
+            "a draft Apply already sent, or a fill, is not pending"
+        );
+        let rows: Vec<PendingEdit> = text_pending(true, "work", "work")
+            .then(|| pending_text(true))
+            .into_iter()
+            .collect();
+        assert!(
+            !apply_enabled(&pending(vec![(HostKey::Local, rows)])),
+            "so the gate stays shut"
+        );
+    }
+
+    #[test]
+    fn a_local_toggle_is_held_until_pressed_back_to_the_saved_value() {
+        let mut store = PendingSettings::default();
+        let saved = LocalPending::CopyOnSelect(false);
+        store.set_local(LocalPending::CopyOnSelect(true), &saved);
+        assert_eq!(store.local, [LocalPending::CopyOnSelect(true)]);
+        store.set_local(
+            LocalPending::CheckUpdates(false),
+            &LocalPending::CheckUpdates(true),
+        );
+        store.set_local(LocalPending::CopyOnSelect(false), &saved);
+        assert_eq!(
+            store.local,
+            [LocalPending::CheckUpdates(false)],
+            "pressed back, copy on selection is not held; the other toggle is"
+        );
+    }
+
+    #[test]
+    fn a_later_choice_replaces_the_held_one() {
+        let mut store = PendingSettings::default();
+        let saved = Some(HostPending::KeepAwake(KeepAwakeMode::Off));
+        store.set_host(
+            &HostKey::Local,
+            HostPending::KeepAwake(KeepAwakeMode::Always),
+            saved.as_ref(),
+        );
+        store.set_host(
+            &HostKey::Local,
+            HostPending::KeepAwake(KeepAwakeMode::WhenBusy),
+            saved.as_ref(),
+        );
+        assert_eq!(
+            store.host(&HostKey::Local),
+            [HostPending::KeepAwake(KeepAwakeMode::WhenBusy)]
+        );
+        store.set_host(
+            &HostKey::Local,
+            HostPending::KeepAwake(KeepAwakeMode::Off),
+            saved.as_ref(),
+        );
+        assert_eq!(store.host(&HostKey::Local), []);
+        assert!(store.hosts.is_empty(), "a host holding nothing goes");
+    }
+
+    #[test]
+    fn host_values_are_held_per_host_and_agent_fields_per_field() {
+        let mut store = PendingSettings::default();
+        let field = |name: &str, on: bool| HostPending::AgentField {
+            agent: id("claude"),
+            field: name.to_owned(),
+            value: OptionValue::Bool(on),
+        };
+        store.set_host(&HostKey::Local, field("a", true), Some(&field("a", false)));
+        store.set_host(&HostKey::Local, field("b", true), Some(&field("b", false)));
+        store.set_host(&box_host(), field("a", true), None);
+        assert_eq!(
+            store.host(&HostKey::Local).len(),
+            2,
+            "two fields, two values"
+        );
+        assert_eq!(store.host(&box_host()), [field("a", true)]);
+        assert_eq!(store.take_host(&box_host()), [field("a", true)]);
+        assert!(store.host(&box_host()).is_empty(), "taken values go");
+        assert_eq!(store.host(&HostKey::Local).len(), 2, "This PC's stay");
     }
 
     #[test]
