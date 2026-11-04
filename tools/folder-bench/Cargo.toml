@@ -1,0 +1,34 @@
+[package]
+name = "folder-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "A bench harness that times fetching a folder from a remote host by each transfer candidate; a development tool, never shipped"
+publish = false
+
+[[bin]]
+name = "folder-bench"
+path = "src/main.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+# The base64 JSON-line frames, encoded like `FetchFileChunk`.
+base64 = "0.22"
+# `ClientMessage`/`DaemonMessage` for the fetch candidates over `bridge`.
+protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Process CPU times (`GetProcessTimes`) for this process and its children.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }

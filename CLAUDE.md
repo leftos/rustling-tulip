@@ -23,6 +23,7 @@ apps/native/            binary = rustling-tulip-native (thin main.rs over a lib,
 crates/agents/claude/fake/ fake-claude CLI shim the Claude plugin hands the native e2e tier through fake_cli
 tools/e2e/fake-tailscale/ fake `tailscale` CLI shim (whoami, whois, status, cert from a JSON state file) used by the live tier's remote specs
 tools/e2e/fake-ssh/     fake `ssh` shim (checks the client's argv, then runs `rustling-tulipd bridge` locally) used by the live tier's SSH specs
+tools/folder-bench/     package folder-bench (publish = false, never in the installer): the dev-only harness that generates deterministic folder fixtures and times folder-transfer candidates from this PC to the builder, against an isolated daemon there; see its README.md
 tools/rt-driver-mcp/    package rt-driver-mcp (never in the installer): the stdio MCP server `rt-driver` (registered in .mcp.json) that launches an isolated driven native client and calls its driver endpoint; see docs/native-client.md "Driver MCP server"
 README.md               the user-facing feature showcase and install steps, refreshed each release (docs/release.md)
 CHANGELOG.md            what changed in each release, for users; each landed item adds its bullet under Unreleased

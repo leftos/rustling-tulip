@@ -44,6 +44,7 @@ apps/
 tools/
   e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
+  folder-bench/ - the dev-only harness that generates folder fixtures and times folder-transfer candidates to the builder; never shipped
   installer/    - the NSIS installer script
   rt-driver-mcp/ - the `rt-driver` MCP server that launches and drives an isolated native client; never shipped
 docs/
