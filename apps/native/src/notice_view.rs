@@ -86,10 +86,7 @@ impl RootView {
     /// is offline.
     pub(crate) fn push_offline_toast(&mut self, host: &HostKey, cx: &mut Context<Self>) {
         let name = host.wire().unwrap_or("This PC");
-        tracing::warn!(
-            ?host,
-            "a spawn or duplicate asked of an offline host; dropped"
-        );
+        tracing::warn!(?host, "an action asked of an offline host; dropped");
         self.push_toast(
             ToastKind::Error,
             OFFLINE_TITLE,
@@ -607,6 +604,8 @@ impl RootView {
             self.apply_shell_focus(window, cx);
         } else if self.fetch_dialog.is_some() {
             self.apply_fetch_focus(window, cx);
+        } else if self.preset_wizard.is_some() {
+            self.preset_wizard_focus.focus(window);
         } else if self.themes_modal.is_some() {
             self.themes_focus.focus(window);
         } else if self.appearance_editor.is_some() {

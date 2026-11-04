@@ -108,7 +108,7 @@ fn pick_selector(pick: &Pick) -> String {
 }
 
 impl RootView {
-    /// Opens the wizard for `entry` launched on `target`, unless the
+    /// Opens the wizard for `entry` launched on `target`, unless that host's
     /// connection is down.
     pub(crate) fn open_preset_wizard(
         &mut self,
@@ -117,10 +117,14 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.conn().overlay().is_some() {
+        let host_key = self.host_of_preset_target(&target);
+        if host_key == HostKey::Local && self.conn().overlay().is_some() {
             return;
         }
-        let host_key = self.host_of_preset_target(&target);
+        if self.is_remote_offline(&host_key) {
+            self.push_offline_toast(&host_key, cx);
+            return;
+        }
         let repo_path = self
             .sidebar
             .repos_of(&host_key)
@@ -217,6 +221,23 @@ impl RootView {
         if self.preset_wizard.take().is_some() {
             self.focus_active_pane(window, cx);
             cx.notify();
+        }
+    }
+
+    /// Closes the wizard when `host` owns it; a wizard on another host stays
+    /// open.
+    pub(crate) fn close_preset_wizard_of(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .preset_wizard
+            .as_ref()
+            .is_some_and(|dialog| dialog.host == *host)
+        {
+            self.close_preset_wizard(window, cx);
         }
     }
 

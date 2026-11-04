@@ -35,7 +35,8 @@ use protocol::{
 use rustling_tulip_native::palette::{LAUNCHED_TINT, SELECTION};
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{
-    Activity, FileFilter, LaunchButton, NextButton, Toast, ToastKind, toast_action_selector,
+    Activity, Connection, FileFilter, LaunchButton, NetEvent, NextButton, Toast, ToastKind,
+    toast_action_selector,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -378,6 +379,23 @@ fn remote_repo() -> PresetTarget {
 /// Opens [`REMOTE`]'s `r2` menu, answers it with `entry` as that host does
 /// and presses its row.
 fn open_remote_wizard(h: &mut Harness<'_>, entry: PresetEntry) {
+    press_remote_preset_row(h, entry);
+    assert!(
+        h.root(|root, _| root.preset_wizard_open()),
+        "the wizard opened"
+    );
+}
+
+/// Opens [`REMOTE`]'s `r2` menu, answers it with `entry` as that host does
+/// and presses its row, whatever that opens.
+fn press_remote_preset_row(h: &mut Harness<'_>, entry: PresetEntry) {
+    open_remote_menu(h, entry);
+    h.click_on("container-menu-launch-preset-0");
+}
+
+/// Opens [`REMOTE`]'s `r2` menu and answers it with `entry` as that host
+/// does, leaving the menu open.
+fn open_remote_menu(h: &mut Harness<'_>, entry: PresetEntry) {
     h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
     let target = remote_repo();
     let request_id = h
@@ -396,10 +414,23 @@ fn open_remote_wizard(h: &mut Harness<'_>, entry: PresetEntry) {
         entries: vec![entry],
         request_id,
     });
-    h.click_on("container-menu-launch-preset-0");
+}
+
+#[gpui::test]
+fn a_remote_hosts_wizard_stays_open_while_this_pc_is_offline(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    open_remote_wizard(&mut h, remote_preset(json!([]), json!([])));
+
+    h.lose_connection();
     assert!(
         h.root(|root, _| root.preset_wizard_open()),
-        "the wizard opened"
+        "This PC's lost connection leaves the remote host's wizard open"
+    );
+    h.lose_connection();
+    assert!(
+        h.root(|root, _| root.preset_wizard_open()),
+        "and its next state event leaves it open"
     );
 }
 
@@ -691,6 +722,88 @@ fn escape_and_a_lost_connection_close_the_wizard(cx: &mut TestAppContext) {
     assert!(
         !h.root(|root, _| root.preset_wizard_open()),
         "the connection overlay closes it"
+    );
+}
+
+#[gpui::test]
+fn a_remote_wizard_closes_with_its_own_hosts_reset(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    open_remote_wizard(&mut h, remote_preset(json!([]), json!([])));
+
+    h.host(&remote()).connect();
+
+    assert!(
+        !h.root(|root, _| root.preset_wizard_open()),
+        "the remote host's new Welcome closes its wizard"
+    );
+}
+
+#[gpui::test]
+fn a_remote_wizard_on_an_offline_host_shows_the_offline_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    let offline = Connection::for_target(remote());
+    h.host(&remote()).event(NetEvent::State(offline));
+
+    press_remote_preset_row(&mut h, remote_preset(json!([]), json!([])));
+
+    assert!(
+        !h.root(|root, _| root.preset_wizard_open()),
+        "no wizard opens on a host that cannot answer it"
+    );
+    let wanted = format!("{REMOTE} is offline");
+    let shown: Vec<(String, Option<String>)> = toasts(&mut h)
+        .into_iter()
+        .map(|toast| (toast.title, toast.detail))
+        .collect();
+    assert!(
+        shown
+            .iter()
+            .any(|(_, detail)| detail.as_deref() == Some(wanted.as_str())),
+        "the offline toast says so: {shown:?}"
+    );
+}
+
+#[gpui::test]
+fn a_remote_wizard_closes_when_its_host_disconnects(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    open_remote_wizard(&mut h, remote_preset(json!([]), json!([])));
+
+    let offline = Connection::for_target(remote());
+    h.host(&remote()).event(NetEvent::State(offline));
+
+    assert!(
+        !h.root(|root, _| root.preset_wizard_open()),
+        "the remote host's dropped connection closes its wizard"
+    );
+}
+
+#[gpui::test]
+fn a_remote_wizard_keeps_the_keyboard_when_this_pc_resets(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    open_remote_wizard(&mut h, remote_preset(json!([]), json!([])));
+    // This PC's checkout prompt holds the keyboard, and its reset closes it.
+    h.send(DaemonMessage::CheckoutConfirmRequired {
+        repo_id: "r1".to_owned(),
+        branch: "b".to_owned(),
+        dirty_count: 1,
+        request_id: None,
+    });
+
+    h.lose_connection();
+    h.keys("x");
+
+    let typed = h.sent_input("s1");
+    assert!(
+        typed.is_empty(),
+        "the key reaches the wizard, not the terminal s1: {typed:?}"
+    );
+    assert!(
+        h.root(|root, _| root.preset_wizard_open()),
+        "the wizard stays open and keeps the keyboard"
     );
 }
 

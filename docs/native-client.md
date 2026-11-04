@@ -93,7 +93,11 @@ This doc records the decisions a change to the client needs to know; what each f
 
   The last stage is Preview: `{n} prompt(s) ready to spawn.` (plus ` → {t} tab(s).` when the preset groups by tab), the prompts as `[n] first line` under `Tab i of m` headers, a `Max panes per tab` field (hidden without tab grouping; blank takes the preset's cap, a preset cap of 0 counts as 1; input that is not a whole number of 1 or more disables Launch with an inline message; read-only while scripts run) and a `Scripts to run` section listing each script command with its variables filled in.
 
-  Launch runs the scripts on the daemon first, then sends `LaunchPreset` with a client-made job id and closes the dialog; a script failure stays on Preview with the error inline and the failing script's row marked in the danger colour, and the button reads `Retry script(s) & launch …`. Esc, Cancel and Back wait while the scripts run; a new `Welcome` and the connection overlay still close the wizard.
+  Launch runs the scripts on the daemon first, then sends `LaunchPreset` with a client-made job id and closes the dialog; a script failure stays on Preview with the error inline and the failing script's row marked in the danger colour, and the button reads `Retry script(s) & launch …`. Esc, Cancel and Back wait while the scripts run.
+
+  The wizard belongs to its host. Opening it on an offline remote host toasts "{host} is offline" instead. This PC's connection overlay and This PC's new `Welcome` close a This PC wizard only; a remote host's wizard closes when that host's connection drops or resets, and stays open while This PC is down.
+
+  This PC's overlay still covers the whole window, so a remote wizard cannot be used until This PC returns (RT-865). A notice closing hands the keyboard back to the wizard, not the terminal.
 
   Opened from a remote host's repo, the wizard's folder and path rows take typed paths on that host, and a folder source's default is under that repo's path on the host.
 
@@ -109,7 +113,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   It only highlights. `Stop all` stops the job's live created and partial sessions with no confirm and keeps their worktrees; on a running launch it sends `CancelPresetLaunch` first. `Cancel` leaves the toast once pressed. For a tab-grouping launch the first tab the job creates is shown once its id is known.
 
-  A non-optional prompted variable is required and a toggle never is: `Next` stays disabled with the tooltip `Fill in: <labels>` until each is filled. The last stage's `Next` is disabled with the tooltip `Preview and launch arrive with the next update`. Esc, a lost connection or a new `Welcome` closes the wizard.
+  A non-optional prompted variable is required and a toggle never is: `Next` stays disabled with the tooltip `Fill in: <labels>` until each is filled. The last stage's `Next` is disabled with the tooltip `Preview and launch arrive with the next update`. Esc, or its host's lost connection or new `Welcome`, closes the wizard.
 
 ## Daemon connection and protocol
 
@@ -132,7 +136,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   **Remote mode** (`remote_mode.rs`): views ask a capability table per host (`RootView::capabilities_of(&HostKey)` over `Capabilities::for_target`), never a target; the window has no remote mode of its own, only hosts whose capabilities are remote.
 
-  Local-file actions (Reveal, Open in Explorer or VS Code, the Browse buttons and the preset wizard's Pick… buttons; every picker goes through `RootView::pick_local`) stay visible but disabled with the tooltip "Not available on a remote host: this opens files on this PC", and a refused click toasts "Couldn't open" with that detail; a Ctrl+click on a terminal path link fetches the file instead (see "Fetched files").
+  Local-file actions (Reveal, Open in Explorer or VS Code, the Browse buttons and the preset wizard's Pick… buttons; these pickers go through `RootView::pick_local`) stay visible but disabled with the tooltip "Not available on a remote host: this opens files on this PC", and a refused click toasts "Couldn't open" with that detail; a Ctrl+click on a terminal path link fetches the file instead (see "Fetched files").
 
   Where a path must name a file or folder on the host, the view takes it typed instead: Add repo, the workspace creator's `.code-workspace` file and the preset wizard's file and folder rows (source and variables, the folder row prefilled with its default) and the Shell… dialog's folder are text fields checked by the same host-path rules (`repo_add.rs`, `check_host_path_rules`: not empty, absolute in Windows or POSIX form, no `..`), and a failing row shows its refusal and holds Next.
 
@@ -261,7 +265,7 @@ Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `
 
 Settings → Worktrees edits the daemon's worktrees-root override, and shows `Saved` only once the daemon has echoed the last save. Manage worktrees (opened from that tab, and offered only while This PC is the chosen host, since it manages This PC's worktrees) lists the root's groups titled by their `.rt-group` name, deletes one group or every stale one, and "Launch session here" opens the spawn dialog with the target locked and that worktree pinned (the spawn form's `Lock`, which a duplicate prefill reuses).
 
-On a remote host the path field stays enabled with the hint "Created on {host} if it does not exist." and Browse stays disabled. Folder and file pickers go through `RootDeps.pick_folder` / `RootDeps.pick_file`, so specs inject fakes: GPUI's test platform cannot prompt.
+On a remote host the path field stays enabled with the hint "Created on {host} if it does not exist." and Browse stays disabled. Folder and file pickers go through `RootDeps.pick_folder` / `RootDeps.pick_file`, so specs inject fakes: GPUI's test platform cannot prompt. In a cloaked or driven client (`offscreen::requested()`) the deps hold `folder_picker::offscreen_*_picker` instead, which open no dialog, since the desktop would show it: Add repo, Browse, the preset wizard's picks and Settings' picks act as a cancel, Themes Export shows "native dialogs are off in a cloaked client", and each attempt logs a warning.
 
 ## Tab layouts
 

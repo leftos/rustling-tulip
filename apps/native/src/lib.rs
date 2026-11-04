@@ -1305,9 +1305,21 @@ impl RootView {
             } else {
                 Rc::new(taskbar_badge::SystemTaskbarBadge::default())
             },
-            pick_folder: folder_picker::system_folder_picker(window),
-            pick_file: folder_picker::system_file_picker(window),
-            pick_save: folder_picker::system_save_picker(window),
+            pick_folder: if offscreen::requested() {
+                folder_picker::offscreen_folder_picker()
+            } else {
+                folder_picker::system_folder_picker(window)
+            },
+            pick_file: if offscreen::requested() {
+                folder_picker::offscreen_file_picker()
+            } else {
+                folder_picker::system_file_picker(window)
+            },
+            pick_save: if offscreen::requested() {
+                folder_picker::offscreen_save_picker()
+            } else {
+                folder_picker::system_save_picker(window)
+            },
             autostart: Arc::new(remote_access::SystemAutostart),
             tokens,
             // The cloaked smoke window neither checks nor takes the last
@@ -4097,7 +4109,7 @@ impl RootView {
             self.close_shell_dialog(window, cx);
             self.close_fetch_dialog(window, cx);
             self.close_workspace_creator(window, cx);
-            self.close_preset_wizard(window, cx);
+            self.close_preset_wizard_of(&HostKey::Local, window, cx);
             self.vscode_suggestions.clear();
             self.cwd_workspace_scans
                 .retain(|(host, _), _| *host != HostKey::Local);
@@ -4649,8 +4661,9 @@ impl RootView {
 
     /// The part of a new connection's reset that sends nothing. This PC's:
     /// fresh panes, nothing in flight, and every dialog, menu and notice of
-    /// the old connection closed. A remote host's: its agents go, and only
-    /// what showed one of its sessions closes; the window's dialogs stay.
+    /// the old connection closed. A remote host's: its agents go, the preset
+    /// wizard it owns closes, and only what showed one of its sessions
+    /// closes; the window's other dialogs stay.
     fn reset_host(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.forget_agents(host);
         self.forget_daemon_settings(host);
@@ -4661,6 +4674,7 @@ impl RootView {
         self.reset_preset_launches(host, cx);
         if *host != HostKey::Local {
             self.reset_cleanup_failed(host, window, cx);
+            self.close_preset_wizard_of(host, window, cx);
             if let Some(mirrors) = self.mirrors_of_mut(host) {
                 mirrors.worktrees_root = None;
             }
@@ -4678,7 +4692,7 @@ impl RootView {
         self.close_fetch_dialog(window, cx);
         self.close_host_path_prompt(window, cx);
         self.close_workspace_creator(window, cx);
-        self.close_preset_wizard(window, cx);
+        self.close_preset_wizard_of(&HostKey::Local, window, cx);
         self.launched_highlight.clear();
         self.vscode_suggestions.clear();
         self.close_appearance_editor(window, cx);

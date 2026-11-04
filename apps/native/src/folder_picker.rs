@@ -81,6 +81,52 @@ pub(crate) fn system_save_picker(window: &Window) -> SavePicker {
     )
 }
 
+/// The folder picker of a client whose window is cloaked: it opens no
+/// dialog, which the desktop would show, and answers as a cancel.
+pub(crate) fn offscreen_folder_picker() -> FolderPicker {
+    Rc::new(|_cx: &mut App, _start: Option<PathBuf>| {
+        async {
+            tracing::warn!(
+                "native dialogs are off in a cloaked client; the folder picker answered as cancelled"
+            );
+            None
+        }
+        .boxed_local()
+    })
+}
+
+/// The file picker of a client whose window is cloaked: it opens no dialog
+/// and answers as a cancel.
+pub(crate) fn offscreen_file_picker() -> FilePicker {
+    Rc::new(
+        |_cx: &mut App, _start: Option<PathBuf>, _filter: FileFilter| {
+            async {
+                tracing::warn!(
+                    "native dialogs are off in a cloaked client; the file picker answered as cancelled"
+                );
+                None
+            }
+            .boxed_local()
+        },
+    )
+}
+
+/// The save picker of a client whose window is cloaked: it opens no dialog
+/// and answers the error the Themes modal shows.
+pub(crate) fn offscreen_save_picker() -> SavePicker {
+    Rc::new(
+        |_cx: &mut App, _start: Option<PathBuf>, _suggested: String, _filter: FileFilter| {
+            async {
+                tracing::warn!(
+                    "native dialogs are off in a cloaked client; the save picker answered with an error"
+                );
+                Err("native dialogs are off in a cloaked client".to_owned())
+            }
+            .boxed_local()
+        },
+    )
+}
+
 /// `path`, with the filter's first extension added when it has none.
 fn with_default_extension(mut path: PathBuf, filter: &FileFilter) -> PathBuf {
     if path.extension().is_none()
@@ -451,8 +497,42 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use super::{filter_spec, start_folder_check, with_default_extension};
+    use super::{
+        filter_spec, offscreen_file_picker, offscreen_folder_picker, offscreen_save_picker,
+        start_folder_check, with_default_extension,
+    };
     use crate::FileFilter;
+
+    #[gpui::test]
+    fn the_offscreen_folder_picker_answers_none(cx: &mut gpui::TestAppContext) {
+        let picker = offscreen_folder_picker();
+        let picked = cx.update(|cx| picker(cx, None));
+        assert_eq!(cx.background_executor.block(picked), None);
+    }
+
+    #[gpui::test]
+    fn the_offscreen_file_picker_answers_none(cx: &mut gpui::TestAppContext) {
+        let picker = offscreen_file_picker();
+        let picked = cx.update(|cx| picker(cx, None, FileFilter::new("Theme", &["json"])));
+        assert_eq!(cx.background_executor.block(picked), None);
+    }
+
+    #[gpui::test]
+    fn the_offscreen_save_picker_answers_an_error(cx: &mut gpui::TestAppContext) {
+        let picker = offscreen_save_picker();
+        let picked = cx.update(|cx| {
+            picker(
+                cx,
+                None,
+                "theme".to_owned(),
+                FileFilter::new("Theme", &["json"]),
+            )
+        });
+        assert_eq!(
+            cx.background_executor.block(picked),
+            Err("native dialogs are off in a cloaked client".to_owned())
+        );
+    }
 
     #[test]
     fn a_saved_name_without_an_extension_takes_the_filters() {

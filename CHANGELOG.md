@@ -13,6 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - The new-session dialog keeps its fields, agents and worktree preview right when its target moves between hosts.
+- A remote host's preset wizard no longer closes when This PC reconnects, and closes when its own host goes offline.
 - A PC whose app data was copied from another machine no longer shows up as "Same daemon as" that machine.
 - When Stop can't stop the background service, the app now says why instead of acting as if it stopped.
 - The new-session dialog greys out a host the moment it goes offline and says "{host} is offline" for it, without losing what you typed.

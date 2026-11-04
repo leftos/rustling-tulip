@@ -327,9 +327,11 @@ impl RootView {
         self.close_diff_tabs_of(host, cx);
         self.close_fetch_dialog_of(host, window, cx);
         // This PC's chooser stays under the connecting overlay until its
-        // next `Welcome`; a remote host's question ends with its connection.
+        // next `Welcome`; a remote host's question, and its preset wizard,
+        // end with its connection.
         if *host != HostKey::Local {
             self.close_layout_chooser_of(host, window, cx);
+            self.close_preset_wizard_of(host, window, cx);
         }
         self.set_remote_status(host, None, cx);
         // A remote host's spawns and duplicates in flight end with its
