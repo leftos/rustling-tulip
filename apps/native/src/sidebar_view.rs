@@ -202,8 +202,10 @@ impl RootView {
                 .collect();
             self.sidebar.active_filter_empty(&listed)
         };
+        // While host groups show, This PC's note sits under its header
+        // instead ([`Self::sidebar_rows`]).
         let body = body
-            .when(no_repos, |body| {
+            .when(no_repos && groups.is_empty(), |body| {
                 body.child(no_repos_note(
                     AddRepoGate::for_caps(self.capabilities_of(&HostKey::Local)),
                     self.conn().target(),
@@ -323,6 +325,16 @@ impl RootView {
             let state = self.host_header_state(&group.host);
             shown.push(host_header(group, state, index == 0, cx));
             if !group.collapsed {
+                if group.host == HostKey::Local && self.no_repos_yet() {
+                    shown.push(
+                        no_repos_note(
+                            AddRepoGate::for_caps(self.capabilities_of(&HostKey::Local)),
+                            self.conn().target(),
+                            cx,
+                        )
+                        .into_any_element(),
+                    );
+                }
                 shown.extend(self.host_no_repos_note(&group.host, cx));
                 shown.extend(
                     group
@@ -510,7 +522,7 @@ impl RootView {
 
     /// The muted line an online remote host's group shows once its registry
     /// has arrived and holds no repo or workspace; This PC's empty registry
-    /// has the window-wide note instead.
+    /// has the note with the Add repo button instead.
     fn host_no_repos_note(&self, host: &HostKey, cx: &mut Context<Self>) -> Option<AnyElement> {
         if *host == HostKey::Local
             || self.is_remote_offline(host)

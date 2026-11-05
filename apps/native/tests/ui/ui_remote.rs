@@ -1484,3 +1484,40 @@ fn this_pcs_no_repos_note_keeps_its_wording_beside_a_remote_host(cx: &mut TestAp
         "No repos or workspaces yet."
     ));
 }
+
+#[gpui::test]
+fn this_pcs_empty_state_is_under_its_host_header(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::saved_remote_over(cx, &dir, &Fixture::default(), &[]);
+    h.host(&support::saved_remote()).send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "D:/r2")],
+    });
+
+    let local = h.bounds("host-header-local");
+    let note = h.bounds("sidebar-no-repos");
+    let remote = h.bounds(&format!("host-header-{}", support::REMOTE));
+    assert!(note.origin.x >= px(0.0), "This PC's empty state shows");
+    assert!(
+        local.origin.y < note.origin.y,
+        "the empty state sits under This PC's header"
+    );
+    assert!(
+        note.origin.y < remote.origin.y,
+        "the empty state sits above the next host's header"
+    );
+
+    // A second copy above the header would push it down; with This PC's
+    // registry filled the header must stay where it was.
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("a1", "D:/a1")],
+    });
+    assert!(
+        !h.root(|root, _| root.no_repos_yet()),
+        "This PC's registry is filled"
+    );
+    assert_eq!(
+        h.bounds("host-header-local").origin.y,
+        local.origin.y,
+        "the empty state is drawn once, under the header"
+    );
+}
