@@ -1,8 +1,8 @@
 # rustling-tulip
 
-rustling-tulip is a Windows desktop app for running many Claude Code sessions side by side, across your repos and multi-repo workspaces. A background daemon owns every terminal, so sessions keep running when you close the window and come back after a reboot. Each session can get its own git worktree and branch, and the sidebar shows which sessions are working, which have finished and which need you. It runs the `claude` CLI you already have; it never calls the Anthropic API itself.
+rustling-tulip is a desktop app for Windows and Apple silicon Macs for running many Claude Code sessions side by side, across your repos and multi-repo workspaces. A background daemon owns every terminal, so sessions keep running when you close the window and come back after a reboot. Each session can get its own git worktree and branch, and the sidebar shows which sessions are working, which have finished and which need you. It runs the `claude` CLI you already have; it never calls the Anthropic API itself.
 
-It is alpha software, Windows only for now.
+It is alpha software.
 
 ![The main window: sessions grouped by repo in the sidebar, two session panes in a tab, and the status footer](docs/images/sessions.png)
 
@@ -116,9 +116,18 @@ It is alpha software, Windows only for now.
 
 ## Install
 
+On Windows:
+
 1. Install [Claude Code](https://github.com/anthropics/claude-code) and check that `claude` runs from a terminal: rustling-tulip finds it on your `PATH`.
 2. Download `rustling-tulip-<version>-setup.exe` from the [latest release](https://github.com/leftos/rustling-tulip/releases/latest) and run it. It installs for your user only, with no administrator prompt, and can start the daemon when you log in.
 3. The installer and the app are signed with a verified publisher, so Windows names who made them. While the signature is new, SmartScreen may still warn on first run: choose More info, then Run anyway.
+
+On a Mac with Apple silicon (there is no build for Intel Macs):
+
+1. Install [Claude Code](https://github.com/anthropics/claude-code) and check that `claude` runs from a terminal.
+2. Download `rustling-tulip-<version>-macos-arm64.dmg` from the [latest release](https://github.com/leftos/rustling-tulip/releases/latest), open it and drag rustling-tulip into Applications. The app is signed and notarized, so it opens without a warning.
+3. Run it from Applications: a copy run from the disk image or from Downloads cannot update itself.
+4. Secret environment rows need Windows Credential Manager, so on a Mac a session with a secret row will not start; give it the secret through an `${env:NAME}` row instead.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
 
