@@ -589,6 +589,11 @@ mod tests {
                 include_str!("fixtures/v198-main-up-lands-on-tasks-pill.txt"),
                 "background_shell",
             ),
+            (
+                "v2318-subagent-running-w40",
+                include_str!("fixtures/v2318-subagent-running-w40.txt"),
+                "background_subagents",
+            ),
         ];
         for (name, text, rule) in shown {
             assert_eq!(

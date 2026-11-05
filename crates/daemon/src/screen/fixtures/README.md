@@ -6,6 +6,10 @@ The spike captures (`v03-ready.txt`, `c11-turn1-end.txt`, `p98-compacted.txt` an
 
 `v173-…` to `v200-…` are Claude Code 2.1.314 screens (152 columns) captured for CV.24: the built-in Heads up in a subagent's view, the prompt stash (`› stashed`, one slot shared by every view), an image through the stash, the tasks pill holding the keys, and AskUserQuestion's Chat about this from a subagent's view.
 
+`v2318-agent-view-subagent-running.txt` and `v2318-agent-view-subagent-finished-main-woken.txt` are Claude Code 2.1.318 screens (120 columns) taken for RT-946: a subagent's view with its spinner up while the main agent's turn waits, and the same view with its idle box once the subagent's report has woken the main agent.
+
+`v2318-subagent-running-w40.txt` is the panel's running-subagent row at 40 columns, as Claude Code 2.1.318 draws it with no description: `  ◯ general-purpose 2m 7s · ↓ 66.5k`.
+
 `v152-heads-up-collapsed.txt` is the one capture made by hand: `v152-learn-more.txt` with the expanded title and bullet rows taken out and the key row replaced by the collapsed notice's `1: Learn more   2: Knew this already   0: Dismiss`, since no capture of the collapsed notice exists.
 
 The `claude--*` files are the `web/src/fixtures/panes/` panes from collie, https://github.com/leftos/collie at commit 82c6bba7, SGR-coloured text under the MIT licence (see `LICENSE-collie` beside them).

@@ -59,9 +59,11 @@ const HOOKS_RUNNING: &str = r"^\s*[·✢*✶✻✽✳]\s+\S.*\(running \p{L}+ ho
 const BACKGROUND_SHELLS: &str = r"^\s*(?:⏵⏵|⏸) .* · \d+ (?:shells?|monitors?|MCP tasks?|background tasks?)(?:, \d+ (?:shells?|monitors?))*(?: ·.*)?\s*$";
 
 /// A running subagent's row in the panel under the prompt box: the hollow
-/// marker, the agent type, two spaces, its task, then its elapsed time and
-/// token count.
-const RUNNING_SUBAGENT: &str = r"^\s+◯ \S+  \S.*\s\d+s · [↑↓] \S+ tokens\s*$";
+/// marker, the agent type, its task when the width leaves room for one, then
+/// its elapsed time and token count, hours and minutes ahead of the seconds;
+/// at narrow widths the task is gone and the word `tokens` with it.
+const RUNNING_SUBAGENT: &str =
+    r"^\s+◯ \S+(?:  \S.*)?\s(?:\d+[hm] )*\d+s · [↑↓] \S+(?: tokens)?\s*$";
 
 /// How much output and how long a silence the daemon waits for before it
 /// types a prompt into Claude's TUI: the banner tuning the heuristic was

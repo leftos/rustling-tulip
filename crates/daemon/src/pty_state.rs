@@ -352,6 +352,9 @@ struct ScreenRead {
     background: Option<Arc<str>>,
     /// The last non-empty row is a shell's prompt.
     prompt: bool,
+    /// The plugin's view reading of an agent's screen, taken whichever
+    /// conversation is in view and whether or not the view return asks.
+    agent_view: Option<ViewReading>,
     /// The plugin's view and chat readings, when asked for.
     view: Option<(ViewReading, Option<ChatScreen>)>,
 }
@@ -595,21 +598,45 @@ impl ScreenWatch {
         let view_due = self.view_key_at.is_none_or(|at| {
             self.last_output.is_some_and(|output| output > at) || now >= at + KEY_WAIT
         });
+        let view_agent = if mode == Mode::Shell {
+            None
+        } else {
+            self.session_agent()
+        };
         let target = if quiet && view_due && mode != Mode::Shell {
             self.view_target()
         } else {
             None
         };
         let Some(ScreenRead {
-            reading,
-            background,
+            mut reading,
+            mut background,
             prompt,
+            agent_view,
             view,
-        }) = self.read_screen(mode, target.as_ref().map(|(_, agent)| agent))
+        }) = self.read_screen(mode, view_agent.as_ref(), target.is_some())
         else {
             self.confirm.hold(now);
             return Checked::Done;
         };
+        // Another agent's conversation in view is an overlay: the screen shows
+        // that agent's turn, not the main one's, so it writes neither the
+        // status nor the background flag, and the windows it would confirm
+        // reset. A dialog is the one exception: either agent's dialog needs
+        // the user, and the view return never goes back to main while one is
+        // up. A held turn end lands through its own path only while no hooks
+        // row was read first; one still held at `TURN_END_CEILING` is dropped
+        // by `turn_end_ceiling`'s `ceiling_overlay` branch, writing no `Idle`.
+        if agent_view
+            .as_ref()
+            .is_some_and(|view| view.agent_in_view.is_some())
+        {
+            if reading.verdict != Verdict::State(ScreenState::AwaitingInput) {
+                reading.verdict = Verdict::Keep;
+                reading.rule = Some(Arc::from("agent_in_view"));
+            }
+            background = None;
+        }
         if let (Some((pty, agent)), Some((view, chat))) = (&target, &view) {
             self.drive_view(pty, agent, view, chat.as_ref(), now);
         }
@@ -763,9 +790,15 @@ impl ScreenWatch {
     /// grid's size changed since the last executed check: the frame under the
     /// new size may be half drawn. A frame that is read, of an agent's
     /// screen (`mode` not [`Mode::Shell`]), goes to the chat mirror too.
-    /// With `view_agent`, the same frame's view and chat readings by that
-    /// agent's plugin come back too.
-    fn read_screen(&mut self, mode: Mode, view_agent: Option<&AgentId>) -> Option<ScreenRead> {
+    /// With `view_agent`, the same frame's view reading by that agent's
+    /// plugin comes back too, and with `view_wanted` its chat reading beside
+    /// it.
+    fn read_screen(
+        &mut self,
+        mode: Mode,
+        view_agent: Option<&AgentId>,
+        view_wanted: bool,
+    ) -> Option<ScreenRead> {
         let (size, resized, read) = {
             let screen = crate::sync::lock(&self.screen);
             let size = screen.size();
@@ -773,14 +806,21 @@ impl ScreenWatch {
             if !resized && mode != Mode::Shell {
                 self.chat.observe(&screen);
             }
-            let view = view_agent.filter(|_| !resized).and_then(|agent| {
-                let view = crate::screen::dialogs::read_view(agent, &screen)?;
-                Some((view, crate::screen::dialogs::read(agent, &screen)))
-            });
+            let wanted = view_agent.filter(|_| !resized);
+            let agent_view =
+                wanted.and_then(|agent| crate::screen::dialogs::read_view(agent, &screen));
+            let view = if view_wanted {
+                wanted
+                    .zip(agent_view.clone())
+                    .map(|(agent, view)| (view, crate::screen::dialogs::read(agent, &screen)))
+            } else {
+                None
+            };
             let read = ScreenRead {
                 reading: self.rules.read(&screen),
                 background: self.rules.read_background(&screen),
                 prompt: rules::last_row_is_shell_prompt(&screen),
+                agent_view,
                 view,
             };
             (size, resized, read)
@@ -813,6 +853,14 @@ impl ScreenWatch {
     fn release_view_turn(&mut self) {
         self.view_turn = None;
         self.view_turn_since = None;
+    }
+
+    /// The agent whose plugin reads this session's screen; `None` when the
+    /// record is gone.
+    fn session_agent(&self) -> Option<AgentId> {
+        let arc = self.registry.get(&self.session_id)?;
+        let agent = crate::sync::lock(&arc).agent.clone();
+        Some(agent)
     }
 
     /// The session's PTY and agent, for the view return to type into and
@@ -5265,6 +5313,118 @@ mod hysteresis_tests {
             Some(1),
             "the screen write moved the stamp"
         );
+    }
+
+    const SUBAGENT_IN_VIEW: &str =
+        include_str!("screen/fixtures/v2318-agent-view-subagent-running.txt");
+    const FINISHED_SUBAGENT_IN_VIEW: &str =
+        include_str!("screen/fixtures/v2318-agent-view-subagent-finished-main-woken.txt");
+
+    fn capture_frame(capture: &str) -> Vec<u8> {
+        let rows: Vec<&str> = capture.lines().collect();
+        frame(&rows)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subagent_in_view_keeps_the_main_agents_idle_and_background() {
+        // The main agent's Stop listed the running subagent.
+        let mut record = hook_record(SessionStatus::Idle);
+        record.background = true;
+        let h = start_record("agent-view-spinner", false, record);
+        pass_hold().await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the subagent's spinner was read as the main agent's turn"
+        );
+        assert!(
+            h.background(),
+            "the subagent's view cleared the main Stop's flag"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_subagent_in_view_never_ends_the_main_agents_turn() {
+        // UserPromptSubmit: the subagent's report woke the main agent.
+        let h = start_record(
+            "agent-view-finished",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(capture_frame(FINISHED_SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the subagent's idle box ended the main agent's turn"
+        );
+    }
+
+    /// `SUBAGENT_IN_VIEW` with an `AskUserQuestion` dialog in the box: the
+    /// dialog block from `c31-ask-q1.txt` (its rule, the question tab, the
+    /// question and its options, its rule and key row), then the rule the
+    /// agent in view rides on.
+    fn subagent_view_with_a_question() -> Vec<u8> {
+        let dialog: Vec<&str> = include_str!("screen/fixtures/c31-ask-q1.txt")
+            .lines()
+            .collect();
+        let tab = dialog
+            .iter()
+            .position(|row| row.trim_start().starts_with("←  ☐"))
+            .expect("the capture draws the question's tabs");
+        let keys = dialog
+            .iter()
+            .position(|row| row.trim_start().starts_with("Enter to select"))
+            .expect("the capture draws the question's keys");
+        let mut rows: Vec<&str> = SUBAGENT_IN_VIEW.lines().take(17).collect();
+        rows.extend(&dialog[tab - 2..=keys]);
+        rows.push(
+            SUBAGENT_IN_VIEW
+                .lines()
+                .find(|row| row.trim_matches('─').trim() == "Agent C sleep")
+                .expect("the view labels the rule with the agent in view"),
+        );
+        frame(&rows)
+    }
+
+    /// Either agent's dialog needs the user: a question drawn in a subagent's
+    /// view still raises the session to `AwaitingInput`.
+    #[tokio::test(start_paused = true)]
+    async fn a_dialog_in_a_subagents_view_still_awaits_input() {
+        let h = start_from("agent-view-dialog", false, SessionStatus::Working);
+        pass_hold().await;
+        h.chunk(subagent_view_with_a_question());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a dialog in a subagent's view left the session working"
+        );
+    }
+
+    /// A held `Stop` lands on its first settled frame even with another
+    /// agent's conversation in view, through the turn end's `no_evidence`
+    /// path.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_stop_lands_while_a_subagent_is_in_view() {
+        let h = start_record(
+            "agent-view-held-stop",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        h.hook(2, &main_stop(false));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the held Stop was dropped while a subagent was in view"
+        );
+        assert!(!h.holds_turn_end(), "the held turn end was not landed");
     }
 
     #[tokio::test(start_paused = true)]

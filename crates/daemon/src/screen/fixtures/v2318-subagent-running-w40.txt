@@ -1,0 +1,32 @@
+
+✻ Cogitated for 12s · done 5:02 PM
+
+● Agent "Agent B sleep 90s" finished ·
+1m 53s
+
+❯ Start one general-purpose subagent
+  with the Agent tool. It runs the Bash
+  command python -c "import time;
+  time.sleep(150)" with a 300000 ms
+  timeout and then replies "done". When
+  it reports back, reply "done" in one
+  line.
+
+● Agent(Sleep 150s then reply done)
+  ⎿  Backgrounded agent (↓ to
+
+● I've started the agent. It sleeps for
+  150 seconds, and I'll reply "done"
+  when it reports back.
+
+✻ Waiting for 1 background agent to
+  finish
+
+────────────────────────────────────────
+❯
+────────────────────────────────────────
+  ctx:  10%  |  sub: 5h  79% (1h42m) …
+  ⏵⏵ auto mode on (shift+tab to cycle)
+
+  ● main
+  ◯ general-purpose 2m 7s · ↓ 66.5k

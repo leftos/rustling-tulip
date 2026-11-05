@@ -42,6 +42,8 @@ A screen-derived change publishes at once when it enters `AwaitingInput` from a 
 
 Every screen write is refused when a hook event, the owner's key or an exit moved the record (status, hook stamp or hook-driven flag) since the read. After any such foreign write, and when the watcher starts, the screen is left unread for 700 ms. A reading from the title alone, an overlay or a screen no rule matches never writes.
 
+The screen reads only the view in force. While the plugin's view reading says another agent (a subagent) is in view, the watcher writes neither the status nor the `background` flag: every screen verdict becomes `Keep` (rule `agent_in_view`), except that a dialog's `AwaitingInput` still publishes, since either agent's dialog needs the user. The view reading is taken on every agent-mode screen read. A held `Stop` still lands on its first settled frame; one still held at `TURN_END_CEILING` while a subagent's view is up, after the hooks row was seen in the main view, is dropped and writes no `Idle`.
+
 A plain shell keeps its own classifier (command output outpacing echo promotes to `Working`, `SHELL_IDLE_AFTER` of silence ends it) until it is hook-driven or its screen has shown Claude for a whole confirmation window; it then runs the same screen check.
 
 A plain shell with no `hook_agent` (from spawn or recovery) becomes an agent session while its screen watcher recognises an agent's TUI, whatever started it (the agent's command, an alias or function, a wrapper, a full path). The record keeps its plain-shell mode; its snapshot reports mode interactive, `agent` the agent whose screen rules matched and `program_name` that agent's tag, so Chat and Summary turn on. A recovered shell with a `hook_agent` is never promoted by the screen.
