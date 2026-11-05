@@ -141,7 +141,7 @@ Note: the Tauri app is no longer on `main`; it lives on the `tauri` branch (tag 
 - [x] The Mac mini builder has Xcode's Metal Toolchain, so gpui's build script compiles its shaders there.
 - [x] `mac clippy` runs clean with `-D warnings`.
 
-- [ ] Accounts on macOS ([accounts.md](./accounts.md), RT-916): the forked `claude-accounts` crate gains Unix locks and reads and writes the live Claude credential through the Keychain (on macOS it is not in `.credentials.json`), allowing for Claude Code's roughly 30-second Keychain cache before a switch takes effect. Accounts shows on macOS once it lands.
+- [x] Accounts on macOS ([accounts.md](./accounts.md), RT-916): the forked `claude-accounts` crate gains Unix locks and reads and writes the live Claude credential through the Keychain (on macOS it is not in `.credentials.json`), allowing for Claude Code's roughly 30-second Keychain cache before a switch takes effect. Accounts shows on macOS once it lands.
 
 ## Native client
 

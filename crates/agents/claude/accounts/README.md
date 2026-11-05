@@ -33,3 +33,21 @@ The item holds only printable ASCII, since `security -w` prints any other value 
 Each `security` call is bounded to 5 s; a call that fails for another reason than "no such item" (a locked or refusing Keychain) or does not answer is an error naming its exit code (`ClaudeFileError::CredentialStore`), never a fallback to the file. Claude Code caches its Keychain read for about 30 s, so a switch's outcome says so in `SwitchOutcome::takes_effect_within` (`KEYCHAIN_CACHE`), and `None` where Claude Code reads the file afresh.
 
 The account store stays an owner-only folder of files on macOS (mode 0600 files under the 0700 root), not Keychain items per account: its files never leave the owner's account, and an item per account would be a second store to keep in step with the folder.
+
+## macOS smoke run
+
+`tests/smoke_macos.rs` (macOS only, ignored by default) runs the Keychain path against the real `/usr/bin/security`: it captures two logins from a Keychain item with `capture_live_login`, switches to the first and back to the second with `switch`, and checks after each switch that the item holds that login's bytes and that the store lists both accounts. The profile endpoint and the credentials come from the refresh tests' fakes (`tests/refresh/support.rs`).
+
+It touches only a throwaway keychain and a scratch service. The test creates `smoke.keychain-db` in a fresh temp folder, unlocks it, and runs every call through a `security-smoke` wrapper. The wrapper appends the keychain's path to each call's arguments, and to each command line `security -i` reads on its stdin. The item's service is `Claude Code-credentials-smoke-` plus 8 random hex digits, and its account is `rt-smoke`. At the end, from a drop guard that also runs after a failed assertion, the test does three things. It removes the item from the throwaway keychain. It searches the default keychain list for the scratch service with `/usr/bin/security` itself, where any item it finds is deleted and fails the test. Then it deletes the keychain by its path.
+
+Run it from Windows on the Mac mini builder:
+
+```powershell
+& .\rt.ps1 mac test -- --package claude-accounts --test smoke_macos -- --ignored
+```
+
+The first `--` ends `rt.ps1`'s own parameters, since PowerShell would otherwise bind `--test` to `-Test`. The rest goes to `cargo nextest run`. The run's result line:
+
+```text
+     Summary [   0.750s] 1 test run: 1 passed, 0 skipped
+```
