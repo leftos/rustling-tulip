@@ -23,6 +23,10 @@ use crate::{RootView, UI_TEXT_SIZE};
 /// How tall a toast with no answers is, in logical px.
 const CARD_HEIGHT: f32 = 116.0;
 
+/// What the `Go to pane` row adds to a toast's height, in logical px: a
+/// compact button's height. An account toast draws no such row.
+const GO_ROW_HEIGHT: f32 = 28.0;
+
 /// How tall a toast with answers is, in logical px.
 const ANSWERS_HEIGHT: f32 = 152.0;
 
@@ -51,7 +55,10 @@ const SENT: &str = "Sent";
 #[must_use]
 pub fn card_height(toast: &AppToast) -> f32 {
     let Some(ask) = &toast.ask else {
-        return CARD_HEIGHT;
+        return match toast.kind {
+            AppToastKind::Account => CARD_HEIGHT - GO_ROW_HEIGHT,
+            AppToastKind::NeedsYou { .. } | AppToastKind::Finished => CARD_HEIGHT,
+        };
     };
     let choices = ask.choices.len();
     let base = if choices == 0 {
@@ -490,6 +497,16 @@ mod tests {
         )
     }
 
+    fn account() -> AppToast {
+        AppToast::new(
+            key_of(&HostKey::Local, "s1"),
+            AppToastKind::Account,
+            "a title".to_owned(),
+            "a body".to_owned(),
+            Instant::now(),
+        )
+    }
+
     /// A toast waiting on `choices` answers, with a command when `command`.
     fn asking(choices: u16, command: bool) -> AppToast {
         let choice = |index| AskChoice {
@@ -521,6 +538,7 @@ mod tests {
             (asking(0, true), 146.0, "a command and no choices"),
             (asking(3, false), 186.0, "a second row of choices"),
             (asking(3, true), 216.0, "a second row and a command"),
+            (account(), 88.0, "an account toast draws no Go to pane row"),
         ];
         for (toast, height, why) in cases {
             assert!((card_height(&toast) - height).abs() < f32::EPSILON, "{why}");
