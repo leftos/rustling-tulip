@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::Term;
@@ -29,12 +30,24 @@ use crate::theme::{self, TerminalPalette};
 pub(crate) mod prompt_nav;
 
 /// Collects what the terminal asks of its client: the replies to the child
-/// (`Event::PtyWrite`: cursor-position reports, device attributes), and the
-/// texts it wants on the clipboard (`Event::ClipboardStore`, OSC 52).
+/// (`Event::PtyWrite`: cursor-position reports, device attributes), the colour
+/// queries it made (`Event::ColorRequest`, OSC 4/10/11/12) whose answers wait
+/// for the end of the feed, and the texts it wants on the clipboard
+/// (`Event::ClipboardStore`, OSC 52).
 #[derive(Clone, Default)]
 pub struct Listener {
     replies: Rc<RefCell<Vec<u8>>>,
+    colors: Rc<RefCell<Vec<ColorQuery>>>,
     copies: Rc<RefCell<Vec<String>>>,
+}
+
+/// A colour query the parser made during a feed: where in the reply buffer its
+/// answer belongs, the palette index it asked about, and the formatter that
+/// turns the colour into the reply's bytes.
+struct ColorQuery {
+    at: usize,
+    index: usize,
+    reply: Arc<dyn Fn(Rgb) -> String + Sync + Send>,
 }
 
 impl EventListener for Listener {
@@ -53,6 +66,15 @@ impl EventListener for Listener {
                 self.replies
                     .borrow_mut()
                     .extend_from_slice(formatter("").as_bytes());
+            }
+            // A colour query needs the terminal's colours, which the parser
+            // holds while it runs: record it with its place in the reply
+            // buffer and answer it at the end of the feed.
+            Event::ColorRequest(index, reply) => {
+                let at = self.replies.borrow().len();
+                self.colors
+                    .borrow_mut()
+                    .push(ColorQuery { at, index, reply });
             }
             _ => {}
         }
@@ -525,33 +547,65 @@ impl Terminal {
             shell,
             ..
         } = self;
-        let Some(shell) = shell.as_mut() else {
-            parser.advance(term, bytes);
-            return;
-        };
-        for slice in bytes.chunks(FEED_SLICE) {
-            let mut rest = slice;
-            while !rest.is_empty() {
-                let (read, split) = shell.scanner.next(rest);
-                let Some(split) = split else {
-                    parser.advance(term, rest);
-                    break;
-                };
-                if split.before_final() {
-                    let final_byte = read.saturating_sub(1);
-                    parser.advance(term, &rest[..final_byte]);
-                    flush_sync(parser, term);
-                    shell.before(term, &split);
-                    parser.advance(term, &rest[final_byte..read]);
-                } else {
-                    parser.advance(term, &rest[..read]);
-                    flush_sync(parser, term);
-                    shell.after(term, split, at);
+        if let Some(shell) = shell.as_mut() {
+            for slice in bytes.chunks(FEED_SLICE) {
+                let mut rest = slice;
+                while !rest.is_empty() {
+                    let (read, split) = shell.scanner.next(rest);
+                    let Some(split) = split else {
+                        parser.advance(term, rest);
+                        break;
+                    };
+                    if split.before_final() {
+                        let final_byte = read.saturating_sub(1);
+                        parser.advance(term, &rest[..final_byte]);
+                        flush_sync(parser, term);
+                        shell.before(term, &split);
+                        parser.advance(term, &rest[final_byte..read]);
+                    } else {
+                        parser.advance(term, &rest[..read]);
+                        flush_sync(parser, term);
+                        shell.after(term, split, at);
+                    }
+                    rest = &rest[read..];
                 }
-                rest = &rest[read..];
+                shell.settle(term);
             }
-            shell.settle(term);
+        } else {
+            parser.advance(term, bytes);
         }
+        self.answer_color_queries();
+    }
+
+    /// Answers the colour queries the feed recorded, each spliced into the
+    /// reply buffer at the position where its request arrived. Later queries
+    /// go in first, so an earlier position stays valid.
+    fn answer_color_queries(&mut self) {
+        let queries = std::mem::take(&mut *self.listener.colors.borrow_mut());
+        for query in queries.into_iter().rev() {
+            let Some(colour) = self.query_colour(query.index) else {
+                continue;
+            };
+            let reply = (query.reply)(colour);
+            self.listener
+                .replies
+                .borrow_mut()
+                .splice(query.at..query.at, reply.bytes());
+        }
+    }
+
+    /// The colour a query for `index` resolves to: the program's own override
+    /// when it set one, else the pane's palette. `None` for an index the
+    /// palette has no colour for.
+    fn query_colour(&self, index: usize) -> Option<Rgb> {
+        let fallback = match index {
+            0..=255 => default_indexed(u8::try_from(index).ok()?, &self.theme),
+            256 => self.theme.fg,
+            257 => self.theme.bg,
+            258 => self.theme.caret,
+            _ => return None,
+        };
+        Some(self.term.colors()[index].unwrap_or(fallback))
     }
 
     /// The dots of the finished commands whose prompt row is on screen, top
@@ -1612,6 +1666,13 @@ mod tests {
         term
     }
 
+    /// The reply alacritty formats for a colour query: each channel doubled,
+    /// as `rgb:rrrr/gggg/bbbb`.
+    fn colour_reply(prefix: &str, color: Rgb) -> String {
+        let (r, g, b) = (color.r, color.g, color.b);
+        format!("\x1b]{prefix};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07")
+    }
+
     /// The text of grid line `line`, trailing blanks trimmed.
     fn row_text(term: &Terminal, line: i32) -> String {
         term.read_row(line).text.trim_end().to_owned()
@@ -1756,6 +1817,51 @@ mod tests {
         let mut term = fed(b"\x1b]52;c;?\x07");
         assert_eq!(term.take_replies(), b"\x1b]52;c;\x07".to_vec());
         assert_eq!(term.take_copies(), [] as [std::string::String; 0]);
+    }
+
+    #[test]
+    fn osc_11_query_answers_with_the_palette_background() {
+        let theme = default_theme();
+        let mut term = fed(b"\x1b]11;?\x07");
+        assert_eq!(
+            term.take_replies(),
+            colour_reply("11", theme.bg).into_bytes()
+        );
+    }
+
+    #[test]
+    fn osc_4_query_answers_a_program_override() {
+        let mut term = fed(b"\x1b]4;1;#102030\x07\x1b]4;1;?\x07");
+        assert_eq!(
+            term.take_replies(),
+            b"\x1b]4;1;rgb:1010/2020/3030\x07".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_10_query_answers_after_set_palette() {
+        let palette = crate::theme::build_theme(rgb(0xf6f4ef));
+        let fg = palette.fg;
+        let mut term = fed(b"");
+        term.set_palette(palette);
+        term.feed(b"\x1b]10;?\x07");
+        assert_eq!(term.take_replies(), colour_reply("10", fg).into_bytes());
+    }
+
+    #[test]
+    fn colour_reply_keeps_its_place_before_device_attributes() {
+        let theme = default_theme();
+        let mut term = fed(b"\x1b]11;?\x07\x1b[c");
+        let mut expected = colour_reply("11", theme.bg).into_bytes();
+        expected.extend_from_slice(b"\x1b[?6c");
+        assert_eq!(term.take_replies(), expected);
+
+        let mut replayed = fed(b"");
+        replayed.feed_history(b"\x1b]11;?\x07\x1b[c");
+        assert!(
+            replayed.take_replies().is_empty(),
+            "the history answers nothing"
+        );
     }
 
     #[test]

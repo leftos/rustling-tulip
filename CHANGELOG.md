@@ -10,6 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The new-session dialog's Target list narrows as you type, matching repo and workspace names in part, so "ya" finds yaat.
 - With Nushell or fish as the default shell, new Claude sessions start inside it, like PowerShell, cmd and POSIX shells.
 - A plain shell where you start Claude yourself, by name, an alias or a wrapper like a pwsh function, gets Chat and Summary while Claude runs.
+- Programs such as vim, bat and delta can ask the terminal for its colours, so they pick light or dark styles to match your theme.
 
 ### Fixed
 

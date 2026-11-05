@@ -446,7 +446,7 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 ## Terminal
 
 - **Scrollback-first attach**: `LoadScrollback` with live output buffered meanwhile; an 8 s request timeout with retries after 2 s and 4 s, each with its own `request_id`, and a reply to an older id dropped. When the daemon restarts the forwarder (`forwarder_restarted: true`) the held-back output is discarded, since it is already in the history. The logical scrollback cap is 5000 lines.
-- **Size and replies**: only one pane per session (its size driver) answers terminal queries, so a session shown in two panes gets each reply once.
+- **Size and replies**: only one pane per session (its size driver) answers terminal queries, so a session shown in two panes gets each reply once. Colour queries (OSC 4, 10, 11, 12) are answered with the program's own colour override when it set one, else the pane's palette (indexed 0–255, text colour, background, caret); each reply sits in the reply stream where its query arrived, so a later device-attributes answer still follows it, and replayed history answers none.
 
   Across clients, the daemon lets only the client with recent input own a session's size. Every `Resize` carries `claim`, true when the pane had input in the last 5 s (typed keys, IME text, paste, Re-run command, mouse presses, releases that end a gesture, wheel and pointer moves to a new pixel) or when this client just resized the pane.
 
