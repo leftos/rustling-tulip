@@ -41,9 +41,10 @@
       clean      Run `cargo clean`.
       mac        Run one workspace cargo command on the Mac mini builder
                  over SSH as a heavy gate run: `mac check`, `mac build`,
-                 `mac clippy` or `mac test`, then extra cargo arguments
-                 (long forms only, e.g. `--package <crate>`: `-p` binds to
-                 -PrintOnly). Log: .tmp\rt-mac-<sub-verb>.log.
+                 `mac clippy` or `mac test`, then extra cargo arguments.
+                 For an argument that trips rt.ps1's own parameters (`-p`,
+                 `--test`, or a bare `--`), call tools/rt-mac.ps1 directly.
+                 Log: .tmp\rt-mac-<sub-verb>.log.
       native     Build the daemon and tracer, then run the native client.
                  Extra arguments go to the client (an optional session id
                  to focus, or to place in the active tab).
@@ -237,8 +238,6 @@ $ImageName       = 'rustling-tulipd'
 $TracerImageName = 'rt-tracer'
 $HandshakeFile   = Join-Path (Get-ConfigDir) 'daemon.json'
 $TestMapPath     = Join-Path $ScriptDir 'tools/test-map.json'
-# The Mac mini builder `mac` sends its cargo runs to: SSH on the tailnet, no override.
-$MacBuilder      = 'builder@mac-mini'
 
 $script:SetupRestartNeeded = $false
 
@@ -1312,71 +1311,13 @@ function Invoke-NativeShot {
     Write-Host $outPath
 }
 
-# `build` on the Mac sends `-p <crate>` for each `--package` pair, since the
-# routed patterns are `cargo build --workspace --all-targets` and
-# `cargo build -p * --all-targets*`.
-function Get-MacBuildCommand([string[]]$Extra) {
-    if (-not $Extra) { return @('cargo', 'build', '--workspace', '--all-targets') }
-    $words = @('cargo', 'build')
-    $i = 0
-    while ($i -lt $Extra.Count) {
-        $word = $Extra[$i]
-        if ($word -eq '--package') {
-            if ($i + 1 -ge $Extra.Count) { throw 'rt.ps1 mac build: --package needs a crate name' }
-            $words += @('-p', $Extra[$i + 1])
-            $i += 2
-        }
-        elseif ($word -like '--package=*') {
-            $words += @('-p', $word.Substring('--package='.Length))
-            $i++
-        }
-        else {
-            $words += $word
-            $i++
-        }
-    }
-    if ($words -notcontains '--all-targets') { $words += '--all-targets' }
-    return $words
-}
-
 # `mac`: one workspace cargo command on the Mac mini builder through the
-# gate's pinned run, so the log lands here under .tmp/.
+# gate's pinned run, so the log lands here under .tmp/. The arguments after the
+# sub-verb belong to cargo, so they go to tools/rt-mac.ps1, which declares no
+# parameters: here PowerShell would bind `--test` to -Test and `-p` to
+# -PrintOnly before the body runs.
 function Invoke-Mac {
-    if (Test-UnderGate) {
-        throw 'rt.ps1 mac: run it from this PC, not inside a gate job'
-    }
-    $subVerb = if ($Rest) { $Rest[0] } else { '' }
-    if ($subVerb -notin @('check', 'build', 'clippy', 'test')) {
-        throw 'rt.ps1 mac: expected check, build, clippy or test'
-    }
-    $extra = @()
-    if ($Rest.Count -gt 1) { $extra = @($Rest | Select-Object -Skip 1) }
-
-    if ($subVerb -eq 'check') {
-        $cargoWords = if ($extra) { @('cargo', 'check') + $extra } else { @('cargo', 'check', '--workspace', '--all-targets') }
-    }
-    elseif ($subVerb -eq 'build') {
-        $cargoWords = Get-MacBuildCommand $extra
-    }
-    elseif ($subVerb -eq 'clippy') {
-        Write-Host '==> agent names stay behind the seam (tools/check-agent-names.ps1)...' -ForegroundColor Cyan
-        & pwsh -NoProfile -File (Join-Path $ScriptDir 'tools/check-agent-names.ps1')
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        $cargoWords = if ($extra) { @('cargo', 'clippy') + $extra } else { @('cargo', 'clippy', '--workspace', '--all-targets') }
-        # Never --all-features: the `driver` feature turns on windows crate features.
-        $cargoWords += @('--', '-D', 'warnings')
-    }
-    else {
-        $cargoWords = @('cargo', 'nextest', 'run', '--cargo-profile', 'test-release')
-        if ($extra) { $cargoWords += $extra } else { $cargoWords += '--workspace' }
-    }
-
-    $tmp = Join-Path $ScriptDir '.tmp'
-    if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Force -Path $tmp | Out-Null }
-    $log = Join-Path $tmp "rt-mac-$subVerb.log"
-    Write-Host "==> $($cargoWords -join ' ') on $MacBuilder..." -ForegroundColor Cyan
-    $gate = Join-Path $ScriptDir 'tools/gate.ps1'
-    & pwsh -NoProfile -File $gate run --builder $MacBuilder --cd $ScriptDir --log $log --timeout 3600 --slot heavy -- @cargoWords
+    & pwsh -NoProfile -File (Join-Path $ScriptDir 'tools/rt-mac.ps1') @Rest
     exit $LASTEXITCODE
 }
 
@@ -1412,23 +1353,21 @@ Commands:
              `cargo clippy --all-targets --all-features -- -D warnings`.
   fmt        `cargo fmt --all`.
   clean      `cargo clean`.
-  mac check [<extra>]
-             `cargo check --workspace --all-targets` on the Mac mini
-             builder (builder@mac-mini, SSH on the tailnet); <extra>
-             replaces the workspace default.
-  mac build [--package <crate>]...
-             `cargo build --workspace --all-targets` on the Mac mini
-             builder; a --package names crates instead.
-  mac clippy [<extra>]
-             tools/check-agent-names.ps1 here, then `cargo clippy
-             --workspace --all-targets -- -D warnings` on the Mac mini
-             builder (never --all-features: `driver` needs Windows).
-  mac test [<extra>]
-             `cargo nextest run --workspace --cargo-profile test-release`
-             on the Mac mini builder; <extra> replaces --workspace.
-             Each mac run is one heavy gate call, logged at
-             .tmp\rt-mac-<sub-verb>.log.
-  mac extras use long forms (--package <crate>): -p binds to -PrintOnly.
+  mac check|build|clippy|test [<cargo args>]
+             One cargo command on the Mac mini builder (builder@mac-mini,
+             SSH on the tailnet) as a heavy gate call, logged at
+             .tmp\rt-mac-<sub-verb>.log. check: `cargo check --workspace
+             --all-targets`; build: `cargo build --workspace --all-targets`,
+             with each --package sent as -p; clippy: tools/check-agent-names.ps1
+             here, then `cargo clippy --workspace --all-targets -- -D warnings`
+             (never --all-features: `driver` needs Windows); test: `cargo
+             nextest run --workspace --cargo-profile test-release`. Extra
+             arguments replace the workspace default.
+  mac        For an argument that rt.ps1's own parameters would swallow
+             (`-p`, `--test`, a bare `--`), call the entry script directly:
+             `pwsh -NoProfile -File tools/rt-mac.ps1 check|build|clippy|test
+             [<cargo args>]`. RT_MAC_PRINT_ONLY=1 prints the gate command
+             line instead of running it.
   native     `cargo build -p daemon -p tracer`, then `cargo run -p
              rustling-tulip-native`. Extra args are passed on (an
              optional session id to focus, or to place in the active tab).
