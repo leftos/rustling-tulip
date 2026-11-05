@@ -61,7 +61,7 @@ impl RootView {
                     row,
                     session: self.sidebar.session(&row.session_id)?,
                     facts: self.dashboard_facts.facts_for(&row.session_id),
-                    agents: self.sidebar.session_agents(&row.session_id),
+                    agents: self.sidebar.session_label_agents(&row.session_id),
                     unseen: self.sidebar.is_unseen(&row.session_id),
                     prompt: self.chat.held_prompt(&row.session_id),
                 })

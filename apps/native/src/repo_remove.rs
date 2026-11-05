@@ -299,7 +299,7 @@ pub(crate) fn live_owned_sessions(
         .filter(|session| is_live(session) && owned_by(host, level, session, model))
         .map(|session| RepoRemoveSession {
             id: session.id.clone(),
-            label: crate::sidebar::display_label(session, model.agents(host)),
+            label: crate::sidebar::display_label(session, model.label_agents(host)),
             agent: session
                 .agent
                 .as_ref()

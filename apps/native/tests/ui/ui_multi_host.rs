@@ -1852,6 +1852,16 @@ fn dropped(target: Target) -> Connection {
     conn
 }
 
+/// A connection to `target` open and welcomed, its daemon yet to send its
+/// agents, as a reconnect's first moment is.
+fn welcomed(target: Target) -> Connection {
+    let mut conn = Connection::for_target(target);
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_welcome(PROTOCOL, Vec::new());
+    conn
+}
+
 #[gpui::test]
 fn an_offline_hosts_rows_dim_and_come_back_when_it_reconnects(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -2374,6 +2384,98 @@ fn a_reconnecting_host_attaches_nothing_before_its_list(cx: &mut TestAppContext)
         h.host(&saved_remote()).scrollback_requests("b1").len(),
         before + 1,
         "its fresh list attaches both panes with one request"
+    );
+}
+
+/// The Dashboard view's now line for the row of `id`.
+fn dashboard_now(h: &mut Harness<'_>, id: &str) -> String {
+    h.root(|root, _| root.dashboard_view_rows())
+        .into_iter()
+        .flat_map(|(_, rows)| rows)
+        .find(|row| row.session_id == id)
+        .expect("the session has a Dashboard row")
+        .now
+}
+
+/// The title of pane `pane_id` and the label of the sidebar leaf `id`.
+fn title_and_leaf_label(h: &mut Harness<'_>, pane_id: &str, id: &str) -> (String, String) {
+    h.root(|root, _| {
+        let title = root
+            .pane_header_parts(pane_id)
+            .expect("the pane shows a session")
+            .title;
+        let label = root
+            .sidebar_containers()
+            .into_iter()
+            .flat_map(|container| container.leaves)
+            .find(|leaf| leaf.id == id)
+            .expect("the session is listed")
+            .label;
+        (title, label)
+    })
+}
+
+#[gpui::test]
+fn a_reconnecting_hosts_claude_titles_are_kept(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let fixture = Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: vec![tab("t1", &remote_pane("p1", "b1"))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut host = h.host(&saved_remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("b1")
+                .agent("claude")
+                .terminal_title("✳ Claude Code")
+                .label("Fix the bug")
+                .status("awaiting_input")
+                .build(),
+        ],
+    });
+    let label = "Fix the bug";
+    assert_eq!(
+        title_and_leaf_label(&mut h, "p1", "b1"),
+        (label.to_owned(), label.to_owned()),
+        "its placeholder title falls through to the label while the host is connected"
+    );
+
+    h.host(&saved_remote())
+        .event(NetEvent::State(dropped(saved_remote())));
+    h.host(&saved_remote())
+        .event(NetEvent::State(welcomed(saved_remote())));
+    h.host(&saved_remote()).send(welcome(PROTOCOL));
+
+    assert_eq!(
+        title_and_leaf_label(&mut h, "p1", "b1"),
+        (label.to_owned(), label.to_owned()),
+        "the pane and the leaf keep the label after Welcome, before the new agents arrive"
+    );
+    assert_eq!(
+        dashboard_now(&mut h, "b1"),
+        "Waiting for input",
+        "so does the Dashboard's now line, which reads the terminal title"
+    );
+
+    h.host(&saved_remote()).send(DaemonMessage::Agents {
+        agents: agent_registry::descriptors(),
+    });
+    assert_eq!(
+        title_and_leaf_label(&mut h, "p1", "b1"),
+        (label.to_owned(), label.to_owned()),
+        "and once the new connection's agents arrive"
+    );
+    assert_eq!(
+        dashboard_now(&mut h, "b1"),
+        "Waiting for input",
+        "the now line too"
     );
 }
 

@@ -360,6 +360,9 @@ pub struct TreeInputs<'a> {
     pub sessions: &'a [SessionSnapshot],
     /// The daemon's agents, in its order; empty while disconnected.
     pub agents: &'a [AgentDescriptor],
+    /// The agents a leaf's label and title read: its connection's list, else
+    /// the last one the host sent.
+    pub label_agents: &'a [AgentDescriptor],
     pub container_order: &'a [ContainerRef],
     /// Manual session order per container id.
     pub session_order: &'a HashMap<String, Vec<String>>,
@@ -1310,6 +1313,9 @@ struct HostSlice {
     /// The daemon's agents, in its order, as the connection last sent them;
     /// empty while disconnected.
     agents: Vec<AgentDescriptor>,
+    /// The last non-empty agent list any connection of this host sent, kept
+    /// across a disconnect for labels and titles.
+    known_agents: Vec<AgentDescriptor>,
     container_order: Vec<ContainerRef>,
     session_order: HashMap<String, Vec<String>>,
     attention: HashSet<String>,
@@ -1423,6 +1429,16 @@ impl HostSlice {
         }
     }
 
+    /// The list a session label or title reads: the connection's, else the
+    /// last one a connection of this host sent.
+    fn label_agents(&self) -> &[AgentDescriptor] {
+        if self.agents.is_empty() {
+            &self.known_agents
+        } else {
+            &self.agents
+        }
+    }
+
     /// The container tree's inputs from this slice, folded by `collapsed`.
     fn tree_inputs<'a>(&'a self, collapsed: &'a BTreeSet<String>) -> TreeInputs<'a> {
         TreeInputs {
@@ -1430,6 +1446,7 @@ impl HostSlice {
             workspaces: &self.workspaces,
             sessions: &self.sessions,
             agents: &self.agents,
+            label_agents: self.label_agents(),
             container_order: &self.container_order,
             session_order: &self.session_order,
             attention: &self.attention,
@@ -1622,9 +1639,14 @@ impl SidebarModel {
     }
 
     /// Keeps `host`'s agents, in its daemon's order, as its connection
-    /// sends them.
+    /// sends them; a list a disconnect leaves empty keeps the last one for
+    /// labels.
     pub fn set_agents(&mut self, host: &HostKey, agents: Vec<AgentDescriptor>) {
-        self.slice_mut(host).agents = agents;
+        let slice = self.slice_mut(host);
+        if !agents.is_empty() {
+            slice.known_agents.clone_from(&agents);
+        }
+        slice.agents = agents;
     }
 
     /// `host`'s agents, in its daemon's order, as its connection last sent
@@ -1634,12 +1656,28 @@ impl SidebarModel {
         self.slice(host).map_or(&[], |slice| &slice.agents)
     }
 
+    /// The agents a session label or title reads: the connection's list, else
+    /// the last one a connection of this host sent, so a reconnect keeps
+    /// labels.
+    #[must_use]
+    pub fn label_agents(&self, host: &HostKey) -> &[AgentDescriptor] {
+        self.slice(host).map_or(&[], |slice| slice.label_agents())
+    }
+
     /// The agents of the host that lists session `id`, This PC's for a
-    /// session no host lists: a session's label and chips read its own
-    /// host's descriptors.
+    /// session no host lists: the live list its connection last sent, which
+    /// behaviour such as whether chat is available reads.
     #[must_use]
     pub fn session_agents(&self, id: &str) -> &[AgentDescriptor] {
         &self.slice_of_session(id).agents
+    }
+
+    /// [`Self::label_agents`] of the host that lists session `id`, This PC's
+    /// for a session no host lists: what a session's label, title and agent
+    /// name read, kept while its host reconnects.
+    #[must_use]
+    pub fn session_label_agents(&self, id: &str) -> &[AgentDescriptor] {
+        self.slice_of_session(id).label_agents()
     }
 
     /// Fold a message from `host`'s daemon into that host's slice; a whole
@@ -1910,7 +1948,7 @@ impl SidebarModel {
         build_tab_containers(
             tabs,
             &local.sessions,
-            &local.agents,
+            local.label_agents(),
             &TabRollups {
                 session_order: &local.session_order,
                 attention: &local.attention,
@@ -2853,7 +2891,7 @@ pub fn build_containers(inputs: &TreeInputs<'_>) -> Vec<Container> {
                 inputs,
                 ContainerKind::Shell,
                 &s.id,
-                display_label(s, inputs.agents),
+                display_label(s, inputs.label_agents),
                 vec![s],
             )
         })
@@ -2950,7 +2988,15 @@ fn container(
     sessions.sort_by(|a, b| cmp_ci(&a.label, &b.label));
     let leaves: Vec<Leaf> = apply_session_order(sessions, inputs.session_order.get(id))
         .into_iter()
-        .map(|s| leaf(s, inputs.attention, inputs.unseen, false, inputs.agents))
+        .map(|s| {
+            leaf(
+                s,
+                inputs.attention,
+                inputs.unseen,
+                false,
+                inputs.label_agents,
+            )
+        })
         .collect();
     let key = container_key(kind, id);
     let summary = match kind {
@@ -2996,17 +3042,17 @@ fn leaf(
     attention: &HashSet<String>,
     unseen: &HashSet<String>,
     tabs_view: bool,
-    agents: &[AgentDescriptor],
+    label_agents: &[AgentDescriptor],
 ) -> Leaf {
-    let runtime = runtime_label(s, agents);
+    let runtime = runtime_label(s, label_agents);
     Leaf {
         id: s.id.clone(),
         status: s.status,
         mode: s.mode,
         agent: s.agent.clone(),
-        label: display_label(s, agents),
+        label: display_label(s, label_agents),
         subline: subline(s, HOME.as_deref(), tabs_view),
-        icon: runtime_icon(s, runtime.as_deref(), agents),
+        icon: runtime_icon(s, runtime.as_deref(), label_agents),
         runtime,
         chips: s.agent_chips.clone(),
         attention: attention.contains(&s.id),
@@ -3015,7 +3061,7 @@ fn leaf(
         background: s.background,
         state: LeafState::of(s),
         trusted: s.elevated_authority,
-        tooltip: leaf_tooltip(s, agents),
+        tooltip: leaf_tooltip(s, label_agents),
     }
 }
 
@@ -3146,7 +3192,7 @@ pub struct TabRollups<'a> {
 pub fn build_tab_containers(
     tabs: &[TabEntry],
     sessions: &[SessionSnapshot],
-    agents: &[AgentDescriptor],
+    label_agents: &[AgentDescriptor],
     rollups: &TabRollups<'_>,
     collapsed: &BTreeSet<String>,
 ) -> Vec<Container> {
@@ -3174,7 +3220,7 @@ pub fn build_tab_containers(
             .into_iter()
             .map(|s| {
                 shown.insert(s.id.as_str());
-                leaf(s, attention, unseen, true, agents)
+                leaf(s, attention, unseen, true, label_agents)
             })
             .collect();
         out.push(tab_view_container(
@@ -3193,7 +3239,7 @@ pub fn build_tab_containers(
         unbound.sort_by(|a, b| cmp_ci(&a.label, &b.label));
         let leaves = unbound
             .into_iter()
-            .map(|s| leaf(s, attention, unseen, true, agents))
+            .map(|s| leaf(s, attention, unseen, true, label_agents))
             .collect();
         out.push(tab_view_container(
             ContainerKind::Unbound,
@@ -4032,6 +4078,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn label_agents_keeps_the_last_list_across_a_disconnect() {
+        let host = remote_host("box");
+        let mut model = SidebarModel::default();
+        let claude = claude_descriptor();
+        let test = test_descriptor();
+
+        model.set_agents(&host, vec![claude.clone()]);
+        model.set_agents(&host, Vec::new());
+        assert_eq!(model.agents(&host), [], "the connection's list is empty");
+        assert_eq!(
+            model.label_agents(&host),
+            [claude],
+            "labels keep the last list"
+        );
+
+        model.set_agents(&host, vec![test.clone()]);
+        assert_eq!(
+            model.label_agents(&host),
+            [test],
+            "a new connection's list wins"
+        );
+
+        model.clear_host(&host);
+        assert_eq!(model.agents(&host), [], "its agents went too");
+        assert_eq!(model.label_agents(&host), [], "and the last list with them");
+    }
+
+    #[test]
     fn a_remote_hosts_container_keys_carry_its_host_key() {
         let remote = remote_host("box");
         let mut model = SidebarModel::default();
@@ -4132,6 +4206,7 @@ pub(crate) mod tests {
                 workspaces: &self.workspaces,
                 sessions: &self.sessions,
                 agents: &[],
+                label_agents: &[],
                 container_order: &self.container_order,
                 session_order: &self.session_order,
                 attention: &HashSet::new(),
@@ -7161,6 +7236,7 @@ pub(crate) mod tests {
                 workspaces: &fixture.workspaces,
                 sessions: &fixture.sessions,
                 agents: &[],
+                label_agents: &[],
                 container_order: &fixture.container_order,
                 session_order: &fixture.session_order,
                 attention: &attention,

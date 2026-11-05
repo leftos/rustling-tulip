@@ -2247,7 +2247,7 @@ impl RootView {
             key,
             self.tabs.tabs(),
             self.sidebar.sessions_of(&host),
-            self.sidebar.agents(&host),
+            self.sidebar.label_agents(&host),
         )
     }
 
@@ -5388,7 +5388,9 @@ impl RootView {
     fn session_label(&self, id: &str) -> String {
         self.sidebar.find_session(id).map_or_else(
             || id.to_owned(),
-            |(host, session)| crate::sidebar::display_label(session, self.sidebar.agents(&host)),
+            |(host, session)| {
+                crate::sidebar::display_label(session, self.sidebar.label_agents(&host))
+            },
         )
     }
 }

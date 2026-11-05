@@ -1527,7 +1527,7 @@ impl RootView {
             .session(session_id)
             .and_then(|session| session.agent.as_ref());
         self.sidebar
-            .session_agents(session_id)
+            .session_label_agents(session_id)
             .iter()
             .find(|descriptor| Some(&descriptor.id) == agent)
             .map_or_else(

@@ -812,7 +812,7 @@ impl RootView {
         }
         match msg {
             DaemonMessage::SessionUpdated { session, .. } if finished => {
-                let label = body(Some(session), self.sidebar.agents(host));
+                let label = body(Some(session), self.sidebar.label_agents(host));
                 let awaits_alert = self.waits_for_alert(host, session);
                 self.hold_finished(key_of(host, &session.id), label, awaits_alert, cx);
             }
@@ -822,8 +822,10 @@ impl RootView {
                 ..
             } => {
                 let wanted = self.sidebar.ui_state().notifications.awaiting_input;
-                let body =
-                    needs_you_body(self.sidebar.session(session_id), self.sidebar.agents(host));
+                let body = needs_you_body(
+                    self.sidebar.session(session_id),
+                    self.sidebar.label_agents(host),
+                );
                 self.raise_toast(
                     &Toast {
                         host,
@@ -1222,7 +1224,7 @@ impl RootView {
             row: &row,
             session,
             facts: self.dashboard_facts.facts_for(id),
-            agents: self.sidebar.session_agents(id),
+            agents: self.sidebar.session_label_agents(id),
             unseen: self.sidebar.is_unseen(id),
             prompt: self.chat.held_prompt(id),
         })?;

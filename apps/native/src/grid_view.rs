@@ -1664,7 +1664,7 @@ impl RootView {
             .and_then(|id| self.hosted_session(&host, id))
             .map_or_else(
                 || drag::EMPTY_PANE_LABEL.to_owned(),
-                |session| display_label(session, self.sidebar.agents(&host)),
+                |session| display_label(session, self.sidebar.label_agents(&host)),
             );
         let focus_key = key.clone();
         let focus = BorderedButton {
@@ -2318,12 +2318,12 @@ impl RootView {
     /// What a pane header shows of `host`'s `session`, with the host's chip
     /// when it is a remote one.
     fn session_header_parts(&self, host: &HostKey, session: &SessionSnapshot) -> PaneHeaderParts {
-        let agents = self.sidebar.agents(host);
+        let label_agents = self.sidebar.label_agents(host);
         let host = self.host_chip_label(host);
         header_parts(
             session,
             self.sidebar.is_unseen(&session.id),
-            agents,
+            label_agents,
             host.as_ref(),
         )
     }
@@ -2554,16 +2554,16 @@ impl HeaderChip {
 fn header_parts(
     session: &SessionSnapshot,
     unseen: bool,
-    agents: &[AgentDescriptor],
+    label_agents: &[AgentDescriptor],
     host: Option<&HostLabel>,
 ) -> PaneHeaderParts {
     let mut chips: Vec<HeaderChip> = host
         .map(|host| HeaderChip::new(HeaderChipKind::Host, &host.short, &host.full))
         .into_iter()
         .collect();
-    chips.extend(runtime_label(session, agents).map(|runtime| {
+    chips.extend(runtime_label(session, label_agents).map(|runtime| {
         let tip = format!("Running {runtime}");
-        let icon = runtime_icon(session, Some(&runtime), agents);
+        let icon = runtime_icon(session, Some(&runtime), label_agents);
         HeaderChip::new(HeaderChipKind::Runtime, runtime, tip).with_icon(icon)
     }));
     chips.extend(session.agent_chips.iter().map(|agent_chip| {
@@ -2590,8 +2590,8 @@ fn header_parts(
             "status: {}",
             status_label(session.status, session.background)
         ),
-        title: display_label(session, agents),
-        title_tip: label_tooltip(session, agents),
+        title: display_label(session, label_agents),
+        title_tip: label_tooltip(session, label_agents),
         chips,
     }
 }

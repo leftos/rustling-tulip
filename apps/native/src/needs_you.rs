@@ -65,7 +65,7 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
                 label: leaf.label.clone(),
                 reason,
                 since: session.status_since,
-                detail: detail_of(reason, session, model.agents(&container.host)),
+                detail: detail_of(reason, session, model.label_agents(&container.host)),
             };
             match reason {
                 Reason::Asking => asking.push(row),

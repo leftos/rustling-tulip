@@ -378,7 +378,7 @@ impl RootView {
             let label = self
                 .sidebar
                 .session(&session)
-                .map(|s| display_label(s, self.sidebar.agents(&self.sc_shown)))?;
+                .map(|s| display_label(s, self.sidebar.label_agents(&self.sc_shown)))?;
             let plural = if count == 1 { "" } else { "s" };
             return Some(ScContext {
                 text: format!("{label} · {count} repo{plural}"),

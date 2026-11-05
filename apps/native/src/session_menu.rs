@@ -3579,7 +3579,9 @@ impl RootView {
             .session_on(&dialog.host, confirm.session_id())
             .map_or_else(
                 || confirm.session_id().to_owned(),
-                |session| crate::sidebar::display_label(session, self.sidebar.agents(&dialog.host)),
+                |session| {
+                    crate::sidebar::display_label(session, self.sidebar.label_agents(&dialog.host))
+                },
             );
         let mut lines: Vec<String> = dialog.owner.progress().into_iter().collect();
         lines.push(format!("Removing the worktree for {label}."));
