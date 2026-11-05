@@ -651,7 +651,7 @@ mod tests {
     use chrono::{DateTime, TimeDelta, TimeZone, Utc};
     use protocol::{
         AccountKind, AccountSnapshot, AccountUsageStatus, AccountUsageWindow, AutoSwitchState,
-        DaemonMessage, FleetVerdict, FleetWindow,
+        AutoSwitchStrategy, DaemonMessage, FleetVerdict, FleetWindow,
     };
 
     use super::{
@@ -705,6 +705,8 @@ mod tests {
             threshold_pct: 90.0,
             hysteresis_pct: 5.0,
             cooldown_secs: 300,
+            strategy: AutoSwitchStrategy::Best,
+            rate_window_minutes: None,
             paused_reason: paused.map(str::to_owned),
             warm_up_done: true,
             last_decision: None,

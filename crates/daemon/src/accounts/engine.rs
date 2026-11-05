@@ -244,6 +244,8 @@ mod tests {
             threshold_pct: 80.0,
             hysteresis_pct: 5.0,
             cooldown_secs: 300,
+            strategy: protocol::AutoSwitchStrategy::Best,
+            rate_window_minutes: None,
             paused_reason: reason,
             warm_up_done: true,
             last_decision: None,

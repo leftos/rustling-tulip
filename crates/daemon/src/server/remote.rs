@@ -596,6 +596,32 @@ mod tests {
         assert_eq!(service.calls(), ["auto Some(false) None"]);
     }
 
+    #[tokio::test]
+    async fn a_tailnet_connection_may_set_auto_switch_rules() {
+        let (hub, _scratch, service) = accounts_hub("tailnet-auto-switch-rules");
+
+        let reply = crate::server::accounts::fake::ask_as(
+            &hub,
+            ClientMessage::SetAutoSwitchRules {
+                hysteresis_pct: Some(7.5),
+                cooldown_secs: None,
+                strategy: None,
+                rate_window_minutes: None,
+                request_id: Some("t2".to_owned()),
+            },
+            &AuthKind::Tailnet(test_peer()),
+        )
+        .await;
+
+        assert!(
+            matches!(&reply, DaemonMessage::Accounts { request_id: Some(id), .. } if id == "t2"),
+            "{reply:?}"
+        );
+        let calls = service.calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].starts_with("rules "), "{calls:?}");
+    }
+
     /// A WebSocket upgrade request, with any extra headers a case needs.
     fn ws_upgrade_request(uri: &str, extra: &[(&str, &str)]) -> Request<Body> {
         let mut builder = Request::builder()

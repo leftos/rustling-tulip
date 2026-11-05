@@ -815,6 +815,8 @@ pub fn auto_switch(paused: Option<&str>) -> protocol::AutoSwitchState {
         threshold_pct: 90.0,
         hysteresis_pct: 5.0,
         cooldown_secs: 300,
+        strategy: protocol::AutoSwitchStrategy::Best,
+        rate_window_minutes: None,
         paused_reason: paused.map(str::to_owned),
         warm_up_done: true,
         last_decision: None,

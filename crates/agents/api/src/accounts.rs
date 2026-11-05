@@ -8,6 +8,7 @@
 //! the daemon maps onto its wire types, never a plugin's own types.
 
 use chrono::{DateTime, Utc};
+use protocol::AutoSwitchStrategy;
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -259,6 +260,20 @@ pub trait AccountsService: Send + Sync {
         Err(AccountsFailure::unsupported())
     }
 
+    /// Sets auto-switch's rules: the hysteresis, in percentage points, the
+    /// least time between two switches, how the engine picks its target, and
+    /// the span the fleet forecast reads usage rise over, in minutes; a
+    /// `None` keeps its value. Blocks.
+    ///
+    /// # Errors
+    ///
+    /// A rule is refused, auto-switch is unsupported here, or the settings
+    /// could not be written.
+    fn set_auto_switch_rules(&self, rules: AutoSwitchRules) -> Result<bool, AccountsFailure> {
+        let _ = rules;
+        Err(AccountsFailure::unsupported())
+    }
+
     /// Runs one auto-switch engine tick when auto-switch is on: the engine
     /// is made on first use, claims and heartbeats its lease, and may switch
     /// the login. While auto-switch is off, or where it cannot run, nothing
@@ -413,9 +428,28 @@ pub struct AutoState {
     pub hysteresis_pct: f64,
     /// The least time between two switches, in seconds.
     pub cooldown_secs: u64,
+    /// How the engine picks the account to switch to.
+    pub strategy: AutoSwitchStrategy,
+    /// The span the fleet forecast reads usage rise over, in minutes.
+    pub rate_window_minutes: Option<u32>,
     /// Why the engine is paused; `None` while it runs.
     pub paused_reason: Option<String>,
     pub warm_up_done: bool,
     /// The engine's last decision, as it names it.
     pub last_decision: Option<String>,
+}
+
+/// The auto-switch rules a [`AccountsService::set_auto_switch_rules`] sets; a
+/// `None` field keeps its value.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AutoSwitchRules {
+    /// How far, in percentage points, usage must fall back before an account
+    /// counts as recovered.
+    pub hysteresis_pct: Option<f64>,
+    /// The least time between two switches, in seconds.
+    pub cooldown_secs: Option<u64>,
+    /// How the engine picks the account to switch to.
+    pub strategy: Option<AutoSwitchStrategy>,
+    /// The span the fleet forecast reads usage rise over, in minutes.
+    pub rate_window_minutes: Option<u32>,
 }

@@ -17,13 +17,14 @@ use std::time::{Duration, Instant};
 use agent_api::accounts::EngineTick;
 use agent_api::{
     AccountKindRow, AccountsConfig, AccountsFailure, AccountsFailureKind, AccountsService, Agent,
-    PollScope, UsageStatus,
+    AutoSwitchRules, PollScope, UsageStatus,
 };
 use agent_claude::accounts::{BODY_CAP, ProfileClient, RefreshClient, UsageClient};
 use claude_accounts::{
     AccessToken, AccountLock, AccountsRoot, ClaudePaths, CredentialBlob, ProfileTransport,
     RefreshError, Store, TransportError, UsageTransport, refresh_grant,
 };
+use protocol::AutoSwitchStrategy;
 use serde_json::json;
 
 /// What the local server does with each request it reads.
@@ -1194,6 +1195,184 @@ fn set_auto_switch_writes_the_settings_file() {
         (written.autoswitch.threshold - 90.0).abs() < 1e-9,
         "a refused threshold writes nothing: {written:?}"
     );
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn set_auto_switch_rules_writes_the_rules() {
+    let dir = scratch("set_auto_switch_rules_writes_the_rules");
+    let service = two_accounts(&dir);
+    let file = dir.join("accounts").join("settings.json");
+
+    let changed = service
+        .set_auto_switch_rules(AutoSwitchRules {
+            hysteresis_pct: Some(7.5),
+            cooldown_secs: Some(600),
+            strategy: Some(AutoSwitchStrategy::ConsumeFirst),
+            rate_window_minutes: Some(120),
+        })
+        .expect("the rules are set");
+
+    assert!(changed);
+    let written = claude_accounts::Settings::read(&file).expect("the settings file reads");
+    assert!(
+        (written.autoswitch.hysteresis_pct - 7.5).abs() < 1e-9,
+        "{written:?}"
+    );
+    assert!(
+        (written.autoswitch.cooldown_seconds - 600.0).abs() < 1e-9,
+        "{written:?}"
+    );
+    assert_eq!(
+        written.autoswitch.strategy,
+        claude_accounts::StrategyName::ConsumeFirst
+    );
+    assert_eq!(
+        written.fleet.rate_window,
+        claude_accounts::RateWindow::TwoHours
+    );
+
+    let auto = service
+        .snapshot()
+        .expect("the store reads")
+        .auto
+        .expect("the snapshot carries the auto-switch state");
+    assert!((auto.hysteresis_pct - 7.5).abs() < 1e-9, "{auto:?}");
+    assert_eq!(auto.cooldown_secs, 600);
+    assert_eq!(auto.strategy, AutoSwitchStrategy::ConsumeFirst);
+    assert_eq!(auto.rate_window_minutes, Some(120));
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn set_auto_switch_rules_refuses_an_off_list_forecast_window() {
+    let dir = scratch("set_auto_switch_rules_refuses_an_off_list_forecast_window");
+    let service = two_accounts(&dir);
+    let file = dir.join("accounts").join("settings.json");
+
+    assert_eq!(
+        failure_kind(service.set_auto_switch_rules(AutoSwitchRules {
+            rate_window_minutes: Some(45),
+            ..AutoSwitchRules::default()
+        })),
+        AccountsFailureKind::Refused
+    );
+    let written = claude_accounts::Settings::read(&file).expect("the settings file reads");
+    assert_eq!(
+        written.fleet.rate_window,
+        claude_accounts::RateWindow::default(),
+        "a refused window writes nothing"
+    );
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn set_auto_switch_rules_refuses_an_out_of_range_hysteresis() {
+    let dir = scratch("set_auto_switch_rules_refuses_an_out_of_range_hysteresis");
+    let service = two_accounts(&dir);
+    let file = dir.join("accounts").join("settings.json");
+    let default = claude_accounts::AutoSwitchSection::default().hysteresis_pct;
+
+    assert_eq!(
+        failure_kind(service.set_auto_switch_rules(AutoSwitchRules {
+            hysteresis_pct: Some(60.0),
+            ..AutoSwitchRules::default()
+        })),
+        AccountsFailureKind::Refused
+    );
+    let written = claude_accounts::Settings::read(&file).expect("the settings file reads");
+    assert!(
+        (written.autoswitch.hysteresis_pct - default).abs() < 1e-9,
+        "a refused hysteresis writes nothing: {written:?}"
+    );
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn set_auto_switch_rules_with_the_same_values_changes_nothing() {
+    let dir = scratch("set_auto_switch_rules_with_the_same_values_changes_nothing");
+    let service = two_accounts(&dir);
+    let rules = AutoSwitchRules {
+        hysteresis_pct: Some(7.5),
+        cooldown_secs: Some(600),
+        strategy: Some(AutoSwitchStrategy::ConsumeFirst),
+        rate_window_minutes: Some(120),
+    };
+
+    assert!(
+        service
+            .set_auto_switch_rules(rules)
+            .expect("the rules are set")
+    );
+    assert!(
+        !service
+            .set_auto_switch_rules(rules)
+            .expect("the same rules are set again"),
+        "a write with nothing to change reports no change"
+    );
+}
+
+/// The two auto-switch writes hold one guard across their read-modify-write,
+/// so a switch and a rules change started together both land; without it the
+/// later write puts back the other's old field, and `enabled` can come back
+/// true after the engine was retired.
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn concurrent_auto_switch_and_rules_writes_keep_both_changes() {
+    use std::sync::Barrier;
+
+    for round in 0..20 {
+        let dir = scratch(&format!("concurrent-auto-switch-and-rules-{round}"));
+        let service = two_accounts(&dir);
+        assert!(
+            service
+                .set_auto_switch(Some(true), None)
+                .expect("auto-switch is turned on"),
+            "round {round}: the switch starts on"
+        );
+        let barrier = Arc::new(Barrier::new(2));
+
+        let switching = {
+            let service = Arc::clone(&service);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                service.set_auto_switch(Some(false), None).map(|_| ())
+            })
+        };
+        let ruling = {
+            let service = Arc::clone(&service);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                service
+                    .set_auto_switch_rules(AutoSwitchRules {
+                        cooldown_secs: Some(600),
+                        ..AutoSwitchRules::default()
+                    })
+                    .map(|_| ())
+            })
+        };
+        switching
+            .join()
+            .expect("the switch thread did not panic")
+            .expect("the switch writes");
+        ruling
+            .join()
+            .expect("the rules thread did not panic")
+            .expect("the rules write");
+
+        let file = dir.join("accounts").join("settings.json");
+        let written = claude_accounts::Settings::read(&file).expect("the settings file reads");
+        assert!(
+            !written.autoswitch.enabled,
+            "round {round}: the switch was lost: {written:?}"
+        );
+        assert!(
+            (written.autoswitch.cooldown_seconds - 600.0).abs() < 1e-9,
+            "round {round}: the rules were lost: {written:?}"
+        );
+    }
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]

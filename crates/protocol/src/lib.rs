@@ -3201,6 +3201,20 @@ pub struct FleetVerdict {
     pub first_reset: Option<DateTime<Utc>>,
 }
 
+/// How auto-switch picks the account to switch to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSwitchStrategy {
+    /// The account with the most headroom.
+    #[default]
+    Best,
+    /// The account whose weekly window resets soonest.
+    ConsumeFirst,
+    /// Forward-compat fallback: a strategy the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
 /// The host's auto-switch engine as it stands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoSwitchState {
@@ -3212,6 +3226,13 @@ pub struct AutoSwitchState {
     pub hysteresis_pct: f64,
     /// The least time between two switches, in seconds.
     pub cooldown_secs: u64,
+    /// How the engine picks the account to switch to.
+    #[serde(default)]
+    pub strategy: AutoSwitchStrategy,
+    /// The span the fleet forecast's usage rise is read over, in minutes;
+    /// `None` from a daemon that does not send it.
+    #[serde(default)]
+    pub rate_window_minutes: Option<u32>,
     /// Why the engine is paused (the lease holder, or the store's refusal);
     /// `None` while it runs.
     #[serde(default)]
@@ -4574,6 +4595,26 @@ pub enum ClientMessage {
         enabled: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         threshold_pct: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Set auto-switch's rules: the hysteresis, in percentage points
+    /// (`hysteresis_pct`), the least time between two switches
+    /// (`cooldown_secs`), how the engine picks its target (`strategy`), and
+    /// the span the fleet forecast reads usage rise over, in minutes
+    /// (`rate_window_minutes`); a field left out keeps its value. Answered
+    /// like [`ClientMessage::SwitchAccount`]; a request that sets no field,
+    /// or a rule the host refuses, is answered
+    /// `Error { code: account_refused }`. Served on any connection origin.
+    SetAutoSwitchRules {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hysteresis_pct: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cooldown_secs: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strategy: Option<AutoSwitchStrategy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rate_window_minutes: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -7215,6 +7256,8 @@ mod tests {
             threshold_pct: 90.0,
             hysteresis_pct: 5.0,
             cooldown_secs: 600,
+            strategy: AutoSwitchStrategy::ConsumeFirst,
+            rate_window_minutes: Some(120),
             paused_reason: Some("another engine holds the lease".to_owned()),
             warm_up_done: true,
             last_decision: Some("stay".to_owned()),
@@ -7337,6 +7380,87 @@ mod tests {
                 "{back:?}"
             );
         }
+    }
+
+    #[test]
+    fn set_auto_switch_rules_round_trips() {
+        let msg = ClientMessage::SetAutoSwitchRules {
+            hysteresis_pct: Some(7.5),
+            cooldown_secs: Some(600),
+            strategy: Some(AutoSwitchStrategy::ConsumeFirst),
+            rate_window_minutes: Some(120),
+            request_id: Some("r1".to_owned()),
+        };
+        let sent = serde_json::to_string(&msg).expect("serializes");
+        let want = concat!(
+            r#"{"type":"set_auto_switch_rules","hysteresis_pct":7.5,"cooldown_secs":600,"#,
+            r#""strategy":"consume_first","rate_window_minutes":120,"request_id":"r1"}"#
+        );
+        assert_eq!(sent, want);
+        let back: ClientMessage = serde_json::from_str(&sent).expect("decodes");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::SetAutoSwitchRules {
+                    hysteresis_pct: Some(hysteresis_pct),
+                    cooldown_secs: Some(cooldown_secs),
+                    strategy: Some(strategy),
+                    rate_window_minutes: Some(rate_window_minutes),
+                    request_id: Some(id),
+                } if (*hysteresis_pct - 7.5).abs() < f64::EPSILON
+                    && *cooldown_secs == 600
+                    && *strategy == AutoSwitchStrategy::ConsumeFirst
+                    && *rate_window_minutes == 120
+                    && id == "r1"
+            ),
+            "{back:?}"
+        );
+
+        let empty: ClientMessage = serde_json::from_str(r#"{"type":"set_auto_switch_rules"}"#)
+            .expect("the empty form decodes");
+        assert!(
+            matches!(
+                &empty,
+                ClientMessage::SetAutoSwitchRules {
+                    hysteresis_pct: None,
+                    cooldown_secs: None,
+                    strategy: None,
+                    rate_window_minutes: None,
+                    request_id: None,
+                }
+            ),
+            "{empty:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_strategy_decodes_as_unknown() {
+        let msg: ClientMessage =
+            serde_json::from_str(r#"{"type":"set_auto_switch_rules","strategy":"newest"}"#)
+                .expect("a strategy this build does not know still decodes");
+
+        assert!(
+            matches!(
+                &msg,
+                ClientMessage::SetAutoSwitchRules {
+                    strategy: Some(AutoSwitchStrategy::Unknown),
+                    ..
+                }
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[test]
+    fn an_auto_switch_state_without_rules_fields_decodes() {
+        let state: AutoSwitchState = serde_json::from_str(concat!(
+            r#"{"enabled":true,"threshold_pct":90.0,"hysteresis_pct":5.0,"#,
+            r#""cooldown_secs":600}"#
+        ))
+        .expect("a state from before the rules fields decodes");
+
+        assert_eq!(state.strategy, AutoSwitchStrategy::Best);
+        assert_eq!(state.rate_window_minutes, None);
     }
 
     #[test]

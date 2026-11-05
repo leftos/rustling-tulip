@@ -16,8 +16,8 @@ use std::time::Duration;
 use agent_api::accounts::{AccountEventRow, EngineTick};
 use agent_api::{
     AccountKindRow, AccountRef, AccountRow, AccountsConfig, AccountsError, AccountsFailure,
-    AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, PollReport, PollScope,
-    SwitchReport, UsageRow, UsageStatus, UsageWindowRow,
+    AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, AutoSwitchRules, PollReport,
+    PollScope, SwitchReport, UsageRow, UsageStatus, UsageWindowRow,
 };
 use chrono::{DateTime, Utc};
 use claude_accounts::engine::{
@@ -27,14 +27,15 @@ use claude_accounts::engine::{
 use claude_accounts::{
     AccessToken, AccountKind, AccountLock, AccountRecord, AccountsRoot, AutoSwitchSection,
     CaptureError, ClaudePaths, Drain, FetchScope, Identity, LockError, LockTiming, PROFILE_TIMEOUT,
-    PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts, ProfileTransport, RawProfile, RawToken,
-    RawUsage, RefreshContext, RefreshRequest, RefreshTransport, Secret, Settings, SettingsError,
-    Store, StoreError, StoreErrorKind, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome,
-    SwitchPrecondition, TOKEN_URL, TransportError, USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL,
-    UsageEntry, UsageTable, UsageTransport, UsageWindow, capture_live_login, poll_with_refresh,
-    probe_outgoing,
+    PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts, ProfileTransport, RateWindow, RawProfile,
+    RawToken, RawUsage, RefreshContext, RefreshRequest, RefreshTransport, Secret, Settings,
+    SettingsError, Store, StoreError, StoreErrorKind, StrategyName, SwitchAccount, SwitchError,
+    SwitchErrorKind, SwitchOutcome, SwitchPrecondition, TOKEN_URL, TransportError,
+    USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable, UsageTransport,
+    UsageWindow, capture_live_login, poll_with_refresh, probe_outgoing,
 };
 use directories::UserDirs;
+use protocol::AutoSwitchStrategy;
 use reqwest::blocking::{Body, Client, RequestBuilder};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER, USER_AGENT};
 use reqwest::redirect::Policy;
@@ -410,8 +411,8 @@ impl AccountsService for ClaudeAccounts {
     }
 
     /// Reads the settings, changes the fields given and, when that changed
-    /// anything, writes them back under a drain guard. Unsupported where the
-    /// account locks are, before anything is read.
+    /// anything, writes them back under the switch guard and a drain guard.
+    /// Unsupported where the account locks are, before anything is read.
     fn set_auto_switch(
         &self,
         enabled: Option<bool>,
@@ -422,6 +423,11 @@ impl AccountsService for ClaudeAccounts {
         }
         let store = self.store().map_err(|error| store_failure(&error))?;
         let root = store.root();
+        // Held across the read and the write, so the other settings write
+        // beside this one cannot read the file before this write and put its
+        // old fields back. An engine switch in flight finishes first; one
+        // started after this write reads what it wrote.
+        let switching = lock(&self.switch_guard);
         let mut settings =
             Settings::read(&root.settings()).map_err(|error| settings_failure(&error))?;
         let before = settings.clone();
@@ -437,9 +443,6 @@ impl AccountsService for ClaudeAccounts {
         let Ok(_work) = self.drain.begin() else {
             return Err(draining());
         };
-        // An engine switch in flight finishes first; one after this write
-        // reads what it wrote.
-        let switching = lock(&self.switch_guard);
         Settings::write(root, &settings).map_err(|error| settings_failure(&error))?;
         // A tick holds the engine while its switch takes the guard, so the
         // guard is let go before the engine is taken.
@@ -449,6 +452,47 @@ impl AccountsService for ClaudeAccounts {
         if !settings.autoswitch.enabled {
             self.retire(&mut lock(&self.engine));
         }
+        Ok(true)
+    }
+
+    /// Reads the settings, changes the rules given and, when that changed
+    /// anything, writes them back under the switch guard and a drain guard.
+    /// Unsupported where the account locks are, before anything is read. The
+    /// engine is not retired: its next tick reads the rules this wrote.
+    fn set_auto_switch_rules(&self, rules: AutoSwitchRules) -> Result<bool, AccountsFailure> {
+        if !LOCKS_SUPPORTED {
+            return Err(AccountsFailure::unsupported());
+        }
+        let store = self.store().map_err(|error| store_failure(&error))?;
+        let root = store.root();
+        // Held across the read and the write, so the other settings write
+        // beside this one cannot read the file before this write and put its
+        // old fields back. An engine switch in flight finishes first; one
+        // started after this write reads what it wrote.
+        let switching = lock(&self.switch_guard);
+        let mut settings =
+            Settings::read(&root.settings()).map_err(|error| settings_failure(&error))?;
+        let before = settings.clone();
+        if let Some(hysteresis_pct) = rules.hysteresis_pct {
+            settings.autoswitch.hysteresis_pct = hysteresis_pct;
+        }
+        if let Some(cooldown_secs) = rules.cooldown_secs {
+            settings.autoswitch.cooldown_seconds = Duration::from_secs(cooldown_secs).as_secs_f64();
+        }
+        if let Some(strategy) = rules.strategy {
+            settings.autoswitch.strategy = strategy_name(strategy)?;
+        }
+        if let Some(minutes) = rules.rate_window_minutes {
+            settings.fleet.rate_window = forecast_window(minutes)?;
+        }
+        if settings == before {
+            return Ok(false);
+        }
+        let Ok(_work) = self.drain.begin() else {
+            return Err(draining());
+        };
+        Settings::write(root, &settings).map_err(|error| settings_failure(&error))?;
+        drop(switching);
         Ok(true)
     }
 
@@ -661,10 +705,11 @@ fn auto_state(root: &AccountsRoot) -> Option<AutoState> {
     if !LOCKS_SUPPORTED {
         return None;
     }
-    let (section, paused_reason) = match Settings::read(&root.settings()) {
-        Ok(settings) => (settings.autoswitch, None),
+    let (section, rate_window, paused_reason) = match Settings::read(&root.settings()) {
+        Ok(settings) => (settings.autoswitch, settings.fleet.rate_window, None),
         Err(error) => (
             AutoSwitchSection::default(),
+            RateWindow::default(),
             Some(format!(
                 "the auto-switch settings could not be read: {error}"
             )),
@@ -678,9 +723,45 @@ fn auto_state(root: &AccountsRoot) -> Option<AutoState> {
         threshold_pct: section.threshold,
         hysteresis_pct: section.hysteresis_pct,
         cooldown_secs: cooldown.map_or(0, |cooldown| cooldown.as_secs()),
+        strategy: protocol_strategy(section.strategy),
+        rate_window_minutes: Some(rate_window.minutes()),
         paused_reason,
         warm_up_done: false,
         last_decision: None,
+    })
+}
+
+/// The engine's spelling of the strategy `name`.
+fn protocol_strategy(name: StrategyName) -> AutoSwitchStrategy {
+    match name {
+        StrategyName::Best => AutoSwitchStrategy::Best,
+        StrategyName::ConsumeFirst => AutoSwitchStrategy::ConsumeFirst,
+    }
+}
+
+/// The settings file's spelling of `strategy`; a strategy this build does not
+/// know is refused.
+fn strategy_name(strategy: AutoSwitchStrategy) -> Result<StrategyName, AccountsFailure> {
+    match strategy {
+        AutoSwitchStrategy::Best => Ok(StrategyName::Best),
+        AutoSwitchStrategy::ConsumeFirst => Ok(StrategyName::ConsumeFirst),
+        AutoSwitchStrategy::Unknown => Err(failure(
+            AccountsFailureKind::Refused,
+            "strategy_unknown",
+            "unknown strategy".to_owned(),
+        )),
+    }
+}
+
+/// The settings file's forecast window `minutes` long; one the file cannot
+/// hold is refused.
+fn forecast_window(minutes: u32) -> Result<RateWindow, AccountsFailure> {
+    RateWindow::from_minutes(minutes).ok_or_else(|| {
+        failure(
+            AccountsFailureKind::Refused,
+            "rate_window_refused",
+            "the forecast window is 30, 60, 120 or 180 minutes".to_owned(),
+        )
     })
 }
 

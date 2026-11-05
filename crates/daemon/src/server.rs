@@ -808,7 +808,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::RemoveAccount { .. }
         | ClientMessage::SetAccountAlias { .. }
         | ClientMessage::SetAccountOrder { .. }
-        | ClientMessage::SetAutoSwitch { .. }) => accounts::handle(hub, m, ctx).await,
+        | ClientMessage::SetAutoSwitch { .. }
+        | ClientMessage::SetAutoSwitchRules { .. }) => accounts::handle(hub, m, ctx).await,
         m @ (ClientMessage::ListRepos
         | ClientMessage::AddRepo { .. }
         | ClientMessage::RemoveRepo { .. }

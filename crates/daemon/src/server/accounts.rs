@@ -6,13 +6,15 @@
 //! auto-switch state.
 //!
 //! The writes (`SwitchAccount`, `AddCurrentLogin`, `RemoveAccount`,
-//! `SetAccountAlias`, `SetAccountOrder`, `SetAutoSwitch`) each run on a task
-//! of their own, so a write never holds the connection's later messages, and
-//! call the service's seam method on a blocking thread; every one but the
-//! switch and `SetAutoSwitch` is local-only, refused before it gets here
-//! (`remote::host_only_refusal`). On a host with an account service, a
-//! `SetAutoSwitch` that sets neither field is refused `account_refused` before
-//! any seam call; a successful one wakes the engine task after its refresh.
+//! `SetAccountAlias`, `SetAccountOrder`, `SetAutoSwitch`,
+//! `SetAutoSwitchRules`) each run on a task of their own, so a write never
+//! holds the connection's later messages, and call the service's seam method
+//! on a blocking thread; every one but the switch, `SetAutoSwitch` and
+//! `SetAutoSwitchRules` is local-only, refused before it gets here
+//! (`remote::host_only_refusal`). On a host with an account service,
+//! a `SetAutoSwitch` that sets neither field, and a `SetAutoSwitchRules` that
+//! sets no field, are refused `account_refused` before any seam call; a
+//! successful one wakes the engine task after its refresh.
 //! After the write returns,
 //! whether it succeeded or not, the handler asks the driver for a refresh
 //! and waits up to [`REFRESH_WAIT`] for it, so the driver stays the cache's
@@ -30,7 +32,9 @@ use crate::accounts::engine::account_event;
 use crate::accounts::snapshot::{Wire, wire};
 use crate::accounts::{Accounts, SharedAccounts};
 use agent_api::accounts::AccountEventRow;
-use agent_api::{AccountsConfig, AccountsFailure, AccountsFailureKind, AccountsSnapshot};
+use agent_api::{
+    AccountsConfig, AccountsFailure, AccountsFailureKind, AccountsSnapshot, AutoSwitchRules,
+};
 use protocol::{ClientMessage, DaemonMessage, error_codes};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,7 +48,8 @@ pub(crate) const REFRESH_WAIT: Duration = Duration::from_secs(10);
 /// The answer to a write on a host that keeps no accounts.
 const NO_ACCOUNTS: &str = "this host keeps no accounts";
 
-/// The answer to a `SetAutoSwitch` that sets neither field.
+/// The answer to a `SetAutoSwitch` or a `SetAutoSwitchRules` that sets
+/// nothing.
 const NOTHING_TO_CHANGE: &str = "nothing to change";
 
 /// The trigger of a switch a user asked for.
@@ -139,6 +144,19 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
                 service.set_order(order).map(|_| None)
             });
         }
+        m @ (ClientMessage::SetAutoSwitch { .. } | ClientMessage::SetAutoSwitchRules { .. }) => {
+            auto_switch(hub, ctx, m);
+        }
+        other => warn!(?other, "accounts::handle: routed a message it does not own"),
+    }
+}
+
+/// The `SetAutoSwitch` and `SetAutoSwitchRules` arms of [`handle`]: a message
+/// that sets nothing is refused before any seam call, so a host with an
+/// account service answers `account_refused` rather than a no-op write; a
+/// successful write wakes the engine task after its refresh.
+fn auto_switch(hub: &Hub, ctx: &ConnCtx<'_>, msg: ClientMessage) {
+    match msg {
         ClientMessage::SetAutoSwitch {
             enabled,
             threshold_pct,
@@ -167,7 +185,42 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
                 },
             );
         }
-        other => warn!(?other, "accounts::handle: routed a message it does not own"),
+        ClientMessage::SetAutoSwitchRules {
+            hysteresis_pct,
+            cooldown_secs,
+            strategy,
+            rate_window_minutes,
+            request_id,
+        } => {
+            let rules = AutoSwitchRules {
+                hysteresis_pct,
+                cooldown_secs,
+                strategy,
+                rate_window_minutes,
+            };
+            // After the no-service check `write` makes: a host with no
+            // account service answers `account_unsupported` either way.
+            if hub.accounts.is_some() && rules == AutoSwitchRules::default() {
+                let _ = ctx.out_tx.send(error(
+                    error_codes::ACCOUNT_REFUSED,
+                    NOTHING_TO_CHANGE.to_owned(),
+                    request_id,
+                ));
+                return;
+            }
+            write_then(
+                hub,
+                ctx,
+                request_id,
+                "set auto-switch rules",
+                AfterWrite::WakeEngine,
+                move |service| service.set_auto_switch_rules(rules).map(|_| None),
+            );
+        }
+        other => warn!(
+            ?other,
+            "accounts::auto_switch: routed a message it does not own"
+        ),
     }
 }
 
@@ -355,7 +408,8 @@ pub(crate) mod fake {
     use crate::server::{Hub, dispatch};
     use agent_api::{
         AccountKindRow, AccountRef, AccountRow, AccountsError, AccountsFailure, AccountsService,
-        AccountsSnapshot, AutoState, PollReport, PollScope, SwitchReport, UsageRow, UsageStatus,
+        AccountsSnapshot, AutoState, AutoSwitchRules, PollReport, PollScope, SwitchReport,
+        UsageRow, UsageStatus,
     };
     use protocol::{ClientMessage, DaemonMessage};
     use std::collections::HashMap;
@@ -584,6 +638,8 @@ pub(crate) mod fake {
                     threshold_pct: 95.0,
                     hysteresis_pct: 5.0,
                     cooldown_secs: 300,
+                    strategy: protocol::AutoSwitchStrategy::Best,
+                    rate_window_minutes: None,
                     paused_reason: None,
                     warm_up_done: false,
                     last_decision: None,
@@ -593,6 +649,35 @@ pub(crate) mod fake {
                 }
                 if let Some(threshold_pct) = threshold_pct {
                     auto.threshold_pct = threshold_pct;
+                }
+            })?;
+            Ok(true)
+        }
+
+        fn set_auto_switch_rules(&self, rules: AutoSwitchRules) -> Result<bool, AccountsFailure> {
+            self.write(format!("rules {rules:?}"), |snapshot| {
+                let auto = snapshot.auto.get_or_insert(AutoState {
+                    enabled: false,
+                    threshold_pct: 95.0,
+                    hysteresis_pct: 5.0,
+                    cooldown_secs: 300,
+                    strategy: protocol::AutoSwitchStrategy::Best,
+                    rate_window_minutes: None,
+                    paused_reason: None,
+                    warm_up_done: false,
+                    last_decision: None,
+                });
+                if let Some(hysteresis_pct) = rules.hysteresis_pct {
+                    auto.hysteresis_pct = hysteresis_pct;
+                }
+                if let Some(cooldown_secs) = rules.cooldown_secs {
+                    auto.cooldown_secs = cooldown_secs;
+                }
+                if let Some(strategy) = rules.strategy {
+                    auto.strategy = strategy;
+                }
+                if let Some(rate_window_minutes) = rules.rate_window_minutes {
+                    auto.rate_window_minutes = Some(rate_window_minutes);
                 }
             })?;
             Ok(true)
@@ -610,10 +695,12 @@ mod tests {
     use crate::server::connection::AuthKind;
     use crate::server::test_support::{dispatch_one_as, test_hub, test_peer};
     use agent_api::{
-        AccountKindRow, AccountRow, AccountsError, AccountsService, AutoState, ExtraUsageRow,
-        ModelLimitRow, PollReport, PollScope, UsageRow, UsageStatus, UsageWindowRow,
+        AccountKindRow, AccountRow, AccountsError, AccountsService, AutoState, AutoSwitchRules,
+        ExtraUsageRow, ModelLimitRow, PollReport, PollScope, UsageRow, UsageStatus, UsageWindowRow,
     };
-    use protocol::{AccountKind, AccountSnapshot, AccountUsageStatus, AutoSwitchState};
+    use protocol::{
+        AccountKind, AccountSnapshot, AccountUsageStatus, AutoSwitchState, AutoSwitchStrategy,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, PoisonError, mpsc};
     use std::time::Duration;
@@ -707,6 +794,8 @@ mod tests {
             threshold_pct,
             hysteresis_pct: 5.0,
             cooldown_secs: 300,
+            strategy: AutoSwitchStrategy::Best,
+            rate_window_minutes: None,
             paused_reason: None,
             warm_up_done: true,
             last_decision: Some("stay".to_owned()),
@@ -1294,6 +1383,70 @@ mod tests {
                     if code == error_codes::ACCOUNT_REFUSED
                         && message == "nothing to change"
                         && id == "a1"
+            ),
+            "{reply:?}"
+        );
+        assert!(service.calls().is_empty(), "{:?}", service.calls());
+    }
+
+    fn set_auto_switch_rules(rules: AutoSwitchRules, id: &str) -> ClientMessage {
+        ClientMessage::SetAutoSwitchRules {
+            hysteresis_pct: rules.hysteresis_pct,
+            cooldown_secs: rules.cooldown_secs,
+            strategy: rules.strategy,
+            rate_window_minutes: rules.rate_window_minutes,
+            request_id: Some(id.to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_auto_switch_rules_answers_accounts_with_the_request_id() {
+        let service = Arc::new(Writable::two_accounts());
+        let (hub, _scratch) = write_hub("set-auto-switch-rules", &service);
+        let rules = AutoSwitchRules {
+            hysteresis_pct: Some(7.5),
+            cooldown_secs: Some(600),
+            strategy: Some(AutoSwitchStrategy::ConsumeFirst),
+            rate_window_minutes: Some(120),
+        };
+
+        let reply = ask_as(&hub, set_auto_switch_rules(rules, "r1"), &AuthKind::Local).await;
+
+        assert!(
+            matches!(&reply, DaemonMessage::Accounts { request_id: Some(id), .. } if id == "r1"),
+            "not the accounts reply to r1: {reply:?}"
+        );
+        let auto = match reply {
+            DaemonMessage::Accounts { auto, .. } => auto,
+            _ => None,
+        }
+        .expect("the answer carries the auto-switch state");
+        assert!((auto.hysteresis_pct - 7.5).abs() < f64::EPSILON, "{auto:?}");
+        assert_eq!(auto.cooldown_secs, 600);
+        assert_eq!(auto.strategy, AutoSwitchStrategy::ConsumeFirst);
+        assert_eq!(auto.rate_window_minutes, Some(120));
+        assert_eq!(service.calls(), [format!("rules {rules:?}")]);
+    }
+
+    #[tokio::test]
+    async fn set_auto_switch_rules_with_nothing_to_change_is_refused() {
+        let service = Arc::new(Writable::two_accounts());
+        let (hub, _scratch) = write_hub("set-auto-switch-rules-nothing", &service);
+
+        let reply = ask_as(
+            &hub,
+            set_auto_switch_rules(AutoSwitchRules::default(), "r1"),
+            &AuthKind::Local,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { code: Some(code), message, request_id: Some(id) }
+                    if code == error_codes::ACCOUNT_REFUSED
+                        && message == "nothing to change"
+                        && id == "r1"
             ),
             "{reply:?}"
         );
