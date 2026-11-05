@@ -6,6 +6,7 @@
 // the console so a failing test still prints.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+mod accounts;
 mod activity_log;
 mod atomic_file;
 mod background_work;

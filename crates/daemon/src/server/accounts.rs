@@ -1,30 +1,23 @@
 //! The accounts messages: the read-only half. `ListAccounts` is served on
 //! every connection origin, since a snapshot carries no secret. The answer
-//! comes from the plugin's account service, read off the async threads; a
-//! host with no service, or one whose store cannot be read, answers no
+//! is the snapshot the accounts driver last polled; before its first poll it
+//! is the plugin's account service's snapshot, read off the async threads.
+//! A host with no service, or one whose store cannot be read, answers no
 //! accounts and no auto-switch state.
 use super::Hub;
 use super::connection::ConnCtx;
-use agent_api::{
-    AccountKindRow, AccountRow, AccountsConfig, AccountsService, AccountsSnapshot, AutoState,
-    ExtraUsageRow, ModelLimitRow, UsageStatus, UsageWindowRow,
-};
-use protocol::{
-    AccountExtraUsage, AccountKind, AccountModelLimit, AccountSnapshot, AccountUsageStatus,
-    AccountUsageWindow, AutoSwitchState, ClientMessage, DaemonMessage,
-};
+use crate::accounts::snapshot::{Wire, wire};
+use crate::accounts::{Accounts, SharedAccounts};
+use agent_api::{AccountsConfig, AccountsSnapshot};
+use protocol::{ClientMessage, DaemonMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-/// The account service as the hub holds it: shared, with no lock around it,
-/// so a read answers while a poll is in flight.
-pub type SharedAccounts = Arc<dyn AccountsService>;
-
-/// The account service the registered plugins offer over this host's
-/// account store, or `None` when the daemon runs elevated, the store's
-/// folder cannot be resolved, or no plugin keeps accounts.
-pub(crate) fn start_service() -> Option<SharedAccounts> {
+/// The accounts handle over the service the registered plugins offer for
+/// this host's account store, or `None` when the daemon runs elevated, the
+/// store's folder cannot be resolved, or no plugin keeps accounts.
+pub(crate) fn start_service() -> Option<Arc<Accounts>> {
     let dir = match crate::paths::resolve_accounts_dir() {
         Ok(dir) => dir,
         Err(err) => {
@@ -38,7 +31,7 @@ pub(crate) fn start_service() -> Option<SharedAccounts> {
             .find_map(|plugin| plugin.accounts(cfg))
     });
     info!(enabled = service.is_some(), "account service");
-    service
+    service.map(Accounts::new)
 }
 
 /// The service `ask` builds for the store at `dir`; `ask` is not called
@@ -55,15 +48,25 @@ pub(crate) fn service_for(
 pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
     match msg {
         ClientMessage::ListAccounts { request_id } => {
-            let snapshot = match &hub.accounts {
-                Some(service) => read_snapshot(Arc::clone(service)).await,
-                None => AccountsSnapshot::default(),
+            let Wire { accounts, auto } = match &hub.accounts {
+                Some(handle) => match handle.cached() {
+                    Some(cached) => cached,
+                    // Before the driver's first poll: one read of the
+                    // store, which the driver's poll then replaces.
+                    None => wire(&read_snapshot(Arc::clone(handle.service())).await),
+                },
+                None => Wire::default(),
             };
             let _ = ctx.out_tx.send(DaemonMessage::Accounts {
-                accounts: snapshot.accounts.iter().map(account_snapshot).collect(),
-                auto: snapshot.auto.as_ref().and_then(auto_state),
+                accounts,
+                auto,
                 request_id,
             });
+            // A client asking is interest: a driver parked with no account
+            // polls again.
+            if let Some(handle) = &hub.accounts {
+                handle.wake.notify_one();
+            }
         }
         other => warn!(?other, "accounts::handle: routed a message it does not own"),
     }
@@ -85,88 +88,6 @@ async fn read_snapshot(service: SharedAccounts) -> AccountsSnapshot {
     }
 }
 
-/// `value` when it is finite.
-fn finite(value: f64) -> Option<f64> {
-    value.is_finite().then_some(value)
-}
-
-/// `row` on the wire. A window or a per-model limit whose percentage is not
-/// finite is left out, and an extra-usage limit that is not finite is `None`.
-fn account_snapshot(row: &AccountRow) -> AccountSnapshot {
-    let usage = &row.usage;
-    AccountSnapshot {
-        number: row.number,
-        email: row.email.clone(),
-        alias: row.alias.clone(),
-        organization_name: row.org_name.clone(),
-        kind: match row.kind {
-            AccountKindRow::Oauth => AccountKind::Oauth,
-            AccountKindRow::ApiKey => AccountKind::ApiKey,
-        },
-        active: row.active,
-        disabled: row.disabled,
-        status: usage_status(usage.status),
-        five_hour: usage.five_hour.as_ref().and_then(usage_window),
-        seven_day: usage.seven_day.as_ref().and_then(usage_window),
-        model_limits: usage.model_limits.iter().filter_map(model_limit).collect(),
-        extra_usage: usage.extra_usage.as_ref().map(extra_usage),
-        fetched_at: usage.fetched_at,
-        error: usage.error.clone(),
-    }
-}
-
-fn usage_status(status: UsageStatus) -> AccountUsageStatus {
-    match status {
-        UsageStatus::Ok => AccountUsageStatus::Ok,
-        UsageStatus::TokenExpired => AccountUsageStatus::TokenExpired,
-        UsageStatus::ApiKey => AccountUsageStatus::ApiKey,
-        UsageStatus::ReloginRequired => AccountUsageStatus::ReloginRequired,
-        UsageStatus::ForeignCredential => AccountUsageStatus::ForeignCredential,
-        UsageStatus::NoCredentials => AccountUsageStatus::NoCredentials,
-        UsageStatus::StoreUnwritable => AccountUsageStatus::StoreUnwritable,
-        UsageStatus::Unavailable => AccountUsageStatus::Unavailable,
-    }
-}
-
-fn usage_window(window: &UsageWindowRow) -> Option<AccountUsageWindow> {
-    Some(AccountUsageWindow {
-        pct: finite(window.pct)?,
-        resets_at: window.resets_at,
-    })
-}
-
-fn model_limit(limit: &ModelLimitRow) -> Option<AccountModelLimit> {
-    Some(AccountModelLimit {
-        model: limit.model.clone(),
-        pct: finite(limit.pct)?,
-        resets_at: limit.resets_at,
-    })
-}
-
-fn extra_usage(extra: &ExtraUsageRow) -> AccountExtraUsage {
-    AccountExtraUsage {
-        enabled: extra.enabled,
-        user_disabled: extra.user_disabled,
-        spend_limit_reached: extra.spend_limit_reached,
-        limit: extra.limit.and_then(finite),
-    }
-}
-
-/// `auto` on the wire, or `None` when its threshold or hysteresis is not
-/// finite.
-fn auto_state(auto: &AutoState) -> Option<AutoSwitchState> {
-    Some(AutoSwitchState {
-        enabled: auto.enabled,
-        threshold_pct: finite(auto.threshold_pct)?,
-        hysteresis_pct: finite(auto.hysteresis_pct)?,
-        cooldown_secs: auto.cooldown_secs,
-        paused_reason: auto.paused_reason.clone(),
-        warm_up_done: auto.warm_up_done,
-        last_decision: auto.last_decision.clone(),
-        fleet_verdict: None,
-    })
-}
-
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -176,7 +97,11 @@ mod tests {
     use super::*;
     use crate::server::connection::AuthKind;
     use crate::server::test_support::{dispatch_one_as, test_hub, test_peer};
-    use agent_api::{AccountsError, PollReport, PollScope, UsageRow};
+    use agent_api::{
+        AccountKindRow, AccountRow, AccountsError, AccountsService, AutoState, ExtraUsageRow,
+        ModelLimitRow, PollReport, PollScope, UsageRow, UsageStatus, UsageWindowRow,
+    };
+    use protocol::{AccountKind, AccountSnapshot, AccountUsageStatus, AutoSwitchState};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, PoisonError, mpsc};
     use std::time::Duration;
@@ -201,8 +126,8 @@ mod tests {
         }
     }
 
-    fn shared(answer: Result<AccountsSnapshot, AccountsError>) -> SharedAccounts {
-        Arc::new(FakeAccounts(answer))
+    fn shared(answer: Result<AccountsSnapshot, AccountsError>) -> Arc<Accounts> {
+        Accounts::new(Arc::new(FakeAccounts(answer)))
     }
 
     /// An account service whose poll says it has started, then blocks until
@@ -415,7 +340,7 @@ mod tests {
             started: Mutex::new(started_tx),
             release: Mutex::new(release_rx),
         });
-        hub.accounts = Some(Arc::clone(&service));
+        hub.accounts = Some(Accounts::new(Arc::clone(&service)));
         let poller = std::thread::spawn(move || service.poll(PollScope::OnDemand));
         started_rx
             .recv_timeout(Duration::from_secs(30))
@@ -430,6 +355,42 @@ mod tests {
         assert_eq!(numbers, [1]);
         let polled = poller.join().expect("the poll thread did not panic");
         assert!(polled.is_ok(), "{polled:?}");
+    }
+
+    #[tokio::test]
+    async fn list_accounts_answers_from_the_cache() {
+        let (mut hub, _scratch) = test_hub("list-accounts-cache");
+        let handle = shared(Ok(AccountsSnapshot {
+            accounts: vec![row(1, 10.0)],
+            auto: None,
+        }));
+        let polled = AccountsSnapshot {
+            accounts: vec![row(2, 60.0), row(1, 30.0)],
+            auto: Some(auto(95.0)),
+        };
+        assert!(handle.store_if_changed(wire(&polled)));
+        hub.accounts = Some(handle);
+
+        let (accounts, auto) = list(&hub).await;
+
+        let numbers: Vec<u32> = accounts.iter().map(|account| account.number).collect();
+        assert_eq!(numbers, [2, 1], "the cached poll, not the store's snapshot");
+        assert_eq!(accounts[0].five_hour.as_ref().map(|w| w.pct), Some(60.0));
+        assert!(auto.is_some(), "the cached auto-switch state");
+    }
+
+    #[tokio::test]
+    async fn list_accounts_wakes_the_driver() {
+        let (mut hub, _scratch) = test_hub("list-accounts-wake");
+        let handle = shared(Ok(AccountsSnapshot::default()));
+        hub.accounts = Some(Arc::clone(&handle));
+
+        let _ = list(&hub).await;
+
+        // A hang guard only: the wake's permit is already stored.
+        tokio::time::timeout(Duration::from_secs(60), handle.wake.notified())
+            .await
+            .expect("the list woke the driver");
     }
 
     #[test]

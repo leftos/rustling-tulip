@@ -794,6 +794,9 @@ fn spawn_state_forwarder(
                         active,
                     });
                 }
+                Ok(StateEvent::Accounts { accounts, auto }) => {
+                    let _ = out_tx.send(DaemonMessage::AccountsUpdated { accounts, auto });
+                }
                 Ok(StateEvent::DetailedLogging { enabled }) => {
                     let _ = out_tx.send(DaemonMessage::DetailedLogging { enabled });
                 }
@@ -2048,6 +2051,38 @@ mod tests {
             "the forwarder keeps forwarding after the resend"
         );
         forwarder.abort();
+    }
+
+    #[tokio::test]
+    async fn accounts_event_reaches_a_connection_as_accounts_updated() {
+        let (hub, _scratch) = test_hub("accounts-event");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            false,
+        );
+        let account = crate::accounts::snapshot::account_snapshot(
+            &crate::accounts::snapshot::test_support::row(3, 25.0),
+        );
+
+        let _ = hub.state_events.send(StateEvent::Accounts {
+            accounts: vec![account.clone()],
+            auto: None,
+        });
+
+        let message = next_message(&mut rx).await;
+        forwarder.abort();
+        assert!(
+            matches!(
+                &message,
+                DaemonMessage::AccountsUpdated { accounts, auto: None }
+                    if *accounts == [account]
+            ),
+            "{message:?}"
+        );
     }
 
     #[tokio::test]

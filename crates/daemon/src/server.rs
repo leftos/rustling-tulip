@@ -198,9 +198,9 @@ pub struct Hub {
     /// consulted only when [`Hub::integrity`] is elevated.
     pub peer_integrity: Arc<dyn PeerIntegrity>,
     /// The plugin's account service over this host's account store, called
-    /// off the async threads; `None` when no plugin keeps accounts or the
-    /// daemon runs elevated.
-    pub accounts: Option<accounts::SharedAccounts>,
+    /// off the async threads, with the snapshot its driver last polled;
+    /// `None` when no plugin keeps accounts or the daemon runs elevated.
+    pub accounts: Option<Arc<crate::accounts::Accounts>>,
 }
 
 impl Hub {
@@ -267,6 +267,13 @@ pub enum StateEvent {
     KeepAwakeStatus {
         mode: protocol::KeepAwakeMode,
         active: bool,
+    },
+    /// Broadcast by the accounts driver when a poll changed the accounts or
+    /// the auto-switch state. Mirrors
+    /// [`protocol::DaemonMessage::AccountsUpdated`].
+    Accounts {
+        accounts: Vec<protocol::AccountSnapshot>,
+        auto: Option<protocol::AutoSwitchState>,
     },
     /// Broadcast after every [`ClientMessage::SetDetailedLogging`] so every
     /// connected client's Settings UI shows the switch as it now stands.
@@ -552,6 +559,7 @@ pub async fn run(
         .await
         .context("axum serve failed");
     info!(?serve_result, "server::run: axum::serve returned");
+    stop_accounts(&hub).await;
     // Best-effort cleanup: remove the discovery file so a subsequent app
     // launch doesn't try to reconnect to a defunct port.
     let _ = std::fs::remove_file(&dirs.handshake_file);
@@ -1111,6 +1119,16 @@ fn chat_hub(
     (client_count, client_count_rx, live_lines, outlets)
 }
 
+/// Let the accounts driver drain its credential spends and end before the
+/// process exits. Whichever path flipped the shutdown watch, the driver is
+/// ending; a serve that failed flipped nothing, so the watch is flipped here.
+async fn stop_accounts(hub: &Hub) {
+    if let Some(accounts) = &hub.accounts {
+        hub.shutdown_tx.send_replace(true);
+        accounts.join_driver(crate::accounts::DRIVER_JOIN).await;
+    }
+}
+
 /// Start the tasks that watch the hub for the daemon's lifetime.
 fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usize>) {
     start_history_broadcaster(hub);
@@ -1129,6 +1147,17 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
         Arc::clone(&hub.summarizer),
         Arc::clone(&hub.turns),
     );
+    // The accounts poller; it parks while no client is connected and ends,
+    // after draining the service, when the shutdown watch flips.
+    if let Some(accounts) = &hub.accounts {
+        accounts.start_driver(
+            hub.state_events.clone(),
+            crate::accounts::driver::Watches {
+                clients: client_count_rx.clone(),
+                shutdown: hub.shutdown_tx.subscribe(),
+            },
+        );
+    }
     // Idle self-exit: once the last client disconnects and no session has a
     // live child for a full grace period, flip the shutdown watch so a
     // resident daemon doesn't pin a stale executable across app updates.

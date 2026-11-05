@@ -121,6 +121,14 @@
     },
     {
       "paths": [
+        "crates/daemon/src/accounts/mod.rs",
+        "crates/daemon/src/accounts/driver.rs",
+        "crates/daemon/src/accounts/snapshot.rs"
+      ],
+      "filter": "package(daemon) & (test(/^(accounts|server::accounts)::/) | test(/accounts_event_reaches_a_connection/))"
+    },
+    {
+      "paths": [
         "crates/daemon/**"
       ],
       "filter": "rdeps(daemon)"
