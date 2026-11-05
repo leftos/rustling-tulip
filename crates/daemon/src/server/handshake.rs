@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_default_shell() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
         assert!(
             matches!(
                 &welcome,

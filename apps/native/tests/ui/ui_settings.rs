@@ -5403,7 +5403,7 @@ fn shell_connection() -> Connection {
     let mut conn = Connection::for_target(rustling_tulip_native::target::Target::Local);
     conn.on_connecting();
     conn.on_socket_open(4242);
-    conn.on_welcome(support::PROTOCOL, features);
+    conn.on_welcome(support::PROTOCOL, features, None);
     conn
 }
 

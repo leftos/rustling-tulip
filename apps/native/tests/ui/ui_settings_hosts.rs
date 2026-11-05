@@ -726,7 +726,7 @@ fn default_shell_row_follows_selected_host(cx: &mut TestAppContext) {
     let mut conn = Connection::for_target(Target::Local);
     conn.on_connecting();
     conn.on_socket_open(4242);
-    conn.on_welcome(PROTOCOL, features);
+    conn.on_welcome(PROTOCOL, features, None);
     h.event(NetEvent::State(conn));
     h.send(DaemonMessage::DefaultShell {
         id: "pwsh".to_owned(),
