@@ -135,7 +135,7 @@ Note: the Tauri app is no longer on `main`; it lives on the `tauri` branch (tag 
 ## 4. Build, bundle, packaging
 
 - The shipped client is `apps/native` (GPUI); its installer is Phase 6 (Wave 3), Windows-first.
-- [ ] Add a macOS bundle for `apps/native` (an `.app` carrying `rustling-tulipd` and `rt-tracer`, then a `.dmg`) beside the Windows installer that Phase 6 builds.
+- [x] Add a macOS bundle for `apps/native` (an `.app` carrying `rustling-tulipd` and `rt-tracer`, then a `.dmg`) beside the Windows installer that Phase 6 builds: `tools/installer/pack-macos.ps1`, run on a Mac, makes an ad-hoc signed arm64 bundle, its dmg and the update zip (`tools/installer/README.md` "macOS app and disk image"). Unsigned for distribution: Developer ID signing and notarization stay open below.
 - [ ] Code-signing + notarization (Developer ID cert, `entitlements.plist`,
       `notarytool`). Build-machine/CI concern, not source. Needed for distribution
       but not for local dev runs.

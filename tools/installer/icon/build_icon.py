@@ -6,11 +6,14 @@
 # ]
 # ///
 
-"""Builds tools/installer/icon.ico from the icon's SVG sources.
+"""Builds tools/installer/icon.ico and tools/installer/icon/icon-1024.png from the icon's SVG sources.
 
 icon.svg is rendered at 256, 64, 48, 32 and 24 px; icon-16.svg is a glyph drawn for 16 px and is used for that size
 alone, since the large art shrunk to 16 px loses its prompt. The .ico serves both the installer and the native exe,
 whose build script embeds it as icon resource 1.
+
+icon.svg is also rendered at 1024 px to icon-1024.png, the source tools/installer/pack-macos.ps1 builds the macOS
+app's icon.icns from.
 
 Run from the repo root: uv run --script tools/installer/icon/build_icon.py
 """
@@ -24,6 +27,7 @@ from PIL import Image
 HERE = Path(__file__).resolve().parent
 LARGE_SIZES = (256, 64, 48, 32, 24)
 SMALL_SIZE = 16
+MAC_SIZE = 1024
 
 
 def render(svg: Path, size: int) -> Image.Image:
@@ -47,6 +51,10 @@ def main() -> None:
     sizes = [(frame.width, frame.height) for frame in frames]
     frames[0].save(out, format="ICO", sizes=sizes, append_images=frames[1:])
     print(f"wrote {out} with sizes {[s for s, _ in sizes]}")
+
+    png = HERE / "icon-1024.png"
+    render(HERE / "icon.svg", MAC_SIZE).save(png, format="PNG")
+    print(f"wrote {png} at {MAC_SIZE} px")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist of rustling-tulip.app. tools/installer/pack-macos.ps1 replaces the
+  SHORT_VERSION and BUNDLE_VERSION placeholders with the numeric part of the
+  workspace version (0.9.0 for 0.9.0-alpha), since both keys must be numeric,
+  and writes the result to Contents/Info.plist.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>rustling-tulip-native</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.leftos.rustling-tulip</string>
+  <key>CFBundleName</key>
+  <string>rustling-tulip</string>
+  <key>CFBundleDisplayName</key>
+  <string>rustling-tulip</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleIconFile</key>
+  <string>icon</string>
+  <key>CFBundleShortVersionString</key>
+  <string>__SHORT_VERSION__</string>
+  <key>CFBundleVersion</key>
+  <string>__BUNDLE_VERSION__</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>

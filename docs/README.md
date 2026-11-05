@@ -45,7 +45,7 @@ tools/
   e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
   folder-bench/ - the dev-only harness that generates folder fixtures and times folder-transfer candidates to the builder; never shipped
-  installer/    - the NSIS installer script
+  installer/    - the NSIS installer script, and `pack-macos.ps1`, which builds the macOS app bundle and disk image on a Mac
   rt-driver-mcp/ - the `rt-driver` MCP server that launches and drives an isolated native client; never shipped
 docs/
   README.md     - this page: the docs start page and the glossary
@@ -93,6 +93,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Agent skill pack**: the `rt-*` skills and the `rt-worker` agent under `agent-pack/`, installed into `~/.claude` so an agent can fan work out, review it and merge it.
 - **Answer recipe**: the key sequence an agent plugin gives for one answer to one terminal dialog (a digit; Tab, text, Enter; toggles then submit), which the daemon types for a chat answer and checks against the screen after each group of keys; see `docs/architecture.md` "Chat mirror".
 - **Answer rule**: the test that an `Idle` session needs you because its latest summary asks the user something (`NeedsAnswer`) and was made at or after its last status change (`needs_you::is_answer`); the Dashboard's Needs you group uses it.
+- **App bundle**: the macOS `rustling-tulip.app` folder `tools/installer/pack-macos.ps1` builds (bundle id `dev.leftos.rustling-tulip`, arm64, ad-hoc signed): the client, daemon and tracer side by side in `Contents/MacOS/`, then packed into a disk image and the update zip; see `tools/installer/README.md` ("macOS app and disk image").
 - **App id (AUMID)**: the Windows application user model id a toast is raised under, which names its sender; the installed native client uses `leftos.RustlingTulip` (`toast_activation::APP_ID`), anything else the PowerShell id.
 - **apply-update**: `rustling-tulipd apply-update --from <staging> --to <dir>`, the subcommand the installer runs from the staged daemon to swap the installed files for the staged ones (stop the daemon, rename each file to `.old`, roll back on failure, record `last-result.json`); `crates/daemon/src/cli_apply_update.rs`, `docs/auto-update.md`.
 - **Ask block**: the answer part of a Dashboard row or an app toast (`dashboard_rows::ask_block`): the permission command, and the Allow and Deny or option buttons that answer the prompt a session waits on; see `docs/native-client.md` "Notifications".

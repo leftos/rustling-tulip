@@ -74,6 +74,7 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md, dashboard, dashboard-compact, connections, connections-ssh, menu, update, chat, summary, themes, themes-edit, multi-host, spawn-hosts, settings-hosts, settings-sounds, update-notes, chat-compact) in .tmp\shots\
 .\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe and its .sha256 beside it, which the app's updater checks a download against, signed with Azure Artifact Signing; `-Unsigned` for a test build (needs NSIS 3; tools/installer/README.md)
 .\rt.ps1 help             # usage summary
+pwsh -NoProfile -File tools/installer/pack-macos.ps1 [-OutDir <dir>] [-SkipBuild]   # run on a Mac (from SSH, in a login shell: `zsh -lc`, to find pwsh): release build, then target/installer/rustling-tulip.app (arm64, ad-hoc signed) and the macos-arm64 .dmg, .zip and .zip.sha256; no rt.ps1 verb yet (tools/installer/README.md)
 pwsh -NoProfile -File tools/rt-driver-mcp/install.ps1   # build and install the rt-driver MCP server that .mcp.json starts (release build through the gate)
 pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1   # the driver MCP's live spec; run it as one gate job with --slot heavy (docs/testing.md)
 ```

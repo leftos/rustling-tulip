@@ -104,6 +104,36 @@ Never run `user-path.ps1 -Add` or `-Remove` by hand on a machine you care about:
 
 It is built from the SVGs in `icon/`: `icon.svg` for 24 px and up, and `icon-16.svg`, a glyph drawn for 16 px. After changing either, rebuild it from the repo root with `uv run --script tools/installer/icon/build_icon.py` and commit the `.ico`. The design and the concepts it was picked from are in `docs/plans/canvases/app-icon/`.
 
+## macOS app and disk image
+
+`pack-macos.ps1` builds the macOS app bundle `rustling-tulip.app` (Apple Silicon, arm64 only), a disk image holding it and the zip the app's updater downloads. It runs on a Mac with PowerShell 7 (`pwsh`), Rust and the Xcode command-line tools; it refuses to run anywhere else. From another machine over SSH, copy or clone the tree to the Mac first and run it there:
+
+```sh
+pwsh -NoProfile -File tools/installer/pack-macos.ps1 [-OutDir <dir>] [-SkipBuild]
+```
+
+- `-OutDir <dir>`: where the staging folder and the assets go; default `target/installer` under the repo root.
+- `-SkipBuild`: use the binaries already in `target/release` instead of running `cargo build --release -p rustling-tulip-native -p daemon -p tracer`.
+
+The script stops at the first native command that fails. It assembles the bundle in a fresh `macos-staging/dmg-root/` under `-OutDir`:
+
+| In the bundle | What |
+|---|---|
+| `Contents/MacOS/rustling-tulip-native` | the client, the bundle's executable |
+| `Contents/MacOS/rustling-tulipd`, `Contents/MacOS/rt-tracer` | the daemon and the tracer, beside the client, where the client looks for them |
+| `Contents/Resources/icon.icns` | the app icon, built with `sips` and `iconutil` from `icon/icon-1024.png` |
+| `Contents/Info.plist` | from `macos/Info.plist.template`: bundle id `dev.leftos.rustling-tulip`, minimum macOS 13.0, both version keys set to the numeric part of the workspace version (`0.9.0` for `0.9.0-alpha`) |
+
+It ad-hoc signs (`codesign --force --sign -`) the three binaries and then the bundle, and writes into `-OutDir`, printing the three paths last:
+
+- `rustling-tulip-<version>-macos-arm64.dmg`: volume `rustling-tulip` holding the app and an `Applications` link to drag it onto, for a first install;
+- `rustling-tulip-<version>-macos-arm64.zip`: the app zipped with `ditto -c -k --keepParent`, the update payload;
+- `rustling-tulip-<version>-macos-arm64.zip.sha256`: `<hex>  <zip file name>`, which the updater checks the zip against.
+
+`<version>` is `[workspace.package] version` in `Cargo.toml`, pre-release suffix included. Developer ID signing and notarization are added by a later step; an ad-hoc signed app opened from a downloaded disk image is stopped by Gatekeeper.
+
+`icon/icon-1024.png` is written by `icon/build_icon.py` beside `icon.ico`; rebuild and commit both after changing `icon.svg`.
+
 ## Hand test
 
 1. Run the setup exe with the default options. It installs under `%LOCALAPPDATA%\Programs\rustling-tulip`, adds the Start menu entry and the autostart value, appends the install directory to the user PATH once (a second install adds no duplicate), and offers to run the client; it connects to a daemon. A new terminal finds `rustling-tulipd` by name.
