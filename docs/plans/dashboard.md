@@ -277,9 +277,9 @@ Each read runs with `--no-optional-locks` and `-c core.quotepath=false`, with `-
 
 ### Gates
 
-**Orchestrator decision (not an owner ruling):** gate rows come from the daemon's one gate reader, the one [gate-dashboard.md](./gate-dashboard.md) designs for RT-55 and RT-64 re-cuts around the `gate-state` crate (`github.com/leftos/gate`, which ops-tower pins by rev in its `Cargo.toml:28`). The Dashboard adds only the placement.
+**Orchestrator decision (not an owner ruling):** gate rows come from the daemon's one gate reader, the one [gate-dashboard.md](./gate-dashboard.md) designs for RT-55 and RT-64 re-cuts around the `gate-state` crate (`github.com/leftos/gate`, which ops-tower pins by rev in its `Cargo.toml`). The Dashboard adds only the placement.
 
-A claim or queue ticket is placed under the nearest listed session whose process is its ancestor (`sysinfo`, already a daemon dependency, `crates/daemon/Cargo.toml:67`), and under the subagent whose open `Bash` call's command matches the claim's (ops-tower's `command_matches`).
+A claim or queue ticket is placed under the nearest listed session whose process is its ancestor (`sysinfo`, already a daemon dependency in `crates/daemon/Cargo.toml`), and under the subagent whose open `Bash` call's command matches the claim's (ops-tower's `command_matches`).
 
 A machine without the gate shows no gate rows, no gate ticks and no gate rule in the now line.
 
