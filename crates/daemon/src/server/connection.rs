@@ -800,6 +800,20 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::AccountEvent { event }) => {
                     let _ = out_tx.send(DaemonMessage::AccountEvent { event });
                 }
+                Ok(StateEvent::AccountLogin {
+                    state,
+                    session_id,
+                    message,
+                }) => {
+                    // A request id is unique only per client, so a broadcast
+                    // copy never carries one.
+                    let _ = out_tx.send(DaemonMessage::AccountLogin {
+                        state,
+                        session_id,
+                        message,
+                        request_id: None,
+                    });
+                }
                 Ok(StateEvent::DetailedLogging { enabled }) => {
                     let _ = out_tx.send(DaemonMessage::DetailedLogging { enabled });
                 }
@@ -2194,6 +2208,40 @@ mod tests {
         forwarder.abort();
         assert!(
             matches!(&message, DaemonMessage::AccountEvent { event: sent } if *sent == event),
+            "{message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn account_login_broadcast_carries_no_request_id() {
+        let (hub, _scratch) = test_hub("account-login-broadcast");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            false,
+        );
+
+        let _ = hub.state_events.send(StateEvent::AccountLogin {
+            state: protocol::AccountLoginState::Failed,
+            session_id: Some("s1".to_owned()),
+            message: Some("the login timed out".to_owned()),
+        });
+
+        let message = next_message(&mut rx).await;
+        forwarder.abort();
+        assert!(
+            matches!(
+                &message,
+                DaemonMessage::AccountLogin {
+                    state: protocol::AccountLoginState::Failed,
+                    session_id: Some(session),
+                    message: Some(said),
+                    request_id: None,
+                } if session == "s1" && said == "the login timed out"
+            ),
             "{message:?}"
         );
     }

@@ -25,10 +25,15 @@
 //! `AccountEvent` `switched` with trigger `manual`, after the refresh and
 //! before the answer. A failure answers `Error` with an `account_*`
 //! code. A host with no service answers every write `account_unsupported`.
+//!
+//! `StartAccountLogin` and `CancelAccountLogin` (local-only) go to the
+//! login slot ([`crate::accounts::login`]), which answers them at once; a
+//! host with no service answers them `account_unsupported` too.
 use super::Hub;
 use super::StateEvent;
 use super::connection::ConnCtx;
 use crate::accounts::engine::account_event;
+use crate::accounts::login;
 use crate::accounts::snapshot::{Wire, wire};
 use crate::accounts::{Accounts, SharedAccounts};
 use agent_api::accounts::AccountEventRow;
@@ -66,13 +71,34 @@ pub(crate) fn start_service() -> Option<Arc<Accounts>> {
             return None;
         }
     };
+    let mut agent = None;
     let service = service_for(dir, |cfg| {
-        agent_registry::all()
-            .iter()
-            .find_map(|plugin| plugin.accounts(cfg))
+        agent_registry::all().iter().find_map(|plugin| {
+            let service = plugin.accounts(cfg)?;
+            agent = Some(plugin.descriptor().id.clone());
+            Some(service)
+        })
     });
     info!(enabled = service.is_some(), "account service");
-    service.map(Accounts::new)
+    let service = service?;
+    let login_root = match crate::paths::resolve_account_login_dir() {
+        Ok(root) => Some(root),
+        Err(err) => {
+            warn!(%err, "could not resolve the account login folder; account login is off");
+            None
+        }
+    };
+    Some(match (login_root, agent) {
+        (Some(root), Some(agent)) => Accounts::with_login(
+            service,
+            login::LoginSetup {
+                root,
+                agent,
+                runner: Arc::new(login::NoRunner),
+            },
+        ),
+        _ => Accounts::new(service),
+    })
 }
 
 /// The service `ask` builds for the store at `dir`; `ask` is not called
@@ -146,6 +172,33 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
         }
         m @ (ClientMessage::SetAutoSwitch { .. } | ClientMessage::SetAutoSwitchRules { .. }) => {
             auto_switch(hub, ctx, m);
+        }
+        ClientMessage::StartAccountLogin { request_id } => {
+            let reply = login::Reply::new(ctx.out_tx.clone(), request_id);
+            match &hub.accounts {
+                Some(handle) => login::start(
+                    handle,
+                    hub.state_events.clone(),
+                    hub.shutdown_tx.subscribe(),
+                    reply,
+                ),
+                None => reply.send(error(
+                    error_codes::ACCOUNT_UNSUPPORTED,
+                    NO_ACCOUNTS.to_owned(),
+                    reply.id(),
+                )),
+            }
+        }
+        ClientMessage::CancelAccountLogin { request_id } => {
+            let reply = login::Reply::new(ctx.out_tx.clone(), request_id);
+            match &hub.accounts {
+                Some(handle) => login::cancel(handle, reply),
+                None => reply.send(error(
+                    error_codes::ACCOUNT_UNSUPPORTED,
+                    NO_ACCOUNTS.to_owned(),
+                    reply.id(),
+                )),
+            }
         }
         other => warn!(?other, "accounts::handle: routed a message it does not own"),
     }
@@ -225,7 +278,7 @@ fn auto_switch(hub: &Hub, ctx: &ConnCtx<'_>, msg: ClientMessage) {
 }
 
 /// The wire code of a write failure of `kind`.
-fn code_of(kind: AccountsFailureKind) -> &'static str {
+pub(crate) fn code_of(kind: AccountsFailureKind) -> &'static str {
     match kind {
         AccountsFailureKind::Busy => error_codes::ACCOUNT_BUSY,
         AccountsFailureKind::Draining => error_codes::ACCOUNT_DRAINING,
@@ -237,7 +290,7 @@ fn code_of(kind: AccountsFailureKind) -> &'static str {
 }
 
 /// An `Error` reply with `code`.
-fn error(code: &str, message: String, request_id: Option<String>) -> DaemonMessage {
+pub(crate) fn error(code: &str, message: String, request_id: Option<String>) -> DaemonMessage {
     DaemonMessage::Error {
         message,
         request_id,
@@ -361,7 +414,7 @@ async fn write_reply(
 /// Ask the driver for a refresh and wait up to [`REFRESH_WAIT`] for it;
 /// `false` when the lane is closed (no driver, or it ended before serving
 /// the refresh), so the cache cannot be trusted to hold the write.
-async fn refreshed(handle: &Accounts, what: &'static str) -> bool {
+pub(crate) async fn refreshed(handle: &Accounts, what: &'static str) -> bool {
     let Some(ack) = handle.request_refresh() else {
         return false;
     };
@@ -380,7 +433,7 @@ async fn refreshed(handle: &Accounts, what: &'static str) -> bool {
 }
 
 /// `service`'s snapshot, read on a blocking thread; empty when it fails.
-async fn read_snapshot(service: SharedAccounts) -> AccountsSnapshot {
+pub(crate) async fn read_snapshot(service: SharedAccounts) -> AccountsSnapshot {
     let read = tokio::task::spawn_blocking(move || service.snapshot()).await;
     match read {
         Ok(Ok(snapshot)) => snapshot,
@@ -449,6 +502,15 @@ pub(crate) mod fake {
         dispatch(hub, msg, &ctx)
             .await
             .expect("a failed request is reported on the wire, not returned from dispatch");
+    }
+
+    /// [`dispatch_with`] on a local connection.
+    pub(crate) async fn dispatch_local(
+        hub: &Hub,
+        msg: ClientMessage,
+        out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    ) {
+        dispatch_with(hub, msg, &AuthKind::Local, out_tx).await;
     }
 
     /// The next message on `rx`, failing as hung after [`HANG`].

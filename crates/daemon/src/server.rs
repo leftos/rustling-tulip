@@ -8,6 +8,18 @@ pub(crate) use self::remote::RemoteSlot;
 
 mod accounts;
 mod agent_hooks;
+/// What the account login's run task (`crate::accounts::login`) shares with
+/// the accounts writes: the failure codes, the error reply, the refresh wait
+/// and the direct read of the store.
+pub(crate) use accounts::{
+    code_of as account_code_of, error as account_error, read_snapshot as read_account_snapshot,
+    refreshed as accounts_refreshed,
+};
+/// The accounts handler's test fakes, for the login's tests.
+#[cfg(test)]
+pub(crate) mod accounts_fake {
+    pub(crate) use super::accounts::fake::{ADDED, HANG, account, dispatch_local, next_reply};
+}
 mod chat;
 mod connection;
 mod dashboard;
@@ -279,6 +291,15 @@ pub enum StateEvent {
     /// manual switch. Mirrors [`protocol::DaemonMessage::AccountEvent`].
     AccountEvent {
         event: protocol::AccountEventKind,
+    },
+    /// Broadcast by a daemon-driven account login's run task: `Started`,
+    /// then its one terminal state. Mirrors
+    /// [`protocol::DaemonMessage::AccountLogin`], whose `request_id` a
+    /// broadcast never carries.
+    AccountLogin {
+        state: protocol::AccountLoginState,
+        session_id: Option<String>,
+        message: Option<String>,
     },
     /// Broadcast after every [`ClientMessage::SetDetailedLogging`] so every
     /// connected client's Settings UI shows the switch as it now stands.
@@ -809,7 +830,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::SetAccountAlias { .. }
         | ClientMessage::SetAccountOrder { .. }
         | ClientMessage::SetAutoSwitch { .. }
-        | ClientMessage::SetAutoSwitchRules { .. }) => accounts::handle(hub, m, ctx).await,
+        | ClientMessage::SetAutoSwitchRules { .. }
+        | ClientMessage::StartAccountLogin { .. }
+        | ClientMessage::CancelAccountLogin { .. }) => accounts::handle(hub, m, ctx).await,
         m @ (ClientMessage::ListRepos
         | ClientMessage::AddRepo { .. }
         | ClientMessage::RemoveRepo { .. }

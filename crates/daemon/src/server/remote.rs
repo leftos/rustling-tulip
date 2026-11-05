@@ -468,7 +468,9 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
         ClientMessage::AddCurrentLogin { .. }
         | ClientMessage::RemoveAccount { .. }
         | ClientMessage::SetAccountAlias { .. }
-        | ClientMessage::SetAccountOrder { .. } => Some("account administration is local-only"),
+        | ClientMessage::SetAccountOrder { .. }
+        | ClientMessage::StartAccountLogin { .. }
+        | ClientMessage::CancelAccountLogin { .. } => Some("account administration is local-only"),
         _ => None,
     }
 }
@@ -551,6 +553,37 @@ mod tests {
             );
         }
         assert!(service.calls().is_empty(), "{:?}", service.calls());
+    }
+
+    #[tokio::test]
+    async fn account_login_is_local_only() {
+        let (hub, _scratch, service) = accounts_hub("tailnet-account-login");
+        let login = [
+            ClientMessage::StartAccountLogin {
+                request_id: Some("l1".to_owned()),
+            },
+            ClientMessage::CancelAccountLogin {
+                request_id: Some("l2".to_owned()),
+            },
+        ];
+        for msg in login {
+            let reply = dispatch_one_as(&hub, msg, &AuthKind::Tailnet(test_peer())).await;
+            assert!(
+                matches!(&reply, DaemonMessage::Error { message, code: Some(code), request_id: None }
+                    if message == "account administration is local-only"
+                        && code == protocol::error_codes::LOCAL_ONLY),
+                "{reply:?}"
+            );
+        }
+        assert!(service.calls().is_empty(), "{:?}", service.calls());
+        let handle = hub.accounts.as_ref().expect("the hub has accounts");
+        assert!(
+            matches!(
+                *crate::sync::lock(&handle.login),
+                crate::accounts::login::LoginSlot::Idle
+            ),
+            "a refused start claimed nothing"
+        );
     }
 
     #[tokio::test]

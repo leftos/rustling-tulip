@@ -169,8 +169,11 @@ pub struct LoginCommand {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     /// The variables the login child must not inherit from the daemon's
-    /// environment, removed before `env` is applied: ones that would point
-    /// the login away from the scratch dir, at the user's live login.
+    /// environment: ones that would point the login away from the scratch
+    /// dir, at the user's live login. The spawn applies `env` first and
+    /// removes these after it, so `env` and `env_remove` never share a name:
+    /// a shared name would be removed, and the daemon refuses such a command
+    /// before it spawns anything.
     pub env_remove: Vec<String>,
 }
 
@@ -257,6 +260,21 @@ pub trait AccountsService: Send + Sync {
     fn capture_login_from(&self, scratch: &Path) -> Result<LoginCapture, AccountsFailure> {
         let _ = scratch;
         Err(AccountsFailure::unsupported())
+    }
+
+    /// Cleans up what a login run in `scratch` left outside it, for a run
+    /// that ended without [`AccountsService::capture_login_from`] (cancelled,
+    /// failed, timed out or stopped), such as a scratch credential item in
+    /// the OS's credential store. Called before the daemon removes `scratch`
+    /// itself; leaves `scratch` to the caller. Nothing to clean up is `Ok`.
+    /// Blocks.
+    ///
+    /// # Errors
+    ///
+    /// What the run left could not be removed.
+    fn discard_login(&self, scratch: &Path) -> Result<(), AccountsFailure> {
+        let _ = scratch;
+        Ok(())
     }
 
     /// Removes account `number` from the store. Blocks.

@@ -3277,6 +3277,26 @@ pub enum AccountEventKind {
     Unknown,
 }
 
+/// Where a daemon-driven account login stands, as
+/// [`DaemonMessage::AccountLogin`] carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountLoginState {
+    /// The login's terminal session is running; the user finishes the
+    /// login in it.
+    Started,
+    /// The login finished and its account is in the store.
+    Succeeded,
+    /// The login ended without an account; `message` says why.
+    Failed,
+    /// The login was cancelled, stopped or ended by the daemon's shutdown;
+    /// `message` says which when it was not the user's cancel.
+    Cancelled,
+    /// Forward-compat fallback: a state the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
@@ -4618,6 +4638,28 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Start a daemon-driven login of a new account: the daemon runs the
+    /// agent's own login in a terminal session of its own, and adds the
+    /// account it ends with to the store. At most one runs at a time.
+    /// Answered at once, to the requester only: `AccountLogin` `started`
+    /// echoing `request_id`, or `Error` with an `account_*` code
+    /// (`account_busy` while a login runs, `account_draining` while the
+    /// daemon shuts down). Every connection then hears the run as
+    /// [`DaemonMessage::AccountLogin`]. Local-only: a tailnet connection is
+    /// answered `Error { code: local_only }`.
+    StartAccountLogin {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Cancel the running account login. Answered, to the requester only,
+    /// by the run's terminal `AccountLogin` echoing `request_id`, or by
+    /// `Error`: `account_refused` when no login runs, `account_busy` while
+    /// it is starting or finishing. Local-only, as
+    /// [`ClientMessage::StartAccountLogin`].
+    CancelAccountLogin {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 }
 
 /// One history entry to recover, and how.
@@ -4970,6 +5012,22 @@ pub enum DaemonMessage {
     /// [`FEATURE_ACCOUNT_EVENTS`].
     AccountEvent {
         event: AccountEventKind,
+    },
+    /// A daemon-driven account login's progress
+    /// ([`ClientMessage::StartAccountLogin`]): `started` once its terminal
+    /// session (`session_id`) runs, then exactly one of `succeeded`,
+    /// `failed` or `cancelled`, with `message` saying why when there is
+    /// more to say. Broadcast to every client with `request_id` `None`; the
+    /// requester of a start, or of a cancel, also gets its answer directly,
+    /// echoing its `request_id`.
+    AccountLogin {
+        state: AccountLoginState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     AuthFailed {
         reason: String,
@@ -7550,6 +7608,125 @@ mod tests {
                 &later,
                 DaemonMessage::AccountEvent {
                     event: AccountEventKind::Unknown
+                }
+            ),
+            "{later:?}"
+        );
+    }
+
+    #[test]
+    fn account_login_requests_round_trip() {
+        let cases = [
+            (
+                ClientMessage::StartAccountLogin {
+                    request_id: Some("l1".to_owned()),
+                },
+                r#"{"type":"start_account_login","request_id":"l1"}"#,
+            ),
+            (
+                ClientMessage::StartAccountLogin { request_id: None },
+                r#"{"type":"start_account_login"}"#,
+            ),
+            (
+                ClientMessage::CancelAccountLogin {
+                    request_id: Some("l2".to_owned()),
+                },
+                r#"{"type":"cancel_account_login","request_id":"l2"}"#,
+            ),
+            (
+                ClientMessage::CancelAccountLogin { request_id: None },
+                r#"{"type":"cancel_account_login"}"#,
+            ),
+        ];
+        for (msg, json) in cases {
+            assert_eq!(serde_json::to_string(&msg).expect("serializes"), json);
+            let back: ClientMessage = serde_json::from_str(json).expect("decodes");
+            assert_eq!(
+                serde_json::to_string(&back).expect("serializes again"),
+                json,
+                "{back:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn account_login_round_trips_each_state() {
+        let cases = [
+            (
+                DaemonMessage::AccountLogin {
+                    state: AccountLoginState::Started,
+                    session_id: Some("s1".to_owned()),
+                    message: None,
+                    request_id: Some("l1".to_owned()),
+                },
+                r#"{"type":"account_login","state":"started","session_id":"s1","request_id":"l1"}"#,
+            ),
+            (
+                DaemonMessage::AccountLogin {
+                    state: AccountLoginState::Succeeded,
+                    session_id: Some("s1".to_owned()),
+                    message: None,
+                    request_id: None,
+                },
+                r#"{"type":"account_login","state":"succeeded","session_id":"s1"}"#,
+            ),
+            (
+                DaemonMessage::AccountLogin {
+                    state: AccountLoginState::Failed,
+                    session_id: Some("s1".to_owned()),
+                    message: Some("the login exited with code 3".to_owned()),
+                    request_id: None,
+                },
+                r#"{"type":"account_login","state":"failed","session_id":"s1","message":"the login exited with code 3"}"#,
+            ),
+            (
+                DaemonMessage::AccountLogin {
+                    state: AccountLoginState::Cancelled,
+                    session_id: None,
+                    message: Some("the daemon is shutting down".to_owned()),
+                    request_id: Some("l2".to_owned()),
+                },
+                r#"{"type":"account_login","state":"cancelled","message":"the daemon is shutting down","request_id":"l2"}"#,
+            ),
+        ];
+        for (msg, json) in cases {
+            assert_eq!(serde_json::to_string(&msg).expect("serializes"), json);
+            let back: DaemonMessage = serde_json::from_str(json).expect("decodes");
+            assert_eq!(
+                serde_json::to_string(&back).expect("serializes again"),
+                json,
+                "{back:?}"
+            );
+        }
+        let bare: DaemonMessage =
+            serde_json::from_str(r#"{"type":"account_login","state":"started"}"#)
+                .expect("a login message with only its state decodes");
+        assert!(
+            matches!(
+                &bare,
+                DaemonMessage::AccountLogin {
+                    state: AccountLoginState::Started,
+                    session_id: None,
+                    message: None,
+                    request_id: None,
+                }
+            ),
+            "{bare:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_account_login_state_reads_unknown() {
+        let later: DaemonMessage = serde_json::from_str(
+            r#"{"type":"account_login","state":"later_state","session_id":"s1"}"#,
+        )
+        .expect("a state this build does not know still decodes");
+        assert!(
+            matches!(
+                &later,
+                DaemonMessage::AccountLogin {
+                    state: AccountLoginState::Unknown,
+                    ..
                 }
             ),
             "{later:?}"

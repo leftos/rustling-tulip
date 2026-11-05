@@ -12,8 +12,12 @@
 //! Beside the driver runs the engine task ([`engine`]), which ticks the
 //! service's auto-switch engine whether or not a client is connected; a
 //! settings write wakes it ([`Accounts::engine_wake`]).
+//!
+//! It also holds the daemon-driven login's slot ([`login`]): at most one
+//! login runs at a time, through the runner its [`login::LoginSetup`] names.
 pub(crate) mod driver;
 pub(crate) mod engine;
+pub(crate) mod login;
 pub(crate) mod snapshot;
 
 use crate::server::StateEvent;
@@ -53,11 +57,31 @@ pub(crate) struct Accounts {
     refresh_tx: mpsc::UnboundedSender<RefreshAck>,
     /// The refresh lane's receiving end until the driver takes it.
     refresh_rx: Mutex<Option<mpsc::UnboundedReceiver<RefreshAck>>>,
+    /// Where the daemon-driven login stands; locked with
+    /// [`crate::sync::lock`], never across an `.await`.
+    pub(crate) login: Mutex<login::LoginSlot>,
+    /// The login's run task, stored by the start that claimed the slot while
+    /// it still held the slot's lock; taken by [`Accounts::join_driver`].
+    pub(crate) login_task: Mutex<Option<JoinHandle<()>>>,
+    /// The login root, the plugin's agent and the runner; `None` on a handle
+    /// that cannot run a login, where a start or a cancel answers
+    /// `account_unsupported`.
+    login_setup: Option<login::LoginSetup>,
 }
 
 impl Accounts {
-    /// The handle over `service`, with nothing cached and no driver.
+    /// The handle over `service`, with nothing cached, no driver and no
+    /// login setup.
     pub(crate) fn new(service: SharedAccounts) -> Arc<Self> {
+        Self::build(service, None)
+    }
+
+    /// [`Accounts::new`], with the login run through `setup`.
+    pub(crate) fn with_login(service: SharedAccounts, setup: login::LoginSetup) -> Arc<Self> {
+        Self::build(service, Some(setup))
+    }
+
+    fn build(service: SharedAccounts, login_setup: Option<login::LoginSetup>) -> Arc<Self> {
         let (refresh_tx, refresh_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
             service,
@@ -68,7 +92,16 @@ impl Accounts {
             engine: Mutex::new(None),
             refresh_tx,
             refresh_rx: Mutex::new(Some(refresh_rx)),
+            login: Mutex::new(login::LoginSlot::Idle),
+            login_task: Mutex::new(None),
+            login_setup,
         })
+    }
+
+    /// The login's root, agent and runner; `None` when this handle runs no
+    /// login.
+    pub(crate) fn login_setup(&self) -> Option<&login::LoginSetup> {
+        self.login_setup.as_ref()
     }
 
     /// Start the driver, which broadcasts on `events`; one per hub.
@@ -99,14 +132,24 @@ impl Accounts {
     }
 
     /// Wait up to `bound`, once the shutdown watch has flipped, for the
-    /// driver to drain and end and for the engine task to end, both at once.
+    /// driver to drain and end, for the engine task to end and for a login
+    /// run to end (its run task stops the login when the watch flips), all
+    /// at once.
     pub(crate) async fn join_driver(&self, bound: Duration) {
         let driver = crate::sync::lock(&self.driver).take();
         let engine = crate::sync::lock(&self.engine).take();
+        // Under the slot's lock, where a start checks the watch, claims the
+        // slot and stores its task: a start either saw the watch flipped and
+        // refused, or stored the task this takes.
+        let login = {
+            let _slot = crate::sync::lock(&self.login);
+            crate::sync::lock(&self.login_task).take()
+        };
         let deadline = tokio::time::Instant::now() + bound;
         tokio::join!(
             join_task(driver, "the accounts driver", deadline, bound),
             join_task(engine, "the accounts engine task", deadline, bound),
+            join_task(login, "the account login run", deadline, bound),
         );
     }
 
