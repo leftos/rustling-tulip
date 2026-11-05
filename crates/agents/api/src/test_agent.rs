@@ -50,6 +50,7 @@ pub static DESCRIPTOR: LazyLock<AgentDescriptor> = LazyLock::new(|| AgentDescrip
         resume: false,
         extra_folders: false,
         shell_resume: false,
+        user_hooks: false,
     },
     trust_note: None,
     texts: AgentTexts {

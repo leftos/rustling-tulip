@@ -270,6 +270,10 @@ pub struct AgentCaps {
     pub resume: bool,
     pub extra_folders: bool,
     pub shell_resume: bool,
+    /// The agent can install the daemon's hooks in its user settings file,
+    /// so a session the user starts by hand reports too.
+    #[serde(default)]
+    pub user_hooks: bool,
 }
 
 /// Agent-specific wording the client shows.
@@ -10826,6 +10830,7 @@ mod tests {
                 resume: true,
                 extra_folders: true,
                 shell_resume: true,
+                user_hooks: false,
             },
             trust_note: Some("Trusted launch skips prompts.".to_owned()),
             texts: AgentTexts {

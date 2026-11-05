@@ -90,6 +90,20 @@ pub struct HookShim<'a> {
     pub config_dir: &'a Path,
 }
 
+/// How far an agent's user settings file holds the hooks the daemon installs
+/// there, read from the file itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserHooksState {
+    /// No event holds an entry of ours.
+    Off,
+    /// Every event holds our entry, running the current shim.
+    On,
+    /// Some events hold an entry of ours, some none.
+    Partial,
+    /// Every event holds an entry of ours, and some run another shim path.
+    Stale,
+}
+
 /// One file of a [`HookPlan`], written into the session's own
 /// `sessions/<id>/` directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -712,6 +726,55 @@ pub trait Agent: Send + Sync + 'static {
         HookPlan::default()
     }
 
+    /// The agent's user settings file, where the daemon installs its hooks for
+    /// a session the user starts by hand, as the daemon's own environment
+    /// resolves it; `None` for an agent with no user-hook support.
+    fn user_settings_path(&self) -> Option<PathBuf> {
+        None
+    }
+
+    /// The user settings file's new text with the daemon's hook entries
+    /// present, each running `shim`; `existing` is the file's text, `None`
+    /// when there is no file. Never touches the disk.
+    ///
+    /// # Errors
+    ///
+    /// One naming the agent when it has no user-hook support, or when
+    /// `existing` is not in a shape the agent can edit.
+    fn install_user_hooks(
+        &self,
+        _existing: Option<&str>,
+        _shim: &Path,
+    ) -> Result<String, AgentError> {
+        Err(user_hooks_unsupported(self.descriptor()))
+    }
+
+    /// The user settings file's new text with exactly the daemon's hook
+    /// entries gone, whichever shim path they run. Never touches the disk.
+    ///
+    /// # Errors
+    ///
+    /// One naming the agent when it has no user-hook support, or when
+    /// `existing` is not in a shape the agent can edit.
+    fn remove_user_hooks(&self, _existing: &str, _shim: &Path) -> Result<String, AgentError> {
+        Err(user_hooks_unsupported(self.descriptor()))
+    }
+
+    /// How far the user settings file's text holds the daemon's hook entries
+    /// running `shim`; `existing` is `None` when there is no file.
+    ///
+    /// # Errors
+    ///
+    /// One naming the agent when it has no user-hook support, or when
+    /// `existing` is not in a shape the agent can read.
+    fn user_hooks_state(
+        &self,
+        _existing: Option<&str>,
+        _shim: &Path,
+    ) -> Result<UserHooksState, AgentError> {
+        Err(user_hooks_unsupported(self.descriptor()))
+    }
+
     /// What one hook payload says about its session, or `None` for a payload
     /// the agent does not know. `spawn` is the session's spawn options, when
     /// the session has a record that carries them, and `trusted` whether it
@@ -952,6 +1015,35 @@ pub trait AgentPlugin: Send + Sync {
         shim: &HookShim<'_>,
     ) -> Result<HookPlan, AgentError>;
 
+    /// See [`Agent::user_settings_path`].
+    fn user_settings_path(&self) -> Option<PathBuf>;
+
+    /// See [`Agent::install_user_hooks`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Agent::install_user_hooks`].
+    fn install_user_hooks(&self, existing: Option<&str>, shim: &Path)
+    -> Result<String, AgentError>;
+
+    /// See [`Agent::remove_user_hooks`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Agent::remove_user_hooks`].
+    fn remove_user_hooks(&self, existing: &str, shim: &Path) -> Result<String, AgentError>;
+
+    /// See [`Agent::user_hooks_state`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Agent::user_hooks_state`].
+    fn user_hooks_state(
+        &self,
+        existing: Option<&str>,
+        shim: &Path,
+    ) -> Result<UserHooksState, AgentError>;
+
     /// [`Agent::map_hook_event`] over `spawn` decoded; when they do not
     /// decode, an error is logged and the payload is mapped with no options.
     fn map_hook_event(
@@ -1175,6 +1267,30 @@ impl<A: Agent> AgentPlugin for A {
         Ok(Agent::hook_plan(self, &opts, trusted, shim))
     }
 
+    fn user_settings_path(&self) -> Option<PathBuf> {
+        Agent::user_settings_path(self)
+    }
+
+    fn install_user_hooks(
+        &self,
+        existing: Option<&str>,
+        shim: &Path,
+    ) -> Result<String, AgentError> {
+        Agent::install_user_hooks(self, existing, shim)
+    }
+
+    fn remove_user_hooks(&self, existing: &str, shim: &Path) -> Result<String, AgentError> {
+        Agent::remove_user_hooks(self, existing, shim)
+    }
+
+    fn user_hooks_state(
+        &self,
+        existing: Option<&str>,
+        shim: &Path,
+    ) -> Result<UserHooksState, AgentError> {
+        Agent::user_hooks_state(self, existing, shim)
+    }
+
     fn map_hook_event(
         &self,
         body: &serde_json::Value,
@@ -1291,6 +1407,14 @@ fn decode_for_spawn<A: Agent>(agent: &A, values: &OptionValues) -> Result<A::Opt
         detail: err.to_string(),
         hint: None,
     })
+}
+
+/// The refusal of an agent with no user-hook support, naming it.
+fn user_hooks_unsupported(descriptor: &AgentDescriptor) -> AgentError {
+    AgentError::new(format!(
+        "{}: user hooks are not supported",
+        descriptor.label
+    ))
 }
 
 /// An agent refused a call: the spawn's options did not decode into the
@@ -1743,6 +1867,26 @@ mod tests {
         assert_eq!(plugin.liveness_tokens(), [] as [&str; 0]);
         let bare: &dyn AgentPlugin = &Bare;
         assert_eq!(bare.liveness_tokens(), ["bare-agent"]);
+    }
+
+    #[test]
+    fn user_hooks_default_to_unsupported() {
+        let plugin: &dyn AgentPlugin = &Bare;
+        assert_eq!(plugin.user_settings_path(), None);
+        let shim = Path::new("rt-hook");
+        let errors = [
+            plugin.install_user_hooks(None, shim).err(),
+            plugin.remove_user_hooks("{}", shim).err(),
+            plugin.user_hooks_state(None, shim).err(),
+        ];
+        for error in errors {
+            let message = error.expect("unsupported").to_string();
+            assert!(
+                message.contains("user hooks are not supported"),
+                "{message}"
+            );
+            assert!(message.contains(DESCRIPTOR.label.as_str()), "{message}");
+        }
     }
 
     #[test]

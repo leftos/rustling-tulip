@@ -30,8 +30,8 @@ use agent_api::{
     ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HeadlessEvent, HookPlan,
     HookReport, HookShim, ImportedRun, KeyLookup, LiveLine, ReadySignal, RecoveredRun, Refusal,
     ResolvedRows, ScreenRules, ScreenWork, SpawnCheck, SpawnContext, SummarizerRequest,
-    SummarizerSpec, TracerRun, TranscriptLineFacts, ViewGoal, ViewReading, ViewStep,
-    hook_vocabulary, workspace_prelude,
+    SummarizerSpec, TracerRun, TranscriptLineFacts, UserHooksState, ViewGoal, ViewReading,
+    ViewStep, hook_vocabulary, workspace_prelude,
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
@@ -94,6 +94,7 @@ fn claude_descriptor() -> AgentDescriptor {
             resume: true,
             extra_folders: true,
             shell_resume: true,
+            user_hooks: true,
         },
         trust_note: Some("Trusted launch passes --dangerously-skip-permissions.".to_string()),
         texts: AgentTexts {
@@ -463,6 +464,30 @@ impl Agent for ClaudePlugin {
 
     fn hook_plan(&self, _opts: &ClaudeOptions, _trusted: bool, shim: &HookShim<'_>) -> HookPlan {
         hooks::hook_plan(shim)
+    }
+
+    fn user_settings_path(&self) -> Option<PathBuf> {
+        transcripts::claude_home(&ResolvedRows::default()).map(|home| home.join("settings.json"))
+    }
+
+    fn install_user_hooks(
+        &self,
+        existing: Option<&str>,
+        shim: &Path,
+    ) -> Result<String, AgentError> {
+        hooks::install_user_hooks(existing, shim)
+    }
+
+    fn remove_user_hooks(&self, existing: &str, shim: &Path) -> Result<String, AgentError> {
+        hooks::remove_user_hooks(existing, shim)
+    }
+
+    fn user_hooks_state(
+        &self,
+        existing: Option<&str>,
+        shim: &Path,
+    ) -> Result<UserHooksState, AgentError> {
+        hooks::user_hooks_state(existing, shim)
     }
 
     fn map_hook_event(

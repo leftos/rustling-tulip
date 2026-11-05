@@ -26,7 +26,7 @@ directories = { workspace = true }
 protocol = { workspace = true }
 regex = "1.11"
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 

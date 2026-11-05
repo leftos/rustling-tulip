@@ -52,8 +52,9 @@ fn find_in(claude_home: &Path, query: &ConversationQuery<'_>) -> Vec<FoundConver
 
 /// Claude Code's home for a session whose rows are `rows`, as its child sees
 /// it: the last `CLAUDE_CONFIG_DIR` row when the rows name one, else the
-/// daemon's; `<home>/.claude` when that is unset or empty.
-fn claude_home(rows: &ResolvedRows) -> Option<PathBuf> {
+/// daemon's; `<home>/.claude` when that is unset or empty. Empty rows give
+/// the daemon's own Claude home.
+pub(crate) fn claude_home(rows: &ResolvedRows) -> Option<PathBuf> {
     let home = UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
     claude_home_from(rows, std::env::var_os(CONFIG_DIR_VAR), home)
 }
