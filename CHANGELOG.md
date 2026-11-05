@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- The Connections dialog wraps a long tailscale error and a saved host's session count instead of cutting them off.
 - Settings' keep-awake row names the selected host instead of always saying "this PC".
 - With several hosts in the sidebar, This PC's "No repos or workspaces yet" note sits under This PC's header, not above every host.
 - The new-session dialog's Target list keeps its highlighted row in view, and a click inside the list no longer closes it.

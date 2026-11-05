@@ -724,6 +724,35 @@ fn picker_shows_tailscale_not_running_text(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_long_tailscale_error_wraps_inside_the_panel(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 9443 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let message = "[fake-tailscale] RUSTLING_TULIP_FAKE_TAILSCALE_STATE points at a file \
+                   that does not exist, so the fake CLI has no tailnet state to report back";
+
+    open_picker(
+        &mut h,
+        FakePeers(Err(TailnetError::Failed(message.to_owned()))),
+    );
+
+    let panel = h.bounds("connections-panel");
+    let scan = h.bounds("connections-scan");
+    let one_line = h.bounds("connections-detail-This PC").size.height;
+    assert!(
+        scan.right() <= panel.right(),
+        "the error {scan:?} ends inside the panel {panel:?}"
+    );
+    assert!(
+        scan.size.height > one_line,
+        "the error {scan:?} wraps past one {one_line:?} line"
+    );
+}
+
+#[gpui::test]
 fn typed_known_host_on_a_new_port_updates_the_saved_port(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     seed_ui(
@@ -1233,6 +1262,38 @@ fn a_row_shows_its_detail_line(cx: &mut TestAppContext) {
         Some("Online · port 8787 · connecting saves it".to_owned())
     );
     assert!(h.bounds(&format!("connections-detail-{HOST}")).size.width > px(0.0));
+}
+
+#[gpui::test]
+fn a_saved_rows_detail_line_ends_before_its_on_switch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [{ "kind": "ssh", "name": SSH_HOST, "enabled": false }],
+            "host_session_counts": { "ssh:devbox": 2 },
+        }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+
+    open_picker(&mut h, tailnet_with(&[]));
+
+    let key = format!("ssh:{SSH_HOST}");
+    let line = h.bounds(&format!("connections-detail-{key}"));
+    let on = h.bounds(&switch(&key));
+    let one_line = h.bounds("connections-detail-This PC").size.height;
+    assert!(
+        detail(&mut h, &key).is_some_and(|detail| detail.line.ends_with("2 sessions last time")),
+        "the row's line names its sessions"
+    );
+    assert!(
+        line.right() <= on.left(),
+        "the detail line {line:?} ends before the switch {on:?}"
+    );
+    assert!(
+        line.size.height > one_line,
+        "the detail line {line:?} wraps past one {one_line:?} line rather than being cut"
+    );
 }
 
 #[gpui::test]
