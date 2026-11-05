@@ -7,30 +7,36 @@
 //! threads, shares it among the three transports and every later call, and
 //! drops it on a thread of its own, so the service may be dropped anywhere.
 
+mod history;
+
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::Duration;
 
+use self::history::UsageHistory;
 use agent_api::accounts::{AccountEventRow, EngineTick};
 use agent_api::{
     AccountKindRow, AccountRef, AccountRow, AccountsConfig, AccountsError, AccountsFailure,
-    AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, AutoSwitchRules, PollReport,
-    PollScope, SwitchReport, UsageRow, UsageStatus, UsageWindowRow,
+    AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, AutoSwitchRules, FleetRow,
+    FleetWindowRow, PollReport, PollScope, SwitchReport, UsageRow, UsageStatus, UsageWindowRow,
 };
 use chrono::{DateTime, Utc};
 use claude_accounts::engine::{
     Engine, EventBody, Lease, LeaseHolder, LiveSwitch, SwitchFailure, SwitchFn, TickInputs,
     TickOutcome, TickReport, TransportCollector, WhileOn, next_delay,
 };
+use claude_accounts::pace::{
+    self, AccountReading, FleetWindow, Rotation, WindowReading, WindowVerdict,
+};
 use claude_accounts::{
     AccessToken, AccountKind, AccountLock, AccountRecord, AccountsRoot, AutoSwitchSection,
-    CaptureError, ClaudePaths, Drain, FetchScope, Identity, LockError, LockTiming, PROFILE_TIMEOUT,
-    PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts, ProfileTransport, RateWindow, RawProfile,
-    RawToken, RawUsage, RefreshContext, RefreshRequest, RefreshTransport, Secret, Settings,
-    SettingsError, Store, StoreError, StoreErrorKind, StrategyName, SwitchAccount, SwitchError,
-    SwitchErrorKind, SwitchOutcome, SwitchPrecondition, TOKEN_URL, TransportError,
+    AutoswitchState, CaptureError, ClaudePaths, Drain, FetchScope, Identity, LockError, LockTiming,
+    PROFILE_TIMEOUT, PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts, ProfileTransport, RateWindow,
+    RawProfile, RawToken, RawUsage, RefreshContext, RefreshRequest, RefreshTransport, Secret,
+    Settings, SettingsError, Store, StoreError, StoreErrorKind, StrategyName, SwitchAccount,
+    SwitchError, SwitchErrorKind, SwitchOutcome, SwitchPrecondition, TOKEN_URL, TransportError,
     USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable, UsageTransport,
     UsageWindow, capture_live_login, poll_with_refresh, probe_outgoing,
 };
@@ -91,6 +97,10 @@ pub struct ClaudeAccounts {
     /// What the last tick left for [`AccountsService::snapshot`]; `None`
     /// while no engine runs.
     view: Mutex<Option<EngineView>>,
+    /// The usage samples the fleet forecast reads, recorded by each snapshot
+    /// from the store's saved usage. Held only while a forecast is computed,
+    /// and never together with another lock here.
+    history: Mutex<UsageHistory>,
     /// Held by an engine switch across its re-read of the settings and the
     /// switch, and by a settings write: a tick under way when auto-switch is
     /// turned off makes no switch after the write.
@@ -109,14 +119,25 @@ impl ClaudeAccounts {
             processes: process_table(),
             engine: Mutex::new(None),
             view: Mutex::new(None),
+            history: Mutex::new(UsageHistory::default()),
             switch_guard: Mutex::new(()),
         }
     }
 
+    /// How many usage samples the fleet forecast keeps, after the last
+    /// snapshot recorded its readings.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn history_samples(&self) -> usize {
+        lock(&self.history).samples.len()
+    }
+
     /// The auto-switch state for a snapshot: the settings' ([`auto_state`]),
-    /// with what the last tick left while auto-switch is on.
-    fn auto_snapshot(&self, root: &AccountsRoot) -> Option<AutoState> {
+    /// the fleet forecast over `rows`, and what the last tick left while
+    /// auto-switch is on.
+    fn auto_snapshot(&self, root: &AccountsRoot, rows: &[AccountRow]) -> Option<AutoState> {
         let mut auto = auto_state(root)?;
+        auto.fleet = self.fleet_forecast(root, rows);
         if auto.enabled
             && let Some(view) = &*lock(&self.view)
         {
@@ -127,6 +148,30 @@ impl ClaudeAccounts {
             auto.last_decision.clone_from(&view.last_decision);
         }
         Some(auto)
+    }
+
+    /// The fleet forecast over `rows`: the crate's verdict under the
+    /// settings' rate window, with `rows` recorded into the history kept
+    /// here; `None` when the settings or the auto-switch state cannot be
+    /// read, or when no account is on the timeline.
+    fn fleet_forecast(&self, root: &AccountsRoot, rows: &[AccountRow]) -> Option<FleetRow> {
+        let settings = Settings::read(&root.settings()).ok()?;
+        let state = AutoswitchState::read(root).ok()?;
+        let engine_settings = settings.autoswitch.to_engine();
+        let readings = fleet_readings(rows);
+        let rotation = Rotation {
+            active: rows.iter().find(|row| row.active).map(|row| row.number),
+            settings: &engine_settings,
+            state: &state,
+        };
+        let rate_span = settings.fleet.rate_window.span();
+        let now = jiff::Timestamp::now();
+        let verdict = {
+            let mut history = lock(&self.history);
+            history.record(&readings, now);
+            pace::fleet(&readings, &history.samples, rotation, rate_span, now).verdict
+        };
+        verdict.as_ref().map(verdict_row)
     }
 
     /// Halts the engine in `slot`, if any, and releases its lease in the
@@ -276,7 +321,8 @@ impl AccountsService for ClaudeAccounts {
     fn snapshot(&self) -> Result<AccountsSnapshot, AccountsError> {
         let store = self.open_store()?;
         let mut snapshot = read_store(&store)?.snapshot;
-        snapshot.auto = self.auto_snapshot(store.root());
+        let auto = self.auto_snapshot(store.root(), &snapshot.accounts);
+        snapshot.auto = auto;
         Ok(snapshot)
     }
 
@@ -294,7 +340,7 @@ impl AccountsService for ClaudeAccounts {
             return Ok(PollReport {
                 snapshot: AccountsSnapshot {
                     accounts: Vec::new(),
-                    auto: self.auto_snapshot(store.root()),
+                    auto: self.auto_snapshot(store.root(), &[]),
                 },
                 next_poll_in: None,
             });
@@ -310,7 +356,8 @@ impl AccountsService for ClaudeAccounts {
         })?
         .map_err(|error| AccountsError::new(error.to_string()))?;
         let mut read = read_store(&store)?;
-        read.snapshot.auto = self.auto_snapshot(store.root());
+        let auto = self.auto_snapshot(store.root(), &read.snapshot.accounts);
+        read.snapshot.auto = auto;
         let next_poll_in = if read.snapshot.accounts.is_empty() {
             None
         } else {
@@ -728,7 +775,82 @@ fn auto_state(root: &AccountsRoot) -> Option<AutoState> {
         paused_reason,
         warm_up_done: false,
         last_decision: None,
+        fleet: None,
     })
+}
+
+/// The counted accounts' readings: each account not held out of switching,
+/// whose usage read carries a fetch time and whose status leaves it in the
+/// forecast.
+fn fleet_readings(rows: &[AccountRow]) -> Vec<AccountReading> {
+    rows.iter()
+        .filter(|row| !row.disabled && in_forecast(row.usage.status))
+        .filter_map(|row| {
+            let five_hour = row.usage.five_hour.as_ref();
+            Some(AccountReading {
+                account: row.number,
+                fetched_at: jiff_time(row.usage.fetched_at?)?,
+                five_hour: five_hour.and_then(finite_window),
+                seven_day: row.usage.seven_day.as_ref().and_then(finite_window),
+                unstarted_five_hour: five_hour
+                    .filter(|window| window.pct.is_finite() && window.resets_at.is_none())
+                    .map(|window| window.pct),
+            })
+        })
+        .collect()
+}
+
+/// Whether a usage status leaves the account in the forecast: an ok read, or
+/// a transient failure, whose last good reading still stands as the engine
+/// trusts it. Every other status says the account has no reading to forecast
+/// from.
+fn in_forecast(status: UsageStatus) -> bool {
+    matches!(status, UsageStatus::Ok | UsageStatus::Unavailable)
+}
+
+/// `window` as a forecast reading: its percentage when finite, and its reset
+/// when the reading carried one that parses.
+fn finite_window(window: &UsageWindowRow) -> Option<WindowReading> {
+    Some(WindowReading {
+        pct: window.pct.is_finite().then_some(window.pct)?,
+        resets_at: jiff_time(window.resets_at?)?,
+    })
+}
+
+/// A verdict as the seam's row.
+fn verdict_row(verdict: &WindowVerdict) -> FleetRow {
+    FleetRow {
+        window: fleet_window_row(verdict.window),
+        members: u32::try_from(verdict.members).unwrap_or(u32::MAX),
+        accounts: u32::try_from(verdict.accounts).unwrap_or(u32::MAX),
+        remaining: verdict.remaining,
+        rate: verdict.rate,
+        rate_window: fleet_window_row(verdict.rate_window),
+        runs_dry: verdict.runs_dry,
+        blocked_at: verdict
+            .blocked_at
+            .and_then(|at| chrono_time(at.as_nanosecond())),
+        resumes_at: verdict
+            .resumes_at
+            .and_then(|at| chrono_time(at.as_nanosecond())),
+        first_reset: verdict
+            .first_reset
+            .and_then(|at| chrono_time(at.as_nanosecond())),
+    }
+}
+
+/// The seam's name for `window`.
+fn fleet_window_row(window: FleetWindow) -> FleetWindowRow {
+    match window {
+        FleetWindow::FiveHour => FleetWindowRow::FiveHour,
+        // The crate's only other window is the 7-day one.
+        _ => FleetWindowRow::SevenDay,
+    }
+}
+
+/// `at` as a jiff timestamp; `None` when chrono holds a time jiff cannot.
+fn jiff_time(at: DateTime<Utc>) -> Option<jiff::Timestamp> {
+    jiff::Timestamp::from_nanosecond(i128::from(at.timestamp_nanos_opt()?)).ok()
 }
 
 /// The engine's spelling of the strategy `name`.

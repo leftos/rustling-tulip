@@ -249,6 +249,7 @@ mod tests {
             paused_reason: reason,
             warm_up_done: true,
             last_decision: None,
+            fleet: None,
         }
     }
 

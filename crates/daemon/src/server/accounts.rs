@@ -643,6 +643,7 @@ pub(crate) mod fake {
                     paused_reason: None,
                     warm_up_done: false,
                     last_decision: None,
+                    fleet: None,
                 });
                 if let Some(enabled) = enabled {
                     auto.enabled = enabled;
@@ -666,6 +667,7 @@ pub(crate) mod fake {
                     paused_reason: None,
                     warm_up_done: false,
                     last_decision: None,
+                    fleet: None,
                 });
                 if let Some(hysteresis_pct) = rules.hysteresis_pct {
                     auto.hysteresis_pct = hysteresis_pct;
@@ -799,6 +801,7 @@ mod tests {
             paused_reason: None,
             warm_up_done: true,
             last_decision: Some("stay".to_owned()),
+            fleet: None,
         }
     }
 

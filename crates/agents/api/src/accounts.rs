@@ -437,6 +437,45 @@ pub struct AutoState {
     pub warm_up_done: bool,
     /// The engine's last decision, as it names it.
     pub last_decision: Option<String>,
+    /// The fleet forecast over the accounts, computed whether or not
+    /// auto-switch is on; `None` while it cannot be computed.
+    pub fleet: Option<FleetRow>,
+}
+
+/// A usage window the fleet forecast speaks of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FleetWindowRow {
+    /// The 5-hour window.
+    FiveHour,
+    /// The 7-day window.
+    SevenDay,
+}
+
+/// The fleet forecast over a store's accounts: whether the pooled allowance,
+/// spent at the accounts' present rate, lasts the coming week, and when it
+/// runs dry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FleetRow {
+    /// The window the first gap belongs to.
+    pub window: FleetWindowRow,
+    /// How many accounts are in the pool.
+    pub members: u32,
+    /// How many accounts are on the timeline.
+    pub accounts: u32,
+    /// The pooled remaining allowance, in 5-hour points.
+    pub remaining: f64,
+    /// The summed rate per hour, in the points of `rate_window`.
+    pub rate: f64,
+    /// The window whose points `rate` is in.
+    pub rate_window: FleetWindowRow,
+    /// Whether the timeline has a gap.
+    pub runs_dry: bool,
+    /// When the first gap starts.
+    pub blocked_at: Option<DateTime<Utc>>,
+    /// When the first gap ends.
+    pub resumes_at: Option<DateTime<Utc>>,
+    /// The earliest reset among the accounts.
+    pub first_reset: Option<DateTime<Utc>>,
 }
 
 /// The auto-switch rules a [`AccountsService::set_auto_switch_rules`] sets; a

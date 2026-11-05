@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 use agent_api::accounts::EngineTick;
 use agent_api::{
     AccountKindRow, AccountsConfig, AccountsFailure, AccountsFailureKind, AccountsService, Agent,
-    AutoSwitchRules, PollScope, UsageStatus,
+    AutoSwitchRules, FleetWindowRow, PollScope, UsageStatus,
 };
-use agent_claude::accounts::{BODY_CAP, ProfileClient, RefreshClient, UsageClient};
+use agent_claude::accounts::{BODY_CAP, ClaudeAccounts, ProfileClient, RefreshClient, UsageClient};
 use claude_accounts::{
     AccessToken, AccountLock, AccountsRoot, ClaudePaths, CredentialBlob, ProfileTransport,
     RefreshError, Store, TransportError, UsageTransport, refresh_grant,
@@ -1562,5 +1562,194 @@ fn an_unreadable_settings_file_pauses_auto_switch_with_its_reason() {
             "the auto-switch settings could not be read: settings.json is not valid: autoswitch.threshold"
         ),
         "{reason}"
+    );
+}
+
+/// Account `number`'s usage row, its 5-hour window at `pct` resetting at
+/// `resets_at`, fetched at `fetched` (seconds since the epoch).
+fn usage_row(number: u32, pct: f64, resets_at: &str, fetched: i64) -> serde_json::Value {
+    json!({
+        "email": format!("user{number}@example.com"),
+        "organizationUuid": "",
+        "lastGood": {"five_hour": {"pct": pct, "resets_at": resets_at}},
+        "fetchedAt": fetched,
+    })
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn the_snapshot_carries_a_fleet_verdict_with_accounts() {
+    let dir = scratch("the_snapshot_carries_a_fleet_verdict_with_accounts");
+    let now = jiff::Timestamp::now();
+    let resets_at = now
+        .checked_add(jiff::SignedDuration::from_hours(4))
+        .expect("the test's time is in range")
+        .to_string();
+    let fetched = now.as_second() - 300;
+    let rows = json!({
+        "1": usage_row(1, 30.0, &resets_at, fetched),
+        "2": usage_row(2, 20.0, &resets_at, fetched),
+    });
+    let root = write_store(&dir, &[1, 2], &[1, 2], 1, &rows);
+
+    let snapshot = service(root).snapshot().expect("the store reads");
+    let fleet = snapshot
+        .auto
+        .expect("the snapshot carries the auto-switch state")
+        .fleet
+        .expect("the snapshot carries the fleet verdict");
+
+    assert_eq!(fleet.members, 2, "both accounts are in the pool: {fleet:?}");
+    assert_eq!(
+        fleet.accounts, 2,
+        "both accounts are on the timeline: {fleet:?}"
+    );
+    assert_eq!(fleet.rate_window, FleetWindowRow::FiveHour, "{fleet:?}");
+    assert!((fleet.remaining - 150.0).abs() < 1e-6, "{fleet:?}");
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn a_second_snapshot_without_a_new_fetch_adds_no_sample() {
+    let dir = scratch("a_second_snapshot_without_a_new_fetch_adds_no_sample");
+    let now = jiff::Timestamp::now();
+    let resets_at = now
+        .checked_add(jiff::SignedDuration::from_hours(4))
+        .expect("the test's time is in range")
+        .to_string();
+    let rows = json!({"1": usage_row(1, 30.0, &resets_at, now.as_second() - 300)});
+    let root = write_store(&dir, &[1], &[1], 1, &rows);
+    let mut cfg = AccountsConfig::new(root);
+    cfg.agent_home = Some(dir.join("claude"));
+    let service = ClaudeAccounts::new(cfg);
+
+    service.snapshot().expect("the store reads");
+    let recorded = service.history_samples();
+    assert_eq!(recorded, 1, "one counted account leaves one sample");
+    service.snapshot().expect("the store reads");
+
+    assert_eq!(
+        service.history_samples(),
+        recorded,
+        "a repeated snapshot of the same fetch adds no sample"
+    );
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn a_failed_poll_keeps_the_account_in_the_forecast_and_its_history() {
+    let dir = scratch("a_failed_poll_keeps_the_account_in_the_forecast_and_its_history");
+    let now = jiff::Timestamp::now();
+    let resets_at = now
+        .checked_add(jiff::SignedDuration::from_hours(4))
+        .expect("the test's time is in range")
+        .to_string();
+    let fetched = now.as_second() - 300;
+    let rows = json!({
+        "1": usage_row(1, 30.0, &resets_at, fetched),
+        "2": usage_row(2, 20.0, &resets_at, fetched),
+    });
+    let root = write_store(&dir, &[1, 2], &[1, 2], 1, &rows);
+    let mut cfg = AccountsConfig::new(root.clone());
+    cfg.agent_home = Some(dir.join("claude"));
+    let service = ClaudeAccounts::new(cfg);
+
+    let before = service
+        .snapshot()
+        .expect("the store reads")
+        .auto
+        .expect("the snapshot carries the auto-switch state")
+        .fleet
+        .expect("the snapshot carries the fleet verdict");
+    assert_eq!(before.accounts, 2, "{before:?}");
+    assert_eq!(service.history_samples(), 2);
+
+    let mut failed = usage_row(2, 20.0, &resets_at, fetched);
+    failed["consecutiveFailures"] = json!(1);
+    failed["lastError"] = json!("http-429");
+    std::fs::write(
+        root.join("cache").join("usage.json"),
+        json!({
+            "schemaVersion": 3,
+            "accounts": {
+                "1": usage_row(1, 30.0, &resets_at, fetched),
+                "2": failed,
+            },
+        })
+        .to_string(),
+    )
+    .expect("usage.json can be written");
+    let after = service
+        .snapshot()
+        .expect("the store reads")
+        .auto
+        .expect("the snapshot carries the auto-switch state")
+        .fleet
+        .expect("the snapshot carries the fleet verdict");
+
+    assert_eq!(
+        after.accounts, before.accounts,
+        "a failed poll keeps the account on the timeline: {after:?}"
+    );
+    assert_eq!(
+        service.history_samples(),
+        2,
+        "a failed poll keeps the account's samples"
+    );
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn the_fleet_rate_window_follows_the_setting() {
+    let dir = scratch("the_fleet_rate_window_follows_the_setting");
+    let now = jiff::Timestamp::now();
+    let resets_at = now
+        .checked_add(jiff::SignedDuration::from_hours(4))
+        .expect("the test's time is in range")
+        .to_string();
+    let older = now.as_second() - 6_000;
+    let newer = now.as_second() - 300;
+    let root = write_store(
+        &dir,
+        &[1],
+        &[1],
+        1,
+        &json!({"1": usage_row(1, 40.0, &resets_at, older)}),
+    );
+    let service = service(root.clone());
+    service.snapshot().expect("the store reads");
+    let rows = json!({"1": usage_row(1, 50.0, &resets_at, newer)});
+    std::fs::write(
+        root.join("cache").join("usage.json"),
+        json!({"schemaVersion": 3, "accounts": rows}).to_string(),
+    )
+    .expect("usage.json can be written");
+    let sixty = service
+        .snapshot()
+        .expect("the store reads")
+        .auto
+        .expect("the snapshot carries the auto-switch state")
+        .fleet
+        .expect("the snapshot carries the fleet verdict");
+
+    let mut settings = claude_accounts::Settings::default();
+    settings.fleet.rate_window = claude_accounts::RateWindow::TwoHours;
+    claude_accounts::Settings::write(&AccountsRoot::new(root), &settings)
+        .expect("the settings are written");
+    let one_twenty = service
+        .snapshot()
+        .expect("the store reads")
+        .auto
+        .expect("the snapshot carries the auto-switch state")
+        .fleet
+        .expect("the snapshot carries the fleet verdict");
+
+    assert!(
+        (sixty.rate - 54.5).abs() < 1.0,
+        "the 60-minute span keeps one 5-minute-old sample and reads the window's average: {sixty:?}"
+    );
+    assert!(
+        (one_twenty.rate - 6.0).abs() < 1.0,
+        "the 120-minute span reads the rise across both samples: {one_twenty:?}"
     );
 }

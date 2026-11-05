@@ -3,14 +3,15 @@
 //! cannot decode, so the whole frame would be lost. A window or a per-model
 //! limit whose percentage is not finite is left out, an extra-usage limit
 //! that is not finite is `None`, and an auto-switch state whose threshold or
-//! hysteresis is not finite is dropped.
+//! hysteresis is not finite is dropped; so is a fleet verdict whose
+//! remaining allowance or rate is not finite, while its state stays.
 use agent_api::{
-    AccountKindRow, AccountRow, AccountsSnapshot, AutoState, ExtraUsageRow, ModelLimitRow,
-    UsageStatus, UsageWindowRow,
+    AccountKindRow, AccountRow, AccountsSnapshot, AutoState, ExtraUsageRow, FleetRow,
+    FleetWindowRow, ModelLimitRow, UsageStatus, UsageWindowRow,
 };
 use protocol::{
     AccountExtraUsage, AccountKind, AccountModelLimit, AccountSnapshot, AccountUsageStatus,
-    AccountUsageWindow, AutoSwitchState,
+    AccountUsageWindow, AutoSwitchState, FleetVerdict, FleetWindow,
 };
 
 /// A snapshot as the wire carries it: what `Accounts` and `AccountsUpdated`
@@ -109,14 +110,63 @@ fn auto_state(auto: &AutoState) -> Option<AutoSwitchState> {
         paused_reason: auto.paused_reason.clone(),
         warm_up_done: auto.warm_up_done,
         last_decision: auto.last_decision.clone(),
-        fleet_verdict: None,
+        fleet_verdict: auto.fleet.as_ref().and_then(fleet_verdict),
     })
+}
+
+/// `row` on the wire, or `None` when its remaining allowance or rate is not
+/// finite.
+fn fleet_verdict(row: &FleetRow) -> Option<FleetVerdict> {
+    Some(FleetVerdict {
+        window: fleet_window(row.window),
+        members: row.members,
+        accounts: row.accounts,
+        remaining: finite(row.remaining)?,
+        rate: finite(row.rate)?,
+        rate_window: fleet_window(row.rate_window),
+        runs_dry: row.runs_dry,
+        blocked_at: row.blocked_at,
+        resumes_at: row.resumes_at,
+        first_reset: row.first_reset,
+    })
+}
+
+fn fleet_window(window: FleetWindowRow) -> FleetWindow {
+    match window {
+        FleetWindowRow::FiveHour => FleetWindow::FiveHour,
+        FleetWindowRow::SevenDay => FleetWindow::SevenDay,
+    }
 }
 
 /// Rows the accounts tests build snapshots from.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use agent_api::{AccountKindRow, AccountRow, AutoState, UsageRow, UsageStatus, UsageWindowRow};
+    use agent_api::{
+        AccountKindRow, AccountRow, AutoState, FleetRow, FleetWindowRow, UsageRow, UsageStatus,
+        UsageWindowRow,
+    };
+    use chrono::{DateTime, TimeDelta, Utc};
+
+    /// A fixed time for the forecast's stamps.
+    pub(crate) fn at() -> DateTime<Utc> {
+        DateTime::<Utc>::UNIX_EPOCH + TimeDelta::seconds(1_800_000_000)
+    }
+
+    /// A fleet forecast over two half-spent accounts that lasts the week.
+    pub(crate) fn fleet() -> FleetRow {
+        FleetRow {
+            window: FleetWindowRow::FiveHour,
+            members: 2,
+            accounts: 3,
+            remaining: 120.5,
+            rate: 9.5,
+            rate_window: FleetWindowRow::SevenDay,
+            runs_dry: false,
+            blocked_at: Some(at() + TimeDelta::seconds(60)),
+            resumes_at: Some(at() + TimeDelta::seconds(120)),
+            first_reset: Some(at()),
+        }
+    }
 
     /// Account `number`, active when it is 1, its five-hour window at `pct`.
     pub(crate) fn row(number: u32, pct: f64) -> AccountRow {
@@ -155,6 +205,7 @@ pub(crate) mod test_support {
             paused_reason: None,
             warm_up_done: true,
             last_decision: None,
+            fleet: None,
         }
     }
 }
@@ -165,8 +216,9 @@ pub(crate) mod test_support {
     reason = "a test fails with the message of the precondition it lost"
 )]
 mod tests {
-    use super::test_support::{auto, row};
+    use super::test_support::{auto, fleet, row};
     use super::*;
+    use protocol::FleetWindow;
 
     const NON_FINITE: [f64; 3] = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
 
@@ -258,5 +310,80 @@ mod tests {
             auto: Some(auto(95.0)),
         });
         assert!(kept.auto.is_some(), "a finite state stays");
+    }
+
+    #[test]
+    fn a_fleet_row_maps_onto_the_wire_verdict() {
+        let mut state = auto(95.0);
+        state.fleet = Some(fleet());
+
+        let wired = wire(&AccountsSnapshot {
+            accounts: Vec::new(),
+            auto: Some(state),
+        });
+
+        let sent = wired.auto.expect("the auto state stays");
+        let verdict = sent
+            .fleet_verdict
+            .as_ref()
+            .expect("the fleet verdict is carried");
+        let row = fleet();
+        assert_eq!(verdict.window, FleetWindow::FiveHour);
+        assert_eq!(verdict.rate_window, FleetWindow::SevenDay);
+        assert_eq!(verdict.members, row.members);
+        assert_eq!(verdict.accounts, row.accounts);
+        assert_eq!(verdict.remaining, row.remaining);
+        assert_eq!(verdict.rate, row.rate);
+        assert_eq!(verdict.runs_dry, row.runs_dry);
+        assert_eq!(verdict.blocked_at, row.blocked_at);
+        assert_eq!(verdict.resumes_at, row.resumes_at);
+        assert_eq!(verdict.first_reset, row.first_reset);
+        serde_json::to_string(&sent).expect("every number left is finite");
+    }
+
+    #[test]
+    fn a_non_finite_fleet_rate_drops_only_the_verdict() {
+        for value in NON_FINITE {
+            let mut odd = auto(95.0);
+            let mut row = fleet();
+            row.rate = value;
+            odd.fleet = Some(row);
+            let sent = wire(&AccountsSnapshot {
+                accounts: Vec::new(),
+                auto: Some(odd),
+            })
+            .auto
+            .expect("the auto state stays");
+            assert_eq!(sent.fleet_verdict, None, "rate {value}");
+            assert!(sent.enabled, "the state keeps its switch: {sent:?}");
+            assert!((sent.threshold_pct - 95.0).abs() < f64::EPSILON, "{sent:?}");
+
+            let mut odd = auto(95.0);
+            let mut row = fleet();
+            row.remaining = value;
+            odd.fleet = Some(row);
+            let sent = wire(&AccountsSnapshot {
+                accounts: Vec::new(),
+                auto: Some(odd),
+            })
+            .auto
+            .expect("the auto state stays");
+            assert_eq!(sent.fleet_verdict, None, "remaining {value}");
+            assert!(sent.enabled, "the state keeps its switch: {sent:?}");
+        }
+
+        let mut state = auto(95.0);
+        state.fleet = Some(fleet());
+        let sent = wire(&AccountsSnapshot {
+            accounts: Vec::new(),
+            auto: Some(state),
+        });
+        assert!(
+            sent.auto
+                .expect("the auto state stays")
+                .fleet_verdict
+                .is_some(),
+            "a finite verdict stays"
+        );
     }
 }

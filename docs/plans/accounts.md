@@ -61,6 +61,8 @@ The accounts feature lands on the feature branch `feat/claude-accounts`; RT-39 i
 
   No token, key or credential field, ever.
 - `AutoSwitchState`: enabled, threshold, hysteresis, cooldown, `paused_reason: Option<String>` (the lease holder, or the store's refusal), warm-up done, last decision, and an optional fleet verdict (the crate's `WindowVerdict`, with the unit of its `rate_window`).
+
+  The Claude plugin computes the verdict on every snapshot and poll with `pace::fleet`, over an in-memory usage history it keeps for 195 minutes (one sample per account per fetch; lost on a daemon restart, when rates fall back to each window's average until about 10 minutes of samples exist). An account counts when it is not disabled, has a reading, and its status is ok or a transient failure; the rate span is the settings' forecast window. A verdict with a non-finite remaining or rate is left out.
 - `ListAccounts` → `Accounts{accounts, auto}`; broadcast `AccountsUpdated` when a poll or a write's refresh changes the snapshot. A write is answered with `Accounts{.., request_id}` or `Error{code: account_*}`.
 - `SwitchAccount{number, request_id}`, `SetAutoSwitch{enabled, threshold_pct}` (any origin).
 - `AddCurrentLogin`, `RemoveAccount{number}`, `SetAccountAlias{number, alias}`, `SetAccountOrder{order}`, `StartAccountLogin` (local only); `SetAutoSwitchRules{hysteresis_pct, cooldown_secs, strategy, rate_window_minutes}` (any origin, like `SetAutoSwitch`). No message carries a secret.
