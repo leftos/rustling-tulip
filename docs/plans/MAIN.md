@@ -35,15 +35,14 @@
 - [ ] RT-694 Keep the footer from clipping in a narrow window and clear a stale not-found status
 - [ ] RT-699 Keep the terminal link tip off dialogs and the link, and name Cmd on macOS
 - [ ] RT-844 Choose the default shell in Settings, with installed shells and a custom command · release vNext
-  - [ ] RT-853 Default shell: host agent sessions in WSL, Nushell and fish (DS.3) · release vNext
+  - [ ] RT-956 Default shell: host agent sessions in WSL (DS.3, after a measured spike)
 - [ ] RT-918 Split the agent launch command by Windows rules on Windows, so backslash paths survive
 - [ ] RT-921 Default shell: move the save check off the runtime, and detect WSL that is really installed
 - [ ] RT-930 Jump to a pane, tab or sidebar repo or workspace with a Ctrl+Shift+P palette · release vNext+1
 - [ ] RT-932 Add non-git folders to the sidebar, with no worktree or branch choice when spawning into one · release vNext+1
 - [ ] RT-940 Offer an opt-in install of rustling-tulip's hooks in Claude Code's user settings · release vNext
-  - [ ] RT-941 User hooks: the tracer's env-driven hook shim and plain-shell promotion by hook · release vNext
-  - [ ] RT-942 User hooks: install and remove in Claude Code's user settings, with the protocol pair · release vNext
   - [ ] RT-943 User hooks: the Settings toggle and a live spec · release vNext
+- [ ] RT-959 Default shell: verify Nushell raw-string programs, give the resume the launch's .cmd checks, and skip a familyless Automatic shell
 
 ## Wave 2b — Hook status
 
@@ -160,15 +159,14 @@
 ## Wave 12 — Claude accounts and artifacts by account
 
 - [ ] RT-39 Built-in Claude account switching: several logins, usage polling and switching · release vNext
-  - [ ] RT-910 Accounts: usage poller, snapshot and drain (CA.4) · release vNext
-  - [ ] RT-911 Accounts: manual switch, add current login and the admin messages (CA.5 write half, CA.6) · release vNext
+  - [/] RT-911 Accounts: manual switch, add current login and the admin messages (CA.5 write half, CA.6) · release vNext
   - [ ] RT-912 Accounts: auto-switch driver (CA.9) · release vNext
   - [ ] RT-913 Accounts: footer chip and popover (CA.7) · release vNext
   - [ ] RT-914 Accounts: Settings > Accounts page and toasts (CA.8, CA.10) · release vNext
   - [ ] RT-915 Accounts: daemon-driven login and the docs (CA.11, CA.12) · release vNext
   - [ ] RT-916 Accounts on macOS: Unix locks and the Keychain credential in the forked claude-accounts crate · release vNext
-  - [ ] RT-919 Accounts: store writers, the daemon's accounts dir and transports (CA.0, CA.3) · release vNext
   - [ ] RT-924 Merge feat/claude-accounts to main (#205)
+  - [ ] RT-958 Accounts: answer Draining at once for switch and capture, Unsupported for an unsupported lock, and fix the remove-timeout text
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-113 Open Claude artifact links in the account that published them
 - [ ] RT-115 Host-approved extra roots for file fetch
@@ -226,6 +224,7 @@
 - [ ] RT-835 Re-read docs/spikes/hook-status.md against the Claude plugin's changes since 2026-10-30
 - [ ] RT-858 Fix the missing spoken-alerts design file four issues link
 - [ ] RT-907 Re-read docs/session-runtime.md and docs/on-disk.md against their named files' changes since 2026-11-03
+- [ ] RT-945 Restore or re-point the reboot-resume design file RT-277 and RT-725 cite
 
 ## Build tooling
 
@@ -465,16 +464,25 @@
 - [ ] RT-938 Keep test and bench daemons off an inherited account store override
 - [ ] RT-939 Keep each host's Custom shell command draft in Settings
 - [ ] RT-944 Draw the sidebar's Active-filter empty line under its host header
+- [ ] RT-947 User hooks: let a hand-typed agent report after an injected run ends in the same shell
+- [ ] RT-948 User hooks: promote a plain shell from a held user-settings SessionStart, and stop discovery on replay
+- [ ] RT-949 User hooks: make the hook shim refresh safe against concurrent calls, stale temps and read-only copies
+- [ ] RT-950 User hooks: release a shell's conversation pin when its agent dies without SessionEnd
+- [ ] RT-952 Read no agent in view from a dialog with no agent panel under a named session's rule
+- [ ] RT-953 Count the 40-column subagent row in the chat mirror's running work
+- [ ] RT-954 Read a screen's rows once per status check instead of once per reader
+- [ ] RT-955 User hooks: refresh matchers and prune dropped events on install, and read a settings file with a BOM
+- [ ] RT-957 User hooks: write the settings backup without a torn window
 
 ## Design files
 
-- [accounts.md](accounts.md) — RT-39, RT-277, RT-910, RT-911, RT-912, RT-913, RT-914, RT-915, RT-919
+- [accounts.md](accounts.md) — RT-39, RT-277, RT-911, RT-912, RT-913, RT-914, RT-915
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
-- [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-853
+- [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
 - [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-760, RT-779, RT-789, RT-858
-- [default-shell.md](default-shell.md) — RT-844, RT-853
+- [default-shell.md](default-shell.md) — RT-844, RT-956
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-786, RT-787, RT-867, RT-868, RT-869
