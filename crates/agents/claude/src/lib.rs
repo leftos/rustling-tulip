@@ -562,8 +562,10 @@ impl Agent for ClaudePlugin {
     fn accounts(
         &self,
         cfg: &agent_api::AccountsConfig,
-    ) -> Option<Box<dyn agent_api::AccountsService>> {
-        Some(Box::new(accounts::ClaudeAccounts::new(cfg.clone())))
+    ) -> Option<std::sync::Arc<dyn agent_api::AccountsService>> {
+        Some(std::sync::Arc::new(accounts::ClaudeAccounts::new(
+            cfg.clone(),
+        )))
     }
 
     /// Haiku through the CLI on the user's own login, with an allow-listed

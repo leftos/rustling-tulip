@@ -24,7 +24,13 @@ const TITLE_MAX_CHARS: usize = 80;
 /// The most conversations a window search answers.
 const CANDIDATE_LIMIT: usize = 5;
 /// The variable that moves Claude Code's home.
-const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
+pub(crate) const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
+
+/// Claude Code's home as this process sees it: [`CONFIG_DIR_VAR`] when it is
+/// set and not empty, else `<home>/.claude`.
+pub(crate) fn own_claude_home() -> Option<PathBuf> {
+    claude_home(&ResolvedRows::default())
+}
 
 /// The conversations Claude Code recorded for `query`'s folder: the known
 /// id's own when the query names one and its transcript is there, else the

@@ -14,11 +14,12 @@ use protocol::{
     AccountUsageWindow, AutoSwitchState, ClientMessage, DaemonMessage,
 };
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use tracing::{info, warn};
 
-/// The account service as the hub holds it: one call at a time.
-pub type SharedAccounts = Arc<Mutex<Box<dyn AccountsService>>>;
+/// The account service as the hub holds it: shared, with no lock around it,
+/// so a read answers while a poll is in flight.
+pub type SharedAccounts = Arc<dyn AccountsService>;
 
 /// The account service the registered plugins offer over this host's
 /// account store, or `None` when the daemon runs elevated, the store's
@@ -44,10 +45,10 @@ pub(crate) fn start_service() -> Option<SharedAccounts> {
 /// without a folder (an elevated daemon has none).
 pub(crate) fn service_for(
     dir: Option<PathBuf>,
-    ask: impl FnOnce(&AccountsConfig) -> Option<Box<dyn AccountsService>>,
+    ask: impl FnOnce(&AccountsConfig) -> Option<SharedAccounts>,
 ) -> Option<SharedAccounts> {
     let cfg = AccountsConfig::new(dir?);
-    ask(&cfg).map(|service| Arc::new(Mutex::new(service)))
+    ask(&cfg)
 }
 
 /// Handle the accounts messages `dispatch` routes here.
@@ -70,13 +71,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
 
 /// `service`'s snapshot, read on a blocking thread; empty when it fails.
 async fn read_snapshot(service: SharedAccounts) -> AccountsSnapshot {
-    let read = tokio::task::spawn_blocking(move || {
-        service
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .snapshot()
-    })
-    .await;
+    let read = tokio::task::spawn_blocking(move || service.snapshot()).await;
     match read {
         Ok(Ok(snapshot)) => snapshot,
         Ok(Err(err)) => {
@@ -181,8 +176,10 @@ mod tests {
     use super::*;
     use crate::server::connection::AuthKind;
     use crate::server::test_support::{dispatch_one_as, test_hub, test_peer};
-    use agent_api::{AccountsError, UsageRow};
+    use agent_api::{AccountsError, PollReport, PollScope, UsageRow};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, PoisonError, mpsc};
+    use std::time::Duration;
 
     /// An account service answering a fixed snapshot or error.
     struct FakeAccounts(Result<AccountsSnapshot, AccountsError>);
@@ -191,10 +188,56 @@ mod tests {
         fn snapshot(&self) -> Result<AccountsSnapshot, AccountsError> {
             self.0.clone()
         }
+
+        fn poll(&self, _scope: PollScope) -> Result<PollReport, AccountsError> {
+            Ok(PollReport {
+                snapshot: self.0.clone()?,
+                next_poll_in: None,
+            })
+        }
+
+        fn begin_shutdown(&self, _bound: Duration) -> bool {
+            true
+        }
     }
 
     fn shared(answer: Result<AccountsSnapshot, AccountsError>) -> SharedAccounts {
-        Arc::new(Mutex::new(Box::new(FakeAccounts(answer))))
+        Arc::new(FakeAccounts(answer))
+    }
+
+    /// An account service whose poll says it has started, then blocks until
+    /// it is released; its snapshot answers at once.
+    struct BlockedPoll {
+        snapshot: AccountsSnapshot,
+        started: Mutex<mpsc::Sender<()>>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl AccountsService for BlockedPoll {
+        fn snapshot(&self) -> Result<AccountsSnapshot, AccountsError> {
+            Ok(self.snapshot.clone())
+        }
+
+        fn poll(&self, _scope: PollScope) -> Result<PollReport, AccountsError> {
+            let _ = self
+                .started
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send(());
+            let _ = self
+                .release
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv();
+            Ok(PollReport {
+                snapshot: self.snapshot.clone(),
+                next_poll_in: None,
+            })
+        }
+
+        fn begin_shutdown(&self, _bound: Duration) -> bool {
+            true
+        }
     }
 
     fn row(number: u32, pct: f64) -> AccountRow {
@@ -359,12 +402,42 @@ mod tests {
         serde_json::to_string(&accounts).expect("every number left is finite");
     }
 
+    #[tokio::test]
+    async fn list_accounts_answers_while_a_poll_is_blocked() {
+        let (mut hub, _scratch) = test_hub("list-accounts-poll-blocked");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let service: SharedAccounts = Arc::new(BlockedPoll {
+            snapshot: AccountsSnapshot {
+                accounts: vec![row(1, 20.0)],
+                auto: None,
+            },
+            started: Mutex::new(started_tx),
+            release: Mutex::new(release_rx),
+        });
+        hub.accounts = Some(Arc::clone(&service));
+        let poller = std::thread::spawn(move || service.poll(PollScope::OnDemand));
+        started_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the poll started");
+
+        // A hang guard only: the answer is awaited on its channel.
+        let answer = tokio::time::timeout(Duration::from_secs(60), list(&hub)).await;
+        release_tx.send(()).expect("the poll is still waiting");
+        let (accounts, _auto) = answer.expect("the list answered while the poll was blocked");
+
+        let numbers: Vec<u32> = accounts.iter().map(|account| account.number).collect();
+        assert_eq!(numbers, [1]);
+        let polled = poller.join().expect("the poll thread did not panic");
+        assert!(polled.is_ok(), "{polled:?}");
+    }
+
     #[test]
     fn elevated_daemon_asks_for_no_accounts_service() {
         let asked = AtomicBool::new(false);
-        let ask = |_: &AccountsConfig| -> Option<Box<dyn AccountsService>> {
+        let ask = |_: &AccountsConfig| -> Option<SharedAccounts> {
             asked.store(true, Ordering::SeqCst);
-            Some(Box::new(FakeAccounts(Ok(AccountsSnapshot::default()))))
+            Some(Arc::new(FakeAccounts(Ok(AccountsSnapshot::default()))))
         };
         let dir = PathBuf::from(r"C:\accounts");
         let elevated =

@@ -10,14 +10,14 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use agent_api::{AccountKindRow, AccountsConfig, Agent, UsageStatus};
+use agent_api::{AccountKindRow, AccountsConfig, AccountsService, Agent, PollScope, UsageStatus};
 use agent_claude::accounts::{BODY_CAP, ProfileClient, RefreshClient, UsageClient};
 use claude_accounts::{
-    AccessToken, CredentialBlob, ProfileTransport, RefreshError, TransportError, UsageTransport,
-    refresh_grant,
+    AccessToken, AccountLock, AccountsRoot, CredentialBlob, ProfileTransport, RefreshError, Store,
+    TransportError, UsageTransport, refresh_grant,
 };
 use serde_json::json;
 
@@ -301,9 +301,218 @@ fn make_private(dir: &Path) {
 #[cfg(not(any(unix, windows)))]
 fn make_private(_dir: &Path) {}
 
-fn service(root: PathBuf) -> Box<dyn agent_api::AccountsService> {
-    Agent::accounts(&agent_claude::CLAUDE, &AccountsConfig::new(root))
-        .expect("the plugin keeps accounts")
+fn service(root: PathBuf) -> Arc<dyn AccountsService> {
+    let home = root.with_file_name("claude");
+    service_at(root, home, None)
+}
+
+/// The plugin's service over the store at `root`, with Claude Code's home at
+/// `home` and its requests sent to `origin` when one is given.
+fn service_at(root: PathBuf, home: PathBuf, origin: Option<&str>) -> Arc<dyn AccountsService> {
+    let mut cfg = AccountsConfig::new(root);
+    cfg.agent_home = Some(home);
+    cfg.base_url = origin.map(str::to_owned);
+    Agent::accounts(&agent_claude::CLAUDE, &cfg).expect("the plugin keeps accounts")
+}
+
+/// A store at `dir/accounts` holding account 1, active, with a credential
+/// that has not expired and no usage read yet.
+fn store_with_one_account(dir: &Path) -> PathBuf {
+    let root = write_store(dir, &[1], &[1], 1, &json!({}));
+    let store = Store::open(AccountsRoot::new(root.clone())).expect("the scratch store opens");
+    let lock =
+        AccountLock::acquire(&AccountsRoot::new(root.clone())).expect("the account lock is free");
+    let credential = json!({"claudeAiOauth": {
+        "accessToken": "fake-access-1",
+        "refreshToken": "fake-refresh-1",
+        "expiresAt": 4_102_444_800_000_u64,
+        "scopes": ["user:inference", "user:profile"],
+        "subscriptionType": "max"
+    }});
+    store
+        .write_credentials(&lock, 1, &CredentialBlob::new(credential.to_string()))
+        .expect("the credential is written");
+    root
+}
+
+/// `at` as an HTTP-date (IMF-fixdate).
+fn http_date(at: jiff::Timestamp) -> String {
+    at.strftime("%a, %d %b %Y %H:%M:%S GMT").to_string()
+}
+
+#[test]
+fn usage_transport_honours_an_http_date_retry_after() {
+    let date = http_date(jiff::Timestamp::now() + jiff::SignedDuration::from_secs(120));
+    let (origin, _rx) = serve(http(
+        "429 Too Many Requests",
+        &[("Retry-After", &date)],
+        b"",
+    ));
+
+    let usage = UsageClient::new(Some(&origin))
+        .get_usage(&token())
+        .expect("a 429 is an answer, not an error");
+
+    assert_eq!(usage.status, 429);
+    let secs = usage.retry_after.expect("the date is read as a wait");
+    assert!(secs > 0.0 && secs <= 120.0, "{secs}");
+}
+
+/// A store at `dir/accounts` with `accounts` as its `accounts.json`, `rows`
+/// as its usage table's rows and `settings` as its `settings.json`.
+fn write_raw_store(
+    dir: &Path,
+    accounts: &serde_json::Value,
+    rows: &serde_json::Value,
+    settings: &serde_json::Value,
+) -> PathBuf {
+    let root = dir.join("accounts");
+    std::fs::create_dir_all(root.join("cache")).expect("the store folders can be made");
+    std::fs::write(root.join("accounts.json"), accounts.to_string())
+        .expect("accounts.json can be written");
+    let usage = json!({"schemaVersion": 3, "accounts": rows});
+    std::fs::write(root.join("cache").join("usage.json"), usage.to_string())
+        .expect("usage.json can be written");
+    std::fs::write(root.join("settings.json"), settings.to_string())
+        .expect("settings.json can be written");
+    root
+}
+
+#[test]
+fn poll_with_no_planned_poll_keeps_the_floor() {
+    let dir = scratch("poll_with_no_planned_poll_keeps_the_floor");
+    let accounts = json!({
+        "schemaVersion": 1,
+        "order": [1],
+        "active": 1,
+        "accounts": {
+            "1": {
+                "email": "user1@example.com",
+                "uuid": "00000000-0000-4000-8000-000000000001",
+                "added": "2026-09-01T10:00:00Z",
+                "kind": "api_key"
+            }
+        }
+    });
+    let settings = json!({"autoswitch": {"intervalSeconds": 15}});
+    let root = write_raw_store(&dir, &accounts, &json!({}), &settings);
+    let (origin, _rx) = serve(http("200 OK", &[], br#"{"five_hour":{"utilization":12}}"#));
+
+    let report = service_at(root, dir.join("claude"), Some(&origin))
+        .poll(PollScope::OnDemand)
+        .expect("the poll runs");
+
+    assert_eq!(report.snapshot.accounts.len(), 1, "{report:?}");
+    let next = report
+        .next_poll_in
+        .expect("a store with an account polls again");
+    assert!(next >= Duration::from_secs(60), "{next:?}");
+}
+
+#[test]
+fn a_disabled_accounts_old_plan_does_not_set_the_next_poll() {
+    let dir = scratch("a_disabled_accounts_old_plan_does_not_set_the_next_poll");
+    let accounts = json!({
+        "schemaVersion": 1,
+        "order": [1],
+        "active": 1,
+        "accounts": {
+            "1": {
+                "email": "user1@example.com",
+                "uuid": "00000000-0000-4000-8000-000000000001",
+                "added": "2026-09-01T10:00:00Z",
+                "disabled": true
+            }
+        }
+    });
+    let rows = json!({
+        "1": {
+            "email": "user1@example.com",
+            "organizationUuid": "",
+            "lastGood": {"five_hour": {"pct": 30.0}},
+            "fetchedAt": 1_000_000_000,
+            "nextPollAt": 1_000_000_060
+        }
+    });
+    let settings = json!({"autoswitch": {"intervalSeconds": 600}});
+    let root = write_raw_store(&dir, &accounts, &rows, &settings);
+    let (origin, _rx) = serve(http("200 OK", &[], br#"{"five_hour":{"utilization":12}}"#));
+
+    let report = service_at(root, dir.join("claude"), Some(&origin))
+        .poll(PollScope::OnDemand)
+        .expect("the poll runs");
+
+    assert_eq!(report.snapshot.accounts.len(), 1, "{report:?}");
+    assert_eq!(report.next_poll_in, Some(Duration::from_secs(600)));
+}
+
+#[test]
+fn accounts_service_poll_of_empty_store_parks() {
+    let dir = scratch("accounts_service_poll_of_empty_store_parks");
+
+    let report = service_at(dir.join("accounts"), dir.join("claude"), None)
+        .poll(PollScope::OnDemand)
+        .expect("a missing store polls as empty");
+
+    assert!(report.snapshot.accounts.is_empty(), "{report:?}");
+    assert_eq!(report.next_poll_in, None);
+}
+
+#[test]
+fn accounts_service_poll_fetches_usage() {
+    let dir = scratch("accounts_service_poll_fetches_usage");
+    let root = store_with_one_account(&dir);
+    let (origin, rx) = serve(http("200 OK", &[], br#"{"five_hour":{"utilization":12}}"#));
+
+    let report = service_at(root, dir.join("claude"), Some(&origin))
+        .poll(PollScope::OnDemand)
+        .expect("the poll runs");
+
+    let request = the_request(&rx);
+    assert!(request.starts_with("GET /api/oauth/usage "), "{request}");
+    let numbers: Vec<u32> = report
+        .snapshot
+        .accounts
+        .iter()
+        .map(|row| row.number)
+        .collect();
+    assert_eq!(numbers, [1]);
+    let five_hour = report.snapshot.accounts[0]
+        .usage
+        .five_hour
+        .as_ref()
+        .expect("the 5-hour window was read");
+    assert!((five_hour.pct - 12.0).abs() < 1e-9, "{five_hour:?}");
+    let next = report
+        .next_poll_in
+        .expect("a store with an account polls again");
+    assert!(next >= Duration::from_secs(60), "{next:?}");
+}
+
+#[tokio::test]
+async fn dropping_a_used_service_on_a_runtime_thread_does_not_panic() {
+    let dir = scratch("dropping_a_used_service_on_a_runtime_thread_does_not_panic");
+    let root = store_with_one_account(&dir);
+    let (origin, _rx) = serve(http("200 OK", &[], br#"{"five_hour":{"utilization":12}}"#));
+    let service = service_at(root, dir.join("claude"), Some(&origin));
+
+    let polling = Arc::clone(&service);
+    let polled = tokio::task::spawn_blocking(move || polling.poll(PollScope::OnDemand))
+        .await
+        .expect("the poll did not panic");
+    assert!(polled.is_ok(), "{polled:?}");
+
+    // The last handle, and with it the client the poll built, drops here, on
+    // a runtime thread.
+    drop(service);
+}
+
+#[test]
+fn begin_shutdown_with_nothing_in_flight_is_idle() {
+    let dir = scratch("begin_shutdown_with_nothing_in_flight_is_idle");
+    let service = service_at(dir.join("accounts"), dir.join("claude"), None);
+
+    assert!(service.begin_shutdown(Duration::ZERO));
 }
 
 #[test]

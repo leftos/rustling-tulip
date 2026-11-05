@@ -26,6 +26,8 @@ chrono = { workspace = true }
 # implements.
 claude-accounts = { workspace = true }
 directories = { workspace = true }
+# The clock the account poll reads, and the HTTP-date `Retry-After` parse.
+jiff = "0.2.37"
 # The process table the account engine checks a lease holder against.
 proc-table = { git = "https://github.com/leftos/gate", rev = "15659c9e38a82270688c3371af2c5b6d7c19a0b6" }
 protocol = { workspace = true }
@@ -45,5 +47,5 @@ zeroize = "1.9.0"
 
 [dev-dependencies]
 agent-api = { workspace = true, features = ["test-support"] }
-# The clock the refresh transport test hands the store's refresh grant.
-jiff = "0.2.37"
+# The runtime thread the account service is dropped on in its drop test.
+tokio = { workspace = true }

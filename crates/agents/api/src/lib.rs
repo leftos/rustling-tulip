@@ -26,7 +26,8 @@ pub mod test_agent;
 
 pub use accounts::{
     AccountKindRow, AccountRow, AccountsConfig, AccountsError, AccountsService, AccountsSnapshot,
-    AutoState, ExtraUsageRow, ModelLimitRow, UsageRow, UsageStatus, UsageWindowRow,
+    AutoState, ExtraUsageRow, ModelLimitRow, PollReport, PollScope, UsageRow, UsageStatus,
+    UsageWindowRow,
 };
 pub use activity::{
     ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, ContextReading, EndedTask,
@@ -839,7 +840,7 @@ pub trait Agent: Send + Sync + 'static {
     /// The service over the account store `cfg` names, which the daemon keeps
     /// and calls off its async threads. `None` for an agent that keeps no
     /// accounts.
-    fn accounts(&self, _cfg: &AccountsConfig) -> Option<Box<dyn AccountsService>> {
+    fn accounts(&self, _cfg: &AccountsConfig) -> Option<std::sync::Arc<dyn AccountsService>> {
         None
     }
 
@@ -1090,7 +1091,7 @@ pub trait AgentPlugin: Send + Sync {
     fn activity_reader(&self, source: &ActivitySource) -> Option<Box<dyn ActivityReader>>;
 
     /// See [`Agent::accounts`].
-    fn accounts(&self, cfg: &AccountsConfig) -> Option<Box<dyn AccountsService>>;
+    fn accounts(&self, cfg: &AccountsConfig) -> Option<std::sync::Arc<dyn AccountsService>>;
 
     /// See [`Agent::summarizer`].
     fn summarizer(&self, request: &SummarizerRequest<'_>) -> Option<SummarizerSpec>;
@@ -1346,7 +1347,7 @@ impl<A: Agent> AgentPlugin for A {
         Agent::activity_reader(self, source)
     }
 
-    fn accounts(&self, cfg: &AccountsConfig) -> Option<Box<dyn AccountsService>> {
+    fn accounts(&self, cfg: &AccountsConfig) -> Option<std::sync::Arc<dyn AccountsService>> {
         Agent::accounts(self, cfg)
     }
 

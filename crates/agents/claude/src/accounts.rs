@@ -2,85 +2,262 @@
 //! blocking HTTP transports the store's polls, refreshes and profile checks go
 //! through, and the process table its engine checks lease holders against.
 //!
-//! Every reqwest client here is blocking: it is built and dropped inside the
-//! call that sends, which the daemon runs off its async threads.
+//! Every reqwest client here is blocking. The service builds one client
+//! inside the first call that sends, which the daemon runs off its async
+//! threads, shares it among the three transports and every later call, and
+//! drops it on a thread of its own, so the service may be dropped anywhere.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use agent_api::{
     AccountKindRow, AccountRow, AccountsConfig, AccountsError, AccountsService, AccountsSnapshot,
-    UsageRow, UsageStatus, UsageWindowRow,
+    PollReport, PollScope, UsageRow, UsageStatus, UsageWindowRow,
 };
 use chrono::{DateTime, Utc};
 use claude_accounts::{
-    AccessToken, AccountKind, AccountRecord, AccountsRoot, Identity, PROFILE_TIMEOUT, PROFILE_URL,
-    PROFILE_USER_AGENT, ProfileTransport, RawProfile, RawToken, RawUsage, RefreshRequest,
-    RefreshTransport, Secret, Store, StoreError, TOKEN_URL, TransportError, USAGE_BETA_HEADER,
-    USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable, UsageTransport, UsageWindow,
+    AccessToken, AccountKind, AccountRecord, AccountsRoot, ClaudePaths, Drain, FetchScope,
+    Identity, LockTiming, PROFILE_TIMEOUT, PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts,
+    ProfileTransport, RawProfile, RawToken, RawUsage, RefreshContext, RefreshRequest,
+    RefreshTransport, Secret, Settings, Store, StoreError, TOKEN_URL, TransportError,
+    USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable, UsageTransport,
+    UsageWindow, poll_with_refresh,
 };
+use directories::UserDirs;
 use reqwest::blocking::{Body, Client, RequestBuilder};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER, USER_AGENT};
 use reqwest::redirect::Policy;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use crate::transcripts::{CONFIG_DIR_VAR, own_claude_home};
+
 /// The most of a response body a transport reads: a longer body is not read
 /// on, and counts as one that does not parse.
 pub const BODY_CAP: usize = 64 * 1024;
 
+/// The variable that moves Claude Code's credentials into a store the
+/// account store does not mirror.
+const SECURESTORAGE_DIR_VAR: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
+
+/// The least wait between two polls, in seconds: the store crate's urgent
+/// cadence, the floor no planned poll is tightened below.
+const POLL_FLOOR_S: f64 = claude_accounts::engine::URGENT_INTERVAL_S;
+
 /// The account service over the store at an [`AccountsConfig`]'s root. It
-/// opens the store on each call, so it shares nothing between calls.
+/// opens the store on each call and holds no lock across calls; what it keeps
+/// is the HTTP client, the stop drain, the ownership verdicts and the process
+/// table, each safe to share between threads.
 pub struct ClaudeAccounts {
     cfg: AccountsConfig,
+    /// Built by the first call that sends, never on an async thread.
+    client: OnceLock<Client>,
+    drain: Arc<Drain>,
+    verdicts: ProbeVerdicts,
+    #[expect(dead_code, reason = "the auto-switch engine (RT-912) reads it")]
+    processes: Box<dyn proc_table::ProcessTable + Send + Sync>,
 }
 
 impl ClaudeAccounts {
     /// The service over the store `cfg` names.
     #[must_use]
     pub fn new(cfg: AccountsConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            client: OnceLock::new(),
+            drain: Arc::new(Drain::new()),
+            verdicts: ProbeVerdicts::new(),
+            processes: process_table(),
+        }
+    }
+
+    /// The shared client, built now when no call has built it yet. A failed
+    /// build is tried again by the next call.
+    fn client(&self) -> Result<&Client, AccountsError> {
+        shared_client(&self.client, self.cfg.base_url.as_deref())
+            .map_err(|_| AccountsError::new("the HTTP client could not be built"))
+    }
+
+    /// Claude Code's files: its home is the config's `agent_home`, else
+    /// `CLAUDE_CONFIG_DIR`, else `<user home>/.claude`; its global config is
+    /// `.claude.json` in the first two, else `<user home>/.claude.json`.
+    fn claude_paths(&self) -> Result<ClaudePaths, AccountsError> {
+        let missing = || AccountsError::new("Claude Code's home folder could not be found");
+        let moved = self.cfg.agent_home.clone().or_else(|| {
+            std::env::var_os(CONFIG_DIR_VAR)
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from)
+        });
+        if let Some(home) = moved {
+            let global = home.join(".claude.json");
+            return Ok(ClaudePaths::new(home, global));
+        }
+        let home = own_claude_home().ok_or_else(missing)?;
+        let user = UserDirs::new().ok_or_else(missing)?;
+        Ok(ClaudePaths::new(home, user.home_dir().join(".claude.json")))
+    }
+
+    fn open_store(&self) -> Result<Store, AccountsError> {
+        Store::open(AccountsRoot::new(self.cfg.root.clone())).map_err(|error| store_error(&error))
+    }
+}
+
+impl Drop for ClaudeAccounts {
+    /// Drops the client on a thread of its own: a blocking client may not be
+    /// dropped on an async thread, and the last handle on the service may be
+    /// dropped on one.
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take()
+            && let Err(error) = std::thread::Builder::new()
+                .name("accounts-client-drop".to_owned())
+                .spawn(move || drop(client))
+        {
+            tracing::warn!(
+                %error,
+                "the account service's HTTP client could not be dropped on a thread of its own; it drops where the service does"
+            );
+        }
     }
 }
 
 impl AccountsService for ClaudeAccounts {
     fn snapshot(&self) -> Result<AccountsSnapshot, AccountsError> {
-        let store = Store::open(AccountsRoot::new(self.cfg.root.clone()))
-            .map_err(|error| store_error(&error))?;
-        let Some(sequence) = store.read_sequence().map_err(|error| store_error(&error))? else {
-            return Ok(AccountsSnapshot::default());
+        Ok(read_store(&self.open_store()?)?.snapshot)
+    }
+
+    fn poll(&self, scope: PollScope) -> Result<PollReport, AccountsError> {
+        let fetch = match scope {
+            PollScope::OnDemand => FetchScope::OnDemand,
+            _ => return Err(AccountsError::new("this poll scope is not supported")),
         };
-        // The rotation order first, then every record it leaves out, by number.
-        let order = sequence.numbers();
-        let records: Vec<AccountRecord> = order
-            .iter()
-            .filter_map(|&number| sequence.account(number))
-            .chain(
-                sequence
-                    .every_record()
-                    .filter(|record| !order.contains(&record.number))
-                    .cloned(),
-            )
-            .collect();
-        let identities: BTreeMap<u32, Identity> = records
-            .iter()
-            .map(|record| (record.number, Identity::of(record)))
-            .collect();
-        let mut usage = UsageTable::entries(store.root(), &identities);
-        let active = sequence.active();
-        let accounts = records
-            .into_iter()
-            .map(|record| {
-                let entry = usage.remove(&record.number).unwrap_or_default();
-                account_row(record, active, &entry)
-            })
-            .collect();
-        Ok(AccountsSnapshot {
-            accounts,
-            auto: None,
+        let store = self.open_store()?;
+        let has_accounts = store
+            .read_sequence()
+            .map_err(|error| store_error(&error))?
+            .is_some_and(|sequence| sequence.every_record().next().is_some());
+        if !has_accounts {
+            return Ok(PollReport::default());
+        }
+        let settings = Settings::read(&store.root().settings())
+            .map_err(|error| {
+                AccountsError::new(format!("the account settings could not be read: {error}"))
+            })?
+            .autoswitch
+            .to_engine();
+        let origin = self.cfg.base_url.as_deref();
+        let client = self.client()?;
+        let usage = UsageClient::with_client(client.clone(), origin);
+        let refresh = RefreshClient::with_client(client.clone(), origin);
+        let profile = ProfileClient::with_client(client.clone(), origin);
+        let claude = self.claude_paths()?;
+        let context = RefreshContext {
+            store: &store,
+            claude: &claude,
+            transport: &refresh,
+            drain: &self.drain,
+            securestorage_dir_set: std::env::var_os(SECURESTORAGE_DIR_VAR).is_some(),
+            clock: &jiff::Timestamp::now,
+            profile: &profile,
+            verdicts: &self.verdicts,
+            claude_locks: LockTiming::CLAUDE,
+        };
+        poll_with_refresh(&usage, &settings, &context, fetch)
+            .map_err(|error| AccountsError::new(error.to_string()))?;
+        let read = read_store(&store)?;
+        let next_poll_in = if read.snapshot.accounts.is_empty() {
+            None
+        } else {
+            Some(next_poll_wait(
+                read.next_poll_at,
+                jiff::Timestamp::now(),
+                settings.interval_seconds,
+            ))
+        };
+        Ok(PollReport {
+            snapshot: read.snapshot,
+            next_poll_in,
         })
     }
+
+    fn begin_shutdown(&self, bound: Duration) -> bool {
+        let _held = self.drain.start();
+        self.drain.wait_idle(bound)
+    }
+}
+
+/// A store as read: its snapshot, and the earliest next poll its usage table
+/// plans for any of its accounts.
+struct StoreRead {
+    snapshot: AccountsSnapshot,
+    next_poll_at: Option<jiff::Timestamp>,
+}
+
+/// Every account in `store`, in its order, with the usage saved for each.
+/// Sends no request: an empty store is an empty snapshot.
+fn read_store(store: &Store) -> Result<StoreRead, AccountsError> {
+    let Some(sequence) = store.read_sequence().map_err(|error| store_error(&error))? else {
+        return Ok(StoreRead {
+            snapshot: AccountsSnapshot::default(),
+            next_poll_at: None,
+        });
+    };
+    // The rotation order first, then every record it leaves out, by number.
+    let order = sequence.numbers();
+    let records: Vec<AccountRecord> = order
+        .iter()
+        .filter_map(|&number| sequence.account(number))
+        .chain(
+            sequence
+                .every_record()
+                .filter(|record| !order.contains(&record.number))
+                .cloned(),
+        )
+        .collect();
+    let identities: BTreeMap<u32, Identity> = records
+        .iter()
+        .map(|record| (record.number, Identity::of(record)))
+        .collect();
+    let mut usage = UsageTable::entries(store.root(), &identities);
+    // A disabled account is never polled, so a plan it kept says nothing
+    // about when the next poll is due.
+    let next_poll_at = records
+        .iter()
+        .filter(|record| !record.disabled)
+        .filter_map(|record| usage.get(&record.number)?.next_poll_at)
+        .min();
+    let active = sequence.active();
+    let accounts = records
+        .into_iter()
+        .map(|record| {
+            let entry = usage.remove(&record.number).unwrap_or_default();
+            account_row(record, active, &entry)
+        })
+        .collect();
+    Ok(StoreRead {
+        snapshot: AccountsSnapshot {
+            accounts,
+            auto: None,
+        },
+        next_poll_at,
+    })
+}
+
+/// The wait from `now` until `next_poll_at`, or `interval_s` (the settings'
+/// poll interval) when no poll is planned; at least [`POLL_FLOOR_S`] either
+/// way.
+fn next_poll_wait(
+    next_poll_at: Option<jiff::Timestamp>,
+    now: jiff::Timestamp,
+    interval_s: f64,
+) -> Duration {
+    let secs = match next_poll_at {
+        Some(at) => at.duration_since(now).as_secs_f64().max(POLL_FLOOR_S),
+        None => interval_s.max(POLL_FLOOR_S),
+    };
+    Duration::try_from_secs_f64(secs).unwrap_or(Duration::from_secs_f64(POLL_FLOOR_S))
 }
 
 /// A store error as the seam's error.
@@ -202,17 +379,61 @@ fn endpoint(real: &str, origin: Option<&str>) -> String {
     format!("{}{path}", origin.trim_end_matches('/'))
 }
 
-/// A client that waits `timeout` for the whole exchange, follows no redirect,
-/// uses no proxy, and speaks only HTTPS unless an origin override is set.
-fn client(timeout: Duration, origin: Option<&str>) -> Result<Client, TransportError> {
+/// A client that follows no redirect, uses no proxy, and speaks only HTTPS
+/// unless an origin override is set. Each request sets its own timeout.
+fn client(origin: Option<&str>) -> Result<Client, TransportError> {
     Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout)
         .redirect(Policy::none())
         .no_proxy()
         .https_only(origin.is_none())
         .build()
         .map_err(|_| TransportError::Connect)
+}
+
+/// The client in `slot`, built for `origin` now when the slot is empty. A
+/// failed build leaves the slot empty, so the next call tries again.
+fn shared_client<'a>(
+    slot: &'a OnceLock<Client>,
+    origin: Option<&str>,
+) -> Result<&'a Client, TransportError> {
+    if let Some(client) = slot.get() {
+        return Ok(client);
+    }
+    let built = client(origin)?;
+    // A racing call may have filled the slot first: its client wins and
+    // `built` drops here, on this (blocking) thread.
+    Ok(slot.get_or_init(|| built))
+}
+
+/// A transport's way out: the origin it sends to in place of the real
+/// endpoint's, and the client it sends with, shared or built on first use.
+struct Http {
+    origin: Option<String>,
+    client: OnceLock<Client>,
+}
+
+impl Http {
+    fn new(origin: Option<&str>) -> Self {
+        Self {
+            origin: origin.map(str::to_owned),
+            client: OnceLock::new(),
+        }
+    }
+
+    fn with_client(client: Client, origin: Option<&str>) -> Self {
+        Self {
+            origin: origin.map(str::to_owned),
+            client: OnceLock::from(client),
+        }
+    }
+
+    fn origin(&self) -> Option<&str> {
+        self.origin.as_deref()
+    }
+
+    fn client(&self) -> Result<&Client, TransportError> {
+        shared_client(&self.client, self.origin())
+    }
 }
 
 /// `Bearer <token>` as a header value marked sensitive, so reqwest never
@@ -243,8 +464,7 @@ fn exchange(request: RequestBuilder) -> Result<Answer, TransportError> {
         .headers()
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|text| text.trim().parse::<f64>().ok())
-        .filter(|secs| secs.is_finite() && *secs >= 0.0);
+        .and_then(|text| retry_after_secs(text, jiff::Timestamp::now()));
     let mut bytes = Zeroizing::new(Vec::with_capacity(BODY_CAP + 1));
     response
         .take(u64::try_from(BODY_CAP + 1).unwrap_or(u64::MAX))
@@ -265,6 +485,20 @@ fn exchange(request: RequestBuilder) -> Result<Answer, TransportError> {
         retry_after,
         body,
     })
+}
+
+/// A `Retry-After` value as a wait in seconds from `now`: a non-negative
+/// finite number of seconds, or an HTTP-date (`Sun, 06 Nov 1994 08:49:37
+/// GMT`), a past one waiting 0. Anything else is `None`.
+fn retry_after_secs(text: &str, now: jiff::Timestamp) -> Option<f64> {
+    let text = text.trim();
+    if let Ok(secs) = text.parse::<f64>() {
+        return (secs.is_finite() && secs >= 0.0).then_some(secs);
+    }
+    let at = jiff::fmt::rfc2822::DateTimeParser::new()
+        .parse_timestamp(text)
+        .ok()?;
+    Some(at.duration_since(now).as_secs_f64().max(0.0))
 }
 
 /// A failed send as a transport error.
@@ -290,29 +524,40 @@ fn read_error(error: &io::Error) -> TransportError {
     }
 }
 
-/// The usage endpoint over a blocking reqwest client.
+/// The usage endpoint over a blocking reqwest client. Drop it off the async
+/// threads once it has sent.
 pub struct UsageClient {
-    origin: Option<String>,
+    http: Http,
 }
 
 impl UsageClient {
-    /// The client for the real endpoint, or for `origin` in its place.
+    /// The client for the real endpoint, or for `origin` in its place,
+    /// building its HTTP client on its first request.
     #[must_use]
     pub fn new(origin: Option<&str>) -> Self {
         Self {
-            origin: origin.map(str::to_owned),
+            http: Http::new(origin),
+        }
+    }
+
+    /// As [`UsageClient::new`], sending with `client` (a shared handle).
+    #[must_use]
+    pub fn with_client(client: Client, origin: Option<&str>) -> Self {
+        Self {
+            http: Http::with_client(client, origin),
         }
     }
 }
 
 impl UsageTransport for UsageClient {
     fn get_usage(&self, token: &AccessToken) -> Result<RawUsage, TransportError> {
-        let origin = self.origin.as_deref();
-        let client = client(USAGE_TIMEOUT, origin)?;
+        let origin = self.http.origin();
         let (beta_name, beta_value) = USAGE_BETA_HEADER;
         let answer = exchange(
-            client
+            self.http
+                .client()?
                 .get(endpoint(USAGE_URL, origin))
+                .timeout(USAGE_TIMEOUT)
                 .header(AUTHORIZATION, bearer(token)?)
                 .header(beta_name, beta_value),
         )?;
@@ -324,17 +569,27 @@ impl UsageTransport for UsageClient {
     }
 }
 
-/// The token endpoint over a blocking reqwest client.
+/// The token endpoint over a blocking reqwest client. Drop it off the async
+/// threads once it has sent.
 pub struct RefreshClient {
-    origin: Option<String>,
+    http: Http,
 }
 
 impl RefreshClient {
-    /// The client for the real endpoint, or for `origin` in its place.
+    /// The client for the real endpoint, or for `origin` in its place,
+    /// building its HTTP client on its first request.
     #[must_use]
     pub fn new(origin: Option<&str>) -> Self {
         Self {
-            origin: origin.map(str::to_owned),
+            http: Http::new(origin),
+        }
+    }
+
+    /// As [`RefreshClient::new`], sending with `client` (a shared handle).
+    #[must_use]
+    pub fn with_client(client: Client, origin: Option<&str>) -> Self {
+        Self {
+            http: Http::with_client(client, origin),
         }
     }
 }
@@ -358,14 +613,15 @@ impl Read for SecretBody {
 
 impl RefreshTransport for RefreshClient {
     fn post_token(&self, request: &RefreshRequest) -> Result<RawToken, TransportError> {
-        let origin = self.origin.as_deref();
-        let client = client(request.timeout(), origin)?;
+        let origin = self.http.origin();
+        let client = self.http.client()?;
         let text = request.json_body();
         let length = u64::try_from(text.expose().len()).unwrap_or(u64::MAX);
         let body = Body::sized(SecretBody { text, at: 0 }, length);
         let answer = exchange(
             client
                 .post(endpoint(TOKEN_URL, origin))
+                .timeout(request.timeout())
                 .header(CONTENT_TYPE, "application/json")
                 .body(body),
         )?;
@@ -376,28 +632,39 @@ impl RefreshTransport for RefreshClient {
     }
 }
 
-/// The profile endpoint over a blocking reqwest client.
+/// The profile endpoint over a blocking reqwest client. Drop it off the async
+/// threads once it has sent.
 pub struct ProfileClient {
-    origin: Option<String>,
+    http: Http,
 }
 
 impl ProfileClient {
-    /// The client for the real endpoint, or for `origin` in its place.
+    /// The client for the real endpoint, or for `origin` in its place,
+    /// building its HTTP client on its first request.
     #[must_use]
     pub fn new(origin: Option<&str>) -> Self {
         Self {
-            origin: origin.map(str::to_owned),
+            http: Http::new(origin),
+        }
+    }
+
+    /// As [`ProfileClient::new`], sending with `client` (a shared handle).
+    #[must_use]
+    pub fn with_client(client: Client, origin: Option<&str>) -> Self {
+        Self {
+            http: Http::with_client(client, origin),
         }
     }
 }
 
 impl ProfileTransport for ProfileClient {
     fn get_profile(&self, access: &AccessToken) -> Result<RawProfile, TransportError> {
-        let origin = self.origin.as_deref();
-        let client = client(PROFILE_TIMEOUT, origin)?;
+        let origin = self.http.origin();
         let answer = exchange(
-            client
+            self.http
+                .client()?
                 .get(endpoint(PROFILE_URL, origin))
+                .timeout(PROFILE_TIMEOUT)
                 .header(AUTHORIZATION, bearer(access)?)
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, PROFILE_USER_AGENT),
@@ -420,5 +687,38 @@ mod tests {
 
         assert_eq!(before.as_deref(), Some("1969-12-31T23:59:58.500+00:00"));
         assert_eq!(after.as_deref(), Some("1970-01-01T00:00:01.500+00:00"));
+    }
+
+    /// 1994-11-06 08:49:37 UTC, the HTTP-date example's time.
+    fn example_now() -> jiff::Timestamp {
+        jiff::Timestamp::UNIX_EPOCH + jiff::SignedDuration::from_secs(784_111_777)
+    }
+
+    #[test]
+    fn retry_after_reads_seconds() {
+        assert_eq!(retry_after_secs("30", example_now()), Some(30.0));
+        assert_eq!(retry_after_secs(" 1.5 ", example_now()), Some(1.5));
+        assert_eq!(retry_after_secs("0", example_now()), Some(0.0));
+    }
+
+    #[test]
+    fn retry_after_reads_an_http_date() {
+        let secs = retry_after_secs("Sun, 06 Nov 1994 08:51:37 GMT", example_now());
+
+        assert_eq!(secs, Some(120.0));
+    }
+
+    #[test]
+    fn retry_after_past_date_is_zero() {
+        let secs = retry_after_secs("Sun, 06 Nov 1994 08:49:00 GMT", example_now());
+
+        assert_eq!(secs, Some(0.0));
+    }
+
+    #[test]
+    fn retry_after_rejects_garbage_and_non_finite() {
+        for text in ["NaN", "inf", "-5", "soon", ""] {
+            assert_eq!(retry_after_secs(text, example_now()), None, "{text:?}");
+        }
     }
 }

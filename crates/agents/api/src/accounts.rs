@@ -10,6 +10,7 @@
 use chrono::{DateTime, Utc};
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Where a plugin's account service keeps its store, and where its requests
 /// go.
@@ -21,6 +22,9 @@ pub struct AccountsConfig {
     /// sends goes to in place of the plugin's own endpoints: the tests' local
     /// server. Plain `http` is accepted only here; `None` in production.
     pub base_url: Option<String>,
+    /// The agent's own config home, overriding the one the plugin resolves
+    /// from the environment: tests only; `None` in production.
+    pub agent_home: Option<PathBuf>,
 }
 
 impl AccountsConfig {
@@ -30,8 +34,27 @@ impl AccountsConfig {
         Self {
             root,
             base_url: None,
+            agent_home: None,
         }
     }
+}
+
+/// Which accounts a poll reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PollScope {
+    /// Every account whose own schedule says it is due.
+    OnDemand,
+}
+
+/// What a poll found: the store's snapshot after it, and when the next poll
+/// is worth sending.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PollReport {
+    pub snapshot: AccountsSnapshot,
+    /// How long until the next poll; `None` when the store has no account,
+    /// so there is nothing to poll until one is added.
+    pub next_poll_in: Option<Duration>,
 }
 
 /// Why an account service could not answer. The message names no secret.
@@ -58,8 +81,10 @@ impl fmt::Display for AccountsError {
 
 impl std::error::Error for AccountsError {}
 
-/// A plugin's accounts, as the daemon holds them. Every method blocks.
-pub trait AccountsService: Send {
+/// A plugin's accounts, as the daemon holds them: shared, and called from
+/// several threads at once, so it holds no lock across calls. Every method
+/// blocks.
+pub trait AccountsService: Send + Sync {
     /// Every account in the store, in the store's order, with the usage it
     /// last saved for each, and the auto-switch state when an engine runs.
     /// Sends no request: a missing or empty store is an empty snapshot.
@@ -68,6 +93,21 @@ pub trait AccountsService: Send {
     ///
     /// The store could not be opened or read.
     fn snapshot(&self) -> Result<AccountsSnapshot, AccountsError>;
+
+    /// Reads the usage of the accounts `scope` names that are due, saves it
+    /// in the store, and returns the snapshot after it with the wait until
+    /// the next poll. A missing or empty store sends no request and is an
+    /// empty snapshot with no next poll.
+    ///
+    /// # Errors
+    ///
+    /// The store or its settings could not be read, or the poll could not
+    /// save what it read.
+    fn poll(&self, scope: PollScope) -> Result<PollReport, AccountsError>;
+
+    /// Refuses every new credential spend from now on and waits up to `bound`
+    /// for the ones in flight: `true` when none is left.
+    fn begin_shutdown(&self, bound: Duration) -> bool;
 }
 
 /// Every account a store holds and the auto-switch state.

@@ -2,10 +2,11 @@
 //! and its typed options cannot drift apart.
 
 use crate::{
-    AccountsConfig, AccountsService, Agent, AgentPlugin, RecoveredRun, SummarizerRequest,
-    decode_options, validate,
+    AccountsConfig, AccountsService, Agent, AgentPlugin, PollScope, RecoveredRun,
+    SummarizerRequest, decode_options, validate,
 };
 use protocol::{AgentDescriptor, FieldKind, OptionValue, OptionValues};
+use std::time::Duration;
 
 /// Check that `agent`'s option schema and its [`Agent::Options`] agree.
 ///
@@ -73,13 +74,15 @@ pub fn check_accounts<A: Agent>(agent: &A) {
     }
 }
 
-/// A snapshot of a store that does not exist is empty when the service
-/// answers it; a refusal (the folder it would live in is not private) is an
-/// error, never a panic.
+/// A snapshot and a poll of a store that does not exist are empty when the
+/// service answers them, and the poll asks for no next poll; a refusal (the
+/// folder it would live in is not private) is an error, never a panic. A
+/// shutdown with nothing in flight is idle at once.
 ///
 /// # Panics
 ///
-/// Panics when the snapshot lists an account.
+/// Panics when the snapshot or the poll lists an account, the poll asks for
+/// a next poll, or the shutdown is not idle.
 pub fn check_accounts_service(service: &dyn AccountsService) {
     if let Ok(snapshot) = service.snapshot() {
         assert!(
@@ -88,6 +91,21 @@ pub fn check_accounts_service(service: &dyn AccountsService) {
             snapshot.accounts
         );
     }
+    if let Ok(report) = service.poll(PollScope::OnDemand) {
+        assert!(
+            report.snapshot.accounts.is_empty(),
+            "a poll of a store that does not exist lists accounts: {:?}",
+            report.snapshot.accounts
+        );
+        assert_eq!(
+            report.next_poll_in, None,
+            "a poll of a store that does not exist asks for a next poll"
+        );
+    }
+    assert!(
+        service.begin_shutdown(Duration::ZERO),
+        "a shutdown with nothing in flight is not idle"
+    );
 }
 
 /// The largest runtime icon a descriptor may carry, in bytes.
@@ -532,6 +550,17 @@ mod tests {
                 accounts: self.0.clone(),
                 auto: None,
             })
+        }
+
+        fn poll(&self, _scope: PollScope) -> Result<crate::PollReport, crate::AccountsError> {
+            Ok(crate::PollReport {
+                snapshot: self.snapshot()?,
+                next_poll_in: None,
+            })
+        }
+
+        fn begin_shutdown(&self, _bound: Duration) -> bool {
+            true
         }
     }
 
