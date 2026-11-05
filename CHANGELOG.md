@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - Opening a subagent's view in Claude no longer raises a false Finished notification or drops the session's background-work ring.
+- Chat no longer flashes "The prompt box has a draft" right after you send a message.
 - The Connections dialog wraps a long tailscale error and a saved host's session count instead of cutting them off.
 - Settings' keep-awake row names the selected host instead of always saying "this PC".
 - With several hosts in the sidebar, This PC's "No repos or workspaces yet" note sits under This PC's header, not above every host.

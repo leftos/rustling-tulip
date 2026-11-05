@@ -1195,15 +1195,36 @@ struct Send {
     at: Instant,
 }
 
+/// The prompt box's draft a send still owns once it has settled: the send's
+/// own paste can stay on screen after its entry arrives and before the turn
+/// starts, and it is not a draft of the owner's.
+#[derive(Debug, Clone)]
+struct Owner {
+    /// The screen has shown the send's paste as a draft.
+    saw_draft: bool,
+    /// The send's pending user entry has arrived.
+    entry_arrived: bool,
+    /// When the send went out, for the backstop.
+    at: Instant,
+}
+
 /// A session's chat send in flight. The daemon sends no success reply: a
 /// send is in flight from `ChatSend` until its pending user entry arrives,
 /// the screen's composer leaves the draft its paste made, or the daemon
 /// refuses it. While it is in flight its paste is not a draft of the
 /// owner's. The last settled send is kept, so a refusal that comes after
 /// its entry still gives its text back.
+///
+/// A send that settled can still own the prompt box's draft for a moment
+/// (`owns_draft`): its paste may stay on screen after its entry arrived
+/// and before the turn starts, so a `Draft` shows no note until the
+/// composer moves past it, the turn starts, a refusal gives the text back,
+/// or the backstop passes.
 #[derive(Debug, Default)]
 pub struct SendTracker {
     in_flight: Option<Send>,
+    /// The send whose paste the prompt box may still show.
+    owner: Option<Owner>,
     settled: Option<Send>,
     /// The recent card answers that took the composer's text, by request
     /// id, so a refusal gives the text back even after the card left.
@@ -1219,6 +1240,11 @@ impl SendTracker {
             saw_draft: false,
             at: now,
         });
+        self.owner = Some(Owner {
+            saw_draft: false,
+            entry_arrived: false,
+            at: now,
+        });
     }
 
     /// A card answer under `request_id` took `text` from the composer.
@@ -1227,6 +1253,16 @@ impl SendTracker {
         if self.taken.len() > TAKEN_CAP {
             self.taken.pop_front();
         }
+    }
+
+    /// Whether the prompt box's draft may still be the send's own paste:
+    /// from the send going out until the composer moves past it, the turn
+    /// starts, or the backstop passes.
+    #[must_use]
+    pub fn owns_draft(&self, now: Instant) -> bool {
+        self.owner
+            .as_ref()
+            .is_some_and(|owner| now < owner.at + SEND_BACKSTOP)
     }
 
     /// Whether a send is in flight.
@@ -1248,30 +1284,53 @@ impl SendTracker {
         });
         if arrived {
             self.settle();
+            if let Some(owner) = self.owner.as_mut() {
+                owner.entry_arrived = true;
+            }
         }
     }
 
     /// The screen's composer now reads `state`: once it has shown the
-    /// send's paste as a draft, leaving the draft settles the send.
+    /// send's paste as a draft, leaving the draft settles the send. The
+    /// ownership of that draft ends when the composer moves past it, the
+    /// turn starts, or a `Ready` follows the send's entry.
     pub fn on_composer(&mut self, state: &ComposerState) {
-        let Some(send) = self.in_flight.as_mut() else {
-            return;
+        if let Some(send) = self.in_flight.as_mut() {
+            if *state == ComposerState::Draft {
+                send.saw_draft = true;
+            } else if send.saw_draft || *state == ComposerState::Working {
+                self.settle();
+            }
+        }
+
+        let ends = match self.owner.as_mut() {
+            Some(owner) if *state == ComposerState::Draft => {
+                owner.saw_draft = true;
+                false
+            }
+            Some(owner) => {
+                *state == ComposerState::Working
+                    || owner.saw_draft
+                    || (*state == ComposerState::Ready && owner.entry_arrived)
+            }
+            None => false,
         };
-        if *state == ComposerState::Draft {
-            send.saw_draft = true;
-        } else if send.saw_draft || *state == ComposerState::Working {
-            self.settle();
+        if ends {
+            self.owner = None;
         }
     }
 
     /// The daemon refused `request_id`: the text of the send it names, in
-    /// flight or the last settled one, which ends with it.
+    /// flight or the last settled one, which ends with it. A refusal of the
+    /// in-flight or the last settled send also ends its ownership of the
+    /// draft, since the text goes back to the composer and its paste is gone.
     pub fn refused(&mut self, request_id: &str) -> Option<String> {
         if self
             .in_flight
             .as_ref()
             .is_some_and(|send| send.request_id == request_id)
         {
+            self.owner = None;
             return self.in_flight.take().map(|send| send.text);
         }
         if self
@@ -1279,6 +1338,7 @@ impl SendTracker {
             .as_ref()
             .is_some_and(|send| send.request_id == request_id)
         {
+            self.owner = None;
             return self.settled.take().map(|send| send.text);
         }
         let taken = self.taken.iter().position(|(sent, _)| sent == request_id)?;
@@ -1348,13 +1408,15 @@ impl ComposerNote {
 
 /// The note the composer shows: none while it can send. `connected` says
 /// the daemon connection is open, `state` is the screen's last composer
-/// state (none before the chat loaded), and `sending` says our own send is
-/// in flight, whose paste reads as a draft.
+/// state (none before the chat loaded), `sending` says our own send is in
+/// flight, whose paste reads as a draft, and `owns_draft` says a settled
+/// send may still own the draft the screen shows, which then shows no note.
 #[must_use]
 pub fn composer_note(
     connected: bool,
     state: Option<&ComposerState>,
     sending: bool,
+    owns_draft: bool,
 ) -> Option<ComposerNote> {
     if !connected {
         return Some(ComposerNote::NotConnected);
@@ -1363,6 +1425,7 @@ pub fn composer_note(
         return Some(ComposerNote::Sending);
     }
     match state? {
+        ComposerState::Draft if owns_draft => None,
         ComposerState::Draft => Some(ComposerNote::Draft),
         ComposerState::Overlay { name } => Some(ComposerNote::Overlay(name.clone())),
         ComposerState::Unknown => Some(ComposerNote::Unknown),
@@ -2690,23 +2753,23 @@ mod strip_tests {
     fn the_composer_note_says_why_a_send_cannot_go() {
         use super::{ComposerNote, composer_note};
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Ready), false),
+            composer_note(true, Some(&ComposerState::Ready), false, false),
             None
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Working), false),
+            composer_note(true, Some(&ComposerState::Working), false, false),
             None
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Dialog), false),
+            composer_note(true, Some(&ComposerState::Dialog), false, false),
             None
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Draft), false),
+            composer_note(true, Some(&ComposerState::Draft), false, false),
             Some(ComposerNote::Draft)
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Draft), true),
+            composer_note(true, Some(&ComposerState::Draft), true, false),
             Some(ComposerNote::Sending),
             "our own send in flight reads as sending"
         );
@@ -2714,11 +2777,12 @@ mod strip_tests {
             name: "/model".to_owned(),
         };
         assert_eq!(
-            composer_note(true, Some(&overlay), false).map(|note| note.text()),
+            composer_note(true, Some(&overlay), false, false).map(|note| note.text()),
             Some("/model is open in the terminal. Close it there to send.".to_owned())
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Unknown), false).map(|note| note.text()),
+            composer_note(true, Some(&ComposerState::Unknown), false, false)
+                .map(|note| note.text()),
             Some("Can't read the prompt box right now.".to_owned())
         );
         assert_eq!(
@@ -2726,12 +2790,165 @@ mod strip_tests {
             "The prompt box has a draft. Send or clear it in the terminal first."
         );
         assert_eq!(
-            composer_note(false, Some(&ComposerState::Ready), false).map(|note| note.text()),
+            composer_note(false, Some(&ComposerState::Ready), false, false).map(|note| note.text()),
             Some("Not connected".to_owned())
         );
         assert!(ComposerNote::NotConnected.disables());
         assert!(!ComposerNote::Draft.disables());
-        assert_eq!(composer_note(true, None, false), None);
+        assert_eq!(composer_note(true, None, false, false), None);
+        assert_eq!(
+            composer_note(true, Some(&ComposerState::Draft), false, true),
+            None,
+            "a draft the send owns shows no note"
+        );
+        assert_eq!(
+            composer_note(true, Some(&ComposerState::Draft), true, true),
+            Some(ComposerNote::Sending),
+            "sending still wins over an owned draft"
+        );
+    }
+
+    /// The note the composer shows with `state`, after `sends`' last step.
+    fn composer_note_shown(
+        sends: &super::SendTracker,
+        state: &ComposerState,
+        now: Instant,
+    ) -> Option<super::ComposerNote> {
+        super::composer_note(
+            true,
+            Some(state),
+            sends.in_flight(now),
+            sends.owns_draft(now),
+        )
+    }
+
+    #[test]
+    fn a_draft_after_the_pending_entry_is_still_ours() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), at);
+        sends.on_entries(&[pending_user("pending:1", "hello")]);
+        assert_eq!(composer_note_shown(&sends, &ComposerState::Ready, at), None);
+        sends.on_composer(&ComposerState::Draft);
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Draft, at),
+            None,
+            "the send's own paste is not the owner's draft"
+        );
+        sends.on_composer(&ComposerState::Working);
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Working, at),
+            None
+        );
+        assert!(
+            !sends.owns_draft(at),
+            "the turn starting ends the ownership"
+        );
+    }
+
+    #[test]
+    fn a_draft_before_the_pending_entry_reads_sending_then_nothing() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), at);
+        sends.on_composer(&ComposerState::Draft);
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Draft, at),
+            Some(super::ComposerNote::Sending)
+        );
+        sends.on_entries(&[pending_user("pending:1", "hello")]);
+        assert_eq!(composer_note_shown(&sends, &ComposerState::Draft, at), None);
+        sends.on_composer(&ComposerState::Working);
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Working, at),
+            None
+        );
+    }
+
+    #[test]
+    fn ready_after_the_pending_entry_ends_the_ownership() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), at);
+        sends.on_entries(&[pending_user("pending:1", "hello")]);
+        assert_eq!(composer_note_shown(&sends, &ComposerState::Ready, at), None);
+        sends.on_composer(&ComposerState::Ready);
+        assert_eq!(composer_note_shown(&sends, &ComposerState::Ready, at), None);
+        sends.on_composer(&ComposerState::Draft);
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Draft, at),
+            Some(super::ComposerNote::Draft),
+            "a draft after the send settled is the owner's"
+        );
+    }
+
+    #[test]
+    fn leaving_the_draft_ends_the_ownership() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), at);
+        sends.on_composer(&ComposerState::Draft);
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Draft, at),
+            Some(super::ComposerNote::Sending)
+        );
+        sends.on_composer(&ComposerState::Ready);
+        assert_eq!(composer_note_shown(&sends, &ComposerState::Ready, at), None);
+        sends.on_composer(&ComposerState::Draft);
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Draft, at),
+            Some(super::ComposerNote::Draft)
+        );
+    }
+
+    #[test]
+    fn ownership_ends_at_the_backstop() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), at);
+        sends.on_entries(&[pending_user("pending:1", "hello")]);
+        sends.on_composer(&ComposerState::Draft);
+        assert_eq!(
+            composer_note_shown(
+                &sends,
+                &ComposerState::Draft,
+                at + Duration::from_millis(9_999)
+            ),
+            None
+        );
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Draft, at + super::SEND_BACKSTOP),
+            Some(super::ComposerNote::Draft),
+            "the backstop gives the box back to the owner"
+        );
+    }
+
+    #[test]
+    fn a_refusal_ends_the_ownership() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), at);
+        sends.on_composer(&ComposerState::Draft);
+        assert_eq!(sends.refused("r1"), Some("hello".to_owned()));
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Draft, at),
+            Some(super::ComposerNote::Draft)
+        );
+    }
+
+    #[test]
+    fn a_refusal_after_the_pending_entry_ends_the_ownership() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), at);
+        sends.on_entries(&[pending_user("pending:1", "hello")]);
+        sends.on_composer(&ComposerState::Draft);
+        assert_eq!(sends.refused("r1"), Some("hello".to_owned()));
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Draft, at),
+            Some(super::ComposerNote::Draft),
+            "the settled send's refusal gives the draft back to the owner"
+        );
     }
 }
 
