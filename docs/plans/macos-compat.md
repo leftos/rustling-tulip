@@ -169,6 +169,17 @@ Checks:
 - [x] Clean stop: `kill` of each session, `rustling-tulipd shutdown` of each daemon and a TERM to the client leave no `rt-tracer`, `rustling-tulipd` or fake-claude process, and the tracer sockets are gone from the temp folder.
 - [ ] A shell tab takes keys in the window, Cmd+C and Cmd+V copy and paste (or only Ctrl does), and a Claude session's status shows in the sidebar and pane: not run. Driving the window needs `osascript` and System Events, which hung without an Automation or Accessibility grant, so these need a person at the console or over RustDesk.
 
+The app's own toasts on the Mac mini (macOS 27.0, one 1920×1080 display at scale 1, a debug build, the client isolated under a scratch folder and launched through a `.command` file, toasts raised by the fake CLI's `rt-perm` prompt and closed with `send <id> --keys 1`, windows read with a Swift probe over `CGWindowListCopyWindowInfo`, `NSScreen` and `NSWorkspace`):
+
+- [x] A toast is a layer-101 window 360 points wide, 16 points inside the visible frame's right and bottom edges, clear of the menu bar. `NSScreen.visibleFrame` drifts on a locked console, so a toast is compared against a reading taken at the same moment.
+- [x] Toasts stack and close: a new toast takes the corner and pushes the older ones up by its height plus 8 points; closing one moves the rest back; a Finished toast expires after 6 s and the stack settles.
+- [x] With another app's window opened, a toast stays on screen at layer 101 and the client stays inactive.
+- [x] The logs hold no `already borrowed`, panic or toast-placer warning.
+- [ ] A toast raised while the client is hidden shows but unhides the whole app (RT-1040: the window is ordered front at open, before the panel's `canHide` is turned off).
+- [ ] The frontmost application is unchanged by a toast, and a click on a toast's button leaves the keyboard with the app the user is typing in: not measurable with the console locked (`loginwindow` stays frontmost and no app becomes active); needs the console unlocked, in person or over RustDesk.
+
+A Swift script run from SSH can read the window list and hide or unhide an app (`NSRunningApplication.hide()` returns false but works); Python there has no Quartz bindings.
+
 What the logs say on macOS that is not a launch blocker:
 
 - The client logs `opening the device token store, holding no device tokens: device tokens live in Windows Credential Manager; there is no store off Windows`, so tailnet device tokens are not kept on macOS.
