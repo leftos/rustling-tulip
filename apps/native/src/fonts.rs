@@ -75,8 +75,9 @@ const fn italic(family: &'static str, weight: u16, data: &'static [u8]) -> Face 
 
 /// The bundled faces: Regular, Medium, `SemiBold` and Bold of each family
 /// (Cascadia Code has no static Medium), plus Italic and Bold Italic where
-/// the family has them (Fira Code has none).
-const BUNDLED_FILES: [Face; 21] = [
+/// the family has them (Fira Code has none), and Medium Italic and `SemiBold`
+/// Italic where upstream ships them (Cascadia Code has no Medium Italic).
+const BUNDLED_FILES: [Face; 26] = [
     upright(
         "Geist Mono",
         400,
@@ -101,6 +102,16 @@ const BUNDLED_FILES: [Face; 21] = [
         "Geist Mono",
         400,
         include_bytes!("../assets/fonts/GeistMono/GeistMono-Italic.ttf"),
+    ),
+    italic(
+        "Geist Mono",
+        500,
+        include_bytes!("../assets/fonts/GeistMono/GeistMono-MediumItalic.ttf"),
+    ),
+    italic(
+        "Geist Mono",
+        600,
+        include_bytes!("../assets/fonts/GeistMono/GeistMono-SemiBoldItalic.ttf"),
     ),
     italic(
         "Geist Mono",
@@ -154,6 +165,16 @@ const BUNDLED_FILES: [Face; 21] = [
     ),
     italic(
         "JetBrains Mono",
+        500,
+        include_bytes!("../assets/fonts/JetBrainsMono/JetBrainsMono-MediumItalic.ttf"),
+    ),
+    italic(
+        "JetBrains Mono",
+        600,
+        include_bytes!("../assets/fonts/JetBrainsMono/JetBrainsMono-SemiBoldItalic.ttf"),
+    ),
+    italic(
+        "JetBrains Mono",
         700,
         include_bytes!("../assets/fonts/JetBrainsMono/JetBrainsMono-BoldItalic.ttf"),
     ),
@@ -176,6 +197,11 @@ const BUNDLED_FILES: [Face; 21] = [
         "Cascadia Code",
         400,
         include_bytes!("../assets/fonts/CascadiaCode/CascadiaCode-Italic.ttf"),
+    ),
+    italic(
+        "Cascadia Code",
+        600,
+        include_bytes!("../assets/fonts/CascadiaCode/CascadiaCode-SemiBoldItalic.ttf"),
     ),
     italic(
         "Cascadia Code",
@@ -1048,6 +1074,33 @@ mod tests {
                 &[400, 500, 600, 700]
             };
             assert_eq!(upright, expected, "{family}'s upright faces");
+        }
+    }
+
+    #[test]
+    fn every_terminal_weight_has_an_italic_face() {
+        // Cascadia Code has no static Medium upstream, so it has no Medium Italic either.
+        const NO_UPSTREAM_FACE: [(&str, u16); 1] = [("Cascadia Code", 500)];
+        let italic_families: Vec<&str> = BUNDLED_FILES
+            .iter()
+            .filter(|face| face.italic)
+            .map(|face| face.family)
+            .collect();
+        for family in BUNDLED_FAMILIES
+            .into_iter()
+            .filter(|family| italic_families.contains(family))
+        {
+            for weight in TERMINAL_WEIGHTS {
+                if NO_UPSTREAM_FACE.contains(&(family, weight)) {
+                    continue;
+                }
+                assert!(
+                    BUNDLED_FILES
+                        .iter()
+                        .any(|face| face.family == family && face.italic && face.weight == weight),
+                    "{family} has no italic face at {weight}"
+                );
+            }
         }
     }
 
