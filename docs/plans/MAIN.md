@@ -4,14 +4,10 @@
 
 ## Wave 17 — Themes
 
-- [ ] RT-587 Carry the Contrast look into the HTML viewer template, modal inputs, the installer icon and hovered icons · release vNext
-- [ ] RT-619 Match italic terminal text to the Medium and SemiBold terminal weights · release vNext
 - [ ] RT-674 Step the appearance editor from in-flight values and save an app change once
 
 ## Wave 16 — Several hosts in one window
 
-- [ ] RT-626 Keep a session's remembered chat view when its pane moves to the owning host · release vNext
-- [ ] RT-628 Set the Settings host selector apart from the tab list and dim offline hosts · release vNext
 - [ ] RT-839 Give the keyboard back to the dialog under a closed cleanup failure, and scope the launch highlight to its host
 - [ ] RT-841 Refresh an open spawn dialog on a host's Agents and AgentSettings, and its host label
 - [ ] RT-865 Keep remote hosts usable while This PC's connecting overlay is up
@@ -155,12 +151,11 @@
 ## Wave 12 — Claude accounts and artifacts by account
 
 - [ ] RT-39 Built-in Claude account switching: several logins, usage polling and switching · release vNext
-  - [ ] RT-912 Accounts: auto-switch driver (CA.9) · release vNext
-    - [/] RT-968 Auto-switch: the engine loop under its lease · release vNext
   - [ ] RT-914 Accounts: Settings > Accounts page and toasts (CA.8, CA.10) · release vNext
+    - [ ] RT-980 Accounts: account toasts and the Account switches toggle (CA.10) · release vNext
+    - [ ] RT-981 Accounts: the settings-accounts shot view and the page's docs · release vNext
   - [ ] RT-915 Accounts: daemon-driven login and the docs (CA.11, CA.12) · release vNext
   - [ ] RT-916 Accounts on macOS: Unix locks and the Keychain credential in the forked claude-accounts crate · release vNext
-    - [/] RT-962 Accounts on macOS: the live login through the Keychain · release vNext
     - [ ] RT-964 Accounts: list the accounts feature only where accounts work · release vNext
     - [ ] RT-965 Accounts on macOS: a switch smoke run on the Mac mini · release vNext
   - [ ] RT-924 Merge feat/claude-accounts to main (#205)
@@ -401,10 +396,8 @@
 - [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
 - [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
 - [ ] RT-640 Polish found by the v0.6.0-alpha smoke test · release vNext
-  - [ ] RT-645 Keep the host header's Connecting… clear of + Repo · release vNext
-  - [ ] RT-646 Keep a reconnecting host's Claude pane titles · release vNext
-  - [ ] RT-647 Fit the sidebar view switcher and pane titles at text size +4 · release vNext
   - [ ] RT-649 Keep the pane header tooltip off the Terminal, Chat and Summary labels · release vNext
+  - [ ] RT-984 Fit the sidebar view switcher at the minimum sidebar width and text size +4
 - [ ] RT-701 Replace the Fetching toast with the error when a page fetch fails
 - [ ] RT-702 Close a chat's Tail boxes when its load is refused or its host lacks file_tail
 - [ ] RT-712 Polish the Spawn submenu and New session dialog from the v0.7.0-alpha smoke
@@ -479,10 +472,11 @@
 - [ ] RT-972 Accounts chip: stop asking for the list again after every switch
 - [ ] RT-973 Accounts settings: read, change and write under one lock hold
 - [ ] RT-974 Auto-switch: let a bad accounts settings file be repaired
+- [ ] RT-983 Accounts: report a fractional auto-switch cooldown without truncating it
 
 ## Design files
 
-- [accounts.md](accounts.md) — RT-39, RT-277, RT-912, RT-914, RT-915, RT-964
+- [accounts.md](accounts.md) — RT-39, RT-277, RT-914, RT-915, RT-964, RT-981
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
