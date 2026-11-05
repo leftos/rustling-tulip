@@ -7,8 +7,9 @@
 **M1 and M2 implemented 2026-05-30 (code-complete, Windows build/clippy/test/deny
 green; pending verification on a real Mac).** Scope this round: M1 (IPC over
 `interprocess` local sockets) and M2 (Unix process-tree cleanup via `killpg`),
-both on `main`. M3 (macOS autostart LaunchAgent) is **not** on `main`: it exists
-only on the retired `tauri` branch (RT-156). Distribution scope was set to
+both on `main`. M3 (macOS autostart LaunchAgent) is on `main` too, in
+`crates/daemon-client/src/autostart.rs`, compile-checked and unit-tested on macOS
+(RT-246); only the check that launchd loads it at login on a real Mac is open. Distribution scope was set to
 **local dev builds only** — packaging/signing (M4) stays deferred. Both open
 decisions are now settled (see "Decisions"). What's left is runtime verification
 on macOS (and a Windows runtime reattach smoke test, since M1 replaced the
@@ -36,7 +37,7 @@ sockets on both platforms. Everything else is either already done, a one-line
 
 ### The blockers, ranked
 
-> **Superseded:** items 1 and 2 landed on `main` (M1 and M2); item 3, the LaunchAgent arm, is not on `main` and lives only on the retired `tauri` branch (RT-156); item 4 stays deferred with local dev builds only.
+> **Superseded:** items 1 and 2 landed on `main` (M1 and M2); item 3, the LaunchAgent arm, is on `main` in `crates/daemon-client/src/autostart.rs` (RT-246); item 4 stays deferred with local dev builds only.
 
 1. **Tracer IPC transport (HARD).** Named pipes (`tokio::net::windows::named_pipe`)
    in both the tracer server and the daemon client, plus the `\\.\pipe\…` name
@@ -113,7 +114,7 @@ abstracted. Two viable shapes:
 
 ## 3. Autostart on login
 
-Note: the Tauri app, with `autostart.rs` and its macOS arm, is no longer on `main`; it lives on the `tauri` branch (tag `tauri-last`), and the native client recovers `autostart.rs` from the tag in its Phase 6. The `apps/tauri-app/...` paths, frontend files and `pnpm tauri` commands in this plan refer to that branch.
+Note: the Tauri app is no longer on `main`; it lives on the `tauri` branch (tag `tauri-last`). Its `autostart.rs` was recovered into `crates/daemon-client/src/autostart.rs`, macOS arm included. The `apps/tauri-app/...` paths, frontend files and `pnpm tauri` commands in this plan refer to that branch.
 
 - `apps/tauri-app/src-tauri/src/autostart.rs` — Windows arm (HKCU `Run` via
   `winreg`, lines ~12–49); non-Windows `get_autostart` returns `false` (~54–62)
@@ -121,14 +122,13 @@ Note: the Tauri app, with `autostart.rs` and its macOS arm, is no longer on `mai
   `[target.'cfg(windows)'.dependencies]`.
 - Frontend already gates the toggle when unsupported
   (`SettingsModal.tsx` ~931–944, hides when the value is `null`).
-- [ ] macOS arm **not on `main`**: it exists only on the retired `tauri` branch
-      (RT-156), recovered by the native client's Phase 6. Where it lands:
-      write/remove `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist`
+- [ ] macOS arm, on `main` in `crates/daemon-client/src/autostart.rs` (compile-checked and unit-tested on macOS, RT-246): it
+      writes/removes `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist`
       (hand-emitted XML — no `plist` dep), `ProgramArguments` from
-      `daemon_client::locate_daemon_binary`, `RunAtLoad`. **File-only** (no
+      `daemon_client::locate_daemon_binary` then `--detach` (the same hand-over to the cached copy as the Windows `Run` value), `AbandonProcessGroup` true so launchd spares the cached daemon, `RunAtLoad`, and no `KeepAlive`. **File-only** (no
       `launchctl load` on toggle: that would start a second daemon while the
       app's supervisor runs one; the file gives next-login parity with the
-      Windows `Run` key). *Verify on macOS that launchd loads it at login;
+      Windows `Run` key). Left open: *verify on a real Mac that launchd loads it at login;
       consider an `EnvironmentVariables`/PATH key if the daemon can't find
       `claude` in launchd's minimal env.*
 
@@ -198,9 +198,9 @@ Confirmed dual-arm or platform-neutral during the sweep:
 - [x] **Phase M2 — process-tree cleanup.** `#[cfg(unix)]` `killpg` (SIGTERM →
       SIGKILL) on tracer shutdown, mirroring the Windows job object. Relies on
       `portable-pty` making the child a session leader — *verify on macOS.*
-- [ ] **Phase M3 — autostart (LaunchAgent).** Not on `main` (retired `tauri` branch; RT-156). Writes/removes
-      `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist` (file-only;
-      no `launchctl load` on toggle, to avoid a double daemon). *Verify on macOS.*
+- [ ] **Phase M3 — autostart (LaunchAgent).** On `main` (`crates/daemon-client/src/autostart.rs`, RT-246). Writes/removes
+      `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist` with `--detach`, `RunAtLoad`, `AbandonProcessGroup` and no `KeepAlive` (file-only;
+      no `launchctl load` on toggle, to avoid a double daemon). Left unticked: *verify on a real Mac that launchd loads it at login.*
 - [ ] **Phase M4 — packaging + signing/notarization** for distribution.
       Deferred (local dev only this round).
 

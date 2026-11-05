@@ -13,7 +13,9 @@
 //!   of running the installed exe, which the next installer or rebuild would
 //!   have to replace (see `daemon::detach`).
 //! - **macOS:** a per-user `LaunchAgent` plist under `~/Library/LaunchAgents`,
-//!   written in its final form; launchd loads it at login.
+//!   holding the daemon path followed by `--detach` — the same hand-over to the
+//!   cached copy the Windows value asks for — written in its final form; launchd
+//!   loads it at login.
 //!
 //! [`refresh_registration`] runs at client startup and brings only an entry
 //! that already names this install's daemon up to date: the same program
@@ -282,7 +284,11 @@ mod imp {
     /// Emit the `LaunchAgent` plist. Writing the file is enough: launchd scans
     /// `~/Library/LaunchAgents` at login, and loading it now would start a
     /// second daemon beside the one the client supervises. `RunAtLoad` starts
-    /// the daemon when launchd loads the agent.
+    /// the agent when launchd loads it, and `--detach` makes the started daemon
+    /// hand over to the cached copy and exit. `AbandonProcessGroup` keeps
+    /// launchd from killing that cached daemon when the launcher exits, and
+    /// without `KeepAlive` launchd does not relaunch the launcher it just saw
+    /// exit.
     fn plist_xml(label: &str, daemon_path: &str) -> String {
         const TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -293,7 +299,10 @@ mod imp {
     <key>ProgramArguments</key>
     <array>
         <string>__PROGRAM__</string>
+        <string>--detach</string>
     </array>
+    <key>AbandonProcessGroup</key>
+    <true/>
     <key>RunAtLoad</key>
     <true/>
 </dict>
@@ -335,6 +344,54 @@ mod tests {
         assert_eq!(
             run_value(r"C:\Program Files\rustling-tulip\rustling-tulipd.exe"),
             "\"C:\\Program Files\\rustling-tulip\\rustling-tulipd.exe\" --detach"
+        );
+    }
+
+    /// The login agent hands over to the cached daemon copy and lets it live:
+    /// `--detach` on the program, `AbandonProcessGroup` so launchd spares the
+    /// cached daemon, and no `KeepAlive` so the exited launcher is not
+    /// relaunched.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "tests assert preconditions with expect; failure messages aid debugging"
+    )]
+    fn the_launch_agent_detaches_and_abandons_its_process_group() {
+        const PROGRAM: &str = "/Applications/rustling-tulip.app/Contents/MacOS/rustling-tulipd";
+        let path = std::env::temp_dir().join(format!(
+            "rustling-tulip-launch-agent-{}-{}.plist",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+
+        super::imp::set_at(&path, true, || Ok(PROGRAM.to_owned()))
+            .expect("write the LaunchAgent plist");
+        let xml = std::fs::read_to_string(&path).expect("read the written LaunchAgent plist");
+        let _ = std::fs::remove_file(&path);
+
+        let program = format!("<string>{PROGRAM}</string>");
+        let program_at = xml
+            .find(&program)
+            .expect("the plist names the daemon program");
+        let detach_at = xml
+            .find("<string>--detach</string>")
+            .expect("the launch arguments carry --detach");
+        assert!(
+            detach_at > program_at,
+            "the daemon path must come before --detach in ProgramArguments: {xml}"
+        );
+        assert!(
+            xml.contains("<key>AbandonProcessGroup</key>\n    <true/>"),
+            "launchd must abandon the handed-over daemon's process group: {xml}"
+        );
+        assert!(
+            xml.contains("<key>RunAtLoad</key>\n    <true/>"),
+            "the agent must start at login: {xml}"
+        );
+        assert!(
+            !xml.contains("KeepAlive"),
+            "launchd must not relaunch the launcher that exited: {xml}"
         );
     }
 }
