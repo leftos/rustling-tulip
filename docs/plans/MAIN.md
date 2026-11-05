@@ -20,6 +20,7 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
+- [ ] RT-956 Default shell: host agent sessions in WSL (DS.3, after a measured spike)
 - [ ] RT-526 Show a scrollbar on every scrolling area of the native client
 - [ ] RT-753 Stitch a hard-wrapped terminal path whose continuation row is indented
 - [ ] RT-544 Take the bind and cert files off the tailnet listener's paused-clock schedule tests
@@ -28,8 +29,6 @@
 - [ ] RT-690 Cut a dimmed headless Last row's summary with an ellipsis in the Spawn submenu
 - [ ] RT-694 Keep the footer from clipping in a narrow window and clear a stale not-found status
 - [ ] RT-699 Keep the terminal link tip off dialogs and the link, and name Cmd on macOS
-- [ ] RT-844 Choose the default shell in Settings, with installed shells and a custom command · release vNext
-  - [ ] RT-956 Default shell: host agent sessions in WSL (DS.3, after a measured spike)
 - [ ] RT-918 Split the agent launch command by Windows rules on Windows, so backslash paths survive
 - [ ] RT-921 Default shell: move the save check off the runtime, and detect WSL that is really installed
 - [ ] RT-930 Jump to a pane, tab or sidebar repo or workspace with a Ctrl+Shift+P palette · release vNext+1
@@ -151,13 +150,12 @@
 ## Wave 12 — Claude accounts and artifacts by account
 
 - [ ] RT-39 Built-in Claude account switching: several logins, usage polling and switching · release vNext
-  - [ ] RT-914 Accounts: Settings > Accounts page and toasts (CA.8, CA.10) · release vNext
-    - [ ] RT-980 Accounts: account toasts and the Account switches toggle (CA.10) · release vNext
-    - [ ] RT-981 Accounts: the settings-accounts shot view and the page's docs · release vNext
   - [ ] RT-915 Accounts: daemon-driven login and the docs (CA.11, CA.12) · release vNext
-  - [ ] RT-916 Accounts on macOS: Unix locks and the Keychain credential in the forked claude-accounts crate · release vNext
-    - [ ] RT-964 Accounts: list the accounts feature only where accounts work · release vNext
-    - [ ] RT-965 Accounts on macOS: a switch smoke run on the Mac mini · release vNext
+    - [ ] RT-988 Login: document the daemon-driven login and promote the accounts plan (RT-915 part F) · release vNext
+    - [ ] RT-991 Login: StartAccountLogin and the daemon's login session (RT-915 part C) · release vNext
+      - [ ] RT-1005 Login C2: run the login session, cancel, time out, shut down and sweep (RT-991) · release vNext
+    - [ ] RT-992 Login: the Log in a new account button on Settings › Accounts (RT-915 part D) · release vNext
+    - [ ] RT-993 Login: live specs for a login, a failure and a cancel (RT-915 part E) · release vNext
   - [ ] RT-924 Merge feat/claude-accounts to main (#205)
   - [ ] RT-958 Accounts: answer Draining at once for switch and capture, Unsupported for an unsupported lock, and fix the remove-timeout text
 - [ ] RT-112 PW.13: Accounts screen on the phone
@@ -171,8 +169,16 @@
 
 ## Wave 13 — ops-tower views: gates, board and dock
 
-- [ ] RT-64 Re-cut RT-55 and gate-dashboard.md around ops-tower's gate-state and proc-table crates · release vNext
 - [ ] RT-55 Gate dashboard in the client · release vNext
+  - [ ] RT-995 Gates: pin leftos/gate's gate-state and proc-table crates (GD.1) · release vNext
+  - [ ] RT-996 Gates: GateState, SetGateSlotCount and the history request on the wire (GD.2) · release vNext
+  - [ ] RT-997 Gates: read the gate state in the daemon and convert it to the wire types (GD.3) · release vNext
+  - [ ] RT-998 Gates: push the gate state from the hub on connect and on change (GD.4) · release vNext
+  - [ ] RT-999 Gates: change a slot count from the client (GD.5) · release vNext
+  - [ ] RT-1000 Gates: the client's gate model and the Gates rail item (GD.6) · release vNext
+  - [ ] RT-1001 Gates: the Gates view and the footer strip (GD.7) · release vNext
+  - [ ] RT-1002 Gates: the gate run history (GD.8) · release vNext
+  - [ ] RT-1003 Gates: document the gate view and retire the gate-dashboard plan (GD.9) · release vNext
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-159 Corner status window: Needs you, Just finished and a Working ticker
 
@@ -267,6 +273,7 @@
   - [ ] RT-812 Check that a window minimised in front of the driven client never hands it the foreground
 - [ ] RT-840 Sign the installer's uninstaller too
 - [ ] RT-861 Forget a driver id's bounds in UI specs once it stops being drawn
+- [ ] RT-994 Pass rt.ps1 mac's extra cargo arguments through, and keep --all-targets for mac clippy
 
 ## macOS
 
@@ -274,7 +281,6 @@
 - [ ] RT-665 Ship rustling-tulip on macOS: verified build, signed .app and .dmg, auto-update · release vNext
   - [ ] RT-46 Verify macOS support M0–M3 on real Mac hardware · release vNext
   - [ ] RT-47 M4: macOS packaging, signing and notarization · release vNext
-  - [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent · release vNext
   - [ ] RT-666 Auto-update the macOS client: platform asset in the feed and an .app swap · release vNext
   - [ ] RT-667 Build and publish the macOS release assets from docs/release.md, with macOS install steps in the README · release vNext
   - [ ] RT-906 Port the native client to macOS: build, launch and run sessions on the Mac mini · release vNext
@@ -396,8 +402,8 @@
 - [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
 - [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
 - [ ] RT-640 Polish found by the v0.6.0-alpha smoke test · release vNext
-  - [ ] RT-649 Keep the pane header tooltip off the Terminal, Chat and Summary labels · release vNext
   - [ ] RT-984 Fit the sidebar view switcher at the minimum sidebar width and text size +4
+  - [ ] RT-986 Size an account toast card without the Go to pane row
 - [ ] RT-701 Replace the Fetching toast with the error when a page fetch fails
 - [ ] RT-702 Close a chat's Tail boxes when its load is refused or its host lacks file_tail
 - [ ] RT-712 Polish the Spawn submenu and New session dialog from the v0.7.0-alpha smoke
@@ -473,25 +479,27 @@
 - [ ] RT-973 Accounts settings: read, change and write under one lock hold
 - [ ] RT-974 Auto-switch: let a bad accounts settings file be repaired
 - [ ] RT-983 Accounts: report a fractional auto-switch cooldown without truncating it
+- [ ] RT-985 Evict account toasts before Needs you toasts when the toast stack overflows
+- [ ] RT-987 Open pop-out toolbar tooltips below the toolbar row, like the pane header's
 
 ## Design files
 
-- [accounts.md](accounts.md) — RT-39, RT-277, RT-914, RT-915, RT-964, RT-981
+- [accounts.md](accounts.md) — RT-39, RT-277, RT-915, RT-988
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
 - [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-760, RT-779, RT-789, RT-858
-- [default-shell.md](default-shell.md) — RT-844, RT-956
+- [default-shell.md](default-shell.md) — RT-956
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-786, RT-787, RT-867, RT-868, RT-869
 - [finished-toast.md](finished-toast.md) — RT-754, RT-755, RT-757, RT-769, RT-770
-- [gate-dashboard.md](gate-dashboard.md) — RT-64
+- [gate-dashboard.md](gate-dashboard.md) — RT-995, RT-996, RT-997, RT-998, RT-999, RT-1000, RT-1001, RT-1002, RT-1003
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [macos-compat.md](macos-compat.md) — RT-665, RT-906, RT-964
+- [macos-compat.md](macos-compat.md) — RT-665, RT-906
 - [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-364, RT-365, RT-366, RT-367, RT-368, RT-369, RT-370, RT-881, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
