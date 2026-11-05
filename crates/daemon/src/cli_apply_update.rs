@@ -9,6 +9,11 @@
 //! last, every swap rolled back on a failure), records the outcome in
 //! `last-result.json` and, when asked, starts the client again.
 //!
+//! When `--to` is an `.app` bundle the bundle replaces those files: the
+//! installed app is renamed to `<name>.app.old`, the staged app is renamed into
+//! its place, and a failure puts the old app back, so the signature seal is
+//! never broken half-way.
+//!
 //! Like `shutdown`, it starts no tracing, takes no instance lock, rotates no log
 //! and creates no folder but the one the result file lives in.
 
@@ -26,6 +31,13 @@ use std::time::{Duration, Instant};
 pub const CLIENT_EXE: &str = "rustling-tulip-native.exe";
 #[cfg(not(windows))]
 pub const CLIENT_EXE: &str = "rustling-tulip-native";
+
+/// The folder inside an installed `.app` bundle that holds its executables.
+const BUNDLE_EXECUTABLES: [&str; 2] = ["Contents", "MacOS"];
+
+/// The probe file an update creates in a bundle's parent folder to prove it can
+/// put a bundle there.
+const UPDATE_PROBE: &str = ".rustling-tulip-update-probe";
 
 /// The named mutex every updater and installer holds while it runs.
 #[cfg(windows)]
@@ -96,7 +108,8 @@ pub struct Request {
 /// # Errors
 ///
 /// An unknown argument, a flag missing its value, an `--old-version` that is
-/// not UTF-8, or a missing `--from` or `--to`.
+/// not UTF-8, a missing `--from` or `--to`, or a `--to` that is an `.app`
+/// bundle staged from something that is not one.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Request> {
     let mut args = args.into_iter();
     let (mut from, mut to, mut old_version, mut relaunch) = (None, None, None, false);
@@ -118,9 +131,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Request
             _ => anyhow::bail!("unknown argument {}", arg.display()),
         }
     }
+    let from = from.context("--from <staging folder> is required")?;
+    let to = to.context("--to <install folder> is required")?;
+    if is_bundle(&to) && !is_bundle(&from) {
+        anyhow::bail!("--from must be a .app bundle when --to is one");
+    }
     Ok(Request {
-        from: from.context("--from <staging folder> is required")?,
-        to: to.context("--to <install folder> is required")?,
+        from,
+        to,
         old_version,
         relaunch,
     })
@@ -183,7 +201,9 @@ pub struct Hooks<'a> {
 /// record the outcome in `result_file` and return the exit code: `0` applied,
 /// `2` the daemon did not stop, `3` something still runs from the install
 /// folder, `4` another update holds the lock, `5` a file could not be swapped
-/// (every swap was rolled back).
+/// (every swap was rolled back). When `to` is an `.app` bundle, the whole
+/// bundle is swapped by rename instead of each file, and the old app is put
+/// back when that fails.
 pub async fn run(
     request: &Request,
     result_file: &Path,
@@ -274,14 +294,23 @@ fn say(out: &mut impl Write, message: &str) {
 }
 
 async fn apply(request: &Request, hooks: &Hooks<'_>, out: &mut impl Write) -> Outcome {
-    wait_for_clients(&request.to, hooks).await;
+    let bundle = is_bundle(&request.to);
+    if bundle && let Err(message) = check_replaceable(&request.to) {
+        return Outcome::failed(SWAP_FAILED_CODE, message);
+    }
+    let installed = if bundle {
+        bundle_executables(&request.to)
+    } else {
+        request.to.clone()
+    };
+    wait_for_clients(&installed, hooks).await;
     if let Err(reason) = hooks.daemon.stop().await {
         return Outcome::failed(
             STOP_FAILED_CODE,
             format!("could not stop the daemon: {reason}; nothing was changed"),
         );
     }
-    if let Some(busy) = running_from(&request.to, hooks.processes).first() {
+    if let Some(busy) = running_from(&installed, hooks.processes).first() {
         let name = busy.exe.file_name().unwrap_or(busy.exe.as_os_str());
         return Outcome::failed(
             IN_USE_CODE,
@@ -292,16 +321,30 @@ async fn apply(request: &Request, hooks: &Hooks<'_>, out: &mut impl Write) -> Ou
             ),
         );
     }
+    if bundle {
+        return match swap_bundle(&request.from, &request.to) {
+            Ok(()) => {
+                clean_up_bundle(&request.to, out);
+                updated()
+            }
+            Err(message) => Outcome::failed(SWAP_FAILED_CODE, message),
+        };
+    }
     match swap_all(&request.from, &request.to) {
         Ok(swapped) => {
             clean_up(&request.from, &swapped, out);
-            Outcome {
-                code: 0,
-                ok: true,
-                message: format!("updated to {VERSION}"),
-            }
+            updated()
         }
         Err(message) => Outcome::failed(SWAP_FAILED_CODE, message),
+    }
+}
+
+/// The outcome of an update now in place.
+fn updated() -> Outcome {
+    Outcome {
+        code: 0,
+        ok: true,
+        message: format!("updated to {VERSION}"),
     }
 }
 
@@ -470,6 +513,98 @@ fn remove_new_files(to: &Path, names: &[OsString]) -> Vec<String> {
     stuck
 }
 
+/// True when `path` names an `.app` bundle, whatever the case of its extension.
+fn is_bundle(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("app"))
+}
+
+/// The folder inside the bundle at `to` that holds its executables, and where
+/// the bundle's client is looked for.
+fn bundle_executables(to: &Path) -> PathBuf {
+    BUNDLE_EXECUTABLES
+        .iter()
+        .fold(to.to_path_buf(), |path, part| path.join(part))
+}
+
+/// Where `--relaunch` starts the client: in the install folder, or inside the
+/// bundle's executables folder.
+fn client_path(to: &Path) -> PathBuf {
+    if is_bundle(to) {
+        bundle_executables(to).join(CLIENT_EXE)
+    } else {
+        to.join(CLIENT_EXE)
+    }
+}
+
+/// Why the bundle at `to` cannot be replaced by a rename, as the line to
+/// report, or `Ok` when it can: a bundle the system runs translocated, or one
+/// whose parent folder this process cannot write a probe file in.
+fn check_replaceable(to: &Path) -> Result<(), String> {
+    const REFUSED: &str = "rustling-tulip.app runs from a place the update cannot replace; \
+                           move it to Applications and update again; nothing was changed";
+    if to
+        .components()
+        .any(|part| part.as_os_str() == OsStr::new("AppTranslocation"))
+    {
+        return Err(REFUSED.to_string());
+    }
+    let Some(parent) = to.parent() else {
+        return Err(REFUSED.to_string());
+    };
+    let probe = parent.join(UPDATE_PROBE);
+    let writable = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    if writable {
+        Ok(())
+    } else {
+        Err(REFUSED.to_string())
+    }
+}
+
+/// Replace the whole bundle at `to` with the staged one at `from`: the old app
+/// moves to `<name>.app.old` and the new one is renamed in, with the old app
+/// put back when that rename fails.
+fn swap_bundle(from: &Path, to: &Path) -> Result<(), String> {
+    let old = sibling(to, "old");
+    if old.exists() {
+        std::fs::remove_dir_all(&old).map_err(|err| {
+            format!(
+                "could not remove {}: {err}; nothing was changed",
+                old.display()
+            )
+        })?;
+    }
+    std::fs::rename(to, &old).map_err(|err| {
+        format!(
+            "could not replace {}: {err}; nothing was changed",
+            to.display()
+        )
+    })?;
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(err) => Err(match std::fs::rename(&old, to) {
+            Ok(()) => format!(
+                "could not replace {}: {err}; the old app was put back",
+                to.display()
+            ),
+            Err(back) => format!(
+                "could not replace {}: {err}; could not put back the old app ({back})",
+                to.display()
+            ),
+        }),
+    }
+}
+
+/// Remove the bundle this run moved aside. What cannot be removed is reported
+/// and left: the client removes it at its next launch.
+fn clean_up_bundle(to: &Path, out: &mut impl Write) {
+    let old = sibling(to, "old");
+    if let Err(err) = std::fs::remove_dir_all(&old) {
+        say(out, &format!("could not remove {}: {err}", old.display()));
+    }
+}
+
 /// Remove the staging folder and the old copies this run moved aside. What
 /// cannot be removed is reported and left: the installer removes the staging
 /// folder after this exits (this process's own exe is in it), and the client
@@ -503,7 +638,7 @@ fn write_result(path: &Path, request: &Request, outcome: &Outcome) -> anyhow::Re
 
 /// Start the installed client once, telling it which version it replaced.
 fn relaunch(request: &Request, launcher: &dyn Launcher, out: &mut impl Write) {
-    let client = request.to.join(CLIENT_EXE);
+    let client = client_path(&request.to);
     let args: Vec<OsString> = request
         .old_version
         .iter()
@@ -844,10 +979,20 @@ mod tests {
         daemon: &Daemon,
         launches: &Launches,
     ) -> (u8, String) {
+        apply_to(&fixture.result, request, processes, daemon, launches).await
+    }
+
+    async fn apply_to(
+        result: &Path,
+        request: &Request,
+        processes: &Processes,
+        daemon: &Daemon,
+        launches: &Launches,
+    ) -> (u8, String) {
         let mut out = Vec::new();
         let code = run(
             request,
-            &fixture.result,
+            result,
             &hooks(processes, daemon, launches, &FreeLock),
             &mut out,
         )
@@ -860,6 +1005,73 @@ mod tests {
             pid: 4242,
             exe: to.join(DAEMON),
         }])
+    }
+
+    const APP: &str = "rustling-tulip.app";
+
+    /// A staged `.app` bundle in `from` over an installed one in `to`, both
+    /// under `Applications/`, with the result file under `updates/`.
+    struct Bundle {
+        _dir: ScratchDir,
+        from: PathBuf,
+        to: PathBuf,
+        result: PathBuf,
+    }
+
+    impl Bundle {
+        fn new(tag: &str) -> Self {
+            let dir = ScratchDir::new(tag);
+            let applications = dir.path().join("Applications");
+            Self::under(dir, &applications)
+        }
+
+        /// A bundle under the folder the system mounts translocated apps in.
+        fn translocated(tag: &str) -> Self {
+            let dir = ScratchDir::new(tag);
+            let applications = dir.path().join("AppTranslocation").join("X").join("d");
+            Self::under(dir, &applications)
+        }
+
+        fn under(dir: ScratchDir, applications: &Path) -> Self {
+            let to = applications.join(APP);
+            let from = applications.join(".stage").join(APP);
+            for (root, body) in [(&to, "old"), (&from, "new")] {
+                let executables = bundle_executables(root);
+                std::fs::create_dir_all(&executables).expect("create the bundle");
+                std::fs::write(executables.join(CLIENT_EXE), body)
+                    .expect("write the bundle's client");
+            }
+            let result = dir.path().join("updates").join("last-result.json");
+            Self {
+                _dir: dir,
+                from,
+                to,
+                result,
+            }
+        }
+
+        fn request(&self, relaunch: bool) -> Request {
+            Request {
+                from: self.from.clone(),
+                to: self.to.clone(),
+                old_version: Some("0.1.0".to_string()),
+                relaunch,
+            }
+        }
+
+        fn old(&self) -> PathBuf {
+            sibling(&self.to, "old")
+        }
+
+        fn result_json(&self) -> serde_json::Value {
+            let bytes = std::fs::read(&self.result).expect("the result file is written");
+            serde_json::from_slice(&bytes).expect("the result file is JSON")
+        }
+    }
+
+    /// The client file's contents inside the bundle at `root`.
+    fn bundle_client(root: &Path) -> Option<String> {
+        std::fs::read_to_string(bundle_executables(root).join(CLIENT_EXE)).ok()
     }
 
     #[tokio::test]
@@ -977,6 +1189,177 @@ mod tests {
         fixture.assert_unchanged();
         assert_eq!(fixture.leftovers(".old"), vec![format!("{CLIENT_EXE}.old")]);
         assert_eq!(fixture.result_json()["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn a_bundle_is_swapped_whole_and_its_old_copy_removed() {
+        let bundle = Bundle::new("apply-update-bundle-swap");
+        let daemon = Daemon::stopping();
+
+        let (code, out) = apply_to(
+            &bundle.result,
+            &bundle.request(false),
+            &Processes(Vec::new()),
+            &daemon,
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(out, format!("apply-update: updated to {VERSION}\n"));
+        assert_eq!(
+            bundle_client(&bundle.to).as_deref(),
+            Some("new"),
+            "the new app is in place"
+        );
+        assert!(!bundle.old().exists(), "the old app is removed");
+        assert!(!bundle.from.exists(), "the staged app is moved away");
+        assert_eq!(daemon.stops.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_bundle_rename_puts_the_old_app_back() {
+        let bundle = Bundle::new("apply-update-bundle-rollback");
+        // The staged bundle is gone by the time the swap tries to move it in, as
+        // when another process removed it after the command line was checked.
+        std::fs::remove_dir_all(&bundle.from).expect("remove the staged app");
+
+        let (code, out) = apply_to(
+            &bundle.result,
+            &bundle.request(false),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 5, "{out}");
+        assert!(
+            out.starts_with(&format!(
+                "apply-update: could not replace {}: ",
+                bundle.to.display()
+            )),
+            "{out}"
+        );
+        assert!(out.ends_with("; the old app was put back\n"), "{out}");
+        assert_eq!(
+            bundle_client(&bundle.to).as_deref(),
+            Some("old"),
+            "the old app is back"
+        );
+        assert!(!bundle.old().exists(), "nothing was left aside");
+        assert_eq!(bundle.result_json()["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn a_translocated_bundle_is_refused_untouched() {
+        let bundle = Bundle::translocated("apply-update-bundle-translocated");
+        let daemon = Daemon::stopping();
+
+        let (code, out) = apply_to(
+            &bundle.result,
+            &bundle.request(false),
+            &Processes(Vec::new()),
+            &daemon,
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 5, "{out}");
+        let message = "rustling-tulip.app runs from a place the update cannot replace; \
+                       move it to Applications and update again; nothing was changed";
+        assert_eq!(out, format!("apply-update: {message}\n"));
+        assert_eq!(daemon.stops.get(), 0, "the daemon was left running");
+        assert_eq!(
+            bundle_client(&bundle.to).as_deref(),
+            Some("old"),
+            "the app is untouched"
+        );
+        assert_eq!(
+            bundle_client(&bundle.from).as_deref(),
+            Some("new"),
+            "the staged app is untouched"
+        );
+        let parent = bundle.to.parent().expect("the bundle has a parent");
+        assert!(
+            !parent.join(UPDATE_PROBE).exists(),
+            "the probe was removed again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_running_inside_the_bundle_blocks_the_swap() {
+        let bundle = Bundle::new("apply-update-bundle-in-use");
+        let running = Processes(vec![RunningExe {
+            pid: 4242,
+            exe: bundle_executables(&bundle.to).join(CLIENT_EXE),
+        }]);
+
+        let (code, out) = apply_to(
+            &bundle.result,
+            &bundle.request(false),
+            &running,
+            &Daemon::stopping(),
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 3, "{out}");
+        let message = format!(
+            "{CLIENT_EXE} is still running from the install folder (pid 4242); nothing was changed"
+        );
+        assert_eq!(out, format!("apply-update: {message}\n"));
+        assert_eq!(
+            bundle_client(&bundle.to).as_deref(),
+            Some("old"),
+            "the app is untouched"
+        );
+        assert_eq!(
+            bundle_client(&bundle.from).as_deref(),
+            Some("new"),
+            "the staged app is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn bundle_relaunch_runs_the_client_inside_the_bundle() {
+        let bundle = Bundle::new("apply-update-bundle-relaunch");
+        let launches = Launches::default();
+
+        let (code, out) = apply_to(
+            &bundle.result,
+            &bundle.request(true),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &launches,
+        )
+        .await;
+
+        assert_eq!(code, 0, "{out}");
+        let client = bundle_executables(&bundle.to).join(CLIENT_EXE);
+        let args = ["--updated-from", "0.1.0"].map(OsString::from).to_vec();
+        assert_eq!(*launches.0.borrow(), vec![(client, args)]);
+    }
+
+    #[test]
+    fn a_bundle_to_needs_a_bundle_from() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        let err = parse(args(&["--to", "C:/Apps/X.app", "--from", "C:/Apps/folder"]))
+            .expect_err("a folder cannot be staged into an .app bundle");
+        assert_eq!(
+            err.to_string(),
+            "--from must be a .app bundle when --to is one"
+        );
+        for (to, from) in [
+            ("X.app", "Stage.app"),
+            ("X.APP", "Stage.app"),
+            ("X.app", "Stage.APP"),
+        ] {
+            assert!(
+                parse(args(&["--to", to, "--from", from])).is_ok(),
+                "{to} from {from}"
+            );
+        }
     }
 
     #[tokio::test]

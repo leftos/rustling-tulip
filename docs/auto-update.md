@@ -56,6 +56,8 @@ Velopack was considered and not used. It would replace the NSIS installer and ad
 
    Exit codes: 0 applied, 1 a bad command line or unresolvable folders, 2 the daemon would not stop, 3 an exe in the install folder is still running, 4 another update holds the mutex, 5 a file failed and every file was put back. `rustling-tulipd --version` prints the daemon's version.
 
+   On macOS `--to` is the installed `<name>.app` and `--from` a staged `.app`, and the swap replaces the whole bundle by rename: the old bundle moves to `<name>.app.old`, the new one is renamed into place, a failure puts the old app back, and the old copy is removed after success. The exit codes are the same. Exit 5 comes before the daemon stops when the bundle is translocated or its folder is not writable (`nothing was changed`). The client wait, the in-use refusal and `--relaunch` look at `<to>/Contents/MacOS`. The staged bundle must be on the same volume as the installed one; the macOS client's side of this (downloading and staging it, then starting `apply-update`) is RT-1015's and is not built yet.
+
    NSIS removes `.staging` afterwards. Under `/UPDATE` it writes only the uninstall key's `DisplayVersion`, after exit 0, leaving the Run value, the desktop shortcut and PATH as they are. A normal install writes them as before, and on a non-zero exit shows `apply-update`'s message and aborts.
 8. **After the restart.**
    - The client reads `last-result.json` once and deletes it, and drops the `--updated-from <v>` launch argument. Success shows the sticky toast `Updated to {version}` with a `What's new` action (decision 13). Failure shows `Update to {version} didn't install` with the recorded message as its detail, and the ready update stays offered.
