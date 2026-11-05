@@ -2,7 +2,7 @@
   <defs>
     <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#23262e"/>
-      <stop offset="1" stop-color="#0c0b0e"/>
+      <stop offset="1" stop-color="#070609"/>
     </linearGradient>
     <linearGradient id="petal" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#ff8585"/>

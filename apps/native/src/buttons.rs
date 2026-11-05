@@ -294,31 +294,40 @@ pub(crate) struct FieldLook {
     pub ring: bool,
 }
 
-/// The look of a text field's frame in `t`, ringed while `focused`.
-pub(crate) fn field_look(focused: bool, t: &UiTheme) -> FieldLook {
+/// The look of a text field's frame drawn on `layer` in `t`, ringed while
+/// `focused`.
+pub(crate) fn field_look(focused: bool, layer: Layer, t: &UiTheme) -> FieldLook {
     FieldLook {
         min_height: 34.0,
         pad_x: 11.0,
         radius: 7.0,
-        fill: t.ground,
+        fill: match layer {
+            Layer::Base => t.ground,
+            Layer::Floating => t.modal_inset,
+        },
         border: t.line_strong,
         ring: focused,
     }
 }
 
-/// The frame of a text field in `t`, ringed while `focused`; the caller
-/// adds the input as its child.
-pub(crate) fn field_frame(focused: bool, t: &UiTheme) -> Div {
-    framed_field(focused, None, t)
+/// The frame of a text field drawn on `layer` in `t`, ringed while `focused`;
+/// the caller adds the input as its child.
+pub(crate) fn field_frame(focused: bool, layer: Layer, t: &UiTheme) -> Div {
+    framed_field(focused, None, layer, t)
 }
 
 /// [`field_frame`] whose focus ring, while drawn, is tagged `ring_selector`.
-pub(crate) fn field_frame_with_ring(focused: bool, ring_selector: String, t: &UiTheme) -> Div {
-    framed_field(focused, Some(ring_selector), t)
+pub(crate) fn field_frame_with_ring(
+    focused: bool,
+    ring_selector: String,
+    layer: Layer,
+    t: &UiTheme,
+) -> Div {
+    framed_field(focused, Some(ring_selector), layer, t)
 }
 
-fn framed_field(focused: bool, ring_selector: Option<String>, t: &UiTheme) -> Div {
-    let look = field_look(focused, t);
+fn framed_field(focused: bool, ring_selector: Option<String>, layer: Layer, t: &UiTheme) -> Div {
+    let look = field_look(focused, layer, t);
     let ring = focus_ring(look.radius, t);
     let ring = match ring_selector {
         Some(selector) => ring.driver_id(move || selector),
@@ -340,15 +349,15 @@ fn framed_field(focused: bool, ring_selector: Option<String>, t: &UiTheme) -> Di
 mod tests {
     use super::*;
     use crate::palette::{
-        DANGER, DANGER_TEXT, GROUND, HOVER, LINE_STRONG, ON_ACCENT, POPOVER_HOVER, POPOVER_PRESSED,
-        PRESSED, PRIMARY, PRIMARY_HOVER, PRIMARY_PRESSED, TEXT,
+        DANGER, DANGER_TEXT, GROUND, HOVER, LINE_STRONG, MODAL_INSET, ON_ACCENT, POPOVER_HOVER,
+        POPOVER_PRESSED, PRESSED, PRIMARY, PRIMARY_HOVER, PRIMARY_PRESSED, TEXT,
     };
 
     const T: &UiTheme = &UiTheme::CONTRAST;
 
     #[test]
-    fn field_frame_is_ground_with_line_strong_at_34_px() {
-        let look = field_look(false, T);
+    fn a_base_field_frame_is_ground_with_line_strong_at_34_px() {
+        let look = field_look(false, Layer::Base, T);
         assert_eq!(
             (look.min_height, look.pad_x, look.radius),
             (34.0, 11.0, 7.0)
@@ -359,12 +368,23 @@ mod tests {
     }
 
     #[test]
+    fn a_floating_field_frame_is_modal_inset() {
+        assert_eq!(
+            field_look(false, Layer::Floating, T),
+            FieldLook {
+                fill: MODAL_INSET,
+                ..field_look(false, Layer::Base, T)
+            }
+        );
+    }
+
+    #[test]
     fn focused_field_wears_the_ring() {
         assert_eq!(
-            field_look(true, T),
+            field_look(true, Layer::Base, T),
             FieldLook {
                 ring: true,
-                ..field_look(false, T)
+                ..field_look(false, Layer::Base, T)
             }
         );
     }

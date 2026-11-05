@@ -27,6 +27,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Fetch toasts name an SSH host as you typed it, and a click on a path link shows its toast at once.
 - A folder fetch's progress keeps moving while it finishes, drops Cancel once it can't stop, and stays closed when you close it.
 - A link to a repo root missing on the host now says the folder is not there, not that it is outside the repo.
+- Text fields in dialogs and menus sit on the dialog's lighter inset, and the side rail, sidebar launch and tab close icons brighten on hover.
 - Italic terminal text at the Medium and SemiBold weights now matches the weight of the text around it in Geist Mono, JetBrains Mono and Cascadia Code.
 - A session you left in Chat or Summary reopens there when a duplicate host is dropped and its panes move to the host that runs them.
 

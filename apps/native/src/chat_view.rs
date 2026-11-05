@@ -1942,7 +1942,7 @@ impl RootView {
         let disabled = note.as_ref().is_some_and(ComposerNote::disables);
         let text = composer.input.read(cx).text().to_owned();
         let blank = text.trim().is_empty();
-        let field = field_frame(false, &t)
+        let field = field_frame(false, Layer::Base, &t)
             .driver_id(|| "chat-composer".to_owned())
             .flex_1()
             .min_w(px(0.0))

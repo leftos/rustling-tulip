@@ -28,7 +28,7 @@ use crate::agent_options_view::{LOCKED, UPDATE_CLIENT};
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::Level;
 use crate::assets::SIDEBAR_CHEVRON_DOWN_ICON;
-use crate::buttons::{field_frame, focus_ring};
+use crate::buttons::{Layer, field_frame, focus_ring};
 use crate::chat::ChatMode;
 use crate::combobox::list_placement;
 use crate::driver_id::DriverId as _;
@@ -1804,7 +1804,8 @@ impl RootView {
     fn settings_search_field(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
         let search = self.settings_search.as_ref()?;
         let focused = search.focus.is_focused(window);
-        let frame = field_frame(focused, &theme(cx))
+        // The tab list under it is already the modal inset, so the search box keeps the ground fill to show.
+        let frame = field_frame(focused, Layer::Base, &theme(cx))
             .driver_id(|| SEARCH_SELECTOR.to_owned())
             .w_full()
             .on_mouse_down(
@@ -5343,7 +5344,7 @@ impl RootView {
             return Vec::new();
         };
         let path = SettingsControl::WorktreesPath;
-        let field = field_frame(focused == Some(path), &theme(cx))
+        let field = field_frame(focused == Some(path), Layer::Floating, &theme(cx))
             .driver_id(|| path.selector().to_owned())
             .children(search_hit_marker(path.selector(), SEGMENT_RADIUS, cx))
             .flex_1()
@@ -5478,7 +5479,7 @@ impl RootView {
     ) -> Div {
         let t = theme(cx);
         let port = SettingsControl::RemotePort;
-        let frame = field_frame(focused == Some(port), &theme(cx))
+        let frame = field_frame(focused == Some(port), Layer::Floating, &theme(cx))
             .driver_id(|| port.selector().to_owned())
             .children(search_hit_marker(port.selector(), SEGMENT_RADIUS, cx))
             .w(px(PORT_FIELD_WIDTH));
@@ -6071,7 +6072,7 @@ impl RootView {
             .flex_none()
             .size(px(12.0))
             .text_color(gpui::rgb(t.text_2));
-        let trigger = field_frame(focused == Some(control), &t)
+        let trigger = field_frame(focused == Some(control), Layer::Floating, &t)
             .id(selector)
             .driver_id(|| selector.to_owned())
             .w_full()
@@ -6686,7 +6687,7 @@ impl RootView {
             .flex_none()
             .size(px(12.0))
             .text_color(gpui::rgb(t.text_2));
-        let trigger = field_frame(focused == Some(control), &t)
+        let trigger = field_frame(focused == Some(control), Layer::Floating, &t)
             .id(selector)
             .driver_id(|| selector.to_owned())
             .w_full()
@@ -6919,7 +6920,7 @@ impl RootView {
     ) -> Option<Div> {
         let chat_width = self.settings_pending.chat_width.as_ref()?;
         let control = SettingsControl::ChatWidth;
-        let frame = field_frame(focused == Some(control), &theme(cx))
+        let frame = field_frame(focused == Some(control), Layer::Floating, &theme(cx))
             .driver_id(|| control.selector().to_owned())
             .children(search_hit_marker(control.selector(), SEGMENT_RADIUS, cx))
             .w(px(PORT_FIELD_WIDTH))
@@ -8018,7 +8019,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Div {
-        let frame = field_frame(focused == Some(control), &theme(cx))
+        let frame = field_frame(focused == Some(control), Layer::Floating, &theme(cx))
             .driver_id(move || control.selector().to_owned())
             .children(search_hit_marker(control.selector(), SEGMENT_RADIUS, cx))
             .w(px(width))
@@ -9073,7 +9074,7 @@ fn input_frame(
     cx: &mut Context<RootView>,
 ) -> Div {
     let hit = search_hit_marker(control.selector(), SEGMENT_RADIUS, cx);
-    let frame = field_frame(focused == Some(control), &theme(cx))
+    let frame = field_frame(focused == Some(control), Layer::Floating, &theme(cx))
         .driver_id(|| control.selector().to_owned())
         .children(hit)
         .child(input.clone());
@@ -9101,7 +9102,7 @@ fn disabled_launch_row(
     t: &UiTheme,
 ) -> Div {
     let selector = control.selector();
-    let frame = field_frame(false, t)
+    let frame = field_frame(false, Layer::Floating, t)
         .id(selector)
         .driver_id(|| selector.to_owned())
         .opacity(DISABLED_OPACITY)

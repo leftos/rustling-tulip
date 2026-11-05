@@ -1503,8 +1503,10 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
         "Close tab"
     };
     let name = format!("tab-close-{tab_id}");
+    let group = name.clone();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
+        .group(group.clone())
         .driver_id(|| name)
         .flex()
         .flex_none()
@@ -1515,7 +1517,7 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
         .rounded(px(3.0))
         .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
         .tooltip(tooltip(tip))
-        .map(|button| {
+        .map(move |button| {
             if armed {
                 button
                     .text_size(px(11.0))
@@ -1526,7 +1528,8 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
                     svg()
                         .path(TAB_CLOSE_ICON)
                         .size(px(CLOSE_ICON_SIZE))
-                        .text_color(gpui::rgb(t.subtle)),
+                        .text_color(gpui::rgb(t.subtle))
+                        .group_hover(group, move |style| style.text_color(gpui::rgb(t.text_2))),
                 )
             }
         })

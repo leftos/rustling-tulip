@@ -429,7 +429,10 @@ fn rail_button(
             svg()
                 .path(icon)
                 .size(px(ICON_SIZE))
-                .text_color(gpui::rgb(if active { t.text } else { t.subtle })),
+                .text_color(gpui::rgb(if active { t.text } else { t.subtle }))
+                .when(!active, move |glyph| {
+                    glyph.group_hover(selector, move |style| style.text_color(gpui::rgb(t.text_2)))
+                }),
         );
     div()
         .id(selector)

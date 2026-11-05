@@ -2457,11 +2457,13 @@ fn container_launch(
     let t = theme(cx);
     let selector = format!("container-{}-launch", container.key);
     let name = selector.clone();
+    let group = selector.clone();
     let id = container.id.clone();
     let host = container.host.clone();
     let workspace = container.kind == ContainerKind::Workspace;
     div()
         .id(SharedString::from(selector))
+        .group(group.clone())
         .driver_id(|| name)
         .flex()
         .flex_none()
@@ -2473,7 +2475,10 @@ fn container_launch(
         .hover(move |style| style.bg(gpui::rgb(t.hover)))
         .when(two_line, |button| button.mt(px(2.0)))
         .tooltip(tooltip("Launch last again in the current tab"))
-        .child(icon(SIDEBAR_PLAY_ICON, 12.0, t.subtle))
+        .child(
+            icon(SIDEBAR_PLAY_ICON, 12.0, t.subtle)
+                .group_hover(group, move |style| style.text_color(gpui::rgb(t.text_2))),
+        )
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {

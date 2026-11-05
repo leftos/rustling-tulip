@@ -790,7 +790,7 @@ mod tests {
     src: url("../../../../apps/native/assets/fonts/GeistMono/GeistMono-Regular.ttf") format("truetype");
   }
   /* Tokens from apps/native/src/palette.rs */
-  :root { --ground: #111013; }
+  :root { --ground: #08070a; }
 </style>
 </head>
 <body>

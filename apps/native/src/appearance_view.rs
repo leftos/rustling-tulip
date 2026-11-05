@@ -2285,20 +2285,25 @@ fn input_box(
     let selector = stop.selector();
     let focused = focus == Some(stop);
     let hit = search_hit_marker(selector, SEGMENT_RADIUS, cx);
-    field_frame_with_ring(focused, format!("{selector}-ring"), &theme(cx))
-        .driver_id(move || selector.to_owned())
-        .children(hit)
-        .flex_1()
-        .min_w(px(0.0))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                // The modal's tracked focus would take the keyboard back.
-                window.prevent_default();
-                this.press_appearance_field(stop, window, cx);
-            }),
-        )
-        .child(input.clone())
+    field_frame_with_ring(
+        focused,
+        format!("{selector}-ring"),
+        Layer::Floating,
+        &theme(cx),
+    )
+    .driver_id(move || selector.to_owned())
+    .children(hit)
+    .flex_1()
+    .min_w(px(0.0))
+    .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+            // The modal's tracked focus would take the keyboard back.
+            window.prevent_default();
+            this.press_appearance_field(stop, window, cx);
+        }),
+    )
+    .child(input.clone())
 }
 
 /// A row's muted `Resolved: … from …` line.

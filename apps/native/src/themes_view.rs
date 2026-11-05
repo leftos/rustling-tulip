@@ -1863,18 +1863,23 @@ fn editor_field(
     cx: &mut Context<RootView>,
 ) -> Div {
     let selector = control.selector();
-    field_frame_with_ring(focused, format!("{selector}-ring"), &theme(cx))
-        .driver_id(move || selector.to_owned())
-        .flex_1()
-        .min_w(px(0.0))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                window.prevent_default();
-                this.place_themes_focus(control, false, window, cx);
-            }),
-        )
-        .child(input.clone())
+    field_frame_with_ring(
+        focused,
+        format!("{selector}-ring"),
+        Layer::Floating,
+        &theme(cx),
+    )
+    .driver_id(move || selector.to_owned())
+    .flex_1()
+    .min_w(px(0.0))
+    .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+            window.prevent_default();
+            this.place_themes_focus(control, false, window, cx);
+        }),
+    )
+    .child(input.clone())
 }
 
 /// A note under a field, in the danger colour.

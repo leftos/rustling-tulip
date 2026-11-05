@@ -4174,7 +4174,7 @@ fn rename_row(input: &Entity<TextInput>, t: &UiTheme) -> AnyElement {
                 .text_color(gpui::rgb(t.muted))
                 .child("Rename session (blank restores the default)"),
         )
-        .child(field_frame(true, t).child(input.clone()))
+        .child(field_frame(true, Layer::Floating, t).child(input.clone()))
         .into_any_element()
 }
 

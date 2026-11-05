@@ -2451,7 +2451,7 @@ fn target_dropdown(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootV
         .flex_none()
         .size(px(12.0))
         .text_color(gpui::rgb(t.text_2));
-    let trigger = field_frame(focused, &t)
+    let trigger = field_frame(focused, Layer::Floating, &t)
         .id(ElementId::Name(SharedString::from(selector.clone())))
         .driver_id(move || selector)
         .w_full()
@@ -2567,7 +2567,7 @@ fn target_list(dialog: &SpawnDialog, cx: &mut Context<RootView>) -> AnyElement {
         ),
         _ => (false, px(LIST_MAX_HEIGHT)),
     };
-    let query = field_frame(true, &t)
+    let query = field_frame(true, Layer::Floating, &t)
         .driver_id(|| "spawn-target-query".to_owned())
         .flex_none()
         .w_full()
@@ -2976,7 +2976,7 @@ pub(crate) fn input_box(
 ) -> Div {
     let selector = control.selector();
     let focused = focus == control;
-    field_frame(focused, &theme(cx))
+    field_frame(focused, Layer::Floating, &theme(cx))
         .driver_id(move || selector)
         .flex_1()
         .min_w(px(0.0))
@@ -3479,7 +3479,7 @@ fn env_value_cells(
         .get(index)
         .is_some_and(EnvRow::is_saved_secret);
     if saved {
-        let text = field_frame(false, &theme(cx))
+        let text = field_frame(false, Layer::Floating, &theme(cx))
             .driver_id(move || format!("spawn-env-saved-{index}"))
             .flex_1()
             .min_w(px(0.0))

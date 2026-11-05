@@ -1884,7 +1884,8 @@ fn field_row(
     t: &UiTheme,
 ) -> Div {
     let selector = control.selector(&[]);
-    let frame = field_frame(focus == control, t)
+    // The Add-host card is a raised base surface, so its fields keep the ground fill.
+    let frame = field_frame(focus == control, Layer::Base, t)
         .driver_id(move || selector)
         .flex_1()
         .min_w_0()
