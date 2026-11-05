@@ -8,6 +8,8 @@
 
 use crate::support;
 
+use std::time::Duration;
+
 use gpui::{Modifiers, TestAppContext, px};
 use protocol::{
     ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RearrangeLayout, SessionSnapshot,
@@ -1628,4 +1630,200 @@ fn a_rejected_extract_unmarks_the_source_tab(cx: &mut TestAppContext) {
         matches!(sent.as_slice(), [ClientMessage::RestoreTabSnapshot { tab }] if tab.id == "t1"),
         "the refused extract left t1 in place, so it is replaced in place: {sent:?}"
     );
+}
+
+/// The pane header's own tooltip, drawn below the header row.
+const HEADER_TIP: &str = "pane-header-tip";
+
+/// `s1` alone in pane `p1`: a session that offers a chat, so its header
+/// draws the Terminal | Chat | Summary labels.
+fn header_tip_pane<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let s1 = session("s1")
+        .label("repo · main")
+        .cwd("D:/src/repo")
+        .build();
+    Harness::with(cx, dir, &Fixture::single(s1))
+}
+
+/// Rests the mouse on the middle of `selector` for `wait`.
+fn rest_on(h: &mut Harness<'_>, selector: &str, wait: Duration) {
+    let at = h.center(selector);
+    h.hover(at, Modifiers::none());
+    h.advance(wait);
+}
+
+fn header_tip_text(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.header_tip_text())
+}
+
+/// The header tip is painted below `p1`'s header row, clear of its view
+/// labels.
+fn assert_tip_below_the_header(h: &mut Harness<'_>, what: &str) {
+    let tip = h.bounds(HEADER_TIP);
+    assert!(tip.origin.x >= px(0.0), "{what}: the header tip is painted");
+    let header = h.bounds("pane-header-p1");
+    assert!(
+        tip.top() >= header.bottom(),
+        "{what}: the tip {tip:?} opens below the header row {header:?}"
+    );
+    for label in [
+        "pane-view-terminal-p1",
+        "pane-view-chat-p1",
+        "pane-view-summary-p1",
+    ] {
+        let drawn = h.bounds(label);
+        assert!(drawn.origin.x >= px(0.0), "{label} is drawn");
+        assert!(
+            !tip.intersects(&drawn),
+            "{what}: the tip {tip:?} covers {label} {drawn:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn the_title_tip_opens_below_the_header_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = header_tip_pane(cx, &dir);
+
+    rest_on(&mut h, "pane-title-p1", Duration::from_millis(600));
+
+    assert_tip_below_the_header(&mut h, "the title");
+}
+
+#[gpui::test]
+fn a_chip_and_a_control_tip_open_below_the_header_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = header_tip_pane(cx, &dir);
+
+    rest_on(&mut h, "pane-chip-p1-runtime", Duration::from_millis(600));
+    let chip_tip = header_of(&mut h, "p1")
+        .chips
+        .first()
+        .map(|chip| chip.tip.clone());
+    assert_eq!(header_tip_text(&mut h), chip_tip, "the chip's tip shows");
+    assert_tip_below_the_header(&mut h, "the runtime chip");
+
+    rest_on(&mut h, "split-right-p1", Duration::from_millis(600));
+    assert_eq!(
+        header_tip_text(&mut h).as_deref(),
+        Some("Split right (Shift: left)"),
+        "the control's tip replaced the chip's"
+    );
+    assert_tip_below_the_header(&mut h, "the split control");
+}
+
+#[gpui::test]
+fn no_header_tip_before_the_delay(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = header_tip_pane(cx, &dir);
+
+    rest_on(&mut h, "pane-title-p1", Duration::from_millis(300));
+
+    assert_eq!(header_tip_text(&mut h), None);
+    assert!(never_painted(&mut h, HEADER_TIP), "no tip before 500 ms");
+}
+
+#[gpui::test]
+fn moving_off_hides_the_header_tip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = header_tip_pane(cx, &dir);
+    rest_on(&mut h, "pane-title-p1", Duration::from_millis(600));
+    assert!(header_tip_text(&mut h).is_some(), "the tip is up");
+
+    let header = h.bounds("pane-header-p1");
+    let below = gpui::point(header.center().x, header.bottom() + px(60.0));
+    h.hover(below, Modifiers::none());
+    h.advance(Duration::from_millis(600));
+
+    assert_eq!(header_tip_text(&mut h), None, "the tip went with the hover");
+}
+
+#[gpui::test]
+fn a_click_hides_the_header_tip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = header_tip_pane(cx, &dir);
+    rest_on(&mut h, "pane-title-p1", Duration::from_millis(600));
+    assert!(header_tip_text(&mut h).is_some(), "the tip is up");
+
+    h.click_on("pane-title-p1");
+    h.advance(Duration::from_millis(600));
+
+    assert_eq!(
+        header_tip_text(&mut h),
+        None,
+        "a press hides the tip until the next hover"
+    );
+}
+
+#[gpui::test]
+fn a_key_press_hides_the_header_tip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = header_tip_pane(cx, &dir);
+    rest_on(&mut h, "pane-title-p1", Duration::from_millis(600));
+    assert!(header_tip_text(&mut h).is_some(), "the tip is up");
+
+    h.keys("a");
+    h.advance(Duration::from_millis(600));
+
+    assert_eq!(
+        header_tip_text(&mut h),
+        None,
+        "a key hides the tip until the next hover"
+    );
+}
+
+#[gpui::test]
+fn no_header_tip_during_a_drag(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = header_tip_pane(cx, &dir);
+
+    // The title is no control: a press dragged from it drags the pane, and
+    // the drag's moves hover the title.
+    let title = h.center("pane-title-p1");
+    h.start_drag(title);
+    assert!(h.dragging(), "the pane drag is under way");
+    h.advance(Duration::from_millis(600));
+
+    assert_eq!(header_tip_text(&mut h), None, "no tip during a drag");
+    assert!(never_painted(&mut h, HEADER_TIP));
+    h.release(title);
+}
+
+#[gpui::test]
+fn a_view_segment_tip_opens_below_the_header_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = header_tip_pane(cx, &dir);
+
+    rest_on(&mut h, "pane-view-chat-p1", Duration::from_millis(600));
+
+    assert!(
+        header_tip_text(&mut h).is_some(),
+        "the Chat segment's tip shows"
+    );
+    // Clear of all three segments: the other two among them.
+    assert_tip_below_the_header(&mut h, "the Chat segment");
+}
+
+#[gpui::test]
+fn the_pop_out_button_tip_opens_below_the_header_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = header_tip_pane(cx, &dir);
+
+    rest_on(&mut h, "pane-popout-p1", Duration::from_millis(600));
+
+    assert!(header_tip_text(&mut h).is_some(), "Pop out's tip shows");
+    assert_tip_below_the_header(&mut h, "Pop out");
+}
+
+#[gpui::test]
+fn the_header_tip_carries_the_title_tip_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = header_tip_pane(cx, &dir);
+
+    rest_on(&mut h, "pane-title-p1", Duration::from_millis(600));
+
+    let title_tip = header_of(&mut h, "p1").title_tip;
+    assert_eq!(title_tip, "repo · main\nCwd: D:/src/repo");
+    assert_eq!(header_tip_text(&mut h), Some(title_tip));
+    assert!(!never_painted(&mut h, HEADER_TIP), "and it is painted");
 }

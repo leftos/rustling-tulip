@@ -24,6 +24,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The new-session dialog's Target list keeps its highlighted row in view, and a click inside the list no longer closes it.
 - Ctrl+click opens a whole terminal path that holds spaces, or wraps inside a themed Claude reply box, once the file is found.
 - A toast with a long title now wraps inside its card, so its close button stays reachable.
+- A pane header's tooltips now open below the header, so they no longer cover its Terminal, Chat and Summary buttons.
 - Fetch toasts name an SSH host as you typed it, and a click on a path link shows its toast at once.
 - A folder fetch's progress keeps moving while it finishes, drops Cancel once it can't stop, and stays closed when you close it.
 - A link to a repo root missing on the host now says the folder is not there, not that it is outside the repo.

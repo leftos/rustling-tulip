@@ -515,6 +515,12 @@
     },
     {
       "paths": [
+        "apps/native/src/header_tip.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^header_tip::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_panes)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/history.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^history::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_diff_tab|ui_history)::/))"

@@ -26,7 +26,9 @@ use crate::buttons::{
     outlined_button,
 };
 use crate::ellipsis::truncating;
-use crate::grid_view::{DOCK_BACK_TIP, NO_REPOS_TIP, PANE_PENDING_TIP, TAB_DOCK_BACK_TIP};
+use crate::grid_view::{
+    DOCK_BACK_TIP, NO_REPOS_TIP, PANE_PENDING_TIP, TAB_DOCK_BACK_TIP, TipAt, header_tipped,
+};
 use crate::launch_last;
 use crate::notice_view::{MODAL_RADIUS, drop_shadow, modal_panel};
 use crate::notices::ToastKind;
@@ -3018,12 +3020,13 @@ impl RootView {
 
     /// The pane header's Pop out, which opens the pane in a window of its
     /// own on the press; dimmed while an open pop-out already shows its
-    /// session. Nothing for an empty pane.
+    /// session. Nothing for an empty pane. Its tip shows `at`.
     pub(crate) fn header_pop_out(
         &self,
         tab_id: &str,
         pane_id: &str,
         session_id: Option<&str>,
+        at: TipAt,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let host = self.slot_host(pane_id);
@@ -3034,23 +3037,16 @@ impl RootView {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
         };
-        let button = header_text_button(
-            &format!("pane-popout-{pane_id}"),
-            "Pop out",
-            theme(cx).muted,
-            &theme(cx),
-        );
+        let owner = format!("pane-popout-{pane_id}");
+        let button = header_text_button(&owner, "Pop out", theme(cx).muted, &theme(cx));
         if self.popouts.blocking(&key, self.tabs.tabs()).is_some() {
+            let button = button.opacity(0.6).cursor_default().hover(|style| style);
             return Some(
-                button
-                    .opacity(0.6)
-                    .cursor_default()
-                    .hover(|style| style)
-                    .tooltip(tooltip(POP_OUT_ALREADY_TIP))
+                header_tipped(button, &owner, pane_id, POP_OUT_ALREADY_TIP, at, cx)
                     .into_any_element(),
             );
         }
-        let button = button.tooltip(tooltip(POP_OUT_TIP));
+        let button = header_tipped(button, &owner, pane_id, POP_OUT_TIP, at, cx);
         Some(
             on_press(button, cx, move |this, window, cx| {
                 this.open_popout(key.clone(), window, cx);

@@ -9,8 +9,8 @@ use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId,
     Entity, FocusHandle, FontWeight, HighlightStyle, MouseButton, MouseDownEvent, Pixels, Point,
-    SharedString, Stateful, StyledText, Subscription, Window, WindowId, canvas, div, prelude::*,
-    px, relative, svg,
+    SharedString, Stateful, StyledText, Subscription, Window, WindowId, anchored, canvas, deferred,
+    div, point, prelude::*, px, relative, svg,
 };
 use protocol::{
     AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, SessionMember, SessionMode,
@@ -25,6 +25,7 @@ use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
+use crate::header_tip::SHOW_DELAY as HEADER_TIP_DELAY;
 use crate::open_view::LinkSource;
 use crate::popouts::{self, PopoutKey};
 use crate::runtime_icon::{RuntimeIcon, runtime_icon, runtime_icon_view};
@@ -40,7 +41,7 @@ use crate::target::{HostKey, Target};
 use crate::term::prompt_nav::Dir;
 use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
 use crate::ui_theme::{UiTheme, theme};
-use crate::{Drag, PANE_GUTTER, RootView, UI_TEXT_SIZE, new_request_id, tooltip};
+use crate::{Drag, PANE_GUTTER, RootView, UI_TEXT_SIZE, new_request_id, tip_box, tooltip};
 
 /// Why a repo-tied spawn button is disabled.
 pub(crate) const NO_REPOS_TIP: &str = "Register a repo to spawn repo-tied sessions.";
@@ -1829,7 +1830,7 @@ impl RootView {
             return popout_column(toolbar, note.into_any_element());
         };
         let parts = self.session_header_parts(host, session);
-        let title = header_title(&slot_id, Some(&parts), cx);
+        let title = header_title(&slot_id, Some(&parts), TipAt::Mouse, cx);
         let mut controls = self.header_stop(&slot_id, Some(session_id), StopPlace::Popout, cx);
         controls.push(Self::popout_close_window(&slot_id, cx));
         let toolbar = popout_toolbar_row(&slot_id, title, controls, cx);
@@ -1936,7 +1937,7 @@ impl RootView {
     ) -> AnyElement {
         let t = theme(cx);
         let parts = self.popout_header_parts(pane_id);
-        let mut title = header_title(pane_id, parts.as_ref(), cx);
+        let mut title = header_title(pane_id, parts.as_ref(), TipAt::Mouse, cx);
         if let Some(docked) = self.popout_docked_in(pane_id) {
             let name = format!("popout-tab-{pane_id}");
             let docked = div()
@@ -1983,13 +1984,20 @@ impl RootView {
         };
         let root = cx.entity().downgrade();
         let drag_session = session_id.map(str::to_owned);
+        // A popped tab's grid draws in its pop-out window, which keeps gpui's
+        // tooltips; header tips are the main window's.
+        let at = if self.is_tab_popped(tab_id) {
+            TipAt::Mouse
+        } else {
+            TipAt::BelowRow
+        };
         let mut controls: Vec<AnyElement> = self
-            .header_pop_out(tab_id, pane_id, session_id, cx)
+            .header_pop_out(tab_id, pane_id, session_id, at, cx)
             .into_iter()
             .collect();
         controls.extend(self.header_stop(pane_id, session_id, StopPlace::Grid, cx));
         let controls = (!controls.is_empty()).then(|| header_controls(cx).children(controls));
-        let buttons = self.pane_buttons(tab_id, pane_id, session_id, cx);
+        let buttons = self.pane_buttons(tab_id, pane_id, session_id, at, cx);
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .driver_id(|| name)
@@ -2041,20 +2049,117 @@ impl RootView {
             .border_color(gpui::rgb(t.line))
             .text_size(ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text_2))
-            .children(header_title(pane_id, parts.as_ref(), cx))
+            .when(at == TipAt::BelowRow, |row| {
+                row.child(header_row_probe(pane_id))
+            })
+            .children(header_title(pane_id, parts.as_ref(), at, cx))
             .child(div().flex_1())
             .children(controls)
             .children(buttons)
+            // After every element of the row is built: it reads what they
+            // recorded.
+            .children(
+                (at == TipAt::BelowRow)
+                    .then(|| self.header_tip_below(pane_id, cx))
+                    .flatten(),
+            )
+    }
+
+    /// The tip of the header element under the mouse, when it shows and this
+    /// render built the element, with that tip, in the header row of `row`:
+    /// a box whose top is the row's bottom edge plus 2 px, its left the
+    /// mouse's x when the hover began, kept 8 px inside the window and
+    /// painted above everything else in it.
+    fn header_tip_below(&self, row: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tip = self.header_tips.shown()?;
+        let frame = cx.try_global::<HeaderTipFrame>()?;
+        if frame.looking_for.as_deref() != Some(tip.owner.as_str()) {
+            return None;
+        }
+        frame
+            .built
+            .as_ref()
+            .filter(|built| built.row == row && built.text == tip.text)?;
+        let header = *frame.rows.get(row)?;
+        let at = point(px(tip.x), header.bottom() + px(2.0));
+        let tip_box = tip_box(SharedString::from(tip.text.clone()), cx)
+            .driver_id(|| "pane-header-tip".to_owned());
+        Some(
+            deferred(
+                anchored()
+                    .position(at)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(tip_box),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
+    }
+
+    /// The mouse entered header element `owner`, whose tip is `text`: its
+    /// tip shows after the hover delay, unless the hover ends first.
+    fn hover_header_tip(
+        &mut self,
+        owner: &str,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A drag under way passes over header elements; none of them tips.
+        if cx.has_active_drag() {
+            return;
+        }
+        let x = window.mouse_position().x / px(1.0);
+        self.header_tips.hover(owner, text, x, (self.now)());
+        self.header_tip_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HEADER_TIP_DELAY).await;
+            if let Err(err) = this.update(cx, |_, cx| cx.notify()) {
+                tracing::debug!("a header tip came due after the root view went: {err:#}");
+            }
+        }));
+        cx.notify();
+    }
+
+    /// Before the main window renders: drops the header tip whose element
+    /// the last render did not build, or built with other text (its pane
+    /// closed or changed session), shows the hovered one once its delay has
+    /// passed, and tells this render's header elements which one to look
+    /// for.
+    pub(crate) fn settle_header_tips(&mut self, cx: &mut Context<Self>) {
+        let frame = cx.default_global::<HeaderTipFrame>();
+        let built = frame.built.take();
+        let looked_for = frame.looking_for.take();
+        let hovered = self
+            .header_tips
+            .hovered()
+            .map(|tip| (tip.owner.clone(), tip.text.clone()));
+        // A hover that began after the last render was not looked for then:
+        // nothing is known of it yet.
+        if let Some((owner, text)) = hovered
+            && looked_for.as_deref() == Some(owner.as_str())
+        {
+            self.header_tips
+                .retain(|_| built.as_ref().is_some_and(|built| built.text == text));
+        }
+        // The move that starts a drag can hover an element before gpui
+        // holds the drag: no tip waits out a drag either.
+        if cx.has_active_drag() {
+            self.header_tips.press();
+        }
+        self.header_tips.due((self.now)());
+        cx.default_global::<HeaderTipFrame>().looking_for =
+            self.header_tips.hovered().map(|tip| tip.owner.clone());
     }
 
     /// Every button at the right of pane `pane_id`'s header: the Terminal /
     /// Chat toggle on a session that offers a chat, then split, move, the
-    /// prompt jumps (on a terminal only) and close.
+    /// prompt jumps (on a terminal only) and close, each tipping `at`.
     fn pane_buttons(
         &self,
         tab_id: &str,
         pane_id: &str,
         session_id: Option<&str>,
+        at: TipAt,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let session = session_id.and_then(|id| self.sidebar.session(id));
@@ -2068,12 +2173,12 @@ impl RootView {
             })
             .filter(|_| !shown.hides_terminal())
             .map(|_| self.pane_prompt_jumps(pane_id, cx));
-        let mut buttons = Self::header_buttons(tab_id, pane_id, session_id, prompt_jumps, cx);
+        let mut buttons = Self::header_buttons(tab_id, pane_id, session_id, prompt_jumps, at, cx);
         if session.is_some_and(offers_chat) {
             let chat_up = session_id.is_some_and(|id| self.session_chat_available(id));
-            buttons.insert(0, view_segments(pane_id, shown, chat_up, cx));
+            buttons.insert(0, view_segments(pane_id, shown, chat_up, at, cx));
             if shown == PaneView::Chat {
-                let base = header_control(pane_id, "chat-compact", "Compact", COMPACT_TIP, cx);
+                let base = header_control(pane_id, "chat-compact", "Compact", COMPACT_TIP, at, cx);
                 buttons.insert(1, compact_toggle(base, self.sidebar.chat_mode(), cx));
             }
         }
@@ -2197,30 +2302,39 @@ impl RootView {
 
     /// Split right and down (Shift: left and up), move to a new tab when
     /// the pane shows a session, previous and next prompt when
-    /// `prompt_jumps` holds whether each can jump, and close.
+    /// `prompt_jumps` holds whether each can jump, and close, each tipping
+    /// `at`.
     fn header_buttons(
         tab_id: &str,
         pane_id: &str,
         session_id: Option<&str>,
         prompt_jumps: Option<(bool, bool)>,
+        at: TipAt,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let ids = (tab_id.to_owned(), pane_id.to_owned());
         let (right, down, close) = (ids.clone(), ids.clone(), ids);
         let close_session = session_id.map(str::to_owned);
         let mut buttons = vec![
-            header_button(pane_id, "split-right", "│", "Split right (Shift: left)", cx)
-                .on_click(cx.listener(move |this, event: &ClickEvent, _, _| {
-                    let (tab, pane) = &right;
-                    this.split_pane(
-                        tab,
-                        pane,
-                        SplitDirection::Horizontal,
-                        event.modifiers().shift,
-                    );
-                }))
-                .into_any_element(),
-            header_button(pane_id, "split-down", "─", "Split down (Shift: up)", cx)
+            header_button(
+                pane_id,
+                "split-right",
+                "│",
+                "Split right (Shift: left)",
+                at,
+                cx,
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, _| {
+                let (tab, pane) = &right;
+                this.split_pane(
+                    tab,
+                    pane,
+                    SplitDirection::Horizontal,
+                    event.modifiers().shift,
+                );
+            }))
+            .into_any_element(),
+            header_button(pane_id, "split-down", "─", "Split down (Shift: up)", at, cx)
                 .on_click(cx.listener(move |this, event: &ClickEvent, _, _| {
                     let (tab, pane) = &down;
                     this.split_pane(tab, pane, SplitDirection::Vertical, event.modifiers().shift);
@@ -2235,6 +2349,7 @@ impl RootView {
                     "pane-move-new-tab",
                     "↗",
                     "Move this pane to a new tab",
+                    at,
                     cx,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
@@ -2244,11 +2359,11 @@ impl RootView {
             );
         }
         if let Some((previous, next)) = prompt_jumps {
-            buttons.push(prompt_button(pane_id, Dir::Previous, previous, cx));
-            buttons.push(prompt_button(pane_id, Dir::Next, next, cx));
+            buttons.push(prompt_button(pane_id, Dir::Previous, previous, at, cx));
+            buttons.push(prompt_button(pane_id, Dir::Next, next, at, cx));
         }
         buttons.push(
-            header_button(pane_id, "close-pane", "×", "Close pane", cx)
+            header_button(pane_id, "close-pane", "×", "Close pane", at, cx)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     let (tab_id, pane_id) = &close;
                     this.close_pane_clicked(tab_id, pane_id, close_session.as_deref(), window, cx);
@@ -2305,6 +2420,12 @@ impl RootView {
             slot.view.update(cx, |pane, cx| pane.jump_prompt(dir, cx));
         }
         cx.notify();
+    }
+
+    /// The text of the pane header tip on screen, if one is.
+    #[must_use]
+    pub fn header_tip_text(&self) -> Option<String> {
+        self.header_tips.shown().map(|tip| tip.text.clone())
     }
 
     /// What the header of pane `pane_id` in the tab on screen shows of its
@@ -2637,10 +2758,11 @@ fn header_fill(focused: bool, t: &UiTheme) -> u32 {
 }
 
 /// The header's left side: the status glyph, the name and the chips, or
-/// "Empty pane".
+/// "Empty pane", each tipping `at`.
 fn header_title(
     pane_id: &str,
     parts: Option<&PaneHeaderParts>,
+    at: TipAt,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
     let t = theme(cx);
@@ -2660,38 +2782,36 @@ fn header_title(
         .text_size(ui_px(cx, TITLE_TEXT_SIZE))
         .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
         .text_color(gpui::rgb(t.text));
-    let mut out = vec![
-        div()
-            .id(SharedString::from(format!("pane-status-{pane_id}")))
-            .flex_none()
-            .child(glyph_view(
-                glyph(
-                    parts.status,
-                    parts.background,
-                    parts.mode,
-                    parts.unseen,
-                    &theme(cx),
-                ),
-                GlyphSize::Leaf,
-                &format!("pane-glyph-{pane_id}"),
+    let status_id = format!("pane-status-{pane_id}");
+    let status = div()
+        .id(SharedString::from(status_id.clone()))
+        .flex_none()
+        .child(glyph_view(
+            glyph(
+                parts.status,
+                parts.background,
+                parts.mode,
+                parts.unseen,
                 &theme(cx),
-            ))
-            .tooltip(tooltip(parts.status_tip.clone()))
-            .into_any_element(),
-        title
-            .children(ellipsized(
-                &title_id,
-                SharedString::from(parts.title.clone()),
-                StyledText::new(parts.title.clone()),
-            ))
-            .tooltip(tooltip(parts.title_tip.clone()))
-            .into_any_element(),
+            ),
+            GlyphSize::Leaf,
+            &format!("pane-glyph-{pane_id}"),
+            &theme(cx),
+        ));
+    let title = title.children(ellipsized(
+        &title_id,
+        SharedString::from(parts.title.clone()),
+        StyledText::new(parts.title.clone()),
+    ));
+    let mut out = vec![
+        header_tipped(status, &status_id, pane_id, &parts.status_tip, at, cx).into_any_element(),
+        header_tipped(title, &title_id, pane_id, &parts.title_tip, at, cx).into_any_element(),
     ];
     out.extend(
         parts
             .chips
             .iter()
-            .map(|chip| header_chip(pane_id, chip, cx)),
+            .map(|chip| header_chip(pane_id, chip, at, cx)),
     );
     out
 }
@@ -2699,7 +2819,12 @@ fn header_title(
 /// A 20 px Geist Mono chip: the runtime a 20 px square holding its icon,
 /// repo:branch with its repo name bright, trusted an outlined square holding
 /// a shield, the rest filled.
-fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> AnyElement {
+fn header_chip(
+    pane_id: &str,
+    chip: &HeaderChip,
+    at: TipAt,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
     let t = theme(cx);
     let name = format!("pane-chip-{pane_id}-{}", chip.kind.name());
     let selector = name.clone();
@@ -2722,8 +2847,8 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
         .font_family(DEFAULT_FAMILY)
         .font_weight(FontWeight::NORMAL)
         .text_size(ui_px(cx, CHIP_TEXT_SIZE))
-        .text_color(gpui::rgb(t.text_2))
-        .tooltip(tooltip(chip.tip.clone()));
+        .text_color(gpui::rgb(t.text_2));
+    let base = header_tipped(base, &name, pane_id, &chip.tip, at, cx);
     let base = if chip.kind == HeaderChipKind::Branch {
         base
     } else {
@@ -2882,25 +3007,28 @@ fn header_button(
     action: &str,
     glyph: &'static str,
     tip: &'static str,
+    at: TipAt,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let t = theme(cx);
-    header_control(pane_id, action, glyph, tip, cx)
+    header_control(pane_id, action, glyph, tip, at, cx)
         .hover(move |style| style.bg(gpui::rgb(t.hover)).text_color(gpui::rgb(t.text)))
 }
 
 /// A pane header button, tagged `<action>-<pane>`, without a hover look:
-/// the caller sets the one it needs (gpui takes one per element).
+/// the caller sets the one it needs (gpui takes one per element). Its tip
+/// shows `at`.
 fn header_control(
     pane_id: &str,
     action: &str,
     glyph: &'static str,
     tip: &'static str,
+    at: TipAt,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let t = theme(cx);
     let name = format!("{action}-{pane_id}");
-    div()
+    let control = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .driver_id(|| name)
         .on_mouse_down(
@@ -2914,9 +3042,98 @@ fn header_control(
         .size(px(HEADER_BUTTON_SIZE))
         .rounded(px(HEADER_BUTTON_RADIUS))
         .text_color(gpui::rgb(t.text_2))
-        .cursor_pointer()
-        .tooltip(tooltip(tip))
-        .child(glyph)
+        .cursor_pointer();
+    header_tipped(
+        control,
+        &format!("{action}-{pane_id}"),
+        pane_id,
+        tip,
+        at,
+        cx,
+    )
+    .child(glyph)
+}
+
+/// Where a pane header element's tip shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TipAt {
+    /// As a header tip, below the header row: the main window's headers.
+    BelowRow,
+    /// As gpui's tooltip at the mouse: a pop-out window's.
+    Mouse,
+}
+
+/// What the main window's pane headers record while they are built and
+/// painted, for the header tip.
+#[derive(Default)]
+pub(crate) struct HeaderTipFrame {
+    /// The hovered header element the render under way looks for.
+    looking_for: Option<String>,
+    /// That element as the render built it.
+    built: Option<BuiltSite>,
+    /// Each header row's window bounds, by the id of the pane it heads.
+    rows: HashMap<String, Bounds<Pixels>>,
+}
+
+impl gpui::Global for HeaderTipFrame {}
+
+/// The hovered header element as a render built it: its tip and its row.
+struct BuiltSite {
+    text: String,
+    row: String,
+}
+
+/// Makes `site`, the header element tagged `owner` in the header row of
+/// `row`, show `text` `at`: below the header row after the hover delay, or
+/// as gpui's tooltip at the mouse.
+pub(crate) fn header_tipped(
+    site: Stateful<Div>,
+    owner: &str,
+    row: &str,
+    text: &str,
+    at: TipAt,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    if at == TipAt::Mouse {
+        return site.tooltip(tooltip(text.to_owned()));
+    }
+    // Only the hovered element says it was built, and nothing paints.
+    let looked_for = cx
+        .try_global::<HeaderTipFrame>()
+        .is_some_and(|frame| frame.looking_for.as_deref() == Some(owner));
+    if looked_for {
+        cx.global_mut::<HeaderTipFrame>().built = Some(BuiltSite {
+            text: text.to_owned(),
+            row: row.to_owned(),
+        });
+    }
+    let (owner, text) = (owner.to_owned(), text.to_owned());
+    site.on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+        if *hovered {
+            this.hover_header_tip(&owner, &text, window, cx);
+        } else if this.header_tips.leave(&owner) {
+            cx.notify();
+        }
+    }))
+}
+
+/// An invisible layer that records where the header row of `row` was laid
+/// out, for the header tips that open below it, when that changed.
+fn header_row_probe(row: &str) -> impl IntoElement {
+    let row = row.to_owned();
+    canvas(
+        move |bounds, _, cx| {
+            let frame = cx.default_global::<HeaderTipFrame>();
+            if frame.rows.get(&row) != Some(&bounds) {
+                frame.rows.insert(row, bounds);
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// A pane header's Terminal | Chat | Summary control, the view `shown`
@@ -2927,6 +3144,7 @@ fn view_segments(
     pane_id: &str,
     shown: PaneView,
     chat_up: bool,
+    at: TipAt,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let t = theme(cx);
@@ -2940,7 +3158,7 @@ fn view_segments(
         let enabled = chat_up || !view.hides_terminal();
         let (label, tip) = view_segment(view);
         let tip = if enabled { tip } else { AGENT_DOWN_TIP };
-        let segment = header_button(pane_id, action, label, tip, cx)
+        let segment = header_button(pane_id, action, label, tip, at, cx)
             .w_auto()
             .px(px(8.0))
             .when(view == shown, |segment| {
@@ -2974,13 +3192,19 @@ fn view_segments(
 /// A pane header's previous or next prompt button, drawn disabled when it
 /// has nowhere to scroll so the header's buttons never move. Its click asks
 /// the pane again, so a header drawn before new output still jumps.
-fn prompt_button(pane_id: &str, dir: Dir, enabled: bool, cx: &mut Context<RootView>) -> AnyElement {
+fn prompt_button(
+    pane_id: &str,
+    dir: Dir,
+    enabled: bool,
+    at: TipAt,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
     let (action, glyph, tip) = match dir {
         Dir::Previous => ("pane-prompt-prev", "↑", "Previous prompt"),
         Dir::Next => ("pane-prompt-next", "↓", "Next prompt"),
     };
     let pane = pane_id.to_owned();
-    let button = header_button(pane_id, action, glyph, tip, cx).on_click(cx.listener(
+    let button = header_button(pane_id, action, glyph, tip, at, cx).on_click(cx.listener(
         move |this, _: &ClickEvent, window, cx| {
             this.jump_prompt(&pane, dir, window, cx);
         },

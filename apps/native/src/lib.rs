@@ -64,6 +64,7 @@ pub mod fonts;
 mod footer;
 mod fuzzy;
 mod grid_view;
+mod header_tip;
 mod history;
 mod history_view;
 mod host_path_prompt;
@@ -849,6 +850,11 @@ pub struct RootView {
     /// an empty pane: a pane that turns into another session, or loses this
     /// one, ends the drag.
     pane_drag_session: Option<String>,
+    /// The pane header's own tooltips: the hovered header element, since
+    /// when, and whether its tip shows below the header row.
+    header_tips: header_tip::HeaderTips,
+    /// Wakes the view when the hovered header element's tip is due.
+    header_tip_timer: Option<Task<()>>,
     /// The pill a pill drag is over and the side of it the dragged pill
     /// lands on, while a drop there would change the strip's order.
     tab_drop: Option<(String, Side)>,
@@ -1501,6 +1507,8 @@ impl RootView {
             pane_drop: None,
             pane_drag: None,
             pane_drag_session: None,
+            header_tips: header_tip::HeaderTips::default(),
+            header_tip_timer: None,
             tab_drop: None,
             tab_drag: None,
             sidebar_drag: None,
@@ -5472,6 +5480,8 @@ impl Render for RootView {
         if !cx.has_active_drag() {
             self.clear_drag_state();
         }
+        // Before any pane header is built: they read which tip shows.
+        self.settle_header_tips(cx);
         let footer = self.conn().footer(self.sidebar.local_sessions().len());
         let flyout = self
             .flyout_open
@@ -5500,10 +5510,23 @@ impl Render for RootView {
             .font_family(fonts::ui_family(cx))
             .font_weight(fonts::ui_weight(cx, gpui::FontWeight::NORMAL))
             .track_focus(&self.root_focus)
+            // Before the app's own keys, which may stop the key: a key may
+            // open a dialog or a menu, and a pane header tip must not stay
+            // above it.
+            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
+                if this.header_tips.press() {
+                    cx.notify();
+                }
+            }))
             .capture_key_down(cx.listener(Self::on_key_capture))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
-            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, _| {
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.note_interaction(window);
+                // Before any control can stop the press: a pane header tip
+                // goes on a press anywhere in the window.
+                if this.header_tips.press() {
+                    cx.notify();
+                }
             }))
             .on_any_mouse_down(cx.listener(Self::on_any_mouse_down))
             .on_mouse_move(cx.listener(Self::on_drag_move))
@@ -6021,21 +6044,26 @@ struct Tip(SharedString);
 
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        div()
-            .px(px(6.0))
-            .py(px(2.0))
-            .font_family(fonts::ui_family(cx))
-            .font_weight(fonts::ui_weight(cx, gpui::FontWeight::NORMAL))
-            .bg(gpui::rgb(t.popover))
-            .border_1()
-            .border_color(gpui::rgb(t.popover_edge))
-            .rounded(px(10.0))
-            .text_size(ui_px(cx, UI_TEXT_SIZE))
-            .text_color(gpui::rgb(t.text))
-            .driver_id(|| format!("tooltip={}", self.0))
-            .child(self.0.clone())
+        tip_box(self.0.clone(), cx).driver_id(|| format!("tooltip={}", self.0))
     }
+}
+
+/// The box a plain text tooltip draws `text` in: a [`Tip`]'s, and a pane
+/// header tip's.
+pub(crate) fn tip_box(text: SharedString, cx: &App) -> Div {
+    let t = theme(cx);
+    div()
+        .px(px(6.0))
+        .py(px(2.0))
+        .font_family(fonts::ui_family(cx))
+        .font_weight(fonts::ui_weight(cx, gpui::FontWeight::NORMAL))
+        .bg(gpui::rgb(t.popover))
+        .border_1()
+        .border_color(gpui::rgb(t.popover_edge))
+        .rounded(px(10.0))
+        .text_size(ui_px(cx, UI_TEXT_SIZE))
+        .text_color(gpui::rgb(t.text))
+        .child(text)
 }
 
 /// The key a DIR or SH folder's scan answer is stored under: its normalized
