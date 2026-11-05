@@ -6,6 +6,7 @@ pub(crate) mod test_support;
 mod remote;
 pub(crate) use self::remote::RemoteSlot;
 
+mod agent_hooks;
 mod chat;
 mod connection;
 mod dashboard;
@@ -806,6 +807,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::SetAgentSettings { .. }
         | ClientMessage::InspectWorktreesRoot
         | ClientMessage::DeleteWorktreeAt { .. }) => settings::handle(hub, m, ctx).await?,
+        m @ (ClientMessage::GetAgentUserHooks { .. } | ClientMessage::SetAgentUserHooks { .. }) => {
+            agent_hooks::handle(hub, m, ctx).await?;
+        }
         m @ (ClientMessage::PreviewWorkspaceSpawn { .. }
         | ClientMessage::PreviewSpawn { .. }
         | ClientMessage::SpawnSession { .. }) => spawn::handle(hub, m, ctx).await?,
@@ -1109,6 +1113,8 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
     tokio::spawn(async move { summarizer.startup_key_check().await });
     // The Dashboard's 2 s facts tick; it parks while no connection watches.
     hub.dashboard.spawn_ticker();
+    // Keep an agent's user-settings hooks install pointing at a current shim.
+    agent_hooks::spawn_startup_refresh(hub);
     // The 3-minute working refresh; it parks while no connection watches.
     crate::summarizer::refresh::spawn(
         Arc::clone(&hub.sessions),

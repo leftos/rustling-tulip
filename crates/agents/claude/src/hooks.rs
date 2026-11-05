@@ -1,5 +1,6 @@
 //! Claude's hooks: the `--settings` document an interactive spawn carries and
-//! the argv that names it, and the mapping of the events those hooks report.
+//! the argv that names it, the edit that adds or removes the same hooks in
+//! Claude Code's user settings, and the mapping of the events they report.
 
 use crate::ClaudeOptions;
 use agent_api::{

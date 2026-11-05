@@ -63,6 +63,13 @@ pub const FEATURE_FOLDER_FETCH: &str = "folder_fetch";
 /// only when the connected daemon lists it.
 pub const FEATURE_DEFAULT_SHELL: &str = "default_shell";
 
+/// `Welcome.features` entry: the daemon reads, installs and removes its hooks
+/// in an agent's user settings file ([`ClientMessage::GetAgentUserHooks`],
+/// [`ClientMessage::SetAgentUserHooks`], [`DaemonMessage::AgentUserHooks`]),
+/// so a session the user starts by hand reports too. A client offers the
+/// Hooks switch only when the connected daemon lists it.
+pub const FEATURE_AGENT_USER_HOOKS: &str = "agent_user_hooks";
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -222,6 +229,28 @@ pub struct DefaultShell {
     /// other than `custom`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+}
+
+/// How far an agent's user settings file holds the daemon's hooks, as
+/// [`DaemonMessage::AgentUserHooks`] reports it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserHooksWire {
+    /// No event holds the daemon's entry.
+    Off,
+    /// Every event holds the daemon's entry, running the current hook shim.
+    On,
+    /// Some events hold the daemon's entry, some none.
+    Partial,
+    /// Every event holds the daemon's entry, and some run another shim path.
+    Stale,
+    /// This daemon does not edit the agent's user settings: the agent has no
+    /// user-hook support, it is unknown, or the daemon is elevated.
+    #[default]
+    Unsupported,
+    /// A state a newer daemon reports that this build does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One entry of the host's default-shell choices.
@@ -3760,6 +3789,26 @@ pub enum ClientMessage {
     /// Ask for the host's default-shell choices; the daemon detects them and
     /// answers this client alone with [`DaemonMessage::ShellChoices`].
     ListShellChoices,
+    /// Ask how far `agent`'s user settings file holds the daemon's hooks; the
+    /// daemon reads the file and answers this client alone with
+    /// [`DaemonMessage::AgentUserHooks`].
+    GetAgentUserHooks {
+        agent: AgentId,
+        /// Echoed on the [`DaemonMessage::AgentUserHooks`] that answers it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Install (`enabled`) or remove the daemon's hooks in `agent`'s user
+    /// settings file. The daemon answers this client alone with
+    /// [`DaemonMessage::AgentUserHooks`]: the state after the write, or the
+    /// state before it with `error` set when the edit failed.
+    SetAgentUserHooks {
+        agent: AgentId,
+        enabled: bool,
+        /// Echoed on the [`DaemonMessage::AgentUserHooks`] that answers it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Set the values `agent`'s Settings page holds, which clients use as the
     /// spawn dialog's defaults. The daemon validates them against the agent's
     /// option schema, persists them in `state.json`, then broadcasts
@@ -4678,6 +4727,26 @@ pub enum DaemonMessage {
     /// asked with [`ClientMessage::ListShellChoices`].
     ShellChoices {
         choices: Vec<ShellChoice>,
+    },
+    /// How far `agent`'s user settings file holds the daemon's hooks. Sent
+    /// only to the client that asked with
+    /// [`ClientMessage::GetAgentUserHooks`] or
+    /// [`ClientMessage::SetAgentUserHooks`]; after a failed Set it carries the
+    /// file's current state and `error`.
+    AgentUserHooks {
+        agent: AgentId,
+        #[serde(default)]
+        state: UserHooksWire,
+        /// The settings file the state was read from, as the daemon's host
+        /// writes it; `None` when the state is `unsupported`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// Why the request failed, naming the file and the cause.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// The request's `request_id`, echoed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Every registered agent's descriptor, in the daemon's order. Sent once
     /// per connection, after `Welcome` and before `Sessions`.
@@ -9300,6 +9369,153 @@ mod tests {
 
         assert_shell_choices_round_trip();
         assert_eq!(FEATURE_DEFAULT_SHELL, "default_shell");
+    }
+
+    #[test]
+    fn get_and_set_agent_user_hooks_round_trip() {
+        let get = ClientMessage::GetAgentUserHooks {
+            agent: AgentId("agent-a".to_owned()),
+            request_id: None,
+        };
+        let json = serde_json::to_value(&get).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "get_agent_user_hooks", "agent": "agent-a"}),
+            "request_id is omitted when None"
+        );
+        let back: ClientMessage = serde_json::from_value(json).expect("deserialize");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::GetAgentUserHooks { agent, request_id: None } if agent.0 == "agent-a"
+            ),
+            "{back:?}"
+        );
+
+        let set = ClientMessage::SetAgentUserHooks {
+            agent: AgentId("agent-a".to_owned()),
+            enabled: true,
+            request_id: Some("r7".to_owned()),
+        };
+        let json = serde_json::to_value(&set).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "set_agent_user_hooks",
+                "agent": "agent-a",
+                "enabled": true,
+                "request_id": "r7",
+            })
+        );
+        let back: ClientMessage = serde_json::from_value(json).expect("deserialize");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::SetAgentUserHooks { agent, enabled: true, request_id: Some(r) }
+                    if agent.0 == "agent-a" && r == "r7"
+            ),
+            "{back:?}"
+        );
+        assert_eq!(FEATURE_AGENT_USER_HOOKS, "agent_user_hooks");
+    }
+
+    #[test]
+    fn agent_user_hooks_round_trips_and_an_unknown_state_reads_unknown() {
+        for (state, wire) in [
+            (UserHooksWire::Off, "off"),
+            (UserHooksWire::On, "on"),
+            (UserHooksWire::Partial, "partial"),
+            (UserHooksWire::Stale, "stale"),
+            (UserHooksWire::Unsupported, "unsupported"),
+        ] {
+            let reply = DaemonMessage::AgentUserHooks {
+                agent: AgentId("agent-a".to_owned()),
+                state,
+                path: Some("/home/u/settings.json".to_owned()),
+                error: Some("nope".to_owned()),
+                request_id: Some("r1".to_owned()),
+            };
+            let json = serde_json::to_value(&reply).expect("serialize");
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "type": "agent_user_hooks",
+                    "agent": "agent-a",
+                    "state": wire,
+                    "path": "/home/u/settings.json",
+                    "error": "nope",
+                    "request_id": "r1",
+                })
+            );
+            let back: DaemonMessage = serde_json::from_value(json).expect("deserialize");
+            let DaemonMessage::AgentUserHooks {
+                agent,
+                state: back_state,
+                path,
+                error,
+                request_id,
+            } = back
+            else {
+                panic!("expected AgentUserHooks, got {back:?}");
+            };
+            assert_eq!(agent.0, "agent-a");
+            assert_eq!(back_state, state);
+            assert_eq!(path.as_deref(), Some("/home/u/settings.json"));
+            assert_eq!(error.as_deref(), Some("nope"));
+            assert_eq!(request_id.as_deref(), Some("r1"));
+        }
+
+        let later: DaemonMessage = serde_json::from_value(serde_json::json!({
+            "type": "agent_user_hooks",
+            "agent": "agent-a",
+            "state": "some_later_state",
+        }))
+        .expect("an unknown state still decodes");
+        assert!(
+            matches!(
+                later,
+                DaemonMessage::AgentUserHooks {
+                    state: UserHooksWire::Unknown,
+                    ..
+                }
+            ),
+            "{later:?}"
+        );
+    }
+
+    #[test]
+    fn agent_user_hooks_without_new_fields_decodes() {
+        let bare: DaemonMessage = serde_json::from_value(serde_json::json!({
+            "type": "agent_user_hooks",
+            "agent": "agent-a",
+        }))
+        .expect("a reply with only type and agent decodes");
+        let DaemonMessage::AgentUserHooks {
+            agent,
+            state,
+            path,
+            error,
+            request_id,
+        } = bare
+        else {
+            panic!("expected AgentUserHooks, got {bare:?}");
+        };
+        assert_eq!(agent.0, "agent-a");
+        assert_eq!(state, UserHooksWire::Unsupported);
+        assert_eq!((path, error, request_id), (None, None, None));
+        let json = serde_json::to_value(DaemonMessage::AgentUserHooks {
+            agent: AgentId("agent-a".to_owned()),
+            state: UserHooksWire::Off,
+            path: None,
+            error: None,
+            request_id: None,
+        })
+        .expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "agent_user_hooks", "agent": "agent-a", "state": "off"}),
+            "path, error and request_id are omitted when None"
+        );
     }
 
     /// `ShellChoices` pins its JSON, omits a `None` path, decodes back, and

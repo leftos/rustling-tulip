@@ -75,10 +75,16 @@ pub trait Agent: Send + Sync + 'static {
     fn import_tracer_run(&self, run: &TracerRun<'_>) -> Option<ImportedRun<Self::Options>>;
     #[cfg(feature = "test-support")]
     fn fake_cli(&self) -> Option<FakeCli>;
+    fn user_settings_path(&self) -> Option<PathBuf>;
+    fn install_user_hooks(&self, existing: Option<&str>, shim: &Path) -> Result<String, AgentError>;
+    fn remove_user_hooks(&self, existing: Option<&str>, shim: &Path) -> Result<String, AgentError>;
+    fn user_hooks_state(&self, existing: Option<&str>, shim: &Path) -> UserHooksState;
 }
 ```
 
-Methods with an obvious "does nothing" answer (`passthrough_vars`, `hook_plan`, `map_hook_event`, `parse_headless_line`, `find_conversations`, `shell_resume`, `import_tracer_run`, `fake_cli`) have default bodies. The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) and `inherited_session_vars`. A failed decode of `OptionValues` into `Self::Options` is a conformance bug: on a spawn path the adapter refuses the spawn naming the agent, elsewhere it logs an `error!` and uses `Default`; the conformance test keeps it from happening.
+Methods with an obvious "does nothing" answer (`passthrough_vars`, `hook_plan`, `map_hook_event`, `parse_headless_line`, `find_conversations`, `shell_resume`, `import_tracer_run`, `fake_cli`, and the four user-hooks methods, which default to unsupported) have default bodies.
+
+The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) and `inherited_session_vars`. A failed decode of `OptionValues` into `Self::Options` is a conformance bug: on a spawn path the adapter refuses the spawn naming the agent, elsewhere it logs an `error!` and uses `Default`; the conformance test keeps it from happening.
 
 | Capability | Method | What the app does with it |
 |---|---|---|
@@ -129,6 +135,14 @@ The context and result types, all in `agent-api`:
 
   A plain shell maps hooks only with a `hook_agent`. The shell itself stays a plain shell with no agent: its sidecar and history entry carry `agent: None`, and only the in-memory record uses `default_agent()`. Its snapshot carries `agent: None` too, until its screen watcher recognises an agent's TUI: the shell is then promoted, and the snapshot reports mode interactive, `agent` the plugin whose screen rules matched and `program_name` its tag (`session-runtime.md` "Session status"). A recovered shell with a `hook_agent` is never promoted by the screen.
 
+### User hooks
+
+`user_settings_path()` names the agent's own user-level settings file, and `install_user_hooks`, `remove_user_hooks` and `user_hooks_state` are pure text in, text out: the daemon reads and writes the file, the plugin only edits its text. `UserHooksState` is `Off`, `On`, `Partial` (some of the agent's entries are missing) or `Stale` (an entry points at another shim). A plugin that offers it sets `AgentCaps.user_hooks`; the defaults read as unsupported.
+
+Claude's plugin edits Claude Code's user settings (`CLAUDE_CONFIG_DIR` when non-empty, else `~/.claude`, then `settings.json`). It appends an entry `{type: command, command: <shim>, args: ["hook", "--from-env"], async: true}` for the same events and matchers as the injected hooks (one event table builds both documents; the injected one is unchanged), repoints a stale copy (same args, a command whose file name is `rt-hook` or `rt-hook.exe`) and removes only its own entries.
+
+It keeps the user's key order, indent, line endings and trailing newline, and refuses text that does not parse or a `hooks` section of another shape (`crates/agents/claude/src/hooks.rs`). The daemon side is in `docs/wire-protocol.md` (`GetAgentUserHooks`) and `docs/on-disk.md` ("User hooks").
+
 ### Codex and Cursor on this trait
 
 Neither needs an app change to return:
@@ -171,7 +185,7 @@ pub struct AgentDescriptor {
     pub tag: String,                // "claude", the runtime chip and selector part
     pub accent: AccentToken,        // a palette name; Unknown draws the default
     pub shift_enter: ShiftEnter,    // BackslashCr | Lf | Unknown
-    pub caps: AgentCaps,            // headless, resume, extra_folders, shell_resume
+    pub caps: AgentCaps,            // headless, resume, extra_folders, shell_resume, user_hooks
     pub trust_note: Option<String>, // what trusted launch passes, for the dialog's note
     pub texts: AgentTexts,          // shell_resume_label, no_conversation
     pub fields: Vec<OptionField>,

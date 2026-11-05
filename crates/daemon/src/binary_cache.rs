@@ -110,12 +110,18 @@ const HOOK_SHIM_STEM: &str = "rt-hook";
 
 /// The data dir the hook shim's folder lives in: the parent of
 /// [`crate::paths::Dirs::binaries_dir`], or `None` when it has none.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the user-settings hooks install is its caller")
-)]
 pub(crate) fn hook_shim_data_dir(dirs: &crate::paths::Dirs) -> Option<&Path> {
     dirs.binaries_dir.parent()
+}
+
+/// The fixed path of the hook shim under `data_dir`:
+/// `<data_dir>/hook-shim/rt-hook` with the platform's executable suffix.
+/// [`ensure_hook_shim`] writes it there, and a hook entry in an agent's user
+/// settings names it.
+pub(crate) fn hook_shim_path(data_dir: &Path) -> PathBuf {
+    data_dir
+        .join(HOOK_SHIM_DIR)
+        .join(format!("{HOOK_SHIM_STEM}{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// Ensure the fixed copy of the tracer that a hook entry in an agent's user
@@ -130,13 +136,9 @@ pub(crate) fn hook_shim_data_dir(dirs: &crate::paths::Dirs) -> Option<&Path> {
 /// fails (on Windows, a running hook holds the file), the old copy is kept,
 /// a `warn!` is logged, and its path is still returned: a stale shim speaks
 /// the same additive `hook` argv.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the user-settings hooks install is its caller")
-)]
 pub fn ensure_hook_shim(tracer_exe: &Path, data_dir: &Path) -> anyhow::Result<PathBuf> {
     let dir = data_dir.join(HOOK_SHIM_DIR);
-    let target = dir.join(format!("{HOOK_SHIM_STEM}{}", std::env::consts::EXE_SUFFIX));
+    let target = hook_shim_path(data_dir);
     let bytes = fs::read(tracer_exe)
         .with_context(|| format!("reading the tracer {}", tracer_exe.display()))?;
     if fs::read(&target).is_ok_and(|existing| existing == bytes) {

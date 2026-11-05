@@ -243,6 +243,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_FOLDER_FETCH,
     protocol::FEATURE_DETAILED_LOGGING,
     protocol::FEATURE_DEFAULT_SHELL,
+    protocol::FEATURE_AGENT_USER_HOOKS,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every

@@ -140,7 +140,19 @@ The root is created owned by Administrators with a protected DACL for SYSTEM and
 
 The binaries cache holds the content-addressed copies of the daemon and tracer that spawns run. The tracer is copied from its template folder: `RUSTLING_TULIP_BIN_TEMPLATES` when set (the client and `--detach` set it for the daemon they start), else beside the daemon's exe; no `%LOCALAPPDATA%` location is tried. An ordinary daemon copies the template again at each spawn, so a rebuilt tracer runs at the next spawn. An elevated daemon copies it once at start, before it serves, logs info `tracer_client: pinned the elevated daemon's tracer` (field `tracer`), and runs that copy for the rest of its life, so a replaced `rt-tracer.exe` in the install folder takes effect only when the daemon restarts; the startup cache sweep keeps the pinned copy. With no template it refuses to start with "an elevated daemon will not start without its rt-tracer template", naming the folders it looked in (`crates/daemon/src/tracer_client.rs` `pin_tracer_at_start`, `docs/plans/elevated-daemon.md` "Pin at elevation").
 
-Beside the binaries cache (under the binaries dir's parent) sits `hook-shim/rt-hook` (`rt-hook.exe` on Windows): a byte copy of the cached tracer, refreshed only when its bytes differ, written through a temp file `rt-hook[.exe].<pid>.tmp`. It exists for the tracer's `hook --from-env` mode run from a user's settings hooks and has no caller yet (`crates/daemon/src/binary_cache.rs`, `ensure_hook_shim`).
+Beside the binaries cache (under the binaries dir's parent) sits `hook-shim/rt-hook` (`rt-hook.exe` on Windows): a byte copy of the cached tracer, refreshed only when its bytes differ, written through a temp file `rt-hook[.exe].<pid>.tmp`.
+
+It exists for the tracer's `hook --from-env` mode run from a user's settings hooks; turning an agent's user hooks on refreshes it first, and so does the daemon's start for each agent whose entries are installed (`crates/daemon/src/binary_cache.rs`, `ensure_hook_shim`, `hook_shim_path`). Turning the hooks off leaves it.
+
+### User hooks
+
+`GetAgentUserHooks` and `SetAgentUserHooks` (`crates/daemon/src/server/agent_hooks.rs`) read and edit the agent's own user settings file, outside the app's folders: for Claude `settings.json` under `CLAUDE_CONFIG_DIR` (non-empty), else `~/.claude`.
+
+All of the file work runs off the async threads. An unchanged text writes nothing. Before a call's first write the daemon copies the file to `<settings>.rt-backup`, only when that file is absent, and removes the copy again if that call's write does not happen.
+
+Every write is a compare-and-swap (read, compute, re-read, recompute once, else refuse with "<path> changed while it was being edited; try again") and then atomic. A symlinked settings file is refused for a Set ("<path> is a link; …"). On Unix the first write leaves `settings.json` owner-only.
+
+An isolated daemon (config dir overridden) edits only a settings file under a `.tmp` folder (`daemon_client::isolation::under_tmp`), and an elevated daemon answers unsupported and writes nothing. At start a non-elevated daemon repoints stale entries through the same guarded path.
 
 The profile starts empty: presets, history, devices and sessions of the ordinary profile are not imported, because importing files an ordinary process can write is the write-up the root removes. The ordinary profile's data stays where it is.
 

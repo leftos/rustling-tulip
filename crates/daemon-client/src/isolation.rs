@@ -98,7 +98,8 @@ fn check_dir(value: Option<OsString>) -> Result<(), Reason> {
 
 /// Whether a folder named exactly `.tmp` sits above `path`'s last
 /// component, with nothing after it that climbs back out (`..`).
-fn under_tmp(path: &Path) -> bool {
+#[must_use]
+pub fn under_tmp(path: &Path) -> bool {
     let components: Vec<Component<'_>> = path.components().collect();
     let Some((_, ancestors)) = components.split_last() else {
         return false;

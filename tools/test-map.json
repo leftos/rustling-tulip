@@ -115,6 +115,12 @@
     },
     {
       "paths": [
+        "crates/daemon/src/server/agent_hooks.rs"
+      ],
+      "filter": "package(daemon) & test(/^server::agent_hooks::/)"
+    },
+    {
+      "paths": [
         "crates/daemon/**"
       ],
       "filter": "rdeps(daemon)"

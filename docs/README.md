@@ -361,6 +361,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Untouched (picked) layout**: a tab whose layout type was last chosen by a pick (Rearrange or the first-connect chooser) and has not been hand-resized (a divider drag) or hand-arranged since; the daemon rebuilds that type as panes come and go, and the per-client flag is `TabEntry.picked_layout`; see `docs/native-client.md` ("Tab layouts").
 
   A pick of the automatic grid also remembers the pane area's aspect and follows it when the window is resized (that re-fit keeps the tab's empty panes, where a fixed pick just keeps its count).
+- **User hooks**: the hook entries the app adds to an agent's own user settings (Claude Code's `settings.json`) so a session started outside the app reports its status through the hook shim; `GetAgentUserHooks` and `SetAgentUserHooks` read and edit them, and `UserHooksState` (off, on, partial, stale) says what the file holds; see `docs/agent-plugins.md` ("User hooks") and `docs/on-disk.md`.
 - **Waiter**: a `DiscoverAfterLaunch` session registered at spawn, with its baseline and launch time, until discovery claims a conversation for it or its final look runs.
 - **Waiting devices**: the owner's list of tailnet devices whose pairing request awaits approval, in Settings → Remote access; its model is `apps/native/src/pairing.rs` and its views are in `apps/native/src/pairing_view.rs`.
 - **Warm-up gate**: auto-switch making no decision until every usable account has been polled since it started.
