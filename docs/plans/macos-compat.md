@@ -109,8 +109,12 @@ abstracted. Two viable shapes:
       child (session leader), and `kill_process_group` does `killpg(child_pid,
       SIGTERM)` then `SIGKILL` on the tracer shutdown path. Best-effort +
       logged. A tracer killed with SIGKILL still leaks survivors (no
-      `PR_SET_PDEATHSIG` on macOS) — accepted. *Verify on macOS that
-      `portable-pty` makes the child a group leader and grandchildren die.*
+      `PR_SET_PDEATHSIG` on macOS) — accepted. The macOS check is the next line.
+- [ ] Grandchildren die when a session is killed on macOS: failed (see "macOS
+      verification"). `portable-pty` does make the shell a group leader, but
+      zsh's job control puts each background job in a process group of its
+      own, so `killpg` on the shell's group misses them; a `sleep` started by
+      `sh -c '… &'` outlived the session.
 
 ## 3. Autostart on login
 
@@ -128,7 +132,7 @@ Note: the Tauri app is no longer on `main`; it lives on the `tauri` branch (tag 
       `daemon_client::locate_daemon_binary` then `--detach` (the same hand-over to the cached copy as the Windows `Run` value), `AbandonProcessGroup` true so launchd spares the cached daemon, `RunAtLoad`, and no `KeepAlive`. **File-only** (no
       `launchctl load` on toggle: that would start a second daemon while the
       app's supervisor runs one; the file gives next-login parity with the
-      Windows `Run` key). Left open: *verify on a real Mac that launchd loads it at login;
+      Windows `Run` key). The plist it writes passes `plutil -lint` on the Mac mini (see "macOS verification"). Left open: *verify on a real Mac that launchd loads it at login, which needs the owner at the MacBook Air;
       consider an `EnvironmentVariables`/PATH key if the daemon can't find
       `claude` in launchd's minimal env.*
 
@@ -177,6 +181,18 @@ What the logs say on macOS that is not a launch blocker:
 - The daemon logs `the machine's identifier could not be read; the daemon id is not checked against this machine`: the stamp reads `/etc/machine-id`, which macOS does not have, so a copied config folder on a Mac keeps the other machine's daemon id. The macOS machine identifier is `IOPlatformUUID` (from `ioreg`).
 - A debug build of the client logs `GPUI was compiled in test mode`.
 
+## macOS verification
+
+A run of M1, M2 and M3 on the Mac mini builder (arm64), driven over SSH. `.\rt.ps1 mac build --package daemon --package tracer` built the debug `rustling-tulipd` and `rt-tracer`, which were copied side by side into a scratch folder. Every daemon started there had `RUSTLING_TULIP_CONFIG_DIR`, `RUSTLING_TULIP_BINARIES_DIR`, `RUSTLING_TULIP_WORKTREES_DIR`, `RUSTLING_TULIP_TAILNET_DIR`, `RUSTLING_TULIP_REMOTE_FILES_DIR` and `RUSTLING_TULIP_UPDATES_DIR` under the scratch folder's `.tmp`, was started with `nohup <folder>/rustling-tulipd &`, and wrote `daemon.json` in the isolated config folder. Sessions were plain shells (`/bin/zsh`), driven with the daemon's session verbs.
+
+Checks:
+
+- [x] M1, tracer reattach: `spawn --cwd` started a shell under `rt-tracer` on a Unix socket in the temp folder, and after `send <id> "echo before"` `read` showed `echo before` then `before`. `rustling-tulipd shutdown` printed `stopped the daemon`; `pgrep -fl rustling-tulipd` then found nothing, and `pgrep -fl rt-tracer` still showed the session's tracer with the same pid. A second daemon started with the same environment logged `reattach_orphans: begin orphan_count=1` and `tracer reattach succeeded` for the session id; `sessions` listed the same id `idle`, `read` showed the earlier `echo before` and `before` lines, and after `send <id> "echo after"` `read` showed `echo after` then `after`.
+- [ ] M2, process-group kill: failed. In a new shell session `send` of `sleep 600 & sh -c 'sleep 601 &' ; echo started` printed `[1] <pid>` and `started`. `ps` showed the shell `/bin/zsh` as its own group leader (its pgid equals its pid), `sleep 600` in a process group of its own (zsh's job control gives each job one), and `sleep 601` reparented to pid 1 in the exited `sh`'s job group. `kill <id>` returned 0, `wait <id> --status stopped` printed `stopped`, the tracer log shows `stop request received, killing child` and `exiting`, and the tracer was gone. `sleep 600` was gone too, but `sleep 601` was still running 28 seconds later, with parent 1. So `killpg` on the shell's group does not reach a job's own group; a job the shell still knows died (the run does not show how, though zsh hangs up its own jobs when it gets SIGHUP), but a process that left the shell's job table (a grandchild of a backgrounded subshell) survives. The run killed that `sleep 601` by its pid.
+- [x] M3, the LaunchAgent file: `.\rt.ps1 mac test --package daemon-client` passed 132 of 132 on the Mac mini, among them `autostart::tests::the_launch_agent_detaches_and_abandons_its_process_group`, which writes the plist through the macOS `set_at` to a temp path, reads it back and removes it. That test leaves no file, so the plist text it builds (the template in `autostart.rs` with the test's program path) was copied into a file in the scratch folder: `plutil -lint` printed `OK`, and `plutil -p` showed `Label`, `ProgramArguments` (the daemon path, then `--detach`), `AbandonProcessGroup` true and `RunAtLoad` true. The builder account's own `~/Library/LaunchAgents` was not touched.
+- [ ] M3, launchd starts the daemon at login (log out, log in, a daemon is running): needs the owner at the MacBook Air.
+- [x] Clean stop: `kill` of the remaining session and `rustling-tulipd shutdown` left no `rt-tracer` or `rustling-tulipd` process and no tracer socket in the temp folder.
+
 ## 5. Minor cleanups (work as-is, optionally tidy)
 
 - `crates/daemon/src/main.rs:208–213` — `is_tracer_image` strips `.exe`
@@ -221,18 +237,21 @@ Confirmed dual-arm or platform-neutral during the sweep:
 
 - [x] **Phase M0 — compile on macOS.** `mod job_object` was already gated; the
       named-pipe imports (the real blocker) are gone after M1. macOS bundle
-      target intentionally skipped (distribution = local dev only). *Pending: a
-      real `cargo build`/`cargo clippy` on macOS to confirm.*
+      target intentionally skipped (distribution = local dev only). Confirmed
+      on the Mac mini: `mac build` and `mac clippy` run clean (RT-917).
 - [x] **Phase M1 — tracer IPC over `interprocess` local sockets.** Transport
       replaced on both platforms; daemon-restart reattach preserved via a
-      serialized accept loop. Code-complete; *pending macOS + Windows runtime
-      verification.*
-- [x] **Phase M2 — process-tree cleanup.** `#[cfg(unix)]` `killpg` (SIGTERM →
+      serialized accept loop. Verified on macOS: a shell session survives a
+      daemon shutdown and the next daemon reattaches to it (see "macOS
+      verification"). The Windows runtime reattach smoke is not part of that run.
+- [ ] **Phase M2 — process-tree cleanup.** `#[cfg(unix)]` `killpg` (SIGTERM →
       SIGKILL) on tracer shutdown, mirroring the Windows job object. Relies on
-      `portable-pty` making the child a session leader — *verify on macOS.*
+      `portable-pty` making the child a session leader. Failed on macOS: a
+      background job's grandchild survives the session's kill (see "macOS
+      verification").
 - [ ] **Phase M3 — autostart (LaunchAgent).** On `main` (`crates/daemon-client/src/autostart.rs`, RT-246). Writes/removes
       `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist` with `--detach`, `RunAtLoad`, `AbandonProcessGroup` and no `KeepAlive` (file-only;
-      no `launchctl load` on toggle, to avoid a double daemon). Left unticked: *verify on a real Mac that launchd loads it at login.*
+      no `launchctl load` on toggle, to avoid a double daemon). The plist passes `plutil -lint` on macOS (see "macOS verification"). Left unticked: *verify on a real Mac that launchd loads it at login*, which needs the owner at the MacBook Air.
 - [ ] **Phase M4 — packaging + signing/notarization** for distribution.
       Deferred (local dev only this round).
 
