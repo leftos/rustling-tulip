@@ -253,7 +253,11 @@ fn read_capped(path: &Path, file: File, len: u64) -> Result<Zeroizing<Vec<u8>>, 
 /// Whether a folder or file owned by `file_uid` with permission bits `mode` passes for the effective uid
 /// `current_uid`: it must be that uid's and carry no group or other bit.
 #[cfg(any(unix, test))]
-fn unix_verdict(file_uid: u32, current_uid: u32, mode: u32) -> Result<(), GuardErrorKind> {
+pub(crate) fn unix_verdict(
+    file_uid: u32,
+    current_uid: u32,
+    mode: u32,
+) -> Result<(), GuardErrorKind> {
     if file_uid != current_uid {
         Err(GuardErrorKind::NotOwned)
     } else if mode & 0o022 != 0 {

@@ -5,10 +5,10 @@
     reason = "a test that cannot set up its files or take its lock must fail loudly"
 )]
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod entries;
 mod oauth;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod poll;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod support;

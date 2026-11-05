@@ -38,6 +38,16 @@ impl Scratch {
         }
         fs::create_dir_all(&dir).expect("the test's folder can be made");
         make_private(&dir);
+        #[cfg(unix)]
+        {
+            // Every file and folder a test makes is owner-only, as the scratch folder's DACL makes them on Windows.
+            // SAFETY: umask only swaps the process's file-mode creation mask; it takes no pointer and cannot fail.
+            let _previous = unsafe { libc::umask(0o077) };
+        }
+        // A Unix temp folder can sit under a link (macOS's `/var` is `/private/var`), which the store refuses as a
+        // root's parent: the scratch folder is named by its real path.
+        #[cfg(unix)]
+        let dir = fs::canonicalize(&dir).expect("the test's folder has a real path");
         let scratch = Self { dir };
         copy_dir(&fixture_root(), &scratch.backup());
         let store = scratch.store();
@@ -167,8 +177,33 @@ fn make_private(dir: &Path) {
     );
 }
 
+/// Off Windows: mode 0700.
+#[cfg(unix)]
+fn make_private(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        .expect("the test's folder can be made private");
+}
+
+/// Off Windows a copied fixture file keeps the checkout's mode: it is made owner-only (0600), as the store makes its
+/// files. On Windows the folder's DACL already covers it.
+#[cfg(windows)]
+fn make_file_private(_file: &Path) {}
+
+#[cfg(unix)]
+fn make_file_private(file: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::set_permissions(file, fs::Permissions::from_mode(0o600))
+        .expect("a copied fixture file can be made private");
+}
+
 fn copy_dir(from: &Path, to: &Path) {
     fs::create_dir_all(to).expect("a scratch folder can be made");
+    // On Windows the copy inherits the scratch folder's private DACL; off Windows a made folder is 0755 under umask.
+    #[cfg(unix)]
+    make_private(to);
     for entry in fs::read_dir(from).expect("a fixture folder can be listed") {
         let entry = entry.expect("a fixture entry can be read");
         let target = to.join(entry.file_name());
@@ -179,7 +214,8 @@ fn copy_dir(from: &Path, to: &Path) {
         {
             copy_dir(&entry.path(), &target);
         } else {
-            fs::copy(entry.path(), target).expect("a fixture file can be copied");
+            fs::copy(entry.path(), &target).expect("a fixture file can be copied");
+            make_file_private(&target);
         }
     }
 }

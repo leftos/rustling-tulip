@@ -2,33 +2,33 @@
 //! account store.
 
 #![cfg_attr(
-    all(windows, target_pointer_width = "64"),
+    accounts_locks,
     expect(
         clippy::expect_used,
         reason = "a test that cannot set up its files or take its lock must fail loudly"
     )
 )]
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod balance;
 mod cadence;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod cadence_tick;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod collect;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod lease;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod paid;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod rank;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod reading;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod state;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod support;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod tick;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod trigger;

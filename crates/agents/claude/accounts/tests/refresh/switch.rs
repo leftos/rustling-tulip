@@ -3,7 +3,10 @@
 //! them, and a failed write rolled back byte for byte.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
+#[cfg(windows)]
+use std::fs::{File, OpenOptions};
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -11,17 +14,20 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use claude_accounts::AutoSwitchSettings;
+#[cfg(windows)]
+use claude_accounts::LoginState;
 use claude_accounts::{
-    AccessToken, AccountLock, CredentialBlob, FileLock, LockError, LockTiming, LoginState,
-    OutgoingProbe, RawUsage, Store, SwitchError, SwitchErrorKind, SwitchOutcome,
-    SwitchPrecondition, TransportError, UsageTransport, credential_fingerprint,
-    poll_once_with_refresh, probe_outgoing, switch,
+    AccessToken, AccountLock, CredentialBlob, FileLock, LockError, LockTiming, OutgoingProbe,
+    RawUsage, Store, SwitchError, SwitchErrorKind, SwitchOutcome, SwitchPrecondition,
+    TransportError, UsageTransport, credential_fingerprint, poll_once_with_refresh, probe_outgoing,
+    switch,
 };
 use serde::Serialize as _;
 use serde_json::{Value, json};
 
 use crate::links::symlink_or_skip;
 use crate::support::{ONE, ONE_ORG, Rig, Scratch, credential, ms_after, profile};
+#[cfg(windows)]
 use crate::windows_files::{hold_open, temp_files};
 
 /// Account 1's uuid in the usage fixture.
@@ -31,8 +37,10 @@ const TWO: &str = "two@example.test";
 const STRANGER_UUID: &str = "00000000-0000-4000-8000-0000000000ff";
 const STRANGER: &str = "stranger@example.test";
 /// `FILE_SHARE_READ`: a handle that lets others read the file, but not replace it.
+#[cfg(windows)]
 const FILE_SHARE_READ: u32 = 0x1;
 /// Every fake token the suite writes: none may appear in an outcome's or an error's `Debug` or text.
+#[cfg(windows)]
 const FAKE_TOKENS: [&str; 3] = ["fake-access", "fake-refresh", "fake-device"];
 /// What a refusal of a live `primaryApiKey` no managed account backs up says.
 const API_KEY_MESSAGE: &str = "the live login holds an API key no managed account backs up, which the switch would drop; nothing was written";
@@ -226,6 +234,7 @@ fn stash_rows(rig: &Rig) -> Vec<(String, Value)> {
         .collect()
 }
 
+#[cfg(windows)]
 /// Opens `path` sharing only reads: it can be read, but no write replaces it until the handle drops.
 fn readable_only(path: &Path) -> File {
     OpenOptions::new()
@@ -819,6 +828,7 @@ fn a_wiped_outgoing_credential_is_not_backed_up() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn a_failed_stash_aborts_the_switch_with_nothing_live_written() {
     let foreign = fresh("fake-access-x", "fake-refresh-x");
@@ -1198,6 +1208,7 @@ fn direct_activation_writes_no_outgoing_backups() {
     assert_eq!(one_config_backup(&rig), None);
 }
 
+#[cfg(windows)]
 #[test]
 fn a_failed_stash_aborts_direct_activation_with_nothing_live_written() {
     let rig = stranger_rig(
@@ -1244,6 +1255,7 @@ fn a_live_credential_equal_to_the_targets_is_not_stashed() {
     assert_eq!(active(&rig), Some(2));
 }
 
+#[cfg(windows)]
 #[test]
 fn direct_activation_rolls_back_byte_exact_on_a_failed_config_write() {
     let rig = stranger_rig(
@@ -1275,6 +1287,7 @@ fn direct_activation_rolls_back_byte_exact_on_a_failed_config_write() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn direct_activation_rolls_back_byte_exact_on_a_failed_sequence_write() {
     let rig = stranger_rig(
@@ -1303,6 +1316,7 @@ fn direct_activation_rolls_back_byte_exact_on_a_failed_sequence_write() {
     assert_eq!(active(&rig), Some(1));
 }
 
+#[cfg(windows)]
 #[test]
 fn direct_activation_rollback_removes_the_live_files_it_created() {
     let rig = rig(
@@ -1569,6 +1583,7 @@ fn an_unreadable_live_credential_is_refused_by_direct_activation() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn an_empty_live_credential_is_restored_empty_on_rollback() {
     let rig = stranger_rig(
@@ -1609,6 +1624,7 @@ fn an_unmanaged_login_to_an_api_key_target_is_refused_as_unknown() {
     assert_eq!(files(&rig), before, "nothing was written");
 }
 
+#[cfg(windows)]
 #[test]
 fn failed_config_write_rolls_back_credentials() {
     let own = fresh("fake-access-a", "fake-refresh-a");
@@ -1646,6 +1662,7 @@ fn failed_config_write_rolls_back_credentials() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn failed_sequence_write_rolls_back_config_and_credentials() {
     let own = fresh("fake-access-a", "fake-refresh-a");
@@ -1717,6 +1734,7 @@ fn an_oracle_failure_does_not_fail_the_switch() {
     assert!(stash_rows(&rig).is_empty(), "nothing is stashed");
 }
 
+#[cfg(windows)]
 #[test]
 fn no_switch_error_or_outcome_holds_a_token() {
     let rotated = fresh("fake-access-b", "fake-refresh-b");
@@ -1765,6 +1783,7 @@ fn live_files(rig: &Rig) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+#[cfg(windows)]
 #[test]
 fn a_failed_outgoing_credential_backup_aborts_with_nothing_live_written() {
     let rotated = credential("fake-access-b", Some("fake-refresh-b"), ms_after(7200));
@@ -1792,6 +1811,7 @@ fn a_failed_outgoing_credential_backup_aborts_with_nothing_live_written() {
     assert_eq!(active(&rig), Some(1));
 }
 
+#[cfg(windows)]
 #[test]
 fn a_failed_outgoing_config_backup_aborts_with_nothing_live_written() {
     let own = fresh("fake-access-a", "fake-refresh-a");
@@ -2299,7 +2319,9 @@ fn lock_order_is_consume_account_credentials_config() {
 }
 
 /// The tests whose assertions race a write's sub-second retry window: a loaded machine can exhaust the retries before
-/// the racing thread acts, so they run apart in the gate's critical slot (`cargo nextest run -P timing`).
+/// the racing thread acts, so they run apart in the gate's critical slot (`cargo nextest run -P timing`). Each one races
+/// a write that a Windows handle without delete sharing makes fail, so they run on Windows alone.
+#[cfg(windows)]
 mod timing {
     use std::fs;
     use std::path::Path;

@@ -10,7 +10,9 @@ use claude_accounts::{
 use serde_json::{Value, json};
 
 use crate::support::Scratch;
-use crate::windows_files::{hold_open, pin_first_temp, temp_files};
+use crate::windows_files::temp_files;
+#[cfg(windows)]
+use crate::windows_files::{hold_open, pin_first_temp};
 
 fn paths(scratch: &Scratch) -> ClaudePaths {
     ClaudePaths::new(
@@ -109,6 +111,7 @@ fn live_credentials_write_replaces_the_file_and_leaves_no_temp() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn live_credentials_write_leaves_the_old_file_intact_when_the_rename_fails() {
     let scratch = Scratch::empty("claude_files_live_rename_fails");
@@ -137,6 +140,7 @@ fn live_credentials_write_leaves_the_old_file_intact_when_the_rename_fails() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn live_credentials_write_whose_temp_cannot_be_removed_reports_it() {
     let scratch = Scratch::empty("claude_files_live_temp_left");

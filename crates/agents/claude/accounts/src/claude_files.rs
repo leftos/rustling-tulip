@@ -507,10 +507,94 @@ fn remove_if_holding_with(
     crate::win32::remove_file_if_holding(path, written, between).map_err(ClaudeFileError::Write)
 }
 
+/// As [`remove_if_holding`], running `between` after the compare matched and before the delete. Unix has no removal
+/// through the descriptor the compare read, so the file is opened and compared through one descriptor, then its name is
+/// renamed to a sibling only this removal knows (`<name>.rt-remove-<pid>-<n>`; rename(2) moves the name in one step),
+/// and the entry set aside is removed only when it is the file the descriptor read (same device and inode, a link
+/// followed as the open followed it). A file another writer put at the name after the compare is renamed back
+/// without replacing anything made at the name meanwhile, and reported kept (`Ok(false)`); when that put-back fails it
+/// is left set aside with a warning. A failed read of `path` is reported as [`ClaudeFileError::Write`].
+#[cfg(unix)]
+fn remove_if_holding_with(
+    path: &Path,
+    written: &[u8],
+    between: impl FnOnce(),
+) -> Result<bool, ClaudeFileError> {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(ClaudeFileError::Write(error)),
+    };
+    // One byte past `written` is enough to tell a longer file from it.
+    let limit = u64::try_from(written.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut held = Zeroizing::new(Vec::with_capacity(written.len().saturating_add(1)));
+    (&file)
+        .take(limit)
+        .read_to_end(&mut held)
+        .map_err(ClaudeFileError::Write)?;
+    if held.as_slice() != written {
+        return Ok(false);
+    }
+    let compared = file.metadata().map_err(ClaudeFileError::Write)?;
+    between();
+    let Some(name) = path.file_name() else {
+        return Err(ClaudeFileError::Write(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the file to remove has no name",
+        )));
+    };
+    let aside = path.with_file_name(crate::locks::aside_name(name));
+    match fs::rename(path, &aside) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(ClaudeFileError::Write(error)),
+    }
+    let same = fs::metadata(&aside)
+        .is_ok_and(|renamed| renamed.dev() == compared.dev() && renamed.ino() == compared.ino());
+    if same {
+        return match fs::remove_file(&aside) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+            Err(error) => {
+                put_back(&aside, path);
+                Err(ClaudeFileError::Write(error))
+            }
+        };
+    }
+    put_back(&aside, path);
+    Ok(false)
+}
+
+/// Renames the file set aside as `aside` back to `path`, never replacing a file made at `path` meanwhile (macOS's
+/// `renameatx_np(2)` with `RENAME_EXCL` fails with `EEXIST` when the destination exists); when that fails it is left
+/// set aside with a warning naming the file by a fixed description, so no path under the user's profile is logged, and
+/// the set-aside name's shape.
+#[cfg(unix)]
+fn put_back(aside: &Path, path: &Path) {
+    if let Err(error) = crate::locks::rename_exclusive(aside, path) {
+        let file = match path.file_name().and_then(|name| name.to_str()) {
+            Some(".credentials.json") => "Claude Code's live credential file",
+            Some(".claude.json") => "Claude Code's global config",
+            _ => "a Claude Code file",
+        };
+        tracing::warn!(
+            file,
+            set_aside_as = "<file name>.rt-remove-<pid>-<n>, beside the file",
+            error = %error.kind(),
+            "a file set aside for removal was not the one compared and could not be put back; it was left set aside"
+        );
+    }
+}
+
 /// As [`remove_if_holding`], running `between` after the compare matched and before the delete: a read, a compare and
-/// a removal by name, since the switch, the only caller, refuses to run off 64-bit Windows. A failed read of `path` is
-/// reported as [`ClaudeFileError::Write`].
-#[cfg(not(all(windows, target_pointer_width = "64")))]
+/// a removal by name. Neither Unix nor 64-bit Windows takes locks, so the switch, the only caller, never runs here. A
+/// failed read of `path` is reported as [`ClaudeFileError::Write`].
+#[cfg(not(any(unix, all(windows, target_pointer_width = "64"))))]
 fn remove_if_holding_with(
     path: &Path,
     written: &[u8],
@@ -603,7 +687,7 @@ mod tests {
 }
 
 /// The rollback's conditional removal, under Claude Code's locks, which this platform alone takes.
-#[cfg(all(test, windows, target_pointer_width = "64"))]
+#[cfg(all(test, accounts_locks))]
 #[expect(
     clippy::expect_used,
     reason = "a test that cannot set up its files or take its locks must fail loudly"
@@ -686,6 +770,9 @@ mod removal_tests {
         );
     }
 
+    /// A writer renames another file onto the target between the compare and the removal. Windows compares and
+    /// deletes through one handle that refuses the rename; on macOS the rename lands, and the removal, which sets the
+    /// file aside and checks it is the one compared, puts the newcomer back.
     #[test]
     fn a_file_swapped_in_after_the_compare_is_not_deleted() {
         let paths = live_files("swapped", WRITTEN);
@@ -699,19 +786,55 @@ mod removal_tests {
         })
         .expect("the removal runs");
 
-        assert!(gone, "the removal reports the file it compared gone");
-        assert_ne!(
-            fs::read(target).ok().as_deref(),
-            Some(OTHER),
-            "the target does not hold the newcomer's bytes"
-        );
-        assert_eq!(
-            fs::read(&newcomer).ok().as_deref(),
-            Some(OTHER),
-            "the newcomer was not deleted in the compared file's place (rename: {renamed:?})"
-        );
+        #[cfg(windows)]
+        {
+            assert!(gone, "the removal reports the file it compared gone");
+            assert_ne!(
+                fs::read(target).ok().as_deref(),
+                Some(OTHER),
+                "the target does not hold the newcomer's bytes"
+            );
+            assert_eq!(
+                fs::read(&newcomer).ok().as_deref(),
+                Some(OTHER),
+                "the newcomer was not deleted in the compared file's place (rename: {renamed:?})"
+            );
+        }
+        #[cfg(unix)]
+        {
+            assert!(
+                renamed.as_ref().is_some_and(Result::is_ok),
+                "the newcomer was renamed onto the target: {renamed:?}"
+            );
+            assert!(
+                !gone,
+                "the target holds the newcomer, so the removal reports it kept"
+            );
+            assert_eq!(
+                fs::read(target).ok().as_deref(),
+                Some(OTHER),
+                "the newcomer renamed onto the target was not deleted"
+            );
+            let prefix = format!(
+                "{}.rt-remove-",
+                target
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("the target has a name")
+            );
+            let left = fs::read_dir(target.parent().expect("the target has a folder"))
+                .expect("the target's folder lists")
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .is_ok_and(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                })
+                .count();
+            assert_eq!(left, 0, "nothing is left set aside");
+        }
     }
 
+    #[cfg(windows)]
     #[test]
     #[expect(
         clippy::print_stdout,
@@ -743,7 +866,7 @@ mod removal_tests {
 }
 
 /// The switch's compared credential write, under Claude Code's credential locks, which this platform alone takes.
-#[cfg(all(test, windows, target_pointer_width = "64"))]
+#[cfg(all(test, accounts_locks))]
 #[expect(
     clippy::expect_used,
     reason = "a test that cannot set up its files or take its locks must fail loudly"

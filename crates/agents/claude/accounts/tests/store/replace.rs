@@ -1,24 +1,38 @@
 //! A replace that cannot land leaves the target as it was and no temp file behind.
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(windows)]
+use std::fs::OpenOptions;
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use claude_accounts::{
-    AccountLock, AccountLockGuard, AccountsRoot, ConsumeLock, CredentialBlob, Identity, PollError,
-    Sequence, Store, StoreErrorKind, UsageTable,
+    AccountLock, AccountsRoot, ConsumeLock, CredentialBlob, Identity, PollError, Store,
+    StoreErrorKind, UsageTable,
 };
+#[cfg(windows)]
+use claude_accounts::{AccountLockGuard, Sequence};
 
 use crate::links::{junction, snapshot, symlink_or_skip};
-use crate::support::{ALICE, ALICE_CRED, Scratch, assert_owner_only, grant_users_write};
-use crate::windows_files::{pin_first_temp, temp_files as shared_temp_files};
+use crate::support::{ALICE, Scratch, grant_users_write};
+#[cfg(windows)]
+use crate::support::{ALICE_CRED, assert_owner_only};
+#[cfg(windows)]
+use crate::windows_files::pin_first_temp;
+#[cfg(windows)]
+use crate::windows_files::temp_files as shared_temp_files;
 
 /// What a file outside the account store holds, which no store write may change.
+#[cfg(windows)]
 const VICTIM: &[u8] = b"a file outside the account store";
 
+#[cfg(windows)]
 fn temp_files(dir: &Path) -> Vec<String> {
     fs::read_dir(dir)
         .expect("the folder lists")
@@ -32,6 +46,7 @@ fn temp_files(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+#[cfg(windows)]
 #[test]
 fn replace_failure_leaves_target_and_no_temp() {
     let scratch = Scratch::new("replace_failure_leaves_target_and_no_temp");
@@ -80,8 +95,10 @@ fn replace_failure_leaves_target_and_no_temp() {
 }
 
 /// `FILE_SHARE_READ`: a handle that lets others read the file, but not replace it.
+#[cfg(windows)]
 const FILE_SHARE_READ: u32 = 0x1;
 
+#[cfg(windows)]
 /// Holds `path` open letting others read it but not replace it: a write still reads `accounts.json` before it writes
 /// (an unreadable one refuses every write), and the replace onto it fails.
 fn hold_readable(path: &std::path::Path) -> std::fs::File {
@@ -92,6 +109,7 @@ fn hold_readable(path: &std::path::Path) -> std::fs::File {
         .expect("the file opens sharing reads only")
 }
 
+#[cfg(windows)]
 /// The serial the next temp file of this process takes, read off a sequence write held at its temp file: the roster
 /// held open keeps the rename failing while the temp file is pinned, so the write gives up and leaves it. The pinned
 /// temp file is removed again.
@@ -122,6 +140,7 @@ fn next_temp_serial(
         + 1
 }
 
+#[cfg(windows)]
 /// A symbolic link planted at the names a sequence write's temp file takes next is never opened: the file it points at
 /// keeps its bytes, the link stays, and the write lands through a free name.
 #[test]

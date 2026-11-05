@@ -268,8 +268,39 @@ fn scratch(test: &str) -> PathBuf {
     }
     std::fs::create_dir_all(&dir).expect("the test's folder can be made");
     make_private(&dir);
-    dir
+    // A Unix temp folder can sit under a link (macOS's `/var` is `/private/var`), which the store refuses as a root's
+    // parent: the scratch folder is named by its real path.
+    if cfg!(unix) {
+        std::fs::canonicalize(&dir).expect("the test's folder has a real path")
+    } else {
+        dir
+    }
 }
+
+/// Off Windows makes the store at `root` owner-only, as the store makes its own folders and files: the folders a test
+/// writes there are 0755 and its files 0644 under the usual umask, which the store refuses. On Windows the scratch
+/// folder's DACL already covers them.
+#[cfg(unix)]
+fn restrict(root: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let Ok(metadata) = std::fs::symlink_metadata(root) else {
+        return;
+    };
+    if metadata.is_dir() {
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+            .expect("a store folder can be made private");
+        for entry in std::fs::read_dir(root).expect("a store folder lists") {
+            restrict(&entry.expect("a store entry can be read").path());
+        }
+    } else if metadata.is_file() {
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o600))
+            .expect("a store file can be made private");
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict(_root: &Path) {}
 
 #[cfg(windows)]
 fn make_private(dir: &Path) {
@@ -312,6 +343,7 @@ fn service(root: PathBuf) -> Arc<dyn AccountsService> {
 /// The plugin's service over the store at `root`, with Claude Code's home at
 /// `home` and its requests sent to `origin` when one is given.
 fn service_at(root: PathBuf, home: PathBuf, origin: Option<&str>) -> Arc<dyn AccountsService> {
+    restrict(&root);
     let mut cfg = AccountsConfig::new(root);
     cfg.agent_home = Some(home);
     cfg.base_url = origin.map(str::to_owned);
@@ -647,6 +679,7 @@ fn write_store(
     let usage = json!({"schemaVersion": 3, "accounts": rows});
     std::fs::write(root.join("cache").join("usage.json"), usage.to_string())
         .expect("usage.json can be written");
+    restrict(&root);
     root
 }
 
@@ -774,7 +807,7 @@ fn two_accounts(dir: &Path) -> Arc<dyn AccountsService> {
     service_at(root, dir.join("claude"), Some(&profile_of(1).0))
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
 #[test]
 fn set_alias_renames_and_reports_a_change() {
     let dir = scratch("set_alias_renames_and_reports_a_change");
@@ -794,7 +827,7 @@ fn set_alias_renames_and_reports_a_change() {
     assert_eq!(aliases, [None, Some("work")]);
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
 #[test]
 fn set_alias_unchanged_reports_no_change() {
     let dir = scratch("set_alias_unchanged_reports_no_change");
@@ -810,7 +843,7 @@ fn set_alias_unchanged_reports_no_change() {
     assert!(!changed);
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
 #[test]
 fn set_order_with_a_wrong_permutation_is_refused() {
     let dir = scratch("set_order_with_a_wrong_permutation_is_refused");
@@ -827,7 +860,7 @@ fn set_order_with_a_wrong_permutation_is_refused() {
     assert_eq!(numbers, [1, 2]);
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
 #[test]
 fn remove_unknown_account_is_unknown() {
     let dir = scratch("remove_unknown_account_is_unknown");
@@ -845,7 +878,7 @@ fn remove_unknown_account_is_unknown() {
     assert_eq!(failure.code, "unknown_account");
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
 #[test]
 fn remove_the_active_account_is_refused() {
     let dir = scratch("remove_the_active_account_is_refused");
@@ -865,7 +898,7 @@ fn remove_the_active_account_is_refused() {
     assert_eq!(snapshot.accounts.len(), 2);
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
 #[test]
 fn writes_after_begin_shutdown_are_draining() {
     let dir = scratch("writes_after_begin_shutdown_are_draining");
@@ -987,7 +1020,7 @@ fn an_unknown_switch_sends_no_request() {
 /// shutdown begun meanwhile must not report idle while that write can still
 /// land. Either the write landed before the shutdown returned, or it was
 /// refused as draining and never lands.
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
 #[test]
 fn begin_shutdown_waits_for_an_alias_write_in_flight() {
     let dir = scratch("begin_shutdown_waits_for_an_alias_write_in_flight");
@@ -1046,7 +1079,7 @@ fn begin_shutdown_waits_for_an_alias_write_in_flight() {
     }
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
 #[test]
 fn add_current_login_adds_the_live_login() {
     let dir = scratch("add_current_login_adds_the_live_login");
@@ -1068,7 +1101,7 @@ fn add_current_login_adds_the_live_login() {
     assert_eq!(rows, [(number, "user1@example.com", true)]);
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
 #[test]
 fn switch_to_another_account_switches() {
     let dir = scratch("switch_to_another_account_switches");

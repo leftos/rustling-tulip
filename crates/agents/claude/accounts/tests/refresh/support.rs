@@ -8,9 +8,9 @@ use std::sync::{Mutex, MutexGuard};
 use claude_accounts::{RawToken, RefreshRequest, RefreshTransport, TransportError};
 use serde_json::{Value, json};
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 pub use disk::*;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 pub use oracle::*;
 
 /// The clock every test runs at, in seconds since the epoch: 2026-09-21 14:13:20 UTC.
@@ -105,7 +105,7 @@ impl FakeEndpoint {
     }
 
     /// Runs `hook` inside the first POST, before it answers.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     pub fn during_post(self, hook: impl FnOnce() + Send + 'static) -> Self {
         *lock(&self.hook) = Some(Box::new(hook));
         self
@@ -117,7 +117,7 @@ impl FakeEndpoint {
     }
 
     /// The fake refresh token each POST carried.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     pub fn posted_refresh_tokens(&self) -> Vec<String> {
         self.bodies()
             .iter()
@@ -146,7 +146,7 @@ impl RefreshTransport for FakeEndpoint {
 }
 
 /// The profile endpoint's fake, used only by the refreshing polls, which run where the locks work.
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod oracle {
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -205,7 +205,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .expect("no test thread panics holding the fake's lock")
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod disk {
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -239,6 +239,11 @@ mod disk {
             }
             fs::create_dir_all(&dir).expect("the test's folder can be made");
             make_private(&dir);
+            private_umask();
+            // A Unix temp folder can sit under a link (macOS's `/var` is `/private/var`), which the store refuses as a
+            // root's parent: the scratch folder is named by its real path.
+            #[cfg(unix)]
+            let dir = fs::canonicalize(&dir).expect("the test's folder has a real path");
             let scratch = Self { dir };
             copy_dir(&fixture_root(), &scratch.backup());
             restrict(&scratch.backup());
@@ -522,6 +527,17 @@ mod disk {
 
     #[cfg(not(unix))]
     fn restrict(_root: &Path) {}
+
+    /// Off Windows every file and folder a test makes is owner-only (umask 077), as the scratch folder's DACL makes
+    /// them on Windows: the store refuses a file another user can read.
+    #[cfg(unix)]
+    fn private_umask() {
+        // SAFETY: umask only swaps the process's file-mode creation mask; it takes no pointer and cannot fail.
+        let _previous = unsafe { libc::umask(0o077) };
+    }
+
+    #[cfg(not(unix))]
+    fn private_umask() {}
 
     fn copy_dir(from: &Path, to: &Path) {
         fs::create_dir_all(to).expect("a scratch folder can be made");

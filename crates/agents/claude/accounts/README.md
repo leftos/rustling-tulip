@@ -22,4 +22,4 @@ The seal format's identifiers are rustling-tulip's own: the `RTSEAL` magic, the 
 
 ## Platforms
 
-Windows today: the locks and DPAPI sealing are Windows-only, and elsewhere the locks report `Unsupported`. macOS support (its locks and the Keychain) is RT-916.
+The locks work on 64-bit Windows and macOS (on macOS the store's file locks are `flock` on owner-only lock files, and Claude Code's lock directories are opened without following a link); Linux has none, so every lock there reports `Unsupported`. DPAPI sealing is Windows-only; off Windows the store's files are owner-only and unsealed. On macOS the live credential is still `.credentials.json`: the Keychain credential comes with RT-962.

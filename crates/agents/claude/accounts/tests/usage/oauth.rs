@@ -2,10 +2,10 @@
 
 use claude_accounts::CredentialBlob;
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 use crate::support::{FAKE_TOKENS, Scratch};
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn oauth_debug_hides_tokens() {
     let scratch = Scratch::new("oauth_debug_hides_tokens");

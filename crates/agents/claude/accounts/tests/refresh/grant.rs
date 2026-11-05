@@ -377,7 +377,7 @@ fn token_account_debug_hides_the_email() {
     );
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod gate {
     use claude_accounts::StashReason;
     use serde_json::json;

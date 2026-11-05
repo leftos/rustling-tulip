@@ -526,6 +526,7 @@ impl Bench {
     }
 
     /// Makes `autoswitch_state.json` read-only, so every write of it fails while reads go on, or writable again.
+    #[cfg(windows)]
     fn state_read_only(&self, read_only: bool) {
         let path = self.root().autoswitch_state();
         if !path.exists() {
@@ -2639,6 +2640,8 @@ fn a_lease_whose_holder_is_not_running_taken_before_the_switch_stops_it() {
 }
 
 // An identity conflict whose quarantine write failed keeps the account out of rotation until a later tick writes it.
+// Windows only: the write is failed with the read-only file attribute, which a Unix rename over the file ignores.
+#[cfg(windows)]
 #[test]
 fn a_failed_conflict_quarantine_still_blocks_the_target() {
     let mut bench = Bench::new("conflict_quarantine_unwritten", 2);
@@ -2999,6 +3002,8 @@ fn a_target_quarantined_under_the_lock_is_skipped() {
 }
 
 // A switch the state file could not record still starts the cooldown, from the engine's memory.
+// Windows only: the write is failed with the read-only file attribute, which a Unix rename over the file ignores.
+#[cfg(windows)]
 #[test]
 fn an_unrecorded_switch_still_cools_down() {
     let mut bench = three("unrecorded_cooldown");
@@ -4786,6 +4791,9 @@ fn an_in_place_entry_rereads_the_setting_under_the_gate() {
 
 // OPS-460 Part 3: a gate held by a switch in flight leaves the in-place entry to the next tick, with no write and no
 // event.
+// Windows only: its unrecorded move fails the state write with the read-only file attribute, which a Unix rename over
+// the file ignores.
+#[cfg(windows)]
 #[test]
 fn an_in_place_entry_skips_while_the_gate_is_busy() {
     let mut bench = in_place("in_place_busy");

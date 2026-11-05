@@ -1210,7 +1210,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     use super::{
         BEFORE_LOCK, DiscardError, Unrecorded, credential_fingerprint, discard_locked,
         read_manifest, retire,
@@ -1220,7 +1220,7 @@ mod tests {
         write_new_entry, write_unclaimed,
     };
     use crate::guard;
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     use crate::locks::AccountLock;
     use crate::paths::AccountsRoot;
     use crate::seal::{self, AssociatedData, SealPurpose};
@@ -1237,6 +1237,12 @@ mod tests {
             std::env::temp_dir().join(format!("claude-accounts-stash-unit-{}", std::process::id()));
         // A folder left by an earlier run is wiped first; one that does not exist is the usual case.
         let _wiped = fs::remove_dir_all(&dir);
+        #[cfg(unix)]
+        {
+            // Every file a test writes is owner-only, as the private folder's DACL makes it on Windows.
+            // SAFETY: umask only swaps the process's file-mode creation mask; it takes no pointer and cannot fail.
+            let _previous = unsafe { libc::umask(0o077) };
+        }
         fs::create_dir_all(&dir).expect("the test's folder can be made");
         private(&dir);
         let root = AccountsRoot::new(dir.join("backup"));
@@ -1316,7 +1322,7 @@ mod tests {
 
     /// A stash while this thread holds the account lock, as every persist-path stash does, never takes that lock again:
     /// a second acquire would wait on this thread's own lock and fail when it times out.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     #[test]
     fn a_stash_under_the_account_lock_never_takes_it_again() {
         let root = scratch();
@@ -1438,7 +1444,7 @@ mod tests {
     }
 
     /// A retire in a newer store deletes nothing: the entry's bytes and its manifest row stay.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     #[test]
     fn a_refused_retire_deletes_nothing() {
         let root = scratch();
@@ -1472,17 +1478,17 @@ mod tests {
 
     /// Runs `write` as this thread's step between the early refusal check and the manifest lock until the result is
     /// dropped.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     fn before_lock(write: impl Fn() + 'static) -> BeforeLock {
         BEFORE_LOCK.with(|hook| *hook.borrow_mut() = Some(Box::new(write)));
         BeforeLock
     }
 
     /// Clears this thread's step before the lock when dropped.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     struct BeforeLock;
 
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     impl Drop for BeforeLock {
         fn drop(&mut self) {
             BEFORE_LOCK.with(|hook| *hook.borrow_mut() = None);
@@ -1490,7 +1496,7 @@ mod tests {
     }
 
     /// The `.unclaimed-*.cred` entry files in `dir`.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     fn entry_files(dir: &Path) -> Vec<String> {
         fs::read_dir(dir)
             .expect("the folder lists")
@@ -1507,7 +1513,7 @@ mod tests {
 
     /// A rescue whose manifest turns newer between the early check and the lock keeps its entry's bytes, leaves the
     /// manifest as it found it under the lock, and reports the kept rescue.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     #[test]
     fn a_rescue_write_that_meets_a_newer_manifest_under_the_lock_keeps_its_entry() {
         const NEWER_MANIFEST: &[u8] = br#"{"schemaVersion": 2, "entries": {}}"#;
@@ -1546,7 +1552,7 @@ mod tests {
 
     /// A write before a spend whose store turns newer between the early check and the lock is refused under the lock,
     /// and its entry's bytes are removed again.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     #[test]
     fn a_before_spend_write_refused_under_the_lock_removes_its_entry() {
         let root = scratch();
@@ -1579,7 +1585,7 @@ mod tests {
 
     /// A retire whose store turns newer between the early check and the lock is refused under the lock: the entry's
     /// bytes and its manifest row stay.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     #[test]
     fn a_retire_refused_under_the_lock_changes_nothing() {
         let root = scratch();
@@ -1615,7 +1621,7 @@ mod tests {
 
     /// A discard whose entry stops holding up the refresh between its judgement and the manifest lock (its row gone, as
     /// another writer's retire would leave it) deletes nothing: the entry is judged again under the manifest lock.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     #[test]
     fn a_discard_whose_entry_stops_being_held_before_the_manifest_lock_deletes_nothing() {
         const HELD: &str = "20260921T140000-abcdefabcdef-a1b2c3";
@@ -1667,7 +1673,7 @@ mod tests {
     }
 
     /// Rewrites the `accounts.json` at `path` with no accounts at a newer `schemaVersion`.
-    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(accounts_locks)]
     fn newer_store(path: &Path) {
         fs::write(path, format!(r#"{{"schemaVersion": {NEWER_STORE}}}"#))
             .expect("accounts.json can be rewritten");
@@ -1852,6 +1858,12 @@ mod tests {
         ));
         // A folder left by an earlier run is wiped first; one that does not exist is the usual case.
         let _wiped = fs::remove_dir_all(&dir);
+        #[cfg(unix)]
+        {
+            // Every file a test writes is owner-only, as the private folder's DACL makes it on Windows.
+            // SAFETY: umask only swaps the process's file-mode creation mask; it takes no pointer and cannot fail.
+            let _previous = unsafe { libc::umask(0o077) };
+        }
         fs::create_dir_all(&dir).expect("the test's folder can be made");
         private(&dir);
         let root = AccountsRoot::new(dir.join("backup"));

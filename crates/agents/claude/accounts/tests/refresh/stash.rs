@@ -2,18 +2,23 @@
 //! and the next pass adopts it.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
+#[cfg(windows)]
+use std::fs::{File, OpenOptions};
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use claude_accounts::guard;
 use claude_accounts::seal::{self, AssociatedData, SealPurpose};
 use claude_accounts::{
     AccountLock, ConsumeLock, CredentialBlob, DiscardError, Drain, FileLock, GrantError,
     HeldReason, LockError, StashReason, Store, StoreErrorKind, credential_fingerprint,
-    discard_held, guard, held_entries,
+    discard_held, held_entries,
 };
 use serde_json::{Value, json};
 
@@ -24,6 +29,7 @@ use crate::support::{
 };
 
 /// `FILE_SHARE_READ`: a handle opened with it lets others read the file but not replace or delete it.
+#[cfg(windows)]
 const FILE_SHARE_READ: u32 = 1;
 
 fn expired() -> String {
@@ -175,6 +181,7 @@ fn store_unreadable_after_the_post_stashes_and_demotes() {
     assert_stashed(&rig.scratch, StashReason::StoreUnreadable);
 }
 
+#[cfg(windows)]
 #[test]
 fn persist_failure_stashes_and_demotes() {
     let holder: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(None));
@@ -398,6 +405,7 @@ fn unreadable_manifest_leaves_no_unnamed_entry() {
     );
 }
 
+#[cfg(windows)]
 /// A stash whose manifest reads but cannot be replaced takes its entry's bytes back, as an unreadable one does.
 #[test]
 fn unwritable_manifest_leaves_no_unnamed_entry() {
@@ -536,6 +544,7 @@ fn an_unmanaged_row_is_never_adopted() {
     );
 }
 
+#[cfg(windows)]
 /// What the stash writes is a sealed file bound to its slot: it opens under the slot's associated data alone, its bytes
 /// carry no plaintext, and the next pass adopts it.
 #[test]
@@ -622,7 +631,8 @@ fn a_stashed_entry_is_sealed_for_its_slot_and_opens_only_with_it() {
     );
 }
 
-/// Whether `needle` occurs anywhere in `bytes`.
+/// Whether `needle` occurs anywhere in `bytes`. Only the DPAPI-sealed entries on Windows are checked for tokens.
+#[cfg(windows)]
 fn holds(bytes: &[u8], needle: &[u8]) -> bool {
     bytes.windows(needle.len()).any(|window| window == needle)
 }
@@ -667,6 +677,8 @@ fn a_successor_stashed_while_the_roster_is_unreadable_is_adopted_once_it_reads_a
         bytes.starts_with(b"RTSEAL"),
         "the entry is a sealed file: {bytes:?}"
     );
+    // DPAPI seals the entry; off Windows the store is owner-only and unsealed (RT-916 decision 4).
+    #[cfg(windows)]
     assert!(
         !holds(&bytes, b"fake-access-new"),
         "the sealed entry carries no token"
@@ -1511,6 +1523,7 @@ fn discard_refuses_a_newer_store_or_a_newer_manifest_and_deletes_nothing() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn discard_keeps_the_row_when_the_file_cannot_be_removed() {
     let (scratch, row) = held_scratch("discard_unremovable");
@@ -1747,6 +1760,7 @@ fn discard_succeeds_and_only_warns_when_the_usage_cache_cannot_be_cleared() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn discard_that_deleted_the_file_but_could_not_rewrite_the_manifest_says_so_and_the_next_pass_retires_the_row()
  {

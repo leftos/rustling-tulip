@@ -3,7 +3,10 @@
 //! oracle attributes to the account is resynced into the backup.
 
 use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
+#[cfg(windows)]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -24,7 +27,10 @@ use crate::support::{
     FakeEndpoint, FakeProfile, ONE, ONE_ORG, Rig, Scratch, access_of, answer, credential, granted,
     ms_after, now, profile,
 };
-use crate::windows_files::{hold_open, pin_first_temp, temp_files};
+#[cfg(windows)]
+use crate::windows_files::temp_files;
+#[cfg(windows)]
+use crate::windows_files::{hold_open, pin_first_temp};
 
 /// Account 1's uuid in the usage fixture.
 const ONE_UUID: &str = "00000000-0000-4000-8000-000000000011";
@@ -40,7 +46,9 @@ fn private_file(path: &Path) {
 }
 const TWO: &str = "two@example.test";
 /// `FILE_FLAG_BACKUP_SEMANTICS` and `FILE_WRITE_ATTRIBUTES`: enough to open a directory and set its times.
+#[cfg(windows)]
 const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
 const WRITE_ATTRIBUTES: u32 = 0x0100;
 /// How long the rig waits for each of Claude Code's locks.
 const LOCK_WAIT: Duration = Duration::from_millis(700);
@@ -250,6 +258,15 @@ fn wait_for(path: &Path) {
     }
 }
 
+#[cfg(unix)]
+fn set_dir_mtime(dir: &Path, ago: Duration) {
+    File::open(dir)
+        .expect("the lock directory opens for its times")
+        .set_modified(SystemTime::now() - ago)
+        .expect("the lock directory's mtime can be set");
+}
+
+#[cfg(windows)]
 fn set_dir_mtime(dir: &Path, ago: Duration) {
     let handle = OpenOptions::new()
         .access_mode(WRITE_ATTRIBUTES)
@@ -300,6 +317,7 @@ fn stash_rows(rig: &Rig) -> usize {
         .map_or(0, serde_json::Map::len)
 }
 
+#[cfg(windows)]
 /// Answers the rig's one POST with a successor while `paths` are opened with no sharing, so writes to them fail until
 /// the returned handles are cleared.
 fn hold_during_post(rig: &mut Rig, paths: Vec<PathBuf>) -> Arc<Mutex<Vec<File>>> {
@@ -319,6 +337,7 @@ fn hold_during_post(rig: &mut Rig, paths: Vec<PathBuf>) -> Arc<Mutex<Vec<File>>>
     holder
 }
 
+#[cfg(windows)]
 fn release(holder: &Mutex<Vec<File>>) {
     holder
         .lock()
@@ -326,6 +345,7 @@ fn release(holder: &Mutex<Vec<File>>) {
         .clear();
 }
 
+#[cfg(windows)]
 /// Holds Claude Code's legacy credential lock and, once the poller waits on it (every read before the locks done),
 /// opens `path` with no sharing and releases the lock: `path` cannot be read under the locks until the returned handles
 /// are cleared.
@@ -748,6 +768,7 @@ fn credential_rotated_by_claude_code_is_adopted_without_a_post() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn failed_live_write_leaves_credentials_unchanged_and_backup_written() {
     let stale = expired("fake-access-a", "fake-refresh-a");
@@ -835,6 +856,7 @@ fn lock_lost_before_the_live_write_keeps_the_old_live_token() {
     assert!(lock.is_dir(), "Claude Code's lock is left alone");
 }
 
+#[cfg(windows)]
 #[test]
 fn failed_live_write_whose_temp_cannot_be_removed_reports_it() {
     let stale = expired("fake-access-a", "fake-refresh-a");
@@ -869,6 +891,7 @@ fn failed_live_write_whose_temp_cannot_be_removed_reports_it() {
     drop(pinned);
 }
 
+#[cfg(windows)]
 #[test]
 fn successor_is_stashed_when_backup_and_live_writes_fail() {
     let stale = expired("fake-access-a", "fake-refresh-a");
@@ -1189,6 +1212,7 @@ fn foreign_live_token_is_stashed_before_it_is_overwritten() {
     assert_eq!(row["fingerprint"], json!(fingerprint(&foreign)));
 }
 
+#[cfg(windows)]
 #[test]
 fn foreign_live_stash_failure_defers_before_the_post() {
     let foreign = credential("fake-access-x", Some("fake-refresh-x"), ms_after(-7200));
@@ -1383,6 +1407,7 @@ fn resync_skips_when_the_oracle_fails() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn stashed_successor_is_adopted_on_the_next_pass_without_a_post() {
     let stale = expired("fake-access-a", "fake-refresh-a");
@@ -1476,6 +1501,7 @@ fn backup_rewritten_between_read_and_lock_is_used() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn unreadable_backup_defers_without_a_post() {
     let stale = expired("fake-access-a", "fake-refresh-a");
@@ -1522,6 +1548,7 @@ fn drain_after_a_usage_401_returns_the_401() {
     assert!(rig.endpoint.bodies().is_empty(), "nothing was posted");
 }
 
+#[cfg(windows)]
 #[test]
 fn backup_write_is_reported_on_the_outcome() {
     let stale = expired("fake-access-a", "fake-refresh-a");
@@ -1585,6 +1612,7 @@ fn backup_write_is_reported_on_the_outcome() {
     assert_eq!(outcome.backup_written, None, "a restore writes no backup");
 }
 
+#[cfg(windows)]
 #[test]
 fn restore_after_a_failed_live_write_stashes_nothing() {
     let stale = expired("fake-access-a", "fake-refresh-a");
@@ -2122,6 +2150,7 @@ fn active_poll_adopts_an_older_rotation_without_writing_it_over_the_backup() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn resync_skips_when_the_backup_cannot_be_read_under_the_locks() {
     let lineage_b = credential("fake-access-b", Some("fake-refresh-b"), ms_after(7200));
@@ -2496,6 +2525,7 @@ fn a_strike_on_the_backup_generation_holds_in_force_mode() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn an_unreadable_backup_keeps_a_strike_on_the_live_account() {
     let (rig, later) = struck_on_the_backup("active_strike_backup_unreadable");
@@ -2538,6 +2568,7 @@ fn a_missing_backup_lets_a_strike_on_another_generation_lapse() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn unreadable_live_file_under_the_locks_defers() {
     let stale = expired("fake-access-a", "fake-refresh-a");
@@ -2562,6 +2593,7 @@ fn unreadable_live_file_under_the_locks_defers() {
     assert_eq!(live(&rig), stale, "the live file is untouched");
 }
 
+#[cfg(windows)]
 #[test]
 fn backup_unreadable_under_the_locks_defers() {
     let stale = expired("fake-access-a", "fake-refresh-a");
@@ -2586,6 +2618,7 @@ fn backup_unreadable_under_the_locks_defers() {
     assert_eq!(live(&rig), stale, "the live file is untouched");
 }
 
+#[cfg(windows)]
 #[test]
 fn unreadable_stash_defers_the_adoption() {
     let stale = expired("fake-access-a", "fake-refresh-a");
@@ -2619,6 +2652,7 @@ fn unreadable_stash_defers_the_adoption() {
     assert_eq!(live(&rig), stale, "the live file is untouched");
 }
 
+#[cfg(windows)]
 #[test]
 fn refused_stash_adoption_defers_as_store_unwritable() {
     let stale = expired("fake-access-a", "fake-refresh-a");

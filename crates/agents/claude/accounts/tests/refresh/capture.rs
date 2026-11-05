@@ -2,6 +2,7 @@
 //! account's credential written only when the live copy is later, and every refusal made before any write.
 
 use std::fs;
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt as _;
 
 use claude_accounts::seal::{self, AssociatedData, SealPurpose};
@@ -292,6 +293,7 @@ fn a_capture_removes_a_held_entry_that_is_a_junction_and_never_what_it_points_at
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn a_capture_keeps_the_row_of_a_held_entry_whose_file_cannot_be_removed() {
     /// `FILE_SHARE_READ`: a handle opened with it lets others read the file but not delete it.

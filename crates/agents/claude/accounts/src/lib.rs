@@ -5,7 +5,8 @@
 //! `oauthAccount` alone and `credentials/<n>.cred` each account's sealed credential file. [`Store`] reads that root and
 //! writes it, keeping every key it does not know, and refuses every write while sealing does not work in this process
 //! (the canary fails) or `accounts.json` carries a `schemaVersion` it does not know. Writes take the account lock as a
-//! parameter; [`ClaudeCodeLocks`] takes Claude Code's own directory locks. Credentials stay inside [`CredentialBlob`],
+//! parameter; [`ClaudeCodeLocks`] takes Claude Code's own directory locks. The locks work on 64-bit Windows and macOS;
+//! elsewhere every lock returns [`LockError::Unsupported`], so no store write runs there. Credentials stay inside [`CredentialBlob`],
 //! [`AccessToken`] and [`RefreshToken`], which never print, clone or serialize. The crate reads no environment
 //! variable: the caller says where the account store and Claude Code's files are.
 //!

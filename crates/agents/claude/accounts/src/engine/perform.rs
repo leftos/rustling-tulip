@@ -341,7 +341,7 @@ pub(crate) fn cooling(
     in_cooldown(trigger, &last, settings, now)
 }
 
-#[cfg(all(test, windows, target_pointer_width = "64"))]
+#[cfg(all(test, accounts_locks))]
 #[expect(
     clippy::expect_used,
     reason = "a test that cannot set up its scratch store or claim its lease must fail loudly"
@@ -415,6 +415,12 @@ mod tests {
         ));
         // A folder left by an earlier run is wiped first; one that does not exist is the usual case.
         let _wiped = fs::remove_dir_all(&dir);
+        #[cfg(unix)]
+        {
+            // Every folder and file the test makes is owner-only, as the user's temp folder makes them on Windows.
+            // SAFETY: umask only swaps the process's file-mode creation mask; it takes no pointer and cannot fail.
+            let _previous = unsafe { libc::umask(0o077) };
+        }
         let root = AccountsRoot::new(dir.join("backup"));
         fs::create_dir_all(root.root()).expect("the scratch store folder can be made");
         let store = Store::open(root.clone()).expect("the scratch store opens");

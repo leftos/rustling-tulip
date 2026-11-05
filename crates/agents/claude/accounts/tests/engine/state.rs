@@ -1,8 +1,12 @@
 //! `autoswitch_state.json`: read as an engine writes it, written back with every key this crate does not model, and
 //! only ever under `.autoswitch_state.lock`.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs;
+#[cfg(windows)]
+use std::fs::{File, OpenOptions};
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
 use std::path::Path;
 use std::time::Duration;
 
@@ -353,9 +357,12 @@ fn state_update_holds_the_state_lock() {
 }
 
 /// `FILE_SHARE_READ` and `FILE_SHARE_WRITE`: a handle that lets others read and write the file, but not replace it.
+#[cfg(windows)]
 const FILE_SHARE_READ: u32 = 0x1;
+#[cfg(windows)]
 const FILE_SHARE_WRITE: u32 = 0x2;
 
+#[cfg(windows)]
 /// Opens `path` for reading, sharing reads and writes but not deletes, so a read of the target succeeds and a rename
 /// over it fails. Dropping the handle releases it.
 fn hold_open_against_replace(path: &Path) -> File {
@@ -367,6 +374,7 @@ fn hold_open_against_replace(path: &Path) -> File {
 }
 
 /// The names of `folder`'s files that end in `.tmp`.
+#[cfg(windows)]
 fn temp_files(folder: &Path) -> Vec<String> {
     fs::read_dir(folder)
         .expect("the folder lists")
@@ -385,6 +393,7 @@ fn temp_files(folder: &Path) -> Vec<String> {
         .collect()
 }
 
+#[cfg(windows)]
 #[test]
 fn a_failed_state_write_leaves_no_temp_file() {
     let scratch = Scratch::new("a_failed_state_write_leaves_no_temp_file");

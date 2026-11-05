@@ -17,7 +17,14 @@ pub fn snapshot(folder: &Path) -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
+/// Makes `link` a junction to the folder `target`, which needs no privilege; off Windows a symbolic link to it.
+#[cfg(unix)]
+pub fn junction(link: &Path, target: &Path) {
+    std::os::unix::fs::symlink(target, link).expect("the folder symlink can be made");
+}
+
 /// Makes `link` a junction to the folder `target`, which needs no privilege.
+#[cfg(windows)]
 pub fn junction(link: &Path, target: &Path) {
     let made = std::process::Command::new("cmd")
         .args(["/c", "mklink", "/J"])
@@ -33,7 +40,16 @@ pub fn junction(link: &Path, target: &Path) {
 }
 
 /// Makes `link` a file symlink to `target`: false when this machine does not allow it (no Developer Mode and no
+/// elevation, os error 1314), so the caller skips. Off Windows a symlink needs no privilege and is always made.
+#[cfg(unix)]
+pub fn symlink_or_skip(link: &Path, target: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).expect("the symlink can be made");
+    true
+}
+
+/// Makes `link` a file symlink to `target`: false when this machine does not allow it (no Developer Mode and no
 /// elevation, os error 1314), so the caller skips.
+#[cfg(windows)]
 #[expect(
     clippy::print_stdout,
     reason = "a test that cannot make its symlink says why it was skipped"

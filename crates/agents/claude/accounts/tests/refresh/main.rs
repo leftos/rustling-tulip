@@ -6,24 +6,24 @@
     reason = "a test that cannot set up its files or take its lock must fail loudly"
 )]
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod active;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod capture;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod freshen;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod gate;
 mod grant;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[path = "../support/links.rs"]
 mod links;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod poll;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod stash;
 mod support;
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 mod switch;
 #[cfg(all(windows, target_pointer_width = "64"))]
 #[path = "../support/windows_files.rs"]

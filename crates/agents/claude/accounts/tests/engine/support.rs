@@ -28,6 +28,11 @@ impl Scratch {
         }
         fs::create_dir_all(&dir).expect("the test's folder can be made");
         make_private(&dir);
+        private_umask();
+        // A Unix temp folder can sit under a link (macOS's `/var` is `/private/var`), which the store refuses as a
+        // root's parent: the scratch folder is named by its real path.
+        #[cfg(unix)]
+        let dir = fs::canonicalize(&dir).expect("the test's folder has a real path");
         fs::create_dir(dir.join("backup")).expect("the test's account store can be made");
         make_private(&dir.join("backup"));
         Self { dir }
@@ -37,6 +42,17 @@ impl Scratch {
         AccountsRoot::new(self.dir.join("backup"))
     }
 }
+
+/// Off Windows every file and folder a test makes is owner-only (umask 077), as the scratch folder's DACL makes them on
+/// Windows: the store refuses a file another user can read.
+#[cfg(unix)]
+fn private_umask() {
+    // SAFETY: umask only swaps the process's file-mode creation mask; it takes no pointer and cannot fail.
+    let _previous = unsafe { libc::umask(0o077) };
+}
+
+#[cfg(not(unix))]
+fn private_umask() {}
 
 /// Makes `dir` this user's alone: on Windows a DACL with no inherited ACEs and one for this user, off Windows mode
 /// 0700.
