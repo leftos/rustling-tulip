@@ -18,7 +18,8 @@ use std::fmt::Display;
 
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use protocol::{
-    AccountSnapshot, AccountUsageStatus, AccountUsageWindow, AutoSwitchState, DaemonMessage,
+    AccountSnapshot, AccountUsageStatus, AccountUsageWindow, AutoSwitchState, AutoSwitchStrategy,
+    DaemonMessage,
 };
 
 use crate::target::HostKey;
@@ -42,6 +43,26 @@ const THRESHOLD_MIN: f64 = 50.0;
 /// The threshold stepper's highest value, in percent.
 const THRESHOLD_MAX: f64 = 95.0;
 
+/// The Hysteresis stepper's step, lowest and highest value, in percentage
+/// points.
+const HYSTERESIS_STEP: f64 = 1.0;
+const HYSTERESIS_MIN: f64 = 0.0;
+const HYSTERESIS_MAX: f64 = 50.0;
+/// The Cooldown row's choices, in minutes.
+const COOLDOWN_MINUTES: [u64; 6] = [0, 1, 5, 15, 30, 60];
+/// The Cooldown row's 0-minute segment.
+const OFF_LABEL: &str = "Off";
+/// The Strategy row's choices.
+const STRATEGY_CHOICES: [(AutoSwitchStrategy, &str); 2] = [
+    (AutoSwitchStrategy::Best, "Most headroom"),
+    (AutoSwitchStrategy::ConsumeFirst, "Resets soonest"),
+];
+/// The Forecast window row's choices, in minutes.
+const FORECAST_WINDOWS: [(u32, &str); 4] =
+    [(30, "30 min"), (60, "1 h"), (120, "2 h"), (180, "3 h")];
+/// What a Settings page row says in Remove's place on the account in use.
+pub(crate) const SWITCH_FIRST: &str = "Switch first";
+
 /// An ask sent to a host: its request id and the host's update count when
 /// it was sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,13 +79,6 @@ struct WriteAsk {
 }
 
 /// What the pending write asks a host's daemon to do.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Settings page sends the actions the popover does not; the unit tests construct them"
-    )
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WriteAction {
     Switch(u32),
@@ -586,6 +600,179 @@ pub(crate) fn threshold_step(current: f64, up: bool) -> Option<f64> {
         .then_some(next)
 }
 
+/// The hysteresis one step from `current` (1 percentage point, within 0 to
+/// 50), or `None` past the bound; a value outside the bounds steps back
+/// onto the nearer one.
+pub(crate) fn hysteresis_step(current: f64, up: bool) -> Option<f64> {
+    let next = if up {
+        (current.floor() + HYSTERESIS_STEP).max(HYSTERESIS_MIN)
+    } else {
+        (current.ceil() - HYSTERESIS_STEP).min(HYSTERESIS_MAX)
+    };
+    (HYSTERESIS_MIN..=HYSTERESIS_MAX)
+        .contains(&next)
+        .then_some(next)
+}
+
+/// What stands in a row's Remove place on the Settings page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Removal {
+    /// The Remove button.
+    Remove,
+    /// The account in use: the text [`SWITCH_FIRST`], no button.
+    SwitchFirst,
+}
+
+/// The buttons a Settings page row has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowActions {
+    /// Switch, as the popover offers it.
+    pub(crate) switch: bool,
+    pub(crate) up: bool,
+    pub(crate) down: bool,
+    pub(crate) removal: Removal,
+}
+
+/// The buttons of `row`, place `index` of `count` rows: Switch where the
+/// popover offers it, Up but on the first, Down but on the last, and Remove
+/// but on the account in use, which says [`SWITCH_FIRST`] instead.
+pub(crate) fn row_actions(row: &Row, index: usize, count: usize) -> RowActions {
+    RowActions {
+        switch: row.switch.is_some(),
+        up: index > 0,
+        down: index + 1 < count,
+        removal: if row.active {
+            Removal::SwitchFirst
+        } else {
+            Removal::Remove
+        },
+    }
+}
+
+/// The rotation order of `accounts` with account `number` moved one place
+/// `up` or down; `None` when it is not listed or already at that end.
+pub(crate) fn moved_order(accounts: &[AccountSnapshot], number: u32, up: bool) -> Option<Vec<u32>> {
+    let mut order: Vec<u32> = accounts.iter().map(|account| account.number).collect();
+    let at = order.iter().position(|listed| *listed == number)?;
+    let to = if up {
+        at.checked_sub(1)?
+    } else {
+        Some(at + 1).filter(|to| *to < order.len())?
+    };
+    order.swap(at, to);
+    Some(order)
+}
+
+/// What an edit of the alias field sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AliasChange {
+    Set(String),
+    Clear,
+}
+
+impl AliasChange {
+    /// The `alias` of the `SetAccountAlias` it sends.
+    pub(crate) fn alias(self) -> Option<String> {
+        match self {
+            Self::Set(alias) => Some(alias),
+            Self::Clear => None,
+        }
+    }
+}
+
+/// What an edit of the alias field to `typed` sends over the alias
+/// `current`, both read trimmed: `None` when it changes nothing, a blank
+/// field clearing it.
+pub(crate) fn alias_change(current: Option<&str>, typed: &str) -> Option<AliasChange> {
+    let typed = typed.trim();
+    let current = current.map_or("", str::trim);
+    (typed != current).then(|| {
+        if typed.is_empty() {
+            AliasChange::Clear
+        } else {
+            AliasChange::Set(typed.to_owned())
+        }
+    })
+}
+
+/// The note under Add current login, naming the agent `agent_label` (the
+/// descriptor's label), or "the agent" before the host listed one.
+pub(crate) fn add_login_note(agent_label: Option<&str>) -> String {
+    let agent = agent_label.unwrap_or("the agent");
+    format!(
+        "Saves the login {agent} is using now. Don't /logout first: logging out can revoke the account you're leaving."
+    )
+}
+
+/// One segment of a Settings choice row: the value it sends, its label and
+/// whether it shows selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Segment<T> {
+    pub(crate) value: T,
+    pub(crate) label: String,
+    pub(crate) selected: bool,
+}
+
+/// A cooldown of `secs` as a segment label: [`OFF_LABEL`], `{n} min`, or
+/// `{n} s` for a value of no whole minutes.
+fn cooldown_label(secs: u64) -> String {
+    if secs == 0 {
+        OFF_LABEL.to_owned()
+    } else if secs.is_multiple_of(60) {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{secs} s")
+    }
+}
+
+/// The Cooldown row's segments, in seconds, `current_secs` selected; a
+/// current value off the list is a segment of its own, in its place by
+/// value.
+pub(crate) fn cooldown_segments(current_secs: u64) -> Vec<Segment<u64>> {
+    let mut choices: Vec<u64> = COOLDOWN_MINUTES
+        .iter()
+        .map(|minutes| minutes * 60)
+        .collect();
+    if !choices.contains(&current_secs) {
+        choices.push(current_secs);
+        choices.sort_unstable();
+    }
+    choices
+        .into_iter()
+        .map(|value| Segment {
+            value,
+            label: cooldown_label(value),
+            selected: value == current_secs,
+        })
+        .collect()
+}
+
+/// The Strategy row's segments, `current` selected; a strategy this build
+/// does not know selects neither.
+pub(crate) fn strategy_segments(current: AutoSwitchStrategy) -> Vec<Segment<AutoSwitchStrategy>> {
+    STRATEGY_CHOICES
+        .iter()
+        .map(|(value, label)| Segment {
+            value: *value,
+            label: (*label).to_owned(),
+            selected: *value == current,
+        })
+        .collect()
+}
+
+/// The Forecast window row's segments, in minutes, `current` selected; none
+/// is while the host reports none or one off the list.
+pub(crate) fn window_segments(current: Option<u32>) -> Vec<Segment<u32>> {
+    FORECAST_WINDOWS
+        .iter()
+        .map(|(value, label)| Segment {
+            value: *value,
+            label: (*label).to_owned(),
+            selected: Some(*value) == current,
+        })
+        .collect()
+}
+
 /// Why the engine is paused, while it is.
 pub(crate) fn paused_line(auto: Option<&AutoSwitchState>) -> Option<String> {
     auto?
@@ -655,8 +842,10 @@ mod tests {
     };
 
     use super::{
-        AccountsState, Level, RELOGIN_LINE, STORE_READ_ONLY, Tag, WriteAction, age_text, bar,
-        checked_line, chip, forecast, header, paused_line, row, threshold_step,
+        AccountsState, AliasChange, Level, RELOGIN_LINE, Removal, RowActions, STORE_READ_ONLY,
+        Segment, Tag, WriteAction, add_login_note, age_text, alias_change, bar, checked_line, chip,
+        cooldown_segments, forecast, header, hysteresis_step, moved_order, paused_line, row,
+        row_actions, strategy_segments, threshold_step, window_segments,
     };
     use crate::target::HostKey;
 
@@ -1183,6 +1372,180 @@ mod tests {
         assert!(shown.signed_out);
         assert_eq!(shown.five_hour, None, "no stale usage");
         assert_eq!(shown.seven_day, None);
+    }
+
+    #[test]
+    fn row_actions_follow_the_place_and_the_account_in_use() {
+        let first = row(&active(1), None, false, now(), &Utc);
+        assert_eq!(
+            row_actions(&first, 0, 3),
+            RowActions {
+                switch: false,
+                up: false,
+                down: true,
+                removal: Removal::SwitchFirst,
+            },
+            "the first row is the one in use: no Switch, no Up, Switch first"
+        );
+        let middle = row(&account(2, "ops"), None, false, now(), &Utc);
+        assert_eq!(
+            row_actions(&middle, 1, 3),
+            RowActions {
+                switch: true,
+                up: true,
+                down: true,
+                removal: Removal::Remove,
+            }
+        );
+        let last = row(&account(3, "lab"), None, false, now(), &Utc);
+        let actions = row_actions(&last, 2, 3);
+        assert!(actions.up && !actions.down, "no Down on the last row");
+        let only = row_actions(&last, 0, 1);
+        assert!(!only.up && !only.down, "a lone row moves nowhere");
+        let mut refused = account(4, "client");
+        refused.status = AccountUsageStatus::ReloginRequired;
+        let refused = row(&refused, None, false, now(), &Utc);
+        assert!(!row_actions(&refused, 1, 3).switch, "as in the popover");
+        assert_eq!(row_actions(&refused, 1, 3).removal, Removal::Remove);
+    }
+
+    #[test]
+    fn a_move_swaps_the_row_with_its_neighbour() {
+        let accounts = [active(1), account(2, "b"), account(3, "c")];
+        assert_eq!(moved_order(&accounts, 2, true), Some(vec![2, 1, 3]));
+        assert_eq!(moved_order(&accounts, 2, false), Some(vec![1, 3, 2]));
+        assert_eq!(
+            moved_order(&accounts, 1, true),
+            None,
+            "the first goes no higher"
+        );
+        assert_eq!(moved_order(&accounts, 3, false), None, "the last no lower");
+        assert_eq!(moved_order(&accounts, 9, true), None, "an unknown account");
+    }
+
+    #[test]
+    fn hysteresis_step_moves_by_one_within_bounds() {
+        let rows = [
+            (5.0, true, Some(6.0)),
+            (5.0, false, Some(4.0)),
+            (4.5, true, Some(5.0)),
+            (4.5, false, Some(4.0)),
+            (50.0, true, None),
+            (0.0, false, None),
+            (60.0, false, Some(50.0)),
+            (-3.0, true, Some(0.0)),
+        ];
+        for (current, up, want) in rows {
+            assert_eq!(hysteresis_step(current, up), want, "{current} up={up}");
+        }
+    }
+
+    fn shown<T: Copy>(segments: &[Segment<T>]) -> Vec<(T, &str, bool)> {
+        segments
+            .iter()
+            .map(|segment| (segment.value, segment.label.as_str(), segment.selected))
+            .collect()
+    }
+
+    #[test]
+    fn cooldown_segments_list_the_choices_and_the_current_value() {
+        assert_eq!(
+            shown(&cooldown_segments(300)),
+            [
+                (0, "Off", false),
+                (60, "1 min", false),
+                (300, "5 min", true),
+                (900, "15 min", false),
+                (1800, "30 min", false),
+                (3600, "60 min", false),
+            ]
+        );
+        let extra = cooldown_segments(600);
+        assert_eq!(extra.len(), 7, "a value off the list is its own segment");
+        assert_eq!(
+            shown(&extra)[3],
+            (600, "10 min", true),
+            "in its place by value"
+        );
+        assert!(
+            extra.iter().filter(|segment| segment.selected).count() == 1,
+            "only the current value is selected"
+        );
+        assert_eq!(shown(&cooldown_segments(90))[2], (90, "90 s", true));
+        assert_eq!(shown(&cooldown_segments(0))[0], (0, "Off", true));
+    }
+
+    #[test]
+    fn strategy_segments_select_the_known_strategy_only() {
+        assert_eq!(
+            shown(&strategy_segments(AutoSwitchStrategy::Best)),
+            [
+                (AutoSwitchStrategy::Best, "Most headroom", true),
+                (AutoSwitchStrategy::ConsumeFirst, "Resets soonest", false),
+            ]
+        );
+        assert!(strategy_segments(AutoSwitchStrategy::ConsumeFirst)[1].selected);
+        assert!(
+            strategy_segments(AutoSwitchStrategy::Unknown)
+                .iter()
+                .all(|segment| !segment.selected),
+            "a strategy this build does not know selects neither"
+        );
+    }
+
+    #[test]
+    fn window_segments_select_the_current_window() {
+        assert_eq!(
+            shown(&window_segments(Some(120))),
+            [
+                (30, "30 min", false),
+                (60, "1 h", false),
+                (120, "2 h", true),
+                (180, "3 h", false),
+            ]
+        );
+        assert!(
+            window_segments(None)
+                .iter()
+                .all(|segment| !segment.selected),
+            "no window reported selects none"
+        );
+        assert!(
+            window_segments(Some(45))
+                .iter()
+                .all(|segment| !segment.selected),
+            "a window off the list selects none"
+        );
+    }
+
+    #[test]
+    fn an_alias_edit_sends_only_a_change() {
+        assert_eq!(alias_change(Some("ops"), "ops"), None, "unchanged");
+        assert_eq!(alias_change(Some("ops"), " ops "), None, "spaces only");
+        assert_eq!(
+            alias_change(Some("ops"), "work"),
+            Some(AliasChange::Set("work".to_owned()))
+        );
+        assert_eq!(
+            alias_change(Some("ops"), "  "),
+            Some(AliasChange::Clear),
+            "blank clears"
+        );
+        assert_eq!(alias_change(None, ""), None, "nothing to clear");
+        assert_eq!(
+            alias_change(None, "lab").and_then(AliasChange::alias),
+            Some("lab".to_owned())
+        );
+        assert_eq!(AliasChange::Clear.alias(), None);
+    }
+
+    #[test]
+    fn the_add_login_note_names_the_agent() {
+        assert_eq!(
+            add_login_note(Some("Agent")),
+            "Saves the login Agent is using now. Don't /logout first: logging out can revoke the account you're leaving."
+        );
+        assert!(add_login_note(None).starts_with("Saves the login the agent is using now."));
     }
 
     #[test]

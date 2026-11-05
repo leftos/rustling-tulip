@@ -223,8 +223,9 @@ pub(crate) const RING_EXEMPT: &[(&str, &str)] = &[
 
 /// Whether a search covers the control `selector`: a catalogue entry
 /// names it, an exemption says why none needs to, it is a provider of the
-/// Dashboard's Provider row, or another choice of an agent page's choice row
-/// whose first choice an entry names.
+/// Dashboard's Provider row, a control of the Accounts page's table or
+/// another choice of one of its rows, or another choice of an agent page's
+/// choice row whose first choice an entry names.
 #[must_use]
 pub(crate) fn names(selector: &str, agents: &[AgentDescriptor]) -> bool {
     let catalogue = entries(agents);
@@ -239,6 +240,9 @@ pub(crate) fn names(selector: &str, agents: &[AgentDescriptor]) -> bool {
     }
     if selector.starts_with("settings-dashboard-provider-") {
         return catalogued("settings-dashboard-provider");
+    }
+    if let Some(covered) = accounts_covered(selector, catalogued) {
+        return covered;
     }
     agents.iter().any(|descriptor| {
         let options = AgentOptions::new(descriptor.clone(), None);
@@ -301,6 +305,7 @@ fn fixed_entries() -> Vec<Entry> {
     entries.extend(spawn_defaults_entries());
     entries.extend(worktrees_entries());
     entries.extend(remote_access_entries());
+    entries.extend(accounts_entries());
     entries.extend(appearance_entries());
     entries.extend(app_title_entries());
     entries
@@ -626,6 +631,99 @@ fn remote_access_entries() -> Vec<Entry> {
             Gate::RemoteTab,
         ),
     ]
+}
+
+/// The Accounts page's rows: Add current login under the account table,
+/// then the auto-switch block's, which the page draws only while the host
+/// reports an auto-switch state. The account table's rows are the saved
+/// accounts, not settings, and no entry names them.
+fn accounts_entries() -> Vec<Entry> {
+    vec![
+        Entry {
+            aliases: &["account", "login"],
+            ..entry(
+                SettingsTab::Accounts,
+                "settings-accounts-add-login",
+                "Add current login",
+                "Accounts",
+                Gate::Always,
+            )
+        },
+        Entry {
+            aliases: &["auto-switch", "rotation"],
+            ..entry(
+                SettingsTab::Accounts,
+                "settings-accounts-auto",
+                "Switch accounts automatically",
+                "Auto-switch",
+                Gate::Always,
+            )
+        },
+        Entry {
+            aliases: &["threshold"],
+            ..entry(
+                SettingsTab::Accounts,
+                "settings-accounts-threshold-down",
+                "Switch at",
+                "Auto-switch",
+                Gate::Always,
+            )
+        },
+        entry(
+            SettingsTab::Accounts,
+            "settings-accounts-hysteresis-down",
+            "Hysteresis",
+            "Auto-switch",
+            Gate::Always,
+        ),
+        entry(
+            SettingsTab::Accounts,
+            "settings-accounts-cooldown-0",
+            "Cooldown",
+            "Auto-switch",
+            Gate::Always,
+        ),
+        entry(
+            SettingsTab::Accounts,
+            "settings-accounts-strategy-best",
+            "Strategy",
+            "Auto-switch",
+            Gate::Always,
+        ),
+        Entry {
+            aliases: &["forecast", "rate"],
+            ..entry(
+                SettingsTab::Accounts,
+                "settings-accounts-window-30",
+                "Forecast window",
+                "Auto-switch",
+                Gate::Always,
+            )
+        },
+    ]
+}
+
+/// Whether a search covers the Accounts page's control `selector`, `None`
+/// for a selector of no Accounts control: a control of a saved account's own
+/// row always ([`accounts_entries`]: no query needs to land on one), another
+/// choice or stepper end of a row when `catalogued` names the row's first.
+fn accounts_covered(selector: &str, catalogued: impl Fn(&str) -> bool) -> Option<bool> {
+    let part = selector.strip_prefix("settings-accounts-")?;
+    let row = ["switch-", "alias-", "up-", "down-", "remove-"];
+    if row.iter().any(|prefix| part.starts_with(prefix)) {
+        return Some(true);
+    }
+    let companions = [
+        ("threshold-", "settings-accounts-threshold-down"),
+        ("hysteresis-", "settings-accounts-hysteresis-down"),
+        ("cooldown-", "settings-accounts-cooldown-0"),
+        ("strategy-", "settings-accounts-strategy-best"),
+        ("window-", "settings-accounts-window-30"),
+    ];
+    companions
+        .into_iter()
+        .find(|(prefix, _)| part.starts_with(prefix))
+        .map(|(_, first)| catalogued(first))
 }
 
 /// The Appearance tab's rows, which the app level draws under no section

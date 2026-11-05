@@ -6,6 +6,7 @@
 //! over their own transport with [`RootView::with_transport`].
 
 mod accounts;
+mod accounts_settings;
 mod accounts_view;
 mod activity_bar;
 mod activity_track;

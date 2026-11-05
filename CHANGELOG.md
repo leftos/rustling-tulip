@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - The footer shows the Claude account in use and its usage; click it to switch accounts, set auto-switch and see when they run dry.
+- Settings › Accounts lists your saved accounts to switch, rename, reorder, remove or add, and sets auto-switch's threshold, cooldown, strategy and forecast window.
 - Settings › General picks each host's default shell for new sessions, from its installed shells or a custom command.
 - The new-session dialog's Target list narrows as you type, matching repo and workspace names in part, so "ya" finds yaat.
 - With Nushell or fish as the default shell, new Claude sessions start inside it, like PowerShell, cmd and POSIX shells.

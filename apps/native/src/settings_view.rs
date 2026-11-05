@@ -23,6 +23,7 @@ use protocol::{
     SummarizerKeySource, SummarizerSettings, SummarySource, UserHooksWire, error_codes,
 };
 
+use crate::accounts_settings::{AccountsControl, AliasFields};
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
 use crate::agent_options_view::{LOCKED, UPDATE_CLIENT};
 use crate::appearance_stops::{AppearanceStop, after_lost};
@@ -262,6 +263,8 @@ pub(crate) enum SettingsTab {
     SpawnDefaults,
     Worktrees,
     RemoteAccess,
+    /// This PC's saved agent accounts and the auto-switch rules.
+    Accounts,
     Appearance,
     AppTitle,
     /// The page of the agent with this id (interned), one per agent the
@@ -271,13 +274,14 @@ pub(crate) enum SettingsTab {
 
 impl SettingsTab {
     /// The tabs shown before the agents' pages, in the list's order.
-    pub(crate) const FIXED: [Self; 8] = [
+    pub(crate) const FIXED: [Self; 9] = [
         Self::General,
         Self::Notifications,
         Self::Dashboard,
         Self::SpawnDefaults,
         Self::Worktrees,
         Self::RemoteAccess,
+        Self::Accounts,
         Self::Appearance,
         Self::AppTitle,
     ];
@@ -292,6 +296,7 @@ impl SettingsTab {
             Self::SpawnDefaults => "Spawn defaults",
             Self::Worktrees => "Worktrees",
             Self::RemoteAccess => "Remote access",
+            Self::Accounts => "Accounts",
             Self::Appearance => "Appearance",
             Self::AppTitle => "App title",
             Self::Agent(id) => agent_descriptor(agents, id)
@@ -308,6 +313,7 @@ impl SettingsTab {
             Self::SpawnDefaults => "settings-tab-spawn-defaults",
             Self::Worktrees => "settings-tab-worktrees",
             Self::RemoteAccess => "settings-tab-remote-access",
+            Self::Accounts => "settings-tab-accounts",
             Self::Appearance => "settings-tab-appearance",
             Self::AppTitle => "settings-tab-app-title",
             Self::Agent(id) => {
@@ -361,13 +367,14 @@ fn agent_descriptor<'a>(agents: &'a [AgentDescriptor], id: &str) -> Option<&'a A
 }
 
 /// The tab list's rows in order: the fixed tabs (Remote access only when
-/// `remote`), then, while `agents` lists any, the Agents group row and one
-/// page per agent in the daemon's order. A group row is drawn between the
-/// tabs and never reached by the keyboard.
-fn tab_rows(agents: &[AgentDescriptor], remote: bool) -> Vec<SettingsRow> {
+/// `remote`, Accounts only when `accounts`), then, while `agents` lists
+/// any, the Agents group row and one page per agent in the daemon's order.
+/// A group row is drawn between the tabs and never reached by the keyboard.
+fn tab_rows(agents: &[AgentDescriptor], remote: bool, accounts: bool) -> Vec<SettingsRow> {
     let fixed = SettingsTab::FIXED
         .into_iter()
         .filter(|tab| remote || *tab != SettingsTab::RemoteAccess)
+        .filter(|tab| accounts || *tab != SettingsTab::Accounts)
         .map(SettingsRow::Tab);
     let group = (!agents.is_empty()).then_some(SettingsRow::Group(AGENTS_GROUP));
     let pages = agents
@@ -636,6 +643,12 @@ pub(crate) enum SettingsControl {
     DashboardEnvVariable,
     DashboardCap,
     DashboardTest,
+    /// A control of the Accounts page; `selector` is its
+    /// [`AccountsControl::selector_text`], interned.
+    Accounts {
+        control: AccountsControl,
+        selector: &'static str,
+    },
     /// The footer's OK: Apply, then close.
     FooterOk,
     /// The footer's Apply: sends every host's pending edits.
@@ -723,7 +736,8 @@ impl SettingsControl {
             Self::AgentChoice { selector, .. }
             | Self::AgentToggle { selector, .. }
             | Self::AgentText { selector, .. }
-            | Self::DashboardProvider { selector, .. } => selector,
+            | Self::DashboardProvider { selector, .. }
+            | Self::Accounts { selector, .. } => selector,
             Self::WorktreesPath => "settings-worktrees-root-input",
             Self::WorktreesBrowse => "settings-worktrees-root-browse",
             Self::WorktreesReset => "settings-worktrees-root-reset",
@@ -1844,12 +1858,14 @@ impl RootView {
 
     /// The rows the tab list draws for the host Settings shows, in order:
     /// Remote access configures this PC's daemon, so it is offered only
-    /// where the client manages it, and an agent's page only while the
-    /// daemon lists it.
+    /// where the client manages it, Accounts there too and only while its
+    /// daemon lists the accounts feature, and an agent's page only while
+    /// the daemon lists it.
     fn settings_rows(&self) -> Vec<SettingsRow> {
         tab_rows(
             self.agents(),
             self.capabilities_of(&self.settings_host).manages_daemon(),
+            self.accounts_tab_offered(),
         )
     }
 
@@ -2151,12 +2167,13 @@ impl RootView {
     /// buttons; a disabled one is left out.
     fn settings_controls(&self, cx: &App) -> Vec<SettingsControl> {
         let applies = self.settings_apply_enabled();
+        let ok = applies || self.account_alias_edited(cx);
         let mut controls = self.tab_controls(cx);
-        controls.extend(
-            FOOTER_CONTROLS
-                .into_iter()
-                .filter(|control| applies || *control == SettingsControl::FooterCancel),
-        );
+        controls.extend(FOOTER_CONTROLS.into_iter().filter(|control| match control {
+            SettingsControl::FooterOk => ok,
+            SettingsControl::FooterApply => applies,
+            _ => true,
+        }));
         controls
     }
 
@@ -2208,6 +2225,7 @@ impl RootView {
                 controls
             }
             SettingsTab::RemoteAccess => self.remote_access_controls(),
+            SettingsTab::Accounts => self.accounts_controls(true),
             SettingsTab::Appearance => self
                 .appearance_stops(false, cx)
                 .into_iter()
@@ -2276,6 +2294,7 @@ impl RootView {
                 SettingsControl::RemotePort,
                 SettingsControl::RemoteAutostart,
             ],
+            SettingsTab::Accounts => self.accounts_controls(false),
             SettingsTab::Appearance => self
                 .appearance_stop_order(false)
                 .into_iter()
@@ -2881,7 +2900,13 @@ impl RootView {
     /// OK: Apply, then close at once when it sent nothing to a daemon, or
     /// once every daemon echoed what it sent.
     fn press_settings_ok(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // An alias typed on the Accounts page is sent as Enter would; it
+        // owes no echo, so it never holds Settings open.
+        let alias_sent = self.commit_alias_on_close(cx);
         let Some(sent) = self.apply_pending_settings(window, cx) else {
+            if alias_sent {
+                self.close_appearance_editor(window, cx);
+            }
             return;
         };
         if sent.is_empty() {
@@ -3192,6 +3217,15 @@ impl RootView {
                             .settings_field_focus(*control)
                             .is_some_and(|focus| focus.is_focused(window))
                 }
+                SettingsControl::Accounts {
+                    control: AccountsControl::Alias(_),
+                    ..
+                } => {
+                    self.settings_tab == SettingsTab::Accounts
+                        && self
+                            .settings_field_focus(*control)
+                            .is_some_and(|focus| focus.is_focused(window))
+                }
                 _ => self.appearance_focus.is_focused(window),
             };
             has_keyboard && controls.contains(control)
@@ -3265,6 +3299,10 @@ impl RootView {
             SettingsControl::DashboardCap => {
                 self.shown_dashboard_tab().map(|tab| tab.cap_focus.clone())
             }
+            SettingsControl::Accounts {
+                control: AccountsControl::Alias(number),
+                ..
+            } => self.alias_focus(number),
             _ => None,
         }
     }
@@ -3280,6 +3318,9 @@ impl RootView {
             self.settings_ring_control = None;
             return;
         }
+        // The Accounts page's alias fields follow the account list, which
+        // changes between renders with no window to build a field with.
+        self.hold_account_alias_fields(window, cx);
         let controls = self.settings_controls(cx);
         if let Some(control) = self.focused_control_in(&controls, window, cx) {
             self.settings_ring_control = Some(control);
@@ -3508,6 +3549,7 @@ impl RootView {
             SettingsControl::RemoteToggle => self.toggle_remote_access(),
             SettingsControl::RemoteAutostart => self.toggle_autostart(),
             SettingsControl::AgentUserHooks => self.toggle_user_hooks(),
+            SettingsControl::Accounts { control, .. } => self.press_accounts_control(control, cx),
             SettingsControl::Appearance(stop) => {
                 self.press_appearance_stop(stop, window, cx);
                 self.keep_keyboard_after_press(stop, window, cx);
@@ -4226,6 +4268,9 @@ impl RootView {
         if tab == SettingsTab::Dashboard {
             self.hold_dashboard_tab(window, cx);
         }
+        if tab == SettingsTab::Accounts {
+            self.on_accounts_tab_selected(window, cx);
+        }
         if let Some(agent) = tab.agent() {
             self.hold_agent_tab(agent, window, cx);
         }
@@ -4818,6 +4863,7 @@ impl RootView {
             || self.launch_args_focused(window)
             || self.agent_texts_focused(window)
             || self.dashboard_fields_focused(window)
+            || self.account_alias_focused(window)
             || self.appearance_field_focused(window, cx)
     }
 
@@ -5050,6 +5096,7 @@ impl RootView {
         }
         let close = close_button("settings-close", false, &theme(cx)).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| {
+                this.commit_alias_on_close(cx);
                 this.close_appearance_editor(window, cx);
             },
         ));
@@ -5103,15 +5150,18 @@ impl RootView {
     }
 
     /// The footer: OK, Apply and Cancel, right-aligned. OK and Apply are
-    /// disabled while [`Self::settings_apply_enabled`] says no.
+    /// disabled while [`Self::settings_apply_enabled`] says no; OK also
+    /// takes a press while an Accounts alias field holds an edit, which it
+    /// sends.
     fn settings_footer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let focused = self.focused_settings_control(window, cx);
         let applies = self.settings_apply_enabled();
+        let ok = applies || self.account_alias_edited(cx);
         dialog_footer(&theme(cx))
             .child(settings_button(
                 SettingsControl::FooterOk,
                 "OK",
-                applies,
+                ok,
                 focused,
                 cx,
             ))
@@ -5337,6 +5387,7 @@ impl RootView {
             SettingsTab::Agent(_) => self.agent_page_content(focused, cx),
             SettingsTab::Worktrees => self.worktrees_tab_content(focused, cx),
             SettingsTab::RemoteAccess => self.remote_access_tab_content(focused, cx),
+            SettingsTab::Accounts => self.accounts_tab_content(focused, cx),
         }
     }
 
@@ -8083,7 +8134,7 @@ fn group_row(offset: i8, shift: i8, label: &'static str, t: &UiTheme) -> Div {
 }
 
 /// A quiet line under or beside a control.
-fn hint(offset: i8, text: impl Into<SharedString>, t: &UiTheme) -> Div {
+pub(crate) fn hint(offset: i8, text: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
         .text_size(crate::fonts::ui_px_at(offset, HINT_SIZE))
         .text_color(gpui::rgb(t.subtle))
@@ -8102,7 +8153,7 @@ fn press(
 
 /// `control`'s button, outlined when it has the keyboard; a disabled one is
 /// dimmed and inert.
-fn settings_button(
+pub(crate) fn settings_button(
     control: SettingsControl,
     label: &'static str,
     enabled: bool,
@@ -8132,14 +8183,14 @@ fn settings_button(
 /// How a Settings toggle is drawn: ticked when `checked`, and dimmed and
 /// inert when not `enabled`.
 #[derive(Debug, Clone, Copy)]
-struct ToggleState {
-    checked: bool,
-    enabled: bool,
+pub(crate) struct ToggleState {
+    pub(crate) checked: bool,
+    pub(crate) enabled: bool,
 }
 
 /// `control`'s checkbox row, ticked when its state says so and ringed when
 /// it has the keyboard.
-fn toggle(
+pub(crate) fn toggle(
     control: SettingsControl,
     state: ToggleState,
     label: impl Into<SharedString>,
@@ -8643,6 +8694,9 @@ pub(crate) struct PendingSettings {
     /// Each host's daemon's refusal of its last Default shell apply, shown
     /// under the row until Settings closes.
     shell_refusals: HashMap<HostKey, String>,
+    /// The Accounts page's alias fields, one per account it lists, built
+    /// while the page shows.
+    pub(crate) account_aliases: AliasFields,
 }
 
 /// The General tab's Maximum chat width field and its draft.
@@ -9089,7 +9143,7 @@ fn unknown_field_row(tag: &str, view: &FieldView, cx: &mut Context<RootView>) ->
 
 /// A text field's frame round `input`; a click gives it the keyboard
 /// unless the field takes no input.
-fn input_frame(
+pub(crate) fn input_frame(
     control: SettingsControl,
     input: &Entity<TextInput>,
     editable: bool,
@@ -9137,7 +9191,7 @@ fn disabled_launch_row(
 
 /// Whether a choice row takes input, and the note that says why not.
 #[derive(Clone, Copy)]
-enum RowLock {
+pub(crate) enum RowLock {
     /// The choices take clicks and keys.
     Live,
     /// The choices are dimmed and inert; the note and its selector say why.
@@ -9411,7 +9465,7 @@ fn shell_list_row(
 /// A labelled row of segmented choices, laid out as the spawn dialog's;
 /// unless `lock` is [`RowLock::Live`] the choices are dimmed, inert and out
 /// of the ring.
-fn choice_row(
+pub(crate) fn choice_row(
     label: impl Into<SharedString>,
     choices: &[(SettingsControl, &'static str, bool)],
     lock: RowLock,
@@ -9725,14 +9779,14 @@ mod tests {
     }
 
     fn labels(agents: &[AgentDescriptor], remote: bool) -> Vec<&'static str> {
-        tab_rows(agents, remote)
+        tab_rows(agents, remote, false)
             .into_iter()
             .map(|row| row.label(agents))
             .collect()
     }
 
     fn agent_selectors(agents: &[AgentDescriptor]) -> Vec<&'static str> {
-        row_tabs(&tab_rows(agents, true))
+        row_tabs(&tab_rows(agents, true, false))
             .into_iter()
             .filter(|tab| matches!(tab, SettingsTab::Agent(_)))
             .map(|tab| tab.selector(agents))
@@ -9770,7 +9824,7 @@ mod tests {
             "Remote access only where the client manages the daemon"
         );
         assert!(
-            !row_tabs(&tab_rows(&agents, true))
+            !row_tabs(&tab_rows(&agents, true, false))
                 .iter()
                 .any(|tab| tab.label(&agents) == "Agents"),
             "the group row is no tab"
@@ -9864,22 +9918,46 @@ mod tests {
     fn a_shown_agent_page_falls_back_to_general_when_its_agent_leaves() {
         let shown = SettingsTab::Agent(intern("test-agent".to_owned()));
         assert_eq!(
-            tab_kept(shown, &tab_rows(&[claude(), test_agent()], true)),
+            tab_kept(shown, &tab_rows(&[claude(), test_agent()], true, false)),
             shown
         );
         assert_eq!(
-            tab_kept(shown, &tab_rows(&[claude()], true)),
+            tab_kept(shown, &tab_rows(&[claude()], true, false)),
             SettingsTab::General,
             "the daemon no longer lists the agent"
         );
         assert_eq!(
-            tab_kept(shown, &tab_rows(&[], true)),
+            tab_kept(shown, &tab_rows(&[], true, false)),
             SettingsTab::General,
             "a disconnected client lists no agent"
         );
         assert_eq!(
-            tab_kept(SettingsTab::RemoteAccess, &tab_rows(&[claude()], false)),
+            tab_kept(
+                SettingsTab::RemoteAccess,
+                &tab_rows(&[claude()], false, false)
+            ),
             SettingsTab::General
+        );
+        assert_eq!(
+            tab_kept(SettingsTab::Accounts, &tab_rows(&[claude()], true, false)),
+            SettingsTab::General,
+            "the daemon no longer lists the accounts feature"
+        );
+    }
+
+    #[test]
+    fn accounts_follows_remote_access_only_where_offered() {
+        let mut want = FIXED.to_vec();
+        want.insert(6, "Accounts");
+        let shown: Vec<&str> = tab_rows(&[], true, true)
+            .into_iter()
+            .map(|row| row.label(&[]))
+            .collect();
+        assert_eq!(shown, want, "right after Remote access");
+        assert_eq!(labels(&[], true), FIXED, "not offered: absent");
+        assert_eq!(
+            tab_kept(SettingsTab::Accounts, &tab_rows(&[], true, true)),
+            SettingsTab::Accounts
         );
     }
 
