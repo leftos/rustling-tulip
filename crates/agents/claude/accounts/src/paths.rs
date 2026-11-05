@@ -214,21 +214,69 @@ impl AccountsRoot {
     }
 }
 
-/// Claude Code's own files: its config home (`~/.claude`) and its global config file (`~/.claude.json`).
+/// Where Claude Code keeps its live login.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveStore {
+    /// The live credential file, `<config home>/.credentials.json`, alone: Windows and Linux.
+    File,
+    /// The macOS Keychain's generic-password item of `service` and `account`, read and written through Apple's
+    /// `security` tool at `security`. A read takes the item, and the live credential file only when there is no item;
+    /// a write goes to the item and rewrites the live credential file with the same bytes when one exists, never
+    /// creating it, so a running Claude Code that watches the file notices the change sooner.
+    Keychain {
+        /// The item's service: `Claude Code-credentials`, suffixed for a config dir that is not the default.
+        service: String,
+        /// The item's account: the user's name, as Claude Code picks it.
+        account: String,
+        /// The `security` tool to run: `/usr/bin/security`, never one found on `PATH`.
+        security: PathBuf,
+    },
+}
+
+/// Claude Code's own files: its config home (`~/.claude`) and its global config file (`~/.claude.json`), and where it
+/// keeps its live login ([`LiveStore`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaudePaths {
     config_home: PathBuf,
     global_config: PathBuf,
+    live: LiveStore,
 }
 
 impl ClaudePaths {
-    /// Claude Code's config home and global config file.
+    /// Claude Code's config home and global config file, its live login kept in the live credential file
+    /// ([`LiveStore::File`]).
     #[must_use]
     pub fn new(config_home: PathBuf, global_config: PathBuf) -> Self {
         Self {
             config_home,
             global_config,
+            live: LiveStore::File,
         }
+    }
+
+    /// These paths with the live login kept in the macOS Keychain item of `service` and `account`, read and written
+    /// through the `security` tool at `security` ([`LiveStore::Keychain`]).
+    #[must_use]
+    pub fn with_keychain(
+        self,
+        service: impl Into<String>,
+        account: impl Into<String>,
+        security: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            live: LiveStore::Keychain {
+                service: service.into(),
+                account: account.into(),
+                security: security.into(),
+            },
+            ..self
+        }
+    }
+
+    /// Where Claude Code keeps its live login.
+    #[must_use]
+    pub fn live_store(&self) -> &LiveStore {
+        &self.live
     }
 
     /// Claude Code's global config file, `~/.claude.json`: its `oauthAccount` names the account logged in now.
@@ -238,7 +286,8 @@ impl ClaudePaths {
     }
 
     /// Claude Code's live credential file, `<config home>/.credentials.json`: the active account's tokens, which
-    /// Claude Code renews.
+    /// Claude Code renews. With [`LiveStore::Keychain`] the item comes first, and the file only stands in when there is
+    /// no item.
     #[must_use]
     pub fn credentials_file(&self) -> PathBuf {
         self.config_home.join(".credentials.json")

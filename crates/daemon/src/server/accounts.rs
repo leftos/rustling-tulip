@@ -532,6 +532,7 @@ pub(crate) mod fake {
                     email: format!("user{number}@example.com"),
                 },
                 warnings: Vec::new(),
+                takes_effect_within: None,
             })
         }
 
@@ -1067,6 +1068,7 @@ mod tests {
                     email: format!("user{number}@example.com"),
                 },
                 warnings: Vec::new(),
+                takes_effect_within: None,
             })
         }
     }

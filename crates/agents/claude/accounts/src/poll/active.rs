@@ -17,7 +17,9 @@ use std::cell::Cell;
 
 use serde_json::Value;
 
-use crate::claude_files::{ClaudeFileError, clear_primary_api_key, write_live_credentials};
+use crate::claude_files::{
+    ClaudeFileError, clear_primary_api_key, read_live_credentials, write_live_credentials,
+};
 use crate::locks::{
     AccountLock, AccountLockGuard, ClaudeCodeLocks, ClaudeCredentialsGuard, ConsumeLock,
 };
@@ -32,7 +34,7 @@ use crate::refresh::{
     splice_oauth, stash,
 };
 use crate::secret::{AccessToken, CredentialBlob};
-use crate::store::{self, AccountRecord};
+use crate::store::AccountRecord;
 use crate::transport::{LOCKED_REFRESH_TIMEOUT, UsageTransport};
 use crate::usage::Identity;
 
@@ -590,7 +592,7 @@ impl<'a, 'c> Active<'a, 'c> {
 
     /// The live credential file: empty text when it is absent, `None` when it cannot be read or is not UTF-8.
     fn read_live(&self) -> Option<CredentialBlob> {
-        match store::read_optional(&self.context.claude.credentials_file()) {
+        match read_live_credentials(self.context.claude) {
             Ok(None) => Some(CredentialBlob::new(String::new())),
             Ok(Some(bytes)) => std::str::from_utf8(&bytes)
                 .ok()

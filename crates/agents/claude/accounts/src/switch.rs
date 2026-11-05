@@ -17,20 +17,21 @@
 //! carries a token, a credential or a path.
 
 use std::fmt;
+use std::time::Duration;
 
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
 use crate::claude_files::{
-    ClaudeFileError, Expected, remove_global_config, remove_live_credentials,
-    restore_global_config, restore_live_credentials, rewrite_global_config,
-    rewrite_live_credentials,
+    ClaudeFileError, Expected, read_live_credentials, remove_global_config,
+    remove_live_credentials, restore_global_config, restore_live_credentials,
+    rewrite_global_config, rewrite_live_credentials,
 };
 use crate::locks::{
     AccountLock, AccountLockGuard, ClaudeCodeLocks, ClaudeCredentialsGuard, ConsumeLock,
     ConsumeLockGuard, DirLockGuard, LockError,
 };
-use crate::paths::{ClaudePaths, Email};
+use crate::paths::{ClaudePaths, Email, LiveStore};
 use crate::poll::{identity_in, live_identity};
 use crate::refresh::oracle::{
     LineageKey, ResolvedProfile, Verdict, resolve, resolved_matches_slot_identity,
@@ -437,6 +438,19 @@ pub struct SwitchOutcome {
     /// What the switch did that the user should know of: the outgoing credential stashed rather than backed up, found
     /// wiped, or backed up without its `.prev` copy.
     pub warnings: Vec<String>,
+    /// How long a running Claude Code may go on with the login it had: [`KEYCHAIN_CACHE`] when the live login is kept
+    /// in the macOS Keychain, whose reads Claude Code caches; `None` when it reads the live credential file afresh, and
+    /// for a switch that moved nothing.
+    pub takes_effect_within: Option<Duration>,
+}
+
+/// How long Claude Code keeps a Keychain read of its live login before it reads the item again: a switch written to
+/// the Keychain reaches a running Claude Code within this.
+pub const KEYCHAIN_CACHE: Duration = Duration::from_secs(30);
+
+/// [`SwitchOutcome::takes_effect_within`] for a switch that wrote the live login where `paths` keeps it.
+fn takes_effect_within(paths: &ClaudePaths) -> Option<Duration> {
+    matches!(paths.live_store(), LiveStore::Keychain { .. }).then_some(KEYCHAIN_CACHE)
 }
 
 /// What the profile oracle said, before the switch took any lock, about whose account the live credential is.
@@ -718,9 +732,7 @@ fn current_account(paths: &ClaudePaths, sequence: &Sequence) -> Option<AccountRe
 
 /// The live credential file's text; `None` when it is missing, empty, unreadable or not UTF-8.
 fn read_live(paths: &ClaudePaths) -> Option<CredentialBlob> {
-    let bytes = store::read_optional(&paths.credentials_file())
-        .ok()
-        .flatten()?;
+    let bytes = read_live_credentials(paths).ok().flatten()?;
     let text = std::str::from_utf8(&bytes)
         .ok()
         .filter(|text| !text.is_empty())?;
@@ -750,6 +762,7 @@ fn already_active(target: &AccountRecord) -> SwitchOutcome {
             target.email.as_str()
         ),
         warnings: Vec::new(),
+        takes_effect_within: None,
     }
 }
 
@@ -976,7 +989,12 @@ impl Switch<'_, '_> {
         {
             return Err(self.roll_back(held, found.before(), &written));
         }
-        Ok(switched(displaced_from(identity), target, Vec::new()))
+        Ok(switched(
+            self.context.claude,
+            displaced_from(identity),
+            target,
+            Vec::new(),
+        ))
     }
 
     /// What a direct activation reads before it writes anything, in order: Claude Code's locks still held, the target's
@@ -1052,7 +1070,12 @@ impl Switch<'_, '_> {
         {
             return Err(self.roll_back(held, snapshot.before(), &written));
         }
-        Ok(switched(Some(SwitchAccount::of(current)), target, warnings))
+        Ok(switched(
+            self.context.claude,
+            Some(SwitchAccount::of(current)),
+            target,
+            warnings,
+        ))
     }
 
     /// What a switch from managed account `current` does before it reads the target's backup: the live files
@@ -1552,8 +1575,9 @@ fn splice(config: &mut Map<String, Value>, oauth_account: &mut Scrubbed) {
     }
 }
 
-/// The outcome of a switch that made `target` live, leaving `from`.
+/// The outcome of a switch that made `target` live, leaving `from`, the live login written where `paths` keeps it.
 fn switched(
+    paths: &ClaudePaths,
     from: Option<SwitchAccount>,
     target: &AccountRecord,
     warnings: Vec<String>,
@@ -1570,6 +1594,7 @@ fn switched(
             target.email.as_str()
         ),
         warnings,
+        takes_effect_within: takes_effect_within(paths),
     }
 }
 
@@ -1586,7 +1611,7 @@ fn displaced_from(identity: Option<&Identity>) -> Option<SwitchAccount> {
 /// The live credential file's text, `None` when the file does not exist; `Err` when it exists but cannot be read or is
 /// not UTF-8.
 fn found_live(paths: &ClaudePaths) -> Result<Option<CredentialBlob>, ()> {
-    let Some(bytes) = store::read_optional(&paths.credentials_file()).map_err(|_| ())? else {
+    let Some(bytes) = read_live_credentials(paths).map_err(|_| ())? else {
         return Ok(None);
     };
     let text = std::str::from_utf8(&bytes).map_err(|_| ())?;

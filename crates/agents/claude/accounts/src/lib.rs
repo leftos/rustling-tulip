@@ -43,6 +43,7 @@ mod claude_files;
 pub mod drain;
 pub mod engine;
 pub mod guard;
+mod keychain;
 mod locks;
 pub mod pace;
 mod paths;
@@ -69,12 +70,14 @@ pub use engine::{
     QuarantineEntry, QuarantineRecord, STATE_SCHEMA_VERSION, decision_value, paid_eligible,
     paid_ranking, parse_model_names, scoped_window_counts,
 };
+#[cfg(unix)]
+pub use keychain::os_user_name;
 pub use locks::{
     ACCOUNT_LOCK_TIMEOUT, AccountLock, AccountLockGuard, CLAUDE_LOCK_TIMEOUT, CONFIG_STALENESS,
     CREDENTIALS_STALENESS, ClaudeCodeLocks, ClaudeCredentialsGuard, ConsumeLock, ConsumeLockGuard,
     DirLock, DirLockGuard, FileLock, FileLockGuard, LockError, LockTiming, TOUCH_INTERVAL,
 };
-pub use paths::{AccountsRoot, ClaudePaths, Email};
+pub use paths::{AccountsRoot, ClaudePaths, Email, LiveStore};
 pub use poll::{
     BalanceReadError, CLAIM_TTL_S, Claims, DeferReason, FetchError, FetchMode, FetchResult,
     FetchScope, PlanContext, PlanRequest, PollError, PollOutcome, PollPlan, PollResult,
@@ -100,8 +103,8 @@ pub use store::{
     default_canary,
 };
 pub use switch::{
-    LoginState, OutgoingProbe, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome,
-    SwitchPrecondition, TempsLeft, probe_outgoing, switch,
+    KEYCHAIN_CACHE, LoginState, OutgoingProbe, SwitchAccount, SwitchError, SwitchErrorKind,
+    SwitchOutcome, SwitchPrecondition, TempsLeft, probe_outgoing, switch,
 };
 pub use transport::{
     CLIENT_ID, LOCKED_REFRESH_TIMEOUT, PREPAID_URL_TEMPLATE, PROFILE_TIMEOUT, PROFILE_URL,

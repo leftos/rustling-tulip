@@ -2129,7 +2129,7 @@ pub(crate) use crate::claude_files::identity_in;
 /// the file is missing, cannot be read or is not UTF-8; one that holds no OAuth access token is also passed over by the
 /// caller, which then falls back to the backup copy.
 pub(crate) fn live_blob(claude: &ClaudePaths) -> Option<CredentialBlob> {
-    let bytes = store::read_optional(&claude.credentials_file())
+    let bytes = crate::claude_files::read_live_credentials(claude)
         .ok()
         .flatten()?;
     let text = std::str::from_utf8(&bytes).ok()?;

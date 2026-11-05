@@ -24,8 +24,9 @@ use std::path::Path;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
+use crate::keychain;
 use crate::locks::{ClaudeCredentialsGuard, DirLockGuard};
-use crate::paths::ClaudePaths;
+use crate::paths::{ClaudePaths, LiveStore};
 use crate::refresh::{Scrubbed, scrub};
 use crate::secret::CredentialBlob;
 use crate::store;
@@ -67,16 +68,26 @@ pub enum ClaudeFileError {
     /// The live credential file exists but could not be read, or is not UTF-8 text. Nothing was written.
     #[error("Claude Code's live credential file exists but could not be read; nothing was written")]
     CredentialsUnreadable(#[source] io::Error),
+    /// The macOS Keychain item holding the live login could not be read, written or deleted: `security` failed for
+    /// another reason than "no such item" (a locked or refusing Keychain), or did not answer in time. The text says
+    /// which, with its exit code; it carries no value. The live credential file was not read or written in its place.
+    #[error(
+        "the Keychain item holding Claude Code's live login could not be used ({0}); the live credential file was not used in its place"
+    )]
+    CredentialStore(String),
 }
 
 /// Writes `blob` as Claude Code's live credential file, `<config home>/.credentials.json`, making its folder first:
 /// through a temp file in the same folder renamed onto it, while
 /// `guard`, Claude Code's credential locks for `paths` ([`crate::ClaudeCodeLocks::credentials`]), is held. On Unix the
 /// file is readable by its owner alone. Whatever the file holds is replaced: a switch writes through
-/// `rewrite_live_credentials` instead, with the bytes its snapshot read.
+/// `rewrite_live_credentials` instead, with the bytes its snapshot read. With [`LiveStore::Keychain`] the Keychain item
+/// is written instead, and the live credential file rewritten with the same bytes only when it exists.
 ///
 /// # Errors
 ///
+/// [`ClaudeFileError::CredentialStore`] when the Keychain item cannot be written or read back, or `blob` is not a JSON
+/// login the item can carry (the file is not written in its place);
 /// [`ClaudeFileError::WrongLock`] when `guard` holds another config home's locks (nothing is written);
 /// [`ClaudeFileError::LockLost`] when either of its locks is no longer held (nothing is written);
 /// [`ClaudeFileError::Write`] when the folder, the temp file or the rename fails; the old file is then unchanged and
@@ -87,11 +98,117 @@ pub fn write_live_credentials(
     blob: &CredentialBlob,
 ) -> Result<(), ClaudeFileError> {
     check_credentials_guard(paths, guard)?;
+    write_live(paths, blob.expose().as_bytes(), check_json)
+}
+
+/// Writes `bytes` as the live login where `paths` keeps it, `check` run on the file's temp copy before its rename. The
+/// live credential file alone, its folder made first ([`LiveStore::File`]); or the Keychain item, then the live
+/// credential file when one exists, never creating it ([`LiveStore::Keychain`]). The item takes `bytes` themselves only
+/// when they are printable ASCII, else the compact JSON they parse to ([`keychain_value`]), and is read back and
+/// compared before anything returns. A login the item cannot carry, or one that does not read back, is
+/// [`ClaudeFileError::CredentialStore`], with nothing written; a file that cannot be rewritten after the item was is
+/// logged and left, since Claude Code reads the item first.
+fn write_live(
+    paths: &ClaudePaths,
+    bytes: &[u8],
+    check: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), ClaudeFileError> {
     let target = paths.credentials_file();
-    if let Some(folder) = target.parent() {
-        fs::create_dir_all(folder).map_err(ClaudeFileError::Write)?;
+    let LiveStore::Keychain {
+        service,
+        account,
+        security,
+    } = paths.live_store()
+    else {
+        if let Some(folder) = target.parent() {
+            fs::create_dir_all(folder).map_err(ClaudeFileError::Write)?;
+        }
+        return replace_checked(&target, bytes, check);
+    };
+    let value = keychain_value(bytes)?;
+    keychain::add(security, service, account, &value).map_err(store_failed)?;
+    let found = keychain::find(security, service, account).map_err(store_failed)?;
+    if found.as_deref().map(Vec::as_slice) != Some(value.as_slice()) {
+        return Err(ClaudeFileError::CredentialStore(
+            "the Keychain item read back differs from what was written".to_owned(),
+        ));
     }
-    replace_file(&target, blob.expose().as_bytes())
+    if target.exists()
+        && let Err(error) = replace_checked(&target, bytes, check)
+    {
+        tracing::warn!(
+            %error,
+            "the Keychain item holding Claude Code's live login was written, but the live credential file beside it could not be rewritten; Claude Code reads the item first"
+        );
+    }
+    Ok(())
+}
+
+/// The value the Keychain item is given for `bytes`, the live login: `bytes` themselves when every byte is printable
+/// ASCII, else the compact JSON they parse to. [`ClaudeFileError::CredentialStore`] when `bytes` are not JSON, or the
+/// compact form still holds a byte the item cannot carry; nothing is written then.
+fn keychain_value(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, ClaudeFileError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| {
+        ClaudeFileError::CredentialStore(
+            "the live login is not JSON, so the Keychain item, which Claude Code reads first, was not written"
+                .to_owned(),
+        )
+    })?;
+    if keychain::printable(bytes) {
+        return Ok(Zeroizing::new(bytes.to_vec()));
+    }
+    let compact = serde_json::to_vec(&value).map_err(|error| {
+        ClaudeFileError::CredentialStore(format!(
+            "the live login could not be written as compact JSON for the Keychain item ({error})"
+        ))
+    })?;
+    if !keychain::printable(&compact) {
+        return Err(ClaudeFileError::CredentialStore(
+            "the live login holds characters the Keychain item cannot carry".to_owned(),
+        ));
+    }
+    Ok(Zeroizing::new(compact))
+}
+
+/// The live login's bytes where `paths` keeps it: the live credential file ([`LiveStore::File`]), or the Keychain
+/// item, the file only when there is no item ([`LiveStore::Keychain`]); `None` when there is neither. Every reader of
+/// the live login reads through here.
+///
+/// # Errors
+///
+/// [`ClaudeFileError::CredentialsUnreadable`] when the file exists but cannot be read;
+/// [`ClaudeFileError::CredentialStore`] when the Keychain could not be read (the file is not read in its place).
+pub(crate) fn read_live_credentials(
+    paths: &ClaudePaths,
+) -> Result<Option<Zeroizing<Vec<u8>>>, ClaudeFileError> {
+    read_live_or(paths, ClaudeFileError::CredentialsUnreadable)
+}
+
+/// As [`read_live_credentials`], a file that cannot be read reported as `file_error` says.
+fn read_live_or(
+    paths: &ClaudePaths,
+    file_error: fn(io::Error) -> ClaudeFileError,
+) -> Result<Option<Zeroizing<Vec<u8>>>, ClaudeFileError> {
+    if let Some(item) = read_item(paths)? {
+        return Ok(Some(item));
+    }
+    store::read_optional(&paths.credentials_file()).map_err(file_error)
+}
+
+/// The Keychain item's bytes; `None` when there is no item, or the live login is kept in the file alone.
+fn read_item(paths: &ClaudePaths) -> Result<Option<Zeroizing<Vec<u8>>>, ClaudeFileError> {
+    match paths.live_store() {
+        LiveStore::File => Ok(None),
+        LiveStore::Keychain {
+            service,
+            account,
+            security,
+        } => keychain::find(security, service, account).map_err(store_failed),
+    }
+}
+
+fn store_failed(failure: keychain::Failure) -> ClaudeFileError {
+    ClaudeFileError::CredentialStore(failure.to_string())
 }
 
 /// As [`write_live_credentials`], only while the live credential file holds what `expected` says: the file is read
@@ -109,11 +226,11 @@ pub(crate) fn rewrite_live_credentials(
     blob: &CredentialBlob,
 ) -> Result<(), ClaudeFileError> {
     check_credentials_guard(paths, guard)?;
-    let held = store::read_optional(&paths.credentials_file()).map_err(ClaudeFileError::Write)?;
+    let held = read_live_or(paths, ClaudeFileError::Write)?;
     if !expected.matches(held.as_deref().map(Vec::as_slice)) {
         return Err(ClaudeFileError::Changed);
     }
-    write_live_credentials(paths, guard, blob)
+    write_live(paths, blob.expose().as_bytes(), check_json)
 }
 
 /// Updates Claude Code's global config, `paths`' `~/.claude.json`, in place,
@@ -331,9 +448,7 @@ pub(crate) struct LiveLogin {
 /// [`ClaudeFileError::CredentialsUnreadable`] when the credential file exists but cannot be read or is not UTF-8;
 /// [`ClaudeFileError::ConfigUnreadable`] when `~/.claude.json` exists but cannot be read or is not a JSON object.
 pub(crate) fn read_live_login(paths: &ClaudePaths) -> Result<LiveLogin, ClaudeFileError> {
-    let credential = match store::read_optional(&paths.credentials_file())
-        .map_err(ClaudeFileError::CredentialsUnreadable)?
-    {
+    let credential = match read_live_credentials(paths)? {
         Some(bytes) => {
             let text = std::str::from_utf8(&bytes).map_err(|error| {
                 ClaudeFileError::CredentialsUnreadable(io::Error::new(
@@ -403,9 +518,11 @@ pub fn clear_primary_api_key(
 /// Writes `bytes` back as `paths`' live credential file, byte for byte, while `guard`, Claude Code's credential locks
 /// for `paths`, is still held, and only while the file holds exactly `written`: the rollback of a switch that wrote
 /// those bytes over it. `Ok(true)` when the file was put back, `Ok(false)` when it holds other bytes, written since, or
-/// is gone, and was left as it is. Unlike [`write_live_credentials`] the read-back only compares the bytes, since the
-/// file being put back need not have been JSON. The compare and the replace are two steps, so a writer that ignores the
-/// lock can still land between them.
+/// is gone, and was left as it is. Unlike [`write_live_credentials`] the file's read-back only compares the bytes, since
+/// the bytes being put back need not have been JSON; the Keychain item still takes only a JSON login. The compare and
+/// the replace are two steps, so a writer that ignores the lock can still land between them. With
+/// [`LiveStore::Keychain`] the live login is compared as it is read (the item, else the file) and put back as it is
+/// written (the item, and the file only when it exists).
 ///
 /// # Errors
 ///
@@ -417,7 +534,15 @@ pub(crate) fn restore_live_credentials(
     bytes: &[u8],
 ) -> Result<bool, ClaudeFileError> {
     check_credentials_guard(paths, guard)?;
-    restore_if_holding(&paths.credentials_file(), written, bytes)
+    if *paths.live_store() == LiveStore::File {
+        return restore_if_holding(&paths.credentials_file(), written, bytes);
+    }
+    let held = read_live_or(paths, ClaudeFileError::Write)?;
+    if held.as_deref().map(Vec::as_slice) != Some(written) {
+        return Ok(false);
+    }
+    write_live(paths, bytes, |temp| store::read_back_equals(temp, bytes))?;
+    Ok(true)
 }
 
 /// Writes `bytes` back as `paths`' `~/.claude.json`, byte for byte, while `guard`, its config lock, is still held, and
@@ -457,19 +582,37 @@ fn restore_if_holding(
 
 /// Removes `paths`' live credential file while `guard`, Claude Code's credential locks for `paths`, is still held, and
 /// only while it holds exactly `written`: the rollback of a switch that created it with those bytes. `Ok(true)` when the
-/// file is gone (one already gone included), `Ok(false)` when it holds other bytes, written since, and was left.
+/// file is gone (one already gone included), `Ok(false)` when it holds other bytes, written since, and was left. With
+/// [`LiveStore::Keychain`] the Keychain item is compared and deleted instead, the file left as it is.
 ///
 /// # Errors
 ///
 /// [`ClaudeFileError::WrongLock`] or [`ClaudeFileError::LockLost`], as [`write_live_credentials`] (nothing is removed);
-/// [`ClaudeFileError::Write`] when the file could not be read or removed.
+/// [`ClaudeFileError::Write`] when the file could not be read or removed; [`ClaudeFileError::CredentialStore`] when the
+/// Keychain item could not be read or deleted.
 pub(crate) fn remove_live_credentials(
     paths: &ClaudePaths,
     guard: &ClaudeCredentialsGuard,
     written: &[u8],
 ) -> Result<bool, ClaudeFileError> {
     check_credentials_guard(paths, guard)?;
-    remove_if_holding(&paths.credentials_file(), written)
+    let LiveStore::Keychain {
+        service,
+        account,
+        security,
+    } = paths.live_store()
+    else {
+        return remove_if_holding(&paths.credentials_file(), written);
+    };
+    // A switch never creates the live credential file beside the item, so only the item is removed.
+    match keychain::find(security, service, account).map_err(store_failed)? {
+        None => Ok(true),
+        Some(held) if held.as_slice() != written => Ok(false),
+        Some(_) => {
+            keychain::delete(security, service, account).map_err(store_failed)?;
+            Ok(true)
+        }
+    }
 }
 
 /// Removes `paths`' `~/.claude.json` while `guard`, its config lock, is still held, and only while it holds exactly
@@ -931,5 +1074,182 @@ mod rewrite_tests {
             "a file holding the expected bytes is rewritten"
         );
         assert_eq!(held, NEW.as_bytes(), "the file holds the new credential");
+    }
+}
+
+/// The live login kept in the Keychain, against the fake `security`, under Claude Code's credential locks.
+#[cfg(all(test, unix, accounts_locks))]
+#[expect(
+    clippy::expect_used,
+    reason = "a test that cannot set up its files or take its locks must fail loudly"
+)]
+mod keychain_tests {
+    use std::fs;
+
+    use super::{
+        ClaudeFileError, Expected, read_live_credentials, remove_live_credentials,
+        restore_live_credentials, rewrite_live_credentials, write_live_credentials,
+    };
+    use crate::keychain::fake::FakeKeychain;
+    use crate::locks::ClaudeCodeLocks;
+    use crate::secret::CredentialBlob;
+
+    const OLD: &[u8] = br#"{"claudeAiOauth": {"accessToken": "fake-access-old", "refreshToken": "fake-refresh-old"}}"#;
+    const FILE: &[u8] = br#"{"claudeAiOauth": {"accessToken": "fake-access-file", "refreshToken": "fake-refresh-file"}}"#;
+    const NEW: &str = r#"{"claudeAiOauth": {"accessToken": "fake-access-new", "refreshToken": "fake-refresh-new"}}"#;
+
+    fn new_blob() -> CredentialBlob {
+        CredentialBlob::new(NEW.to_owned())
+    }
+
+    fn read(fake: &FakeKeychain) -> Option<Vec<u8>> {
+        read_live_credentials(&fake.paths())
+            .expect("the live login reads")
+            .map(|bytes| bytes.to_vec())
+    }
+
+    #[test]
+    fn keychain_read_prefers_the_item_and_falls_back_to_the_file() {
+        let fake = FakeKeychain::new("read");
+        let paths = fake.paths();
+
+        assert_eq!(read(&fake), None, "no item and no file is no live login");
+        fs::write(paths.credentials_file(), FILE).expect("the live file can be written");
+        assert_eq!(
+            read(&fake).as_deref(),
+            Some(FILE),
+            "with no item, the file is read"
+        );
+        fake.put(OLD);
+        assert_eq!(
+            read(&fake).as_deref(),
+            Some(OLD),
+            "the item wins over the file"
+        );
+    }
+
+    #[test]
+    fn keychain_write_updates_the_item_and_rewrites_an_existing_file_only() {
+        let fake = FakeKeychain::new("write");
+        let paths = fake.paths();
+        fake.put(OLD);
+        fs::write(paths.credentials_file(), FILE).expect("the live file can be written");
+        let locks = ClaudeCodeLocks::credentials(&paths).expect("the credential locks are free");
+
+        write_live_credentials(&paths, &locks, &new_blob()).expect("the live login is written");
+
+        assert_eq!(
+            fake.item().as_deref(),
+            Some(NEW.as_bytes()),
+            "the item holds the new login"
+        );
+        assert_eq!(
+            fs::read(paths.credentials_file()).expect("the live file stays"),
+            NEW.as_bytes(),
+            "the existing file is rewritten with the same bytes, while the locks are held"
+        );
+        assert!(!paths.global_config().exists(), "nothing else is written");
+    }
+
+    #[test]
+    fn keychain_write_never_creates_the_file() {
+        let fake = FakeKeychain::new("no-file");
+        let paths = fake.paths();
+        let locks = ClaudeCodeLocks::credentials(&paths).expect("the credential locks are free");
+
+        write_live_credentials(&paths, &locks, &new_blob()).expect("the live login is written");
+
+        assert_eq!(fake.item().as_deref(), Some(NEW.as_bytes()));
+        assert!(
+            !paths.credentials_file().exists(),
+            "no live file is created beside the item"
+        );
+    }
+
+    #[test]
+    fn keychain_failure_is_an_error_not_a_file_write() {
+        let fake = FakeKeychain::new("failure");
+        let paths = fake.paths();
+        fs::write(paths.credentials_file(), FILE).expect("the live file can be written");
+        let locks = ClaudeCodeLocks::credentials(&paths).expect("the credential locks are free");
+        fake.fail_with(51);
+
+        let written = write_live_credentials(&paths, &locks, &new_blob());
+        let read = read_live_credentials(&paths);
+
+        assert!(
+            matches!(
+                &written,
+                Err(ClaudeFileError::CredentialStore(cause))
+                    if cause.contains("51") && !cause.contains("fake-access")
+            ),
+            "a refusing Keychain is a credential store error naming the exit code and no secret: {written:?}"
+        );
+        assert!(
+            matches!(read, Err(ClaudeFileError::CredentialStore(_))),
+            "a refusing Keychain is not read as no item, so the file is not read in its place"
+        );
+        assert_eq!(
+            fs::read(paths.credentials_file()).expect("the live file stays"),
+            FILE,
+            "the file is not written in the item's place"
+        );
+        assert_eq!(fake.item(), None, "no item was written");
+    }
+
+    #[test]
+    fn keychain_rollback_restores_the_item() {
+        let fake = FakeKeychain::new("rollback");
+        let paths = fake.paths();
+        fake.put(OLD);
+        let locks = ClaudeCodeLocks::credentials(&paths).expect("the credential locks are free");
+        rewrite_live_credentials(&paths, &locks, Expected::Bytes(OLD), &new_blob())
+            .expect("the item holding the expected bytes is rewritten");
+        assert_eq!(fake.item().as_deref(), Some(NEW.as_bytes()));
+
+        let restored = restore_live_credentials(&paths, &locks, NEW.as_bytes(), OLD)
+            .expect("the rollback runs");
+
+        assert!(
+            restored,
+            "the item still held the written bytes, so it is put back"
+        );
+        assert_eq!(
+            fake.item().as_deref(),
+            Some(OLD),
+            "the item holds its old login again"
+        );
+        assert!(
+            !paths.credentials_file().exists(),
+            "the rollback writes the store it wrote, and creates no file"
+        );
+    }
+
+    #[test]
+    fn keychain_remove_deletes_the_item() {
+        let fake = FakeKeychain::new("remove");
+        let paths = fake.paths();
+        let locks = ClaudeCodeLocks::credentials(&paths).expect("the credential locks are free");
+        rewrite_live_credentials(&paths, &locks, Expected::Absent, &new_blob())
+            .expect("an absent login is written");
+
+        let other = remove_live_credentials(&paths, &locks, OLD).expect("the removal runs");
+        assert!(!other, "an item holding other bytes is kept");
+        assert_eq!(fake.item().as_deref(), Some(NEW.as_bytes()));
+
+        let gone =
+            remove_live_credentials(&paths, &locks, NEW.as_bytes()).expect("the removal runs");
+        assert!(gone, "the item holding the written bytes is deleted");
+        assert_eq!(fake.item(), None);
+        let again =
+            remove_live_credentials(&paths, &locks, NEW.as_bytes()).expect("the removal runs");
+        assert!(again, "an item already gone counts as removed");
+        assert!(
+            fake.argv()
+                .iter()
+                .any(|line| line == "delete-generic-password -a tester -s Claude Code-credentials"),
+            "the removal deletes the item: {:?}",
+            fake.argv()
+        );
     }
 }

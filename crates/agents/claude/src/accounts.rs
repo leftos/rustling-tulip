@@ -184,7 +184,11 @@ impl ClaudeAccounts {
 
     /// Claude Code's files: its home is the config's `agent_home`, else
     /// `CLAUDE_CONFIG_DIR`, else `<user home>/.claude`; its global config is
-    /// `.claude.json` in the first two, else `<user home>/.claude.json`.
+    /// `.claude.json` in the first two, else `<user home>/.claude.json`. Its
+    /// live login is where Claude Code keeps it on this platform
+    /// ([`with_live_store`]), except under the config's `agent_home`, a
+    /// test's own home, where it stays in the live credential file, so no
+    /// test reaches the user's Keychain.
     fn claude_paths(&self) -> Result<ClaudePaths, AccountsError> {
         let missing = || AccountsError::new("Claude Code's home folder could not be found");
         let moved = self.cfg.agent_home.clone().or_else(|| {
@@ -192,13 +196,18 @@ impl ClaudeAccounts {
                 .filter(|dir| !dir.is_empty())
                 .map(PathBuf::from)
         });
-        if let Some(home) = moved {
-            let global = home.join(".claude.json");
-            return Ok(ClaudePaths::new(home, global));
+        let paths = if let Some(home) = &moved {
+            ClaudePaths::new(home.clone(), home.join(".claude.json"))
+        } else {
+            let home = own_claude_home().ok_or_else(missing)?;
+            let user = UserDirs::new().ok_or_else(missing)?;
+            ClaudePaths::new(home, user.home_dir().join(".claude.json"))
+        };
+        if self.cfg.agent_home.is_some() {
+            return Ok(paths);
         }
-        let home = own_claude_home().ok_or_else(missing)?;
-        let user = UserDirs::new().ok_or_else(missing)?;
-        Ok(ClaudePaths::new(home, user.home_dir().join(".claude.json")))
+        let config_dir = std::env::var_os(CONFIG_DIR_VAR);
+        Ok(with_live_store(paths, config_dir.as_deref()))
     }
 
     fn open_store(&self) -> Result<Store, AccountsError> {
@@ -735,6 +744,7 @@ fn roster_answer(
         from: Some(account.clone()),
         to: account,
         warnings: Vec::new(),
+        takes_effect_within: None,
     }))
 }
 
@@ -776,7 +786,90 @@ fn switch_report(outcome: SwitchOutcome) -> SwitchReport {
         from: outcome.from.as_ref().map(account_ref),
         to: account_ref(&outcome.to),
         warnings: outcome.warnings,
+        takes_effect_within: outcome.takes_effect_within,
     }
+}
+
+/// The `security` tool Claude Code's Keychain item is read and written
+/// through on macOS: Apple's own, never one found on `PATH`.
+#[cfg(target_os = "macos")]
+const SECURITY_TOOL: &str = "/usr/bin/security";
+
+/// Claude Code's Keychain service for its live OAuth login, the default
+/// config dir's.
+#[cfg(any(target_os = "macos", test))]
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// The Keychain account Claude Code falls back to when it finds no user name.
+#[cfg(any(target_os = "macos", test))]
+const KEYCHAIN_FALLBACK_ACCOUNT: &str = "claude-code-user";
+
+/// `paths` with the live login where Claude Code keeps it on this platform:
+/// on macOS the Keychain item of the service the config dir picks
+/// (`config_dir`, `CLAUDE_CONFIG_DIR` as the process has it) and
+/// of the user's name, read and written through `/usr/bin/security`.
+#[cfg(target_os = "macos")]
+fn with_live_store(paths: ClaudePaths, config_dir: Option<&std::ffi::OsStr>) -> ClaudePaths {
+    let secure = std::env::var_os(SECURESTORAGE_DIR_VAR);
+    let user = std::env::var_os("USER");
+    paths.with_keychain(
+        keychain_service(secure.as_deref(), config_dir),
+        keychain_account(user.as_deref(), claude_accounts::os_user_name),
+        SECURITY_TOOL,
+    )
+}
+
+/// `paths` with the live login where Claude Code keeps it on this platform:
+/// off macOS the live credential file, as `paths` already says.
+#[cfg(not(target_os = "macos"))]
+fn with_live_store(paths: ClaudePaths, _config_dir: Option<&std::ffi::OsStr>) -> ClaudePaths {
+    paths
+}
+
+/// The Keychain service Claude Code keeps its live login under, as it picks
+/// it: `CLAUDE_SECURESTORAGE_CONFIG_DIR` (`secure`) when it is set at all,
+/// else `CLAUDE_CONFIG_DIR` (`config_dir`); an empty or missing one is the
+/// default service, and any other is the default service suffixed with `-`
+/// and the first 8 hex digits of the SHA-256 of the value as given, in NFC.
+#[cfg(any(target_os = "macos", test))]
+fn keychain_service(
+    secure: Option<&std::ffi::OsStr>,
+    config_dir: Option<&std::ffi::OsStr>,
+) -> String {
+    use sha2::{Digest as _, Sha256};
+    use unicode_normalization::UnicodeNormalization as _;
+
+    let dir = match secure {
+        Some(secure) => secure,
+        None => config_dir.unwrap_or_default(),
+    };
+    if dir.is_empty() {
+        return KEYCHAIN_SERVICE.to_owned();
+    }
+    let normalized: String = dir.to_string_lossy().nfc().collect();
+    let digest = Sha256::digest(normalized.as_bytes());
+    let suffix: String = digest
+        .iter()
+        .take(4)
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .map(|digit| char::from_digit(u32::from(digit), 16).unwrap_or('0'))
+        .collect();
+    format!("{KEYCHAIN_SERVICE}-{suffix}")
+}
+
+/// The Keychain account Claude Code keeps its live login under, as it picks
+/// it: `USER` (`user`) when it is set and not empty, else the OS user name
+/// (`os_user`), else `claude-code-user`.
+#[cfg(any(target_os = "macos", test))]
+fn keychain_account(
+    user: Option<&std::ffi::OsStr>,
+    os_user: impl FnOnce() -> Option<String>,
+) -> String {
+    user.and_then(std::ffi::OsStr::to_str)
+        .filter(|user| !user.is_empty())
+        .map(str::to_owned)
+        .or_else(os_user)
+        .unwrap_or_else(|| KEYCHAIN_FALLBACK_ACCOUNT.to_owned())
 }
 
 /// A failure of the service around a write (its HTTP client, Claude Code's
@@ -1487,6 +1580,54 @@ impl ProfileTransport for ProfileClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_keychain_service_name_follows_the_config_dir_rule() {
+        use std::ffi::OsStr;
+
+        let work = OsStr::new("/Users/me/.claude-work");
+        assert_eq!(
+            keychain_service(None, None),
+            "Claude Code-credentials",
+            "the default config dir has the unsuffixed item"
+        );
+        assert_eq!(
+            keychain_service(None, Some(OsStr::new(""))),
+            "Claude Code-credentials",
+            "an empty CLAUDE_CONFIG_DIR is no config dir"
+        );
+        assert_eq!(
+            keychain_service(None, Some(work)),
+            "Claude Code-credentials-1e91dd84",
+            "a config dir suffixes the first 8 hex digits of its SHA-256"
+        );
+        assert_eq!(
+            keychain_service(Some(work), Some(OsStr::new("/Users/me/.claude-other"))),
+            "Claude Code-credentials-1e91dd84",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR wins over CLAUDE_CONFIG_DIR"
+        );
+        assert_eq!(
+            keychain_service(Some(OsStr::new("")), Some(work)),
+            "Claude Code-credentials",
+            "an empty CLAUDE_SECURESTORAGE_CONFIG_DIR means the unsuffixed item"
+        );
+        assert_eq!(
+            keychain_service(None, Some(OsStr::new("/Users/me/cafe\u{301}"))),
+            keychain_service(None, Some(OsStr::new("/Users/me/caf\u{e9}"))),
+            "the config dir is hashed in NFC"
+        );
+        assert_eq!(keychain_account(Some(OsStr::new("me")), || None), "me");
+        assert_eq!(
+            keychain_account(Some(OsStr::new("")), || Some("os-me".to_owned())),
+            "os-me",
+            "with no USER, the OS user name"
+        );
+        assert_eq!(
+            keychain_account(None, || None),
+            "claude-code-user",
+            "with neither, Claude Code's fallback name"
+        );
+    }
 
     #[test]
     fn chrono_time_converts_a_pre_epoch_time() {

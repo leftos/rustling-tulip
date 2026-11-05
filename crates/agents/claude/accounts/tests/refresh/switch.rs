@@ -316,6 +316,10 @@ fn switch_writes_target_credentials_and_splices_oauth_account_keeping_other_keys
     assert_eq!(outcome.message, "Switched to Account-2 (two@example.test)");
     assert!(outcome.warnings.is_empty(), "got {:?}", outcome.warnings);
     assert_eq!(
+        outcome.takes_effect_within, None,
+        "a live credential file is read afresh, so the switch takes effect at once"
+    );
+    assert_eq!(
         json_of(&live(&rig))["claudeAiOauth"],
         json_of(&target)["claudeAiOauth"],
         "the target's login is live"
@@ -342,6 +346,165 @@ fn switch_writes_target_credentials_and_splices_oauth_account_keeping_other_keys
         Some(target),
         "the target's backup is left as it was"
     );
+}
+
+/// The fake `security` (`tests/support/fake-security.sh`) with its items in `rig`'s folder, through a wrapper that
+/// names that folder: the path to run as `security`.
+#[cfg(unix)]
+fn fake_security(rig: &Rig) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = rig.scratch.dir.join("keychain");
+    fs::create_dir_all(dir.join("items")).expect("the fake Keychain's folder can be made");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake-security.sh");
+    let security = dir.join("security");
+    fs::write(
+        &security,
+        format!(
+            "#!/bin/sh\nexport FAKE_SECURITY_DIR='{}'\nexec /bin/sh '{}' \"$@\"\n",
+            dir.display(),
+            script.display()
+        ),
+    )
+    .expect("the fake's wrapper can be written");
+    fs::set_permissions(&security, fs::Permissions::from_mode(0o700))
+        .expect("the fake's wrapper can be made runnable");
+    security
+}
+
+/// The fake Keychain item of `service` and `account` in `rig`'s folder, as text; `None` when there is none.
+#[cfg(unix)]
+fn fake_item(rig: &Rig, service: &str, account: &str) -> Option<String> {
+    let name: String = format!("{service}\n{account}")
+        .bytes()
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .map(|digit| char::from_digit(u32::from(digit), 16).unwrap_or('0'))
+        .collect();
+    let hex = fs::read_to_string(rig.scratch.dir.join("keychain/items").join(name)).ok()?;
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .filter_map(|at| hex.get(at..at + 2))
+        .filter_map(|pair| u8::from_str_radix(pair, 16).ok())
+        .collect();
+    String::from_utf8(bytes).ok()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_keychain_switch_reports_its_takes_effect_within() {
+    let own = fresh("fake-access-a", "fake-refresh-a");
+    let target = fresh("fake-access-two", "fake-refresh-two");
+    let mut rig = rig("keychain_switch", &own, &own, &target);
+    let security = fake_security(&rig);
+    rig.claude = rig
+        .claude
+        .clone()
+        .with_keychain("Claude Code-credentials", "tester", &security);
+
+    let outcome = switch_to(&rig, 2).expect("the switch succeeds");
+
+    assert!(outcome.switched);
+    assert_eq!(
+        outcome.takes_effect_within,
+        Some(std::time::Duration::from_secs(30)),
+        "a running Claude Code reads its Keychain cache for up to 30 s"
+    );
+    let item = fake_item(&rig, "Claude Code-credentials", "tester")
+        .expect("the switch wrote the Keychain item");
+    assert_eq!(
+        json_of(&item)["claudeAiOauth"],
+        json_of(&target)["claudeAiOauth"],
+        "the target's login is in the item"
+    );
+    assert_eq!(
+        json_of(&live(&rig))["claudeAiOauth"],
+        json_of(&target)["claudeAiOauth"],
+        "the existing live file is rewritten with the same login"
+    );
+    assert_eq!(active(&rig), Some(2));
+}
+
+/// The Keychain item's value of `service` and `account`, when `live` is written through the item: the compact JSON,
+/// which `security -w` prints raw, rather than bytes it would read back as hex.
+#[cfg(unix)]
+#[test]
+fn a_keychain_write_of_a_newline_ended_login_stores_it_compact() {
+    use claude_accounts::{ClaudeCodeLocks, capture_live_login, write_live_credentials};
+
+    use crate::support::FakeProfile;
+
+    let own = fresh("fake-access-a", "fake-refresh-a");
+    let mut rig = rig(
+        "keychain_write_newline",
+        &own,
+        &own,
+        &fresh("fake-access-two", "fake-refresh-two"),
+    );
+    let security = fake_security(&rig);
+    rig.claude = rig
+        .claude
+        .clone()
+        .with_keychain("Claude Code-credentials", "tester", &security);
+    rig.profile = FakeProfile::answering(vec![profile(ONE_UUID, ONE, ONE_ORG)]);
+    let pretty = String::from_utf8(non_canonical(&json_of(&own)))
+        .expect("the pretty-printed login is UTF-8");
+    let locks = ClaudeCodeLocks::credentials(&rig.claude).expect("the credential locks are free");
+
+    write_live_credentials(&rig.claude, &locks, &CredentialBlob::new(pretty))
+        .expect("the login is written through the Keychain");
+    drop(locks);
+
+    assert_eq!(
+        fake_item(&rig, "Claude Code-credentials", "tester").as_deref(),
+        Some(json_of(&own).to_string().as_str()),
+        "the item holds the compact JSON, which `security -w` reads back raw"
+    );
+    let captured = capture_live_login(&rig.context())
+        .expect("the crate reads the item back as the login it wrote");
+    assert_eq!(
+        captured.number, 1,
+        "the login read back is the account 1 login that was written"
+    );
+}
+
+/// A write of bytes that are not a login at all: the item Claude Code reads first is never given them, and neither is
+/// the live credential file.
+#[cfg(unix)]
+#[test]
+fn a_keychain_write_of_bytes_that_are_not_json_writes_nothing() {
+    use claude_accounts::{ClaudeCodeLocks, ClaudeFileError, write_live_credentials};
+
+    let own = fresh("fake-access-a", "fake-refresh-a");
+    let mut rig = rig(
+        "keychain_write_not_json",
+        &own,
+        &own,
+        &fresh("fake-access-two", "fake-refresh-two"),
+    );
+    let security = fake_security(&rig);
+    rig.claude = rig
+        .claude
+        .clone()
+        .with_keychain("Claude Code-credentials", "tester", &security);
+    let before = live(&rig);
+    let locks = ClaudeCodeLocks::credentials(&rig.claude).expect("the credential locks are free");
+
+    let written = write_live_credentials(
+        &rig.claude,
+        &locks,
+        &CredentialBlob::new("not a login".to_owned()),
+    );
+    drop(locks);
+
+    assert!(
+        matches!(&written, Err(ClaudeFileError::CredentialStore(_))),
+        "bytes that are not a login are refused: {written:?}"
+    );
+    assert!(
+        fake_item(&rig, "Claude Code-credentials", "tester").is_none(),
+        "no item is written"
+    );
+    assert_eq!(live(&rig), before, "the live credential file is unchanged");
 }
 
 #[test]

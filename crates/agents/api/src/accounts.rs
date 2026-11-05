@@ -153,6 +153,11 @@ pub struct SwitchReport {
     pub to: AccountRef,
     /// What the switch did that the user should know of.
     pub warnings: Vec<String>,
+    /// How long a running agent may go on with the login it had, when it
+    /// caches its read of the login (about 30 s for a login kept in the
+    /// macOS Keychain); `None` when the switch reaches it at once, or moved
+    /// nothing.
+    pub takes_effect_within: Option<Duration>,
 }
 
 /// A plugin's accounts, as the daemon holds them: shared, and called from

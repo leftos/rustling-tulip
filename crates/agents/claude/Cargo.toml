@@ -40,7 +40,13 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
+# The SHA-256 of the config dir that names Claude Code's Keychain service on
+# macOS; the version claude-accounts already uses.
+sha2 = "0.11.0"
 tracing = { workspace = true }
+# The NFC form of the config dir that Claude Code hashes for its Keychain
+# service name.
+unicode-normalization = "0.1.26"
 uuid = { workspace = true }
 # Zeroes the transports' response buffers, which may hold tokens.
 zeroize = "1.9.0"
