@@ -74,6 +74,9 @@ The views:
 - `spawn-hosts`: the spawn dialog over those two hosts with its closed Target field.
 - `settings-hosts`: Settings on the Claude page with the host selector showing This PC.
 - `settings-sounds`: Settings on the Notifications tab with the Needs you sound list open.
+- `accounts`: the footer's accounts popover open over scripted accounts. The shots' fake daemon lists `accounts`, so every view shows the accounts chip.
+
+The `support` builders for account specs (`apps/native/tests/support/mod.rs`) are `account`, `auto_switch`, `accounts_reply` and `accounts_updated`; `Harness::reconnect_with_features` redoes the handshake with extra `Welcome.features` (`tests/ui/ui_accounts.rs` uses it to list `accounts`).
 
 ## Fake CLIs
 

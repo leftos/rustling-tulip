@@ -5,6 +5,8 @@
 //! The binary opens [`open_main_window`]; the UI specs build a [`RootView`]
 //! over their own transport with [`RootView::with_transport`].
 
+mod accounts;
+mod accounts_view;
 mod activity_bar;
 mod activity_track;
 mod agent_options;
@@ -941,6 +943,12 @@ pub struct RootView {
     flyout_open: bool,
     /// The flyout's two-click stop.
     stop: StopConfirm,
+    /// Whether the footer's accounts popover is open; it and the flyout
+    /// never show together, and everything that closes one closes both.
+    accounts_open: bool,
+    /// Each host's saved accounts and the asks in flight, as the accounts
+    /// chip and popover read them.
+    accounts: accounts::AccountsState,
     /// The last copy, while its "copied" chip is up.
     copy_chip: Copied,
     /// Wakes the view when the chip's time is up.
@@ -1540,6 +1548,8 @@ impl RootView {
             status: String::new(),
             flyout_open: false,
             stop: StopConfirm::default(),
+            accounts_open: false,
+            accounts: accounts::AccountsState::default(),
             copy_chip: Copied::default(),
             chip_timer: None,
             paths,
@@ -4054,16 +4064,22 @@ impl RootView {
         }
     }
 
+    /// Opens the daemon flyout, closing the accounts popover, or closes it
+    /// when open.
     fn toggle_flyout(&mut self) {
         if self.flyout_open {
             self.close_flyout();
         } else {
+            self.accounts_open = false;
             self.flyout_open = true;
         }
     }
 
+    /// Closes the daemon flyout and the accounts popover: every site that
+    /// closes the footer's popovers calls this one.
     fn close_flyout(&mut self) {
         self.flyout_open = false;
+        self.accounts_open = false;
         self.stop.reset();
     }
 
@@ -4156,6 +4172,10 @@ impl RootView {
             | NetEvent::TokenSaveFailed
             | NetEvent::PairRequestSent => {}
         }
+        // A Welcome that forgot the rows, a host that stopped listing the
+        // feature or a dropped connection takes the chip away; its popover
+        // closes with it rather than reopening when the chip comes back.
+        self.close_accounts_without_chip();
         if moves_badge {
             self.schedule_taskbar_badge(window, cx);
         }
@@ -4360,6 +4380,7 @@ impl RootView {
         // counts as not focused.
         self.notify_on(host, &msg, finished, window.is_window_active(), cx);
         self.on_summarizer_message(host, &msg, cx);
+        self.on_accounts_message(host, &msg, cx);
         self.on_shell_message(host, &msg, window, cx);
         if self.on_panel_message(host, &msg, window, cx) {
             return;
@@ -4626,6 +4647,7 @@ impl RootView {
                 self.on_agent_setting_refused(host, id, &message, cx);
                 self.on_default_shell_refused(host, id, &message, cx)
                     || self.on_summarizer_refused(host, id, &message, cx)
+                    || self.on_accounts_refused(host, id, &message, cx)
                     || self.on_agent_command_error(host, id, code, &message, cx)
                     || self.on_preset_list_failed(id, &message, cx)
             }
@@ -4697,6 +4719,7 @@ impl RootView {
     fn on_welcome(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.lists_since_welcome.remove(host);
         self.reset_host(host, window, cx);
+        self.ask_accounts_if_listed(host);
         if *host != HostKey::Local {
             self.ask_history(host);
             return;
@@ -5183,7 +5206,7 @@ impl RootView {
             self.close_sc_picker(window, cx);
         } else if self.changes.file_menu.is_some() && ks.key == "escape" {
             self.close_sc_file_menu(window, cx);
-        } else if self.flyout_open && ks.key == "escape" {
+        } else if (self.flyout_open || self.accounts_popover_open()) && ks.key == "escape" {
             self.close_flyout();
         } else if let Some(key) = font_key(ks) {
             self.close_shell_menu(window, cx);
@@ -5483,9 +5506,7 @@ impl Render for RootView {
         // Before any pane header is built: they read which tip shows.
         self.settle_header_tips(cx);
         let footer = self.conn().footer(self.sidebar.local_sessions().len());
-        let flyout = self
-            .flyout_open
-            .then(|| [flyout_backdrop(cx).into_any_element(), self.flyout(cx)]);
+        let flyout = self.flyout_layers(cx);
         let overlay = self
             .conn()
             .overlay()
@@ -5692,8 +5713,22 @@ impl RootView {
                     .flex_1()
                     .text_right(),
             )
+            .children(self.accounts_chip(cx))
             .children(self.update_footer(cx))
             .children(self.version_footer())
+    }
+
+    /// The open footer flyout over its backdrop: the daemon flyout or the
+    /// accounts popover, which share the backdrop; at most one is open.
+    fn flyout_layers(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+        let layer = if self.flyout_open {
+            self.flyout(cx)
+        } else if self.accounts_popover_open() {
+            self.accounts_popover(cx)
+        } else {
+            return None;
+        };
+        Some([flyout_backdrop(cx).into_any_element(), layer])
     }
 
     /// The troubleshooting flyout above the pill: details, files, control.
@@ -6025,12 +6060,12 @@ fn action_button(
 
 /// `text` in a box a spec finds by `<selector>=<text>`, so it reads what the
 /// element shows rather than what the model would say.
-fn tagged_text(selector: &'static str, text: impl Into<SharedString>) -> Div {
+fn tagged_text(selector: impl Into<String>, text: impl Into<SharedString>) -> Div {
     let text = text.into();
-    let tag = text.clone();
-    div()
-        .driver_id(move || format!("{selector}={tag}"))
-        .child(text)
+    let mut tag = selector.into();
+    tag.push('=');
+    tag.push_str(&text);
+    div().driver_id(move || tag).child(text)
 }
 
 /// A button that opens `path` with the system's default application.

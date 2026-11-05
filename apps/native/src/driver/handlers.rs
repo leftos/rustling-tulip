@@ -583,7 +583,8 @@ impl RootView {
             || self.sidebar_more_open()
             || self.sc_file_menu_open()
             || self.sc_picker_open()
-            || self.flyout_open;
+            || self.flyout_open
+            || self.accounts_popover_open();
         if self.settings_open() {
             Some("settings")
         } else if menu_open {

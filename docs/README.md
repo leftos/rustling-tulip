@@ -80,6 +80,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 ## Glossary
 
 - **Account store**: rustling-tulip's own folder of saved logins (`accounts\` under its data folder: `accounts.json` and sealed `credentials/<n>.cred`), opened through the `claude-accounts` crate; it starts empty, and the user adds logins in Settings > Accounts.
+- **Accounts chip**: the footer chip (`footer-accounts`) showing the active account and its 5h and 7d usage; a click opens the accounts popover, where Switch changes the active account (`docs/native-client.md` "Accounts chip and popover").
 - **Active account**: the Claude login in `.credentials.json` that every Anthropic Claude session on the machine uses; a switch changes it for all of them at once.
 - **Activity track**: the Dashboard's thin two-hour bar per session or dispatch run (working, asking, idle, finished, gate holds as ticks, a hatched gap where the daemon kept no record), drawn from the status-change log; see `docs/plans/dashboard.md`.
 - **Admin message**: an account write a remote connection may not send (add current login, remove, alias, order); `host_only_refusal` answers it `local_only`.

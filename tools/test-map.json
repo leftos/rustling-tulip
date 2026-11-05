@@ -505,6 +505,14 @@
     },
     {
       "paths": [
+        "apps/native/src/accounts.rs",
+        "apps/native/src/accounts_view.rs",
+        "apps/native/tests/ui/ui_accounts.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^accounts::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_accounts)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/footer.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^footer::/))"

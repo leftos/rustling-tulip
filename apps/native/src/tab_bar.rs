@@ -1067,6 +1067,7 @@ impl RootView {
             || self.sc_picker_open
             || self.changes.file_menu.is_some()
             || self.flyout_open
+            || self.accounts_popover_open()
     }
 
     /// Shows `tab_id` as a click on its pill does.

@@ -865,6 +865,18 @@ fn spawn_state_forwarder(
                     // A lost summarizer status is not repeated until the
                     // next change, so the current one is sent again too.
                     hub.summarizer.send_status(&out_tx);
+                    // A lost accounts broadcast is not repeated until the
+                    // next poll changes them either, so the cached snapshot
+                    // goes again (nothing before the first poll; the store
+                    // is not read here).
+                    if let Some(accounts) = &hub.accounts
+                        && let Some(wire) = accounts.cached()
+                    {
+                        let _ = out_tx.send(DaemonMessage::AccountsUpdated {
+                            accounts: wire.accounts,
+                            auto: wire.auto,
+                        });
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -2083,6 +2095,75 @@ mod tests {
             ),
             "{message:?}"
         );
+    }
+
+    /// An account service whose store holds nothing; the specs below read
+    /// only the cache the hub's accounts handle holds.
+    struct EmptyAccounts;
+
+    impl agent_api::AccountsService for EmptyAccounts {
+        fn snapshot(&self) -> Result<agent_api::AccountsSnapshot, agent_api::AccountsError> {
+            Ok(agent_api::AccountsSnapshot {
+                accounts: Vec::new(),
+                auto: None,
+            })
+        }
+
+        fn poll(
+            &self,
+            _scope: agent_api::PollScope,
+        ) -> Result<agent_api::PollReport, agent_api::AccountsError> {
+            Ok(agent_api::PollReport {
+                snapshot: self.snapshot()?,
+                next_poll_in: None,
+            })
+        }
+
+        fn begin_shutdown(&self, _bound: Duration) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lagged_connection_gets_the_cached_accounts_again() {
+        let (mut hub, _scratch) = test_hub("lagged-accounts");
+        let handle = crate::accounts::Accounts::new(Arc::new(EmptyAccounts));
+        let account = crate::accounts::snapshot::account_snapshot(
+            &crate::accounts::snapshot::test_support::row(3, 25.0),
+        );
+        assert!(
+            handle.store_if_changed(crate::accounts::snapshot::Wire {
+                accounts: vec![account.clone()],
+                auto: None,
+            }),
+            "the first snapshot is cached"
+        );
+        hub.accounts = Some(handle);
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            true,
+        );
+
+        for _ in 0..=crate::server::STATE_EVENT_CAPACITY {
+            let _ = hub.state_events.send(StateEvent::Repos(Vec::new()));
+        }
+
+        let mut resent = None;
+        for _ in 0..=crate::server::STATE_EVENT_CAPACITY + 4 {
+            let message = next_message(&mut rx).await;
+            if let DaemonMessage::AccountsUpdated { accounts, auto } = message {
+                resent = Some((accounts, auto));
+                break;
+            }
+        }
+        forwarder.abort();
+        let (accounts, auto) = resent.expect("the lagged stream hears the cached accounts");
+        assert_eq!(accounts, [account]);
+        assert_eq!(auto, None);
     }
 
     #[tokio::test]

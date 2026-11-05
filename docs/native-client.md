@@ -265,6 +265,16 @@ This doc records the decisions a change to the client needs to know; what each f
 - Unknown daemon message types are logged with their tag and skipped; a frame that fails to decode is logged as an error.
 - The client logs to `logs/native.log`, rotated on each launch.
 - On Windows a build without debug assertions (release, test-release) is a GUI-subsystem exe, so an installed launch opens no console window; a debug build keeps the console and its stderr log.
+
+## Accounts chip and popover
+
+The footer's accounts chip (`footer-accounts`) and its popover (`accounts-popover`) show This PC's saved accounts and switch between them (`accounts.rs` model, `accounts_view.rs` view, the chip in `footer_bar` in `lib.rs`). Only This PC's footer has them; a remote host's accounts are not shown.
+
+- **Chip**: "{alias or email} · 5h {n}% · 7d {n}%" for the active account, or "No active account"; its tooltip is "{agent label} accounts". It is drawn only when This PC lists `accounts` in `Welcome.features` and its account list is non-empty. A click opens or closes the popover.
+- **Popover**: a header "{agent label} accounts" with "Auto-switch on at {n}%" or "Auto-switch off"; notes for a paused auto-switch ("Auto-switch paused: {reason}"), an error message and a forecast line; then one row per account with its tags (In use, sign-in refused, out of rotation), a reason line where one applies ("Log in again from Settings › Accounts", "Store read-only"), its 5h and 7d usage lines with their reset ("resets HH:MM", "resets Ddd HH:MM", "not started", "used up · back HH:MM") and a Switch button. A row whose fetch is over 10 minutes old adds "· {n}m ago"; the footer line reads "checked {age}".
+- **Closing**: Esc, the backdrop and every site that closes the daemon flyout close it, and the popover and the flyout are mutually exclusive.
+- **Wire**: `ListAccounts` goes out on `Welcome` when the host lists `accounts` and on each popover open; Switch sends `SwitchAccount` and the popover shows "Switching…" with every Switch disabled until the answer. An `Error` answering the pending switch shows inline in the popover. A reply is applied only when no `AccountsUpdated` arrived since it was asked, so a stale answer never overwrites a newer push; a switch whose reply was dropped asks for the list again.
+
 ## Persistence
 
 Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `sidebar.rs`; the field list is in [on-disk.md](on-disk.md)). Tab layouts, session appearance overrides and host settings such as the keep-awake mode and the worktrees root live on the daemon, so every client sees them. Saves are debounced (layout and tab font sizes 500 ms) and flushed on quit.

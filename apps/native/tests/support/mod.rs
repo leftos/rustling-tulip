@@ -729,6 +729,120 @@ pub fn activity_tracks_message(
     }
 }
 
+/// An account fixture: store number `number`, aliased `alias` with the
+/// email `{alias}@example.com`, signed in, not in use, its five-hour window
+/// at 34 % resetting in two hours and its seven-day window at 12 %
+/// resetting in two days, fetched just now.
+pub fn account(number: u32, alias: &str) -> AccountBuilder {
+    let now = Utc::now();
+    AccountBuilder(protocol::AccountSnapshot {
+        number,
+        email: format!("{alias}@example.com"),
+        alias: Some(alias.to_owned()),
+        organization_name: None,
+        kind: protocol::AccountKind::Oauth,
+        active: false,
+        disabled: false,
+        status: protocol::AccountUsageStatus::Ok,
+        five_hour: Some(protocol::AccountUsageWindow {
+            pct: 34.0,
+            resets_at: Some(now + chrono::Duration::hours(2)),
+        }),
+        seven_day: Some(protocol::AccountUsageWindow {
+            pct: 12.0,
+            resets_at: Some(now + chrono::Duration::days(2)),
+        }),
+        model_limits: Vec::new(),
+        extra_usage: None,
+        fetched_at: Some(now),
+        error: None,
+    })
+}
+
+/// The [`protocol::AccountSnapshot`] a spec words.
+pub struct AccountBuilder(protocol::AccountSnapshot);
+
+impl AccountBuilder {
+    /// The account in use.
+    pub fn active(mut self) -> Self {
+        self.0.active = true;
+        self
+    }
+
+    /// Taken out of rotation.
+    pub fn disabled(mut self) -> Self {
+        self.0.disabled = true;
+        self
+    }
+
+    /// With the last poll finding `status`.
+    pub fn status(mut self, status: protocol::AccountUsageStatus) -> Self {
+        self.0.status = status;
+        self
+    }
+
+    /// With its five-hour window at `pct`.
+    pub fn five_hour(mut self, pct: f64) -> Self {
+        if let Some(window) = &mut self.0.five_hour {
+            window.pct = pct;
+        }
+        self
+    }
+
+    /// With its seven-day window at `pct`.
+    pub fn seven_day(mut self, pct: f64) -> Self {
+        if let Some(window) = &mut self.0.seven_day {
+            window.pct = pct;
+        }
+        self
+    }
+
+    /// With its usage fetched `minutes` ago.
+    pub fn fetched_minutes_ago(mut self, minutes: i64) -> Self {
+        self.0.fetched_at = Some(Utc::now() - chrono::Duration::minutes(minutes));
+        self
+    }
+
+    pub fn build(self) -> protocol::AccountSnapshot {
+        self.0
+    }
+}
+
+/// An auto-switch state: on at 90 %, paused for `paused` when it is set.
+pub fn auto_switch(paused: Option<&str>) -> protocol::AutoSwitchState {
+    protocol::AutoSwitchState {
+        enabled: true,
+        threshold_pct: 90.0,
+        hysteresis_pct: 5.0,
+        cooldown_secs: 300,
+        paused_reason: paused.map(str::to_owned),
+        warm_up_done: true,
+        last_decision: None,
+        fleet_verdict: None,
+    }
+}
+
+/// The `Accounts` reply to the request `request_id`.
+pub fn accounts_reply(
+    accounts: Vec<protocol::AccountSnapshot>,
+    auto: Option<protocol::AutoSwitchState>,
+    request_id: &str,
+) -> DaemonMessage {
+    DaemonMessage::Accounts {
+        accounts,
+        auto,
+        request_id: Some(request_id.to_owned()),
+    }
+}
+
+/// The `AccountsUpdated` broadcast of `accounts`, with no auto-switch state.
+pub fn accounts_updated(accounts: Vec<protocol::AccountSnapshot>) -> DaemonMessage {
+    DaemonMessage::AccountsUpdated {
+        accounts,
+        auto: None,
+    }
+}
+
 /// A `SummarizerStatus` fixture: summaries on, provider `p1` with a stored
 /// key, nothing spent and the cap not reached.
 pub fn summarizer_status() -> SummarizerStatusBuilder {
@@ -2622,6 +2736,17 @@ impl<'a> Harness<'a> {
     fn connect(&mut self) {
         self.event(NetEvent::State(connected(daemon_features())));
         self.report_handshake();
+        self.welcome_messages();
+    }
+
+    /// Reconnects This PC to a daemon listing [`daemon_features`] and
+    /// `extra`, then sends what it sends first, as [`Self::open`] does. What
+    /// the client sends on the `Welcome` stays for [`Self::sent`], all but
+    /// the session history ask.
+    pub fn reconnect_with_features(&mut self, extra: &[&str]) {
+        let mut features = daemon_features();
+        features.extend(extra.iter().map(|feature| (*feature).to_owned()));
+        self.event(NetEvent::State(connected(features)));
         self.welcome_messages();
     }
 

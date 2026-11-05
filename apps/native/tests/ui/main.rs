@@ -14,6 +14,7 @@
 mod support;
 
 mod exe_subsystem;
+mod ui_accounts;
 mod ui_agent_exit;
 mod ui_agent_options;
 mod ui_appearance;

@@ -215,10 +215,11 @@ enum View {
     SettingsDashboard,
     Toast,
     SettingsSounds,
+    Accounts,
 }
 
 impl View {
-    const ALL: [Self; 27] = [
+    const ALL: [Self; 28] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -245,6 +246,7 @@ impl View {
         Self::SettingsHosts,
         Self::SettingsDashboard,
         Self::SettingsSounds,
+        Self::Accounts,
         Self::Toast,
     ];
 
@@ -276,6 +278,7 @@ impl View {
             Self::SettingsHosts => "settings-hosts",
             Self::SettingsDashboard => "settings-dashboard",
             Self::SettingsSounds => "settings-sounds",
+            Self::Accounts => "accounts",
             Self::Toast => "toast",
         }
     }
@@ -341,6 +344,8 @@ impl View {
         match self {
             // Drawn by `start_toast_shot`, in a window with no root view.
             Self::Toast => true,
+            // The popover open over the fake daemon's accounts.
+            Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             Self::Main | Self::MainCompact => {
                 !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
             }
@@ -506,6 +511,7 @@ impl Shot {
             | View::SettingsHosts
             | View::SettingsDashboard
             | View::SettingsSounds
+            | View::Accounts
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -1101,6 +1107,7 @@ fn drive(
 ) -> Result<()> {
     match view {
         View::Main | View::MainCompact | View::MultiHost | View::Toast => Ok(()),
+        View::Accounts => open_accounts(window, cx),
         View::SourceControl => {
             let y = (SOURCE_CONTROL_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
             #[expect(
@@ -1897,6 +1904,7 @@ impl FakeDaemon {
             protocol::FEATURE_FILE_TAIL.to_owned(),
             protocol::FEATURE_DEFAULT_SHELL.to_owned(),
             protocol::FEATURE_AGENT_USER_HOOKS.to_owned(),
+            protocol::FEATURE_ACCOUNTS.to_owned(),
         ];
         conn.on_welcome(version, features.clone(), None);
         self.event(NetEvent::State(conn))?;
@@ -2081,6 +2089,9 @@ impl FakeDaemon {
                     request_id: request_id.clone(),
                 }
             }
+            ClientMessage::ListAccounts { request_id } => {
+                shot_accounts(self.now, request_id.clone())
+            }
             ClientMessage::SuggestBranchName { target, request_id } => {
                 DaemonMessage::BranchNameSuggestion {
                     target: target.clone(),
@@ -2092,6 +2103,68 @@ impl FakeDaemon {
         };
         Ok(vec![reply])
     }
+}
+
+/// The fake daemon's accounts at `now`, the mock's five: main in use, ops
+/// and lab ready (lab's five-hour window near its limit), spare out of
+/// rotation and fetched long ago, client signed out.
+fn shot_accounts(now: DateTime<Utc>, request_id: Option<String>) -> DaemonMessage {
+    let window = |pct: f64, resets_in_minutes: Option<i64>| protocol::AccountUsageWindow {
+        pct,
+        resets_at: resets_in_minutes.map(|minutes| now + chrono::Duration::minutes(minutes)),
+    };
+    let account = |number: u32, alias: &str, five: f64, seven: f64| protocol::AccountSnapshot {
+        number,
+        email: format!("{alias}@example.com"),
+        alias: Some(alias.to_owned()),
+        organization_name: None,
+        kind: protocol::AccountKind::Oauth,
+        active: false,
+        disabled: false,
+        status: protocol::AccountUsageStatus::Ok,
+        five_hour: Some(window(five, Some(140))),
+        seven_day: Some(window(seven, Some(60 * 45))),
+        model_limits: Vec::new(),
+        extra_usage: None,
+        fetched_at: Some(now - chrono::Duration::seconds(12)),
+        error: None,
+    };
+    let main = protocol::AccountSnapshot {
+        active: true,
+        ..account(1, "main", 34.0, 41.0)
+    };
+    let lab = protocol::AccountSnapshot {
+        five_hour: Some(window(86.0, Some(55))),
+        ..account(3, "lab", 86.0, 63.0)
+    };
+    let spare = protocol::AccountSnapshot {
+        disabled: true,
+        five_hour: Some(window(3.0, None)),
+        fetched_at: Some(now - chrono::Duration::minutes(42)),
+        ..account(4, "spare", 3.0, 9.0)
+    };
+    let client = protocol::AccountSnapshot {
+        status: protocol::AccountUsageStatus::ReloginRequired,
+        ..account(5, "client", 0.0, 0.0)
+    };
+    DaemonMessage::Accounts {
+        accounts: vec![main, account(2, "ops", 12.0, 28.0), lab, spare, client],
+        auto: None,
+        request_id,
+    }
+}
+
+/// Opens the accounts popover from the footer's chip.
+fn open_accounts(window: &mut Window, cx: &mut App) -> Result<()> {
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    root.update(cx, |root, cx| {
+        root.toggle_accounts();
+        cx.notify();
+    });
+    Ok(())
 }
 
 /// The fake daemon's default-shell choices, as a Windows host with
