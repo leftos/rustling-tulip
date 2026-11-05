@@ -5,9 +5,9 @@
 
 use chrono::Utc;
 use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, div, prelude::*, px, relative};
-use protocol::{ClientMessage, DaemonMessage, FEATURE_ACCOUNTS};
+use protocol::{AutoSwitchState, ClientMessage, DaemonMessage, FEATURE_ACCOUNTS};
 
-use crate::accounts::{self, Bar, Chip, Level, Row, Tag, WindowLine};
+use crate::accounts::{self, Bar, Chip, Level, Row, Tag, WindowLine, WriteAction};
 use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_text_size, ui_weight, ui_weight_shift};
@@ -34,7 +34,7 @@ const ACTIVE_WASH: f32 = 0.06;
 
 impl RootView {
     /// Folds what `msg` from `host` says about its accounts, asking for the
-    /// list again when the fold dropped a switch's reply.
+    /// list again when the fold dropped a write's reply.
     pub(crate) fn on_accounts_message(
         &mut self,
         host: &HostKey,
@@ -45,7 +45,7 @@ impl RootView {
         if folded.ask_again {
             tracing::info!(
                 ?host,
-                "accounts: a switch's reply was overtaken; asking again"
+                "accounts: a write's reply was overtaken; asking again"
             );
             self.ask_accounts(host);
         }
@@ -75,7 +75,7 @@ impl RootView {
     }
 
     /// A daemon refusal from `host` carrying `request_id`: when it answers
-    /// the pending switch or list, the popover shows `message`. Returns
+    /// the pending write or list, the popover shows `message`. Returns
     /// whether it did.
     pub(crate) fn on_accounts_refused(
         &mut self,
@@ -155,23 +155,34 @@ impl RootView {
         self.ask_accounts_if_listed(&HostKey::Local);
     }
 
-    /// Sends This PC's daemon a switch to account `number`, unless one is
-    /// pending.
+    /// Sends This PC's daemon a switch to account `number`, unless a write
+    /// is pending.
     fn switch_account(&mut self, number: u32, cx: &mut Context<Self>) {
-        let host = HostKey::Local;
-        if self.accounts.switching(&host).is_some() {
-            return;
+        self.send_account_write(
+            &HostKey::Local,
+            WriteAction::Switch(number),
+            |request_id| ClientMessage::SwitchAccount { number, request_id },
+            cx,
+        );
+    }
+
+    /// Sends `host` the account write `message`, recorded as `action`,
+    /// unless a write is pending; returns whether it sent.
+    pub(crate) fn send_account_write(
+        &mut self,
+        host: &HostKey,
+        action: WriteAction,
+        message: impl FnOnce(Option<String>) -> ClientMessage,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.accounts.writing(host) {
+            return false;
         }
         let request_id = new_request_id();
-        self.accounts.sent_switch(&host, number, request_id.clone());
-        self.send_to(
-            &host,
-            ClientMessage::SwitchAccount {
-                number,
-                request_id: Some(request_id),
-            },
-        );
+        self.accounts.sent_write(host, action, request_id.clone());
+        self.send_to(host, message(Some(request_id)));
         cx.notify();
+        true
     }
 
     /// The popover's title, from This PC's default agent.
@@ -284,6 +295,9 @@ impl RootView {
         let list = self.accounts.accounts(&host);
         let auto = self.accounts.auto(&host);
         let switching = self.accounts.switching(&host);
+        let writing = self.accounts.writing(&host);
+        let controls =
+            auto.map_or_else(Vec::new, |auto| Self::auto_controls(auto, writing, &t, cx));
         let head = div()
             .flex()
             .items_center()
@@ -300,12 +314,7 @@ impl RootView {
                         self.accounts_header(),
                     )),
             )
-            .children(accounts::auto_line(auto).map(|line| {
-                div()
-                    .flex_none()
-                    .text_color(gpui::rgb(t.text_2))
-                    .child(tagged_text("accounts-auto".to_owned(), line))
-            }));
+            .children(controls);
         let note = |selector: &str, text: String, color: u32| {
             div()
                 .px(px(14.0))
@@ -323,7 +332,7 @@ impl RootView {
         ];
         let rows = list
             .iter()
-            .map(|account| accounts::row(account, switching, now, &chrono::Local))
+            .map(|account| accounts::row(account, switching, writing, now, &chrono::Local))
             .map(|row| Self::account_row(row, &t, cx))
             .collect::<Vec<_>>();
         let checked = accounts::checked_line(list, now).map(|line| {
@@ -348,6 +357,123 @@ impl RootView {
             .children(rows)
             .children(checked)
             .into_any_element()
+    }
+
+    /// The popover header's auto-switch controls: the on/off toggle and,
+    /// while it is on, the threshold stepper; every control takes a click
+    /// only while no write is pending.
+    fn auto_controls(
+        auto: &AutoSwitchState,
+        writing: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let on = auto.enabled;
+        let toggle_enabled = !writing;
+        let toggle = outlined_button(
+            ui_text_size(cx),
+            ui_weight_shift(cx),
+            "accounts-auto-toggle",
+            ButtonSize::Compact,
+            toggle_enabled,
+            Layer::Floating,
+            t,
+        )
+        .child(tagged_text(
+            "accounts-auto-toggle".to_owned(),
+            if on {
+                "Auto-switch: On"
+            } else {
+                "Auto-switch: Off"
+            },
+        ))
+        .when(toggle_enabled, |button| {
+            button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.send_account_write(
+                    &HostKey::Local,
+                    WriteAction::AutoSwitch,
+                    |request_id| ClientMessage::SetAutoSwitch {
+                        enabled: Some(!on),
+                        threshold_pct: None,
+                        request_id,
+                    },
+                    cx,
+                );
+            }))
+        });
+        let mut controls = vec![div().flex_none().child(toggle).into_any_element()];
+        if auto.enabled {
+            controls.push(Self::threshold_button(
+                auto.threshold_pct,
+                false,
+                writing,
+                t,
+                cx,
+            ));
+            controls.push(
+                div()
+                    .flex_none()
+                    .text_color(gpui::rgb(t.text_2))
+                    .child(tagged_text(
+                        "accounts-auto-threshold".to_owned(),
+                        format!("at {:.0}%", auto.threshold_pct),
+                    ))
+                    .into_any_element(),
+            );
+            controls.push(Self::threshold_button(
+                auto.threshold_pct,
+                true,
+                writing,
+                t,
+                cx,
+            ));
+        }
+        controls
+    }
+
+    /// The threshold stepper's `up` or down button, disabled when the step
+    /// leaves the bounds or a write is pending.
+    fn threshold_button(
+        current: f64,
+        up: bool,
+        writing: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selector = if up {
+            "accounts-auto-up"
+        } else {
+            "accounts-auto-down"
+        };
+        let step = accounts::threshold_step(current, up);
+        let enabled = !writing && step.is_some();
+        outlined_button(
+            ui_text_size(cx),
+            ui_weight_shift(cx),
+            selector,
+            ButtonSize::Compact,
+            enabled,
+            Layer::Floating,
+            t,
+        )
+        .child(tagged_text(selector.to_owned(), if up { "+" } else { "−" }))
+        .when(enabled, |button| {
+            button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if let Some(threshold) = step {
+                    this.send_account_write(
+                        &HostKey::Local,
+                        WriteAction::AutoSwitch,
+                        |request_id| ClientMessage::SetAutoSwitch {
+                            enabled: None,
+                            threshold_pct: Some(threshold),
+                            request_id,
+                        },
+                        cx,
+                    );
+                }
+            }))
+        })
+        .into_any_element()
     }
 
     /// One account's row: its name line, its reason, its window lines and

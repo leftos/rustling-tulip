@@ -1,7 +1,8 @@
 //! Accounts chip specs: the footer's chip naming This PC's account in use
 //! and its two usage windows, the popover it opens with one row per saved
-//! account, Switch and its pending and refused states, the rows' reasons and
-//! ages, and the rule that drops a reply a newer broadcast overtook.
+//! account, Switch and its pending and refused states, the auto-switch
+//! toggle and threshold stepper, the rows' reasons and ages, and the rule
+//! that drops a reply a newer broadcast overtook.
 
 #![expect(
     clippy::expect_used,
@@ -11,7 +12,9 @@
 use crate::support;
 
 use gpui::{TestAppContext, px};
-use protocol::{AccountSnapshot, AccountUsageStatus, ClientMessage, DaemonMessage};
+use protocol::{
+    AccountSnapshot, AccountUsageStatus, AutoSwitchState, ClientMessage, DaemonMessage,
+};
 use support::{Harness, TestDir, account, accounts_reply, accounts_updated, auto_switch};
 
 /// Whether the element tagged `selector` was drawn at some point.
@@ -66,11 +69,37 @@ fn shown(h: &mut Harness<'_>, accounts: Vec<AccountSnapshot>) {
 /// [`shown`], then the popover opened from the chip, its own
 /// `ListAccounts` answered with `accounts` too.
 fn popover(h: &mut Harness<'_>, accounts: Vec<AccountSnapshot>) {
+    popover_with_auto(h, accounts, None);
+}
+
+/// [`popover`], its own `ListAccounts` answered with `auto` as well.
+fn popover_with_auto(
+    h: &mut Harness<'_>,
+    accounts: Vec<AccountSnapshot>,
+    auto: Option<AutoSwitchState>,
+) {
     shown(h, accounts.clone());
     h.click_on("footer-accounts");
     assert!(h.root(|root, _| root.accounts_open()), "the chip opens it");
     let id = listed(h);
-    h.send(accounts_reply(accounts, None, &id));
+    h.send(accounts_reply(accounts, auto, &id));
+}
+
+/// The newest `SetAutoSwitch` the client sent since the last read: its
+/// fields and request id.
+fn auto_sent(h: &mut Harness<'_>) -> (Option<bool>, Option<f64>, String) {
+    h.sent()
+        .into_iter()
+        .rev()
+        .find_map(|msg| match msg {
+            ClientMessage::SetAutoSwitch {
+                enabled,
+                threshold_pct,
+                request_id,
+            } => request_id.map(|id| (enabled, threshold_pct, id)),
+            _ => None,
+        })
+        .expect("the client sent a SetAutoSwitch with a request id")
 }
 
 fn chip_text(h: &mut Harness<'_>) -> Option<String> {
@@ -250,7 +279,10 @@ fn a_paused_auto_switch_shows_its_reason(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::open(cx, &dir);
     popover(&mut h, pair());
-    assert!(!drawn(&mut h, "accounts-auto"), "no auto-switch state yet");
+    assert!(
+        !drawn(&mut h, "accounts-auto-toggle"),
+        "no auto-switch state yet"
+    );
     h.send(DaemonMessage::AccountsUpdated {
         accounts: pair(),
         auto: Some(auto_switch(Some("held by another engine"))),
@@ -259,7 +291,85 @@ fn a_paused_auto_switch_shows_its_reason(cx: &mut TestAppContext) {
         &mut h,
         "accounts-paused=Auto-switch paused: held by another engine"
     ));
-    assert!(drawn(&mut h, "accounts-auto=Auto-switch on at 90%"));
+    assert!(drawn(&mut h, "accounts-auto-toggle=Auto-switch: On"));
+}
+
+#[gpui::test]
+fn the_auto_switch_toggle_sends_only_enabled(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    let mut auto = auto_switch(None);
+    auto.enabled = false;
+    popover_with_auto(&mut h, pair(), Some(auto));
+    assert!(drawn(&mut h, "accounts-auto-toggle=Auto-switch: Off"));
+
+    h.click_on("accounts-auto-toggle");
+    let (enabled, threshold, _) = auto_sent(&mut h);
+    assert_eq!(enabled, Some(true));
+    assert_eq!(threshold, None, "a toggle sends no threshold");
+}
+
+#[gpui::test]
+fn the_threshold_buttons_send_the_stepped_threshold(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    let mut auto = auto_switch(None);
+    auto.threshold_pct = 80.0;
+    popover_with_auto(&mut h, pair(), Some(auto));
+    assert!(drawn(&mut h, "accounts-auto-threshold=at 80%"));
+    assert!(drawn(&mut h, "accounts-auto-down=−"));
+    assert!(drawn(&mut h, "accounts-auto-up=+"));
+
+    h.click_on("accounts-auto-up");
+    let (enabled, threshold, _) = auto_sent(&mut h);
+    assert_eq!(threshold, Some(85.0));
+    assert_eq!(enabled, None, "a step sends no toggle");
+}
+
+#[gpui::test]
+fn the_auto_switch_controls_wait_for_the_pending_write(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    let mut auto = auto_switch(None);
+    auto.threshold_pct = 80.0;
+    popover_with_auto(&mut h, pair(), Some(auto.clone()));
+    h.click_on("accounts-auto-up");
+    let (_, threshold, id) = auto_sent(&mut h);
+    assert_eq!(threshold, Some(85.0));
+
+    h.click_on("accounts-auto-up");
+    assert!(
+        h.sent()
+            .iter()
+            .all(|msg| !matches!(msg, ClientMessage::SetAutoSwitch { .. })),
+        "a second press while the write is pending sends nothing"
+    );
+
+    h.click_on("accounts-switch-2");
+    assert!(
+        h.sent()
+            .iter()
+            .all(|msg| !matches!(msg, ClientMessage::SwitchAccount { .. })),
+        "the Switch button waits for the pending write"
+    );
+
+    auto.threshold_pct = 85.0;
+    h.send(accounts_reply(pair(), Some(auto), &id));
+    h.click_on("accounts-auto-up");
+    let (_, threshold, _) = auto_sent(&mut h);
+    assert_eq!(threshold, Some(90.0), "the controls work again");
+}
+
+#[gpui::test]
+fn no_threshold_buttons_while_auto_switch_is_off(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    let mut auto = auto_switch(None);
+    auto.enabled = false;
+    popover_with_auto(&mut h, pair(), Some(auto));
+    assert!(drawn(&mut h, "accounts-auto-toggle=Auto-switch: Off"));
+    assert!(!drawn(&mut h, "accounts-auto-up"));
+    assert!(!drawn(&mut h, "accounts-auto-down"));
 }
 
 #[gpui::test]

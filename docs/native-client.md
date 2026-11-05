@@ -271,9 +271,15 @@ This doc records the decisions a change to the client needs to know; what each f
 The footer's accounts chip (`footer-accounts`) and its popover (`accounts-popover`) show This PC's saved accounts and switch between them (`accounts.rs` model, `accounts_view.rs` view, the chip in `footer_bar` in `lib.rs`). Only This PC's footer has them; a remote host's accounts are not shown.
 
 - **Chip**: "{alias or email} · 5h {n}% · 7d {n}%" for the active account, or "No active account"; its tooltip is "{agent label} accounts". It is drawn only when This PC lists `accounts` in `Welcome.features` and its account list is non-empty. A click opens or closes the popover.
-- **Popover**: a header "{agent label} accounts" with "Auto-switch on at {n}%" or "Auto-switch off"; notes for a paused auto-switch ("Auto-switch paused: {reason}"), an error message and a forecast line; then one row per account with its tags (In use, sign-in refused, out of rotation), a reason line where one applies ("Log in again from Settings › Accounts", "Store read-only"), its 5h and 7d usage lines with their reset ("resets HH:MM", "resets Ddd HH:MM", "not started", "used up · back HH:MM") and a Switch button. A row whose fetch is over 10 minutes old adds "· {n}m ago"; the footer line reads "checked {age}".
+- **Popover**: a header "{agent label} accounts" with, while the host runs an engine, an "Auto-switch: On" or "Auto-switch: Off" toggle and, while on, "at {n}%" between − and + buttons that step the threshold by 5 within 50 to 95 (a step past a bound is disabled); notes for a paused auto-switch ("Auto-switch paused: {reason}"), an error message and a forecast line.
+
+  Then one row per account with its tags (In use, sign-in refused, out of rotation), a reason line where one applies ("Log in again from Settings › Accounts", "Store read-only"), its 5h and 7d usage lines with their reset ("resets HH:MM", "resets Ddd HH:MM", "not started", "used up · back HH:MM") and a Switch button.
+
+  A row whose fetch is over 10 minutes old adds "· {n}m ago"; the footer line reads "checked {age}".
 - **Closing**: Esc, the backdrop and every site that closes the daemon flyout close it, and the popover and the flyout are mutually exclusive.
-- **Wire**: `ListAccounts` goes out on `Welcome` when the host lists `accounts` and on each popover open; Switch sends `SwitchAccount` and the popover shows "Switching…" with every Switch disabled until the answer. An `Error` answering the pending switch shows inline in the popover. A reply is applied only when no `AccountsUpdated` arrived since it was asked, so a stale answer never overwrites a newer push; a switch whose reply was dropped asks for the list again.
+- **Wire**: `ListAccounts` goes out on `Welcome` when the host lists `accounts` and on each popover open; Switch sends `SwitchAccount` and the popover shows "Switching…"; the toggle and the threshold buttons send `SetAutoSwitch` with only the field they change. One account write is in flight at a time: every Switch and auto-switch control is disabled until its answer. An `Error` answering the pending write shows inline in the popover.
+
+  A reply is applied only when no `AccountsUpdated` arrived since it was asked, so a stale answer never overwrites a newer push; a write whose reply was dropped asks for the list again.
 
 ## Persistence
 

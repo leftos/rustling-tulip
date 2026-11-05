@@ -7,11 +7,11 @@
 //! caller passes.
 //!
 //! The stale-reply rule: the client counts each host's `AccountsUpdated`
-//! broadcasts. A `ListAccounts` or a `SwitchAccount` is stamped with that
+//! broadcasts. A `ListAccounts` or an account write is stamped with that
 //! count and its request id, and its `Accounts` reply lands only while it is
 //! the pending ask and the count has not moved since; a broadcast always
-//! lands. A dropped reply to a switch asks for the list again, since it was
-//! the only post-switch snapshot the client was sent.
+//! lands. A dropped reply to a write asks for the list again, since it was
+//! the only post-write snapshot the client was sent.
 
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -35,6 +35,12 @@ pub(crate) const STORE_READ_ONLY: &str = "Store read-only";
 /// A row's Switch button, and its label while its switch is pending.
 const SWITCH_LABEL: &str = "Switch";
 const SWITCHING_LABEL: &str = "Switching…";
+/// The threshold stepper's step, in percentage points.
+const THRESHOLD_STEP: f64 = 5.0;
+/// The threshold stepper's lowest value, in percent.
+const THRESHOLD_MIN: f64 = 50.0;
+/// The threshold stepper's highest value, in percent.
+const THRESHOLD_MAX: f64 = 95.0;
 
 /// An ask sent to a host: its request id and the host's update count when
 /// it was sent.
@@ -44,11 +50,30 @@ struct Ask {
     updates_at_ask: u64,
 }
 
-/// A switch sent to a host and not answered yet.
+/// A write sent to a host and not answered yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SwitchAsk {
-    number: u32,
+struct WriteAsk {
+    action: WriteAction,
     ask: Ask,
+}
+
+/// What the pending write asks a host's daemon to do.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Settings page sends the actions the popover does not; the unit tests construct them"
+    )
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteAction {
+    Switch(u32),
+    AddLogin,
+    Remove(u32),
+    Alias(u32),
+    Order,
+    AutoSwitch,
+    Rules,
 }
 
 /// One host's accounts.
@@ -60,8 +85,8 @@ struct HostAccounts {
     updates_seen: u64,
     /// The newest `ListAccounts` not answered yet.
     list: Option<Ask>,
-    /// The `SwitchAccount` not answered yet.
-    switch: Option<SwitchAsk>,
+    /// The account write not answered yet.
+    write: Option<WriteAsk>,
     /// The daemon's refusal of the last ask, until the next reply lands.
     error: Option<String>,
 }
@@ -121,14 +146,14 @@ impl AccountsState {
             tracing::debug!(?host, "accounts: dropping a reply no ask is waiting for");
             return Folded::default();
         };
-        let (asked, switch) = if state.list.as_ref().is_some_and(|ask| ask.request_id == id) {
+        let (asked, write) = if state.list.as_ref().is_some_and(|ask| ask.request_id == id) {
             (state.list.take(), false)
         } else if state
-            .switch
+            .write
             .as_ref()
-            .is_some_and(|switch| switch.ask.request_id == id)
+            .is_some_and(|write| write.ask.request_id == id)
         {
-            (state.switch.take().map(|switch| switch.ask), true)
+            (state.write.take().map(|write| write.ask), true)
         } else {
             tracing::debug!(
                 ?host,
@@ -139,12 +164,12 @@ impl AccountsState {
         if asked.is_none_or(|ask| ask.updates_at_ask != state.updates_seen) {
             tracing::debug!(
                 ?host,
-                switch,
+                write,
                 "accounts: dropping a reply an update overtook"
             );
             return Folded {
-                changed: switch,
-                ask_again: switch,
+                changed: write,
+                ask_again: write,
             };
         }
         state.accounts = accounts.to_vec();
@@ -157,18 +182,18 @@ impl AccountsState {
     }
 
     /// A daemon `Error` from `host` answering `request_id`: when it answers
-    /// the pending switch or list, the ask ends and `message` shows until
+    /// the pending write or list, the ask ends and `message` shows until
     /// the next reply lands. Returns whether it answered either.
     pub(crate) fn refused(&mut self, host: &HostKey, request_id: &str, message: &str) -> bool {
         let Some(state) = self.hosts.get_mut(host) else {
             return false;
         };
         if state
-            .switch
+            .write
             .as_ref()
-            .is_some_and(|switch| switch.ask.request_id == request_id)
+            .is_some_and(|write| write.ask.request_id == request_id)
         {
-            state.switch = None;
+            state.write = None;
         } else if state
             .list
             .as_ref()
@@ -192,12 +217,12 @@ impl AccountsState {
         });
     }
 
-    /// The `SwitchAccount` to `number`, `request_id`, was sent to `host`;
-    /// the last refusal goes.
-    pub(crate) fn sent_switch(&mut self, host: &HostKey, number: u32, request_id: String) {
+    /// The account write `action`, `request_id`, was sent to `host`; the
+    /// last refusal goes.
+    pub(crate) fn sent_write(&mut self, host: &HostKey, action: WriteAction, request_id: String) {
         let state = self.hosts.entry(host.clone()).or_default();
-        state.switch = Some(SwitchAsk {
-            number,
+        state.write = Some(WriteAsk {
+            action,
             ask: Ask {
                 request_id,
                 updates_at_ask: state.updates_seen,
@@ -223,7 +248,17 @@ impl AccountsState {
 
     /// The account whose switch `host` has not answered yet.
     pub(crate) fn switching(&self, host: &HostKey) -> Option<u32> {
-        Some(self.hosts.get(host)?.switch.as_ref()?.number)
+        match self.hosts.get(host)?.write.as_ref()?.action {
+            WriteAction::Switch(number) => Some(number),
+            _ => None,
+        }
+    }
+
+    /// Whether `host` has an account write pending.
+    pub(crate) fn writing(&self, host: &HostKey) -> bool {
+        self.hosts
+            .get(host)
+            .is_some_and(|state| state.write.is_some())
     }
 }
 
@@ -410,12 +445,14 @@ pub(crate) struct Row {
 }
 
 /// `account`'s row at `now` in time zone `tz`, while the switch to
-/// `switching` is pending (none pending: `None`). The active row and a row
-/// whose sign-in was refused offer no Switch; while a switch is pending,
-/// no row's Switch takes a click.
+/// `switching` is pending (none pending: `None`) and `writing` says an
+/// account write is pending. The active row and a row whose sign-in was
+/// refused offer no Switch; while any write is pending, no row's Switch
+/// takes a click.
 pub(crate) fn row<Tz: TimeZone>(
     account: &AccountSnapshot,
     switching: Option<u32>,
+    writing: bool,
     now: DateTime<Utc>,
     tz: &Tz,
 ) -> Row
@@ -460,7 +497,7 @@ where
         } else {
             SWITCH_LABEL
         },
-        enabled: switching.is_none(),
+        enabled: switching.is_none() && !writing,
     });
     let age = account
         .fetched_at
@@ -536,15 +573,17 @@ pub(crate) fn header(agent_label: Option<&str>) -> String {
     )
 }
 
-/// The auto-switch state, read-only, while the host runs an engine.
-pub(crate) fn auto_line(auto: Option<&AutoSwitchState>) -> Option<String> {
-    auto.map(|auto| {
-        if auto.enabled {
-            format!("Auto-switch on at {:.0}%", auto.threshold_pct)
-        } else {
-            "Auto-switch off".to_owned()
-        }
-    })
+/// The threshold one step from `current` (5 percentage points, within 50 to
+/// 95), or `None` past the bound.
+pub(crate) fn threshold_step(current: f64, up: bool) -> Option<f64> {
+    let next = if up {
+        (current / THRESHOLD_STEP).floor() * THRESHOLD_STEP + THRESHOLD_STEP
+    } else {
+        (current / THRESHOLD_STEP).ceil() * THRESHOLD_STEP - THRESHOLD_STEP
+    };
+    (THRESHOLD_MIN..=THRESHOLD_MAX)
+        .contains(&next)
+        .then_some(next)
 }
 
 /// Why the engine is paused, while it is.
@@ -616,8 +655,8 @@ mod tests {
     };
 
     use super::{
-        AccountsState, Level, RELOGIN_LINE, STORE_READ_ONLY, Tag, age_text, auto_line, bar,
-        checked_line, chip, forecast, header, paused_line, row,
+        AccountsState, Level, RELOGIN_LINE, STORE_READ_ONLY, Tag, WriteAction, age_text, bar,
+        checked_line, chip, forecast, header, paused_line, row, threshold_step,
     };
     use crate::target::HostKey;
 
@@ -772,23 +811,56 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_switch_reply_asks_again() {
+    fn a_dropped_write_reply_asks_again() {
         let mut state = AccountsState::default();
         let host = HostKey::Local;
         state.fold(&host, &updated(vec![active(1), account(2, "b")]));
-        state.sent_switch(&host, 2, "s1".to_owned());
+        state.sent_write(&host, WriteAction::Switch(2), "s1".to_owned());
         assert_eq!(state.switching(&host), Some(2));
         state.fold(&host, &updated(vec![active(1), account(2, "b")]));
         let folded = state.fold(&host, &reply(Some("s1"), vec![account(1, "a"), active(2)]));
-        assert!(folded.ask_again, "the switch's own snapshot was dropped");
-        assert!(folded.changed, "the switch is no longer pending");
+        assert!(folded.ask_again, "the write's own snapshot was dropped");
+        assert!(folded.changed, "the write is no longer pending");
         assert_eq!(state.switching(&host), None);
         assert_eq!(in_use(&state, &host), Some(1));
 
-        state.sent_switch(&host, 2, "s2".to_owned());
+        state.sent_write(&host, WriteAction::Switch(2), "s2".to_owned());
         let folded = state.fold(&host, &reply(Some("s2"), vec![account(1, "a"), active(2)]));
         assert!(folded.changed && !folded.ask_again, "no update overtook it");
         assert_eq!(in_use(&state, &host), Some(2));
+    }
+
+    #[test]
+    fn a_dropped_write_reply_asks_again_for_every_action() {
+        let actions = [
+            WriteAction::Switch(2),
+            WriteAction::AddLogin,
+            WriteAction::Remove(2),
+            WriteAction::Alias(2),
+            WriteAction::Order,
+            WriteAction::AutoSwitch,
+            WriteAction::Rules,
+        ];
+        for action in actions {
+            let mut state = AccountsState::default();
+            let host = HostKey::Local;
+            state.fold(&host, &updated(vec![active(1), account(2, "b")]));
+            state.sent_write(&host, action, "w1".to_owned());
+            state.fold(&host, &updated(vec![active(1), account(2, "b")]));
+            let folded = state.fold(&host, &reply(Some("w1"), vec![account(1, "a"), active(2)]));
+            assert!(folded.ask_again, "{action:?} asks again");
+            assert!(folded.changed, "{action:?} is no longer pending");
+            assert!(!state.writing(&host), "{action:?} ended");
+        }
+    }
+
+    #[test]
+    fn a_pending_write_is_not_a_switch() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.sent_write(&host, WriteAction::AutoSwitch, "w1".to_owned());
+        assert!(state.writing(&host));
+        assert_eq!(state.switching(&host), None, "not a switch");
     }
 
     #[test]
@@ -798,7 +870,7 @@ mod tests {
         assert!(state.fold(&host, &updated(vec![active(1)])).changed);
         assert_eq!(in_use(&state, &host), Some(1));
         state.sent_list(&host, "l1".to_owned());
-        state.sent_switch(&host, 2, "s1".to_owned());
+        state.sent_write(&host, WriteAction::Switch(2), "s1".to_owned());
         assert!(state.fold(&host, &updated(vec![active(4)])).changed);
         assert_eq!(
             in_use(&state, &host),
@@ -830,12 +902,12 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_of_the_pending_switch_shows_until_the_next_reply() {
+    fn a_refusal_of_the_pending_write_shows_until_the_next_reply() {
         let mut state = AccountsState::default();
         let host = HostKey::Local;
         state.fold(&host, &updated(vec![active(1), account(2, "b")]));
-        state.sent_switch(&host, 2, "s1".to_owned());
-        assert!(!state.refused(&host, "other", "no"), "not the switch's id");
+        state.sent_write(&host, WriteAction::Switch(2), "s1".to_owned());
+        assert!(!state.refused(&host, "other", "no"), "not the write's id");
         assert!(state.refused(&host, "s1", "busy"));
         assert_eq!(state.error(&host), Some("busy"));
         assert_eq!(state.switching(&host), None);
@@ -877,23 +949,31 @@ mod tests {
     }
 
     #[test]
-    fn no_auto_switch_line_without_auto() {
-        assert_eq!(auto_line(None), None);
+    fn no_paused_line_while_running() {
         assert_eq!(paused_line(None), None);
         assert_eq!(paused_line(Some(&auto(None))), None, "running, not paused");
-        assert_eq!(
-            auto_line(Some(&auto(None))).as_deref(),
-            Some("Auto-switch on at 90%")
-        );
-        let off = AutoSwitchState {
-            enabled: false,
-            ..auto(None)
-        };
-        assert_eq!(auto_line(Some(&off)).as_deref(), Some("Auto-switch off"));
         assert_eq!(
             paused_line(Some(&auto(Some("held by another engine")))).as_deref(),
             Some("Auto-switch paused: held by another engine")
         );
+    }
+
+    #[test]
+    fn threshold_step_moves_by_five_within_bounds() {
+        let rows = [
+            (80.0, true, Some(85.0)),
+            (80.0, false, Some(75.0)),
+            (82.5, true, Some(85.0)),
+            (82.5, false, Some(80.0)),
+            (95.0, true, None),
+            (50.0, false, None),
+            (99.9, false, Some(95.0)),
+            (99.9, true, None),
+            (49.0, true, Some(50.0)),
+        ];
+        for (current, up, want) in rows {
+            assert_eq!(threshold_step(current, up), want, "{current} up={up}");
+        }
     }
 
     #[test]
@@ -937,34 +1017,41 @@ mod tests {
 
     #[test]
     fn no_switch_on_the_active_or_a_relogin_row() {
-        let in_use = row(&active(1), None, now(), &Utc);
+        let in_use = row(&active(1), None, false, now(), &Utc);
         assert_eq!(in_use.switch, None, "the active row");
         assert_eq!(in_use.tag, Some(Tag::InUse));
         assert!(in_use.active);
 
         let mut refused = account(5, "client");
         refused.status = AccountUsageStatus::ReloginRequired;
-        let refused = row(&refused, None, now(), &Utc);
+        let refused = row(&refused, None, false, now(), &Utc);
         assert_eq!(refused.switch, None, "a relogin row");
         assert_eq!(refused.tag, Some(Tag::SignInRefused));
         assert_eq!(refused.reason, Some(RELOGIN_LINE));
         assert!(refused.windows.is_empty(), "no bars");
         assert!(refused.dim);
 
-        let ready = row(&account(2, "ops"), None, now(), &Utc);
+        let ready = row(&account(2, "ops"), None, false, now(), &Utc);
         let button = ready.switch.expect("an ordinary row offers Switch");
         assert_eq!((button.label, button.enabled), ("Switch", true));
         assert_eq!(ready.windows.len(), 2);
 
-        let pending = row(&account(2, "ops"), Some(2), now(), &Utc).switch;
+        let pending = row(&account(2, "ops"), Some(2), false, now(), &Utc).switch;
         let pending = pending.expect("the pending row keeps its button");
         assert_eq!((pending.label, pending.enabled), ("Switching…", false));
-        let other = row(&account(3, "lab"), Some(2), now(), &Utc).switch;
+        let other = row(&account(3, "lab"), Some(2), false, now(), &Utc).switch;
         assert_eq!(other.map(|button| button.enabled), Some(false));
+
+        let busy = row(&account(2, "ops"), None, true, now(), &Utc).switch;
+        assert_eq!(
+            busy.map(|button| (button.label, button.enabled)),
+            Some(("Switch", false)),
+            "a write other than a switch only disables it"
+        );
 
         let mut spare = account(4, "spare");
         spare.disabled = true;
-        let spare = row(&spare, None, now(), &Utc);
+        let spare = row(&spare, None, false, now(), &Utc);
         assert_eq!(spare.tag, Some(Tag::OutOfRotation));
         assert!(spare.switch.is_some(), "still switchable");
         assert!(
@@ -980,18 +1067,18 @@ mod tests {
         let mut ops = account(2, "ops");
         ops.fetched_at = Some(now() - TimeDelta::minutes(30));
         assert_eq!(
-            row(&ops, None, now(), &Utc).detail.as_deref(),
+            row(&ops, None, false, now(), &Utc).detail.as_deref(),
             Some("ops@example.com · 30m ago")
         );
         ops.fetched_at = Some(now() - TimeDelta::minutes(5));
         assert_eq!(
-            row(&ops, None, now(), &Utc).detail.as_deref(),
+            row(&ops, None, false, now(), &Utc).detail.as_deref(),
             Some("ops@example.com"),
             "fresh enough"
         );
         ops.alias = None;
         ops.fetched_at = Some(now() - TimeDelta::hours(2));
-        let bare = row(&ops, None, now(), &Utc);
+        let bare = row(&ops, None, false, now(), &Utc);
         assert_eq!(bare.name, "ops@example.com");
         assert_eq!(bare.detail.as_deref(), Some("· 2h ago"));
     }
@@ -1000,8 +1087,14 @@ mod tests {
     fn a_read_only_store_row_shows_its_reason() {
         let mut lab = account(3, "lab");
         lab.status = AccountUsageStatus::StoreUnwritable;
-        assert_eq!(row(&lab, None, now(), &Utc).reason, Some(STORE_READ_ONLY));
-        assert_eq!(row(&account(3, "lab"), None, now(), &Utc).reason, None);
+        assert_eq!(
+            row(&lab, None, false, now(), &Utc).reason,
+            Some(STORE_READ_ONLY)
+        );
+        assert_eq!(
+            row(&account(3, "lab"), None, false, now(), &Utc).reason,
+            None
+        );
     }
 
     #[test]
@@ -1020,7 +1113,7 @@ mod tests {
             Some(now() + TimeDelta::hours(5) + TimeDelta::minutes(40)),
         ));
         lab.seven_day = Some(window(20.0, Some(now() + TimeDelta::hours(21))));
-        let resets: Vec<String> = row(&lab, None, now(), &Utc)
+        let resets: Vec<String> = row(&lab, None, false, now(), &Utc)
             .windows
             .into_iter()
             .map(|line| line.reset)
@@ -1032,7 +1125,7 @@ mod tests {
             100.0,
             Some(now() + TimeDelta::hours(6) + TimeDelta::minutes(5)),
         ));
-        let lines = row(&lab, None, now(), &Utc).windows;
+        let lines = row(&lab, None, false, now(), &Utc).windows;
         let shown: Vec<(&str, bool)> = lines
             .iter()
             .map(|line| (line.reset.as_str(), line.used_up))
@@ -1094,7 +1187,7 @@ mod tests {
     fn an_active_account_out_of_rotation_keeps_its_bar_colours() {
         let mut main = active(1);
         main.disabled = true;
-        let shown = row(&main, None, now(), &Utc);
+        let shown = row(&main, None, false, now(), &Utc);
         assert!(!shown.dim);
         let levels: Vec<Level> = shown.windows.iter().map(|line| line.bar.level).collect();
         assert_eq!(levels, [Level::Normal, Level::Normal]);
