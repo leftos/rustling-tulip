@@ -37,11 +37,11 @@ const CHANGELOG_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct Offer {
     /// The release's version, from its `v<version>` tag.
     pub version: semver::Version,
-    /// Where `rustling-tulip-<version>-setup.exe` downloads from.
+    /// Where the update's asset for this platform downloads from.
     pub installer_url: String,
-    /// Where `rustling-tulip-<version>-setup.exe.sha256` downloads from.
+    /// Where the update asset's `.sha256` downloads from.
     pub sha256_url: String,
-    /// `rustling-tulip-<version>-setup.exe`.
+    /// The update's asset for this platform, as [`asset_name`] names it.
     pub installer_name: String,
     /// The changelog from the running version up to this one, as
     /// [`changelog_text`] joins it; empty until `pick` fills it from the
@@ -93,15 +93,68 @@ pub fn feed_base() -> String {
     }
 }
 
+/// A platform the release feed publishes update assets for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    /// Windows: the NSIS setup exe.
+    Windows,
+    /// macOS on Apple silicon: a zip of the `.app`.
+    MacArm64,
+}
+
+impl Platform {
+    /// The platform this client runs on; `None` where the feed publishes no
+    /// update asset for it.
+    #[must_use]
+    pub fn current() -> Option<Self> {
+        #[cfg(windows)]
+        {
+            Some(Self::Windows)
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            Some(Self::MacArm64)
+        }
+        #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
+        {
+            None
+        }
+    }
+}
+
+/// The update asset `raw_version` carries on `platform`: the setup exe on
+/// Windows, the `.app` zip on Apple-silicon macOS. Its `.sha256` asset is
+/// this name with `.sha256` appended.
+#[must_use]
+pub fn asset_name(raw_version: &str, platform: Platform) -> String {
+    let suffix = match platform {
+        Platform::Windows => "setup.exe",
+        Platform::MacArm64 => "macos-arm64.zip",
+    };
+    format!("rustling-tulip-{raw_version}-{suffix}")
+}
+
 /// The newest non-draft release in the feed `json` strictly newer than
-/// `current` by semver, pre-releases included, that carries both its
-/// installer and its `.sha256` asset. A release whose tag is not
+/// `current` by semver, pre-releases included, that carries both this
+/// platform's update asset and its `.sha256`. A release whose tag is not
 /// `v<version>` is skipped; a feed that does not decode is logged and offers
-/// nothing.
+/// nothing, and so does a platform the feed publishes no asset for.
 #[must_use]
 pub fn parse_releases(json: &str, current: &semver::Version) -> Option<Offer> {
+    let platform = this_platform()?;
+    parse_releases_for(json, current, platform)
+}
+
+/// [`parse_releases`] for `platform`: the newest release carrying both that
+/// platform's update asset and the asset's `.sha256`.
+#[must_use]
+pub fn parse_releases_for(
+    json: &str,
+    current: &semver::Version,
+    platform: Platform,
+) -> Option<Offer> {
     match decode_releases(json) {
-        Ok(releases) => pick(&releases, current),
+        Ok(releases) => pick(&releases, current, platform),
         Err(err) => {
             warn!("update: {err:#}");
             None
@@ -109,28 +162,37 @@ pub fn parse_releases(json: &str, current: &semver::Version) -> Option<Offer> {
     }
 }
 
+/// [`Platform::current`], logging when this platform has no update asset.
+fn this_platform() -> Option<Platform> {
+    let platform = Platform::current();
+    if platform.is_none() {
+        tracing::debug!("update: no release asset for this platform");
+    }
+    platform
+}
+
 fn decode_releases(json: &str) -> anyhow::Result<Vec<Release>> {
     serde_json::from_str(json).context("the release feed did not decode")
 }
 
 /// See [`parse_releases`].
-fn pick(releases: &[Release], current: &semver::Version) -> Option<Offer> {
+fn pick(releases: &[Release], current: &semver::Version, platform: Platform) -> Option<Offer> {
     let mut offer = releases
         .iter()
         .filter(|release| !release.draft)
-        .filter_map(offer_of)
+        .filter_map(|release| offer_of(release, platform))
         .filter(|offer| offer.version > *current)
         .max_by(|a, b| a.version.cmp(&b.version))?;
     offer.notes = changelog_text(&notes_between(releases, Some(current), &offer.version));
     Some(offer)
 }
 
-/// The offer `release` makes: its tag `v<version>` parsed, and both assets
-/// found by name.
-fn offer_of(release: &Release) -> Option<Offer> {
+/// The offer `release` makes on `platform`: its tag `v<version>` parsed, and
+/// both assets found by name.
+fn offer_of(release: &Release, platform: Platform) -> Option<Offer> {
     let raw = release.tag_name.strip_prefix('v')?;
     let version = semver::Version::parse(raw).ok()?;
-    let installer_name = format!("rustling-tulip-{raw}-setup.exe");
+    let installer_name = asset_name(raw, platform);
     let sha256_name = format!("{installer_name}.sha256");
     let url_of = |name: &str| {
         release
@@ -335,8 +397,11 @@ async fn fetch_offer(
     current: &semver::Version,
     feed_base: &str,
 ) -> anyhow::Result<Option<Offer>> {
+    let Some(platform) = this_platform() else {
+        return Ok(None);
+    };
     let body = fetch_feed(http, feed_base).await?;
-    Ok(pick(&decode_releases(&body)?, current))
+    Ok(pick(&decode_releases(&body)?, current, platform))
 }
 
 /// The feed's body from `feed_base`.
@@ -891,8 +956,8 @@ mod lock {
 )]
 mod tests {
     use super::{
-        FEED_PATH, HASH_MISMATCH, Ready, check_and_download, fetch_changelog, parse_changelog,
-        parse_releases, parse_sha256,
+        FEED_PATH, HASH_MISMATCH, Platform, Ready, asset_name, check_and_download, fetch_changelog,
+        parse_changelog, parse_releases_for, parse_sha256,
     };
     use serde_json::{Value, json};
     use sha2::{Digest as _, Sha256};
@@ -941,7 +1006,8 @@ mod tests {
     }
 
     fn picked(releases: Vec<Value>, current: &str) -> Option<semver::Version> {
-        parse_releases(&feed(releases), &v(current)).map(|offer| offer.version)
+        parse_releases_for(&feed(releases), &v(current), Platform::Windows)
+            .map(|offer| offer.version)
     }
 
     #[test]
@@ -951,7 +1017,8 @@ mod tests {
             complete("v0.6.0-beta.1", BASE),
             complete("v0.5.2-alpha", BASE),
         ]);
-        let offer = parse_releases(&json, &v("0.5.0-alpha")).expect("an offer");
+        let offer =
+            parse_releases_for(&json, &v("0.5.0-alpha"), Platform::Windows).expect("an offer");
         let name = "rustling-tulip-0.6.0-beta.1-setup.exe";
         assert_eq!(offer.version, v("0.6.0-beta.1"));
         assert_eq!(offer.installer_name, name);
@@ -1020,6 +1087,88 @@ mod tests {
         let alpha_last = vec![complete("v0.6.0", BASE), complete("v0.6.0-alpha", BASE)];
         assert_eq!(picked(alpha_first, "0.5.0"), Some(v("0.6.0")));
         assert_eq!(picked(alpha_last, "0.5.0"), Some(v("0.6.0")));
+    }
+
+    #[test]
+    fn asset_name_follows_the_platform() {
+        assert_eq!(
+            asset_name("0.9.0-alpha", Platform::Windows),
+            "rustling-tulip-0.9.0-alpha-setup.exe"
+        );
+        assert_eq!(
+            asset_name("0.9.0-alpha", Platform::MacArm64),
+            "rustling-tulip-0.9.0-alpha-macos-arm64.zip"
+        );
+    }
+
+    /// A release tagged `tag` carrying both the Windows pair and the mac zip
+    /// pair.
+    fn complete_both(tag: &str, base: &str) -> Value {
+        let raw = tag.trim_start_matches('v');
+        let windows = asset_name(raw, Platform::Windows);
+        let mac = asset_name(raw, Platform::MacArm64);
+        release(
+            tag,
+            &[
+                format!("{windows}.sha256"),
+                windows,
+                format!("{mac}.sha256"),
+                mac,
+            ],
+            base,
+        )
+    }
+
+    /// A release tagged `tag` carrying only the mac zip pair.
+    fn complete_mac(tag: &str, base: &str) -> Value {
+        let name = asset_name(tag.trim_start_matches('v'), Platform::MacArm64);
+        release(tag, &[format!("{name}.sha256"), name], base)
+    }
+
+    #[test]
+    fn a_mac_client_is_offered_the_mac_zip() {
+        let json = feed(vec![complete_both("v0.9.0-alpha", BASE)]);
+
+        let offer = parse_releases_for(&json, &v("0.8.0"), Platform::MacArm64).expect("an offer");
+
+        let name = "rustling-tulip-0.9.0-alpha-macos-arm64.zip";
+        assert_eq!(offer.version, v("0.9.0-alpha"));
+        assert_eq!(offer.installer_name, name);
+        assert_eq!(offer.installer_url, format!("{BASE}/dl/{name}"));
+        assert_eq!(offer.sha256_url, format!("{BASE}/dl/{name}.sha256"));
+    }
+
+    #[test]
+    fn a_windows_client_ignores_the_mac_assets() {
+        let json = feed(vec![complete_both("v0.9.0-alpha", BASE)]);
+
+        let offer = parse_releases_for(&json, &v("0.8.0"), Platform::Windows).expect("an offer");
+
+        let name = "rustling-tulip-0.9.0-alpha-setup.exe";
+        assert_eq!(offer.version, v("0.9.0-alpha"));
+        assert_eq!(offer.installer_name, name);
+        assert_eq!(offer.installer_url, format!("{BASE}/dl/{name}"));
+        assert_eq!(offer.sha256_url, format!("{BASE}/dl/{name}.sha256"));
+    }
+
+    #[test]
+    fn a_release_missing_this_platforms_pair_is_skipped() {
+        let newer_windows_only = feed(vec![
+            complete("v0.9.0", BASE),
+            complete_both("v0.8.0", BASE),
+        ]);
+
+        assert_eq!(
+            parse_releases_for(&newer_windows_only, &v("0.5.0"), Platform::MacArm64)
+                .map(|offer| offer.version),
+            Some(v("0.8.0"))
+        );
+
+        let mac_only = feed(vec![complete_mac("v0.9.0", BASE)]);
+        assert_eq!(
+            parse_releases_for(&mac_only, &v("0.5.0"), Platform::Windows),
+            None
+        );
     }
 
     const HASH: &str = "ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01";
@@ -1163,7 +1312,7 @@ mod tests {
         hashed: &'static [u8],
     ) -> impl FnOnce(&str) -> Routes {
         move |base| {
-            let name = format!("rustling-tulip-{version}-setup.exe");
+            let name = asset_name(version, Platform::current().unwrap_or(Platform::Windows));
             let tag = format!("v{version}");
             vec![
                 (
@@ -1432,7 +1581,7 @@ mod tests {
             with_body(complete("v0.7.0", BASE), "seven"),
         ]);
 
-        let offer = parse_releases(&json, &v("0.5.0")).expect("an offer");
+        let offer = parse_releases_for(&json, &v("0.5.0"), Platform::Windows).expect("an offer");
 
         assert_eq!(offer.version, v("0.7.0"));
         assert_eq!(offer.notes, "## v0.7.0\n\nseven\n\n## v0.6.0\n\nsix");

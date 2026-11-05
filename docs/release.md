@@ -5,7 +5,7 @@ How a versioned release of rustling-tulip is cut, starting with `v0.1.0-alpha`. 
 ## What a release publishes
 
 - A git tag `v<version>` on `main` (`v0.1.0-alpha`, `v0.2.0-alpha`, …).
-- A GitHub release of that tag, never marked pre-release (every build is an alpha, and the flag would hide the newest one from the repo's home page) and marked Latest, with the Windows installer and its SHA-256 file attached: `rustling-tulip-<version>-setup.exe` and `rustling-tulip-<version>-setup.exe.sha256` (a release missing either is never offered as an update), built by `.\rt.ps1 installer` (NSIS, per-user, code-signed with Azure Artifact Signing; see `tools/installer/README.md`).
+- A GitHub release of that tag, never marked pre-release (every build is an alpha, and the flag would hide the newest one from the repo's home page) and marked Latest, with the Windows installer and its SHA-256 file attached: `rustling-tulip-<version>-setup.exe` and `rustling-tulip-<version>-setup.exe.sha256` (a release missing either is never offered to a Windows client as an update), built by `.\rt.ps1 installer` (NSIS, per-user, code-signed with Azure Artifact Signing; see `tools/installer/README.md`).
 - The version lives in one place, `[workspace.package] version` in `Cargo.toml`, which every crate inherits; the installer reads it from there.
 
 ## Steps
