@@ -65,6 +65,12 @@ use crate::{FileFilter, Pick, RootView, tooltip};
 const TAB_LIST_WIDTH: f32 = 150.0;
 /// A tab row's height and corner radius, as on the Settings board.
 const TAB_ROW_HEIGHT: f32 = 34.0;
+/// A section label's text size, above the rows of its group.
+const SECTION_LABEL_SIZE: f32 = 11.0;
+/// How opaque a host row whose connection is not open draws: the same dim
+/// the sidebar gives a remote host's rows while it is not open
+/// (`sidebar_view::DIMMED_ROW_OPACITY`).
+const OFFLINE_HOST_OPACITY: f32 = 0.55;
 const TAB_ROW_RADIUS: f32 = 7.0;
 /// As wide as the Appearance tab's two columns, so the modal keeps its size
 /// from tab to tab.
@@ -5184,9 +5190,9 @@ impl RootView {
     }
 
     /// The host selector over the tab list, while the window holds two or
-    /// more hosts: a Host label, then one row per held host, the shown one
-    /// filled. A host not connected is dimmed and takes no click. It is not
-    /// a keyboard stop.
+    /// more hosts: a HOST section label, then one row per held host, the
+    /// shown one filled. A host not connected is dimmed and takes no click.
+    /// It is not a keyboard stop.
     fn settings_host_row(&self, cx: &mut Context<Self>) -> Option<Div> {
         let choices = self.settings_host_choices();
         if choices.is_empty() {
@@ -5199,6 +5205,7 @@ impl RootView {
             .into_iter()
             .map(|(host, open)| {
                 let shown = host == self.settings_host;
+                let dim = !shown && !open;
                 let selector = format!("settings-host-{}", host.wire().unwrap_or("local"));
                 let label = crate::sidebar::host_label(&host);
                 let text = match (shown, open) {
@@ -5216,6 +5223,7 @@ impl RootView {
                     .px(px(12.0))
                     .rounded(px(TAB_ROW_RADIUS))
                     .text_color(gpui::rgb(text))
+                    .when(dim, |row| row.opacity(OFFLINE_HOST_OPACITY))
                     .when(shown, |row| {
                         row.bg(gpui::rgb(t.selection)).font_weight(shown_weight)
                     })
@@ -5237,7 +5245,7 @@ impl RootView {
                 .flex_col()
                 .gap(px(2.0))
                 .pb(px(8.0))
-                .child(group_row(
+                .child(section_label(
                     size,
                     crate::fonts::ui_weight_shift(cx),
                     "Host",
@@ -8044,6 +8052,21 @@ fn labelled_row(label: &'static str, field: Div) -> Div {
         .gap(px(8.0))
         .child(label)
         .child(field)
+}
+
+/// A section label over a group of the tab list's rows: uppercased, bold
+/// and small in the subtle text colour, with the rows' horizontal padding
+/// and no row height of its own, so it reads as a heading rather than a
+/// row. Painted, never a tab stop; the selector's is tagged for the specs.
+fn section_label(offset: i8, shift: i8, label: &str, t: &UiTheme) -> Div {
+    crate::tagged_text("settings-host-label", label.to_uppercase())
+        .flex_none()
+        .px(px(12.0))
+        .pt(px(2.0))
+        .pb(px(4.0))
+        .text_size(crate::fonts::ui_px_at(offset, SECTION_LABEL_SIZE))
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::BOLD))
+        .text_color(gpui::rgb(t.subtle))
 }
 
 /// A group label in the tab list: painted, never a tab stop.

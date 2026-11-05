@@ -65,6 +65,23 @@ fn two_hosts<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
 }
 
 #[gpui::test]
+fn the_host_selector_label_is_a_section_label(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.keys("ctrl-,");
+    assert!(
+        drawn(&mut h, "settings-host-label=HOST"),
+        "the selector's label reads HOST"
+    );
+    let label = h.bounds("settings-host-label=HOST").size.height;
+    let row = h.bounds(LOCAL_ROW).size.height;
+    assert!(
+        label < row,
+        "the label sits shorter than a host row: {label:?} against {row:?}"
+    );
+}
+
+#[gpui::test]
 fn detailed_logging_rows_are_hidden_while_a_remote_host_is_chosen(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = two_hosts(cx, &dir);
