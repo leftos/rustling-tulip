@@ -73,6 +73,7 @@ The views:
 - `multi-host`: the sidebar grouped by host: This PC, "box" online with a repo and a session in the first tab's second pane, and "lab" offline.
 - `spawn-hosts`: the spawn dialog over those two hosts with its closed Target field.
 - `settings-hosts`: Settings on the Claude page with the host selector showing This PC.
+- `settings-accounts`: Settings on the Accounts tab, scrolled to the auto-switch block and its forecast.
 - `settings-sounds`: Settings on the Notifications tab with the Needs you sound list open.
 - `accounts`: the footer's accounts popover open over scripted accounts. The shots' fake daemon lists `accounts`, so every view shows the accounts chip.
 

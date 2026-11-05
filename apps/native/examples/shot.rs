@@ -213,13 +213,14 @@ enum View {
     SpawnHosts,
     SettingsHosts,
     SettingsDashboard,
+    SettingsAccounts,
     Toast,
     SettingsSounds,
     Accounts,
 }
 
 impl View {
-    const ALL: [Self; 28] = [
+    const ALL: [Self; 29] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -245,6 +246,7 @@ impl View {
         Self::SpawnHosts,
         Self::SettingsHosts,
         Self::SettingsDashboard,
+        Self::SettingsAccounts,
         Self::SettingsSounds,
         Self::Accounts,
         Self::Toast,
@@ -277,6 +279,7 @@ impl View {
             Self::SpawnHosts => "spawn-hosts",
             Self::SettingsHosts => "settings-hosts",
             Self::SettingsDashboard => "settings-dashboard",
+            Self::SettingsAccounts => "settings-accounts",
             Self::SettingsSounds => "settings-sounds",
             Self::Accounts => "accounts",
             Self::Toast => "toast",
@@ -296,13 +299,18 @@ impl View {
     /// once drawn and takes its typing once focused; the chat opens, then its
     /// stretch, Bash card and Tail box, then scrolls up to the box once drawn;
     /// Claude's page opens, then the wheel takes it down to its Hooks
-    /// section.
+    /// section; the accounts page opens at its top, then wheels down to the
+    /// auto-switch block that ends it.
     fn steps(self) -> usize {
         match self {
             Self::ConnectionsSsh => 4,
             Self::Themes | Self::Chat | Self::SettingsDashboard => 3,
             Self::ThemesEdit => 5,
-            Self::Update | Self::UpdateNotes | Self::Summary | Self::SettingsClaude => 2,
+            Self::Update
+            | Self::UpdateNotes
+            | Self::Summary
+            | Self::SettingsClaude
+            | Self::SettingsAccounts => 2,
             _ => 1,
         }
     }
@@ -353,6 +361,7 @@ impl View {
             Self::Diff => root.active_tab_id() == Some(DIFF_TAB),
             Self::Settings => root.settings_open(),
             Self::SettingsClaude => root.settings_open() && root.settings_tab() == "Claude",
+            Self::SettingsAccounts => root.settings_open() && root.settings_tab() == "Accounts",
             Self::SettingsSounds => {
                 root.settings_open() && root.open_sound_list() == Some(NotifyKind::NeedsYou)
             }
@@ -510,6 +519,7 @@ impl Shot {
             | View::SpawnHosts
             | View::SettingsHosts
             | View::SettingsDashboard
+            | View::SettingsAccounts
             | View::SettingsSounds
             | View::Accounts
             | View::Toast => None,
@@ -1121,6 +1131,7 @@ fn drive(
         View::Settings => press("ctrl-,", window, cx),
         View::SettingsClaude | View::SettingsHosts => drive_claude_page(step, address, window, cx),
         View::SettingsSounds => drive_settings_sounds(window, cx),
+        View::SettingsAccounts => drive_settings_accounts(step, address, window, cx),
         View::Spawn => {
             press("ctrl-shift-n", window, cx)?;
             let root = window
@@ -1211,7 +1222,7 @@ const SETTINGS_PAGE_POINT: (i32, i32) = (560, 300);
 /// wheel turns there to bring the box into view.
 const CHAT_TAIL_POINT: (i32, i32) = (660, 155);
 const CHAT_TAIL_NOTCHES: i16 = -3;
-/// Enough wheel notches to reach the General page's end.
+/// Enough wheel notches to reach a Settings page's end.
 const SETTINGS_PAGE_NOTCHES: i16 = 40;
 
 /// Step `step` of the `settings-claude` and `settings-hosts` shots: Settings
@@ -1414,6 +1425,30 @@ fn open_menu(window: &mut Window, cx: &mut App) -> Result<()> {
             cx,
         );
         root.open_more_menu(window, cx);
+    });
+    Ok(())
+}
+
+/// Step `step` of the `settings-accounts` shot: Settings on its Accounts
+/// tab, then the wheel down the page to the auto-switch block. The tab list's
+/// position depends on the host's feature list and the agents it offers, so
+/// the tab is chosen by name rather than walked to with Down.
+fn drive_settings_accounts(
+    step: usize,
+    address: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<()> {
+    if step > 0 {
+        return win32::wheel_down(address, SETTINGS_PAGE_POINT, SETTINGS_PAGE_NOTCHES);
+    }
+    press("ctrl-,", window, cx)?;
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    root.update(cx, |root, cx| {
+        root.show_settings_tab("Accounts", window, cx);
     });
     Ok(())
 }
@@ -2149,8 +2184,36 @@ fn shot_accounts(now: DateTime<Utc>, request_id: Option<String>) -> DaemonMessag
     };
     DaemonMessage::Accounts {
         accounts: vec![main, account(2, "ops", 12.0, 28.0), lab, spare, client],
-        auto: None,
+        auto: Some(shot_auto(now)),
         request_id,
+    }
+}
+
+/// The fake daemon's auto-switch engine at `now`, running on the stock
+/// rules with a fleet verdict that runs dry in two days.
+fn shot_auto(now: DateTime<Utc>) -> protocol::AutoSwitchState {
+    protocol::AutoSwitchState {
+        enabled: true,
+        threshold_pct: 85.0,
+        hysteresis_pct: 5.0,
+        cooldown_secs: 300,
+        strategy: protocol::AutoSwitchStrategy::Best,
+        rate_window_minutes: Some(60),
+        paused_reason: None,
+        warm_up_done: true,
+        last_decision: None,
+        fleet_verdict: Some(protocol::FleetVerdict {
+            window: protocol::FleetWindow::SevenDay,
+            members: 5,
+            accounts: 5,
+            remaining: 1.8,
+            rate: 0.4,
+            rate_window: protocol::FleetWindow::FiveHour,
+            runs_dry: true,
+            blocked_at: Some(now + chrono::Duration::days(2)),
+            resumes_at: Some(now + chrono::Duration::days(3)),
+            first_reset: Some(now + chrono::Duration::days(1)),
+        }),
     }
 }
 

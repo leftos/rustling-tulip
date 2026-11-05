@@ -281,6 +281,19 @@ The footer's accounts chip (`footer-accounts`) and its popover (`accounts-popove
 
   A reply is applied only when no `AccountsUpdated` arrived since it was asked, so a stale answer never overwrites a newer push; a write whose reply was dropped asks for the list again.
 
+## Settings › Accounts
+
+The Accounts tab (`accounts_settings.rs` draws it, `accounts.rs` holds its texts and row actions; the tab rows are in `settings_view.rs`, its search entries in `settings_search.rs`) manages This PC's saved accounts and the auto-switch rules. It is listed only while the Settings target manages the daemon (This PC) and that host lists `accounts` in `Welcome.features`; the daemon lists it only on 64-bit Windows and macOS hosts with an accounts service, and the client never checks its own OS.
+
+- **Account table**: one row per account with its tags, usage bars and reset times, then Switch (the row in use has none), an alias field, Up and Down (they move the row in the rotation order) and Remove. Remove on the row in use reads "Switch first" instead of a button.
+- **Add current login**: saves the login the agent is using now, with a note beside it not to `/logout` first, since logging out can revoke the account being left.
+- **Auto-switch block**: the on/off toggle, "Switch at" (the threshold) and Hysteresis steppers, and Cooldown, Strategy and Forecast window choice rows. A host whose `Accounts` answer carries no engine shows "Auto-switch is not available on this host" instead. A paused engine adds "Auto-switch paused: {reason}".
+- **Forecast line**: the fleet verdict ("Rotation lasts the next 7 days", "Runs dry at {when}", "All accounts used up", then "back {when}" and the account count), drawn only while the daemon sends a verdict.
+- **Writes**: every control sends its account write at once (`SwitchAccount`, `AddCurrentLogin`, `RemoveAccount`, `SetAccountAlias`, `SetAccountOrder`, `SetAutoSwitch`, `SetAutoSwitchRules`), never through Apply or OK. One write is in flight at a time, and every write control is disabled until its answer; the page shows what the next `Accounts` or `AccountsUpdated` carries.
+- **Remote origin**: when the daemon's `Welcome` calls this connection `Remote`, the admin controls (alias, Up, Down, Remove, Add current login) are disabled with the tooltip "Only on the machine running the daemon".
+
+The popover's auto-switch toggle and threshold stepper (see "Accounts chip and popover") send the same `SetAutoSwitch`. The account toasts are under "Notifications".
+
 ## Persistence
 
 Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `sidebar.rs`; the field list is in [on-disk.md](on-disk.md)). Tab layouts, session appearance overrides and host settings such as the keep-awake mode and the worktrees root live on the daemon, so every client sees them. Saves are debounced (layout and tab font sizes 500 ms) and flushed on quit.
