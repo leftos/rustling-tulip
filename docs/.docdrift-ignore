@@ -43,3 +43,5 @@ summary.json
 summarizer-spend.json
 # User theme files under the config dir
 themes/*.json
+# The account store under the data dir
+accounts.json
