@@ -1317,14 +1317,14 @@ fn sighting_fields(rec: &SessionRecord) -> SightingFields {
     }
 }
 
-/// The screen showed an agent in session `session_id`'s shell for a whole
-/// window: a plain shell is promoted to one running that agent, or a promoted
-/// one starts its run again, in one registry update (see
-/// [`crate::session::SessionRecord::agent_shown_in_plain_shell`]), and its
-/// conversation is then looked for from its transcripts. An agent session's
-/// record is left to its hooks.
-fn agent_shown_in_shell(registry: &Arc<SessionRegistry>, session_id: &str) {
-    let shown_at = chrono::Utc::now();
+/// An agent is running in session `session_id`'s shell: a plain shell is
+/// promoted to one running that agent, or a promoted one starts its run
+/// again, in one registry update (see
+/// [`crate::session::SessionRecord::agent_shown_in_plain_shell`]), and what
+/// happened is answered. No conversation is looked for here: the screen path
+/// starts its waiter after this, and the hook path needs none, since its
+/// `SessionStart` names the conversation.
+pub(crate) fn promote_plain_shell(registry: &Arc<SessionRegistry>, session_id: &str) -> ShownAgent {
     let mut shown = ShownAgent::Ignored;
     // A sighting that changes no field (a running agent seen again) is
     // neither broadcast nor written to the sidecar.
@@ -1333,6 +1333,18 @@ fn agent_shown_in_shell(registry: &Arc<SessionRegistry>, session_id: &str) {
         shown = rec.agent_shown_in_plain_shell();
         sighting_fields(rec) != before
     });
+    shown
+}
+
+/// The screen showed an agent in session `session_id`'s shell for a whole
+/// window: a plain shell is promoted to one running that agent, or a promoted
+/// one starts its run again, in one registry update (see
+/// [`crate::session::SessionRecord::agent_shown_in_plain_shell`]), and its
+/// conversation is then looked for from its transcripts. An agent session's
+/// record is left to its hooks.
+fn agent_shown_in_shell(registry: &Arc<SessionRegistry>, session_id: &str) {
+    let shown_at = chrono::Utc::now();
+    let shown = promote_plain_shell(registry, session_id);
     if shown == ShownAgent::Ignored {
         return;
     }

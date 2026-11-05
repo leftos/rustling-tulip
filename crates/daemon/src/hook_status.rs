@@ -168,7 +168,9 @@ pub fn apply_signal(
 /// session's live-line channel and nowhere else: it never stamps or orders
 /// the record, and never changes its status, `hook_driven`, `background` or
 /// pending input. Any other event the plugin maps is applied with
-/// [`apply_signal`]; one it does not know changes nothing.
+/// [`apply_signal`]; one it does not know changes nothing. An applied event
+/// whose conversation id the record now holds stops the session's discovery
+/// waiter, if it has one.
 pub fn deliver(
     hub: &Hub,
     session_id: &str,
@@ -196,6 +198,16 @@ pub fn deliver(
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         apply_signal(hub, session_id, event_time, &report, event);
+        // The hook named the conversation the record now holds, so a
+        // discovery waiter for the session has nothing left to find.
+        // The record lock is released before the discovery lock is taken.
+        let holds_hook_id = report
+            .conversation_id
+            .as_deref()
+            .is_some_and(|id| crate::sync::lock(record).conversation_id.as_deref() == Some(id));
+        if holds_hook_id {
+            hub.sessions.discovery().deregister(session_id);
+        }
     }
 }
 
@@ -1856,5 +1868,68 @@ mod tests {
         deliver(&hub, "s1", &arc, Some(9), &message_display("Red\n", 0));
         let mut lines = hub.live_lines.subscribe("s1");
         assert!(lines.try_recv().is_err(), "a line before the subscription");
+    }
+
+    /// A discovery waiter for `session_id` in the default agent's plugin.
+    fn default_agent_waiter(session_id: &str) -> crate::conversations::discovery::Waiter {
+        use crate::conversations::discovery::{Baseline, Waiter};
+        let plugin = agent_registry::plugin(&agent_registry::default_agent())
+            .expect("the default agent is registered");
+        Waiter::new(
+            session_id.to_owned(),
+            Baseline {
+                ids: std::collections::HashSet::new(),
+                plugin,
+                rows: agent_api::ResolvedRows::default(),
+                folder: std::path::PathBuf::from("folder"),
+                launched_at: chrono::Utc::now(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn hook_conversation_id_deregisters_the_discovery_waiter() {
+        let (hub, _scratch) = crate::server::test_support::test_hub("hook-id-deregisters");
+        hub.sessions.insert(crate::history::test_support::record(
+            "s1",
+            SessionMode::Interactive,
+        ));
+        hub.sessions
+            .discovery()
+            .register(default_agent_waiter("s1"));
+        let arc = hub.sessions.get("s1").expect("inserted");
+
+        // An event naming no conversation leaves the waiter waiting.
+        deliver(
+            &hub,
+            "s1",
+            &arc,
+            Some(100),
+            &json!({"hook_event_name": "UserPromptSubmit"}),
+        );
+        assert!(
+            hub.sessions.discovery().waiter("s1").is_some(),
+            "no id, so discovery still waits"
+        );
+
+        deliver(
+            &hub,
+            "s1",
+            &arc,
+            Some(200),
+            &json!({
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+                "session_id": "conv-hook",
+            }),
+        );
+        assert_eq!(
+            crate::sync::lock(&arc).conversation_id.as_deref(),
+            Some("conv-hook")
+        );
+        assert!(
+            hub.sessions.discovery().deregister("s1").is_none(),
+            "the hook's id stopped the waiter"
+        );
     }
 }

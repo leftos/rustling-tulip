@@ -379,6 +379,19 @@ pub const TRACER_OWNER_ENV: &str = "RUSTLING_TULIP_TRACER_OWNER";
 /// Env var naming the tracer's per-session log file (see [`tracer_log_path`]).
 pub const TRACER_LOG_ENV: &str = "RUSTLING_TULIP_TRACER_LOG";
 
+/// Env var every PTY child gets holding its own session id, which a
+/// user-layer hook shim (`rt-tracer hook --from-env`) posts its events for.
+pub const SESSION_ID_ENV: &str = "RUSTLING_TULIP_SESSION_ID";
+
+/// Env var every PTY child gets holding the spawning daemon's config dir,
+/// whose `daemon.json` a user-layer hook shim reads.
+pub const HOOK_CONFIG_DIR_ENV: &str = "RUSTLING_TULIP_HOOK_CONFIG_DIR";
+
+/// Env var a spawn whose hooks the daemon injected sets to `1`, so a
+/// user-layer hook shim in the same session does nothing. A spawn that sets
+/// none removes any inherited value.
+pub const HOOKS_INJECTED_ENV: &str = "RUSTLING_TULIP_HOOKS_INJECTED";
+
 /// The variables a running session of any registered agent sets for its own
 /// children (each plugin's `inherited_session_vars`). A daemon started from
 /// inside such a session would pass them to every session it spawns, marking
@@ -404,8 +417,9 @@ struct TracerLaunch<'a> {
 /// with, shared by both platforms' spawn paths.
 struct TracerInvocation {
     args: Vec<OsString>,
-    /// Applied before `env_remove`, so a name in both is removed; the owner
-    /// and log variables never appear in `env_remove`.
+    /// Applied before `env_remove`, so a name in both is removed; the owner,
+    /// session id, hook config dir and log variables never appear in
+    /// `env_remove`.
     env_set: Vec<(OsString, OsString)>,
     env_remove: Vec<OsString>,
 }
@@ -443,6 +457,13 @@ fn tracer_invocation(launch: &TracerLaunch<'_>) -> TracerInvocation {
     let mut env_set: Vec<(OsString, OsString)> =
         spec.env.iter().map(|(k, v)| (k.into(), v.into())).collect();
     env_set.push((TRACER_OWNER_ENV.into(), launch.owner.as_os_str().to_owned()));
+    // What a user-layer hook shim finds its session and daemon by. Always
+    // set, so a nested spawn never keeps a parent session's values.
+    env_set.push((SESSION_ID_ENV.into(), spec.session_id.clone().into()));
+    env_set.push((
+        HOOK_CONFIG_DIR_ENV.into(),
+        launch.owner.as_os_str().to_owned(),
+    ));
     // Per-session tracer log so we can debug spawn issues for things like
     // `.cmd` shims and shebang scripts that CreateProcess handles weirdly.
     // Best-effort: if the log dir can't be created we skip the log — losing
@@ -451,23 +472,27 @@ fn tracer_invocation(launch: &TracerLaunch<'_>) -> TracerInvocation {
         env_set.push((TRACER_LOG_ENV.into(), log_path.as_os_str().to_owned()));
     }
     // The tracer inherits the daemon's environment, so a variable the spawn
-    // must not pass on is removed rather than left out of `env`. The owner
-    // and log variables take effect after the removals: a removal naming one
-    // of them is dropped here rather than let it drop the variable.
+    // must not pass on is removed rather than left out of `env`. The owner,
+    // session id, hook config dir and log variables take effect after the
+    // removals: a removal naming one of them is dropped here rather than let
+    // it drop the variable.
     let mut env_remove: Vec<OsString> = spec
         .env_remove
         .iter()
         .filter(|name| {
-            let names_owner = is_env_name(name, TRACER_OWNER_ENV);
+            let names_always_set = [TRACER_OWNER_ENV, SESSION_ID_ENV, HOOK_CONFIG_DIR_ENV]
+                .iter()
+                .any(|var| is_env_name(name, var));
             let names_set_log = launch.log_path.is_some() && is_env_name(name, TRACER_LOG_ENV);
-            !names_owner && !names_set_log
+            !names_always_set && !names_set_log
         })
         .map(OsString::from)
         .collect();
     // A parent agent session's markers are removed too, unless the spawn sets
     // one on purpose: `env_set` is applied before `env_remove`, so a name in
-    // both would be dropped.
-    for name in inherited_session_vars() {
+    // both would be dropped. The injected-hooks marker is a parent session's
+    // marker the same way: a spawn that injected no hooks must not inherit it.
+    for name in inherited_session_vars().chain([HOOKS_INJECTED_ENV]) {
         let set_by_spawn = spec.env.iter().any(|(key, _)| is_env_name(key, name));
         let already_removed = spec
             .env_remove
@@ -1606,6 +1631,101 @@ mod tests {
         assert!(
             !args.iter().any(|arg| arg == "--agent-note"),
             "no note flag: {args:?}"
+        );
+    }
+
+    /// The tracer invocation of a `prog` spawn of session `abc` with `env`
+    /// and `env_remove`, owned by config dir `owner-config`.
+    fn env_invocation(
+        env: Vec<(String, String)>,
+        env_remove: Vec<String>,
+    ) -> super::TracerInvocation {
+        let spec = crate::pty::PtySpawnSpec {
+            session_id: "abc".to_string(),
+            program: "prog".to_string(),
+            args: Vec::new(),
+            cwd: PathBuf::from("cwd"),
+            env,
+            env_remove,
+            cols: 80,
+            rows: 24,
+            agent_note: None,
+        };
+        let owner = PathBuf::from("owner-config");
+        super::tracer_invocation(&super::TracerLaunch {
+            tracer: Path::new("rt-tracer"),
+            spec: &spec,
+            pipe_name: "pipe",
+            log_path: None,
+            owner: &owner,
+        })
+    }
+
+    #[test]
+    fn tracer_invocation_exports_the_session_id_and_hook_config_dir() {
+        use std::ffi::OsString;
+        let names = [
+            "RUSTLING_TULIP_SESSION_ID",
+            "RUSTLING_TULIP_HOOK_CONFIG_DIR",
+        ];
+        // A removal naming either is dropped, as one naming the owner is.
+        let invocation = env_invocation(
+            Vec::new(),
+            names.iter().map(|name| (*name).to_owned()).collect(),
+        );
+        assert!(
+            invocation.env_set.contains(&(
+                OsString::from("RUSTLING_TULIP_SESSION_ID"),
+                OsString::from("abc")
+            )),
+            "{:?}",
+            invocation.env_set
+        );
+        assert!(
+            invocation.env_set.contains(&(
+                OsString::from("RUSTLING_TULIP_HOOK_CONFIG_DIR"),
+                OsString::from("owner-config")
+            )),
+            "{:?}",
+            invocation.env_set
+        );
+        for name in names {
+            assert!(
+                !invocation.env_remove.iter().any(|removed| removed == name),
+                "{name} is never removed: {:?}",
+                invocation.env_remove
+            );
+        }
+    }
+
+    #[test]
+    fn tracer_invocation_removes_an_inherited_hooks_injected_marker() {
+        use std::ffi::OsString;
+        let marker = "RUSTLING_TULIP_HOOKS_INJECTED";
+        let plain = env_invocation(Vec::new(), Vec::new());
+        assert!(
+            plain.env_remove.iter().any(|removed| removed == marker),
+            "a spawn that wrote no hooks drops a parent's marker: {:?}",
+            plain.env_remove
+        );
+        assert!(
+            !plain.env_set.iter().any(|(name, _)| name == marker),
+            "{:?}",
+            plain.env_set
+        );
+
+        let hooked = env_invocation(vec![(marker.to_owned(), "1".to_owned())], Vec::new());
+        assert!(
+            hooked
+                .env_set
+                .contains(&(OsString::from(marker), OsString::from("1"))),
+            "{:?}",
+            hooked.env_set
+        );
+        assert!(
+            !hooked.env_remove.iter().any(|removed| removed == marker),
+            "a spawn that sets the marker keeps it: {:?}",
+            hooked.env_remove
         );
     }
 

@@ -23,7 +23,9 @@ use tracing::{debug, warn};
 
 #[cfg(windows)]
 use super::job::{self, JobGuard};
-use crate::tracer_client::{inherited_session_vars, is_env_name};
+use crate::tracer_client::{
+    HOOK_CONFIG_DIR_ENV, HOOKS_INJECTED_ENV, SESSION_ID_ENV, inherited_session_vars, is_env_name,
+};
 
 /// How long a pre-create run may take before it is killed and the spawn goes
 /// ahead with no conversation.
@@ -91,8 +93,10 @@ pub(crate) async fn run_until(
 }
 
 /// The pre-create child's environment: `base` (the daemon's own) without a
-/// parent agent session's markers, as every PTY spawn drops them, then each
-/// variable in `set` applied, then each name in `remove` removed.
+/// parent agent session's markers, as every PTY spawn drops them, and
+/// without an outer rustling-tulip session's hook variables, so the child's
+/// hooks never post to the session a daemon started from a shell sits in;
+/// then each variable in `set` applied, then each name in `remove` removed.
 fn child_env(
     base: impl IntoIterator<Item = (OsString, OsString)>,
     set: &[(String, String)],
@@ -100,7 +104,11 @@ fn child_env(
 ) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = base
         .into_iter()
-        .filter(|(key, _)| !inherited_session_vars().any(|var| names(key, var)))
+        .filter(|(key, _)| {
+            !inherited_session_vars()
+                .chain([SESSION_ID_ENV, HOOK_CONFIG_DIR_ENV, HOOKS_INJECTED_ENV])
+                .any(|var| names(key, var))
+        })
         .collect();
     for (name, value) in set {
         env.retain(|(key, _)| !names(key, name));
@@ -565,6 +573,29 @@ mod tests {
         assert!(!named("CLAUDE_CODE_SESSION_ID"), "{env:?}");
         assert!(has("RT_SET", "yes"), "{env:?}");
         assert!(has("PATH", "kept"), "{env:?}");
+    }
+
+    #[test]
+    fn child_env_strips_the_outer_sessions_hook_variables() {
+        // A daemon started inside a rustling-tulip shell holds that shell's
+        // values; its own agent runs must not post hooks to that session.
+        let names = [
+            "RUSTLING_TULIP_SESSION_ID",
+            "RUSTLING_TULIP_HOOK_CONFIG_DIR",
+            "RUSTLING_TULIP_HOOKS_INJECTED",
+        ];
+        let base = names
+            .iter()
+            .map(|name| (OsString::from(name), OsString::from("outer")))
+            .chain([(OsString::from("PATH"), OsString::from("kept"))]);
+        let env = child_env(base, &[], &[]);
+        for name in names {
+            assert!(!env.iter().any(|(key, _)| key == name), "{name}: {env:?}");
+        }
+        assert!(
+            env.contains(&(OsString::from("PATH"), OsString::from("kept"))),
+            "{env:?}"
+        );
     }
 
     #[tokio::test]

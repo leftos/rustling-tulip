@@ -2,7 +2,11 @@
 //!
 //! An interactive agent session is spawned with a `--settings` file whose
 //! hooks are exec-form command hooks running
-//! `<cached rt-tracer.exe> hook --session <id> --config-dir <dir>`. One
+//! `<cached rt-tracer.exe> hook --session <id> --config-dir <dir>`. A hook
+//! entry in the agent's own user settings runs `<shim> hook --from-env`
+//! instead, which reads the session id and config dir from the variables
+//! every rustling-tulip PTY exports and names itself to the daemon with
+//! `X-RT-Hook-Source: user` (see [`run_invocation`]). One
 //! invocation reads the event JSON from stdin, looks the daemon's current port
 //! and auth token up in `daemon.json`, makes the listener on that port prove
 //! with `GET /proof` that it holds this run's daemon token, then POSTs the
@@ -100,6 +104,24 @@ impl Args {
             config_dir: config_dir?,
         })
     }
+
+    /// The user-layer mode's arguments, read from `env`: `None` without a
+    /// safe session id or a config dir, or when the spawn injected its own
+    /// hooks.
+    fn from_env(env: &dyn Fn(&str) -> Option<OsString>) -> Option<Self> {
+        if env(HOOKS_INJECTED_ENV).is_some() {
+            return None;
+        }
+        let session_id = env(SESSION_ID_ENV)?.into_string().ok()?;
+        if !is_safe_session_id(&session_id) {
+            return None;
+        }
+        let config_dir = env(HOOK_CONFIG_DIR_ENV).filter(|dir| !dir.is_empty())?;
+        Some(Self {
+            session_id,
+            config_dir: PathBuf::from(config_dir),
+        })
+    }
 }
 
 /// Whether `session_id` is safe in a request path: the daemon's ids are hex,
@@ -128,45 +150,112 @@ struct Daemon {
     token: String,
 }
 
+/// The argv tail of the user-layer mode: a hook entry in the agent's own user
+/// settings runs `<shim> hook --from-env` and finds its session from the
+/// environment every rustling-tulip PTY exports.
+const FROM_ENV_FLAG: &str = "--from-env";
+
+/// The session id every rustling-tulip PTY exports to its child.
+const SESSION_ID_ENV: &str = "RUSTLING_TULIP_SESSION_ID";
+
+/// The config dir of the daemon that spawned the PTY, whose `daemon.json`
+/// the user-layer shim reads.
+const HOOK_CONFIG_DIR_ENV: &str = "RUSTLING_TULIP_HOOK_CONFIG_DIR";
+
+/// Set in a session whose spawn injected its own hooks: the user-layer shim
+/// then does nothing, so no event is reported twice.
+const HOOKS_INJECTED_ENV: &str = "RUSTLING_TULIP_HOOKS_INJECTED";
+
+/// Which hook entry ran the shim, sent to the daemon so it can tell a
+/// user-layer event from an injected one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// A hook the daemon injected into the spawn (`--session` mode).
+    Injected,
+    /// A hook in the agent's user settings (`--from-env` mode).
+    User,
+}
+
 /// Runs the `hook` subcommand end to end. Never fails: every path is exit 0.
 pub(crate) fn run_from_env(started_nanos: u128) {
     let argv: Vec<OsString> = std::env::args_os().skip(2).collect();
-    let _ = run_invocation(&argv, std::io::stdin(), started_nanos, BUDGET);
+    let _ = run_invocation(
+        &argv,
+        &|name| std::env::var_os(name),
+        std::io::stdin(),
+        started_nanos,
+        BUDGET,
+    );
 }
 
-/// One `hook` invocation for an argv tail, apart from the process's own argv
-/// and stdin.
+/// One `hook` invocation for an argv tail, apart from the process's own argv,
+/// environment (`env` looks a variable up) and stdin.
+///
+/// `--session <id> --config-dir <dir>` is the injected mode. Exactly
+/// `--from-env` is the user-layer mode: the session id and config dir come
+/// from [`SESSION_ID_ENV`] and [`HOOK_CONFIG_DIR_ENV`], and the run does
+/// nothing when either is missing, the id is unsafe, or [`HOOKS_INJECTED_ENV`]
+/// is set to any value, so an agent run outside rustling-tulip, or one whose
+/// injected hooks already report, is unaffected.
 pub(crate) fn run_invocation(
     argv: &[OsString],
+    env: &dyn Fn(&str) -> Option<OsString>,
     stdin: impl Read + Send + 'static,
     started_nanos: u128,
     budget: Duration,
 ) -> Outcome {
-    let Some(args) = Args::parse(argv) else {
+    let target = if argv.len() == 1 && argv[0] == FROM_ENV_FLAG {
+        Args::from_env(env).map(|args| (args, Source::User))
+    } else {
+        Args::parse(argv).map(|args| (args, Source::Injected))
+    };
+    let Some((args, source)) = target else {
         // Drain stdin even for an unusable invocation: the agent must not see
         // a broken pipe mid-write.
         let _ = read_input(stdin, budget);
         return Outcome::Skipped;
     };
-    run(
+    run_from(
         stdin,
         &args.config_dir,
         &args.session_id,
+        source,
+        started_nanos,
+        budget,
+    )
+}
+
+/// [`run_from`] for an injected hook, as the tests drive it.
+#[cfg(test)]
+pub(crate) fn run(
+    stdin: impl Read + Send + 'static,
+    config_dir: &Path,
+    session_id: &str,
+    started_nanos: u128,
+    budget: Duration,
+) -> Outcome {
+    run_from(
+        stdin,
+        config_dir,
+        session_id,
+        Source::Injected,
         started_nanos,
         budget,
     )
 }
 
 /// One shim run: read the event from `stdin`, then POST it to the daemon that
-/// `config_dir`'s `daemon.json` names.
+/// `config_dir`'s `daemon.json` names, for a hook entry of `source`, which a
+/// user-layer POST names in its `X-RT-Hook-Source` header.
 ///
 /// `started_nanos` is the wall clock taken when the shim started, sent as
 /// `X-RT-Hook-Time` so the daemon can order events from async hooks, which
 /// finish out of order. `budget` bounds the whole run.
-pub(crate) fn run(
+fn run_from(
     stdin: impl Read + Send + 'static,
     config_dir: &Path,
     session_id: &str,
+    source: Source,
     started_nanos: u128,
     budget: Duration,
 ) -> Outcome {
@@ -183,7 +272,7 @@ pub(crate) fn run(
     let Some(daemon) = read_daemon(config_dir) else {
         return Outcome::Skipped;
     };
-    post(&daemon, session_id, &body, started_nanos, deadline)
+    post(&daemon, session_id, source, &body, started_nanos, deadline)
 }
 
 /// The time left before `deadline`, or `None` once it is spent.
@@ -376,6 +465,7 @@ fn scan(reader: &mut impl BufRead) -> Scanned {
 fn post(
     daemon: &Daemon,
     session_id: &str,
+    source: Source,
     body: &[u8],
     started_nanos: u128,
     deadline: Instant,
@@ -401,11 +491,18 @@ fn post(
         return outcome;
     }
     let mut writer = &stream;
+    // Only a user-layer hook names its source; an injected one sends the
+    // request it always has.
+    let source_header = match source {
+        Source::Injected => "",
+        Source::User => "X-RT-Hook-Source: user\r\n",
+    };
     let request = format!(
         "POST /hook/{session_id} HTTP/1.1\r\n\
          Host: 127.0.0.1:{port}\r\n\
          Authorization: Bearer {token}\r\n\
          X-RT-Hook-Time: {started_nanos}\r\n\
+         {source_header}\
          Content-Type: application/json\r\n\
          Content-Length: {length}\r\n\
          Connection: close\r\n\
@@ -967,6 +1064,7 @@ mod tests {
             let consumed = Arc::new(AtomicUsize::new(0));
             let outcome = run_invocation(
                 &argv,
+                &no_env,
                 CountingReader::new(INPUT.as_bytes().to_vec(), Arc::clone(&consumed)),
                 unix_nanos(),
                 LONG_BUDGET,
@@ -978,6 +1076,190 @@ mod tests {
                 "stdin must be drained for argv: {argv:?}"
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A test environment's variables, by name.
+    type EnvVars = Vec<(&'static str, OsString)>;
+
+    /// An environment holding no variable at all.
+    fn no_env(_: &str) -> Option<OsString> {
+        None
+    }
+
+    /// An environment holding exactly `vars`, so a test sets no process env.
+    fn env_of(vars: Vec<(&'static str, OsString)>) -> impl Fn(&str) -> Option<OsString> {
+        move |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    /// The user-layer shim's argv tail.
+    fn from_env_argv() -> Vec<OsString> {
+        vec![OsString::from("--from-env")]
+    }
+
+    /// Runs `argv` with `vars` as the environment and asserts it was
+    /// `Skipped` with stdin drained.
+    fn assert_skips_and_drains(argv: &[OsString], vars: Vec<(&'static str, OsString)>) {
+        let what = format!("argv: {argv:?}, env: {vars:?}");
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let outcome = run_invocation(
+            argv,
+            &env_of(vars),
+            CountingReader::new(INPUT.as_bytes().to_vec(), Arc::clone(&consumed)),
+            unix_nanos(),
+            LONG_BUDGET,
+        );
+        assert_eq!(outcome, Outcome::Skipped, "{what}");
+        assert_eq!(
+            consumed.load(Ordering::SeqCst),
+            INPUT.len(),
+            "stdin must be drained for {what}"
+        );
+    }
+
+    #[test]
+    fn from_env_without_session_id_skips_and_drains_stdin() {
+        // The handshake is there and the fake would answer, so a case that got
+        // as far as a request would be `Posted`: only the env and argv checks
+        // can make these `Skipped`.
+        let fake = FakeDaemon::answering();
+        let dir = scratch_dir("from-env-no-session");
+        write_daemon_json(&dir, fake.port, TOKEN);
+        let config = || {
+            (
+                "RUSTLING_TULIP_HOOK_CONFIG_DIR",
+                dir.clone().into_os_string(),
+            )
+        };
+        let session = |id: &str| ("RUSTLING_TULIP_SESSION_ID", OsString::from(id));
+        let cases: Vec<(Vec<OsString>, EnvVars)> = vec![
+            (from_env_argv(), vec![config()]),
+            (from_env_argv(), vec![config(), session("")]),
+            (from_env_argv(), vec![config(), session("bad id")]),
+            (from_env_argv(), vec![config(), session("bad\r\nid")]),
+            // No config dir to find the daemon by.
+            (from_env_argv(), vec![session(SESSION)]),
+            // The mode takes no further argument.
+            (
+                vec![
+                    OsString::from("--from-env"),
+                    OsString::from("--agent"),
+                    OsString::from("some-agent"),
+                ],
+                vec![config(), session(SESSION)],
+            ),
+            (
+                vec![
+                    OsString::from("--from-env"),
+                    OsString::from("--session"),
+                    OsString::from(SESSION),
+                ],
+                vec![config(), session(SESSION)],
+            ),
+        ];
+        for (argv, vars) in cases {
+            assert_skips_and_drains(&argv, vars);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_env_with_hooks_injected_skips() {
+        let fake = FakeDaemon::answering();
+        let dir = scratch_dir("from-env-injected");
+        write_daemon_json(&dir, fake.port, TOKEN);
+        for marker in ["1", "", "0"] {
+            assert_skips_and_drains(
+                &from_env_argv(),
+                vec![
+                    ("RUSTLING_TULIP_SESSION_ID", OsString::from(SESSION)),
+                    (
+                        "RUSTLING_TULIP_HOOK_CONFIG_DIR",
+                        dir.clone().into_os_string(),
+                    ),
+                    ("RUSTLING_TULIP_HOOKS_INJECTED", OsString::from(marker)),
+                ],
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_env_posts_to_the_session_with_the_user_source_header() {
+        let fake = FakeDaemon::answering();
+        let dir = scratch_dir("from-env-posts");
+        write_daemon_json(&dir, fake.port, TOKEN);
+
+        let outcome = run_invocation(
+            &from_env_argv(),
+            &env_of(vec![
+                ("RUSTLING_TULIP_SESSION_ID", OsString::from(SESSION)),
+                (
+                    "RUSTLING_TULIP_HOOK_CONFIG_DIR",
+                    dir.clone().into_os_string(),
+                ),
+            ]),
+            Cursor::new(INPUT.as_bytes().to_vec()),
+            unix_nanos(),
+            LONG_BUDGET,
+        );
+
+        assert_eq!(outcome, Outcome::Posted);
+        let request = fake.finish();
+        let text = String::from_utf8_lossy(&request);
+        assert!(
+            text.starts_with(&format!("POST /hook/{SESSION} HTTP/1.1\r\n")),
+            "{text}"
+        );
+        assert!(text.contains("\r\nX-RT-Hook-Source: user\r\n"), "{text}");
+        assert!(request.ends_with(INPUT.as_bytes()), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_mode_sends_no_source_header() {
+        // An injected hook runs with the injected marker and the session
+        // variables set, and must post exactly as before.
+        let fake = FakeDaemon::answering();
+        let dir = scratch_dir("session-mode-no-source");
+        write_daemon_json(&dir, fake.port, TOKEN);
+        let argv = vec![
+            OsString::from("--session"),
+            OsString::from(SESSION),
+            OsString::from("--config-dir"),
+            dir.clone().into_os_string(),
+        ];
+
+        let outcome = run_invocation(
+            &argv,
+            &env_of(vec![
+                ("RUSTLING_TULIP_SESSION_ID", OsString::from(SESSION)),
+                (
+                    "RUSTLING_TULIP_HOOK_CONFIG_DIR",
+                    dir.clone().into_os_string(),
+                ),
+                ("RUSTLING_TULIP_HOOKS_INJECTED", OsString::from("1")),
+            ]),
+            Cursor::new(INPUT.as_bytes().to_vec()),
+            unix_nanos(),
+            LONG_BUDGET,
+        );
+
+        assert_eq!(outcome, Outcome::Posted);
+        let request = fake.finish();
+        let text = String::from_utf8_lossy(&request);
+        assert!(
+            text.starts_with(&format!("POST /hook/{SESSION} HTTP/1.1\r\n")),
+            "{text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("x-rt-hook-source"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

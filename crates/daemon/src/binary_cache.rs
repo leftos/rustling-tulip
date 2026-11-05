@@ -102,6 +102,83 @@ pub fn ensure_cached(
     Ok(cached)
 }
 
+/// The folder under the data dir that holds the hook shim.
+const HOOK_SHIM_DIR: &str = "hook-shim";
+
+/// The hook shim's file stem; the platform's executable suffix follows it.
+const HOOK_SHIM_STEM: &str = "rt-hook";
+
+/// The data dir the hook shim's folder lives in: the parent of
+/// [`crate::paths::Dirs::binaries_dir`], or `None` when it has none.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the user-settings hooks install is its caller")
+)]
+pub(crate) fn hook_shim_data_dir(dirs: &crate::paths::Dirs) -> Option<&Path> {
+    dirs.binaries_dir.parent()
+}
+
+/// Ensure the fixed copy of the tracer that a hook entry in an agent's user
+/// settings runs exists at `<data_dir>/hook-shim/rt-hook` (with the
+/// platform's executable suffix) and holds `tracer_exe`'s bytes, and return
+/// its path.
+///
+/// Unlike [`ensure_cached`]'s copies, the path never changes, so a user
+/// settings entry naming it stays valid across tracer updates. A missing copy
+/// or one whose bytes differ is replaced through a temp file in the same
+/// folder renamed over it; an equal copy is not rewritten. When the rename
+/// fails (on Windows, a running hook holds the file), the old copy is kept,
+/// a `warn!` is logged, and its path is still returned: a stale shim speaks
+/// the same additive `hook` argv.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the user-settings hooks install is its caller")
+)]
+pub fn ensure_hook_shim(tracer_exe: &Path, data_dir: &Path) -> anyhow::Result<PathBuf> {
+    let dir = data_dir.join(HOOK_SHIM_DIR);
+    let target = dir.join(format!("{HOOK_SHIM_STEM}{}", std::env::consts::EXE_SUFFIX));
+    let bytes = fs::read(tracer_exe)
+        .with_context(|| format!("reading the tracer {}", tracer_exe.display()))?;
+    if fs::read(&target).is_ok_and(|existing| existing == bytes) {
+        debug!(shim = %target.display(), "binary_cache: hook shim is current");
+        return Ok(target);
+    }
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("creating the hook shim dir {}", dir.display()))?;
+    let tmp = dir.join(format!(
+        "{HOOK_SHIM_STEM}{}.{}.tmp",
+        std::env::consts::EXE_SUFFIX,
+        std::process::id()
+    ));
+    let written = fs::write(&tmp, &bytes)
+        .with_context(|| format!("writing {}", tmp.display()))
+        .and_then(|()| copy_mode(tracer_exe, &tmp));
+    if let Err(err) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&tmp, &target) {
+        let _ = fs::remove_file(&tmp);
+        if !target.exists() {
+            // No old copy to keep: nothing would run at the path.
+            return Err(err)
+                .with_context(|| format!("renaming {} to {}", tmp.display(), target.display()));
+        }
+        warn!(
+            ?err,
+            shim = %target.display(),
+            "binary_cache: could not replace the hook shim; keeping the old copy"
+        );
+        return Ok(target);
+    }
+    info!(
+        tracer = %tracer_exe.display(),
+        shim = %target.display(),
+        "binary_cache: hook shim refreshed"
+    );
+    Ok(target)
+}
+
 /// Delete every cached binary that is not present in `in_use`. Paths match
 /// the way process paths do (on Windows ignoring case and a `\\?\` prefix).
 /// Failures on individual entries are logged and skipped — a stale lock or
@@ -305,6 +382,76 @@ mod tests {
 
         let p = ensure_cached(&template, &cache, "rt-tracer").expect("ensure");
         assert!(p.extension().is_none(), "{p:?}");
+    }
+
+    /// Whether `dir` holds a leftover temp file.
+    fn holds_a_temp_file(dir: &Path) -> bool {
+        fs::read_dir(dir).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+        })
+    }
+
+    #[test]
+    fn hook_shim_copies_the_tracer_to_its_fixed_path() {
+        let dirs = crate::history::test_support::scratch_dirs("hook-shim-copy");
+        let data = hook_shim_data_dir(&dirs).expect("the binaries dir has a parent");
+        assert_eq!(Some(data), dirs.binaries_dir.parent());
+        let tracer = write_template(&dirs.config, "rt-tracer.exe", b"tracer v1");
+
+        let shim = ensure_hook_shim(&tracer, data).expect("copy the shim");
+
+        let expected = data
+            .join("hook-shim")
+            .join(format!("rt-hook{}", std::env::consts::EXE_SUFFIX));
+        assert_eq!(shim, expected);
+        assert_eq!(fs::read(&shim).unwrap(), b"tracer v1");
+        assert!(!holds_a_temp_file(&data.join("hook-shim")));
+    }
+
+    #[test]
+    fn hook_shim_refreshes_when_the_tracer_changes() {
+        let scratch = Scratch::new("hook-shim-refresh");
+        let tracer = write_template(scratch.path(), "rt-tracer.exe", b"tracer v1");
+        let data = scratch.path().join("data");
+        let first = ensure_hook_shim(&tracer, &data).expect("first copy");
+
+        fs::write(&tracer, b"tracer v2, longer").unwrap();
+        let second = ensure_hook_shim(&tracer, &data).expect("refresh");
+
+        assert_eq!(first, second, "the shim's path never changes");
+        assert_eq!(fs::read(&second).unwrap(), b"tracer v2, longer");
+        assert!(!holds_a_temp_file(&data.join("hook-shim")));
+    }
+
+    #[test]
+    fn hook_shim_leaves_an_equal_copy_alone() {
+        let scratch = Scratch::new("hook-shim-equal");
+        let tracer = write_template(scratch.path(), "rt-tracer.exe", b"tracer v1");
+        let data = scratch.path().join("data");
+        let shim = ensure_hook_shim(&tracer, &data).expect("first copy");
+        // An old stamp a rewrite would replace with the current time.
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&shim)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let again = ensure_hook_shim(&tracer, &data).expect("second call");
+
+        assert_eq!(again, shim);
+        assert_eq!(
+            fs::metadata(&shim).unwrap().modified().unwrap(),
+            old,
+            "an equal copy is not rewritten"
+        );
+        assert_eq!(fs::read(&shim).unwrap(), b"tracer v1");
+        assert!(!holds_a_temp_file(&data.join("hook-shim")));
     }
 
     #[test]
