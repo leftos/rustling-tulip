@@ -52,8 +52,11 @@ windows = { version = "0.61", features = [
 widestring = "1.0.2"
 
 [target.'cfg(unix)'.dependencies]
-# `killpg` for the Unix equivalent of the Windows kill-on-close job object:
-# portable-pty makes the PTY child a session leader (setsid), so signalling its
-# process group on tracer shutdown takes out surviving dev-server grandchildren
-# that would otherwise pin worktree files open.
+# The Unix equivalent of the Windows kill-on-close job object: portable-pty
+# makes the PTY child a session leader (setsid), so on a stop the tracer reads
+# every process in that session (`getsid`, `getpgid`, `killpg` and `kill` from
+# libc; pid, parent and start time from sysinfo, the version the daemon uses)
+# and kills them, background jobs in groups of their own included, so dev
+# servers and their grandchildren do not pin worktree files open.
 libc = "0.2"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }

@@ -110,11 +110,7 @@ abstracted. Two viable shapes:
       SIGTERM)` then `SIGKILL` on the tracer shutdown path. Best-effort +
       logged. A tracer killed with SIGKILL still leaks survivors (no
       `PR_SET_PDEATHSIG` on macOS) — accepted. The macOS check is the next line.
-- [ ] Grandchildren die when a session is killed on macOS: failed (see "macOS
-      verification"). `portable-pty` does make the shell a group leader, but
-      zsh's job control puts each background job in a process group of its
-      own, so `killpg` on the shell's group misses them; a `sleep` started by
-      `sh -c '… &'` outlived the session.
+- [x] Grandchildren die when a session is killed on macOS (see "macOS verification"). zsh's job control puts each background job in a process group of its own, so `killpg` on the shell's group alone misses them. The tracer therefore also reads the session's processes when the Stop arrives, before it kills the shell (`proc_tree::snapshot`: every process whose session id is the shell's pid, plus a parent-pid walk from the shell), and on shutdown, after the group kill, kills that snapshot merged with a fresh session-id scan (`proc_tree::kill_tree`: SIGTERM per group and per pid, then SIGKILL only to a pid whose start time still matches).
 
 ## 3. Autostart on login
 
@@ -188,7 +184,8 @@ A run of M1, M2 and M3 on the Mac mini builder (arm64), driven over SSH. `.\rt.p
 Checks:
 
 - [x] M1, tracer reattach: `spawn --cwd` started a shell under `rt-tracer` on a Unix socket in the temp folder, and after `send <id> "echo before"` `read` showed `echo before` then `before`. `rustling-tulipd shutdown` printed `stopped the daemon`; `pgrep -fl rustling-tulipd` then found nothing, and `pgrep -fl rt-tracer` still showed the session's tracer with the same pid. A second daemon started with the same environment logged `reattach_orphans: begin orphan_count=1` and `tracer reattach succeeded` for the session id; `sessions` listed the same id `idle`, `read` showed the earlier `echo before` and `before` lines, and after `send <id> "echo after"` `read` showed `echo after` then `after`.
-- [ ] M2, process-group kill: failed. In a new shell session `send` of `sleep 600 & sh -c 'sleep 601 &' ; echo started` printed `[1] <pid>` and `started`. `ps` showed the shell `/bin/zsh` as its own group leader (its pgid equals its pid), `sleep 600` in a process group of its own (zsh's job control gives each job one), and `sleep 601` reparented to pid 1 in the exited `sh`'s job group. `kill <id>` returned 0, `wait <id> --status stopped` printed `stopped`, the tracer log shows `stop request received, killing child` and `exiting`, and the tracer was gone. `sleep 600` was gone too, but `sleep 601` was still running 28 seconds later, with parent 1. So `killpg` on the shell's group does not reach a job's own group; a job the shell still knows died (the run does not show how, though zsh hangs up its own jobs when it gets SIGHUP), but a process that left the shell's job table (a grandchild of a backgrounded subshell) survives. The run killed that `sleep 601` by its pid.
+- [x] M2, session tree kill: in a new `/bin/zsh` session `send` of `sleep 600 & sh -c 'sleep 601 &' ; echo started` left `sleep 600` in a process group of its own and `sleep 601` reparented to pid 1 in the exited `sh`'s group. `kill <id>` returned 0 and `wait <id> --status stopped` printed `stopped`; the tracer log shows `stop request received, killing child`, `tree kill: 1 processes, 1 groups` and `exiting`, and `pgrep -f '^sleep 60[01]$'` then printed nothing.
+- An earlier run, with only the shell's process group killed, failed. In a new shell session `send` of `sleep 600 & sh -c 'sleep 601 &' ; echo started` printed `[1] <pid>` and `started`. `ps` showed the shell `/bin/zsh` as its own group leader (its pgid equals its pid), `sleep 600` in a process group of its own (zsh's job control gives each job one), and `sleep 601` reparented to pid 1 in the exited `sh`'s job group. `kill <id>` returned 0, `wait <id> --status stopped` printed `stopped`, the tracer log shows `stop request received, killing child` and `exiting`, and the tracer was gone. `sleep 600` was gone too, but `sleep 601` was still running 28 seconds later, with parent 1. So `killpg` on the shell's group does not reach a job's own group; a job the shell still knows died (the run does not show how, though zsh hangs up its own jobs when it gets SIGHUP), but a process that left the shell's job table (a grandchild of a backgrounded subshell) survives. The run killed that `sleep 601` by its pid.
 - [x] M3, the LaunchAgent file: `.\rt.ps1 mac test --package daemon-client` passed 132 of 132 on the Mac mini, among them `autostart::tests::the_launch_agent_detaches_and_abandons_its_process_group`, which writes the plist through the macOS `set_at` to a temp path, reads it back and removes it. That test leaves no file, so the plist text it builds (the template in `autostart.rs` with the test's program path) was copied into a file in the scratch folder: `plutil -lint` printed `OK`, and `plutil -p` showed `Label`, `ProgramArguments` (the daemon path, then `--detach`), `AbandonProcessGroup` true and `RunAtLoad` true. The builder account's own `~/Library/LaunchAgents` was not touched.
 - [ ] M3, launchd starts the daemon at login (log out, log in, a daemon is running): needs the owner at the MacBook Air.
 - [x] Clean stop: `kill` of the remaining session and `rustling-tulipd shutdown` left no `rt-tracer` or `rustling-tulipd` process and no tracer socket in the temp folder.
@@ -244,11 +241,7 @@ Confirmed dual-arm or platform-neutral during the sweep:
       serialized accept loop. Verified on macOS: a shell session survives a
       daemon shutdown and the next daemon reattaches to it (see "macOS
       verification"). The Windows runtime reattach smoke is not part of that run.
-- [ ] **Phase M2 — process-tree cleanup.** `#[cfg(unix)]` `killpg` (SIGTERM →
-      SIGKILL) on tracer shutdown, mirroring the Windows job object. Relies on
-      `portable-pty` making the child a session leader. Failed on macOS: a
-      background job's grandchild survives the session's kill (see "macOS
-      verification").
+- [x] **Phase M2 — process-tree cleanup.** `#[cfg(unix)]` on tracer shutdown, mirroring the Windows job object: `killpg` (SIGTERM → SIGKILL) on the shell's group, then a kill of every process in the shell's session, background jobs and reparented grandchildren included, read before the shell dies. Relies on `portable-pty` making the child a session leader. Verified on macOS (see "macOS verification").
 - [ ] **Phase M3 — autostart (LaunchAgent).** On `main` (`crates/daemon-client/src/autostart.rs`, RT-246). Writes/removes
       `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist` with `--detach`, `RunAtLoad`, `AbandonProcessGroup` and no `KeepAlive` (file-only;
       no `launchctl load` on toggle, to avoid a double daemon). The plist passes `plutil -lint` on macOS (see "macOS verification"). Left unticked: *verify on a real Mac that launchd loads it at login*, which needs the owner at the MacBook Air.

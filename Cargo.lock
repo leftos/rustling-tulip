@@ -7194,6 +7194,7 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
+ "sysinfo 0.32.1",
  "tokio",
  "tracer-protocol",
  "tracing",

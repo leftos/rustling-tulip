@@ -173,6 +173,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     drop(pair.slave);
     let child_pid = child.process_id();
     info!(?child_pid, "supervisor: child spawned");
+    // The shell's start time, read while it surely lives, so the shutdown can
+    // tell the shell's pid from a process that reused it.
+    #[cfg(unix)]
+    let child_start_time = child_pid.and_then(crate::proc_tree::start_time_of);
 
     // Bind the child (and every descendant) to a Job object with
     // KILL_ON_JOB_CLOSE so killing the PTY child — or the tracer just
@@ -396,10 +400,25 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // Stop signal: pipe Input/Resize/Stop dispatch sends a kill request here.
     // Kept separate from child.wait() so it can be invoked multiple times.
+    // On Unix each stop reads the session's processes before the shell is
+    // killed, while the parent links still hold; the shutdown cleanup below
+    // kills them.
     let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<()>();
+    #[cfg(unix)]
+    let tree_stash: Arc<Mutex<Option<Vec<crate::proc_tree::Proc>>>> = Arc::new(Mutex::new(None));
+    #[cfg(unix)]
+    let stop_tree_stash = Arc::clone(&tree_stash);
     let stop_handler = tokio::spawn(async move {
         while stop_rx.recv().await.is_some() {
             info!("supervisor: stop request received, killing child");
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                let snapshot = crate::proc_tree::snapshot(pid);
+                if let Ok(mut stash) = stop_tree_stash.lock() {
+                    let earlier = stash.take().unwrap_or_default();
+                    *stash = Some(crate::proc_tree::merge(earlier, snapshot));
+                }
+            }
             let result = child_killer.kill();
             // portable-pty 0.9's WinChildKiller::kill inverts TerminateProcess's check: Err on success.
             #[cfg(windows)]
@@ -473,15 +492,25 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     watchdog.advance(ShutdownStep::ResizeTask);
 
     // Unix mirror of the Windows KILL_ON_JOB_CLOSE job object: take out any
-    // surviving descendants in the child's process group (dev servers, node,
-    // etc.) so they don't pin worktree files open and wedge cleanup, and so a
+    // surviving process of the child's session (dev servers, node, etc.) so
+    // they don't pin worktree files open and wedge cleanup, and so a
     // grandchild holding the PTY slave open doesn't keep the reader thread
-    // from reaching EOF. macOS has no PR_SET_PDEATHSIG, so this is explicit on
-    // the shutdown path; a tracer killed with SIGKILL still leaks survivors.
+    // from reaching EOF. The shell's own group goes first; then every process
+    // the stop's snapshot or a fresh session-id scan finds, which reaches
+    // background jobs in groups of their own and grandchildren reparented to
+    // pid 1. macOS has no PR_SET_PDEATHSIG, so this is explicit on the
+    // shutdown path; a tracer killed with SIGKILL still leaks survivors.
     // Best-effort, mirroring the job-object contract.
     #[cfg(unix)]
     if let Some(pid) = child_pid {
         kill_process_group(pid);
+        let stashed = tree_stash
+            .lock()
+            .ok()
+            .and_then(|mut stash| stash.take())
+            .unwrap_or_default();
+        let tree = crate::proc_tree::shutdown_tree(pid, child_start_time, stashed);
+        crate::proc_tree::kill_tree(pid, &tree);
     }
 
     // On Unix the bound socket leaves a file behind; remove it so a re-spawn
@@ -714,12 +743,14 @@ fn remove_stale_socket(path: &str) {
     }
 }
 
-/// Signal the child's process group on shutdown. `portable-pty` runs `setsid`
-/// for the PTY child, so its PGID equals its PID and the whole descendant tree
-/// shares the group; `killpg` therefore reaches grandchildren the way the
-/// Windows job object does. If the child was somehow not a group leader,
-/// `killpg` no-ops (`ESRCH`) rather than touching the tracer's own group.
-/// SIGTERM first for a clean exit, then SIGKILL for anything still standing.
+/// Signal the child's own process group on shutdown. `portable-pty` runs
+/// `setsid` for the PTY child, so its PGID equals its PID; `killpg` reaches
+/// the processes still in that group, but not a background job that a
+/// job-control shell (zsh) put in a group of its own, nor that job's
+/// grandchildren: `proc_tree::kill_tree` kills those afterwards. If the child
+/// was somehow not a group leader, `killpg` no-ops (`ESRCH`) rather than
+/// touching the tracer's own group. SIGTERM first for a clean exit, then,
+/// after `proc_tree::KILL_GRACE`, SIGKILL for anything still standing.
 #[cfg(unix)]
 fn kill_process_group(child_pid: u32) {
     let Ok(pgid) = i32::try_from(child_pid) else {
@@ -735,7 +766,7 @@ fn kill_process_group(child_pid: u32) {
     unsafe {
         libc::killpg(pgid, libc::SIGTERM);
     }
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    std::thread::sleep(crate::proc_tree::KILL_GRACE);
     // SAFETY: see above.
     let killed = unsafe { libc::killpg(pgid, libc::SIGKILL) };
     debug!(

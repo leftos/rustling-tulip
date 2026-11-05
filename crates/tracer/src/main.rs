@@ -18,6 +18,8 @@ mod hook;
 mod job_object;
 #[cfg(windows)]
 mod pipe_security;
+#[cfg(unix)]
+mod proc_tree;
 mod ring;
 mod supervisor;
 
