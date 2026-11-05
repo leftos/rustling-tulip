@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use gpui::{TestAppContext, px};
 use protocol::{
-    AccountSnapshot, AutoSwitchState, AutoSwitchStrategy, ClientMessage, ConnectionOrigin,
+    AccountLoginState, AccountSnapshot, AutoSwitchState, AutoSwitchStrategy, ClientMessage,
+    ConnectionOrigin, DaemonMessage,
 };
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
@@ -122,6 +123,8 @@ fn writes(h: &mut Harness<'_>) -> Vec<ClientMessage> {
                     | ClientMessage::SetAccountOrder { .. }
                     | ClientMessage::SetAutoSwitch { .. }
                     | ClientMessage::SetAutoSwitchRules { .. }
+                    | ClientMessage::StartAccountLogin { .. }
+                    | ClientMessage::CancelAccountLogin { .. }
             )
         })
         .collect()
@@ -144,7 +147,9 @@ fn request_id(msg: &ClientMessage) -> String {
         | ClientMessage::SetAccountAlias { request_id, .. }
         | ClientMessage::SetAccountOrder { request_id, .. }
         | ClientMessage::SetAutoSwitch { request_id, .. }
-        | ClientMessage::SetAutoSwitchRules { request_id, .. } => request_id.clone(),
+        | ClientMessage::SetAutoSwitchRules { request_id, .. }
+        | ClientMessage::StartAccountLogin { request_id }
+        | ClientMessage::CancelAccountLogin { request_id } => request_id.clone(),
         _ => None,
     }
     .expect("an account write carries a request id")
@@ -174,6 +179,17 @@ fn settings_focus(h: &mut Harness<'_>) -> Option<&'static str> {
 fn press(h: &mut Harness<'_>, selector: &str) {
     h.scroll_into_view("settings-content", selector);
     h.click_on(selector);
+}
+
+/// The daemon's `AccountLogin` for `state`, carrying `message`, echoing
+/// `id` when it is the direct answer to the requester.
+fn login_msg(state: AccountLoginState, message: Option<&str>, id: Option<&str>) -> DaemonMessage {
+    DaemonMessage::AccountLogin {
+        state,
+        session_id: Some("login-1".to_owned()),
+        message: message.map(str::to_owned),
+        request_id: id.map(str::to_owned),
+    }
 }
 
 #[gpui::test]
@@ -648,4 +664,183 @@ fn leaving_an_untouched_alias_field_does_not_undo_a_rename_from_elsewhere(cx: &m
         writes(&mut h).is_empty(),
         "the field the user never edited sends nothing"
     );
+}
+
+/// The running login's status line, as the page shows it.
+const LOGIN_RUNNING_LINE: &str =
+    "Finish the login in its terminal session, “Log in a new account”, in the sidebar.";
+
+#[gpui::test]
+fn log_in_sends_a_start_and_shows_the_running_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    assert!(
+        !drawn(&mut h, "settings-accounts-cancel-login"),
+        "no Cancel before a login runs"
+    );
+    press(&mut h, "settings-accounts-login");
+    let sent = one_write(&mut h);
+    assert!(
+        matches!(sent, ClientMessage::StartAccountLogin { .. }),
+        "{sent:?}"
+    );
+    h.send(login_msg(
+        AccountLoginState::Started,
+        None,
+        Some(&request_id(&sent)),
+    ));
+    assert!(drawn(
+        &mut h,
+        &format!("settings-accounts-login-status={LOGIN_RUNNING_LINE}")
+    ));
+    assert!(
+        drawn(&mut h, "settings-accounts-cancel-login"),
+        "Cancel shows while the login runs"
+    );
+    press(&mut h, "settings-accounts-login");
+    assert!(
+        writes(&mut h).is_empty(),
+        "Log in waits for the running login"
+    );
+}
+
+#[gpui::test]
+fn cancel_login_sends_a_cancel_and_shows_cancelled(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-login");
+    let sent = one_write(&mut h);
+    h.send(login_msg(
+        AccountLoginState::Started,
+        None,
+        Some(&request_id(&sent)),
+    ));
+    press(&mut h, "settings-accounts-cancel-login");
+    let cancel = one_write(&mut h);
+    assert!(
+        matches!(cancel, ClientMessage::CancelAccountLogin { .. }),
+        "{cancel:?}"
+    );
+    h.send(login_msg(
+        AccountLoginState::Cancelled,
+        None,
+        Some(&request_id(&cancel)),
+    ));
+    assert!(drawn(
+        &mut h,
+        "settings-accounts-login-status=The login was cancelled."
+    ));
+    press(&mut h, "settings-accounts-login");
+    assert!(
+        matches!(one_write(&mut h), ClientMessage::StartAccountLogin { .. }),
+        "the run ended and Log in is live again"
+    );
+}
+
+#[gpui::test]
+fn a_failed_login_shows_its_message_and_screen_lines(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-login");
+    let sent = one_write(&mut h);
+    h.send(login_msg(
+        AccountLoginState::Started,
+        None,
+        Some(&request_id(&sent)),
+    ));
+    h.send(login_msg(
+        AccountLoginState::Failed,
+        Some("the login ended\nscreen line two"),
+        None,
+    ));
+    assert!(drawn(
+        &mut h,
+        "settings-accounts-login-status=The login failed: the login ended"
+    ));
+    assert!(
+        drawn(&mut h, "settings-accounts-login-status=screen line two"),
+        "the screen's later lines show too"
+    );
+    press(&mut h, "settings-accounts-login");
+    assert!(
+        matches!(one_write(&mut h), ClientMessage::StartAccountLogin { .. }),
+        "the failed run no longer holds Log in"
+    );
+}
+
+#[gpui::test]
+fn a_succeeded_login_reenables_the_button(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-login");
+    let sent = one_write(&mut h);
+    h.send(login_msg(
+        AccountLoginState::Started,
+        None,
+        Some(&request_id(&sent)),
+    ));
+    h.send(login_msg(AccountLoginState::Succeeded, None, None));
+    assert!(drawn(
+        &mut h,
+        "settings-accounts-login-status=The new account was added."
+    ));
+    press(&mut h, "settings-accounts-login");
+    let sent = one_write(&mut h);
+    assert!(
+        matches!(sent, ClientMessage::StartAccountLogin { .. }),
+        "the button works again: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_busy_start_shows_the_refusal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-login");
+    let sent = one_write(&mut h);
+    h.send(DaemonMessage::Error {
+        code: Some(protocol::error_codes::ACCOUNT_BUSY.to_owned()),
+        message: "another login is running".to_owned(),
+        request_id: Some(request_id(&sent)),
+    });
+    assert!(drawn(
+        &mut h,
+        "settings-accounts-error=another login is running"
+    ));
+    press(&mut h, "settings-accounts-login");
+    assert!(
+        matches!(one_write(&mut h), ClientMessage::StartAccountLogin { .. }),
+        "the button is live again after the refusal"
+    );
+}
+
+#[gpui::test]
+fn login_controls_are_locked_on_a_remote_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let mut features = daemon_features();
+    features.push(protocol::FEATURE_ACCOUNTS.to_owned());
+    let mut conn = Connection::for_target(Target::Local);
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    conn.on_welcome(PROTOCOL, features, Some(ConnectionOrigin::Remote));
+    h.event(NetEvent::State(conn));
+    h.send_welcome(PROTOCOL);
+    let id = listed(&mut h);
+    h.send(accounts_reply(trio(), Some(auto_switch(None)), &id));
+    on_page(&mut h, trio(), Some(auto_switch(None)));
+
+    press(&mut h, "settings-accounts-login");
+    assert!(
+        writes(&mut h).is_empty(),
+        "Log in is locked on a remote origin"
+    );
+    h.send(login_msg(AccountLoginState::Started, None, None));
+    press(&mut h, "settings-accounts-cancel-login");
+    assert!(writes(&mut h).is_empty(), "Cancel login is locked too");
 }

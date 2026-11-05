@@ -1,6 +1,7 @@
 //! The Settings › Accounts page: This PC's saved accounts, one row each with
 //! Switch, the alias field, Up and Down and Remove, then Add current login,
-//! and the auto-switch block. Every control sends its account write at once
+//! Log in a new account and its Cancel, the running login's status line, and
+//! the auto-switch block. Every control sends its account write at once
 //! through [`RootView::send_account_write`] (never Apply), the page shows
 //! what the next `Accounts` or `AccountsUpdated` carries, and every write
 //! control waits while a write is pending. The texts and the rows' actions
@@ -38,6 +39,8 @@ const REMOTE_ORIGIN_TIP: &str = "Only on the machine running the daemon";
 const AUTO_MISSING: &str = "Auto-switch is not available on this host";
 const AUTO_TOGGLE_LABEL: &str = "Switch accounts automatically";
 const ADD_LOGIN_LABEL: &str = "Add current login";
+const LOG_IN_LABEL: &str = "Log in a new account…";
+const CANCEL_LOGIN_LABEL: &str = "Cancel login";
 const UP_LABEL: &str = "Up";
 const DOWN_LABEL: &str = "Down";
 const REMOVE_LABEL: &str = "Remove";
@@ -60,6 +63,8 @@ pub(crate) enum AccountsControl {
     Down(u32),
     Remove(u32),
     AddLogin,
+    LogIn,
+    CancelLogin,
     AutoSwitch,
     ThresholdDown,
     ThresholdUp,
@@ -83,6 +88,8 @@ impl AccountsControl {
             Self::Down(n) => format!("down-{n}"),
             Self::Remove(n) => format!("remove-{n}"),
             Self::AddLogin => "add-login".to_owned(),
+            Self::LogIn => "login".to_owned(),
+            Self::CancelLogin => "cancel-login".to_owned(),
             Self::AutoSwitch => "auto".to_owned(),
             Self::ThresholdDown => "threshold-down".to_owned(),
             Self::ThresholdUp => "threshold-up".to_owned(),
@@ -109,7 +116,13 @@ impl AccountsControl {
     const fn admin(self) -> bool {
         matches!(
             self,
-            Self::Alias(_) | Self::Up(_) | Self::Down(_) | Self::Remove(_) | Self::AddLogin
+            Self::Alias(_)
+                | Self::Up(_)
+                | Self::Down(_)
+                | Self::Remove(_)
+                | Self::AddLogin
+                | Self::LogIn
+                | Self::CancelLogin
         )
     }
 }
@@ -366,6 +379,7 @@ impl RootView {
         let writing = self.accounts.writing(&host);
         let locked = self.accounts_admin_locked();
         let switching = self.accounts.switching(&host);
+        let running = self.accounts.login_running(&host);
         let list = self.accounts.accounts(&host);
         let now = Utc::now();
         let admin = !writing && !locked;
@@ -389,6 +403,10 @@ impl RootView {
             }
         }
         controls.push((AccountsControl::AddLogin, admin));
+        controls.push((AccountsControl::LogIn, admin && !running));
+        if running {
+            controls.push((AccountsControl::CancelLogin, admin));
+        }
         if let Some(auto) = self.accounts.auto(&host) {
             let live = !writing;
             let threshold = |up| accounts::threshold_step(auto.threshold_pct, up).is_some();
@@ -472,6 +490,25 @@ impl RootView {
                     &host,
                     WriteAction::AddLogin,
                     |request_id| ClientMessage::AddCurrentLogin { request_id },
+                    cx,
+                );
+            }
+            AccountsControl::LogIn => {
+                let sent = self.send_account_write(
+                    &host,
+                    WriteAction::LogIn,
+                    |request_id| ClientMessage::StartAccountLogin { request_id },
+                    cx,
+                );
+                if sent {
+                    self.accounts.clear_login(&host);
+                }
+            }
+            AccountsControl::CancelLogin => {
+                self.send_account_write(
+                    &host,
+                    WriteAction::CancelLogin,
+                    |request_id| ClientMessage::CancelAccountLogin { request_id },
                     cx,
                 );
             }
@@ -575,7 +612,9 @@ impl RootView {
             | AccountsControl::Up(_)
             | AccountsControl::Down(_)
             | AccountsControl::Remove(_)
-            | AccountsControl::AddLogin => {}
+            | AccountsControl::AddLogin
+            | AccountsControl::LogIn
+            | AccountsControl::CancelLogin => {}
         }
     }
 
@@ -632,16 +671,54 @@ impl RootView {
                 self.page_row(&row, actions, page, cx)
             })
             .collect::<Vec<_>>();
+        let live = !page.writing && !page.locked;
+        let running = self.accounts.login_running(&host);
         let add = locked_tip(
             settings_button(
                 AccountsControl::AddLogin.control(),
                 ADD_LOGIN_LABEL,
-                !page.writing && !page.locked,
+                live,
                 focused,
                 cx,
             ),
             page.locked,
         );
+        let log_in = locked_tip(
+            settings_button(
+                AccountsControl::LogIn.control(),
+                LOG_IN_LABEL,
+                live && !running,
+                focused,
+                cx,
+            ),
+            page.locked,
+        );
+        let cancel = running.then(|| {
+            locked_tip(
+                settings_button(
+                    AccountsControl::CancelLogin.control(),
+                    CANCEL_LOGIN_LABEL,
+                    live,
+                    focused,
+                    cx,
+                ),
+                page.locked,
+            )
+        });
+        let buttons = div()
+            .flex()
+            .gap(px(8.0))
+            .child(add)
+            .child(log_in)
+            .children(cancel);
+        let status = accounts::login_status(self.accounts.login(&host)).map(|text| {
+            let lines = text.lines().map(|line| {
+                let line = line.to_owned();
+                hint(ui_text_size(cx), line.clone(), &t)
+                    .driver_id(move || format!("settings-accounts-login-status={line}"))
+            });
+            div().flex().flex_col().gap(px(2.0)).children(lines)
+        });
         let label = self
             .sidebar
             .agents(&host)
@@ -651,7 +728,8 @@ impl RootView {
             .driver_id(|| "settings-accounts-add-login-note".to_owned());
         let table = section(ui_text_size(cx), ui_weight_shift(cx), TABLE_SECTION)
             .children(rows)
-            .child(div().flex().child(add))
+            .child(buttons)
+            .children(status)
             .child(note);
         content.push(table.into_any_element());
         content.push(self.auto_section(page, cx).into_any_element());

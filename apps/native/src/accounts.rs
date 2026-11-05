@@ -18,8 +18,8 @@ use std::fmt::Display;
 
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use protocol::{
-    AccountEventKind, AccountSnapshot, AccountUsageStatus, AccountUsageWindow, AutoSwitchState,
-    AutoSwitchStrategy, DaemonMessage,
+    AccountEventKind, AccountLoginState, AccountSnapshot, AccountUsageStatus, AccountUsageWindow,
+    AutoSwitchState, AutoSwitchStrategy, DaemonMessage,
 };
 
 use crate::target::HostKey;
@@ -64,6 +64,15 @@ const FORECAST_WINDOWS: [(u32, &str); 4] =
     [(30, "30 min"), (60, "1 h"), (120, "2 h"), (180, "3 h")];
 /// What a Settings page row says in Remove's place on the account in use.
 pub(crate) const SWITCH_FIRST: &str = "Switch first";
+/// The page's line while a daemon-driven login runs.
+const LOGIN_RUNNING_LINE: &str =
+    "Finish the login in its terminal session, “Log in a new account”, in the sidebar.";
+/// The page's line after a login added its account.
+const LOGIN_SUCCEEDED: &str = "The new account was added.";
+/// The page's line after a login failed with no message.
+const LOGIN_FAILED: &str = "The login failed.";
+/// The page's line after a login was cancelled with no message.
+const LOGIN_CANCELLED: &str = "The login was cancelled.";
 
 /// An ask sent to a host: its request id and the host's update count when
 /// it was sent.
@@ -85,11 +94,30 @@ struct WriteAsk {
 pub(crate) enum WriteAction {
     Switch(u32),
     AddLogin,
+    LogIn,
+    CancelLogin,
     Remove(u32),
     Alias(u32),
     Order,
     AutoSwitch,
     Rules,
+}
+
+/// A daemon-driven login on one host, until the next `LogIn` press or the
+/// host's `Welcome`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Login {
+    /// The login's terminal session runs; the user finishes it there.
+    Running {
+        /// Its session, as the daemon named it.
+        session_id: Option<String>,
+    },
+    /// The login ended with `state` and `message`, which the page shows as
+    /// its last result.
+    Ended {
+        state: AccountLoginState,
+        message: Option<String>,
+    },
 }
 
 /// One host's accounts.
@@ -105,6 +133,8 @@ struct HostAccounts {
     write: Option<WriteAsk>,
     /// The daemon's refusal of the last ask, until the next reply lands.
     error: Option<String>,
+    /// The daemon-driven login this connection last heard of.
+    login: Option<Login>,
 }
 
 /// What a fold did: whether it changed what is shown, and whether the
@@ -184,7 +214,69 @@ impl AccountsState {
                 auto,
                 request_id,
             } => self.reply(host, request_id.as_deref(), accounts, auto.as_ref()),
+            DaemonMessage::AccountLogin {
+                state,
+                session_id,
+                message,
+                request_id,
+            } => self.login_event(
+                host,
+                *state,
+                session_id.as_deref(),
+                message.as_deref(),
+                request_id.as_deref(),
+            ),
             _ => Folded::default(),
+        }
+    }
+
+    /// The login event `state`, `message`, from `host`: the direct answer to
+    /// the pending write `request_id` ends that write, `Started` starts the
+    /// run the page shows and a terminal state ends it.
+    fn login_event(
+        &mut self,
+        host: &HostKey,
+        state: AccountLoginState,
+        session_id: Option<&str>,
+        message: Option<&str>,
+        request_id: Option<&str>,
+    ) -> Folded {
+        let Some(host_state) = self.hosts.get_mut(host) else {
+            return Folded::default();
+        };
+        let mut changed = false;
+        if request_id.is_some_and(|id| {
+            host_state
+                .write
+                .as_ref()
+                .is_some_and(|write| write.ask.request_id == id)
+        }) {
+            host_state.write = None;
+            changed = true;
+        }
+        match state {
+            AccountLoginState::Started => {
+                if !matches!(host_state.login, Some(Login::Running { .. })) {
+                    host_state.login = Some(Login::Running {
+                        session_id: session_id.map(str::to_owned),
+                    });
+                    changed = true;
+                }
+            }
+            AccountLoginState::Succeeded
+            | AccountLoginState::Failed
+            | AccountLoginState::Cancelled => {
+                host_state.login = Some(Login::Ended {
+                    state,
+                    message: message.map(str::to_owned),
+                });
+                changed = true;
+            }
+            AccountLoginState::Unknown => {}
+        }
+        Folded {
+            changed,
+            ask_again: false,
         }
     }
 
@@ -313,6 +405,45 @@ impl AccountsState {
         self.hosts
             .get(host)
             .is_some_and(|state| state.write.is_some())
+    }
+
+    /// The daemon-driven login `host` last heard of, until the next `LogIn`
+    /// press or its `Welcome`.
+    pub(crate) fn login(&self, host: &HostKey) -> Option<&Login> {
+        self.hosts.get(host)?.login.as_ref()
+    }
+
+    /// Whether a daemon-driven login runs on `host`.
+    pub(crate) fn login_running(&self, host: &HostKey) -> bool {
+        matches!(self.login(host), Some(Login::Running { .. }))
+    }
+
+    /// Forgets the login `host` last ran, so the page's last result goes.
+    pub(crate) fn clear_login(&mut self, host: &HostKey) {
+        if let Some(state) = self.hosts.get_mut(host) {
+            state.login = None;
+        }
+    }
+}
+
+/// The status line the page shows for `login`, or `None` before the host
+/// ran a login: the run's state, and the daemon's message when it carried
+/// one.
+pub(crate) fn login_status(login: Option<&Login>) -> Option<String> {
+    match login? {
+        Login::Running { .. } => Some(LOGIN_RUNNING_LINE.to_owned()),
+        Login::Ended { state, message } => match state {
+            AccountLoginState::Succeeded => Some(LOGIN_SUCCEEDED.to_owned()),
+            AccountLoginState::Failed => Some(match message {
+                Some(message) => format!("The login failed: {message}"),
+                None => LOGIN_FAILED.to_owned(),
+            }),
+            AccountLoginState::Cancelled => Some(match message {
+                Some(message) => format!("The login was cancelled: {message}"),
+                None => LOGIN_CANCELLED.to_owned(),
+            }),
+            AccountLoginState::Started | AccountLoginState::Unknown => None,
+        },
     }
 }
 
@@ -925,15 +1056,17 @@ pub(crate) fn age_text(elapsed: TimeDelta) -> String {
 mod tests {
     use chrono::{DateTime, TimeDelta, TimeZone, Utc};
     use protocol::{
-        AccountEventKind, AccountKind, AccountSnapshot, AccountUsageStatus, AccountUsageWindow,
-        AutoSwitchState, AutoSwitchStrategy, DaemonMessage, FleetVerdict, FleetWindow,
+        AccountEventKind, AccountKind, AccountLoginState, AccountSnapshot, AccountUsageStatus,
+        AccountUsageWindow, AutoSwitchState, AutoSwitchStrategy, DaemonMessage, FleetVerdict,
+        FleetWindow,
     };
 
     use super::{
         AccountsState, AliasChange, Level, RELOGIN_LINE, Removal, RowActions, STORE_READ_ONLY,
         Segment, Tag, WriteAction, account_toast, add_login_note, age_text, alias_change, bar,
-        checked_line, chip, cooldown_segments, forecast, header, hysteresis_step, moved_order,
-        paused_line, row, row_actions, strategy_segments, threshold_step, window_segments,
+        checked_line, chip, cooldown_segments, forecast, header, hysteresis_step, login_status,
+        moved_order, paused_line, row, row_actions, strategy_segments, threshold_step,
+        window_segments,
     };
     use crate::target::HostKey;
 
@@ -1013,6 +1146,36 @@ mod tests {
             features: Vec::new(),
             daemon_id: None,
             origin: None,
+        }
+    }
+
+    /// The daemon's direct answer to the requester, `id` echoed.
+    fn login_reply(state: AccountLoginState, id: &str) -> DaemonMessage {
+        DaemonMessage::AccountLogin {
+            state,
+            session_id: Some("login-1".to_owned()),
+            message: None,
+            request_id: Some(id.to_owned()),
+        }
+    }
+
+    /// The daemon's broadcast of `state`, which every connection hears.
+    fn login_seen(state: AccountLoginState) -> DaemonMessage {
+        DaemonMessage::AccountLogin {
+            state,
+            session_id: None,
+            message: None,
+            request_id: None,
+        }
+    }
+
+    /// The broadcast of `state` carrying `message`.
+    fn login_said(state: AccountLoginState, message: &str) -> DaemonMessage {
+        DaemonMessage::AccountLogin {
+            state,
+            session_id: None,
+            message: Some(message.to_owned()),
+            request_id: None,
         }
     }
 
@@ -1193,6 +1356,94 @@ mod tests {
         state.sent_list(&host, "l1".to_owned());
         state.fold(&host, &reply(Some("l1"), vec![active(1)]));
         assert_eq!(state.error(&host), None, "the next reply clears it");
+    }
+
+    #[test]
+    fn a_login_started_reply_clears_the_write_and_runs() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.sent_write(&host, WriteAction::LogIn, "w1".to_owned());
+        let folded = state.fold(&host, &login_reply(AccountLoginState::Started, "w1"));
+        assert!(folded.changed, "the start lands");
+        assert!(!folded.ask_again);
+        assert!(!state.writing(&host), "the start answered the write");
+        assert!(state.login_running(&host), "the login runs");
+        assert_eq!(
+            login_status(state.login(&host)).as_deref(),
+            Some(
+                "Finish the login in its terminal session, “Log in a new account”, in the sidebar."
+            )
+        );
+    }
+
+    #[test]
+    fn a_started_broadcast_after_the_reply_changes_nothing() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.sent_write(&host, WriteAction::LogIn, "w1".to_owned());
+        state.fold(&host, &login_reply(AccountLoginState::Started, "w1"));
+        let folded = state.fold(&host, &login_seen(AccountLoginState::Started));
+        assert!(!folded.changed, "the run is already shown");
+        assert!(state.login_running(&host));
+    }
+
+    #[test]
+    fn a_terminal_login_state_ends_the_run_with_its_message() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.sent_write(&host, WriteAction::LogIn, "w1".to_owned());
+        state.fold(&host, &login_reply(AccountLoginState::Started, "w1"));
+        let folded = state.fold(
+            &host,
+            &login_said(AccountLoginState::Failed, "bad login\nsecond line"),
+        );
+        assert!(folded.changed, "the failure shows");
+        assert!(!state.login_running(&host), "the run ended");
+        assert_eq!(
+            login_status(state.login(&host)).as_deref(),
+            Some("The login failed: bad login\nsecond line")
+        );
+    }
+
+    #[test]
+    fn a_cancel_answered_by_the_terminal_state_clears_the_write() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.sent_write(&host, WriteAction::LogIn, "w1".to_owned());
+        state.fold(&host, &login_reply(AccountLoginState::Started, "w1"));
+        state.sent_write(&host, WriteAction::CancelLogin, "c1".to_owned());
+        let folded = state.fold(&host, &login_reply(AccountLoginState::Cancelled, "c1"));
+        assert!(folded.changed, "the cancel's answer lands");
+        assert!(
+            !state.writing(&host),
+            "the terminal state answered the write"
+        );
+        assert_eq!(
+            login_status(state.login(&host)).as_deref(),
+            Some("The login was cancelled.")
+        );
+    }
+
+    #[test]
+    fn an_unknown_login_state_changes_nothing() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.sent_write(&host, WriteAction::LogIn, "w1".to_owned());
+        state.fold(&host, &login_reply(AccountLoginState::Started, "w1"));
+        let folded = state.fold(&host, &login_seen(AccountLoginState::Unknown));
+        assert!(!folded.changed, "an unknown state shows nothing");
+        assert!(state.login_running(&host), "the run still shows");
+    }
+
+    #[test]
+    fn a_welcome_forgets_the_login() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.sent_write(&host, WriteAction::LogIn, "w1".to_owned());
+        state.fold(&host, &login_reply(AccountLoginState::Started, "w1"));
+        assert!(state.fold(&host, &welcome()).changed);
+        assert_eq!(state.login(&host), None, "the old connection's login goes");
+        assert_eq!(login_status(state.login(&host)), None);
     }
 
     #[test]

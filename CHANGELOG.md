@@ -8,6 +8,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - On Windows and macOS hosts, the footer shows the Claude account in use and its usage; click it to switch accounts, set auto-switch and see when they run dry.
 - Settings › Accounts lists your saved accounts to switch, rename, reorder, remove or add, and sets auto-switch's threshold, cooldown, strategy and forecast window.
+- Settings › Accounts can log in a new account: the sign-in runs in a terminal session in the sidebar, and the account joins the list once it ends.
 - A toast tells you when auto-switch changes accounts, finds every account used up, or stops; Settings › Notifications › Account switches turns them off.
 - Settings › General picks each host's default shell for new sessions, from its installed shells or a custom command.
 - The new-session dialog's Target list narrows as you type, matching repo and workspace names in part, so "ya" finds yaat.
