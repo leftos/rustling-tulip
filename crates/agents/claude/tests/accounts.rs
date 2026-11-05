@@ -13,11 +13,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use agent_api::{AccountKindRow, AccountsConfig, AccountsService, Agent, PollScope, UsageStatus};
+use agent_api::{
+    AccountKindRow, AccountsConfig, AccountsFailure, AccountsFailureKind, AccountsService, Agent,
+    PollScope, UsageStatus,
+};
 use agent_claude::accounts::{BODY_CAP, ProfileClient, RefreshClient, UsageClient};
 use claude_accounts::{
-    AccessToken, AccountLock, AccountsRoot, CredentialBlob, ProfileTransport, RefreshError, Store,
-    TransportError, UsageTransport, refresh_grant,
+    AccessToken, AccountLock, AccountsRoot, ClaudePaths, CredentialBlob, ProfileTransport,
+    RefreshError, Store, TransportError, UsageTransport, refresh_grant,
 };
 use serde_json::json;
 
@@ -706,4 +709,394 @@ fn snapshot_status_follows_the_latest_failed_poll() {
         snapshot.accounts[0].usage.five_hour.is_some(),
         "the saved reading is still shown"
     );
+}
+
+/// The kind of the failure `result` must be.
+fn failure_kind<T: std::fmt::Debug>(result: Result<T, AccountsFailure>) -> AccountsFailureKind {
+    result.expect_err("the write is refused").kind
+}
+
+/// The organization every test login below is in.
+const TEST_ORG: &str = "00000000-0000-4000-8000-0000000000a1";
+
+/// Claude Code at `home` logged in as `user<number>@example.com` in
+/// [`TEST_ORG`], with `fake-access-<number>` as its live credential when
+/// `with_credential`.
+fn log_in(home: &Path, number: u32, with_credential: bool) {
+    std::fs::create_dir_all(home).expect("Claude Code's home can be made");
+    let global = home.join(".claude.json");
+    let oauth = json!({
+        "emailAddress": format!("user{number}@example.com"),
+        "organizationUuid": TEST_ORG,
+        "accountUuid": format!("00000000-0000-4000-8000-00000000001{number}"),
+        "organizationName": "Org"
+    });
+    std::fs::write(&global, json!({"oauthAccount": oauth}).to_string())
+        .expect("the global config can be written");
+    if with_credential {
+        let credential = json!({"claudeAiOauth": {
+            "accessToken": format!("fake-access-{number}"),
+            "refreshToken": format!("fake-refresh-{number}"),
+            "expiresAt": 4_102_444_800_000_u64,
+            "scopes": ["user:inference", "user:profile"],
+            "subscriptionType": "max"
+        }});
+        let paths = ClaudePaths::new(home.to_path_buf(), global);
+        std::fs::write(paths.credentials_file(), credential.to_string())
+            .expect("the live credential can be written");
+    }
+}
+
+/// A profile endpoint naming `user<number>@example.com` in [`TEST_ORG`], as
+/// [`log_in`] logs in: its origin, and the requests it reads, which it
+/// answers only while the receiver is kept.
+fn profile_of(number: u32) -> (String, mpsc::Receiver<String>) {
+    let body = json!({
+        "account": {
+            "uuid": format!("00000000-0000-4000-8000-00000000001{number}"),
+            "email": format!("user{number}@example.com")
+        },
+        "organization": {"uuid": TEST_ORG}
+    })
+    .to_string();
+    serve(http("200 OK", &[], body.as_bytes()))
+}
+
+/// A store holding accounts 1 and 2 in that order, 1 active, and the service
+/// over it with Claude Code's home at `dir/claude` and its requests sent to a
+/// local server.
+fn two_accounts(dir: &Path) -> Arc<dyn AccountsService> {
+    let root = write_store(dir, &[1, 2], &[1, 2], 1, &json!({}));
+    service_at(root, dir.join("claude"), Some(&profile_of(1).0))
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn set_alias_renames_and_reports_a_change() {
+    let dir = scratch("set_alias_renames_and_reports_a_change");
+    let service = two_accounts(&dir);
+
+    let changed = service
+        .set_alias(2, Some("work".to_owned()))
+        .expect("the alias is set");
+
+    assert!(changed);
+    let snapshot = service.snapshot().expect("the store reads");
+    let aliases: Vec<Option<&str>> = snapshot
+        .accounts
+        .iter()
+        .map(|row| row.alias.as_deref())
+        .collect();
+    assert_eq!(aliases, [None, Some("work")]);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn set_alias_unchanged_reports_no_change() {
+    let dir = scratch("set_alias_unchanged_reports_no_change");
+    let service = two_accounts(&dir);
+    service
+        .set_alias(1, Some("home".to_owned()))
+        .expect("the alias is set");
+
+    let changed = service
+        .set_alias(1, Some("home".to_owned()))
+        .expect("the same alias is set again");
+
+    assert!(!changed);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn set_order_with_a_wrong_permutation_is_refused() {
+    let dir = scratch("set_order_with_a_wrong_permutation_is_refused");
+    let service = two_accounts(&dir);
+
+    let failure = service
+        .set_order(vec![1, 3])
+        .expect_err("the order names an account the store does not hold");
+
+    assert_eq!(failure.kind, AccountsFailureKind::Refused, "{failure:?}");
+    assert_eq!(failure.code, "order_mismatch");
+    let snapshot = service.snapshot().expect("the store reads");
+    let numbers: Vec<u32> = snapshot.accounts.iter().map(|row| row.number).collect();
+    assert_eq!(numbers, [1, 2]);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn remove_unknown_account_is_unknown() {
+    let dir = scratch("remove_unknown_account_is_unknown");
+    let service = two_accounts(&dir);
+
+    let failure = service
+        .remove_account(7)
+        .expect_err("no account has number 7");
+
+    assert_eq!(
+        failure.kind,
+        AccountsFailureKind::UnknownAccount,
+        "{failure:?}"
+    );
+    assert_eq!(failure.code, "unknown_account");
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn remove_the_active_account_is_refused() {
+    let dir = scratch("remove_the_active_account_is_refused");
+    let service = two_accounts(&dir);
+
+    let failure = service
+        .remove_account(1)
+        .expect_err("the active account is not removed");
+
+    assert_eq!(failure.kind, AccountsFailureKind::Refused, "{failure:?}");
+    assert_eq!(failure.code, "active_account");
+    assert!(
+        failure.message.contains("switch to another account first"),
+        "{failure:?}"
+    );
+    let snapshot = service.snapshot().expect("the store reads");
+    assert_eq!(snapshot.accounts.len(), 2);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn writes_after_begin_shutdown_are_draining() {
+    let dir = scratch("writes_after_begin_shutdown_are_draining");
+    let service = two_accounts(&dir);
+    assert!(service.begin_shutdown(Duration::ZERO));
+
+    assert_eq!(
+        failure_kind(service.set_alias(2, Some("work".to_owned()))),
+        AccountsFailureKind::Draining
+    );
+    assert_eq!(
+        failure_kind(service.set_order(vec![2, 1])),
+        AccountsFailureKind::Draining
+    );
+    assert_eq!(
+        failure_kind(service.remove_account(2)),
+        AccountsFailureKind::Draining
+    );
+    let snapshot = service.snapshot().expect("the store reads");
+    let rows: Vec<(u32, Option<&str>)> = snapshot
+        .accounts
+        .iter()
+        .map(|row| (row.number, row.alias.as_deref()))
+        .collect();
+    assert_eq!(rows, [(1, None), (2, None)]);
+}
+
+/// A store holding accounts 1 and 2, 1 active, and Claude Code logged in as
+/// account 1 with no live credential, so a switch asks no oracle.
+fn logged_in_as_one(dir: &Path) -> Arc<dyn AccountsService> {
+    let root = write_roster_of_two(dir);
+    log_in(&dir.join("claude"), 1, false);
+    service_at(root, dir.join("claude"), Some(&profile_of(1).0))
+}
+
+/// A store at `dir/accounts` holding accounts 1 and 2 of [`TEST_ORG`], 1
+/// active, with no stored credential.
+fn write_roster_of_two(dir: &Path) -> PathBuf {
+    let root = dir.join("accounts");
+    std::fs::create_dir_all(root.join("cache")).expect("the store folders can be made");
+    let record = |number: u32| {
+        json!({
+            "email": format!("user{number}@example.com"),
+            "uuid": format!("00000000-0000-4000-8000-00000000001{number}"),
+            "orgUuid": TEST_ORG,
+            "orgName": "Org",
+            "added": "2026-09-01T10:00:00Z"
+        })
+    };
+    let accounts = json!({
+        "schemaVersion": 1,
+        "nextNumber": 3,
+        "order": [1, 2],
+        "active": 1,
+        "accounts": {"1": record(1), "2": record(2)}
+    });
+    std::fs::write(root.join("accounts.json"), accounts.to_string())
+        .expect("accounts.json can be written");
+    root
+}
+
+#[test]
+fn switch_to_the_active_account_is_a_no_op() {
+    let dir = scratch("switch_to_the_active_account_is_a_no_op");
+    let service = logged_in_as_one(&dir);
+    let global = dir.join("claude").join(".claude.json");
+    let before = std::fs::read(&global).expect("the global config reads");
+
+    let report = service
+        .switch_to(1)
+        .expect("a switch to the live login is a no-op");
+
+    assert!(!report.switched, "{report:?}");
+    assert_eq!(report.to.number, Some(1));
+    assert_eq!(report.to.email, "user1@example.com");
+    assert_eq!(
+        std::fs::read(&global).expect("the global config reads"),
+        before
+    );
+}
+
+#[test]
+fn switch_to_an_unknown_number_is_unknown_account() {
+    let dir = scratch("switch_to_an_unknown_number_is_unknown_account");
+    let service = logged_in_as_one(&dir);
+
+    let failure = service.switch_to(5).expect_err("no account has number 5");
+
+    assert_eq!(
+        failure.kind,
+        AccountsFailureKind::UnknownAccount,
+        "{failure:?}"
+    );
+    assert_eq!(failure.code, "unknown_account");
+}
+
+#[test]
+fn an_unknown_switch_sends_no_request() {
+    let dir = scratch("an_unknown_switch_sends_no_request");
+    let root = write_roster_of_two(&dir);
+    // Logged in as account 1 with a live credential its (missing) backup does
+    // not hold: a probe of the outgoing login would ask the profile endpoint.
+    log_in(&dir.join("claude"), 1, true);
+    let (origin, requests) = profile_of(1);
+    let service = service_at(root, dir.join("claude"), Some(&origin));
+
+    let failure = service.switch_to(5).expect_err("no account has number 5");
+
+    assert_eq!(
+        failure.kind,
+        AccountsFailureKind::UnknownAccount,
+        "{failure:?}"
+    );
+    let sent = requests.try_recv();
+    assert!(sent.is_err(), "the switch sent a request: {sent:?}");
+}
+
+/// While the test holds the account lock, an alias write waits on it; a
+/// shutdown begun meanwhile must not report idle while that write can still
+/// land. Either the write landed before the shutdown returned, or it was
+/// refused as draining and never lands.
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn begin_shutdown_waits_for_an_alias_write_in_flight() {
+    let dir = scratch("begin_shutdown_waits_for_an_alias_write_in_flight");
+    let root = write_store(&dir, &[1, 2], &[1, 2], 1, &json!({}));
+    let lock =
+        AccountLock::acquire(&AccountsRoot::new(root.clone())).expect("the account lock is free");
+    let service = service_at(root, dir.join("claude"), Some(&profile_of(1).0));
+    let alias_of_two = |service: &dyn AccountsService| {
+        service
+            .snapshot()
+            .expect("the store reads")
+            .accounts
+            .into_iter()
+            .find(|row| row.number == 2)
+            .and_then(|row| row.alias)
+    };
+
+    let writer = Arc::clone(&service);
+    let (written_tx, written_rx) = mpsc::channel();
+    let write = std::thread::spawn(move || {
+        let _ = written_tx.send(writer.set_alias(2, Some("work".to_owned())));
+    });
+    // Lets the writer reach its lock wait; the assertions below hold whatever
+    // the interleaving.
+    std::thread::sleep(Duration::from_millis(300));
+    let stopper = Arc::clone(&service);
+    let (stopped_tx, stopped_rx) = mpsc::channel();
+    let stop = std::thread::spawn(move || {
+        let idle = stopper.begin_shutdown(Duration::from_secs(30));
+        let _ = stopped_tx.send((idle, alias_of_two(stopper.as_ref())));
+    });
+    let (idle, alias_at_stop) = stopped_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the shutdown returns");
+    drop(lock);
+    let written = written_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the write returns");
+    write.join().expect("the writer did not panic");
+    stop.join().expect("the shutdown did not panic");
+
+    assert!(idle, "the shutdown did not report idle");
+    match written {
+        Ok(changed) => {
+            assert!(changed);
+            assert_eq!(
+                alias_at_stop.as_deref(),
+                Some("work"),
+                "the shutdown reported idle before the write landed"
+            );
+        }
+        Err(failure) => {
+            assert_eq!(failure.kind, AccountsFailureKind::Draining, "{failure:?}");
+            assert_eq!(alias_of_two(service.as_ref()), None);
+        }
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn add_current_login_adds_the_live_login() {
+    let dir = scratch("add_current_login_adds_the_live_login");
+    let home = dir.join("claude");
+    log_in(&home, 1, true);
+    let (origin, _requests) = profile_of(1);
+    let service = service_at(dir.join("accounts"), home, Some(&origin));
+
+    let number = service
+        .add_current_login()
+        .expect("the live login is added");
+
+    let snapshot = service.snapshot().expect("the store reads");
+    let rows: Vec<(u32, &str, bool)> = snapshot
+        .accounts
+        .iter()
+        .map(|row| (row.number, row.email.as_str(), row.active))
+        .collect();
+    assert_eq!(rows, [(number, "user1@example.com", true)]);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn switch_to_another_account_switches() {
+    let dir = scratch("switch_to_another_account_switches");
+    let root = dir.join("accounts");
+    let home = dir.join("claude");
+    log_in(&home, 1, true);
+    let (first_origin, _first_requests) = profile_of(1);
+    let first = service_at(root.clone(), home.clone(), Some(&first_origin))
+        .add_current_login()
+        .expect("login 1 is added");
+    log_in(&home, 2, true);
+    let (origin, _requests) = profile_of(2);
+    let service = service_at(root, home.clone(), Some(&origin));
+    let second = service.add_current_login().expect("login 2 is added");
+
+    let report = service.switch_to(first).expect("the switch runs");
+
+    assert!(report.switched, "{report:?}");
+    let from = report.from.as_ref().expect("the outgoing login is named");
+    assert_eq!(from.number, Some(second));
+    assert_eq!(from.email, "user2@example.com");
+    assert_eq!(report.to.number, Some(first));
+    assert_eq!(report.to.email, "user1@example.com");
+    let global =
+        std::fs::read_to_string(home.join(".claude.json")).expect("the global config reads");
+    assert!(global.contains("user1@example.com"), "{global}");
+    let snapshot = service.snapshot().expect("the store reads");
+    let active: Vec<u32> = snapshot
+        .accounts
+        .iter()
+        .filter(|row| row.active)
+        .map(|row| row.number)
+        .collect();
+    assert_eq!(active, [first]);
 }

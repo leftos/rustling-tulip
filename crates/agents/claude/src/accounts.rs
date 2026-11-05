@@ -14,17 +14,19 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use agent_api::{
-    AccountKindRow, AccountRow, AccountsConfig, AccountsError, AccountsService, AccountsSnapshot,
-    PollReport, PollScope, UsageRow, UsageStatus, UsageWindowRow,
+    AccountKindRow, AccountRef, AccountRow, AccountsConfig, AccountsError, AccountsFailure,
+    AccountsFailureKind, AccountsService, AccountsSnapshot, PollReport, PollScope, SwitchReport,
+    UsageRow, UsageStatus, UsageWindowRow,
 };
 use chrono::{DateTime, Utc};
 use claude_accounts::{
-    AccessToken, AccountKind, AccountRecord, AccountsRoot, ClaudePaths, Drain, FetchScope,
-    Identity, LockTiming, PROFILE_TIMEOUT, PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts,
-    ProfileTransport, RawProfile, RawToken, RawUsage, RefreshContext, RefreshRequest,
-    RefreshTransport, Secret, Settings, Store, StoreError, TOKEN_URL, TransportError,
-    USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable, UsageTransport,
-    UsageWindow, poll_with_refresh,
+    AccessToken, AccountKind, AccountLock, AccountRecord, AccountsRoot, CaptureError, ClaudePaths,
+    Drain, FetchScope, Identity, LockError, LockTiming, PROFILE_TIMEOUT, PROFILE_URL,
+    PROFILE_USER_AGENT, ProbeVerdicts, ProfileTransport, RawProfile, RawToken, RawUsage,
+    RefreshContext, RefreshRequest, RefreshTransport, Secret, Settings, Store, StoreError,
+    StoreErrorKind, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome, TOKEN_URL,
+    TransportError, USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable,
+    UsageTransport, UsageWindow, capture_live_login, poll_with_refresh, probe_outgoing,
 };
 use directories::UserDirs;
 use reqwest::blocking::{Body, Client, RequestBuilder};
@@ -101,7 +103,45 @@ impl ClaudeAccounts {
     }
 
     fn open_store(&self) -> Result<Store, AccountsError> {
-        Store::open(AccountsRoot::new(self.cfg.root.clone())).map_err(|error| store_error(&error))
+        self.store().map_err(|error| store_error(&error))
+    }
+
+    fn store(&self) -> Result<Store, StoreError> {
+        Store::open(AccountsRoot::new(self.cfg.root.clone()))
+    }
+
+    /// Runs `run` with the context a store transaction over `store` needs
+    /// (Claude Code's files, the refresh and profile transports, the drain,
+    /// the ownership verdicts, Claude Code's lock timing) and the usage
+    /// transport, all sending with the shared client.
+    ///
+    /// # Errors
+    ///
+    /// The client could not be built, or Claude Code's home could not be
+    /// found; `run` did not run then.
+    fn with_context<T>(
+        &self,
+        store: &Store,
+        run: impl FnOnce(&RefreshContext<'_>, &UsageClient) -> T,
+    ) -> Result<T, AccountsError> {
+        let origin = self.cfg.base_url.as_deref();
+        let client = self.client()?;
+        let usage = UsageClient::with_client(client.clone(), origin);
+        let refresh = RefreshClient::with_client(client.clone(), origin);
+        let profile = ProfileClient::with_client(client.clone(), origin);
+        let claude = self.claude_paths()?;
+        let context = RefreshContext {
+            store,
+            claude: &claude,
+            transport: &refresh,
+            drain: &self.drain,
+            securestorage_dir_set: std::env::var_os(SECURESTORAGE_DIR_VAR).is_some(),
+            clock: &jiff::Timestamp::now,
+            profile: &profile,
+            verdicts: &self.verdicts,
+            claude_locks: LockTiming::CLAUDE,
+        };
+        Ok(run(&context, &usage))
     }
 }
 
@@ -147,25 +187,10 @@ impl AccountsService for ClaudeAccounts {
             })?
             .autoswitch
             .to_engine();
-        let origin = self.cfg.base_url.as_deref();
-        let client = self.client()?;
-        let usage = UsageClient::with_client(client.clone(), origin);
-        let refresh = RefreshClient::with_client(client.clone(), origin);
-        let profile = ProfileClient::with_client(client.clone(), origin);
-        let claude = self.claude_paths()?;
-        let context = RefreshContext {
-            store: &store,
-            claude: &claude,
-            transport: &refresh,
-            drain: &self.drain,
-            securestorage_dir_set: std::env::var_os(SECURESTORAGE_DIR_VAR).is_some(),
-            clock: &jiff::Timestamp::now,
-            profile: &profile,
-            verdicts: &self.verdicts,
-            claude_locks: LockTiming::CLAUDE,
-        };
-        poll_with_refresh(&usage, &settings, &context, fetch)
-            .map_err(|error| AccountsError::new(error.to_string()))?;
+        self.with_context(&store, |context, usage| {
+            poll_with_refresh(usage, &settings, context, fetch)
+        })?
+        .map_err(|error| AccountsError::new(error.to_string()))?;
         let read = read_store(&store)?;
         let next_poll_in = if read.snapshot.accounts.is_empty() {
             None
@@ -185,6 +210,329 @@ impl AccountsService for ClaudeAccounts {
     fn begin_shutdown(&self, bound: Duration) -> bool {
         let _held = self.drain.start();
         self.drain.wait_idle(bound)
+    }
+
+    /// Reads the roster first, so an unknown number or the live login's own
+    /// is answered without a probe; otherwise probes the outgoing login and
+    /// switches with no precondition: a manual switch moves from whatever
+    /// login is live.
+    fn switch_to(&self, number: u32) -> Result<SwitchReport, AccountsFailure> {
+        let store = self.store().map_err(|error| store_failure(&error))?;
+        self.with_context(&store, |context, _| {
+            if let Some(answer) = roster_answer(context, number) {
+                return answer;
+            }
+            let probe = probe_outgoing(context);
+            claude_accounts::switch(context, number, &probe, None)
+                .map(switch_report)
+                .map_err(switch_failure)
+        })
+        .map_err(|error| service_failure(&error))?
+    }
+
+    fn add_current_login(&self) -> Result<u32, AccountsFailure> {
+        let store = self.store().map_err(|error| store_failure(&error))?;
+        self.with_context(&store, |context, _| capture_live_login(context))
+            .map_err(|error| service_failure(&error))?
+            .map(|outcome| outcome.number)
+            .map_err(|error| capture_failure(&error))
+    }
+
+    /// Holds a drain guard across the removal, which takes none of its own,
+    /// so a shutdown waits for it.
+    fn remove_account(&self, number: u32) -> Result<bool, AccountsFailure> {
+        let store = self.store().map_err(|error| store_failure(&error))?;
+        let claude = self
+            .claude_paths()
+            .map_err(|error| service_failure(&error))?;
+        let Ok(_work) = self.drain.begin() else {
+            return Err(draining());
+        };
+        store
+            .remove_account(&claude, number)
+            .map_err(|error| store_failure(&error))
+    }
+
+    /// Takes the account lock, then a drain guard held across the write, the
+    /// order a switch takes them in.
+    fn set_alias(&self, number: u32, alias: Option<String>) -> Result<bool, AccountsFailure> {
+        let store = self.store().map_err(|error| store_failure(&error))?;
+        let lock = AccountLock::acquire(store.root()).map_err(|error| lock_failure(&error))?;
+        let Ok(_work) = self.drain.begin() else {
+            return Err(draining());
+        };
+        store
+            .set_alias(&lock, number, alias.as_deref())
+            .map_err(|error| store_failure(&error))
+    }
+
+    /// As [`AccountsService::set_alias`]: the account lock, then a drain
+    /// guard held across the write.
+    fn set_order(&self, order: Vec<u32>) -> Result<bool, AccountsFailure> {
+        let store = self.store().map_err(|error| store_failure(&error))?;
+        let lock = AccountLock::acquire(store.root()).map_err(|error| lock_failure(&error))?;
+        let Ok(_work) = self.drain.begin() else {
+            return Err(draining());
+        };
+        store
+            .set_order(&lock, &order)
+            .map_err(|error| store_failure(&error))
+    }
+}
+
+/// The refusal of a write once [`AccountsService::begin_shutdown`] has begun.
+fn draining() -> AccountsFailure {
+    failure(
+        AccountsFailureKind::Draining,
+        "draining",
+        "the server is shutting down; nothing was written".to_owned(),
+    )
+}
+
+/// What the roster alone answers for a switch to `number`, before any probe:
+/// an unknown account for a number no switchable account has (or no roster),
+/// the no-op for the account Claude Code is logged in as now. `None` when the
+/// switch has to run, a roster that cannot be read included, which the
+/// switch itself refuses.
+fn roster_answer(
+    context: &RefreshContext<'_>,
+    number: u32,
+) -> Option<Result<SwitchReport, AccountsFailure>> {
+    let unknown = || {
+        let kind = SwitchErrorKind::UnknownAccount;
+        Err(failure(
+            AccountsFailureKind::UnknownAccount,
+            kind.as_str(),
+            format!("{kind} (account {number})"),
+        ))
+    };
+    let sequence = match context.store.read_sequence() {
+        Ok(Some(sequence)) => sequence,
+        Ok(None) => return Some(unknown()),
+        Err(_) => return None,
+    };
+    let Some(target) = sequence.switchable_account(number) else {
+        return Some(unknown());
+    };
+    if live_identity(context.claude)? != Identity::of(&target) {
+        return None;
+    }
+    let account = AccountRef {
+        number: Some(target.number),
+        email: target.email.as_str().to_owned(),
+    };
+    Some(Ok(SwitchReport {
+        switched: false,
+        from: Some(account.clone()),
+        to: account,
+        warnings: Vec::new(),
+    }))
+}
+
+/// The login `claude`'s global config names (its `oauthAccount` email and
+/// organization); `None` when the file is missing, unreadable or names none.
+fn live_identity(claude: &ClaudePaths) -> Option<Identity> {
+    let bytes = std::fs::read(claude.global_config()).ok()?;
+    let config: Value = serde_json::from_slice(&bytes).ok()?;
+    let account = config.get("oauthAccount")?;
+    let email = account
+        .get("emailAddress")
+        .and_then(Value::as_str)
+        .filter(|email| !email.is_empty())?;
+    let org_uuid = account
+        .get("organizationUuid")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    Some(Identity::new(email, org_uuid))
+}
+
+fn failure(kind: AccountsFailureKind, code: &str, message: String) -> AccountsFailure {
+    AccountsFailure {
+        kind,
+        code: code.to_owned(),
+        message,
+    }
+}
+
+fn account_ref(account: &SwitchAccount) -> AccountRef {
+    AccountRef {
+        number: account.number,
+        email: account.email.as_str().to_owned(),
+    }
+}
+
+fn switch_report(outcome: SwitchOutcome) -> SwitchReport {
+    SwitchReport {
+        switched: outcome.switched,
+        from: outcome.from.as_ref().map(account_ref),
+        to: account_ref(&outcome.to),
+        warnings: outcome.warnings,
+    }
+}
+
+/// A failure of the service around a write (its HTTP client, Claude Code's
+/// home), before the write ran.
+fn service_failure(error: &AccountsError) -> AccountsFailure {
+    failure(
+        AccountsFailureKind::Failed,
+        "unavailable",
+        error.message.clone(),
+    )
+}
+
+/// A switch's failure: the crate's kind name as the code, its text as the
+/// message, which for a failed rollback also says where the live login was
+/// left. A plain failure is logged whole first.
+fn switch_failure(error: SwitchError) -> AccountsFailure {
+    let kind = match error.kind() {
+        SwitchErrorKind::LocksBusy => AccountsFailureKind::Busy,
+        SwitchErrorKind::Draining => AccountsFailureKind::Draining,
+        SwitchErrorKind::UnknownAccount => AccountsFailureKind::UnknownAccount,
+        SwitchErrorKind::ApiKeyAccount
+        | SwitchErrorKind::StoreReadOnly
+        | SwitchErrorKind::UnknownSchema
+        | SwitchErrorKind::StoreUnmirrored
+        | SwitchErrorKind::PreconditionFailed
+        | SwitchErrorKind::AutoSwitchOff => AccountsFailureKind::Refused,
+        _ => AccountsFailureKind::Failed,
+    };
+    if kind == AccountsFailureKind::Failed {
+        tracing::error!(?error, "the account switch failed");
+    }
+    let mut message = error.to_string();
+    if error.kind() == SwitchErrorKind::RollbackFailed
+        && let Some(state) = error.login_state()
+    {
+        message.push_str("; the live login was left at: ");
+        message.push_str(state.as_str());
+    }
+    failure(kind, error.kind().as_str(), message)
+}
+
+/// A capture's failure: a `snake_case` name of the crate's variant as the code
+/// (a store refusal's own kind name), its text as the message. A plain
+/// failure is logged whole first.
+fn capture_failure(error: &CaptureError) -> AccountsFailure {
+    let (kind, code) = match error {
+        CaptureError::NoLogin => (AccountsFailureKind::Refused, "no_login"),
+        CaptureError::ApiKeyLogin => (AccountsFailureKind::Refused, "api_key_login"),
+        CaptureError::NoRefreshToken => (AccountsFailureKind::Refused, "no_refresh_token"),
+        CaptureError::UnsafeEmail => (AccountsFailureKind::Refused, "unsafe_email"),
+        CaptureError::StoredAsApiKey => (AccountsFailureKind::Refused, "stored_as_api_key"),
+        CaptureError::AnotherAccountId { .. } => {
+            (AccountsFailureKind::Refused, "another_account_id")
+        }
+        CaptureError::AccountExists => (AccountsFailureKind::Refused, "account_exists"),
+        CaptureError::NumbersExhausted => (AccountsFailureKind::Refused, "numbers_exhausted"),
+        CaptureError::Draining => (AccountsFailureKind::Draining, "draining"),
+        CaptureError::LocksBusy => (AccountsFailureKind::Busy, "locks_busy"),
+        CaptureError::LiveUnreadable => (AccountsFailureKind::Failed, "live_unreadable"),
+        CaptureError::Unverified => (AccountsFailureKind::Failed, "unverified"),
+        CaptureError::LoginChanged => (AccountsFailureKind::Failed, "login_changed"),
+        CaptureError::StoredUnopenable { .. } => (AccountsFailureKind::Failed, "stored_unopenable"),
+        CaptureError::LockFailed => (AccountsFailureKind::Failed, "lock_failed"),
+        CaptureError::Store { kind, .. } => (store_kind(*kind, false), store_code(*kind)),
+        _ => (AccountsFailureKind::Failed, "capture_failed"),
+    };
+    if kind == AccountsFailureKind::Failed {
+        tracing::error!(?error, "adding the live login failed");
+    }
+    failure(kind, code, error.to_string())
+}
+
+/// A store write's failure: the store kind's `snake_case` name as the code, its
+/// text as the message. A lock wait that timed out, which the store reports
+/// as an `accounts.json` write failure, is [`AccountsFailureKind::Busy`].
+fn store_failure(error: &StoreError) -> AccountsFailure {
+    let lock_timed_out = std::error::Error::source(error)
+        .and_then(|source| source.downcast_ref::<io::Error>())
+        .and_then(io::Error::get_ref)
+        .and_then(|inner| inner.downcast_ref::<LockError>())
+        .is_some_and(|lock| matches!(lock, LockError::Timeout));
+    let code = if lock_timed_out {
+        "locks_busy"
+    } else {
+        store_code(error.kind())
+    };
+    failure(
+        store_kind(error.kind(), lock_timed_out),
+        code,
+        error.to_string(),
+    )
+}
+
+/// The failure kind of a store error of `kind`; `lock_timed_out` when a lock
+/// wait under it timed out.
+fn store_kind(kind: StoreErrorKind, lock_timed_out: bool) -> AccountsFailureKind {
+    if lock_timed_out {
+        return AccountsFailureKind::Busy;
+    }
+    match kind {
+        StoreErrorKind::UnknownAccount | StoreErrorKind::AccountsMissing => {
+            AccountsFailureKind::UnknownAccount
+        }
+        StoreErrorKind::ActiveAccount
+        | StoreErrorKind::StoreReadOnly
+        | StoreErrorKind::UnknownSchema
+        | StoreErrorKind::RootUnsafe
+        | StoreErrorKind::RootNotDirectory
+        | StoreErrorKind::OrderMismatch
+        | StoreErrorKind::InvalidAlias
+        | StoreErrorKind::AccountReidentified
+        | StoreErrorKind::UnsafeEmail
+        | StoreErrorKind::AccountExists
+        | StoreErrorKind::NumberTaken
+        | StoreErrorKind::NumbersExhausted => AccountsFailureKind::Refused,
+        _ => AccountsFailureKind::Failed,
+    }
+}
+
+/// A `snake_case` name of a store error's kind.
+fn store_code(kind: StoreErrorKind) -> &'static str {
+    match kind {
+        StoreErrorKind::RootNotDirectory => "root_not_directory",
+        StoreErrorKind::RootUnsafe => "root_unsafe",
+        StoreErrorKind::RootUnreadable => "root_unreadable",
+        StoreErrorKind::AccountsMissing => "accounts_missing",
+        StoreErrorKind::AccountsUnreadable => "accounts_unreadable",
+        StoreErrorKind::AccountsCorrupt => "accounts_corrupt",
+        StoreErrorKind::AccountsWrite => "accounts_write",
+        StoreErrorKind::UnknownSchema => "unknown_schema",
+        StoreErrorKind::AccountReidentified => "account_reidentified",
+        StoreErrorKind::UnsafeEmail => "unsafe_email",
+        StoreErrorKind::ConfigUnreadable => "config_unreadable",
+        StoreErrorKind::ConfigCorrupt => "config_corrupt",
+        StoreErrorKind::ConfigWrite => "config_write",
+        StoreErrorKind::ConfigWriteLeftTemp => "config_write_left_temp",
+        StoreErrorKind::CredentialsUnreadable => "credentials_unreadable",
+        StoreErrorKind::Foreign => "foreign",
+        StoreErrorKind::CredentialsUnopenable => "credentials_unopenable",
+        StoreErrorKind::CredentialsRolledBack => "credentials_rolled_back",
+        StoreErrorKind::CredentialsWrite => "credentials_write",
+        StoreErrorKind::StoreReadOnly => "store_read_only",
+        StoreErrorKind::UnknownAccount => "unknown_account",
+        StoreErrorKind::WrongLock => "wrong_lock",
+        StoreErrorKind::NumbersExhausted => "numbers_exhausted",
+        StoreErrorKind::NumberTaken => "number_taken",
+        StoreErrorKind::AccountExists => "account_exists",
+        StoreErrorKind::LeftoverUnopenable => "leftover_unopenable",
+        StoreErrorKind::OrderMismatch => "order_mismatch",
+        StoreErrorKind::ActiveAccount => "active_account",
+        StoreErrorKind::InvalidAlias => "invalid_alias",
+        _ => "store_error",
+    }
+}
+
+/// The account lock's failure, taken for an alias or order write: a wait
+/// that timed out is [`AccountsFailureKind::Busy`].
+fn lock_failure(error: &LockError) -> AccountsFailure {
+    match error {
+        LockError::Timeout => failure(AccountsFailureKind::Busy, "locks_busy", error.to_string()),
+        _ => failure(
+            AccountsFailureKind::Failed,
+            "lock_failed",
+            error.to_string(),
+        ),
     }
 }
 

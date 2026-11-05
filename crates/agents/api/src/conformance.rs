@@ -2,8 +2,8 @@
 //! and its typed options cannot drift apart.
 
 use crate::{
-    AccountsConfig, AccountsService, Agent, AgentPlugin, PollScope, RecoveredRun,
-    SummarizerRequest, decode_options, validate,
+    AccountsConfig, AccountsFailureKind, AccountsService, Agent, AgentPlugin, PollScope,
+    RecoveredRun, SummarizerRequest, decode_options, validate,
 };
 use protocol::{AgentDescriptor, FieldKind, OptionValue, OptionValues};
 use std::time::Duration;
@@ -61,7 +61,14 @@ pub fn check_accounts<A: Agent>(agent: &A) {
         "agent-api-conformance-accounts-{}-missing",
         std::process::id()
     ));
-    let cfg = AccountsConfig::new(root);
+    // The agent's home is a missing scratch folder too, so no check reads the
+    // real one.
+    let home = root.with_file_name(format!(
+        "agent-api-conformance-accounts-{}-missing-home",
+        std::process::id()
+    ));
+    let mut cfg = AccountsConfig::new(root);
+    cfg.agent_home = Some(home);
     let typed = Agent::accounts(agent, &cfg);
     let adapted = AgentPlugin::accounts(agent, &cfg);
     assert_eq!(
@@ -77,12 +84,15 @@ pub fn check_accounts<A: Agent>(agent: &A) {
 /// A snapshot and a poll of a store that does not exist are empty when the
 /// service answers them, and the poll asks for no next poll; a refusal (the
 /// folder it would live in is not private) is an error, never a panic. A
-/// shutdown with nothing in flight is idle at once.
+/// switch to account 1 there is refused as an unknown account (or a refusal,
+/// or fails) and writes nothing. A shutdown with nothing in flight is idle at
+/// once.
 ///
 /// # Panics
 ///
 /// Panics when the snapshot or the poll lists an account, the poll asks for
-/// a next poll, or the shutdown is not idle.
+/// a next poll, the switch succeeds, is unsupported, is busy or draining, or
+/// leaves an account behind, or the shutdown is not idle.
 pub fn check_accounts_service(service: &dyn AccountsService) {
     if let Ok(snapshot) = service.snapshot() {
         assert!(
@@ -102,10 +112,38 @@ pub fn check_accounts_service(service: &dyn AccountsService) {
             "a poll of a store that does not exist asks for a next poll"
         );
     }
+    check_switch_on_a_missing_store(service);
     assert!(
         service.begin_shutdown(Duration::ZERO),
         "a shutdown with nothing in flight is not idle"
     );
+}
+
+/// A switch to account 1 of a store that does not exist is refused as an
+/// unknown account or a refusal, or fails as the snapshot and the poll may
+/// (a runner whose agent home cannot be resolved), and leaves the store with
+/// no account. A success or an unsupported switch fails the check.
+fn check_switch_on_a_missing_store(service: &dyn AccountsService) {
+    let switched = service.switch_to(1);
+    assert!(
+        matches!(
+            &switched,
+            Err(failure) if matches!(
+                failure.kind,
+                AccountsFailureKind::UnknownAccount
+                    | AccountsFailureKind::Refused
+                    | AccountsFailureKind::Failed
+            )
+        ),
+        "a switch in a store that does not exist is not refused as an unknown account: {switched:?}"
+    );
+    if let Ok(snapshot) = service.snapshot() {
+        assert!(
+            snapshot.accounts.is_empty(),
+            "a refused switch left accounts behind: {:?}",
+            snapshot.accounts
+        );
+    }
 }
 
 /// The largest runtime icon a descriptor may carry, in bytes.
@@ -562,6 +600,48 @@ mod tests {
         fn begin_shutdown(&self, _bound: Duration) -> bool {
             true
         }
+
+        fn switch_to(&self, _number: u32) -> Result<crate::SwitchReport, crate::AccountsFailure> {
+            Err(crate::AccountsFailure {
+                kind: crate::AccountsFailureKind::UnknownAccount,
+                code: "unknown_account".to_owned(),
+                message: "no account has this number".to_owned(),
+            })
+        }
+    }
+
+    /// An account service implementing only the required methods.
+    struct RequiredOnly;
+
+    impl AccountsService for RequiredOnly {
+        fn snapshot(&self) -> Result<crate::AccountsSnapshot, crate::AccountsError> {
+            Ok(crate::AccountsSnapshot::default())
+        }
+
+        fn poll(&self, _scope: PollScope) -> Result<crate::PollReport, crate::AccountsError> {
+            Ok(crate::PollReport::default())
+        }
+
+        fn begin_shutdown(&self, _bound: Duration) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn write_methods_default_to_unsupported() {
+        let service = RequiredOnly;
+        let unsupported = crate::AccountsFailure::unsupported();
+        assert_eq!(unsupported.kind, crate::AccountsFailureKind::Unsupported);
+        assert_eq!(unsupported.code, "unsupported");
+
+        assert_eq!(service.switch_to(1), Err(unsupported.clone()));
+        assert_eq!(service.add_current_login(), Err(unsupported.clone()));
+        assert_eq!(service.remove_account(1), Err(unsupported.clone()));
+        assert_eq!(
+            service.set_alias(1, Some("work".to_owned())),
+            Err(unsupported.clone())
+        );
+        assert_eq!(service.set_order(vec![1]), Err(unsupported));
     }
 
     #[test]
