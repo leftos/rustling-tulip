@@ -54,13 +54,24 @@
  *     hooks and then a `Stop` whose `background_tasks` lists a running shell,
  *     and paints the background footer. A missing or unreadable settings file
  *     leaves the run hookless rather than failing it.
+ *   - Run as `auth login …`, it stands in for `claude auth login` instead of
+ *     a session: it prints the login's lines and, as the `FAKE_CLAUDE_LOGIN`
+ *     knob says, writes a subscription login into `CLAUDE_CONFIG_DIR` for the
+ *     account store's capture, fails, or hangs; every case exits before the
+ *     banner, the settings load or the prompt.
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
  *   - Acknowledges (but does not act on) the `--add-dir`, `-p`,
  *     `--model`, and `--permission-mode` flags the daemon may pass.
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -68,6 +79,9 @@ import { dirname, join } from "node:path";
 /// it is standing in for.
 const TAG = "[fake-claude]";
 const READY_BANNER = `${TAG} ready`;
+/// The lines a successful login prints, in order.
+const LOGIN_OPENING = "Opening the browser to sign in… (fake)";
+const LOGIN_SUCCESS = "Login successful. (fake)";
 /// How long after "/rt-hook ask" the fake runs its `Stop` hooks: long enough
 /// for a spec to observe the prompt, short enough to stay inside its wait.
 const STOP_AFTER_MS = 5000;
@@ -165,6 +179,12 @@ process.on("unhandledRejection", (err) => {
 });
 
 const args = process.argv.slice(2);
+// `claude auth login` is not a session: the daemon runs the CLI that way to
+// capture a subscription login, so this mode answers on the process's own
+// streams and ends the run before anything the session path below does.
+if (args[0] === "auth" && args[1] === "login") {
+  await authLogin();
+}
 const flags = parseArgs(args);
 // Started with neither `--session-id` nor `--resume` (typed into a shell by
 // hand), it mints its conversation id, as Claude Code does.
@@ -936,6 +956,179 @@ function findLineBreak(value) {
  */
 function lineBreakLength(value, index) {
   return value[index] === "\r" && value[index + 1] === "\n" ? 2 : 1;
+}
+
+/**
+ * Stands in for `claude auth login`: prints the lines the real CLI prints and,
+ * once signed in, writes the credential and account files the daemon's
+ * capture reads, as the `FAKE_CLAUDE_LOGIN` knob says. Every path but the hang
+ * ends the process; the hang waits to be killed. Arguments after `auth login`
+ * (such as `--claudeai`) are accepted and ignored.
+ */
+async function authLogin() {
+  const mode = process.env.FAKE_CLAUDE_LOGIN ?? "";
+  if (mode === "" || mode === "ok") {
+    const dir = process.env.CLAUDE_CONFIG_DIR;
+    if (!dir) {
+      return endAfterWrite(
+        process.stderr,
+        "fake-claude: auth login needs CLAUDE_CONFIG_DIR\r\n",
+        2,
+      );
+    }
+    const files = loginFiles(dir);
+    if (files === null) {
+      return endAfterWrite(
+        process.stderr,
+        `fake-claude: ${join(dir, ".claude.json")} is not a JSON object\r\n`,
+        2,
+      );
+    }
+    process.stdout.write(`${LOGIN_OPENING}\r\n`);
+    writeLogin(dir, files);
+    return endAfterWrite(process.stdout, `${LOGIN_SUCCESS}\r\n`, 0);
+  }
+  if (mode === "fail") {
+    return endAfterWrite(
+      process.stderr,
+      "fake-claude: Login failed. (fake)\r\n",
+      1,
+    );
+  }
+  if (mode === "hang") {
+    process.stdout.write(`${LOGIN_OPENING}\r\n`);
+    // A real login waits on the browser here, writing nothing, until it is
+    // killed.
+    setInterval(() => {}, 1 << 30);
+    return new Promise(() => {});
+  }
+  return endAfterWrite(
+    process.stderr,
+    `fake-claude: unknown FAKE_CLAUDE_LOGIN value: ${mode}\r\n`,
+    2,
+  );
+}
+
+/**
+ * The text of the login's two files: `.claude.json`, keeping the keys a file
+ * already there holds and gaining `oauthAccount`, and the OAuth credential.
+ * Both are named after the email's SHA-256, so a rerun for the same email is
+ * the same identity. `null` when `.claude.json` exists and is not a JSON
+ * object, which nothing may be written for.
+ *
+ * @param {string} dir the `CLAUDE_CONFIG_DIR` the login goes into
+ * @returns {{claudeJson: string, credentials: string} | null}
+ */
+function loginFiles(dir) {
+  const claudeJsonPath = join(dir, ".claude.json");
+  let existing;
+  try {
+    existing = claudeJsonAt(claudeJsonPath);
+  } catch {
+    return null;
+  }
+  const email = process.env.FAKE_CLAUDE_LOGIN_EMAIL || "login@example.com";
+  const digest = createHash("sha256").update(email).digest("hex");
+  const tag = digest.slice(0, 12);
+  const claudeJson = existing ?? {};
+  claudeJson.oauthAccount = {
+    emailAddress: email,
+    accountUuid: uuidOf(digest.slice(0, 32)),
+    organizationUuid: uuidOf(digest.slice(32, 64)),
+    organizationName: "Fake org",
+  };
+  const credentials = {
+    claudeAiOauth: {
+      accessToken: `fake-access-${tag}`,
+      refreshToken: `fake-refresh-${tag}`,
+      expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+      scopes: ["user:inference", "user:profile"],
+      subscriptionType: "max",
+    },
+  };
+  return {
+    claudeJson: `${JSON.stringify(claudeJson)}\n`,
+    credentials: `${JSON.stringify(credentials)}\n`,
+  };
+}
+
+/**
+ * Writes the login's two files whole through a temp file and a rename, the
+ * account document first.
+ *
+ * @param {string} dir the `CLAUDE_CONFIG_DIR` the login goes into
+ * @param {{claudeJson: string, credentials: string}} files
+ */
+function writeLogin(dir, files) {
+  mkdirSync(dir, { recursive: true });
+  writeAtomic(join(dir, ".claude.json"), files.claudeJson);
+  writeAtomic(join(dir, ".credentials.json"), files.credentials);
+}
+
+/**
+ * The JSON object at `path`, or `null` when the file is missing. Throws when
+ * the file holds anything else: invalid JSON, or a document that is not an
+ * object.
+ *
+ * @param {string} path
+ * @returns {any | null}
+ */
+function claudeJsonAt(path) {
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      return null;
+    }
+    throw err;
+  }
+  const parsed = JSON.parse(text);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new SyntaxError(`${path} is not a JSON object`);
+  }
+  return parsed;
+}
+
+/**
+ * Writes `text` to `stream` and ends the process with `code` once it has
+ * flushed, holding the module here meanwhile: a `process.exit` straight after
+ * a write can drop the line on a piped stdout.
+ *
+ * @param {any} stream
+ * @param {string} text
+ * @param {number} code
+ * @returns {Promise<never>}
+ */
+function endAfterWrite(stream, text, code) {
+  stream.write(text, () => process.exit(code));
+  return new Promise(() => {});
+}
+
+/**
+ * @param {string} path
+ * @param {string} text
+ */
+function writeAtomic(path, text) {
+  const temp = `${path}.tmp`;
+  writeFileSync(temp, text);
+  renameSync(temp, path);
+}
+
+/**
+ * The uuid shape of 32 hex digits.
+ *
+ * @param {string} hex
+ */
+function uuidOf(hex) {
+  const groups = [8, 4, 4, 4, 12];
+  const parts = [];
+  let at = 0;
+  for (const length of groups) {
+    parts.push(hex.slice(at, at + length));
+    at += length;
+  }
+  return parts.join("-");
 }
 
 /**

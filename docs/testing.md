@@ -91,6 +91,8 @@ It loads the user layer's hooks from `<CLAUDE_CONFIG_DIR>/settings.json` and run
 
 The cue `rt-perm` in a message makes that turn write a `Bash` `tool_use` record, run `PermissionRequest` and draw the permission dialog, where a bare `1` or `2` allows (the `tool_result`, `PostToolUse`, the answer) and `3` denies. The input lines `/rt-hook prompt`, `/rt-hook ask` and `/rt-hook bg` run hooks for an open turn, an AskUserQuestion dialog and a `Stop` listing a running shell (`crates/agents/claude/fake/index.mjs`, its README).
 
+It also stands in for `claude auth login`: run as `auth login …` it writes a subscription login the account store captures, or fails or hangs, as the `FAKE_CLAUDE_LOGIN` knob says (see its README). That mode's `fake_login` test in `agent-claude` runs the shim under `node`, so it needs `node` on `PATH` and is Windows-only.
+
 The `tools/e2e/fake-tailscale/` shim (`fake-tailscale.cmd`, `.sh` and `index.mjs`, see its README) answers `whoami`, `whois`, `status` and `cert` from the JSON state file named by `RUSTLING_TULIP_FAKE_TAILSCALE_STATE`; it is wired in through `RUSTLING_TULIP_TAILSCALE`.
 
 The `tools/e2e/fake-ssh/` shim (`fake-ssh.cmd`, `.sh` and `index.mjs`, see its README) stands in for `ssh` through `RUSTLING_TULIP_SSH`: it checks the client's argv shape (`-T`, `-o BatchMode=yes`, `--` directly before the host, one remote command starting with `rustling-tulipd`), appends `{pid, argv}` to a log, and runs `rustling-tulipd bridge` with the test daemon's isolated environment.

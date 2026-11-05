@@ -30,6 +30,26 @@ The digit typed at that dialog, with no Enter, answers it. `1` or `2` writes the
 
 The transcript goes where the daemon's chat mirror reads it: `<CLAUDE_CONFIG_DIR>/projects/<encoded working directory>/<id>.jsonl`, one JSON record per line, chained by `parentUuid`. The `<id>` comes from the `--session-id` or `--resume` argument, else the uuid the run minted. The folder name is the working directory with every character outside `[A-Za-z0-9-]` turned into `-`. A run with no `CLAUDE_CONFIG_DIR` writes no transcript.
 
+## `auth login`
+
+Run as `auth login …` (further arguments, such as `--claudeai`, are accepted and ignored), the shim stands in for `claude auth login` instead of a session: it prints the CLI's lines and ends without a banner, hooks or a prompt.
+
+The `FAKE_CLAUDE_LOGIN` knob picks the outcome:
+
+- unset, empty or `ok`: prints `Opening the browser to sign in… (fake)`, writes the login, then prints `Login successful. (fake)` and exits 0; the success line comes only after both files are in place.
+- `fail`: prints `fake-claude: Login failed. (fake)` on stderr, writes nothing, exits 1.
+- `hang`: prints the opening line, writes nothing and waits until it is killed.
+- anything else: prints `fake-claude: unknown FAKE_CLAUDE_LOGIN value: <value>` on stderr and exits 2.
+
+The login goes into `CLAUDE_CONFIG_DIR`, which the shim creates when it is missing; without the variable it prints `fake-claude: auth login needs CLAUDE_CONFIG_DIR` on stderr and exits 2. `.claude.json` is written first, then `.credentials.json`, both whole through a temp file and a rename, each ending in a newline:
+
+- `.credentials.json`: a `claudeAiOauth` object with `fake-access-<tag>` and `fake-refresh-<tag>` tokens, an expiry eight hours out, the `user:inference` and `user:profile` scopes, and the `max` subscription type.
+- `.claude.json`: an `oauthAccount` object with the email, `Fake org`, and the derived `accountUuid` and `organizationUuid`.
+
+The email is `FAKE_CLAUDE_LOGIN_EMAIL`, else `login@example.com`; `<tag>` is the first 12 hex digits of its SHA-256, and the two uuids are the first 32 and the next 32 hex digits of that digest in uuid shape, so the same email is the same identity and two emails differ.
+
+`.claude.json` keeps every key a file already there holds and sets `oauthAccount`. A file that exists but is not a JSON object fails the login with `fake-claude: <path> is not a JSON object` on stderr and exit 2, writing nothing.
+
 A crash is appended to `fake-claude-crash.log` in the OS temp dir.
 
 `fake-claude.cmd` (Windows) and `fake-claude.sh` (POSIX) are shims that run `index.mjs` under `node`, forwarding every argument.
