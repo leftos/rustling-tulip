@@ -441,6 +441,32 @@ pub fn resolve_link(
     )
 }
 
+/// Which of a path link's `candidates` exists under `base_dirs`: the index
+/// of the first that does. A candidate with a reading on a network host
+/// that [`resolve_link`] would refuse is passed over without a lookup. Touches
+/// the file system, so it runs off the UI thread.
+#[must_use]
+pub fn first_existing_candidate(
+    candidates: &[TerminalLinkCandidate],
+    base_dirs: &[String],
+    ui_dir: Option<&Path>,
+    opener: &dyn Opener,
+) -> Option<usize> {
+    candidates.iter().position(|candidate| {
+        let readings = readings(&candidate.path, base_dirs);
+        let refused = refused_host(
+            readings.iter(),
+            || ui_dir.map(load_unc_hosts).unwrap_or_default(),
+            || opener.mapped_unc_hosts(),
+        );
+        refused.is_none()
+            && matches!(
+                first_existing(&readings, &mut |reading: &Path| opener.existing(reading)),
+                Some(Ok(_))
+            )
+    })
+}
+
 /// [`resolve_link`] with the listed and mapped host lookups and the
 /// existence check named.
 fn resolve_with(

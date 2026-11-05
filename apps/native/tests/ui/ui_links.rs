@@ -273,6 +273,210 @@ fn soft_wrapped_path_opens_whole(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_path_wrapped_inside_a_capped_reply_box_opens_whole(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    let grid = h.bounds("pane-grid-p1");
+    let cell = h.cell_center("p1", 1, 0).x - h.cell_center("p1", 0, 0).x;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a small positive column count"
+    )]
+    let cols = (grid.size.width / cell).floor() as usize;
+    // ui-themes' reply box: `│` (U+2502) in the first and last columns, 2 pad
+    // columns, the text held to a cap 20 columns short of the right border.
+    let cap = cols - 20;
+    let rel = format!("docs/{}.txt", "w".repeat(cap));
+    let file = write_file(dir.path(), &rel);
+    let (upper, lower) = rel.split_at(cap);
+    h.pty(
+        "s1",
+        format!("\u{2502}  {upper}\x1b[{cols}G\u{2502}\r\n\u{2502}  {lower}\x1b[{cols}G\u{2502}")
+            .as_bytes(),
+    );
+    let on_lower = h.cell_center("p1", 4, 1);
+    h.hover(on_lower, ctrl());
+    assert_eq!(h.hovered_link("p1"), Some(rel));
+    h.click(on_lower, ctrl());
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+}
+
+/// The grid row and column where `needle` first shows in pane `p1`.
+fn find_on_grid(h: &mut Harness<'_>, needle: &str) -> (usize, usize) {
+    h.grid_text("p1")
+        .iter()
+        .enumerate()
+        .find_map(|(r, text)| text.find(needle).map(|c| (r, text[..c].chars().count())))
+        .expect("the text is on screen")
+}
+
+#[gpui::test]
+fn a_path_with_spaces_underlines_and_opens_whole(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(
+        dir.path(),
+        "Program Files/Microsoft Visual Studio/notes.txt",
+    );
+    let shown = file.to_string_lossy().into_owned();
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", format!("at {shown} now").as_bytes());
+    let (row, col) = h
+        .grid_text("p1")
+        .iter()
+        .enumerate()
+        .find_map(|(r, text)| text.find("Visual").map(|c| (r, text[..c].chars().count())))
+        .expect("the path's Visual folder is on screen");
+    let on = h.cell_center("p1", col, row);
+    h.hover(on, ctrl());
+    h.cx.run_until_parked(); // the existence check
+    assert_eq!(
+        h.hovered_link("p1"),
+        Some(shown),
+        "the whole spaced path is underlined"
+    );
+    h.click(on, ctrl());
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+}
+
+#[gpui::test]
+fn prose_after_a_path_stays_split_when_no_spaced_file_exists(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let first = write_file(dir.path(), "foo.txt");
+    let second = write_file(dir.path(), "src/bar.rs");
+    let shown = first.to_string_lossy().into_owned();
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", format!("see {shown} and then src/bar.rs").as_bytes());
+
+    let (row, col) = find_on_grid(&mut h, " and then");
+    let on_prose = h.cell_center("p1", col + 2, row);
+    h.hover(on_prose, ctrl());
+    h.cx.run_until_parked(); // the existence check
+    assert_eq!(h.hovered_link("p1"), None, "the prose is not underlined");
+
+    let (row, col) = find_on_grid(&mut h, "foo.txt");
+    let on_first = h.cell_center("p1", col, row);
+    h.hover(on_first, ctrl());
+    h.cx.run_until_parked();
+    assert_eq!(h.hovered_link("p1"), Some(shown), "the path alone");
+    h.click(on_first, ctrl());
+
+    let (row, col) = find_on_grid(&mut h, "bar.rs");
+    let on_second = h.cell_center("p1", col, row);
+    h.hover(on_second, ctrl());
+    assert_eq!(h.hovered_link("p1").as_deref(), Some("src/bar.rs"));
+    h.click(on_second, ctrl());
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(first), Opened::DefaultApp(second)]
+    );
+}
+
+#[gpui::test]
+fn quoted_path_with_spaces_widens_when_it_exists(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "my-docs/a b.txt");
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty(
+        "s1",
+        b"open \"my-docs/a b.txt\" now\r\nopen \"none/a b.txt\" now",
+    );
+
+    let (row, col) = find_on_grid(&mut h, "none");
+    let on = h.cell_center("p1", col, row);
+    h.hover(on, ctrl());
+    assert_eq!(
+        h.hovered_link("p1").as_deref(),
+        Some("none/a"),
+        "a quoted run is not taken until its file is found"
+    );
+
+    let (row, col) = find_on_grid(&mut h, "b.txt");
+    let on = h.cell_center("p1", col, row);
+    h.hover(on, ctrl());
+    assert_eq!(
+        h.hovered_link("p1").as_deref(),
+        Some("my-docs/a b.txt"),
+        "the whole quoted path is underlined"
+    );
+    h.click(on, ctrl());
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+}
+
+#[gpui::test]
+fn hover_on_a_later_path_checks_its_own_readings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "Program Files/App/a.txt");
+    let shown = file.to_string_lossy().into_owned();
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", format!(r"copied C:\temp\a.txt to {shown}").as_bytes());
+
+    let (row, col) = find_on_grid(&mut h, "Files");
+    let on = h.cell_center("p1", col, row);
+    h.hover(on, ctrl());
+    assert_eq!(
+        h.hovered_link("p1"),
+        Some(shown),
+        "the later path's own spaced reading is checked"
+    );
+    h.click(on, ctrl());
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+}
+
+#[gpui::test]
+fn widen_survives_new_output_elsewhere_on_screen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "Program Files/App/notes.txt");
+    let shown = file.to_string_lossy().into_owned();
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", format!("at {shown} now").as_bytes());
+    let (row, col) = find_on_grid(&mut h, "Files");
+    let on = h.cell_center("p1", col, row);
+    h.hover(on, ctrl());
+    assert_eq!(h.hovered_link("p1"), Some(shown.clone()));
+
+    h.pty("s1", b"\r\n\r\nmore output");
+    h.cx.run_until_parked();
+    assert_eq!(
+        h.hovered_link("p1"),
+        Some(shown),
+        "the widen holds once other rows change"
+    );
+    h.click(on, ctrl());
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+}
+
+#[gpui::test]
+fn widen_holds_on_the_second_row_of_a_wrapped_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    let grid = h.bounds("pane-grid-p1");
+    let cell = h.cell_center("p1", 1, 0).x - h.cell_center("p1", 0, 0).x;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a small positive column count"
+    )]
+    let cols = (grid.size.width / cell).floor() as usize;
+    let file = write_file(
+        dir.path(),
+        &format!("Program Files/{}/notes.txt", "w".repeat(cols)),
+    );
+    let shown = file.to_string_lossy().into_owned();
+    h.pty("s1", format!("at {shown} now").as_bytes());
+    let (row, col) = find_on_grid(&mut h, "Files");
+    let on = h.cell_center("p1", col, row);
+    h.hover(on, ctrl());
+    assert_eq!(h.hovered_link("p1"), Some(shown));
+
+    // The next row is the wrapped run of the long folder name; the click
+    // reads that row's links afresh.
+    let below = h.cell_center("p1", 0, row + 1);
+    h.click(below, ctrl());
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+}
+
+#[gpui::test]
 fn ctrl_hover_underlines_only_the_hovered_link(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir, session("s1").build());

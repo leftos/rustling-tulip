@@ -72,6 +72,17 @@ pub struct TerminalLink {
     /// touches, top first. A hard-stitched row's box border and padding are
     /// not in them.
     pub segments: Vec<LinkSegment>,
+    /// The longer readings text alone cannot confirm, longest kind first:
+    /// the path stitched onto the row below where the upper row reaches only
+    /// its box's text edge, then the whole quoted run a quote before the path
+    /// opens, then an absolute path run on over the space-separated words
+    /// after it, each ending on a word that holds a `\` or `/`. Text alone
+    /// cannot tell `C:\Program Files\x` from prose, so one is taken only once
+    /// a caller finds it exists; until then the link is the path as the
+    /// space or the row break split it.
+    pub spaced: Vec<TerminalLink>,
+    /// The link is an OSC 8 hyperlink rather than text the detector matched.
+    pub hyperlink: bool,
 }
 
 /// The cells of one row a link's characters take: columns `start_column`
@@ -101,6 +112,9 @@ impl TerminalLink {
         for segment in &mut self.segments {
             segment.row += offset;
         }
+        for reading in &mut self.spaced {
+            reading.shift_rows(offset);
+        }
     }
 }
 
@@ -108,7 +122,7 @@ static URL_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| compile(r#"(?i)(?-u:\b)https?://[^\s<>"'`{}|\\^]+"#));
 static PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     compile(
-        r#"(^|[\s(\[{<])((?:[A-Za-z]:[\\/]|\\\\[^\s\\/:*?"<>|]+[\\/][^\s\\/:*?"<>|]+[\\/]|\/|\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s<>"'`|]*)"#,
+        r#"(^['"]?|[\s(\[{<]['"]?)((?:[A-Za-z]:[\\/]|\\\\[^\s\\/:*?"<>|]+[\\/][^\s\\/:*?"<>|]+[\\/]|\/|\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s<>"'`|]*)"#,
     )
 });
 static BARE_NAME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
@@ -151,6 +165,14 @@ fn is_path_continuation(c: char) -> bool {
             c,
             '_' | '.' | '-' | '\\' | '/' | '~' | '$' | '%' | '+' | '@' | '#'
         )
+}
+
+/// The words after an absolute path a spaced reading may run on over.
+const SPACED_WORDS: usize = 8;
+
+/// A character no spaced reading runs on past.
+fn ends_spaced_reading(c: char) -> bool {
+    matches!(c, '<' | '>' | '"' | '\'' | '|')
 }
 
 /// How far short of its wrap column a row may stop and still count as wrapped.
@@ -253,7 +275,7 @@ fn slice_columns(row: &TerminalRow, start: usize, end: usize, cols: usize) -> Ve
 
 /// Every link in one line of text: a single row, or the logical line a group
 /// of rows assembles into. Only the tests read a bare line; the terminal
-/// reads rows through [`detect_row_links`].
+/// reads rows through [`detect_window_links`].
 #[cfg(test)]
 #[must_use]
 pub fn detect_links(text: &str) -> Vec<TerminalLink> {
@@ -268,13 +290,78 @@ pub fn detect_links(text: &str) -> Vec<TerminalLink> {
 }
 
 /// Every link in `rows`, whose text is padded to `cols`.
+#[cfg(test)]
 #[must_use]
 pub fn detect_row_links(rows: &[TerminalRow], cols: usize) -> Vec<TerminalLink> {
-    let mut links = Vec::new();
-    for group in group_rows(rows, cols) {
-        links.extend(detect_segment_links(&group));
+    let mut edges = RowEdges::new(rows, cols);
+    detect_grouped_links(rows, cols, &mut |at| edges.edge(at))
+}
+
+/// Every link in `rows`, as `detect_row_links` finds them, but with each
+/// row's box text edge given rather than read from `rows`: `edges[at]` is
+/// the edge of row `at`'s box as the caller read it from the rows around
+/// the window, `None` where it read none.
+#[must_use]
+pub fn detect_window_links(
+    rows: &[TerminalRow],
+    cols: usize,
+    edges: &[Option<usize>],
+) -> Vec<TerminalLink> {
+    detect_grouped_links(rows, cols, &mut |at| edges.get(at).copied().flatten())
+}
+
+/// Every link in `rows`. A link that would run across a
+/// [`Stitch::Candidate`] break is not one: it rides as the first spaced
+/// readings of the link it shares a cell with, the upper row's first.
+fn detect_grouped_links(
+    rows: &[TerminalRow],
+    cols: usize,
+    edge_of: &mut dyn FnMut(usize) -> Option<usize>,
+) -> Vec<TerminalLink> {
+    let (groups, candidates) = group_rows_with(rows, cols, edge_of, false);
+    let mut links: Vec<TerminalLink> = groups
+        .iter()
+        .flat_map(|group| detect_segment_links(group))
+        .collect();
+    if candidates.is_empty() {
+        return links;
+    }
+    let touches = |reading: &TerminalLink, row: usize| {
+        reading
+            .segments
+            .iter()
+            .any(|segment| segment.row == row_index(row))
+    };
+    let (joined, _) = group_rows_with(rows, cols, edge_of, true);
+    let mut stitched: Vec<(usize, TerminalLink)> = Vec::new();
+    for mut reading in joined.iter().flat_map(|group| detect_segment_links(group)) {
+        let crosses = candidates
+            .iter()
+            .any(|upper| touches(&reading, *upper) && touches(&reading, upper + 1));
+        if crosses
+            && let Some(carrier) = links.iter().position(|link| shares_a_cell(link, &reading))
+        {
+            reading.spaced = Vec::new();
+            stitched.push((carrier, reading));
+        }
+    }
+    for (carrier, reading) in stitched.into_iter().rev() {
+        if let Some(link) = links.get_mut(carrier) {
+            link.spaced.insert(0, reading);
+        }
     }
     links
+}
+
+/// Whether two links take any cell in common.
+fn shares_a_cell(a: &TerminalLink, b: &TerminalLink) -> bool {
+    a.segments.iter().any(|first| {
+        b.segments.iter().any(|second| {
+            first.row == second.row
+                && first.start_column < second.end_column
+                && second.start_column < first.end_column
+        })
+    })
 }
 
 /// Every OSC 8 hyperlink in `rows`: one link per maximal run of consecutive
@@ -428,34 +515,153 @@ fn build_hyperlink_link(
             start_column,
             end_column,
         }],
+        spaced: Vec::new(),
+        hyperlink: true,
     }
 }
 
-/// Whether `below` continues `above` across a hard line break — a real
-/// newline a TUI emitted rather than a soft wrap the grid flagged.
+/// The grid columns of a row's left and right border glyphs, when its first
+/// and its last non-blank characters are both a border.
 #[must_use]
-pub fn can_stitch(above: &TerminalRow, below: &TerminalRow, cols: usize) -> bool {
+pub fn box_border(row: &TerminalRow, cols: usize) -> Option<(usize, usize)> {
+    let glyphs: Vec<(usize, char)> = row
+        .text
+        .chars()
+        .enumerate()
+        .filter(|(_, c)| !c.is_whitespace())
+        .collect();
+    let (left, left_glyph) = *glyphs.first()?;
+    let (right, right_glyph) = *glyphs.last()?;
+    if left == right {
+        return None;
+    }
+    (is_border(left_glyph) && is_border(right_glyph))
+        .then(|| (column_of(row, left, cols), column_of(row, right, cols)))
+}
+
+/// The column just past a row's framed content; `None` when it holds none.
+fn content_end(row: &TerminalRow, cols: usize) -> Option<usize> {
+    let frame = strip_frame(&row.text);
+    (!frame.content.is_empty()).then(|| column_after(row, frame.end.saturating_sub(1), cols))
+}
+
+/// A run of consecutive rows whose left and right border glyphs sit in the
+/// same columns: one box, as far as its rows go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoxRun {
+    /// The indices of the run's first and last rows.
+    pub first: usize,
+    pub last: usize,
+    /// The column the box's text reaches: the widest content end among its
+    /// rows, `None` when every row is blank. A box that caps its text short
+    /// of its right border breaks a long path at that cap, not at the border.
+    pub edge: Option<usize>,
+}
+
+/// The box run `rows[at]` sits in; `None` when `rows[at]` has no border on
+/// both sides.
+#[must_use]
+pub fn box_run(rows: &[TerminalRow], at: usize, cols: usize) -> Option<BoxRun> {
+    let border = box_border(rows.get(at)?, cols)?;
+    let same = |index: &usize| {
+        rows.get(*index)
+            .is_some_and(|row| box_border(row, cols) == Some(border))
+    };
+    let first = (0..at).rev().take_while(same).last().unwrap_or(at);
+    let last = (at + 1..rows.len()).take_while(same).last().unwrap_or(at);
+    let edge = rows
+        .get(first..=last)?
+        .iter()
+        .filter_map(|row| content_end(row, cols))
+        .max();
+    Some(BoxRun { first, last, edge })
+}
+
+/// How a hard line break joins the row above it to the row below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stitch {
+    /// The upper row runs to its wrap column: a link runs on across the
+    /// break.
+    Join,
+    /// The upper row stops short of its right border but reaches its box's
+    /// text edge. A box that caps its text breaks a long path there, but a
+    /// short row of the box ends there just as well, so a link across the
+    /// break is only a reading to confirm on disk.
+    Candidate,
+}
+
+/// How `below` continues `above` across a hard line break — a real newline
+/// a TUI emitted rather than a soft wrap the grid flagged — if it does.
+/// `edge` gives the text edge of the box `above` sits in; it is asked only
+/// once every cheaper check passed and `above` falls short of its border.
+pub fn stitch(
+    above: &TerminalRow,
+    below: &TerminalRow,
+    cols: usize,
+    edge: impl FnOnce() -> Option<usize>,
+) -> Option<Stitch> {
     if below.is_wrapped {
-        return false;
+        return None;
     }
     let a = strip_frame(&above.text);
     let b = strip_frame(&below.text);
     if a.content.is_empty() || b.content.is_empty() {
-        return false;
+        return None;
     }
     let tail = a.content.chars().next_back();
     let head = b.content.chars().next();
     if !tail.is_some_and(is_path_continuation) || !head.is_some_and(is_path_continuation) {
-        return false;
+        return None;
+    }
+    // A full row wraps; a row longer than the one above it is not its tail.
+    if chars_len(b.content) > chars_len(a.content) {
+        return None;
     }
     // A TUI only breaks a row because it ran out of width, so a row that
     // stops well short of its wrap column ended rather than wrapped.
     let content_end = column_after(above, a.end.saturating_sub(1), cols);
-    if content_end < wrap_column(above, cols).saturating_sub(STITCH_TOLERANCE) {
-        return false;
+    if content_end >= wrap_column(above, cols).saturating_sub(STITCH_TOLERANCE) {
+        return Some(Stitch::Join);
     }
-    // A full row wraps; a row longer than the one above it is not its tail.
-    chars_len(b.content) <= chars_len(a.content)
+    let reaches_edge = box_border(above, cols).is_some()
+        && edge().is_some_and(|edge| content_end >= edge.saturating_sub(STITCH_TOLERANCE));
+    reaches_edge.then_some(Stitch::Candidate)
+}
+
+/// Whether `below` continues `above` across a hard line break as one link.
+#[cfg(test)]
+#[must_use]
+pub fn can_stitch(above: &TerminalRow, below: &TerminalRow, cols: usize) -> bool {
+    stitch(above, below, cols, || None) == Some(Stitch::Join)
+}
+
+/// The text edge of each row's box, read from the rows themselves, one box
+/// run at a time.
+#[cfg(test)]
+struct RowEdges<'a> {
+    rows: &'a [TerminalRow],
+    cols: usize,
+    run: Option<BoxRun>,
+}
+
+#[cfg(test)]
+impl<'a> RowEdges<'a> {
+    fn new(rows: &'a [TerminalRow], cols: usize) -> Self {
+        Self {
+            rows,
+            cols,
+            run: None,
+        }
+    }
+
+    /// The text edge of the box `rows[at]` sits in, worked out once per run.
+    fn edge(&mut self, at: usize) -> Option<usize> {
+        if let Some(run) = self.run.filter(|run| (run.first..=run.last).contains(&at)) {
+            return run.edge;
+        }
+        self.run = box_run(self.rows, at, self.cols);
+        self.run.and_then(|run| run.edge)
+    }
 }
 
 /// Split a row into the content a link can live in and the frame around it.
@@ -525,8 +731,24 @@ fn row_index(row: usize) -> i32 {
 }
 
 /// The rows of `rows`, grouped into the logical lines a link can span.
+#[cfg(test)]
 fn group_rows(rows: &[TerminalRow], cols: usize) -> Vec<Vec<Segment>> {
+    let mut edges = RowEdges::new(rows, cols);
+    group_rows_with(rows, cols, &mut |at| edges.edge(at), false).0
+}
+
+/// The rows of `rows`, grouped into the logical lines a link can span, and
+/// the index of the upper row of each [`Stitch::Candidate`] break. Such a
+/// break joins the rows only when `join_candidates` is set. `edge_of` gives
+/// the text edge of row `at`'s box.
+fn group_rows_with(
+    rows: &[TerminalRow],
+    cols: usize,
+    edge_of: &mut dyn FnMut(usize) -> Option<usize>,
+    join_candidates: bool,
+) -> (Vec<Vec<Segment>>, Vec<usize>) {
     let mut groups: Vec<Vec<Segment>> = Vec::new();
+    let mut candidates: Vec<usize> = Vec::new();
     let mut current: Vec<Segment> = Vec::new();
     let mut stitches = 0;
     for (index, row) in rows.iter().enumerate() {
@@ -539,10 +761,19 @@ fn group_rows(rows: &[TerminalRow], cols: usize) -> Vec<Vec<Segment>> {
             current.push(whole_row(index, row, cols));
             continue;
         }
-        let continues = index
+        let joined = index
             .checked_sub(1)
-            .and_then(|above| rows.get(above))
-            .is_some_and(|previous| stitches < STITCH_LIMIT && can_stitch(previous, row, cols));
+            .filter(|_| stitches < STITCH_LIMIT)
+            .and_then(|above| Some((above, rows.get(above)?)))
+            .and_then(|(above, previous)| stitch(previous, row, cols, || edge_of(above)));
+        let continues = match joined {
+            Some(Stitch::Join) => true,
+            Some(Stitch::Candidate) => {
+                candidates.push(index - 1);
+                join_candidates
+            }
+            None => false,
+        };
         if continues {
             // The row above keeps only its framed content: its border and pad
             // spaces would otherwise land between the halves of the path.
@@ -565,7 +796,7 @@ fn group_rows(rows: &[TerminalRow], cols: usize) -> Vec<Vec<Segment>> {
     if !current.is_empty() {
         groups.push(current);
     }
-    groups
+    (groups, candidates)
 }
 
 fn whole_row(index: usize, row: &TerminalRow, cols: usize) -> Segment {
@@ -599,6 +830,7 @@ fn detect_segment_links(segments: &[Segment]) -> Vec<TerminalLink> {
         .map(|segment| segment.text.as_str())
         .collect();
     let indices = CharIndices::of(&text);
+    let chars: Vec<char> = text.chars().collect();
     let mut links: Vec<TerminalLink> = Vec::new();
 
     for captures in URL_PATTERN.captures_iter(&text) {
@@ -623,7 +855,26 @@ fn detect_segment_links(segments: &[Segment]) -> Vec<TerminalLink> {
         if trimmed.is_empty() || overlaps_existing_link(start_index, end_index, &links) {
             continue;
         }
-        links.push(build_link(LinkKind::Path, start_index, &trimmed, segments));
+        // A path in matching quotes may be the whole quoted text, spaces and
+        // all, and an absolute one may run on over the words after it; text
+        // alone cannot tell either from prose.
+        let mut readings: Vec<String> = quoted_text(&chars, start_index)
+            .filter(|quoted| chars_len(quoted) > chars_len(&trimmed))
+            .into_iter()
+            .collect();
+        if is_absolute_path(&trimmed) {
+            for reading in spaced_readings(&chars, start_index, end_index) {
+                if !readings.contains(&reading) {
+                    readings.push(reading);
+                }
+            }
+        }
+        let mut link = build_link(LinkKind::Path, start_index, &trimmed, segments);
+        link.spaced = readings
+            .iter()
+            .map(|reading| build_link(LinkKind::Path, start_index, reading, segments))
+            .collect();
+        links.push(link);
     }
 
     // A bare name is a link only after an absolute path on the same line that
@@ -647,6 +898,63 @@ fn detect_segment_links(segments: &[Segment]) -> Vec<TerminalLink> {
     links.sort_by_key(|link| link.start_index);
     add_absolute_base_readings(&mut links);
     links
+}
+
+/// The text between the quote just before character `start` of `chars` and
+/// the matching quote after it, trimmed as a link is; `None` when no quote
+/// leads the path or none closes it.
+fn quoted_text(chars: &[char], start: usize) -> Option<String> {
+    let quote = *chars.get(start.checked_sub(1)?)?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let close = start + chars.get(start..)?.iter().position(|c| *c == quote)?;
+    let inner: String = chars.get(start..close)?.iter().collect();
+    Some(trim_link_candidate(&inner))
+}
+
+/// The spaced readings of the path at characters `start..end` of `chars`,
+/// longest first: the path run on over each of the next [`SPACED_WORDS`]
+/// words, each a single space after the last, that holds a `\` or `/`. A
+/// double space, a word that starts no word, and any of `<>"'|` end the run;
+/// a word is cut at the stop character it holds.
+fn spaced_readings(chars: &[char], start: usize, end: usize) -> Vec<String> {
+    let mut readings: Vec<String> = Vec::new();
+    let mut at = end;
+    for _ in 0..SPACED_WORDS {
+        if chars.get(at) != Some(&' ') {
+            break;
+        }
+        let word_start = at + 1;
+        let mut word_end = word_start;
+        while chars
+            .get(word_end)
+            .is_some_and(|c| !c.is_whitespace() && !ends_spaced_reading(*c))
+        {
+            word_end += 1;
+        }
+        if word_end == word_start {
+            break;
+        }
+        let word = chars.get(word_start..word_end).unwrap_or_default();
+        if word.iter().any(|c| matches!(c, '\\' | '/')) {
+            let text: String = chars
+                .get(start..word_end)
+                .unwrap_or_default()
+                .iter()
+                .collect();
+            let reading = trim_link_candidate(&text);
+            if chars_len(&reading) > end - start && !readings.contains(&reading) {
+                readings.push(reading);
+            }
+        }
+        if chars.get(word_end).is_some_and(|c| ends_spaced_reading(*c)) {
+            break;
+        }
+        at = word_end;
+    }
+    readings.reverse();
+    readings
 }
 
 /// Gives each relative path, and each bare name, that follows an absolute
@@ -756,6 +1064,8 @@ fn build_link(
         end_row: row_index(end.row),
         end_column: end.after,
         segments: link_segments(segments, start_index, end_index),
+        spaced: Vec::new(),
+        hyperlink: false,
     }
 }
 
@@ -1334,6 +1644,197 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "/var/log/a.tx");
         assert_eq!(links[0].candidates.len(), 1);
+    }
+
+    #[test]
+    fn box_edge_stitch_is_offered_as_a_candidate() {
+        let cols = 140;
+        let rows = [
+            row(
+                &format!("\u{256D}{}\u{256E}", "\u{2500}".repeat(138)),
+                cols,
+                false,
+            ),
+            row(&format!("\u{2502}{:138}\u{2502}", ""), cols, false),
+            row(
+                &format!(
+                    "\u{2502}  {:<136}\u{2502}",
+                    r"Read X:\dev\rustling-tulip.wt\rt-929\apps\native\tests\ui\fixtures\links\a-long-folder-name-to-wrap\"
+                ),
+                cols,
+                false,
+            ),
+            row(
+                &format!(
+                    "\u{2502}  {:<136}\u{2502}",
+                    r"another-folder\the-file.txt first."
+                ),
+                cols,
+                false,
+            ),
+            row(&format!("\u{2502}{:138}\u{2502}", ""), cols, false),
+            row(
+                &format!("\u{2570}{}\u{256F}", "\u{2500}".repeat(138)),
+                cols,
+                false,
+            ),
+        ];
+        assert!(!can_stitch(&rows[2], &rows[3], cols));
+        let links = detect_row_links(&rows, cols);
+        assert_eq!(
+            targets(&links),
+            [
+                r"X:\dev\rustling-tulip.wt\rt-929\apps\native\tests\ui\fixtures\links\a-long-folder-name-to-wrap\",
+                r"another-folder\the-file.txt",
+            ],
+            "the rows stay two links until the stitched file is found"
+        );
+        assert_eq!(links[0].spaced.len(), 1, "the stitched reading is offered");
+        let stitched = &links[0].spaced[0];
+        assert_eq!(
+            stitched.target,
+            r"X:\dev\rustling-tulip.wt\rt-929\apps\native\tests\ui\fixtures\links\a-long-folder-name-to-wrap\another-folder\the-file.txt"
+        );
+        assert_eq!(
+            stitched.segments,
+            vec![
+                LinkSegment {
+                    row: 2,
+                    start_column: 8,
+                    end_column: 103,
+                },
+                LinkSegment {
+                    row: 3,
+                    start_column: 3,
+                    end_column: 30,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn short_rows_in_a_box_do_not_stitch() {
+        let cols = 40;
+        let rows = [
+            row(
+                &format!("│ {:<37}│", "apps/native/src/links.rs"),
+                cols,
+                false,
+            ),
+            row(
+                &format!("│ {:<37}│", "apps/native/src/term.rs"),
+                cols,
+                false,
+            ),
+        ];
+
+        let links = detect_row_links(&rows, cols);
+
+        assert_eq!(
+            targets(&links),
+            ["apps/native/src/links.rs", "apps/native/src/term.rs"]
+        );
+        assert_eq!((links[0].start_row, links[0].end_row), (0, 0));
+        assert_eq!((links[1].start_row, links[1].end_row), (1, 1));
+    }
+
+    /// The texts of a link's spaced readings, longest first.
+    fn spaced(link: &TerminalLink) -> Vec<&str> {
+        link.spaced
+            .iter()
+            .map(|reading| reading.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn spaced_readings_end_on_a_path_token() {
+        let links = detect_links(r"at C:\Program Files\Microsoft Visual Studio\msvs.exe now");
+
+        assert_eq!(links[0].target, r"C:\Program", "the link stays split");
+        assert_eq!(
+            spaced(&links[0]),
+            [
+                r"C:\Program Files\Microsoft Visual Studio\msvs.exe",
+                r"C:\Program Files\Microsoft",
+            ]
+        );
+        let whole = &links[0].spaced[0];
+        assert_eq!(
+            whole.target,
+            r"C:\Program Files\Microsoft Visual Studio\msvs.exe"
+        );
+        assert_eq!((whole.start_column, whole.end_column), (3, 52));
+        assert_eq!(whole.spaced, Vec::<TerminalLink>::new());
+    }
+
+    #[test]
+    fn spaced_readings_stop_at_double_space_and_quotes() {
+        let links = detect_links(r"C:\a b\c  d\e.txt");
+        assert_eq!(spaced(&links[0]), [r"C:\a b\c"], "a double space ends it");
+
+        let links = detect_links(r"C:\a b\c|d\e.txt");
+        assert_eq!(spaced(&links[0]), [r"C:\a b\c"], "a pipe ends it");
+
+        let links = detect_links(r#"C:\a b"c\d.txt"#);
+        assert!(spaced(&links[0]).is_empty(), "a quote ends it");
+
+        let links = detect_links(r"C:\a b<c\d.txt");
+        assert!(spaced(&links[0]).is_empty(), "an angle bracket ends it");
+
+        let links = detect_links(r"C:\a 1 2 3 4 5 6 7 8\x.txt");
+        assert_eq!(spaced(&links[0]), [r"C:\a 1 2 3 4 5 6 7 8\x.txt"]);
+
+        let links = detect_links(r"C:\a 1 2 3 4 5 6 7 8 9\x.txt");
+        assert!(spaced(&links[0]).is_empty(), "no more than 8 words");
+
+        let links = detect_links("see src/a.rs and b/c.rs");
+        assert!(spaced(&links[0]).is_empty(), "a relative path has none");
+    }
+
+    #[test]
+    fn quoted_path_with_spaces_is_a_spaced_reading() {
+        let links = detect_links(r#"open "C:\Program Files\x.txt" now"#);
+        assert_eq!(links[0].target, r"C:\Program", "the link stays split");
+        assert_eq!(spaced(&links[0]), [r"C:\Program Files\x.txt"]);
+        let quoted = &links[0].spaced[0];
+        assert_eq!((quoted.start_column, quoted.end_column), (6, 28));
+
+        let links = detect_links(r"open 'X:\a b\c d.txt', then");
+        assert_eq!(links[0].target, r"X:\a");
+        assert_eq!(spaced(&links[0]), [r"X:\a b\c d.txt", r"X:\a b\c"]);
+    }
+
+    #[test]
+    fn quoted_prose_is_not_one_link() {
+        let links = detect_links(r#"he said "yes/no questions are fine""#);
+        assert_eq!(targets(&links), ["yes/no"]);
+        assert_eq!(spaced(&links[0]), ["yes/no questions are fine"]);
+
+        let links = detect_links(r#""src/a.rs:10: expected ';' here""#);
+        assert_eq!(targets(&links), ["src/a.rs"]);
+        assert_eq!(links[0].text, "src/a.rs:10");
+        assert_eq!(spaced(&links[0]), ["src/a.rs:10: expected ';' here"]);
+
+        let links = detect_links("see 'src/a.rs and the user's config");
+        assert_eq!(targets(&links), ["src/a.rs"]);
+        assert_eq!(spaced(&links[0]), ["src/a.rs and the user"]);
+    }
+
+    #[test]
+    fn quote_leads_a_path() {
+        let links = detect_links(r"'C:\Program Files\nope\x.txt'");
+        assert_eq!(links[0].target, r"C:\Program");
+        assert_eq!(spaced(&links[0]), [r"C:\Program Files\nope\x.txt"]);
+
+        let links = detect_links(r"'C:\nope\x.txt");
+        assert_eq!(targets(&links), [r"C:\nope\x.txt"], "no closing quote");
+
+        let links = detect_links("isn't/wasn't");
+        assert_eq!(
+            targets(&links),
+            Vec::<&str>::new(),
+            "a quote inside a word leads nothing"
+        );
     }
 
     #[test]

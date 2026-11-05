@@ -17,6 +17,7 @@ use crate::remote_mode::Capabilities;
 use crate::run_confirm::{RunButton, RunConfirm};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::target::HostKey;
+use crate::term_view::SpacedCheck;
 use crate::ui_theme::theme;
 use crate::viewer_text::{self, NotText, Verdict};
 use crate::{RootView, file_fetch};
@@ -60,6 +61,20 @@ fn viewer_verdict(action: &OpenAction) -> std::io::Result<Verdict> {
         Ok(_) => verdict,
         Err(not_text) => Verdict::External(Some(not_text)),
     })
+}
+
+/// `link` with the first reading of each of its spaced readings, in their
+/// order, in front of its own candidates: a remote pane cannot check them
+/// before the click, so the host's probe tries them first.
+fn with_spaced_first(link: &TerminalLink) -> TerminalLink {
+    let mut link = link.clone();
+    let spaced: Vec<TerminalLinkCandidate> = link
+        .spaced
+        .iter()
+        .filter_map(|reading| reading.candidates.first().cloned())
+        .collect();
+    link.candidates.splice(0..0, spaced);
+    link
 }
 
 /// The file `action` opens.
@@ -132,10 +147,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let (host, session) = (source.host.clone(), source.session);
-        let opens_here = match self.conn_of(&host) {
-            Some(conn) => Capabilities::for_target(conn.target()).opens_local_files(),
-            None => host == HostKey::Local,
-        };
+        let opens_here = self.opens_here(&host);
         match link.kind {
             LinkKind::Url => match open::validate_http_url(&link.target) {
                 Ok(url) => {
@@ -154,8 +166,11 @@ impl RootView {
             },
             // A host path is not on this PC; resolving it here could open
             // a local file of the same name, so it is fetched instead.
+            // The host's probe skips a spaced reading it does not find, so
+            // they go first, unchecked.
             LinkKind::Path if !opens_here => {
-                self.fetch_path_link(link, &host, session, source.prefer_viewer, cx);
+                let link = with_spaced_first(link);
+                self.fetch_path_link(&link, &host, session, source.prefer_viewer, cx);
             }
             LinkKind::Path => {
                 let candidates = link.candidates.clone();
@@ -166,6 +181,62 @@ impl RootView {
                 self.resolve_path(candidates, base_dirs, opening, window, cx);
             }
         }
+    }
+
+    /// Whether a link in a pane of `host` opens on This PC.
+    fn opens_here(&self, host: &HostKey) -> bool {
+        match self.conn_of(host) {
+            Some(conn) => Capabilities::for_target(conn.target()).opens_local_files(),
+            None => *host == HostKey::Local,
+        }
+    }
+
+    /// Pane `slot_id` of `host` hovered a path with spaced readings: in a
+    /// pane that opens files here, checks them on a background thread, as
+    /// [`Self::resolve_path`] does, and widens the pane's link to the first
+    /// that exists. A remote pane's readings go to its click instead.
+    pub(crate) fn check_spaced_link(
+        &mut self,
+        slot_id: &str,
+        host: &HostKey,
+        check: SpacedCheck,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.opens_here(host) {
+            return;
+        }
+        let Some(pane) = self.panes.get(slot_id).map(|slot| slot.view().downgrade()) else {
+            return;
+        };
+        let SpacedCheck {
+            key,
+            origin,
+            spaced,
+            base_dirs,
+        } = check;
+        let candidates: Vec<TerminalLinkCandidate> = spaced
+            .iter()
+            .filter_map(|reading| reading.candidates.first().cloned())
+            .collect();
+        let ui_dir = self.ui_dir.clone();
+        let opener = Arc::clone(&self.opener);
+        let found = cx.background_executor().spawn(async move {
+            open::first_existing_candidate(
+                &candidates,
+                &base_dirs,
+                ui_dir.as_deref(),
+                opener.as_ref(),
+            )
+        });
+        cx.spawn(async move |_, cx| {
+            let Some(widened) = found.await.and_then(|index| spaced.into_iter().nth(index)) else {
+                return;
+            };
+            // Fails only when the pane is gone, leaving no link to widen.
+            pane.update(cx, |pane, cx| pane.widen_link(key, origin, widened, cx))
+                .ok();
+        })
+        .detach();
     }
 
     /// Checks the path's readings on a background thread, then opens the

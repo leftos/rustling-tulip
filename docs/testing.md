@@ -6,6 +6,8 @@ The test tiers, the runner's settings, the fake CLIs the live tier uses, and how
 
 Tests run with cargo-nextest although the full suite measured 1.41x slower than `cargo test`, because the daemon's git-fixture tests (RT-70) dominate it. `.config/nextest.toml` sets fail-fast off, no retries, a 60 s slow-timeout that kills a test still running at 300 s (a hang guard; it fails as TIMEOUT) and a `serial-live` test group that runs `e2e_live`, `e2e_recover`, `e2e_remote`, `e2e_ssh`, `e2e_multi_host` and `smoke_window` one at a time, with a 120 s period killed at 720 s. The protocol, tracer-protocol and daemon-client crates set `doctest = false`.
 
+`links` is a private module of the native crate, so probing its predicates (the spaced readings, the stitch rule) takes a verbatim copy of `apps/native/src/links.rs` in a standalone crate under `.tmp`, run with `--local`: a routed run gets no copy of gitignored files.
+
 On a paused tokio clock (`#[tokio::test(start_paused = true)]`) a `timeout` or `wait_until` deadline is a count of timer steps, not a hang guard: tokio skips idle virtual time in microseconds of real time, so any real OS call on the awaited path (a socket bind, a file read) that fails for a few milliseconds fails the test. A test whose wait crosses real I/O runs on the real clock with short intervals and waits on the event, its deadline a hang guard that fails as `hung`; only tests that assert a virtual schedule stay paused, with the OS kept off their path.
 
 ## Test tiers

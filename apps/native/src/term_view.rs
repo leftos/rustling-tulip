@@ -27,7 +27,7 @@ use crate::Clock;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, FontSettings};
 use crate::hosts::HostSender;
-use crate::links::{LinkKind, TerminalLink};
+use crate::links::{LinkKind, LinkSegment, TerminalLink};
 use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::open;
@@ -127,6 +127,22 @@ struct LinkHover {
     active: bool,
     cell: Option<(usize, usize)>,
     cache: RefCell<Option<CachedLinks>>,
+    /// The spaced readings found to exist, newest last, kept across cache
+    /// rebuilds so that new output elsewhere, or a hover on another row of
+    /// the same path, keeps the widened link.
+    confirmed: Vec<Confirmed>,
+}
+
+/// How many confirmed readings a pane keeps.
+const CONFIRMED_LIMIT: usize = 16;
+
+/// A spaced reading found to exist: its text and the text of each grid row
+/// it takes, top first. A rebuilt cache takes it again only while those
+/// rows still hold that text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Confirmed {
+    text: String,
+    rows: Vec<String>,
 }
 
 /// The links around one grid line, kept while the terminal's content stays
@@ -136,6 +152,171 @@ struct CachedLinks {
     /// The pane's content generation and the hovered grid line.
     key: (u64, i32),
     links: Vec<TerminalLink>,
+    /// The first segment of each link whose spaced readings were sent to be
+    /// checked, so each is checked once.
+    checked: Vec<LinkSegment>,
+    /// The grid line and text of each row the links were read from.
+    rows: Vec<(i32, String)>,
+}
+
+impl CachedLinks {
+    /// The cache for `links`. A spaced reading that takes a cell of a
+    /// hyperlink is dropped: the hyperlink's own target wins.
+    fn new(key: (u64, i32), mut links: Vec<TerminalLink>) -> Self {
+        let hyperlinks: Vec<TerminalLink> = links
+            .iter()
+            .filter(|link| link.hyperlink)
+            .cloned()
+            .collect();
+        for link in &mut links {
+            link.spaced.retain(|reading| {
+                !hyperlinks
+                    .iter()
+                    .any(|hyperlink| shares_a_cell(hyperlink, reading))
+            });
+        }
+        Self {
+            key,
+            links,
+            checked: Vec::new(),
+            rows: Vec::new(),
+        }
+    }
+
+    /// [`Self::new`] for links read from `rows`, with every `confirmed`
+    /// reading whose rows still hold the same text taken again.
+    fn rebuilt(
+        key: (u64, i32),
+        links: Vec<TerminalLink>,
+        rows: Vec<(i32, String)>,
+        confirmed: &[Confirmed],
+    ) -> Self {
+        let mut cached = Self::new(key, links);
+        cached.rows = rows;
+        let found: Vec<TerminalLink> = cached
+            .links
+            .iter()
+            .flat_map(|link| &link.spaced)
+            .filter(|reading| {
+                cached
+                    .confirmed(reading)
+                    .is_some_and(|reading| confirmed.contains(&reading))
+            })
+            .cloned()
+            .collect();
+        for reading in found {
+            cached.replace_with(reading);
+        }
+        cached
+    }
+
+    /// `reading` as a confirmed reading: its text and its rows' text, when
+    /// the cache holds every row it takes.
+    fn confirmed(&self, reading: &TerminalLink) -> Option<Confirmed> {
+        let mut lines: Vec<i32> = reading.segments.iter().map(|segment| segment.row).collect();
+        lines.dedup();
+        let rows = lines
+            .iter()
+            .map(|line| {
+                self.rows
+                    .iter()
+                    .find(|(row, _)| row == line)
+                    .map(|(_, text)| text.clone())
+            })
+            .collect::<Option<Vec<String>>>()?;
+        Some(Confirmed {
+            text: reading.text.clone(),
+            rows,
+        })
+    }
+
+    /// The checks the cell at grid (`line`, `col`) asks for: the spaced
+    /// readings of every link whose own cells or readings take the cell, the
+    /// link whose own cells take it first, each link's only once; marks them
+    /// sent.
+    fn spaced_to_check(&mut self, line: i32, col: usize) -> Vec<SpacedCheck> {
+        let own = self.links.iter().filter(|link| link.covers(line, col));
+        let by_reading = self.links.iter().filter(|link| {
+            !link.covers(line, col) && link.spaced.iter().any(|reading| reading.covers(line, col))
+        });
+        let checks: Vec<SpacedCheck> = own
+            .chain(by_reading)
+            .filter(|link| !link.spaced.is_empty())
+            .filter_map(|link| {
+                let origin = *link.segments.first()?;
+                (!self.checked.contains(&origin)).then(|| SpacedCheck {
+                    key: self.key,
+                    origin,
+                    spaced: link.spaced.clone(),
+                    base_dirs: Vec::new(),
+                })
+            })
+            .collect();
+        self.checked.extend(checks.iter().map(|check| check.origin));
+        checks
+    }
+
+    /// Puts `widened`, a spaced reading found to exist, in place of the link
+    /// starting at `origin` and every link it overlaps. Dropped, returning
+    /// `false`, when the content or the hovered line changed since the check
+    /// was sent (`key`), the link is gone, the cell hovered now (`hovered`,
+    /// in grid coordinates) is not on the widened link, or the widened link
+    /// would take a hyperlink's cell.
+    fn widen(
+        &mut self,
+        key: (u64, i32),
+        origin: LinkSegment,
+        hovered: Option<(i32, usize)>,
+        widened: TerminalLink,
+    ) -> bool {
+        let still_hovered = hovered.is_some_and(|(line, col)| widened.covers(line, col));
+        let present = self
+            .links
+            .iter()
+            .any(|link| link.segments.first() == Some(&origin));
+        if self.key != key || !present || !still_hovered {
+            return false;
+        }
+        self.replace_with(widened)
+    }
+
+    /// Puts `reading` in place of every link it shares a cell with, unless
+    /// one is a hyperlink.
+    fn replace_with(&mut self, reading: TerminalLink) -> bool {
+        let over_hyperlink = self
+            .links
+            .iter()
+            .any(|link| link.hyperlink && shares_a_cell(link, &reading));
+        if over_hyperlink {
+            return false;
+        }
+        self.links.retain(|link| !shares_a_cell(link, &reading));
+        self.links.push(reading);
+        true
+    }
+}
+
+/// Whether two links take any cell in common.
+fn shares_a_cell(a: &TerminalLink, b: &TerminalLink) -> bool {
+    a.segments.iter().any(|first| {
+        b.segments.iter().any(|second| {
+            first.row == second.row
+                && first.start_column < second.end_column
+                && second.start_column < first.end_column
+        })
+    })
+}
+
+/// A hovered link's spaced readings, for the root to check on disk: the
+/// cache key and the first segment of the link they were read from, so a
+/// stale answer is dropped, and the folders the session's paths resolve
+/// against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpacedCheck {
+    pub key: (u64, i32),
+    pub origin: LinkSegment,
+    pub spaced: Vec<TerminalLink>,
+    pub base_dirs: Vec<String>,
 }
 
 /// The session the pane shows, and the load of its scrollback. Only the
@@ -297,6 +478,10 @@ pub enum PaneEvent {
         session: Option<String>,
         prefer_viewer: bool,
     },
+    /// Ctrl+hover reached a path with spaced readings: the root checks them
+    /// in a pane that opens files here, and widens the link to the first
+    /// that exists through [`TerminalPane::widen_link`].
+    CheckSpacedLink(SpacedCheck),
     /// A left press on the gutter dot at `index` (top first): the root opens
     /// that command's menu at `at`, in window coordinates.
     ShellDotMenu {
@@ -1463,6 +1648,73 @@ impl TerminalPane {
         if changed && shown {
             cx.notify();
         }
+        if changed {
+            self.check_spaced(cx);
+        }
+    }
+
+    /// Asks the root to check the spaced readings of the link under a
+    /// Ctrl+hover, once each.
+    fn check_spaced(&mut self, cx: &mut Context<Self>) {
+        let Some((row, col)) = self.links.cell.filter(|_| self.links.active) else {
+            return;
+        };
+        // Fills the cache for the hovered line.
+        self.link_at(row, col);
+        let (line, col) = self.grid_point(row, col);
+        let checks = self
+            .links
+            .cache
+            .borrow_mut()
+            .as_mut()
+            .map(|cached| cached.spaced_to_check(line, col))
+            .unwrap_or_default();
+        for mut check in checks {
+            check.base_dirs.clone_from(&self.base_dirs);
+            cx.emit(PaneEvent::CheckSpacedLink(check));
+        }
+    }
+
+    /// A spaced reading of the link starting at `origin` exists: the link is
+    /// read at that length from now on, unless the content, the hovered line
+    /// or the hovered link changed since the check was sent under `key`.
+    pub(crate) fn widen_link(
+        &mut self,
+        key: (u64, i32),
+        origin: LinkSegment,
+        widened: TerminalLink,
+        cx: &mut Context<Self>,
+    ) {
+        let hovered = self.links.cell.map(|(row, col)| self.grid_point(row, col));
+        let confirmed = self.links.cache.borrow_mut().as_mut().and_then(|cached| {
+            let confirmed = cached.confirmed(&widened);
+            cached
+                .widen(key, origin, hovered, widened)
+                .then_some(confirmed)
+        });
+        let Some(confirmed) = confirmed else {
+            return;
+        };
+        if let Some(confirmed) = confirmed {
+            let kept = &mut self.links.confirmed;
+            kept.retain(|reading| *reading != confirmed);
+            if kept.len() >= CONFIRMED_LIMIT {
+                kept.remove(0);
+            }
+            kept.push(confirmed);
+        }
+        cx.notify();
+    }
+
+    /// The grid line and column of viewport cell (`row`, `col`).
+    fn grid_point(&self, row: usize, col: usize) -> (i32, usize) {
+        let cell = ViewportCell {
+            row,
+            col,
+            side: Side::Left,
+        };
+        let point = cell.to_point(self.term.display_offset());
+        (point.line.0, point.column.0)
     }
 
     /// Holds link mode while Ctrl is down, in this pane whether it has the
@@ -1474,6 +1726,7 @@ impl TerminalPane {
             if self.links.cell.is_some() {
                 cx.notify();
             }
+            self.check_spaced(cx);
         }
     }
 
@@ -1496,22 +1749,21 @@ impl TerminalPane {
     /// links around a grid line are detected again only once the terminal's
     /// content changed or another line is hovered.
     fn link_at(&self, row: usize, col: usize) -> Option<TerminalLink> {
-        let cell = ViewportCell {
-            row,
-            col,
-            side: Side::Left,
-        };
-        let point = cell.to_point(self.term.display_offset());
-        let (line, col) = (point.line.0, point.column.0);
+        let (line, col) = self.grid_point(row, col);
         let key = (self.content_generation, line);
         let mut cache = self.links.cache.borrow_mut();
         if cache.as_ref().is_none_or(|cached| cached.key != key) {
-            let links = self
+            let (links, rows) = self
                 .term
                 .link_window(line)
-                .map(|window| window.links())
+                .map(|window| (window.links(), window.row_texts()))
                 .unwrap_or_default();
-            *cache = Some(CachedLinks { key, links });
+            *cache = Some(CachedLinks::rebuilt(
+                key,
+                links,
+                rows,
+                &self.links.confirmed,
+            ));
         }
         cache
             .as_ref()?
@@ -2334,8 +2586,8 @@ mod tests {
     use gpui::{point, px};
 
     use super::{
-        Attachment, CLAIM_WINDOW, ReplyVerdict, ShellStatus, SizeGate, decorations, dot_color,
-        paste_log_line, terminal_font, to_rgba,
+        Attachment, CLAIM_WINDOW, CachedLinks, ReplyVerdict, ShellStatus, SizeGate, decorations,
+        dot_color, paste_log_line, terminal_font, to_rgba,
     };
     use crate::palette::{DANGER, WAITING};
     use crate::term_input;
@@ -2351,6 +2603,99 @@ mod tests {
             let verdict = load.on_reply(None, false, false, || Ok::<_, Infallible>(Vec::new()));
             matches!(verdict, Ok(ReplyVerdict::Accepted(_)))
         })
+    }
+
+    #[test]
+    fn stale_spaced_check_does_not_widen_another_link() {
+        let links = crate::links::detect_links(r"C:\A B\x.txt and D:\q.txt");
+        let mut cached = CachedLinks::new((1, 0), links);
+        let texts = |cached: &CachedLinks| -> Vec<String> {
+            cached.links.iter().map(|link| link.text.clone()).collect()
+        };
+        let before = texts(&cached);
+        assert_eq!(before, [r"C:\A", r"B\x.txt", r"D:\q.txt"]);
+
+        let mut checks = cached.spaced_to_check(0, 5);
+        assert_eq!(
+            checks.len(),
+            1,
+            "the word B is in the first link's spaced reading"
+        );
+        let Some(check) = checks.pop() else {
+            return;
+        };
+        assert_eq!(cached.spaced_to_check(0, 5), Vec::new(), "sent once");
+        let readings: Vec<&str> = check.spaced.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(readings, [r"C:\A B\x.txt and D:\q.txt", r"C:\A B\x.txt"]);
+        let widened = check.spaced[1].clone();
+
+        let on_other_link = Some((0, 18));
+        assert!(
+            !cached.widen(check.key, check.origin, on_other_link, widened.clone()),
+            "the hover moved to another link"
+        );
+        assert!(
+            !cached.widen((2, 0), check.origin, Some((0, 5)), widened.clone()),
+            "the content changed"
+        );
+        assert!(
+            !cached.widen((1, 1), check.origin, Some((0, 5)), widened.clone()),
+            "another line is hovered"
+        );
+        assert!(
+            !cached.widen(check.key, check.origin, None, widened.clone()),
+            "nothing is hovered"
+        );
+        assert_eq!(texts(&cached), before, "a stale answer changes nothing");
+
+        assert!(cached.widen(check.key, check.origin, Some((0, 5)), widened));
+        assert_eq!(texts(&cached), [r"D:\q.txt", r"C:\A B\x.txt"]);
+    }
+
+    #[test]
+    fn widen_never_removes_a_hyperlink() {
+        let text = r"C:\A B\x.txt";
+        let count = text.chars().count();
+        let row = crate::links::TerminalRow {
+            text: text.to_owned(),
+            columns: (0..count)
+                .map(|column| u16::try_from(column).unwrap_or(u16::MAX))
+                .collect(),
+            hyperlinks: (0..count)
+                .map(|index| (index >= 5).then(|| "https://example.com".to_owned()))
+                .collect(),
+            is_wrapped: false,
+        };
+        let mut links = crate::links::hyperlink_links(&[row], count);
+        let path = crate::links::detect_links(text).remove(0);
+        let reading = path.spaced.first().cloned();
+        assert_eq!(
+            reading.as_ref().map(|reading| reading.text.as_str()),
+            Some(text),
+            "the path's spaced reading runs over the hyperlink"
+        );
+        let Some(reading) = reading else {
+            return;
+        };
+        let origin = path.segments[0];
+        links.push(path);
+        let mut cached = CachedLinks::new((1, 0), links);
+
+        assert_eq!(
+            cached.spaced_to_check(0, 7),
+            Vec::new(),
+            "a reading over a hyperlink is never offered"
+        );
+        assert!(
+            !cached.widen((1, 0), origin, Some((0, 7)), reading),
+            "a widen never removes a hyperlink"
+        );
+        let targets: Vec<&str> = cached
+            .links
+            .iter()
+            .map(|link| link.target.as_str())
+            .collect();
+        assert_eq!(targets, ["https://example.com", r"C:\A"]);
     }
 
     #[test]

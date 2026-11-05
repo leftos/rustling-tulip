@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Settings' keep-awake row names the selected host instead of always saying "this PC".
 - With several hosts in the sidebar, This PC's "No repos or workspaces yet" note sits under This PC's header, not above every host.
 - The new-session dialog's Target list keeps its highlighted row in view, and a click inside the list no longer closes it.
+- Ctrl+click opens a whole terminal path that holds spaces, or wraps inside a themed Claude reply box, once the file is found.
 - A toast with a long title now wraps inside its card, so its close button stays reachable.
 - Fetch toasts name an SSH host as you typed it, and a click on a path link shows its toast at once.
 - A folder fetch's progress keeps moving while it finishes, drops Cancel once it can't stop, and stays closed when you close it.

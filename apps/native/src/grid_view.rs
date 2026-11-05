@@ -848,6 +848,12 @@ impl RootView {
                 };
                 self.open_link(link, base_dirs.clone(), &source, window, cx);
             }
+            PaneEvent::CheckSpacedLink(check) => {
+                let Some(host) = host else {
+                    return;
+                };
+                self.check_spaced_link(slot_id, &host, check.clone(), cx);
+            }
             PaneEvent::ShellDotMenu { pane_id, index, at } => {
                 self.open_shell_menu(pane_id, *index, *at, window, cx);
             }

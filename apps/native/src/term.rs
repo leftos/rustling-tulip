@@ -1029,10 +1029,21 @@ pub struct LinkWindow {
     /// The grid line of the first row.
     first: i32,
     rows: Vec<TerminalRow>,
+    /// The box text edge of each row the walk read one for, as the walk
+    /// read it from the grid around the window.
+    edges: Vec<Option<usize>>,
     cols: usize,
     /// The walk stopped at its cap rather than at a row that ends the line.
     cut_above: bool,
     cut_below: bool,
+}
+
+/// The box text edges a walk read: the last box run it worked out, as its
+/// first and last grid lines and its edge, and each grid line it asked for.
+#[derive(Debug, Default)]
+struct BoxEdges {
+    run: Option<(i32, i32, Option<usize>)>,
+    read: Vec<(i32, Option<usize>)>,
 }
 
 impl LinkWindow {
@@ -1048,7 +1059,7 @@ impl LinkWindow {
         let hyperlinks = links.len();
         // A hyperlink's own target wins over the text it runs under, so a
         // detected link sharing a cell with one is dropped.
-        for link in links::detect_row_links(&self.rows, self.cols) {
+        for link in links::detect_window_links(&self.rows, self.cols, &self.edges) {
             let shadowed = links[..hyperlinks]
                 .iter()
                 .any(|hyperlink| shares_a_cell(hyperlink, &link));
@@ -1065,6 +1076,15 @@ impl LinkWindow {
             link.shift_rows(self.first);
         }
         links
+    }
+
+    /// Each row of the window as its grid line and its text.
+    #[must_use]
+    pub fn row_texts(&self) -> Vec<(i32, String)> {
+        (self.first..)
+            .zip(&self.rows)
+            .map(|(line, row)| (line, row.text.clone()))
+            .collect()
     }
 }
 
@@ -1130,6 +1150,16 @@ impl Terminal {
             return None;
         }
         let cols = self.size.cols;
+        // Each upper row's box text edge, read from the grid around it once
+        // per box and only for a break the cheaper checks let through; the
+        // window hands the detector the same edges.
+        let mut boxes = BoxEdges::default();
+        let mut joins = |above: &TerminalRow, above_line: i32, below: &TerminalRow| {
+            links::stitch(above, below, cols, || {
+                self.box_edge_at(above_line, cap, (top, bottom), &mut boxes)
+            })
+            .is_some()
+        };
         let mut above = vec![self.read_row(line)];
         let mut first = line;
         while first > top && line - first < cap {
@@ -1137,7 +1167,7 @@ impl Terminal {
             let Some(current) = above.last() else {
                 break;
             };
-            if !current.is_wrapped && !links::can_stitch(&previous, current, cols) {
+            if !current.is_wrapped && !joins(&previous, first - 1, current) {
                 break;
             }
             above.push(previous);
@@ -1154,7 +1184,7 @@ impl Terminal {
             let Some(current) = below.last().or_else(|| above.first()) else {
                 break;
             };
-            if !next.is_wrapped && !links::can_stitch(current, &next, cols) {
+            if !next.is_wrapped && !joins(current, last, &next) {
                 break;
             }
             below.push(next);
@@ -1163,13 +1193,84 @@ impl Terminal {
         let cut_below = last < bottom && last - line >= cap;
 
         above.reverse();
+        let edges = (first..=last)
+            .map(|at| {
+                boxes
+                    .read
+                    .iter()
+                    .rev()
+                    .find(|(read, _)| *read == at)
+                    .and_then(|(_, edge)| *edge)
+            })
+            .collect();
         Some(LinkWindow {
             first,
             rows: above.into_iter().chain(below).collect(),
+            edges,
             cols,
             cut_above,
             cut_below,
         })
+    }
+
+    /// The text edge of the box grid line `line` sits in, from `boxes` when
+    /// it already holds that box; recorded in `boxes.read` either way.
+    fn box_edge_at(
+        &self,
+        line: i32,
+        cap: i32,
+        bounds: (i32, i32),
+        boxes: &mut BoxEdges,
+    ) -> Option<usize> {
+        let edge = match boxes.run {
+            Some((first, last, edge)) if (first..=last).contains(&line) => edge,
+            _ => {
+                let run = self.box_run_near(line, cap, bounds);
+                boxes.run = run;
+                run.and_then(|(_, _, edge)| edge)
+            }
+        };
+        boxes.read.push((line, edge));
+        edge
+    }
+
+    /// The box grid line `line` sits in, read from the rows around it, up to
+    /// `cap` each way, whose border glyphs sit in the same columns as its
+    /// own: its first and last grid lines and its [`links::BoxRun::edge`].
+    /// `None` when `line` has no border.
+    fn box_run_near(
+        &self,
+        line: i32,
+        cap: i32,
+        (top, bottom): (i32, i32),
+    ) -> Option<(i32, i32, Option<usize>)> {
+        let cols = self.size.cols;
+        let hovered = self.read_row(line);
+        let border = links::box_border(&hovered, cols)?;
+        let same = |row: &TerminalRow| links::box_border(row, cols) == Some(border);
+        let mut rows = vec![hovered];
+        let mut first = line;
+        while first > top && line - first < cap {
+            let row = self.read_row(first - 1);
+            if !same(&row) {
+                break;
+            }
+            rows.push(row);
+            first -= 1;
+        }
+        rows.reverse();
+        let at = rows.len() - 1;
+        let mut last = line;
+        while last < bottom && last - line < cap {
+            let row = self.read_row(last + 1);
+            if !same(&row) {
+                break;
+            }
+            rows.push(row);
+            last += 1;
+        }
+        let run = links::box_run(&rows, at, cols)?;
+        Some((first, last, run.edge))
     }
 
     /// One grid line as a [`TerminalRow`]: the cell of every column holding a
