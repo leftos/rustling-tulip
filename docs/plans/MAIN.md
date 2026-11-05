@@ -49,15 +49,15 @@
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
-- [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge
-  - [ ] RT-364 PW.1: Serve the PWA shell from the tailnet listener
-  - [ ] RT-365 PW.3: Pair the PWA with a device token
-  - [ ] RT-366 PW.5: Phone session screen: live rows, composer, Quick and Keys, prompt sheet
-  - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys
-  - [ ] RT-368 PW.7: Home Screen badge with the Needs you count
-  - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone
-  - [ ] RT-370 PW.2: Protocol types for the PWA and its connection
-  - [ ] RT-104 PW.4: Phone Home: grouped list and Needs you tray; answer prompts, stop and resume
+- [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge · release vNext+1
+  - [ ] RT-364 PW.1: Serve the PWA shell from the tailnet listener · release vNext+1
+  - [ ] RT-365 PW.3: Pair the PWA with a device token · release vNext+1
+  - [ ] RT-366 PW.5: Phone session screen: live rows, composer, Quick and Keys, prompt sheet · release vNext+1
+  - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext+1
+  - [ ] RT-368 PW.7: Home Screen badge with the Needs you count · release vNext+1
+  - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext+1
+  - [ ] RT-370 PW.2: Protocol types for the PWA and its connection · release vNext+1
+  - [ ] RT-104 PW.4: Phone Home: grouped list and Needs you tray; answer prompts, stop and resume · release vNext+1
 
 ## Wave 5 — Attention feed on the desktop
 
@@ -152,9 +152,6 @@
 - [ ] RT-39 Built-in Claude account switching: several logins, usage polling and switching · release vNext
   - [ ] RT-915 Accounts: daemon-driven login and the docs (CA.11, CA.12) · release vNext
     - [ ] RT-988 Login: document the daemon-driven login and promote the accounts plan (RT-915 part F) · release vNext
-    - [ ] RT-991 Login: StartAccountLogin and the daemon's login session (RT-915 part C) · release vNext
-      - [ ] RT-1005 Login C2: run the login session, cancel, time out, shut down and sweep (RT-991) · release vNext
-    - [ ] RT-992 Login: the Log in a new account button on Settings › Accounts (RT-915 part D) · release vNext
     - [ ] RT-993 Login: live specs for a login, a failure and a cancel (RT-915 part E) · release vNext
   - [ ] RT-924 Merge feat/claude-accounts to main (#205)
   - [ ] RT-958 Accounts: answer Draining at once for switch and capture, Unsupported for an unsupported lock, and fix the remove-timeout text
@@ -228,6 +225,7 @@
 - [ ] RT-858 Fix the missing spoken-alerts design file four issues link
 - [ ] RT-907 Re-read docs/session-runtime.md and docs/on-disk.md against their named files' changes since 2026-11-03
 - [ ] RT-945 Restore or re-point the reboot-resume design file RT-277 and RT-725 cite
+- [ ] RT-1024 Say how rustling-tulipd wait --text matches line anchors, or match per line
 
 ## Build tooling
 
@@ -273,19 +271,26 @@
   - [ ] RT-812 Check that a window minimised in front of the driven client never hands it the foreground
 - [ ] RT-840 Sign the installer's uninstaller too
 - [ ] RT-861 Forget a driver id's bounds in UI specs once it stops being drawn
-- [ ] RT-994 Pass rt.ps1 mac's extra cargo arguments through, and keep --all-targets for mac clippy
 
 ## macOS
 
 - [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option
 - [ ] RT-665 Ship rustling-tulip on macOS: verified build, signed .app and .dmg, auto-update · release vNext
-  - [ ] RT-46 Verify macOS support M0–M3 on real Mac hardware · release vNext
-  - [ ] RT-47 M4: macOS packaging, signing and notarization · release vNext
+  - [!] RT-46 Verify macOS support M0–M3 on real Mac hardware · release vNext
   - [ ] RT-666 Auto-update the macOS client: platform asset in the feed and an .app swap · release vNext
+    - [ ] RT-1015 Updates: start a macOS update from the client and clean up the old bundle · release vNext
   - [ ] RT-667 Build and publish the macOS release assets from docs/release.md, with macOS install steps in the README · release vNext
   - [ ] RT-906 Port the native client to macOS: build, launch and run sessions on the Mac mini · release vNext
+    - [ ] RT-1008 macOS: show in-app toasts on macOS and hide the OS toast style there · release vNext
+    - [ ] RT-1018 macOS: check the real Claude CLI runs a hook program whose path has a space · release vNext
+    - [ ] RT-1022 macOS: give the daemon the login shell's PATH when it starts with launchd's minimal one · release vNext
 - [ ] RT-925 macOS: check that a case-differing cached folder name doesn't make folder fetch refuse an inside file
 - [ ] RT-926 Unix daemon stop: wait once on a refused owner check, and name a failed owner lookup
+- [ ] RT-1017 macOS: read the machine identifier from IOPlatformUUID
+- [ ] RT-1025 Unix: let the tracer clean up before the daemon's orphan stop kills it
+- [ ] RT-1026 Unix: kill a headless child's descendants, not only its pid
+- [ ] RT-1027 Unix: guard the tracer's shutdown killpg against a reused shell pid
+- [ ] RT-1028 macOS signing: keep a cleanup failure from hiding the real error, and make the temp folder inside the try
 
 ## Agent CLIs
 
@@ -402,8 +407,6 @@
 - [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
 - [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
 - [ ] RT-640 Polish found by the v0.6.0-alpha smoke test · release vNext
-  - [ ] RT-984 Fit the sidebar view switcher at the minimum sidebar width and text size +4
-  - [ ] RT-986 Size an account toast card without the Go to pane row
 - [ ] RT-701 Replace the Fetching toast with the error when a page fetch fails
 - [ ] RT-702 Close a chat's Tail boxes when its load is refused or its host lacks file_tail
 - [ ] RT-712 Polish the Spawn submenu and New session dialog from the v0.7.0-alpha smoke
@@ -481,6 +484,9 @@
 - [ ] RT-983 Accounts: report a fractional auto-switch cooldown without truncating it
 - [ ] RT-985 Evict account toasts before Needs you toasts when the toast stack overflows
 - [ ] RT-987 Open pop-out toolbar tooltips below the toolbar row, like the pane header's
+- [ ] RT-1019 Login: honour a typed-verbatim launch command and share the program lookup with interactive spawns
+- [ ] RT-1020 Login: bound the start-up sweep as a whole and discard a login record whose child will not end
+- [ ] RT-1021 Login: skip files the start-up sweep finds under the login root
 
 ## Design files
 
@@ -499,7 +505,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [macos-compat.md](macos-compat.md) — RT-665, RT-906
+- [macos-compat.md](macos-compat.md) — RT-46, RT-665, RT-906, RT-1022
 - [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-364, RT-365, RT-366, RT-367, RT-368, RT-369, RT-370, RT-881, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
