@@ -789,6 +789,8 @@ When a verified installer is ready, the footer shows the notice `Update {version
 
 The press starts the installer detached and quits through the Keep-sessions-running path, so sessions keep running in their tracers and the new client comes back on the new version. A second update while one runs is refused with the toast `An update is already running`; an installer that cannot be started gives the toast `Couldn't start the update`.
 
+On macOS the press unpacks the zip beside the installed app and starts the staged daemon's `apply-update`, which swaps the whole bundle once the client has quit (`docs/auto-update.md` decision 6). The unpack runs on the UI thread, so the window pauses for a few seconds, and a bundle the update cannot replace (translocated, or in a folder the client cannot write) is refused with the same `Couldn't start the update` toast and nothing changed. There is no update lock off Windows.
+
 Settings → General has an Updates section: a `Check for updates` toggle (`settings-general-check-updates`, saved as `general.check_updates`, default on; off stops the automatic checks and downloads).
 
 The section also has a `Version {version}` line (`settings-update-version`), a last-check line (`settings-update-last-check`: `Not checked yet`, `Up to date`, `Update {version} ready` or `Last check failed: {error}`) and a `Check now` button, which checks whether the toggle is on or off and is disabled while a check runs. While an update is ready the section also has a `What's new` button (`settings-whats-new`) beside `Restart to update`.

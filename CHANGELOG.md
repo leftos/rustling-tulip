@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Settings › Claude can install the app's hooks in Claude Code's user settings, so a Claude you start by hand in a shell reports its conversation and status.
 - A plain shell where you start Claude yourself, by name, an alias or a wrapper like a pwsh function, gets Chat and Summary while Claude runs.
 - Programs such as vim, bat and delta can ask the terminal for its colours, so they pick light or dark styles to match your theme.
+- On macOS, Restart to update replaces the app in place and relaunches it, and the old copy is removed at the next launch.
 
 ### Fixed
 
