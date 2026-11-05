@@ -13,6 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A plain shell where you start Claude yourself, by name, an alias or a wrapper like a pwsh function, gets Chat and Summary while Claude runs.
 - Programs such as vim, bat and delta can ask the terminal for its colours, so they pick light or dark styles to match your theme.
 - On macOS, Restart to update replaces the app in place and relaunches it, and the old copy is removed at the next launch.
+- On macOS, Needs you and Finished notifications show as the app's own toasts at the bottom right, without taking focus.
 
 ### Fixed
 

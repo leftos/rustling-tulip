@@ -101,8 +101,34 @@ rodio = { version = "0.23.0", default-features = false, features = [
 interprocess = { version = "2", features = ["tokio"], optional = true }
 png = { version = "0.18", optional = true }
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+# The app's own toasts reach their window through its native handle.
 raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The app's own toasts: the screen's visible frame (`NSScreen`), keeping a
+# toast's panel up and off the keyboard (`NSPanel`) and moving it (`NSView`
+# to its `NSWindow`) on the main queue once gpui's update returns
+# (`dispatch2`), at the versions gpui already pulls in.
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSPanel",
+    "NSResponder",
+    "NSScreen",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSArray",
+    "NSGeometry",
+] }
+
+[target.'cfg(windows)'.dependencies]
 # Toasts: their XML (`Data_Xml_Dom`), the popup's in-process press handler
 # (`Foundation`), and the toast activator (`Win32_UI_Notifications`) with the
 # Start-menu shortcut that carries the app id and its class id

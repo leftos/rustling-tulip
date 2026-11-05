@@ -117,6 +117,20 @@ fn os_style_opens_no_toast_window(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn os_style_with_no_os_toasts_opens_the_apps_own(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &sessions(&["s2"]));
+    h.answer_scrollback("s1", b"");
+    h.set_os_toasts(false);
+
+    h.send(needs_you("s2"));
+
+    assert_eq!(h.window_count(), 2, "the toast has a window of its own");
+    assert!(h.notified().is_empty(), "no OS toast where there are none");
+    assert_eq!(h.toasts_shown().len(), 1, "the app's own toast is placed");
+}
+
+#[gpui::test]
 fn a_busy_user_gets_no_app_toast_and_no_sound(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir, &sessions(&["s2"]), json!({}));

@@ -763,13 +763,15 @@ An unknown or non-string `skip_when` or `toast_style` loads as its default with 
 
 ### The app's own toasts
 
-With `toast_style` `"app"`, the Needs you and Finished toasts are the client's own windows and never also the OS's; pairing toasts stay OS toasts. The two styles share `raise_toast`'s gate: the toggles, the skip rule and the sound. A summarizer-worded Finished toast is the same toast in either style.
+With `toast_style` `"app"`, the Needs you and Finished toasts are the client's own windows and never also the OS's; pairing toasts stay OS toasts. macOS has no OS toasts (`Notifier::has_os_toasts` is false there), so it always shows the app's own and ignores the saved style, which is never rewritten: a `native-ui.json` shared with Windows keeps its choice there. The Settings style row is Windows only. The two styles share `raise_toast`'s gate: the toggles, the skip rule and the sound. A summarizer-worded Finished toast is the same toast in either style.
 
 An app toast also waits on `Notifier::user_busy` (the Do Not Disturb read above), run off the UI thread, and is not shown when the session's wait ended while that check ran. Windows' per-app toast setting does not apply to it, and no toast window opens in a cloaked (`RUSTLING_TULIP_OFFSCREEN_WINDOW`) run. Its sound is the app's own clip, played once the toast is placed on the stack; it has no OS sound.
 
 Each toast is one GPUI window (`WindowKind::PopUp`, no titlebar, transparent, not movable or resizable) opened hidden. `toast_window.rs` shows it from a short-lived worker thread, since GPUI's window state is borrowed while the window opens: `never_activate` (shared with `offscreen.rs`) gives it `WS_EX_NOACTIVATE`, `SetWindowPos(HWND_TOPMOST, …, SWP_NOACTIVATE)` makes it topmost, and `ShowWindow(SW_SHOWNOACTIVATE)` shows it. A toast never takes focus, and the code never activates the window.
 
 The stack sits in the bottom-right of the work area (`rcWork`) of the monitor holding the main window, else the primary monitor, newest nearest the corner: 360 logical px wide, 8 px apart, 16 px from the edges, at most 4 shown. A fifth drops the oldest Finished toast first, else the oldest of any kind, so a Needs you stays while a Finished could go; a stack too tall for the work area drops the same way. With no readable work area no toast shows.
+
+On macOS the stack sits in the bottom-right of the visible frame (`NSScreen.visibleFrame`, clear of the menu bar and the Dock), in points, of the screen holding the main window, else the menu-bar screen. The window is GPUI's non-activating pop-up panel, shown at open and kept up while the app is in the background or hidden (`hidesOnDeactivate` and `canHide` off); `becomesKeyOnlyIfNeeded` keeps a click from making it key. Moving an open toast (a restack) is applied on the main queue just after the current UI update, against the screen the stack was placed on. `ToastPlacer` is the seam the placement goes through (`SystemToastPlacer` in `toast_window.rs`), so the UI specs record placements with `PlaceRecorder`.
 
 Toasts are keyed by (host, session id): a later toast for a session replaces its earlier one in place and restarts its timer. A Finished toast lasts 6 s and a Needs you without answer buttons 30 s. A Needs you with answer buttons lasts until it is answered, closed with ×, its session leaves `AwaitingInput` or stamps a new `status_since`, the session is removed, or the skip rule now skips it, with a 10-minute cap. Resting the pointer on any toast holds every timer.
 
@@ -1016,7 +1018,7 @@ The client builds and runs on macOS (arm64), packed as an unsigned app bundle (`
 - The daemon and tracer sit beside the client exe (`Contents/MacOS/` in the bundle), and the daemon runs from a cached copy under the binaries folder, as on Windows. Config, data, binaries, worktrees and updates all share `~/Library/Application Support/dev.leftos.rustling-tulip/` (a path with a space; [on-disk.md](./on-disk.md)).
 - Sessions work: a shell and a Claude session start under `rt-tracer`, which the daemon reaches over a Unix socket in the temp folder, and a Claude session's hooks reach the daemon.
 - Autostart is a LaunchAgent (`daemon_client::autostart`).
-- Notifications: the OS toast code is Windows only, so macOS shows no OS notification; in-app toasts are the plan (RT-1008), not built.
+- Notifications: macOS has no OS toasts, so every Needs you and Finished toast is the app's own toast window whatever `toast_style` says ("The app's own toasts"). Pairing prompts still go to the OS notifier and show nothing (RT-1032). Focus / Do Not Disturb and full-screen apps are not checked (RT-1036). A real Mac check is open (RT-1030).
 - Secrets: the daemon refuses to seal an env secret, so a secret reaches a session as an `${env:NAME}` row, and the summarizer cannot read a saved key ([env-secrets.md](./env-secrets.md) "macOS"). Tailnet device tokens are not stored either; the client logs that there is no store off Windows.
 - Signing and notarization are deferred (RT-665).
 

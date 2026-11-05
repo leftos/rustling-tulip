@@ -105,6 +105,12 @@ pub trait Notifier: Send + Sync {
     /// full-screen app, whatever Windows' own toast setting for this app
     /// says. Called off the UI thread.
     fn user_busy(&self) -> bool;
+
+    /// Whether this platform shows OS toasts at all; where it does not, every
+    /// toast is the app's own.
+    fn has_os_toasts(&self) -> bool {
+        true
+    }
 }
 
 /// The notifier the client runs with: Windows toasts under the client's own
@@ -348,6 +354,11 @@ impl Notifier for SystemNotifier {
     }
 
     fn user_busy(&self) -> bool {
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    fn has_os_toasts(&self) -> bool {
         false
     }
 }
@@ -897,7 +908,9 @@ impl RootView {
         ) {
             return;
         }
-        if self.sidebar.ui_state().notifications.toast_style == ToastStyle::App {
+        if self.sidebar.ui_state().notifications.toast_style == ToastStyle::App
+            || !self.notifications.notifier.has_os_toasts()
+        {
             self.raise_app_toast(toast, cx);
             return;
         }
@@ -1325,8 +1338,10 @@ impl RootView {
     }
 
     /// Opens `toast`'s window at `bounds` on `display` and hands it to the
-    /// placer to show on `rect`: hidden until then, so gpui never activates
-    /// it. A window that fails to open dismisses its toast.
+    /// placer to show on `rect`: on Windows hidden until then, so gpui never
+    /// activates it; on macOS shown at open as a panel that is not made key,
+    /// which the placer then keeps up and off the keyboard. A window that
+    /// fails to open dismisses its toast.
     fn open_toast_window(
         &mut self,
         toast: &AppToast,
@@ -1345,7 +1360,9 @@ impl RootView {
                 titlebar: None,
                 kind: WindowKind::PopUp,
                 focus: false,
-                show: false,
+                // macOS orders a pop-up panel front at open without making
+                // it key; Windows shows it from the placer instead.
+                show: cfg!(target_os = "macos"),
                 is_movable: false,
                 is_resizable: false,
                 is_minimizable: false,

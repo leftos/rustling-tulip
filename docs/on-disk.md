@@ -86,7 +86,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   It holds the Finished sound (`notifications.finished_sound`, the same shape: `"off"`, `"default"`, `{"bundled": "<sound id>"}` or `{"custom": "<path to a .wav or .ogg>"}`; a missing key or an unknown value loads as `"default"`, the bundled `apps/native/assets/sounds/mallet-falling-fifth.ogg`).
 
-  It also holds the toast style (`notifications.toast_style`: `"os"`, the default, or `"app"`; a missing key or an unknown value loads as `"os"` with a warning and the rest of the file still loads; `"os"` raises the Needs you and Finished toasts as Windows toasts, `"app"` as the client's own toast windows, `docs/native-client.md` "Notifications").
+  It also holds the toast style (`notifications.toast_style`: `"os"`, the default, or `"app"`; a missing key or an unknown value loads as `"os"` with a warning and the rest of the file still loads; `"os"` raises the Needs you and Finished toasts as Windows toasts, `"app"` as the client's own toast windows, `docs/native-client.md` "Notifications"; macOS ignores the key, always shows the client's own toast windows and never rewrites it).
 
   Its `saved_hosts` list (the hosts the host manager offers) is what the client connects at launch: This PC, then each enabled saved host in saved order. The host manager writes it (adding or picking a host saves it on, a row's switch sets its `enabled`, and Forget rewrites the list).
 

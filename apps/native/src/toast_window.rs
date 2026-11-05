@@ -1,9 +1,10 @@
-//! The Win32 half of the app's own toasts: a window placed on a monitor's
-//! work area, above every other window and never activated.
+//! The platform half of the app's own toasts: a window placed on a monitor's
+//! work area, above every other window and never activated. On Windows that
+//! is Win32; on macOS `AppKit`, inside the screen's visible frame.
 //!
-//! Only the pixel conversion and the serial queue are testable here; the
-//! calls that touch a window run in the app and are proven when a toast is
-//! drawn. The rules they follow are in `docs/native-client.md` "The app's
+//! Only the pixel and coordinate conversions and the serial queue are
+//! testable here; the calls that touch a window run in the app and are
+//! proven when a toast is drawn. The rules they follow are in `docs/native-client.md` "The app's
 //! own toasts".
 
 use crate::toast_stack::WorkArea;
@@ -58,7 +59,7 @@ impl ToastPlacer for SystemToastPlacer {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl ToastPlacer for SystemToastPlacer {
     fn work_area(&self, _near: Option<usize>) -> Option<(WorkArea, u32)> {
         None
@@ -71,6 +72,245 @@ impl ToastPlacer for SystemToastPlacer {
     fn address_of(&self, _window: &gpui::Window) -> Option<usize> {
         None
     }
+}
+
+/// On macOS an address is the `NSView` gpui draws the window into, a work
+/// area is the screen's visible frame (clear of the menu bar and the Dock)
+/// in points, and the DPI is always 96, so [`to_physical`] leaves a rect in
+/// points as gpui's window bounds are.
+#[cfg(target_os = "macos")]
+impl ToastPlacer for SystemToastPlacer {
+    fn work_area(&self, near: Option<usize>) -> Option<(WorkArea, u32)> {
+        mac::work_area(near).map(|area| (area, 96))
+    }
+
+    /// gpui orders a pop-up panel front when it opens it; this keeps the
+    /// panel up while the app is inactive or hidden, and lets a click on it
+    /// leave the keyboard where it was.
+    fn show(&self, hwnd_address: Option<usize>, _rect: PhysicalRect) {
+        if let Some(address) = hwnd_address {
+            mac::keep_panel_up(address);
+        } else {
+            tracing::warn!("a toast window with no view cannot be kept up");
+        }
+    }
+
+    fn restack(&self, hwnd_address: Option<usize>, rect: PhysicalRect) {
+        if let Some(address) = hwnd_address {
+            mac::move_panel(address, rect);
+        } else {
+            tracing::warn!("a toast window with no view cannot be moved");
+        }
+    }
+
+    fn address_of(&self, window: &gpui::Window) -> Option<usize> {
+        mac::view_address(window)
+    }
+}
+
+/// The `AppKit` calls behind the macOS placer. Every one runs on the main
+/// thread, where gpui calls the placer.
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::{PhysicalRect, WorkArea, cocoa_frame, restack_screen, visible_work_area};
+    use dispatch2::{DispatchQueue, MainThreadBound};
+    use objc2::MainThreadMarker;
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSPanel, NSScreen, NSView, NSWindow};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use std::sync::{Mutex, PoisonError};
+
+    /// A screen frame, `(x, y, width, height)` in Cocoa points.
+    type Frame = (f64, f64, f64, f64);
+
+    /// The frame of the screen the last work area was measured on, the one
+    /// the toasts were placed against.
+    static PLACED_ON: Mutex<Option<Frame>> = Mutex::new(None);
+
+    /// The `NSView` of `window`, or `None`, logged at warn, when it has none.
+    pub(super) fn view_address(window: &gpui::Window) -> Option<usize> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let raw = HasWindowHandle::window_handle(window).map(|handle| handle.as_raw());
+        match raw {
+            Ok(RawWindowHandle::AppKit(handle)) => Some(handle.ns_view.as_ptr() as usize),
+            other => {
+                tracing::warn!("the toast window has no AppKit view ({other:?})");
+                None
+            }
+        }
+    }
+
+    /// The visible frame of the screen holding the view at `near`, else of
+    /// the menu-bar screen, relative to that screen's top-left corner.
+    pub(super) fn work_area(near: Option<usize>) -> Option<WorkArea> {
+        let Some(mtm) = MainThreadMarker::new() else {
+            tracing::warn!("the toast work area was asked for off the main thread");
+            return None;
+        };
+        let near_screen = near
+            .and_then(view_at)
+            .and_then(|view| view.window())
+            .and_then(|window| window.screen());
+        let Some(screen) = near_screen.or_else(|| NSScreen::screens(mtm).firstObject()) else {
+            tracing::warn!("no screen to place a toast on");
+            return None;
+        };
+        let frame = parts(screen.frame());
+        *PLACED_ON.lock().unwrap_or_else(PoisonError::into_inner) = Some(frame);
+        Some(visible_work_area(frame, parts(screen.visibleFrame())))
+    }
+
+    /// Keeps the panel whose view is at `address` on screen while the app is
+    /// inactive (a panel hides then by default) or hidden (Cmd+H), and makes
+    /// it key only for a control that asks for the keyboard, which a toast
+    /// has none of, so a click on it leaves the keyboard where it was. None
+    /// of these setters calls back into gpui.
+    pub(super) fn keep_panel_up(address: usize) {
+        if MainThreadMarker::new().is_none() {
+            tracing::warn!("a toast window was shown off the main thread");
+            return;
+        }
+        let Some(window) = window_at(address) else {
+            tracing::warn!("the toast view has no window to keep up");
+            return;
+        };
+        window.setHidesOnDeactivate(false);
+        window.setCanHide(false);
+        if let Ok(panel) = window.downcast::<NSPanel>() {
+            panel.setBecomesKeyOnlyIfNeeded(true);
+        } else {
+            tracing::warn!("the toast window is not a panel; it may take the keyboard");
+        }
+    }
+
+    /// Moves the panel whose view is at `address` to `rect`, in points from
+    /// the top-left of the screen the toasts were placed against (else of
+    /// the panel's own screen). The move runs on the main queue once the
+    /// current gpui update returns, since `AppKit` calls gpui's resize and
+    /// move handlers from it, which need gpui's state free.
+    pub(super) fn move_panel(address: usize, rect: PhysicalRect) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            tracing::warn!("a toast window was moved off the main thread");
+            return;
+        };
+        let Some(window) = window_at(address) else {
+            tracing::warn!("the toast view has no window to move");
+            return;
+        };
+        let placed_on = *PLACED_ON.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(screen) = restack_screen(placed_on, || window.screen().map(|s| parts(s.frame())))
+        else {
+            tracing::warn!("the toast window is on no screen");
+            return;
+        };
+        let (x, y, width, height) = cocoa_frame(
+            screen,
+            f64::from(rect.x),
+            f64::from(rect.y),
+            f64::from(rect.width),
+            f64::from(rect.height),
+        );
+        let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
+        let window = MainThreadBound::new(window, mtm);
+        DispatchQueue::main().exec_async(move || {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let window = window.into_inner(mtm);
+            // A toast closed since the move was asked for stays closed.
+            if window.isVisible() {
+                window.setFrame_display(frame, true);
+            }
+        });
+    }
+
+    /// The window of the view at `address`, retained, so a later call on it
+    /// stays sound after gpui lets the window go.
+    fn window_at(address: usize) -> Option<Retained<NSWindow>> {
+        view_at(address).and_then(|view| view.window())
+    }
+
+    /// The view at `address`, retained for the call.
+    fn view_at(address: usize) -> Option<Retained<NSView>> {
+        // SAFETY: every address comes from `view_address`, the `NSView` of a
+        // window gpui still owns: the main window, or an open toast, whose
+        // entry in the toast map is removed before its window's deferred
+        // close, so no call sees a closed toast's address. This runs on the
+        // main thread, where AppKit frees views, so the pointer is live for
+        // the retain, and any later use goes through the retained window.
+        unsafe { Retained::retain(address as *mut NSView) }
+    }
+
+    /// `rect` as `(x, y, width, height)`.
+    fn parts(rect: NSRect) -> (f64, f64, f64, f64) {
+        (
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        )
+    }
+}
+
+/// The work area that `visible`, a screen's visible frame, makes of the
+/// screen whose frame is `frame`: both `(x, y, width, height)` in Cocoa
+/// points from the bottom-left of the main screen; the area in points from
+/// the screen's own top-left corner, the frame gpui places a window in.
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "only macOS places toasts in a visible frame")
+)]
+fn visible_work_area(frame: (f64, f64, f64, f64), visible: (f64, f64, f64, f64)) -> WorkArea {
+    let (frame_x, frame_y, _, frame_height) = frame;
+    let (x, y, width, height) = visible;
+    let left = x - frame_x;
+    let top = (frame_y + frame_height) - (y + height);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a screen coordinate in points fits an f32"
+    )]
+    let area = WorkArea {
+        left: left as f32,
+        top: top as f32,
+        right: (left + width) as f32,
+        bottom: (top + height) as f32,
+    };
+    area
+}
+
+/// The screen frame a toast is moved against: `placed_on`, the screen its
+/// work area was measured on, when there is one, else what `current`, the
+/// toast window's own screen, reads.
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "only macOS moves a toast against a screen frame")
+)]
+fn restack_screen<F>(placed_on: Option<F>, current: impl FnOnce() -> Option<F>) -> Option<F> {
+    placed_on.or_else(current)
+}
+
+/// The Cocoa frame `(x, y, width, height)`, from the main screen's
+/// bottom-left, of a window `left` and `top` points from the top-left of the
+/// screen whose frame is `screen`, `width` by `height`.
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "only macOS moves a toast by its Cocoa frame")
+)]
+fn cocoa_frame(
+    screen: (f64, f64, f64, f64),
+    left: f64,
+    top: f64,
+    width: f64,
+    height: f64,
+) -> (f64, f64, f64, f64) {
+    let (screen_x, screen_y, _, screen_height) = screen;
+    (
+        screen_x + left,
+        screen_y + screen_height - top - height,
+        width,
+        height,
+    )
 }
 
 /// A rectangle in physical pixels, the unit every Win32 call here takes.
@@ -504,5 +744,74 @@ mod tests {
             height: 0,
         };
         assert_eq!(to_physical(-0.5, -1.4, 0.0, 0.0, 96), negative);
+    }
+
+    #[test]
+    fn the_visible_frame_leaves_out_the_menu_bar_and_a_bottom_dock() {
+        use super::visible_work_area;
+        use crate::toast_stack::WorkArea;
+
+        let area = visible_work_area((0.0, 0.0, 1512.0, 982.0), (0.0, 70.0, 1512.0, 879.0));
+        let expected = WorkArea {
+            left: 0.0,
+            top: 33.0,
+            right: 1512.0,
+            bottom: 912.0,
+        };
+        assert_eq!(area, expected);
+    }
+
+    #[test]
+    fn a_second_display_is_measured_from_its_own_corner() {
+        use super::visible_work_area;
+        use crate::toast_stack::WorkArea;
+
+        let area = visible_work_area(
+            (1512.0, -200.0, 1920.0, 1080.0),
+            (1512.0, -200.0, 1920.0, 1055.0),
+        );
+        let expected = WorkArea {
+            left: 0.0,
+            top: 25.0,
+            right: 1920.0,
+            bottom: 1080.0,
+        };
+        assert_eq!(area, expected);
+    }
+
+    #[test]
+    fn a_left_dock_moves_the_left_edge_in() {
+        use super::visible_work_area;
+        use crate::toast_stack::WorkArea;
+
+        let area = visible_work_area((0.0, 0.0, 1512.0, 982.0), (80.0, 0.0, 1432.0, 949.0));
+        let expected = WorkArea {
+            left: 80.0,
+            top: 33.0,
+            right: 1512.0,
+            bottom: 982.0,
+        };
+        assert_eq!(area, expected);
+    }
+
+    #[test]
+    fn cocoa_frame_flips_the_rect_to_a_bottom_left_origin() {
+        use super::cocoa_frame;
+
+        let screen = (0.0, 0.0, 1512.0, 982.0);
+        let (x, y, width, height) = cocoa_frame(screen, 1136.0, 832.0, 360.0, 64.0);
+        assert_eq!((x, y, width, height), (1136.0, 86.0, 360.0, 64.0));
+        assert_eq!(y + height, screen.3 - 832.0, "the top edge round-trips");
+    }
+
+    #[test]
+    fn a_toast_moves_against_the_screen_it_was_placed_on() {
+        use super::restack_screen;
+
+        let placed = (0.0, 0.0, 1512.0, 982.0);
+        let own = (1512.0, -200.0, 1920.0, 1080.0);
+        assert_eq!(restack_screen(Some(placed), || Some(own)), Some(placed));
+        assert_eq!(restack_screen(None, || Some(own)), Some(own));
+        assert_eq!(restack_screen::<(f64, f64, f64, f64)>(None, || None), None);
     }
 }

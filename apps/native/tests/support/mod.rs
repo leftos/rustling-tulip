@@ -1402,7 +1402,8 @@ impl Opener for OpenRecorder {
 /// spec set (on until set) and whether Do Not Disturb is on (off until set);
 /// Windows holds toasts back while either says so. It records the pairing
 /// toasts too, and keeps the last one's action sink, so a spec can press
-/// its buttons itself.
+/// its buttons itself. It reports OS toasts as available until a spec says
+/// the platform has none.
 pub struct NotifyRecorder {
     shown: Mutex<Vec<(String, String)>>,
     silent: Mutex<Vec<bool>>,
@@ -1410,6 +1411,7 @@ pub struct NotifyRecorder {
     action: Mutex<Option<PairingActionSink>>,
     state: Mutex<NotifyState>,
     do_not_disturb: Mutex<bool>,
+    os_toasts: Mutex<bool>,
 }
 
 impl Default for NotifyRecorder {
@@ -1421,6 +1423,7 @@ impl Default for NotifyRecorder {
             action: Mutex::new(None),
             state: Mutex::new(NotifyState::On),
             do_not_disturb: Mutex::new(false),
+            os_toasts: Mutex::new(true),
         }
     }
 }
@@ -1485,6 +1488,13 @@ impl Notifier for NotifyRecorder {
     fn user_busy(&self) -> bool {
         *self
             .do_not_disturb
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn has_os_toasts(&self) -> bool {
+        *self
+            .os_toasts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
@@ -2546,6 +2556,16 @@ impl<'a> Harness<'a> {
         *self
             .notifier
             .do_not_disturb
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = on;
+    }
+
+    /// Reports the platform as having OS toasts (`on`) or none from now on,
+    /// as macOS has none.
+    pub fn set_os_toasts(&self, on: bool) {
+        *self
+            .notifier
+            .os_toasts
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = on;
     }
