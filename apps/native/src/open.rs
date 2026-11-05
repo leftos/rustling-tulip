@@ -598,18 +598,12 @@ pub fn simplify_path(path: &Path) -> PathBuf {
 }
 
 /// The VS Code commands to try, in order: `code.cmd` then `code.exe` on
-/// `PATH`, then the usual install folders.
-#[cfg_attr(
-    not(windows),
-    expect(
-        clippy::vec_init_then_push,
-        reason = "the Windows list has several sources; off Windows it is one path"
-    )
-)]
+/// `PATH`, then the usual install folders. On macOS, `code` on `PATH` and
+/// then the app bundles a Finder launch's `PATH` leaves out.
 fn vscode_commands() -> Vec<PathBuf> {
-    let mut commands = Vec::new();
     #[cfg(windows)]
     {
+        let mut commands = Vec::new();
         commands.extend(["code.cmd", "code.exe"].into_iter().filter_map(on_path));
         for (env_name, suffix) in [
             ("LOCALAPPDATA", r"Programs\Microsoft VS Code\Code.exe"),
@@ -626,9 +620,34 @@ fn vscode_commands() -> Vec<PathBuf> {
                 commands.push(PathBuf::from(root).join(suffix));
             }
         }
+        commands
     }
-    #[cfg(not(windows))]
-    commands.push(PathBuf::from("code"));
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME");
+        macos_vscode_commands(home.as_deref().map(Path::new))
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        vec![PathBuf::from("code")]
+    }
+}
+
+/// The VS Code commands a macOS launch can find, in order: `code` on `PATH`,
+/// the system-wide app bundle, the user's own `~/Applications` bundle when
+/// `home` is known, then the system-wide Insiders bundle. A client launched
+/// from Finder inherits launchd's minimal `PATH`, which holds none of the
+/// bundles' `bin` folders, so the bundles are named outright.
+#[cfg(any(target_os = "macos", test))]
+fn macos_vscode_commands(home: Option<&Path>) -> Vec<PathBuf> {
+    const IN_BUNDLE: &str = "Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
+    let mut commands = vec![PathBuf::from("code"), Path::new("/").join(IN_BUNDLE)];
+    if let Some(home) = home {
+        commands.push(home.join(IN_BUNDLE));
+    }
+    commands.push(PathBuf::from(
+        "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders",
+    ));
     commands
 }
 
@@ -732,7 +751,23 @@ fn reveal_in_folder(path: &Path) -> Result<(), String> {
         .map_err(|err| format!("show {} in Explorer: {err}", path.display()))
 }
 
-#[cfg(not(windows))]
+/// `open -R <path>`: Finder opens `path`'s folder with `path` selected.
+#[cfg(target_os = "macos")]
+fn reveal_command(path: &Path) -> Command {
+    let mut command = Command::new("open");
+    command.arg("-R").arg(path);
+    command
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_in_folder(path: &Path) -> Result<(), String> {
+    reveal_command(path)
+        .spawn()
+        .map(drop)
+        .map_err(|err| format!("show {}: {err}", path.display()))
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn reveal_in_folder(path: &Path) -> Result<(), String> {
     let folder = path.parent().unwrap_or(path);
     shell_open(folder.as_os_str()).map_err(|err| format!("show {}: {err}", path.display()))
@@ -911,8 +946,8 @@ mod tests {
 
     use super::{
         JobOutcome, OpenAction, OpenFailure, OpenJob, Opener, Resolution, VsCodeTarget, base_dirs,
-        copy_path, existing_on_disk, repo_folder, resolve_with, runs_code, simplify_path, unc_host,
-        validate_http_url, workspace_vscode_target,
+        copy_path, existing_on_disk, macos_vscode_commands, repo_folder, resolve_with, runs_code,
+        simplify_path, unc_host, validate_http_url, workspace_vscode_target,
     };
     use crate::links::TerminalLinkCandidate;
     use crate::temp_dir::TempDir;
@@ -1615,5 +1650,45 @@ mod tests {
             "with no member left the job fails naming the first"
         );
         assert_eq!(opener.asked(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn macos_vscode_commands_try_path_then_the_app_bundles() {
+        const SYSTEM: &str = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
+        const INSIDERS: &str = "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders";
+        assert_eq!(
+            macos_vscode_commands(Some(Path::new("/Users/u"))),
+            vec![
+                PathBuf::from("code"),
+                PathBuf::from(SYSTEM),
+                PathBuf::from(
+                    "/Users/u/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+                ),
+                PathBuf::from(INSIDERS),
+            ],
+            "PATH first, then the system bundle, the user's own, then Insiders"
+        );
+        assert_eq!(
+            macos_vscode_commands(None),
+            vec![
+                PathBuf::from("code"),
+                PathBuf::from(SYSTEM),
+                PathBuf::from(INSIDERS),
+            ],
+            "with no home there is no ~/Applications entry"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reveal_runs_open_with_select() {
+        use std::ffi::OsStr;
+        let command = super::reveal_command(Path::new("/Users/u/notes.txt"));
+        assert_eq!(command.get_program(), OsStr::new("open"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [OsStr::new("-R"), OsStr::new("/Users/u/notes.txt")],
+            "open -R selects the file itself, not just its folder"
+        );
     }
 }
