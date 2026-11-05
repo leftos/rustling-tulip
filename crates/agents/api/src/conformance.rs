@@ -284,10 +284,10 @@ fn check_screen_rules<A: Agent>(agent: &A) {
 )]
 fn check_shell_resume<A: Agent>(agent: &A, case: &str, options: &A::Options) {
     const ID: &str = "conformance-conversation";
-    if let Ok(Some(command)) = agent.shell_resume(options, ID, &[])
-        && !command.contains(ID)
+    if let Ok(Some(argv)) = agent.shell_resume(options, ID, &[])
+        && !argv.iter().any(|arg| arg.contains(ID))
     {
-        panic!("{case}: the shell resume command {command:?} does not name the conversation");
+        panic!("{case}: the shell resume command {argv:?} does not name the conversation");
     }
 }
 

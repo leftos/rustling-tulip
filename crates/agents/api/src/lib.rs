@@ -795,10 +795,12 @@ pub trait Agent: Send + Sync + 'static {
         None
     }
 
-    /// The command a recovered shell types to resume conversation
-    /// `conversation_id` in the agent, after the shell's spawn wrote the hook
-    /// files `hook_files` from [`Self::hook_plan`] (empty when it wrote
-    /// none), or `None` for an agent that cannot be resumed from a shell.
+    /// The program and its arguments, the program first, that a recovered
+    /// shell types to resume conversation `conversation_id` in the agent,
+    /// after the shell's spawn wrote the hook files `hook_files` from
+    /// [`Self::hook_plan`] (empty when it wrote none), or `None` for an agent
+    /// that cannot be resumed from a shell. The daemon quotes them for the
+    /// shell the session runs in.
     ///
     /// # Errors
     ///
@@ -811,7 +813,7 @@ pub trait Agent: Send + Sync + 'static {
         _opts: &Self::Options,
         _conversation_id: &str,
         _hook_files: &[PathBuf],
-    ) -> Result<Option<String>, AgentError> {
+    ) -> Result<Option<Vec<String>>, AgentError> {
         Ok(None)
     }
 
@@ -1067,7 +1069,7 @@ pub trait AgentPlugin: Send + Sync {
         opts: &OptionValues,
         conversation_id: &str,
         hook_files: &[PathBuf],
-    ) -> Result<Option<String>, AgentError>;
+    ) -> Result<Option<Vec<String>>, AgentError>;
 
     /// See [`Agent::screen_rules`].
     fn screen_rules(&self) -> &ScreenRules;
@@ -1316,7 +1318,7 @@ impl<A: Agent> AgentPlugin for A {
         opts: &OptionValues,
         conversation_id: &str,
         hook_files: &[PathBuf],
-    ) -> Result<Option<String>, AgentError> {
+    ) -> Result<Option<Vec<String>>, AgentError> {
         let opts = decode_options(self, opts)?;
         Agent::shell_resume(self, &opts, conversation_id, hook_files)
     }

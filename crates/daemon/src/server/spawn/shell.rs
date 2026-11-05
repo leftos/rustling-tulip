@@ -659,14 +659,17 @@ pub(super) enum ShellFamily {
     PowerShell,
     Cmd,
     Posix,
+    Fish,
+    Nushell,
 }
 
 impl ShellFamily {
     /// The family of the shell `program` runs, from its file stem: `pwsh` and
-    /// `powershell` are PowerShell, `cmd` is cmd, and `sh`, `bash`, `zsh`,
-    /// `dash` and `ksh` are POSIX sh. `None` for any other shell, and for a
-    /// POSIX shell that Windows runs through WSL (under `System32` or
-    /// `WindowsApps`), which takes Linux paths.
+    /// `powershell` are PowerShell, `cmd` is cmd, `sh`, `bash`, `zsh`, `dash`
+    /// and `ksh` are POSIX sh, `fish` is fish and `nu` is Nushell. `None` for
+    /// any other shell, and for a POSIX, fish or Nushell shell that Windows
+    /// runs through WSL (under `System32` or `WindowsApps`), which takes Linux
+    /// paths.
     pub(super) fn of(program: &str) -> Option<Self> {
         match program_stem(program).as_str() {
             "pwsh" | "powershell" => Some(Self::PowerShell),
@@ -674,16 +677,18 @@ impl ShellFamily {
             "sh" | "bash" | "zsh" | "dash" | "ksh" if !runs_through_wsl(program) => {
                 Some(Self::Posix)
             }
+            "fish" if !runs_through_wsl(program) => Some(Self::Fish),
+            "nu" if !runs_through_wsl(program) => Some(Self::Nushell),
             _ => None,
         }
     }
 
     /// The bytes that clear the shell's input line: Esc for PowerShell and
-    /// cmd, Ctrl+U for a POSIX shell's line editor.
+    /// cmd, Ctrl+U for the line editors of a POSIX shell, fish and Nushell.
     fn clear_line(self) -> &'static [u8] {
         match self {
             Self::PowerShell | Self::Cmd => b"\x1b",
-            Self::Posix => b"\x15",
+            Self::Posix | Self::Fish | Self::Nushell => b"\x15",
         }
     }
 }
@@ -707,7 +712,7 @@ fn program_stem(program: &str) -> String {
 }
 
 /// Whether `program` is a Windows path into the system or app-alias folders,
-/// where a POSIX shell is WSL's.
+/// where a POSIX, fish or Nushell shell is WSL's.
 fn runs_through_wsl(program: &str) -> bool {
     let lower = program.to_ascii_lowercase();
     lower.contains(r"\system32\") || lower.contains(r"\windowsapps\")
@@ -749,7 +754,8 @@ pub(super) fn quote_command_line(family: ShellFamily, argv: &[String]) -> Option
     let quoted = quote_args(family, argv)?;
     match family {
         ShellFamily::PowerShell => Some(format!("& {quoted}")),
-        ShellFamily::Cmd | ShellFamily::Posix => Some(quoted),
+        ShellFamily::Nushell => Some(format!("^{quoted}")),
+        ShellFamily::Cmd | ShellFamily::Posix | ShellFamily::Fish => Some(quoted),
     }
 }
 
@@ -760,6 +766,8 @@ fn quote_args(family: ShellFamily, args: &[String]) -> Option<String> {
         ShellFamily::PowerShell => Some(args.iter().map(|arg| powershell_quote(arg)).collect()),
         ShellFamily::Cmd => args.iter().map(|arg| cmd_quote(arg)).collect(),
         ShellFamily::Posix => Some(args.iter().map(|arg| posix_quote(arg)).collect()),
+        ShellFamily::Fish => Some(args.iter().map(|arg| fish_quote(arg)).collect()),
+        ShellFamily::Nushell => Some(args.iter().map(|arg| nu_quote(arg)).collect()),
     };
     Some(quoted?.join(" "))
 }
@@ -768,15 +776,23 @@ fn quote_args(family: ShellFamily, args: &[String]) -> Option<String> {
 /// [`quote_command_line`]), or the user's program word bare followed by
 /// `argv` quoted, then the user's extra arguments verbatim. `None` when cmd
 /// cannot carry an argument, or the extras hold `%` or `!`, which cmd expands.
-fn typed_command(family: ShellFamily, argv: &[String], typed: TypedCommand<'_>) -> Option<String> {
+pub(super) fn typed_command(
+    family: ShellFamily,
+    argv: &[String],
+    typed: TypedCommand<'_>,
+) -> Option<String> {
     let extra = typed.extra.trim();
     if matches!(family, ShellFamily::Cmd) && extra.contains(['%', '!']) {
         return None;
     }
     let mut line = match typed.program_word {
         None => quote_command_line(family, argv)?,
-        Some(word) if argv.is_empty() => word.to_owned(),
-        Some(word) => format!("{word} {}", quote_args(family, argv)?),
+        Some(word) if argv.is_empty() => typed_program_word(family, word),
+        Some(word) => format!(
+            "{} {}",
+            typed_program_word(family, word),
+            quote_args(family, argv)?
+        ),
     };
     if !extra.is_empty() {
         line.push(' ');
@@ -800,7 +816,42 @@ fn launch_line(family: ShellFamily, cwd: &str, command: &str) -> Option<String> 
             Some(format!("cd /d \"{cwd}\" && {command}"))
         }
         ShellFamily::Posix => Some(format!("cd -- {} && {command}", posix_quote(cwd))),
+        ShellFamily::Fish => Some(format!("cd {} && {command}", fish_quote(cwd))),
+        ShellFamily::Nushell => Some(format!("cd {}; {command}", nu_quote(cwd))),
     }
+}
+
+/// The user's program word as `family` types it: bare, as the user typed it,
+/// except in Nushell, where a bare word reads as a Nushell command, so the
+/// external call needs `^`.
+fn typed_program_word(family: ShellFamily, word: &str) -> String {
+    match family {
+        ShellFamily::Nushell => format!("^{word}"),
+        _ => word.to_owned(),
+    }
+}
+
+/// A fish argument: single-quoted, each `\` written `\\` and each `'` written
+/// `\'`, the two escapes fish reads inside single quotes (POSIX sh's
+/// close-escape-reopen trick is not one of them).
+fn fish_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\\', r"\\").replace('\'', r"\'"))
+}
+
+/// A Nushell argument: single-quoted, a raw string with no escapes, unless it
+/// holds a `'`, which a single-quoted string cannot carry; then a raw string
+/// with the fewest `#` that no `'` followed by that many `#`s inside it closes
+/// early.
+fn nu_quote(arg: &str) -> String {
+    if !arg.contains('\'') {
+        return format!("'{arg}'");
+    }
+    let mut hashes = 1;
+    while arg.contains(&format!("'{}", "#".repeat(hashes))) {
+        hashes += 1;
+    }
+    let bar = "#".repeat(hashes);
+    format!("r{bar}'{arg}'{bar}")
 }
 
 /// A POSIX sh argument: single-quoted, each single quote closed, escaped and
@@ -1457,8 +1508,8 @@ const ZSH_INIT_SCRIPT: &str = include_str!("../../../shell-init/zsh-init.zshrc")
 )]
 mod launch_tests {
     use super::{
-        AgentLaunch, Launch, ShellFamily, ShellProgram, TypedCommand, cmd_shim_refuses,
-        plan_launch, quote_command_line,
+        AgentLaunch, Launch, ShellFamily, ShellProgram, TypedCommand, cmd_shim_refuses, fish_quote,
+        launch_line, nu_quote, plan_launch, quote_command_line,
     };
     use base64::Engine as _;
     use protocol::{InjectorStartup, InjectorStep, PromptInjector};
@@ -1820,10 +1871,88 @@ mod launch_tests {
     }
 
     #[test]
+    fn fish_quotes_backslashes_and_single_quotes() {
+        assert_eq!(fish_quote(r"a\b'c"), r"'a\\b\'c'");
+        assert_eq!(fish_quote(r"C:\x y"), r"'C:\\x y'");
+        assert_eq!(
+            quote_command_line(ShellFamily::Fish, &strings(&[r"a\b'c", "plain"])).as_deref(),
+            Some(r"'a\\b\'c' 'plain'"),
+            "fish joins the quoted arguments with no prefix"
+        );
+    }
+
+    #[test]
+    fn nu_quotes_raw_when_a_single_quote_is_inside() {
+        assert_eq!(nu_quote("it's"), r"r#'it's'#");
+        assert_eq!(nu_quote("a'#b"), r"r##'a'#b'##");
+        assert_eq!(nu_quote("plain"), "'plain'");
+        assert_eq!(
+            nu_quote(r"C:\x y"),
+            r"'C:\x y'",
+            "a raw string keeps backslashes"
+        );
+        assert_eq!(
+            quote_command_line(ShellFamily::Nushell, &strings(&["plain", "--resume", "x"]))
+                .as_deref(),
+            Some(r"^'plain' '--resume' 'x'"),
+            "an external call carries the ^ prefix"
+        );
+    }
+
+    #[test]
+    fn fish_launch_line_cds_then_runs() {
+        let argv = strings(&[r"C:\bin\claude.exe", "--resume", "x"]);
+        let command = quote_command_line(ShellFamily::Fish, &argv).expect("fish quotes it");
+        assert_eq!(
+            launch_line(ShellFamily::Fish, r"C:\work\my repo", &command).as_deref(),
+            Some(r"cd 'C:\\work\\my repo' && 'C:\\bin\\claude.exe' '--resume' 'x'")
+        );
+    }
+
+    #[test]
+    fn nushell_launch_line_cds_then_calls_external() {
+        let argv = strings(&[r"C:\bin\claude.exe", "--resume", "x"]);
+        let command = quote_command_line(ShellFamily::Nushell, &argv).expect("Nushell quotes it");
+        assert_eq!(
+            launch_line(ShellFamily::Nushell, r"C:\work\my repo", &command).as_deref(),
+            Some(r"cd 'C:\work\my repo'; ^'C:\bin\claude.exe' '--resume' 'x'")
+        );
+    }
+
+    #[test]
+    fn fish_and_nu_are_recognised_and_wsl_ones_are_not() {
+        for fish in ["fish", "/usr/bin/fish", r"C:\Program Files\fish\fish.exe"] {
+            assert_eq!(ShellFamily::of(fish), Some(ShellFamily::Fish), "{fish}");
+        }
+        for nu in ["nu", "/usr/bin/nu", r"C:\Tools\nu.exe"] {
+            assert_eq!(ShellFamily::of(nu), Some(ShellFamily::Nushell), "{nu}");
+        }
+        for through_wsl in [
+            r"C:\Windows\System32\fish.exe",
+            r"C:\Users\a\AppData\Local\Microsoft\WindowsApps\nu.exe",
+        ] {
+            assert_eq!(
+                ShellFamily::of(through_wsl),
+                None,
+                "{through_wsl} runs through WSL"
+            );
+        }
+    }
+
+    #[test]
+    fn fish_and_nushell_clear_with_ctrl_u() {
+        for family in [ShellFamily::Fish, ShellFamily::Nushell] {
+            assert_eq!(
+                family.clear_line(),
+                [0x15_u8].as_slice(),
+                "{family:?} clears to the start of its line"
+            );
+        }
+    }
+
+    #[test]
     fn an_unknown_shell_keeps_the_direct_spawn() {
         for unknown in [
-            "nu",
-            "/usr/bin/fish",
             "tcsh",
             r"C:\Windows\System32\bash.exe",
             r"C:\Windows\System32\wsl.exe",
@@ -2555,17 +2684,18 @@ mod default_shell_tests {
     }
 
     #[test]
-    fn wsl_nushell_and_fish_do_not_host_agents_yet() {
+    fn wsl_does_not_host_agents_yet() {
         let host = FakeHost::default()
             .env("SystemRoot", r"C:\Windows")
             .file(wsl_path())
             .on_path("nu.exe", r"C:\Tools\nu.exe");
         let choices = host.choices(HostOs::Windows);
-        for id in ["wsl", "nu"] {
-            let found = choice(&choices, id);
-            assert!(found.available, "{id} is installed");
-            assert!(!found.hosts_agents, "{id} spawns agents on their own");
-        }
+        let wsl = choice(&choices, "wsl");
+        assert!(wsl.available, "wsl is installed");
+        assert!(!wsl.hosts_agents, "wsl spawns agents on their own");
+        let nu = choice(&choices, "nu");
+        assert!(nu.available, "nu is installed");
+        assert!(nu.hosts_agents, "Nushell hosts agents");
 
         let host = FakeHost::default()
             .on_path("fish", "/usr/bin/fish")
@@ -2574,7 +2704,7 @@ mod default_shell_tests {
         for id in ["fish", "nu"] {
             let found = choice(&choices, id);
             assert!(found.available, "{id} is installed");
-            assert!(!found.hosts_agents, "{id} spawns agents on their own");
+            assert!(found.hosts_agents, "{id} hosts agents");
         }
     }
 
@@ -2801,16 +2931,30 @@ mod default_shell_tests {
 
     #[test]
     fn a_resume_line_never_goes_into_a_shell_that_cannot_host_it() {
-        let host = windows_host().on_path("nu.exe", r"C:\Tools\nu.exe");
-        let nu = setting("nu", None);
-        let resuming = host.resolve_typing(Some(&nu), None, true);
+        let host = windows_host()
+            .env("SystemRoot", r"C:\Windows")
+            .file(wsl_path())
+            .on_path("nu.exe", r"C:\Tools\nu.exe");
+        let wsl = setting("wsl", None);
+        let resuming = host.resolve_typing(Some(&wsl), None, true);
         assert_eq!(
             resuming.program, "pwsh.exe",
             "Automatic types the resume line"
         );
         assert_eq!(resuming.label, "pwsh");
-        let plain = host.resolve_typing(Some(&nu), None, false);
-        assert_eq!(plain.program, r"C:\Tools\nu.exe", "a plain shell keeps nu");
+        let plain = host.resolve_typing(Some(&wsl), None, false);
+        assert!(
+            plain.program.ends_with("wsl.exe"),
+            "a plain shell keeps WSL: {}",
+            plain.program
+        );
+
+        let nu = setting("nu", None);
+        assert_eq!(
+            host.resolve_typing(Some(&nu), None, true).program,
+            r"C:\Tools\nu.exe",
+            "Nushell types the resume line"
+        );
 
         // Classifying cmd by its Windows path needs Windows path parsing.
         if cfg!(windows) {

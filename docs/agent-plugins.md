@@ -70,7 +70,7 @@ pub trait Agent: Send + Sync + 'static {
     fn parse_headless_line(&self, line: &str) -> Vec<HeadlessEvent>;
     fn find_conversations(&self, query: &ConversationQuery<'_>) -> Vec<FoundConversation>;
     fn recovery_options(&self, run: &RecoveredRun<'_>) -> Self::Options;
-    fn shell_resume(&self, opts: &Self::Options, id: &str, hook_files: &[PathBuf]) -> Result<Option<String>, AgentError>;
+    fn shell_resume(&self, opts: &Self::Options, id: &str, hook_files: &[PathBuf]) -> Result<Option<Vec<String>>, AgentError>;
     fn import_rev(&self) -> u32;
     fn import_tracer_run(&self, run: &TracerRun<'_>) -> Option<ImportedRun<Self::Options>>;
     #[cfg(feature = "test-support")]
@@ -102,7 +102,7 @@ The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) an
 | Headless | `parse_headless_line` | The headless reader applies each `HeadlessEvent` |
 | Conversations | `find_conversations` | Recover's candidates, the existence check before a recovery spawn, and the discovery poller for `DiscoverAfterLaunch` |
 | Resume options | `recovery_options` | The options a recovered run spawns with |
-| Shell resume | `shell_resume` | Called after the shell spawn wrote the plugin's hook files; returns the final command to type, `Err` to refuse (a DeepSeek entry), or `Ok(None)` for an agent without one |
+| Shell resume | `shell_resume` | Called after the shell spawn wrote the plugin's hook files; returns the program and its arguments, which the daemon quotes for the shell's family and types, `Err` to refuse (a DeepSeek entry), or `Ok(None)` for an agent without one |
 | Import | `import_rev`, `import_tracer_run` | The importer offers each tracer log to every plugin and stamps the plugin's revision; the first `Some` becomes the entry, else the app's shell rule applies |
 | Chat | `chat_entries`, `chat_line_facts` | The chat mirror turns each transcript line into entries with `chat_entries`, and reads a line's `promptId`, `timestamp` and user-prompt flag (`TranscriptLineFacts`) with `chat_line_facts` (default: no facts) |
 | Liveness | `liveness_tokens` | The orphan check's fallback for a sidecar with no `program_name` |

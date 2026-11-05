@@ -14,8 +14,8 @@ pub(super) use self::worktree::target_uses_worktree;
 
 use self::hook_settings::{HookSettings, write_hook_files, write_hook_settings};
 use self::shell::{
-    AgentLaunch, Launch, ShellProgram, TypedCommand, choose_agent_command, plan_launch,
-    resolve_shell_program,
+    AgentLaunch, Launch, ShellFamily, ShellProgram, TypedCommand, choose_agent_command,
+    plan_launch, resolve_shell_program, typed_command,
 };
 use self::worktree::{
     SinglePlan, classify_worktree_error, log_fork_point, materialize_single_worktree,
@@ -1493,6 +1493,7 @@ async fn spawn_plain_shell_session(
             agent_registry::plugin(agent)
                 .ok_or_else(|| anyhow!("no agent plugin `{}` is registered", agent.0))?,
             conversation,
+            ShellFamily::of(&shell.program),
         )?,
         _ => ShellResume::default(),
     };
@@ -1699,41 +1700,72 @@ struct ShellResume {
 }
 
 /// Write `plugin`'s hook files for the recovered shell `session_id`, then ask
-/// `plugin` for the command that resumes `conversation_id` with them, typed
-/// once the shell's prompt is up. Both take the recovered selection's options
-/// and trust from `cfg.extras`, never the plain shell's own. A plugin with no
-/// command gets a bare shell and keeps no hook files; a plugin's refusal
-/// refuses the spawn and removes the files.
+/// `plugin` for the program and arguments that resume `conversation_id` with
+/// them, type them with `family`'s quoting (the session's shell) and the
+/// program word bare, so an alias or function from the shell's profile
+/// resolves as it does for a launch, and type the line once the shell's prompt
+/// is up. Both take the recovered selection's options and trust from
+/// `cfg.extras`, never the plain shell's own. A plugin with no command gets a
+/// bare shell and keeps no hook files; a plugin's refusal, or a shell that
+/// cannot carry the line, refuses the spawn and removes the files.
 fn prepare_shell_resume(
     hub: &Hub,
     session_id: &str,
     cfg: &SpawnArgs,
     plugin: &dyn AgentPlugin,
     conversation_id: &str,
+    family: Option<ShellFamily>,
 ) -> anyhow::Result<ShellResume> {
     let options = &cfg.extras.hook_options;
     let hook_settings = write_hook_files(hub, session_id, plugin, options, cfg.extras.hook_trusted);
     let files = hook_settings.as_ref().map_or(&[][..], HookSettings::files);
-    match plugin.shell_resume(options, conversation_id, files) {
-        Ok(Some(command)) => Ok(ShellResume {
-            hook_settings,
-            injector: Some(shell_resume_injector(command)),
-        }),
+    let command = match plugin.shell_resume(options, conversation_id, files) {
         Ok(None) => {
-            if let Some(settings) = hook_settings {
-                settings.discard(session_id);
-            }
-            Ok(ShellResume::default())
+            discard_hook_settings(hook_settings, session_id);
+            return Ok(ShellResume::default());
         }
+        Ok(Some(argv)) => argv.split_first().and_then(|(program, args)| {
+            family.and_then(|family| {
+                typed_command(
+                    family,
+                    args,
+                    TypedCommand {
+                        program_word: Some(program.as_str()),
+                        extra: "",
+                    },
+                )
+            })
+        }),
         Err(err) => {
-            if let Some(settings) = hook_settings {
-                settings.discard(session_id);
-            }
-            Err(anyhow!(
+            discard_hook_settings(hook_settings, session_id);
+            return Err(anyhow!(
                 "{} cannot resume conversation {conversation_id} in a shell: {err}",
                 plugin.descriptor().label
-            ))
+            ));
         }
+    };
+    let Some(command) = command else {
+        discard_hook_settings(hook_settings, session_id);
+        return Err(anyhow!(
+            "{} cannot resume conversation {conversation_id} in a shell: {}",
+            plugin.descriptor().label,
+            match family {
+                None => "its shell family is unknown".to_owned(),
+                Some(_) => "the shell cannot carry the resume command".to_owned(),
+            }
+        ));
+    };
+    Ok(ShellResume {
+        hook_settings,
+        injector: Some(shell_resume_injector(command)),
+    })
+}
+
+/// Discard `settings`, the hook files a spawn wrote, when it then refused the
+/// resume, so a refused spawn leaves nothing behind.
+fn discard_hook_settings(settings: Option<HookSettings>, session_id: &str) {
+    if let Some(settings) = settings {
+        settings.discard(session_id);
     }
 }
 
@@ -3270,17 +3302,20 @@ mod tests {
             _opts: &serde_json::Value,
             conversation_id: &str,
             hook_files: &[PathBuf],
-        ) -> Result<Option<String>, agent_api::AgentError> {
+        ) -> Result<Option<Vec<String>>, agent_api::AgentError> {
             match &self.answer {
                 Ok(true) if hook_files.iter().all(|file| file.exists()) => {
                     let files: Vec<String> = hook_files
                         .iter()
                         .map(|file| file.display().to_string())
                         .collect();
-                    Ok(Some(format!(
-                        "scripted --hooks {} --resume {conversation_id}",
-                        files.join(",")
-                    )))
+                    Ok(Some(vec![
+                        "scripted".to_owned(),
+                        "--hooks".to_owned(),
+                        files.join(","),
+                        "--resume".to_owned(),
+                        conversation_id.to_owned(),
+                    ]))
                 }
                 Ok(true) => Err(agent_api::AgentError::new("a hook file is missing")),
                 Ok(false) => Ok(None),
@@ -3302,6 +3337,92 @@ mod tests {
         ]
     }
 
+    /// A plugin that writes Claude's hook files and answers any shell resume
+    /// with `argv`.
+    struct FixedResume {
+        argv: Vec<String>,
+    }
+
+    impl agent_api::Agent for FixedResume {
+        type Options = serde_json::Value;
+
+        fn descriptor(&self) -> &protocol::AgentDescriptor {
+            &agent_api::test_agent::DESCRIPTOR
+        }
+
+        fn program_env_var(&self) -> &'static str {
+            "RUSTLING_TULIP_FIXED_RESUME"
+        }
+
+        fn default_program(&self) -> &'static str {
+            "fixed-resume"
+        }
+
+        fn liveness_tokens(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn recovery_options(&self, run: &agent_api::RecoveredRun<'_>) -> serde_json::Value {
+            run.recorded_as().unwrap_or_default()
+        }
+
+        fn check_request(
+            &self,
+            _opts: &serde_json::Value,
+            _req: &SpawnCheck<'_>,
+        ) -> Result<(), agent_api::Refusal> {
+            Ok(())
+        }
+
+        fn spawn_env(
+            &self,
+            _opts: &serde_json::Value,
+            _rows: &ResolvedRows,
+            _keys: &dyn KeyLookup,
+        ) -> Result<EnvPlan, agent_api::Refusal> {
+            Ok(EnvPlan::default())
+        }
+
+        fn conversation_plan(
+            &self,
+            _opts: &serde_json::Value,
+            _resume: Option<&str>,
+        ) -> ConversationPlan {
+            ConversationPlan::None
+        }
+
+        fn interactive_args(
+            &self,
+            _opts: &serde_json::Value,
+            _ctx: &SpawnContext<'_>,
+            _members: &[SessionMember],
+            _initial_prompt: Option<&str>,
+        ) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn hook_plan(
+            &self,
+            _opts: &serde_json::Value,
+            trusted: bool,
+            shim: &agent_api::HookShim<'_>,
+        ) -> agent_api::HookPlan {
+            agent_registry::plugin(&agent_registry::default_agent())
+                .expect("Claude is registered")
+                .hook_plan(&claude_options(), trusted, shim)
+                .expect("Claude's default options decode")
+        }
+
+        fn shell_resume(
+            &self,
+            _opts: &serde_json::Value,
+            _conversation_id: &str,
+            _hook_files: &[PathBuf],
+        ) -> Result<Option<Vec<String>>, agent_api::AgentError> {
+            Ok(Some(self.argv.clone()))
+        }
+    }
+
     #[tokio::test]
     async fn shell_resume_types_the_plugins_command_after_writing_the_hook_files() {
         let (hub, _scratch) = hook_test_hub("shell-resume-command");
@@ -3312,6 +3433,7 @@ mod tests {
             &shell_resume_spawn_args(),
             &ScriptedResume { answer: Ok(true) },
             "abc-123",
+            Some(ShellFamily::PowerShell),
         )
         .expect("the plugin answers a command");
         assert!(file.exists(), "the hook file is written");
@@ -3319,11 +3441,11 @@ mod tests {
         assert_eq!(settings.files(), std::slice::from_ref(&file));
         let injector = resume.injector.expect("a command to type");
         assert_eq!(injector.startup, protocol::InjectorStartup::ShellPrompt);
+        let scripted_file = file.display().to_string();
         assert_eq!(
             injector.steps,
             typed(format!(
-                "scripted --hooks {} --resume abc-123",
-                file.display()
+                "scripted '--hooks' '{scripted_file}' '--resume' 'abc-123'"
             ))
         );
 
@@ -3334,14 +3456,14 @@ mod tests {
             &shell_resume_spawn_args(),
             agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered"),
             "abc-123",
+            Some(ShellFamily::PowerShell),
         )
         .expect("Claude answers a command");
-        let file = hook_settings_file(&hub, "s2");
+        let claude_file = hook_settings_file(&hub, "s2").display().to_string();
         assert_eq!(
             resume.injector.expect("a command to type").steps,
             typed(format!(
-                "claude --settings \"{}\" --resume abc-123",
-                file.display()
+                "claude '--settings' '{claude_file}' '--resume' 'abc-123'"
             ))
         );
     }
@@ -3357,6 +3479,7 @@ mod tests {
                 answer: Err("Scripted will not resume here".to_owned()),
             },
             "abc-123",
+            Some(ShellFamily::PowerShell),
         )
         .err()
         .expect("the plugin's refusal refuses the spawn");
@@ -3383,12 +3506,126 @@ mod tests {
             &shell_resume_spawn_args(),
             &ScriptedResume { answer: Ok(false) },
             "abc-123",
+            Some(ShellFamily::PowerShell),
         )
         .expect("no command is not a refusal");
         assert!(resume.injector.is_none(), "nothing is typed");
         assert!(resume.hook_settings.is_none(), "a bare shell gets no hooks");
         assert!(!hook_settings_file(&hub, "s1").exists());
         assert!(!hub.dirs.sessions_dir.join("s1").exists());
+    }
+
+    #[tokio::test]
+    async fn a_resume_is_typed_with_the_shells_quoting() {
+        let (hub, _scratch) = hook_test_hub("shell-resume-quoting");
+        let fixed = FixedResume {
+            argv: ["claude", "--settings", r"C:\h\s.json", "--resume", "abc"]
+                .map(str::to_owned)
+                .to_vec(),
+        };
+        for (session, family, line) in [
+            (
+                "s1",
+                ShellFamily::PowerShell,
+                r"claude '--settings' 'C:\h\s.json' '--resume' 'abc'",
+            ),
+            (
+                "s2",
+                ShellFamily::Posix,
+                r"claude '--settings' 'C:\h\s.json' '--resume' 'abc'",
+            ),
+            (
+                "s3",
+                ShellFamily::Fish,
+                r"claude '--settings' 'C:\\h\\s.json' '--resume' 'abc'",
+            ),
+            (
+                "s4",
+                ShellFamily::Nushell,
+                r"^claude '--settings' 'C:\h\s.json' '--resume' 'abc'",
+            ),
+            (
+                "s5",
+                ShellFamily::Cmd,
+                r"claude --settings C:\h\s.json --resume abc",
+            ),
+        ] {
+            let resume = prepare_shell_resume(
+                &hub,
+                session,
+                &shell_resume_spawn_args(),
+                &fixed,
+                "abc",
+                Some(family),
+            )
+            .expect("the plugin answers a command");
+            assert_eq!(
+                resume.injector.expect("a command to type").steps,
+                typed(line.to_owned()),
+                "{family:?} types the resume for its shell"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resume_cmd_cannot_carry_refuses_and_discards_hook_files() {
+        let (hub, _scratch) = hook_test_hub("shell-resume-cmd-refused");
+        let error = prepare_shell_resume(
+            &hub,
+            "s1",
+            &shell_resume_spawn_args(),
+            &FixedResume {
+                argv: ["claude", "--settings", r"C:\h\s%.json", "--resume", "abc"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            },
+            "abc",
+            Some(ShellFamily::Cmd),
+        )
+        .err()
+        .expect("cmd cannot carry an argument holding %");
+        assert!(
+            format!("{error:#}").contains(
+                "cannot resume conversation abc in a shell: the shell cannot carry the resume command"
+            ),
+            "{error:#}"
+        );
+        assert!(
+            !hook_settings_file(&hub, "s1").exists(),
+            "the refused spawn removed the hook file it wrote"
+        );
+        assert!(
+            !hub.dirs.sessions_dir.join("s1").exists(),
+            "and the session dir it created"
+        );
+    }
+
+    /// A shell with no family reaches here as `None`: an env override such as
+    /// `tcsh`, or a Unix Automatic `$SHELL` with no family. Its resume line
+    /// cannot be quoted, so the spawn is refused rather than run wrong.
+    #[tokio::test]
+    async fn a_resume_refuses_a_shell_with_no_family() {
+        let (hub, _scratch) = hook_test_hub("shell-resume-no-family");
+        let error = prepare_shell_resume(
+            &hub,
+            "s1",
+            &shell_resume_spawn_args(),
+            &ScriptedResume { answer: Ok(true) },
+            "abc-123",
+            None,
+        )
+        .err()
+        .expect("a shell with no family cannot be handed the resume line");
+        assert!(
+            format!("{error:#}").contains(
+                "cannot resume conversation abc-123 in a shell: its shell family is unknown"
+            ),
+            "{error:#}"
+        );
+        assert!(
+            !hook_settings_file(&hub, "s1").exists(),
+            "the refused spawn removed the hook file it wrote"
+        );
     }
 
     /// A plugin whose hook file records the options and trust its hook plan
@@ -3474,8 +3711,13 @@ mod tests {
             opts: &serde_json::Value,
             conversation_id: &str,
             _hook_files: &[PathBuf],
-        ) -> Result<Option<String>, agent_api::AgentError> {
-            Ok(Some(format!("echo {opts} --resume {conversation_id}")))
+        ) -> Result<Option<Vec<String>>, agent_api::AgentError> {
+            Ok(Some(vec![
+                "echo".to_owned(),
+                opts.to_string(),
+                "--resume".to_owned(),
+                conversation_id.to_owned(),
+            ]))
         }
     }
 
@@ -3512,6 +3754,7 @@ mod tests {
             &echo_resume_spawn_args(recovered, false),
             &EchoOptions,
             "abc-123",
+            Some(ShellFamily::PowerShell),
         )
         .expect("the plugin answers a command");
 
@@ -3522,7 +3765,7 @@ mod tests {
         );
         assert_eq!(
             resume.injector.expect("a command to type").steps,
-            typed(r#"echo {"mode":"recovered-marker"} --resume abc-123"#.to_owned()),
+            typed(r#"echo '{"mode":"recovered-marker"}' '--resume' 'abc-123'"#.to_owned()),
             "the resume command gets the recovered options"
         );
     }
@@ -3538,6 +3781,7 @@ mod tests {
                 &echo_resume_spawn_args(OptionValues::new(), trusted),
                 &EchoOptions,
                 "abc-123",
+                Some(ShellFamily::PowerShell),
             )
             .expect("the plugin answers a command");
             assert_eq!(

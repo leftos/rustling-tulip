@@ -1264,15 +1264,15 @@ fn recovery_setup(
     Ok((agent, plugin, options, trusted))
 }
 
-/// The command a shell types to resume `conversation` with `options`; the
-/// error says why the agent cannot, which is the refusal the client shows. A
-/// plugin without `caps.shell_resume` cannot, whatever its `shell_resume`
-/// builds.
+/// The program and arguments a shell types to resume `conversation` with
+/// `options`; the error says why the agent cannot, which is the refusal the
+/// client shows. A plugin without `caps.shell_resume` cannot, whatever its
+/// `shell_resume` builds.
 fn shell_resume_command(
     plugin: &dyn AgentPlugin,
     options: &OptionValues,
     conversation: &str,
-) -> Result<String, String> {
+) -> Result<Vec<String>, String> {
     let descriptor = plugin.descriptor();
     let command = if descriptor.caps.shell_resume {
         plugin
@@ -3671,8 +3671,8 @@ mod recovery_tests {
             _opts: &TestOptions,
             _conversation_id: &str,
             _hook_files: &[std::path::PathBuf],
-        ) -> Result<Option<String>, agent_api::AgentError> {
-            Ok(self.resume_command.map(str::to_owned))
+        ) -> Result<Option<Vec<String>>, agent_api::AgentError> {
+            Ok(self.resume_command.map(|command| vec![command.to_owned()]))
         }
 
         fn check_request(

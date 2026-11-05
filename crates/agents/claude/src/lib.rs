@@ -503,12 +503,11 @@ impl Agent for ClaudePlugin {
         hook_vocabulary::live_line(body)
     }
 
-    /// `claude --settings "<path>" --resume <id>`, naming the hook settings
-    /// file the shell's spawn wrote. The path is always double-quoted, since
-    /// the config dir can hold spaces; a path holding a character a shell
-    /// expands inside double quotes (`SHELL_EXPANDED`) or the pair `\\` cannot
-    /// be quoted for cmd, PowerShell and POSIX shells at once, so it, like a
-    /// spawn that wrote no file, resumes without the settings.
+    /// `claude`, then `--settings <path>` for the hook settings file the
+    /// shell's spawn wrote, then `--resume <id>`; the daemon quotes each
+    /// argument for the session's shell. A path holding a character a shell
+    /// expands (`SHELL_EXPANDED`) or the pair `\\`, like a spawn that wrote no
+    /// file, resumes without the settings.
     ///
     /// An id outside `[A-Za-z0-9][A-Za-z0-9-]*`, an empty id included, has no
     /// resume line at all: it could read as more than one word in some shell,
@@ -522,7 +521,7 @@ impl Agent for ClaudePlugin {
         opts: &ClaudeOptions,
         conversation_id: &str,
         hook_files: &[PathBuf],
-    ) -> Result<Option<String>, AgentError> {
+    ) -> Result<Option<Vec<String>>, AgentError> {
         if !opts.provider.is_anthropic() {
             return Err(AgentError::new(match display_name(opts.provider) {
                 Some(name) => format!("{name} sessions recover as Claude."),
@@ -532,16 +531,18 @@ impl Agent for ClaudePlugin {
         if !is_plain_conversation_id(conversation_id) {
             return Ok(None);
         }
-        // A POSIX shell turns `\\` inside double quotes into `\`, which mangles
-        // a UNC path or any doubled backslash before claude sees it.
         let settings = hook_files
             .first()
             .map(|path| path.to_string_lossy())
             .filter(|path| !path.contains(SHELL_EXPANDED) && !path.contains(r"\\"));
-        Ok(Some(match settings {
-            Some(path) => format!("claude --settings \"{path}\" --resume {conversation_id}"),
-            None => format!("claude --resume {conversation_id}"),
-        }))
+        let mut argv = vec!["claude".to_owned()];
+        if let Some(path) = settings {
+            argv.push("--settings".to_owned());
+            argv.push(path.into_owned());
+        }
+        argv.push("--resume".to_owned());
+        argv.push(conversation_id.to_owned());
+        Ok(Some(argv))
     }
 
     /// Claude's rule table, which the daemon reads a session's rendered screen
@@ -890,29 +891,38 @@ mod tests {
         );
     }
 
-    fn shell_resume(hook_files: &[std::path::PathBuf]) -> Option<String> {
+    fn shell_resume(hook_files: &[std::path::PathBuf]) -> Option<Vec<String>> {
         ClaudePlugin
             .shell_resume(&ClaudeOptions::default(), "abc-123", hook_files)
             .expect("Claude resumes in a shell")
     }
 
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
     #[test]
-    fn shell_resume_quotes_a_settings_path_with_spaces() {
+    fn shell_resume_names_the_settings_file_and_the_conversation() {
         let path =
             std::path::PathBuf::from(r"C:\Users\Some Name\config\sessions\s1\hook-settings.json");
         assert_eq!(
-            shell_resume(&[path]).as_deref(),
-            Some(
-                r#"claude --settings "C:\Users\Some Name\config\sessions\s1\hook-settings.json" --resume abc-123"#
-            )
+            shell_resume(&[path]),
+            Some(strings(&[
+                "claude",
+                "--settings",
+                r"C:\Users\Some Name\config\sessions\s1\hook-settings.json",
+                "--resume",
+                "abc-123",
+            ])),
+            "the daemon quotes the path for the session's shell"
         );
     }
 
     #[test]
     fn shell_resume_without_hook_files_is_a_bare_resume() {
         assert_eq!(
-            shell_resume(&[]).as_deref(),
-            Some("claude --resume abc-123")
+            shell_resume(&[]),
+            Some(strings(&["claude", "--resume", "abc-123"]))
         );
     }
 
@@ -920,8 +930,8 @@ mod tests {
     fn shell_resume_drops_the_settings_for_an_unquotable_path() {
         let path = std::path::PathBuf::from("C:\\odd\"name\\hook-settings.json");
         assert_eq!(
-            shell_resume(&[path]).as_deref(),
-            Some("claude --resume abc-123")
+            shell_resume(&[path]),
+            Some(strings(&["claude", "--resume", "abc-123"]))
         );
     }
 
@@ -934,8 +944,8 @@ mod tests {
                 r"C:\Users\a{expanded}b\config\sessions\s1\hook-settings.json"
             ));
             assert_eq!(
-                shell_resume(&[path]).as_deref(),
-                Some("claude --resume abc-123"),
+                shell_resume(&[path]),
+                Some(strings(&["claude", "--resume", "abc-123"])),
                 "{expanded:?}"
             );
         }
@@ -945,8 +955,8 @@ mod tests {
     fn shell_resume_drops_the_settings_for_a_unc_path() {
         let path = std::path::PathBuf::from(r"\\server\share\rt\sessions\s1\hook-settings.json");
         assert_eq!(
-            shell_resume(&[path]).as_deref(),
-            Some("claude --resume abc-123")
+            shell_resume(&[path]),
+            Some(strings(&["claude", "--resume", "abc-123"]))
         );
     }
 
@@ -962,7 +972,7 @@ mod tests {
         for id in ["abc-123", "85573BB1-C581-489E-BAAA-94D5A384744C"] {
             assert_eq!(
                 ClaudePlugin.shell_resume(&ClaudeOptions::default(), id, &[]),
-                Ok(Some(format!("claude --resume {id}"))),
+                Ok(Some(strings(&["claude", "--resume", id]))),
                 "{id:?}"
             );
         }
@@ -1051,7 +1061,7 @@ mod tests {
         let files = [std::path::PathBuf::from(HOOK_SETTINGS)];
         for provider in [ClaudeProvider::Deepseek, ClaudeProvider::Unknown] {
             let opts = on_provider(provider);
-            let refusals: Vec<Result<Option<String>, AgentError>> = ["abc-123", "", RESUME_ID]
+            let refusals: Vec<Result<Option<Vec<String>>, AgentError>> = ["abc-123", "", RESUME_ID]
                 .iter()
                 .flat_map(|id| {
                     [
