@@ -140,10 +140,42 @@ Note: the Tauri app is no longer on `main`; it lives on the `tauri` branch (tag 
       `notarytool`). Build-machine/CI concern, not source. Needed for distribution
       but not for local dev runs.
 - The macOS dev loop runs from the Windows PC: `.\rt.ps1 mac check|build|clippy|test [<extra>]` sends one cargo command to the Mac mini builder (`builder@mac-mini`) as a pinned heavy gate run, logged at `.tmp\rt-mac-<sub-verb>.log`. Extra cargo arguments use long forms (`--package <crate>`), since `-p` binds to `rt.ps1`'s `-PrintOnly`. There is no `rt.sh`.
-- [ ] The Mac mini builder lacks Xcode's Metal Toolchain (`xcodebuild -showComponent MetalToolchain` says uninstalled), so gpui's build script stops at "cannot execute tool 'metal'" before any of this repo's code compiles. Either install it there (`xcodebuild -downloadComponent MetalToolchain`) or build gpui with its `runtime_shaders` feature on macOS; RT-906 decides.
-- [ ] `crates/daemon-client` warns on macOS (an unused `anyhow` import in `protected_root.rs`, unused items in `device_tokens.rs` and `logon_task.rs`), which `mac clippy`'s `-D warnings` turns into errors; RT-906 or RT-46 gates them.
+- [x] The Mac mini builder has Xcode's Metal Toolchain, so gpui's build script compiles its shaders there.
+- [x] `mac clippy` runs clean with `-D warnings`.
 
 - [ ] Accounts on macOS ([accounts.md](./accounts.md), RT-916): the forked `claude-accounts` crate gains Unix locks and reads and writes the live Claude credential through the Keychain (on macOS it is not in `.credentials.json`), allowing for Claude Code's roughly 30-second Keychain cache before a switch takes effect. Accounts shows on macOS once it lands.
+
+## Native client
+
+A smoke run of `rustling-tulip-native` on the Mac mini builder (arm64), driven over SSH with no person at the console. Nothing found blocks a launch: the client builds, opens its window, starts a daemon, and that daemon runs a shell and a Claude session whose hooks reach it, also from a binaries folder whose path has a space.
+
+The run was isolated: every daemon and client had `RUSTLING_TULIP_CONFIG_DIR`, `RUSTLING_TULIP_BINARIES_DIR` and `RUSTLING_TULIP_WORKTREES_DIR` (and the tailnet, remote-files and updates folders) under a scratch `.tmp` folder, `RUSTLING_TULIP_CLAUDE` pointing at `crates/agents/claude/fake/fake-claude.sh`, and `CLAUDE_CONFIG_DIR` under the same `.tmp`.
+
+How it was built and launched:
+
+- Build: `.\rt.ps1 mac build --package rustling-tulip-native --package daemon --package tracer` builds the three debug binaries through the gate, gpui included. The output stays on the builder in the gate's work folder for the worktree, `~/gate-remote/work/<worktree>-<hash>/target/debug/`, so no separate clone is needed. The smoke copied `rustling-tulip-native`, `rustling-tulipd` and `rt-tracer` from there into one folder, so the daemon and tracer sit beside the client.
+- Launch form that worked from SSH: a `.command` file that sources the environment and runs `exec <folder>/rustling-tulip-native > <log> 2>&1`, opened with `open -n <file>.command`. It starts in the logged-in GUI session, through Terminal.app, which stays open beside the client.
+- Launch form that failed: `launchctl asuser $(id -u) env ... rustling-tulip-native` from an SSH login prints `Could not switch to audit session 0x186a2: 1: Operation not permitted`; it needs root.
+- `node` is not on the builder's SSH PATH (it lives under `~/gate-tools/node/bin` and only a login shell adds it), so the smoke put that folder on PATH for fake-claude. A Finder-launched client meets the same launchd-minimal PATH, which RT-1007 takes on.
+
+Checks:
+
+- [x] The window opens: the window list (`CGWindowListCopyWindowInfo`) shows an on-screen, layer-0 window owned by the client's pid, 1000 by 672 points.
+- [ ] A screenshot of the window: `screencapture -x` from SSH fails with `could not create image from display`, as the SSH context has no Screen Recording grant. Not a client problem.
+- [x] The client starts the daemon: `native.log` shows `daemon binary cache: populated`, `spawning daemon from cache` (template beside the client exe, cached copy under the isolated binaries folder), `wait_for_handshake: daemon ready` and `connected to daemon`. `pgrep -fl rustling-tulipd` shows the cached copy running with `--start-failure-file` under the isolated `logs/`.
+- [x] The daemon writes `daemon.json` in the isolated config folder, with the port, pid, `supported_versions` and `build_version`.
+- [x] A plain shell session through the daemon's verbs: `spawn --cwd` starts `/bin/zsh` under `rt-tracer` over a Unix socket in the temp folder, `send <id> "echo hi"` types it, and `read` shows `echo hi` then `hi`; `sessions` lists it `idle`.
+- [x] A Claude session with fake-claude: `spawn --agent claude` prints the `[fake-claude] ready` banner, and after `send` of a message `watch` shows `idle`, then `working`, then `idle`. `daemon.log` shows `status set by a hook event` for `UserPromptSubmit` and `turn end held`, so the hook commands reach the daemon.
+- [x] The same Claude check with a second daemon whose `RUSTLING_TULIP_BINARIES_DIR` has a space (`.tmp/bin dir`): `hook-settings.json` names the hook program as `.../bin dir/rt-tracer-<hash>` with its arguments in a separate list, and the status goes `idle`, `working`, `idle` with the same hook log lines. fake-claude runs the hook as a program with an argument list; how the real Claude CLI runs that `command` field from a path with a space is not checked here.
+- [x] Clean stop: `kill` of each session, `rustling-tulipd shutdown` of each daemon and a TERM to the client leave no `rt-tracer`, `rustling-tulipd` or fake-claude process, and the tracer sockets are gone from the temp folder.
+- [ ] A shell tab takes keys in the window, Cmd+C and Cmd+V copy and paste (or only Ctrl does), and a Claude session's status shows in the sidebar and pane: not run. Driving the window needs `osascript` and System Events, which hung without an Automation or Accessibility grant, so these need a person at the console or over RustDesk.
+
+What the logs say on macOS that is not a launch blocker:
+
+- The client logs `opening the device token store, holding no device tokens: device tokens live in Windows Credential Manager; there is no store off Windows`, so tailnet device tokens are not kept on macOS.
+- The daemon logs `the secret store could not be installed` (Credential Manager only) and the summarizer cannot read a saved key, as expected: macOS refuses sealed secrets for now (RT-665's decisions; RT-1010 documents it).
+- The daemon logs `the machine's identifier could not be read; the daemon id is not checked against this machine`: the stamp reads `/etc/machine-id`, which macOS does not have, so a copied config folder on a Mac keeps the other machine's daemon id. The macOS machine identifier is `IOPlatformUUID` (from `ioreg`).
+- A debug build of the client logs `GPUI was compiled in test mode`.
 
 ## 5. Minor cleanups (work as-is, optionally tidy)
 
