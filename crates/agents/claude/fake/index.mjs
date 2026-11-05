@@ -141,6 +141,20 @@ function reportFatal(kind, err) {
     /* stderr may already be gone */
   }
 }
+// Lines the real CLI would not print, kept off the PTY.
+const QUIET_LOG = join(tmpdir(), "fake-claude.log");
+/**
+ * Appends `line` to the quiet log, never to the screen.
+ *
+ * @param {string} line
+ */
+function logQuietly(line) {
+  try {
+    appendFileSync(QUIET_LOG, `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    /* the log is best effort */
+  }
+}
 process.on("uncaughtException", (err) => {
   reportFatal("uncaughtException", err);
   process.exit(1);
@@ -160,12 +174,28 @@ if (flags.conversationId === null) {
 // Every interactive Claude spawn passes `--settings`; a run whose file is
 // missing or malformed stays hookless with a line naming the path, because the
 // daemon itself spawns without hooks when it cannot write the file.
-const settingsDoc = loadSettings(flags.settings);
+const settingsDoc = loadSettings(flags.settings, "settings");
+// The user layer, `<CLAUDE_CONFIG_DIR>/settings.json`, as Claude Code reads it
+// beside `--settings`; a missing or malformed file leaves the layer empty.
+const userSettingsDoc = loadUserSettings();
 // The transcript a message turn writes, where the daemon's chat mirror reads
 // it; null (nothing written) without a Claude home.
 const transcriptFile = transcriptPath(flags.conversationId);
 
 process.stdout.write(`${READY_BANNER} (pid: ${process.pid})\r\n`);
+// Claude Code reports every start to `SessionStart`, before any transcript
+// exists, carrying the conversation id; the source is its matcher's subject.
+const startSource = flags.resumed ? "resume" : "startup";
+runHooks(
+  "SessionStart",
+  {
+    hook_event_name: "SessionStart",
+    session_id: flags.conversationId,
+    source: startSource,
+    cwd: process.cwd(),
+  },
+  startSource,
+);
 if (flags.addDirs.length > 0) {
   process.stdout.write(
     `${TAG} add-dir: ${flags.addDirs.join(", ")}\r\n`,
@@ -752,8 +782,9 @@ function appendRecord(fields) {
 }
 
 /**
- * Runs every hook the settings document configures for `event`, with
- * `payload` on its stdin, before this returns. Each one is synchronous on
+ * Runs every hook the settings layers configure for `event`, with `payload`
+ * on its stdin, before this returns: the user layer's groups first, then the
+ * `--settings` document's, as Claude Code merges its layers. Each one is synchronous on
  * purpose: the daemon applies the event before it answers the hook, so the
  * cue that follows already sees the status the daemon holds, and the hooks'
  * ordering stamps stay increasing. The document's `async` field is ignored.
@@ -763,10 +794,10 @@ function appendRecord(fields) {
  * @param {string} [toolName] the matcher's subject, the event's tool name
  */
 function runHooks(event, payload, toolName) {
-  const groups = settingsDoc?.hooks?.[event];
-  if (!Array.isArray(groups)) {
-    return;
-  }
+  const groups = [userSettingsDoc, settingsDoc].flatMap((doc) => {
+    const layer = doc?.hooks?.[event];
+    return Array.isArray(layer) ? layer : [];
+  });
   for (const group of groups) {
     if (!hookGroupMatches(group, toolName)) {
       continue;
@@ -911,7 +942,7 @@ function lineBreakLength(value, index) {
  * @param {string[]} argv
  */
 function parseArgs(argv) {
-  /** @type {{addDirs: string[], prompt: string | null, model: string | null, permissionMode: string | null, skipPermissions: boolean, settings: string | null, conversationId: string | null}} */
+  /** @type {{addDirs: string[], prompt: string | null, model: string | null, permissionMode: string | null, skipPermissions: boolean, settings: string | null, conversationId: string | null, resumed: boolean}} */
   const out = {
     addDirs: [],
     prompt: null,
@@ -920,6 +951,8 @@ function parseArgs(argv) {
     skipPermissions: false,
     settings: null,
     conversationId: null,
+    // Whether the conversation id came from `--resume`.
+    resumed: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -934,6 +967,7 @@ function parseArgs(argv) {
     } else if (a === "--settings" && argv[i + 1] !== undefined) {
       out.settings = argv[++i];
     } else if ((a === "--session-id" || a === "--resume") && argv[i + 1] !== undefined) {
+      out.resumed = a === "--resume";
       out.conversationId = argv[++i];
     } else if (a === "--dangerously-skip-permissions") {
       out.skipPermissions = true;
@@ -950,9 +984,16 @@ function parseArgs(argv) {
  * interactive spawn on this branch passes the flag.
  *
  * @param {string | null} path
+ * @param {string} label the word the failure line starts with
+ * @param {(line: string) => void} [reportMissing] where a missing file's
+ *   line goes: the screen unless given
  * @returns {any | null}
  */
-function loadSettings(path) {
+function loadSettings(
+  path,
+  label,
+  reportMissing = (line) => process.stdout.write(`${line}\r\n`),
+) {
   if (path === null) {
     return null;
   }
@@ -960,13 +1001,30 @@ function loadSettings(path) {
   try {
     text = readFileSync(path, "utf8");
   } catch {
-    process.stdout.write(`${TAG} settings-missing ${path}\r\n`);
+    reportMissing(`${TAG} ${label}-missing ${path}`);
     return null;
   }
   try {
     return JSON.parse(text);
   } catch {
-    process.stdout.write(`${TAG} settings-invalid ${path}\r\n`);
+    process.stdout.write(`${TAG} ${label}-invalid ${path}\r\n`);
     return null;
   }
+}
+
+/**
+ * The user settings document, `<CLAUDE_CONFIG_DIR>/settings.json`, or null
+ * without a Claude home or when the file cannot be read or parsed; either
+ * failure leaves the user layer empty. A missing file is the usual case and,
+ * as under the real CLI, is silent on the screen: its line goes to the quiet
+ * log. A malformed one prints its line.
+ *
+ * @returns {any | null}
+ */
+function loadUserSettings() {
+  const home = process.env.CLAUDE_CONFIG_DIR;
+  if (home === undefined || home === "") {
+    return null;
+  }
+  return loadSettings(join(home, "settings.json"), "user-settings", logQuietly);
 }

@@ -321,6 +321,7 @@ pub use crate::recover_view::RecoverRow;
 pub use crate::runtime_icon::RuntimeIcon;
 pub use crate::scrollbar::Thumb;
 pub use crate::settings_view::LaunchCommandRow;
+pub use crate::settings_view::UserHooksRow;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{
     Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, DETACHED_BANNER,

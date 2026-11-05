@@ -291,13 +291,15 @@ impl View {
     /// modal opens over Settings once drawn, and takes its Down once drawn;
     /// the editor opens on the modal once drawn, its input takes the keyboard
     /// once drawn and takes its typing once focused; the chat opens, then its
-    /// stretch, Bash card and Tail box, then scrolls up to the box once drawn.
+    /// stretch, Bash card and Tail box, then scrolls up to the box once drawn;
+    /// Claude's page opens, then the wheel takes it down to its Hooks
+    /// section.
     fn steps(self) -> usize {
         match self {
             Self::ConnectionsSsh => 4,
             Self::Themes | Self::Chat | Self::SettingsDashboard => 3,
             Self::ThemesEdit => 5,
-            Self::Update | Self::UpdateNotes | Self::Summary => 2,
+            Self::Update | Self::UpdateNotes | Self::Summary | Self::SettingsClaude => 2,
             _ => 1,
         }
     }
@@ -1110,15 +1112,7 @@ fn drive(
         }
         View::Diff => press("ctrl-3", window, cx),
         View::Settings => press("ctrl-,", window, cx),
-        // Settings opens with the keyboard on its tab list, where Down
-        // walks the tabs to the last, Claude.
-        View::SettingsClaude | View::SettingsHosts => {
-            press("ctrl-,", window, cx)?;
-            for _ in 0..CLAUDE_TAB_DOWNS {
-                press("down", window, cx)?;
-            }
-            Ok(())
-        }
+        View::SettingsClaude | View::SettingsHosts => drive_claude_page(step, address, window, cx),
         View::SettingsSounds => drive_settings_sounds(window, cx),
         View::Spawn => {
             press("ctrl-shift-n", window, cx)?;
@@ -1212,6 +1206,21 @@ const CHAT_TAIL_POINT: (i32, i32) = (660, 155);
 const CHAT_TAIL_NOTCHES: i16 = -3;
 /// Enough wheel notches to reach the General page's end.
 const SETTINGS_PAGE_NOTCHES: i16 = 40;
+
+/// Step `step` of the `settings-claude` and `settings-hosts` shots: Settings
+/// opens with the keyboard on its tab list, where Down walks the tabs to the
+/// last, Claude; then (`settings-claude` only) the wheel takes the page to
+/// its end, where the Hooks section is drawn whole.
+fn drive_claude_page(step: usize, address: usize, window: &mut Window, cx: &mut App) -> Result<()> {
+    if step == 1 {
+        return win32::wheel_down(address, SETTINGS_PAGE_POINT, SETTINGS_PAGE_NOTCHES);
+    }
+    press("ctrl-,", window, cx)?;
+    for _ in 0..CLAUDE_TAB_DOWNS {
+        press("down", window, cx)?;
+    }
+    Ok(())
+}
 
 /// Step `step` of the `update` shot: Check now, which the shot's updater
 /// answers with a ready 0.99.0, and Settings; then the wheel over the
@@ -1887,6 +1896,7 @@ impl FakeDaemon {
             protocol::FEATURE_AGENT_COMMANDS.to_owned(),
             protocol::FEATURE_FILE_TAIL.to_owned(),
             protocol::FEATURE_DEFAULT_SHELL.to_owned(),
+            protocol::FEATURE_AGENT_USER_HOOKS.to_owned(),
         ];
         conn.on_welcome(version, features.clone());
         self.event(NetEvent::State(conn))?;
@@ -2060,6 +2070,15 @@ impl FakeDaemon {
             }
             ClientMessage::TestSummary { request_id } => shot_summary_test(request_id.clone()),
             ClientMessage::ListShellChoices => shot_shell_choices(),
+            ClientMessage::GetAgentUserHooks { agent, request_id } => {
+                DaemonMessage::AgentUserHooks {
+                    agent: agent.clone(),
+                    state: protocol::UserHooksWire::On,
+                    path: Some("C:\\Users\\you\\.claude\\settings.json".to_owned()),
+                    error: None,
+                    request_id: request_id.clone(),
+                }
+            }
             ClientMessage::SuggestBranchName { target, request_id } => {
                 DaemonMessage::BranchNameSuggestion {
                     target: target.clone(),

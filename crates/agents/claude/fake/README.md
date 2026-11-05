@@ -14,6 +14,10 @@ It echoes stdin lines back, reports an EOT-terminated paste as `RT_PASTE_RESULT 
 
 It accepts and ignores the `--add-dir`, `-p`, `--model` and `--permission-mode` flags the daemon may pass, and takes the conversation id its transcript is named after from `--session-id` or `--resume`; started with neither (typed into a shell by hand), it mints a uuid for it at start, as Claude Code does. It reads the `--settings` hooks document the daemon injects: on `/rt-hook prompt`, `/rt-hook ask` and `/rt-hook bg` it runs the configured hook commands with the event JSON on stdin.
 
+It also loads hooks from the user layer, `<CLAUDE_CONFIG_DIR>/settings.json`, and runs that layer's groups before the `--settings` groups for each event, as Claude Code merges its layers; a missing or malformed user file leaves the layer empty. A missing one is silent on the screen, as under the real CLI: its `user-settings-missing <path>` line goes to `fake-claude.log` in the OS temp dir; a malformed one prints `user-settings-invalid <path>`.
+
+Every start runs `SessionStart` right after the banner, with `session_id` the conversation id and `source` `resume` when started with `--resume`, else `startup`; the source is the matcher's subject, so a `SessionStart` group with a `matcher` (`startup`, `resume`, `startup|resume`) runs as under the real CLI.
+
 The prompt cue leaves its turn open under the spinner, the ask cue paints the question dialog and then runs `Stop` 5 s later and paints the idle box, and the bg cue ends its turn with a `Stop` that lists a running background shell (the payloads are in `index.mjs`).
 
 The prompt box echoes what is typed or pasted into it as `❯ <text>`, cut to one row, the way Claude's box shows a draft, so the daemon's chat send sees its message in the box before it presses Enter. Paste markers and control bytes are left out, and nothing is echoed while an EOT-terminated paste is buffered.

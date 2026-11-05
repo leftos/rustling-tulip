@@ -18,7 +18,7 @@ use crate::connection_picker::SavedHost;
 use crate::net::{HandshakeInfo, NetCommand};
 use crate::remote_access::RemoteStatusView;
 use crate::remote_mode::Capabilities;
-use crate::settings_view::{KeepAwake, SettingApply};
+use crate::settings_view::{KeepAwake, SettingApply, UserHooksEntry, UserHooksPending};
 use crate::tabs::{PaneBinding, SessionRef};
 use crate::target::{HostKey, Target};
 
@@ -32,6 +32,10 @@ pub(crate) struct HostMirrors {
     pub(crate) remote_status: Option<RemoteStatusView>,
     /// The daemon's launch commands, by agent.
     pub(crate) agent_commands: Option<HashMap<AgentId, AgentCommandEntry>>,
+    /// Each agent's user-settings hooks, as the daemon last answered.
+    pub(crate) agent_user_hooks: HashMap<AgentId, UserHooksEntry>,
+    /// Each agent's user-hooks Set still waiting on its answer.
+    pub(crate) agent_user_hooks_pending: HashMap<AgentId, UserHooksPending>,
     /// Each agent's Settings page values.
     pub(crate) agent_settings: BTreeMap<AgentId, OptionValues>,
     /// Whether the daemon has reported its agents' Settings values.
@@ -639,12 +643,15 @@ impl RootView {
         self.hosts.get_mut(host).map(|entry| &mut entry.mirrors)
     }
 
-    /// Forgets `host`'s daemon's keep-awake state, launch commands and
-    /// default shell, as a disconnect does.
+    /// Forgets `host`'s daemon's keep-awake state, launch commands, its
+    /// agents' user-hooks states and the user-hooks Sets still waiting on an
+    /// answer, and its default shell, as a disconnect does.
     pub(crate) fn forget_daemon_settings(&mut self, host: &HostKey) {
         if let Some(mirrors) = self.mirrors_of_mut(host) {
             mirrors.keep_awake = None;
             mirrors.agent_commands = None;
+            mirrors.agent_user_hooks.clear();
+            mirrors.agent_user_hooks_pending.clear();
             mirrors.shell = crate::shell_choice::HostShell::default();
         }
     }

@@ -18,7 +18,7 @@ use protocol::{
 };
 use rustling_tulip_native::{
     BadgeOverlay, Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, OpenOutcome,
-    PopoutKey, SidebarView, TabBadge, chat::ChatMode, fonts,
+    PopoutKey, SidebarView, TabBadge, UserHooksRow, chat::ChatMode, fonts,
 };
 use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, split, tab};
 
@@ -2096,6 +2096,219 @@ fn refuse_last_command(h: &mut Harness<'_>, message: &str) -> Option<String> {
 
 fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
     h.bounds(selector).origin.x >= px(0.0)
+}
+
+const USER_HOOKS_PATH: &str = "C:\\Users\\me\\.agent\\settings.json";
+
+/// The agents each user-hooks Get among `sent` asks about, in order.
+fn user_hooks_gets(sent: &[ClientMessage]) -> Vec<AgentId> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::GetAgentUserHooks { agent, .. } => Some(agent.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The request id of the last user-hooks Get among `sent`.
+fn last_user_hooks_get_id(sent: &[ClientMessage]) -> Option<String> {
+    sent.iter()
+        .rev()
+        .find_map(|msg| match msg {
+            ClientMessage::GetAgentUserHooks { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// Each user-hooks Set among `sent`: its agent, value and request id.
+fn user_hooks_sets(sent: &[ClientMessage]) -> Vec<(AgentId, bool, Option<String>)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetAgentUserHooks {
+                agent,
+                enabled,
+                request_id,
+            } => Some((agent.clone(), *enabled, request_id.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The daemon's answer for Claude's user hooks.
+fn user_hooks_reply(
+    state: protocol::UserHooksWire,
+    error: Option<&str>,
+    request_id: Option<String>,
+) -> DaemonMessage {
+    DaemonMessage::AgentUserHooks {
+        agent: claude(),
+        state,
+        path: Some(USER_HOOKS_PATH.to_owned()),
+        error: error.map(str::to_owned),
+        request_id,
+    }
+}
+
+/// [`opened`] on a daemon that lists the user-hooks feature, Claude's Get
+/// answered with `state`, and Settings open on Claude's page with the Hooks
+/// switch in view.
+fn opened_with_user_hooks<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    state: protocol::UserHooksWire,
+) -> Harness<'a> {
+    let mut h = opened(cx, dir);
+    reconnect_with_user_hooks(&mut h, true);
+    let get = last_user_hooks_get_id(&h.sent());
+    assert!(get.is_some(), "the client asked for Claude's user hooks");
+    h.send(user_hooks_reply(state, None, get));
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    h.scroll_into_view("settings-content", "settings-agent-user-hooks");
+    h
+}
+
+/// The local daemon's connection is reported again listing the current
+/// features, and the user-hooks one when `user_hooks`, then the daemon lists
+/// its agents; what the client sends is left for `sent`.
+fn reconnect_with_user_hooks(h: &mut Harness<'_>, user_hooks: bool) {
+    let mut features = support::daemon_features();
+    if user_hooks {
+        features.push(protocol::FEATURE_AGENT_USER_HOOKS.to_owned());
+    }
+    let mut conn = Connection::new();
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    conn.on_welcome(support::PROTOCOL, features);
+    h.event(NetEvent::State(conn));
+    h.send(DaemonMessage::Agents {
+        agents: agent_registry::descriptors(),
+    });
+}
+
+fn user_hooks_row(h: &mut Harness<'_>) -> Option<UserHooksRow> {
+    h.root(|root, _| root.settings_user_hooks_row())
+}
+
+#[gpui::test]
+fn user_hooks_get_sent_when_agents_arrive(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    reconnect_with_user_hooks(&mut h, true);
+    assert_eq!(
+        user_hooks_gets(&h.sent()),
+        vec![claude()],
+        "the agent whose descriptor has user_hooks is asked about"
+    );
+    list_agents(&mut h, test_agent());
+    assert_eq!(
+        user_hooks_gets(&h.sent()),
+        vec![claude()],
+        "a second listing asks again, and never about an agent without the flag"
+    );
+}
+
+#[gpui::test]
+fn user_hooks_toggle_sends_set_and_shows_the_reply(cx: &mut TestAppContext) {
+    use protocol::UserHooksWire;
+    let dir = TestDir::new();
+    let mut h = opened_with_user_hooks(cx, &dir, UserHooksWire::Off);
+    let row = user_hooks_row(&mut h).expect("the Hooks section is drawn");
+    assert!(row.enabled && !row.checked, "off and live: {row:?}");
+    assert_eq!(row.path.as_deref(), Some(USER_HOOKS_PATH));
+    assert!(drawn(&mut h, "settings-agent-user-hooks-path"));
+
+    h.click_on("settings-agent-user-hooks");
+    let sets = user_hooks_sets(&h.sent());
+    assert_eq!(sets.len(), 1, "one Set: {sets:?}");
+    let (agent, enabled, id) = sets[0].clone();
+    assert_eq!((agent, enabled), (claude(), true));
+    assert!(id.is_some(), "the Set carries a request id");
+    let row = user_hooks_row(&mut h).expect("still drawn");
+    assert!(
+        row.checked && row.pending,
+        "the asked-for value shows: {row:?}"
+    );
+
+    h.send(user_hooks_reply(UserHooksWire::Stale, None, id));
+    let row = user_hooks_row(&mut h).expect("still drawn");
+    assert!(
+        row.checked && !row.pending && row.repair,
+        "the reply's state shows: {row:?}"
+    );
+    assert!(drawn(&mut h, "settings-agent-user-hooks-repair"));
+
+    h.click_on("settings-agent-user-hooks");
+    let sets = user_hooks_sets(&h.sent());
+    assert_eq!(sets.len(), 1, "one Set: {sets:?}");
+    assert!(!sets[0].1, "a click on the switch shown on asks for off");
+    let row = user_hooks_row(&mut h).expect("still drawn");
+    assert!(!row.checked && row.pending, "{row:?}");
+    h.send(user_hooks_reply(
+        UserHooksWire::Off,
+        None,
+        sets[0].2.clone(),
+    ));
+    let row = user_hooks_row(&mut h).expect("still drawn");
+    assert!(!row.checked && !row.pending && !row.repair, "{row:?}");
+}
+
+#[gpui::test]
+fn user_hooks_section_disabled_without_the_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    reconnect_with_user_hooks(&mut h, false);
+    assert_eq!(
+        user_hooks_gets(&h.sent()),
+        Vec::<AgentId>::new(),
+        "nothing is asked of a daemon without the feature"
+    );
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    h.scroll_into_view("settings-content", "settings-agent-user-hooks");
+    let row = user_hooks_row(&mut h).expect("the Hooks section is drawn, dimmed");
+    assert!(!row.enabled && !row.checked, "{row:?}");
+    assert_eq!(
+        h.root(|root, _| root.settings_user_hooks_tip()),
+        Some(
+            "This host's daemon is too old for this setting. Update rustling-tulip there to use it."
+        )
+    );
+    assert!(drawn(&mut h, "settings-agent-user-hooks"));
+    h.click_on("settings-agent-user-hooks");
+    assert_eq!(
+        user_hooks_sets(&h.sent()),
+        Vec::new(),
+        "a click on the dimmed switch sends nothing"
+    );
+}
+
+#[gpui::test]
+fn user_hooks_error_shown_under_the_row(cx: &mut TestAppContext) {
+    use protocol::UserHooksWire;
+    let dir = TestDir::new();
+    let mut h = opened_with_user_hooks(cx, &dir, UserHooksWire::Off);
+    assert!(!drawn(&mut h, "settings-agent-user-hooks-error"));
+    h.click_on("settings-agent-user-hooks");
+    let id = user_hooks_sets(&h.sent()).pop().and_then(|(_, _, id)| id);
+    let refusal = "writing C:\\Users\\me\\.agent\\settings.json: access denied";
+    h.send(user_hooks_reply(UserHooksWire::Off, Some(refusal), id));
+    let row = user_hooks_row(&mut h).expect("still drawn");
+    assert_eq!(row.error.as_deref(), Some(refusal));
+    assert!(
+        !row.checked && !row.pending,
+        "the file's state shows: {row:?}"
+    );
+    assert!(drawn(&mut h, "settings-agent-user-hooks-error"));
+
+    h.send(user_hooks_reply(UserHooksWire::Off, None, None));
+    assert_eq!(
+        user_hooks_row(&mut h).and_then(|row| row.error),
+        None,
+        "the next reply clears the error"
+    );
+    assert!(!drawn(&mut h, "settings-agent-user-hooks-error"));
 }
 
 #[gpui::test]

@@ -54,7 +54,8 @@ To look at a UI change, run `.\rt.ps1 native-shot <view>`: it writes a PNG of th
 
 The views:
 
-- `main`, `source-control`, `diff`, `settings`, `settings-claude`, `viewer`, `viewer-md`, `dashboard`: those screens as named; `dashboard` is seeded to the By status view.
+- `main`, `source-control`, `diff`, `settings`, `viewer`, `viewer-md`, `dashboard`: those screens as named; `dashboard` is seeded to the By status view.
+- `settings-claude`: Settings on Claude's page scrolled to its end, the end of Launch command and then Hooks.
 - `dashboard-compact`: the Dashboard's Compact view over scripted agents in several repos, a workspace and a folder, at 1920x1080.
 - `main-compact`: the sidebar's Compact leaves.
 - `settings-dashboard`: Settings on its Dashboard tab with a keyed provider, a stored key, some spend and a Test result.
@@ -81,6 +82,8 @@ The `crates/agents/claude/fake/` shim (`fake-claude.cmd` or `fake-claude.sh`, pl
 It also points the plugin's home variable at `<root>/<agent id>-home` and puts the plugin's stub name first on `PATH`; a registered plugin with no fake panics. That PATH stub only prints a marker: a spec that needs the fake started by hand types its full path (from `RUSTLING_TULIP_CLAUDE`) or a wrapper that calls it.
 
 The Claude fake plays the chat mirror's side of a session too. It echoes the draft typed or pasted into the prompt box as `❯ <text>`, writes a transcript to `<CLAUDE_CONFIG_DIR>/projects/<encoded cwd>/<id>.jsonl` (the id from `--session-id` or `--resume`; started with neither, it mints a uuid and names the transcript after it), and runs a turn for any submitted line that is not blank or a `/` command: a `user` record and `UserPromptSubmit`, the spinner, the answer, a `turn_duration` record, `Stop` and the idle box.
+
+It loads the user layer's hooks from `<CLAUDE_CONFIG_DIR>/settings.json` and runs them before the `--settings` hooks for each event, printing `user-settings-invalid <path>` when that file is malformed (a missing one goes to `fake-claude.log` in the OS temp dir, not the screen); every start runs `SessionStart` (`source` `resume` under `--resume`, else `startup`, tested against a group's `matcher`), so a spec can show a hand-started run reporting through user hooks (`user_hooks_report_a_hand_started_agents_conversation` in `e2e_live.rs`).
 
 The cue `rt-perm` in a message makes that turn write a `Bash` `tool_use` record, run `PermissionRequest` and draw the permission dialog, where a bare `1` or `2` allows (the `tool_result`, `PostToolUse`, the answer) and `3` denies. The input lines `/rt-hook prompt`, `/rt-hook ask` and `/rt-hook bg` run hooks for an open turn, an AskUserQuestion dialog and a `Stop` listing a running shell (`crates/agents/claude/fake/index.mjs`, its README).
 

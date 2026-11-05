@@ -18,9 +18,9 @@ use gpui::{
 };
 use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, ClientMessage, DaemonMessage,
-    FEATURE_AGENT_COMMANDS, FEATURE_DEFAULT_SHELL, FEATURE_DETAILED_LOGGING, FieldKind,
-    KeepAwakeMode, KeyState, OptionValue, RemoteState, Secret, SummarizerKeySource,
-    SummarizerSettings, SummarySource, error_codes,
+    FEATURE_AGENT_COMMANDS, FEATURE_AGENT_USER_HOOKS, FEATURE_DEFAULT_SHELL,
+    FEATURE_DETAILED_LOGGING, FieldKind, KeepAwakeMode, KeyState, OptionValue, RemoteState, Secret,
+    SummarizerKeySource, SummarizerSettings, SummarySource, UserHooksWire, error_codes,
 };
 
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
@@ -120,6 +120,13 @@ const UNSUPPORTED_SHELL_TEXT: &str = "Automatic";
 /// The tab list's group row over the agents' pages.
 const AGENTS_GROUP: &str = "Agents";
 const LAUNCH_ARGS_PLACEHOLDER: &str = "Extra arguments";
+/// The Hooks section's note while some of the daemon's entries are missing
+/// from the agent's user settings or run another hook shim.
+const USER_HOOKS_REPAIR_HINT: &str =
+    "Some entries are missing or out of date. Turn it off and on to repair.";
+/// The dimmed Hooks switch's tooltip, on a daemon without the feature.
+const USER_HOOKS_UNSUPPORTED_TIP: &str =
+    "This host's daemon is too old for this setting. Update rustling-tulip there to use it.";
 const LAUNCH_USE_HINT: &str = "Used for new sessions, Restart and Resume; not for headless runs.";
 const LAUNCH_QUOTING_HINT: &str = "Extra arguments follow POSIX shell rules: quote a Windows path or double its backslashes. In cmd, a doskey macro is not expanded; set Program to a .cmd file instead.";
 
@@ -607,6 +614,8 @@ pub(crate) enum SettingsControl {
     RemoteAutostart,
     AgentProgram,
     AgentArgs,
+    /// The shown agent page's Hooks switch, which sends at once.
+    AgentUserHooks,
     Appearance(AppearanceStop),
     DashboardEnabled,
     /// Provider `index` of the shown host's summarizer status; `selector`
@@ -718,6 +727,7 @@ impl SettingsControl {
             Self::RemoteAutostart => "settings-remote-autostart-toggle",
             Self::AgentProgram => "settings-agent-program",
             Self::AgentArgs => "settings-agent-args",
+            Self::AgentUserHooks => "settings-agent-user-hooks",
             Self::Appearance(stop) => stop.selector(),
             Self::DashboardEnabled => "settings-dashboard-enabled",
             Self::DashboardKeySource(KeySourceChoice::Stored) => {
@@ -1871,23 +1881,130 @@ impl RootView {
     }
 
     /// Folds the daemon's agents or their Settings values, as
-    /// [`RootView::on_agents`] does, and the agent pages follow them; any
-    /// other message is dropped.
+    /// [`RootView::on_agents`] does, and the agent pages follow them; an
+    /// answer about an agent's user hooks goes to
+    /// [`RootView::on_agent_user_hooks`]; any other message is dropped.
     pub(crate) fn fold_agents(
         &mut self,
         host: &crate::target::HostKey,
         msg: DaemonMessage,
         cx: &mut Context<Self>,
     ) {
+        if matches!(msg, DaemonMessage::AgentUserHooks { .. }) {
+            self.on_agent_user_hooks(host, msg, cx);
+            return;
+        }
         let listed = matches!(msg, DaemonMessage::Agents { .. });
         let pages_follow = listed || matches!(msg, DaemonMessage::AgentSettings { .. });
         self.on_agents(host, msg);
         if listed {
             self.follow_agent_list(host);
+            self.ask_user_hooks(host);
         }
         if pages_follow {
             self.refresh_setting_texts(host, cx);
         }
+    }
+
+    /// After `host`'s daemon listed its agents, on a connection that lists
+    /// the user-hooks feature: asks it about each agent whose descriptor has
+    /// `user_hooks`.
+    fn ask_user_hooks(&self, host: &HostKey) {
+        if !self
+            .conn_of(host)
+            .is_some_and(|conn| conn.supports(FEATURE_AGENT_USER_HOOKS))
+        {
+            return;
+        }
+        for descriptor in self.sidebar.agents(host) {
+            if !descriptor.caps.user_hooks {
+                continue;
+            }
+            let request_id = crate::new_request_id();
+            tracing::info!(agent = %descriptor.id.0, ?host, %request_id, "settings: asking for an agent's user hooks");
+            self.send_to(
+                host,
+                ClientMessage::GetAgentUserHooks {
+                    agent: descriptor.id.clone(),
+                    request_id: Some(request_id),
+                },
+            );
+        }
+    }
+
+    /// The Hooks switch's press on the shown agent page: asks the daemon at
+    /// once for the opposite of the switch as shown, which the switch shows
+    /// until the answer.
+    fn toggle_user_hooks(&mut self) {
+        let host = self.settings_host.clone();
+        let Some(agent) = self.settings_tab.agent() else {
+            return;
+        };
+        let Some(row) = self
+            .user_hooks_row_of(&host, &agent)
+            .filter(|row| row.enabled)
+        else {
+            return;
+        };
+        let enabled = !row.checked;
+        let request_id = crate::new_request_id();
+        let Some(mirrors) = self.mirrors_of_mut(&host) else {
+            return;
+        };
+        mirrors.agent_user_hooks_pending.insert(
+            agent.clone(),
+            UserHooksPending {
+                request_id: request_id.clone(),
+                enabled,
+            },
+        );
+        tracing::info!(agent = %agent.0, ?host, enabled, %request_id, "settings: setting an agent's user hooks");
+        self.send_to(
+            &host,
+            ClientMessage::SetAgentUserHooks {
+                agent,
+                enabled,
+                request_id: Some(request_id),
+            },
+        );
+    }
+
+    /// `host`'s daemon's answer about an agent's user hooks.
+    pub(crate) fn on_agent_user_hooks(
+        &mut self,
+        host: &HostKey,
+        msg: DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
+        let DaemonMessage::AgentUserHooks {
+            agent,
+            state,
+            path,
+            error,
+            request_id,
+        } = msg
+        else {
+            return;
+        };
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
+            return;
+        };
+        if let Some(error) = &error {
+            tracing::warn!(agent = %agent.0, ?host, %error, "settings: the daemon could not edit an agent's user hooks");
+        }
+        let crate::hosts::HostMirrors {
+            agent_user_hooks,
+            agent_user_hooks_pending,
+            ..
+        } = mirrors;
+        fold_user_hooks_reply(
+            agent_user_hooks,
+            agent_user_hooks_pending,
+            agent,
+            UserHooksEntry { state, path, error },
+            request_id.as_deref(),
+        );
+        cx.notify();
     }
 
     /// After `host`'s agents or their Settings values arrived: each of its
@@ -2184,6 +2301,12 @@ impl RootView {
             }
             controls.push(SettingsControl::AgentArgs);
         }
+        if self
+            .user_hooks_row_of(host, &page.id)
+            .is_some_and(|row| row.enabled)
+        {
+            controls.push(SettingsControl::AgentUserHooks);
+        }
         controls
     }
 
@@ -2311,6 +2434,43 @@ impl RootView {
             .program_env
             .as_ref()?;
         Some(format!("Set by {env}"))
+    }
+
+    /// The shown agent page's Hooks section, while Settings shows an agent
+    /// page that draws one.
+    #[must_use]
+    pub fn settings_user_hooks_row(&self) -> Option<UserHooksRow> {
+        if !self.settings_open() {
+            return None;
+        }
+        self.user_hooks_row_of(&self.settings_host, &self.settings_tab.agent()?)
+    }
+
+    /// The dimmed Hooks switch's tooltip, while Settings shows an agent page
+    /// whose switch is dimmed.
+    #[must_use]
+    pub fn settings_user_hooks_tip(&self) -> Option<&'static str> {
+        self.settings_user_hooks_row()
+            .filter(|row| !row.enabled)
+            .map(|_| USER_HOOKS_UNSUPPORTED_TIP)
+    }
+
+    /// `host`'s agent `agent`'s Hooks section; none while the connection is
+    /// not open.
+    fn user_hooks_row_of(&self, host: &HostKey, agent: &AgentId) -> Option<UserHooksRow> {
+        let conn = self.conn_of(host).filter(|conn| conn.is_open())?;
+        let flag = self
+            .sidebar
+            .agents(host)
+            .iter()
+            .any(|descriptor| descriptor.id == *agent && descriptor.caps.user_hooks);
+        let mirrors = self.mirrors_of(host)?;
+        user_hooks_row(
+            flag,
+            conn.supports(FEATURE_AGENT_USER_HOOKS),
+            mirrors.agent_user_hooks.get(agent),
+            mirrors.agent_user_hooks_pending.get(agent),
+        )
     }
 
     /// Why the launch-command rows are disabled, while Settings is open
@@ -3340,6 +3500,7 @@ impl RootView {
             SettingsControl::WorktreesManage => self.open_worktrees_manager(window, cx),
             SettingsControl::RemoteToggle => self.toggle_remote_access(),
             SettingsControl::RemoteAutostart => self.toggle_autostart(),
+            SettingsControl::AgentUserHooks => self.toggle_user_hooks(),
             SettingsControl::Appearance(stop) => {
                 self.press_appearance_stop(stop, window, cx);
                 self.keep_keyboard_after_press(stop, window, cx);
@@ -5452,7 +5613,70 @@ impl RootView {
             );
         }
         sections.extend(self.launch_command_section(&page, focused, cx));
+        sections.extend(self.user_hooks_section(&page, focused, cx));
         sections
+    }
+
+    /// Agent `page`'s Hooks section: the switch that installs the daemon's
+    /// hooks in the agent's user settings, its note, the file it edits and
+    /// the last answer's error. On a daemon without the feature the switch
+    /// is dimmed and inert; for an agent without user hooks, or one its
+    /// daemon says it cannot edit, there is no section.
+    fn user_hooks_section(
+        &self,
+        page: &AgentPage,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let row = self.user_hooks_row_of(&self.settings_host, &page.id)?;
+        let t = theme(cx);
+        let size = crate::fonts::ui_text_size(cx);
+        let name = &page.label;
+        let switch = toggle(
+            SettingsControl::AgentUserHooks,
+            ToggleState {
+                checked: row.checked,
+                enabled: row.enabled,
+            },
+            format!("Install hooks in {name}'s user settings"),
+            focused,
+            cx,
+        );
+        let switch = if row.enabled {
+            switch.into_any_element()
+        } else {
+            div()
+                .id("settings-agent-user-hooks-unsupported")
+                .tooltip(tooltip(USER_HOOKS_UNSUPPORTED_TIP))
+                .child(switch)
+                .into_any_element()
+        };
+        let repair = row.repair.then(|| {
+            hint(size, USER_HOOKS_REPAIR_HINT, &t)
+                .driver_id(|| "settings-agent-user-hooks-repair".to_owned())
+        });
+        let path = row.path.as_ref().map(|path| {
+            hint(size, format!("Edits {path}"), &t)
+                .driver_id(|| "settings-agent-user-hooks-path".to_owned())
+        });
+        let error = row.error.clone().map(|error| {
+            hint(size, error, &t)
+                .text_color(gpui::rgb(t.danger_text))
+                .driver_id(|| "settings-agent-user-hooks-error".to_owned())
+        });
+        let section = section(size, crate::fonts::ui_weight_shift(cx), "Hooks")
+            .child(switch)
+            .child(hint(
+                size,
+                format!(
+                    "Lets {name} runs you start by hand in a shell report their conversation and status. Applies to shells opened afterwards."
+                ),
+                &t,
+            ))
+            .children(repair)
+            .children(path)
+            .children(error);
+        Some(section.into_any_element())
     }
 
     /// Agent `page`'s Launch command section: the Program and Extra
@@ -8123,6 +8347,110 @@ impl HostPending {
     }
 }
 
+/// An agent's user-settings hooks as its daemon last answered
+/// [`ClientMessage::GetAgentUserHooks`] or [`ClientMessage::SetAgentUserHooks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UserHooksEntry {
+    pub(crate) state: UserHooksWire,
+    /// The settings file the daemon read the state from.
+    pub(crate) path: Option<String>,
+    /// Why the answered request failed; shown until the next answer.
+    pub(crate) error: Option<String>,
+}
+
+/// A [`ClientMessage::SetAgentUserHooks`] sent and still waiting on its
+/// answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UserHooksPending {
+    pub(crate) request_id: String,
+    /// The value asked for, which the switch shows until the answer.
+    pub(crate) enabled: bool,
+}
+
+/// What an agent page's Hooks section draws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent part of the row the view reads by name"
+)]
+pub struct UserHooksRow {
+    /// Whether the switch takes clicks: false on a daemon without the
+    /// feature, where the row is dimmed.
+    pub enabled: bool,
+    /// Whether the switch is on.
+    pub checked: bool,
+    /// Whether the note asking to turn it off and on shows: some entries
+    /// are missing or out of date.
+    pub repair: bool,
+    /// The settings file the daemon edits, once it has said.
+    pub path: Option<String>,
+    /// The last answer's failure.
+    pub error: Option<String>,
+    /// Whether a Set is still waiting on its answer.
+    pub pending: bool,
+}
+
+/// The Hooks section of an agent whose descriptor has `flag` set, on a
+/// connection that does (`feature`) or does not list the feature, given the
+/// daemon's last answer `entry` and the Set still waiting `pending`. `None`
+/// draws no section.
+pub(crate) fn user_hooks_row(
+    flag: bool,
+    feature: bool,
+    entry: Option<&UserHooksEntry>,
+    pending: Option<&UserHooksPending>,
+) -> Option<UserHooksRow> {
+    if !flag {
+        return None;
+    }
+    if !feature {
+        return Some(UserHooksRow {
+            enabled: false,
+            checked: false,
+            repair: false,
+            path: None,
+            error: None,
+            pending: false,
+        });
+    }
+    let state = entry.map(|entry| entry.state);
+    if matches!(
+        state,
+        Some(UserHooksWire::Unsupported | UserHooksWire::Unknown)
+    ) {
+        return None;
+    }
+    let repair = matches!(state, Some(UserHooksWire::Partial | UserHooksWire::Stale));
+    let installed = repair || state == Some(UserHooksWire::On);
+    Some(UserHooksRow {
+        enabled: true,
+        checked: pending.map_or(installed, |pending| pending.enabled),
+        repair: repair && pending.is_none(),
+        path: entry.and_then(|entry| entry.path.clone()),
+        error: entry.and_then(|entry| entry.error.clone()),
+        pending: pending.is_some(),
+    })
+}
+
+/// Folds `agent`'s answer `entry`, carrying `request_id`, into one host's
+/// answers and waiting Sets: the answer replaces the last, its error
+/// included, and ends the Set it answers.
+pub(crate) fn fold_user_hooks_reply(
+    entries: &mut HashMap<AgentId, UserHooksEntry>,
+    pending: &mut HashMap<AgentId, UserHooksPending>,
+    agent: AgentId,
+    entry: UserHooksEntry,
+    request_id: Option<&str>,
+) {
+    let answers = pending
+        .get(&agent)
+        .is_some_and(|sent| request_id == Some(sent.request_id.as_str()));
+    if answers {
+        pending.remove(&agent);
+    }
+    entries.insert(agent, entry);
+}
+
 /// The daemon message that echoes a send of Apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EchoKind {
@@ -9143,6 +9471,186 @@ mod tests {
             "another window's root, and its pane appearance editor, draw no outline"
         );
         assert_eq!(owned_hit(None, mine), None);
+    }
+
+    fn hooks_entry(state: protocol::UserHooksWire) -> super::UserHooksEntry {
+        super::UserHooksEntry {
+            state,
+            path: Some("C:\\home\\settings.json".to_owned()),
+            error: None,
+        }
+    }
+
+    fn hooks_pending(request_id: &str, enabled: bool) -> super::UserHooksPending {
+        super::UserHooksPending {
+            request_id: request_id.to_owned(),
+            enabled,
+        }
+    }
+
+    /// The live row, its switch at `checked`, for the entry above.
+    fn live_row(checked: bool, repair: bool, pending: bool) -> super::UserHooksRow {
+        super::UserHooksRow {
+            enabled: true,
+            checked,
+            repair,
+            path: Some("C:\\home\\settings.json".to_owned()),
+            error: None,
+            pending,
+        }
+    }
+
+    #[test]
+    fn user_hooks_row_hidden_without_the_descriptor_flag() {
+        use protocol::UserHooksWire;
+        let on = hooks_entry(UserHooksWire::On);
+        assert_eq!(super::user_hooks_row(false, true, Some(&on), None), None);
+        assert_eq!(super::user_hooks_row(false, true, None, None), None);
+        assert_eq!(
+            super::user_hooks_row(false, false, None, None),
+            None,
+            "an agent without the flag draws nothing, even on an older daemon"
+        );
+    }
+
+    #[test]
+    fn user_hooks_row_disabled_without_the_feature() {
+        assert_eq!(
+            super::user_hooks_row(true, false, None, None),
+            Some(super::UserHooksRow {
+                enabled: false,
+                checked: false,
+                repair: false,
+                path: None,
+                error: None,
+                pending: false,
+            })
+        );
+    }
+
+    #[test]
+    fn user_hooks_row_shows_on_off_and_repair() {
+        use protocol::UserHooksWire;
+        let row = |state| super::user_hooks_row(true, true, Some(&hooks_entry(state)), None);
+        assert_eq!(row(UserHooksWire::On), Some(live_row(true, false, false)));
+        assert_eq!(row(UserHooksWire::Off), Some(live_row(false, false, false)));
+        assert_eq!(
+            row(UserHooksWire::Partial),
+            Some(live_row(true, true, false))
+        );
+        assert_eq!(row(UserHooksWire::Stale), Some(live_row(true, true, false)));
+        let mut failed = hooks_entry(UserHooksWire::Off);
+        failed.error = Some("denied".to_owned());
+        assert_eq!(
+            super::user_hooks_row(true, true, Some(&failed), None).and_then(|row| row.error),
+            Some("denied".to_owned()),
+            "the answer's error shows under the row"
+        );
+        assert_eq!(
+            super::user_hooks_row(true, true, None, None),
+            Some(super::UserHooksRow {
+                path: None,
+                ..live_row(false, false, false)
+            }),
+            "before the first answer the switch is off and takes clicks"
+        );
+    }
+
+    #[test]
+    fn user_hooks_row_hidden_when_unsupported_or_unknown() {
+        use protocol::UserHooksWire;
+        for state in [UserHooksWire::Unsupported, UserHooksWire::Unknown] {
+            let entry = hooks_entry(state);
+            assert_eq!(super::user_hooks_row(true, true, Some(&entry), None), None);
+            assert_eq!(
+                super::user_hooks_row(true, true, Some(&entry), Some(&hooks_pending("r1", true))),
+                None,
+                "{state:?} hides the section with a Set waiting too"
+            );
+        }
+    }
+
+    #[test]
+    fn user_hooks_row_shows_the_pending_value_then_the_reply() {
+        use protocol::UserHooksWire;
+        let claude = AgentId("claude".to_owned());
+        let mut entries = HashMap::new();
+        let mut pending = HashMap::new();
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            hooks_entry(UserHooksWire::Off),
+            Some("get"),
+        );
+        let row = |entries: &HashMap<AgentId, super::UserHooksEntry>,
+                   pending: &HashMap<AgentId, super::UserHooksPending>| {
+            super::user_hooks_row(true, true, entries.get(&claude), pending.get(&claude))
+        };
+        assert_eq!(row(&entries, &pending), Some(live_row(false, false, false)));
+
+        pending.insert(claude.clone(), hooks_pending("set-1", true));
+        assert_eq!(
+            row(&entries, &pending),
+            Some(live_row(true, false, true)),
+            "the asked-for value shows while the Set waits"
+        );
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            hooks_entry(UserHooksWire::Off),
+            Some("another"),
+        );
+        assert_eq!(
+            row(&entries, &pending),
+            Some(live_row(true, false, true)),
+            "an answer to another request leaves the Set waiting"
+        );
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            hooks_entry(UserHooksWire::Partial),
+            Some("set-1"),
+        );
+        assert_eq!(
+            row(&entries, &pending),
+            Some(live_row(true, true, false)),
+            "the answer's state shows once it arrives"
+        );
+
+        pending.insert(claude.clone(), hooks_pending("set-2", false));
+        assert_eq!(row(&entries, &pending), Some(live_row(false, false, true)));
+        let mut failed = hooks_entry(UserHooksWire::On);
+        failed.error = Some("denied".to_owned());
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            failed,
+            Some("set-2"),
+        );
+        assert_eq!(
+            row(&entries, &pending),
+            Some(super::UserHooksRow {
+                error: Some("denied".to_owned()),
+                ..live_row(true, false, false)
+            }),
+            "a failed Set shows the file's state and the error"
+        );
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            hooks_entry(UserHooksWire::On),
+            Some("get-2"),
+        );
+        assert_eq!(
+            row(&entries, &pending),
+            Some(live_row(true, false, false)),
+            "the next answer clears the error"
+        );
     }
 
     #[test]

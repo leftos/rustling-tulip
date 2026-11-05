@@ -20,7 +20,7 @@ use base64::Engine as _;
 use gpui::{TestAppContext, px, size};
 use protocol::{
     ChatEntry, ClientMessage, DaemonMessage, InitLayoutKind, PendingInput, PendingQuestion,
-    SessionMode, SessionSnapshot, SessionStatus, SplitDirection, SplitPlace,
+    SessionMode, SessionSnapshot, SessionStatus, SplitDirection, SplitPlace, UserHooksWire,
 };
 use serde_json::{Value, json};
 use support::Harness;
@@ -771,6 +771,77 @@ fn shell_quoted(path: &str) -> String {
 #[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
 fn typed_agent_in_plain_shell_gets_chat(cx: &mut TestAppContext) {
     agent_typed_by_hand_gets_chat(cx, "typed-agent", |_, fake| shell_quoted(fake));
+}
+
+/// With the daemon's hooks installed in the agent's user settings (the
+/// isolated agent home under `.tmp`), the agent's CLI started by hand in a
+/// plain shell reports its conversation id before any message is typed: no
+/// transcript exists yet, so only its `SessionStart` hook can have said it.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn user_hooks_report_a_hand_started_agents_conversation(cx: &mut TestAppContext) {
+    let daemon = LiveDaemon::start("user-hooks");
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+    let node = Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    assert!(node, "node not on PATH; fake-claude needs it");
+
+    let request_id = "rt-943-install".to_owned();
+    client.send(ClientMessage::SetAgentUserHooks {
+        agent: agent_registry::default_agent(),
+        enabled: true,
+        request_id: Some(request_id.clone()),
+    });
+    let mut reply = None;
+    h.wait_until("the daemon's answer to the install", |_| {
+        reply = client.find_message(|msg| match msg {
+            DaemonMessage::AgentUserHooks {
+                state,
+                path,
+                error,
+                request_id: Some(id),
+                ..
+            } if *id == request_id => Some((*state, path.clone(), error.clone())),
+            _ => None,
+        });
+        reply.is_some()
+    });
+    let (state, path, error) = reply.expect("the wait just found it");
+    assert_eq!(error, None, "the install succeeds");
+    assert_eq!(state, UserHooksWire::On);
+    let path = PathBuf::from(path.expect("the answer names the settings file"));
+    assert!(
+        path.starts_with(daemon.dir()),
+        "the daemon edits a settings file under its scratch dir {}, not {}",
+        daemon.dir().display(),
+        path.display()
+    );
+
+    client.send(spawn_shell(daemon.dir()));
+    let pane = place_first_session(&mut h, &client);
+    let shell = wait_snapshot(&mut h, &client, "the plain shell", |_| true);
+    assert_eq!(shell.mode, SessionMode::PlainShell);
+    h.wait_for_row(&pane, "the shell's prompt", |row| {
+        row.trim_end().ends_with('>')
+    });
+
+    let fake = shell_quoted(&fake_agent_path(&daemon));
+    h.type_into(&pane, &format!("{fake}\n"));
+    let found = wait_snapshot(
+        &mut h,
+        &client,
+        "the hand-started agent's session with its conversation id",
+        |s| {
+            s.id == shell.id
+                && s.mode == SessionMode::Interactive
+                && s.agent.is_some()
+                && s.conversation_id.is_some()
+        },
+    );
+    assert_eq!(found.agent, Some(agent_registry::default_agent()));
 }
 
 /// An agent started through a custom command of the user's own (here `cui`,
