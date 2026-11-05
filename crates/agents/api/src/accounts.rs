@@ -161,7 +161,7 @@ pub struct SwitchReport {
 /// answering `bool` says whether anything changed.
 pub trait AccountsService: Send + Sync {
     /// Every account in the store, in the store's order, with the usage it
-    /// last saved for each, and the auto-switch state when an engine runs.
+    /// last saved for each, and the auto-switch state where it can run.
     /// Sends no request: a missing or empty store is an empty snapshot.
     ///
     /// # Errors
@@ -237,13 +237,54 @@ pub trait AccountsService: Send + Sync {
         let _ = order;
         Err(AccountsFailure::unsupported())
     }
+
+    /// Turns auto-switch on or off, sets the usage, in percent, at which it
+    /// switches away, or both; a `None` keeps its value. Blocks.
+    ///
+    /// # Errors
+    ///
+    /// The threshold is refused, auto-switch is unsupported here, or the
+    /// settings could not be written.
+    fn set_auto_switch(
+        &self,
+        enabled: Option<bool>,
+        threshold_pct: Option<f64>,
+    ) -> Result<bool, AccountsFailure> {
+        let _ = (enabled, threshold_pct);
+        Err(AccountsFailure::unsupported())
+    }
+}
+
+/// Something that happened to a store's accounts that a client may tell the
+/// user of.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AccountEventRow {
+    /// The login moved from account `from` (`None` when it was no stored
+    /// account) to account `to`; `trigger` names what moved it, `manual`
+    /// for a user's switch.
+    Switched {
+        from: Option<u32>,
+        to: u32,
+        trigger: String,
+    },
+    /// Every account is out of usage; the first reset among them, if known.
+    AllExhausted {
+        earliest_reset_at: Option<DateTime<Utc>>,
+    },
+    /// Account `number` is held out of switching.
+    Quarantined { number: u32 },
+    /// Account `number` is back in switching.
+    Unquarantined { number: u32 },
+    /// The auto-switch engine stopped for good; `message` says why.
+    Halted { message: String },
 }
 
 /// Every account a store holds and the auto-switch state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AccountsSnapshot {
     pub accounts: Vec<AccountRow>,
-    /// `None` while no auto-switch engine runs.
+    /// `None` where auto-switch cannot run; while it is off, a state with
+    /// `enabled: false`.
     pub auto: Option<AutoState>,
 }
 

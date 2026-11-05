@@ -15,17 +15,17 @@ use std::time::Duration;
 
 use agent_api::{
     AccountKindRow, AccountRef, AccountRow, AccountsConfig, AccountsError, AccountsFailure,
-    AccountsFailureKind, AccountsService, AccountsSnapshot, PollReport, PollScope, SwitchReport,
-    UsageRow, UsageStatus, UsageWindowRow,
+    AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, PollReport, PollScope,
+    SwitchReport, UsageRow, UsageStatus, UsageWindowRow,
 };
 use chrono::{DateTime, Utc};
 use claude_accounts::{
-    AccessToken, AccountKind, AccountLock, AccountRecord, AccountsRoot, CaptureError, ClaudePaths,
-    Drain, FetchScope, Identity, LockError, LockTiming, PROFILE_TIMEOUT, PROFILE_URL,
-    PROFILE_USER_AGENT, ProbeVerdicts, ProfileTransport, RawProfile, RawToken, RawUsage,
-    RefreshContext, RefreshRequest, RefreshTransport, Secret, Settings, Store, StoreError,
-    StoreErrorKind, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome, TOKEN_URL,
-    TransportError, USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable,
+    AccessToken, AccountKind, AccountLock, AccountRecord, AccountsRoot, AutoSwitchSection,
+    CaptureError, ClaudePaths, Drain, FetchScope, Identity, LockError, LockTiming, PROFILE_TIMEOUT,
+    PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts, ProfileTransport, RawProfile, RawToken,
+    RawUsage, RefreshContext, RefreshRequest, RefreshTransport, Secret, Settings, SettingsError,
+    Store, StoreError, StoreErrorKind, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome,
+    TOKEN_URL, TransportError, USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable,
     UsageTransport, UsageWindow, capture_live_login, poll_with_refresh, probe_outgoing,
 };
 use directories::UserDirs;
@@ -165,7 +165,10 @@ impl Drop for ClaudeAccounts {
 
 impl AccountsService for ClaudeAccounts {
     fn snapshot(&self) -> Result<AccountsSnapshot, AccountsError> {
-        Ok(read_store(&self.open_store()?)?.snapshot)
+        let store = self.open_store()?;
+        let mut snapshot = read_store(&store)?.snapshot;
+        snapshot.auto = auto_state(store.root());
+        Ok(snapshot)
     }
 
     fn poll(&self, scope: PollScope) -> Result<PollReport, AccountsError> {
@@ -179,7 +182,13 @@ impl AccountsService for ClaudeAccounts {
             .map_err(|error| store_error(&error))?
             .is_some_and(|sequence| sequence.every_record().next().is_some());
         if !has_accounts {
-            return Ok(PollReport::default());
+            return Ok(PollReport {
+                snapshot: AccountsSnapshot {
+                    accounts: Vec::new(),
+                    auto: auto_state(store.root()),
+                },
+                next_poll_in: None,
+            });
         }
         let settings = Settings::read(&store.root().settings())
             .map_err(|error| {
@@ -191,7 +200,8 @@ impl AccountsService for ClaudeAccounts {
             poll_with_refresh(usage, &settings, context, fetch)
         })?
         .map_err(|error| AccountsError::new(error.to_string()))?;
-        let read = read_store(&store)?;
+        let mut read = read_store(&store)?;
+        read.snapshot.auto = auto_state(store.root());
         let next_poll_in = if read.snapshot.accounts.is_empty() {
             None
         } else {
@@ -278,6 +288,86 @@ impl AccountsService for ClaudeAccounts {
             .set_order(&lock, &order)
             .map_err(|error| store_failure(&error))
     }
+
+    /// Reads the settings, changes the fields given and, when that changed
+    /// anything, writes them back under a drain guard. Unsupported where the
+    /// account locks are, before anything is read.
+    fn set_auto_switch(
+        &self,
+        enabled: Option<bool>,
+        threshold_pct: Option<f64>,
+    ) -> Result<bool, AccountsFailure> {
+        if !LOCKS_SUPPORTED {
+            return Err(AccountsFailure::unsupported());
+        }
+        let store = self.store().map_err(|error| store_failure(&error))?;
+        let root = store.root();
+        let mut settings =
+            Settings::read(&root.settings()).map_err(|error| settings_failure(&error))?;
+        let before = settings.clone();
+        if let Some(enabled) = enabled {
+            settings.autoswitch.enabled = enabled;
+        }
+        if let Some(threshold) = threshold_pct {
+            settings.autoswitch.threshold = threshold;
+        }
+        if settings == before {
+            return Ok(false);
+        }
+        let Ok(_work) = self.drain.begin() else {
+            return Err(draining());
+        };
+        Settings::write(root, &settings).map_err(|error| settings_failure(&error))?;
+        Ok(true)
+    }
+}
+
+/// Whether this platform's account locks work: off 64-bit Windows every
+/// lock is refused, so auto-switch cannot run there.
+const LOCKS_SUPPORTED: bool = cfg!(all(windows, target_pointer_width = "64"));
+
+/// The auto-switch state the settings in `root` give while no engine runs:
+/// their switch, threshold and rules, the defaults when the file or its
+/// section is missing. A settings file that cannot be read gives the
+/// defaults, paused with the reason. `None` where the account locks are
+/// unsupported.
+fn auto_state(root: &AccountsRoot) -> Option<AutoState> {
+    if !LOCKS_SUPPORTED {
+        return None;
+    }
+    let (section, paused_reason) = match Settings::read(&root.settings()) {
+        Ok(settings) => (settings.autoswitch, None),
+        Err(error) => (
+            AutoSwitchSection::default(),
+            Some(format!(
+                "the auto-switch settings could not be read: {error}"
+            )),
+        ),
+    };
+    Some(AutoState {
+        enabled: section.enabled,
+        threshold_pct: section.threshold,
+        hysteresis_pct: section.hysteresis_pct,
+        cooldown_secs: Duration::try_from_secs_f64(section.cooldown_seconds)
+            .map_or(0, |cooldown| cooldown.as_secs()),
+        paused_reason,
+        warm_up_done: false,
+        last_decision: None,
+    })
+}
+
+/// A settings write's failure: a refused value is
+/// [`AccountsFailureKind::Refused`], a lock wait that timed out
+/// [`AccountsFailureKind::Busy`], anything else
+/// [`AccountsFailureKind::Failed`].
+fn settings_failure(error: &SettingsError) -> AccountsFailure {
+    let (kind, code) = match error {
+        SettingsError::Invalid(_) => (AccountsFailureKind::Refused, "settings_invalid"),
+        SettingsError::Lock(LockError::Timeout) => (AccountsFailureKind::Busy, "locks_busy"),
+        SettingsError::Lock(_) => (AccountsFailureKind::Failed, "lock_failed"),
+        _ => (AccountsFailureKind::Failed, "settings_failed"),
+    };
+    failure(kind, code, error.to_string())
 }
 
 /// The refusal of a write once [`AccountsService::begin_shutdown`] has begun.

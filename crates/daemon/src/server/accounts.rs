@@ -6,23 +6,29 @@
 //! auto-switch state.
 //!
 //! The writes (`SwitchAccount`, `AddCurrentLogin`, `RemoveAccount`,
-//! `SetAccountAlias`, `SetAccountOrder`) each run on a task of their own,
-//! so a write never holds the connection's later messages, and call the
-//! service's seam method on a blocking thread; every one but the switch is local-only, refused before
-//! it gets here (`remote::host_only_refusal`). After the write returns,
+//! `SetAccountAlias`, `SetAccountOrder`, `SetAutoSwitch`) each run on a task
+//! of their own, so a write never holds the connection's later messages, and
+//! call the service's seam method on a blocking thread; every one but the
+//! switch and `SetAutoSwitch` is local-only, refused before it gets here
+//! (`remote::host_only_refusal`). A `SetAutoSwitch` that sets neither field
+//! is refused `account_refused` before any seam call. After the write returns,
 //! whether it succeeded or not, the handler asks the driver for a refresh
 //! and waits up to [`REFRESH_WAIT`] for it, so the driver stays the cache's
 //! only writer. A success answers `Accounts` from the cache (or, with no
 //! driver to refresh it, from one direct read of the store that caches
 //! nothing); every other connection hears `AccountsUpdated` from the driver
-//! when the snapshot changed. A failure answers `Error` with an `account_*`
+//! when the snapshot changed. A switch that moved the login also broadcasts
+//! `AccountEvent` `switched` with trigger `manual`, after the refresh and
+//! before the answer. A failure answers `Error` with an `account_*`
 //! code. A host with no service answers every write `account_unsupported`.
 use super::Hub;
+use super::StateEvent;
 use super::connection::ConnCtx;
 use crate::accounts::snapshot::{Wire, wire};
 use crate::accounts::{Accounts, SharedAccounts};
+use agent_api::accounts::AccountEventRow;
 use agent_api::{AccountsConfig, AccountsFailure, AccountsFailureKind, AccountsSnapshot};
-use protocol::{ClientMessage, DaemonMessage, error_codes};
+use protocol::{AccountEventKind, ClientMessage, DaemonMessage, error_codes};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +40,27 @@ pub(crate) const REFRESH_WAIT: Duration = Duration::from_secs(10);
 
 /// The answer to a write on a host that keeps no accounts.
 const NO_ACCOUNTS: &str = "this host keeps no accounts";
+
+/// The answer to a `SetAutoSwitch` that sets neither field.
+const NOTHING_TO_CHANGE: &str = "nothing to change";
+
+/// The trigger of a switch a user asked for.
+const MANUAL: &str = "manual";
+
+/// `row` on the wire.
+fn account_event(row: AccountEventRow) -> AccountEventKind {
+    match row {
+        AccountEventRow::Switched { from, to, trigger } => {
+            AccountEventKind::Switched { from, to, trigger }
+        }
+        AccountEventRow::AllExhausted { earliest_reset_at } => {
+            AccountEventKind::AllExhausted { earliest_reset_at }
+        }
+        AccountEventRow::Quarantined { number } => AccountEventKind::Quarantined { number },
+        AccountEventRow::Unquarantined { number } => AccountEventKind::Unquarantined { number },
+        AccountEventRow::Halted { message } => AccountEventKind::Halted { message },
+    }
+}
 
 /// The accounts handle over the service the registered plugins offer for
 /// this host's account store, or `None` when the daemon runs elevated, the
@@ -91,17 +118,23 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
         }
         ClientMessage::SwitchAccount { number, request_id } => {
             write(hub, ctx, request_id, "switch", move |service| {
-                service.switch_to(number).map(drop)
+                service.switch_to(number).map(|report| {
+                    report.switched.then(|| AccountEventRow::Switched {
+                        from: report.from.and_then(|from| from.number),
+                        to: report.to.number.unwrap_or(number),
+                        trigger: MANUAL.to_owned(),
+                    })
+                })
             });
         }
         ClientMessage::AddCurrentLogin { request_id } => {
             write(hub, ctx, request_id, "add current login", |service| {
-                service.add_current_login().map(drop)
+                service.add_current_login().map(|_| None)
             });
         }
         ClientMessage::RemoveAccount { number, request_id } => {
             write(hub, ctx, request_id, "remove", move |service| {
-                service.remove_account(number).map(drop)
+                service.remove_account(number).map(|_| None)
             });
         }
         ClientMessage::SetAccountAlias {
@@ -110,12 +143,31 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             request_id,
         } => {
             write(hub, ctx, request_id, "set alias", move |service| {
-                service.set_alias(number, alias).map(drop)
+                service.set_alias(number, alias).map(|_| None)
             });
         }
         ClientMessage::SetAccountOrder { order, request_id } => {
             write(hub, ctx, request_id, "set order", move |service| {
-                service.set_order(order).map(drop)
+                service.set_order(order).map(|_| None)
+            });
+        }
+        ClientMessage::SetAutoSwitch {
+            enabled,
+            threshold_pct,
+            request_id,
+        } => {
+            if enabled.is_none() && threshold_pct.is_none() {
+                let _ = ctx.out_tx.send(error(
+                    error_codes::ACCOUNT_REFUSED,
+                    NOTHING_TO_CHANGE.to_owned(),
+                    request_id,
+                ));
+                return;
+            }
+            write(hub, ctx, request_id, "set auto-switch", move |service| {
+                service
+                    .set_auto_switch(enabled, threshold_pct)
+                    .map(|_| None)
             });
         }
         other => warn!(?other, "accounts::handle: routed a message it does not own"),
@@ -143,16 +195,20 @@ fn error(code: &str, message: String, request_id: Option<String>) -> DaemonMessa
     }
 }
 
+/// What a write's seam call came to: the event it broadcasts, if any.
+type WriteOutcome = Result<Option<AccountEventRow>, AccountsFailure>;
+
 /// Start the write `op` (named `what` in the log) on a task of its own, so
 /// the seam call and the refresh wait never hold this connection's later
-/// messages; the task answers the requester. A host with no account service
-/// is answered at once.
+/// messages; the task answers the requester, after broadcasting the event a
+/// successful `op` returned. A host with no account service is answered at
+/// once.
 fn write(
     hub: &Hub,
     ctx: &ConnCtx<'_>,
     request_id: Option<String>,
     what: &'static str,
-    op: impl FnOnce(&dyn agent_api::AccountsService) -> Result<(), AccountsFailure> + Send + 'static,
+    op: impl FnOnce(&dyn agent_api::AccountsService) -> WriteOutcome + Send + 'static,
 ) {
     let Some(handle) = &hub.accounts else {
         let _ = ctx.out_tx.send(error(
@@ -164,25 +220,27 @@ fn write(
     };
     let handle = Arc::clone(handle);
     let out_tx = ctx.out_tx.clone();
+    let events = hub.state_events.clone();
     tokio::spawn(async move {
-        let reply = write_reply(&handle, request_id, what, op).await;
+        let reply = write_reply(&handle, &events, request_id, what, op).await;
         let _ = out_tx.send(reply);
     });
 }
 
-/// Run `op` on a blocking thread, wait for the driver's refresh, and build
-/// the answer: `Accounts` on success, `Error` with an `account_*` code
-/// otherwise.
+/// Run `op` on a blocking thread, wait for the driver's refresh, broadcast
+/// the event `op` returned, and build the answer: `Accounts` on success,
+/// `Error` with an `account_*` code otherwise.
 async fn write_reply(
     handle: &Accounts,
+    events: &tokio::sync::broadcast::Sender<StateEvent>,
     request_id: Option<String>,
     what: &'static str,
-    op: impl FnOnce(&dyn agent_api::AccountsService) -> Result<(), AccountsFailure> + Send + 'static,
+    op: impl FnOnce(&dyn agent_api::AccountsService) -> WriteOutcome + Send + 'static,
 ) -> DaemonMessage {
     let service = Arc::clone(handle.service());
     let done = tokio::task::spawn_blocking(move || op(service.as_ref())).await;
     let outcome = match done {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(event)) => Ok(event),
         Ok(Err(failure)) => {
             warn!(
                 what,
@@ -205,7 +263,12 @@ async fn write_reply(
     // rollback), so the refresh comes first either way.
     let lane_open = refreshed(handle, what).await;
     match outcome {
-        Ok(()) => {
+        Ok(event) => {
+            if let Some(row) = event {
+                let _ = events.send(StateEvent::AccountEvent {
+                    event: account_event(row),
+                });
+            }
             let cached = if lane_open { handle.cached() } else { None };
             let Wire { accounts, auto } = match cached {
                 Some(cached) => cached,
@@ -271,7 +334,7 @@ pub(crate) mod fake {
     use crate::server::{Hub, dispatch};
     use agent_api::{
         AccountKindRow, AccountRef, AccountRow, AccountsError, AccountsFailure, AccountsService,
-        AccountsSnapshot, PollReport, PollScope, SwitchReport, UsageRow, UsageStatus,
+        AccountsSnapshot, AutoState, PollReport, PollScope, SwitchReport, UsageRow, UsageStatus,
     };
     use protocol::{ClientMessage, DaemonMessage};
     use std::collections::HashMap;
@@ -428,14 +491,21 @@ pub(crate) mod fake {
         }
 
         fn switch_to(&self, number: u32) -> Result<SwitchReport, AccountsFailure> {
+            let mut from = None;
             self.write(format!("switch {number}"), |snapshot| {
                 for row in &mut snapshot.accounts {
+                    if row.active {
+                        from = Some(AccountRef {
+                            number: Some(row.number),
+                            email: row.email.clone(),
+                        });
+                    }
                     row.active = row.number == number;
                 }
             })?;
             Ok(SwitchReport {
                 switched: true,
-                from: None,
+                from,
                 to: AccountRef {
                     number: Some(number),
                     email: format!("user{number}@example.com"),
@@ -477,6 +547,31 @@ pub(crate) mod fake {
                         .position(|number| *number == row.number)
                         .unwrap_or(usize::MAX)
                 });
+            })?;
+            Ok(true)
+        }
+
+        fn set_auto_switch(
+            &self,
+            enabled: Option<bool>,
+            threshold_pct: Option<f64>,
+        ) -> Result<bool, AccountsFailure> {
+            self.write(format!("auto {enabled:?} {threshold_pct:?}"), |snapshot| {
+                let auto = snapshot.auto.get_or_insert(AutoState {
+                    enabled: false,
+                    threshold_pct: 95.0,
+                    hysteresis_pct: 5.0,
+                    cooldown_secs: 300,
+                    paused_reason: None,
+                    warm_up_done: false,
+                    last_decision: None,
+                });
+                if let Some(enabled) = enabled {
+                    auto.enabled = enabled;
+                }
+                if let Some(threshold_pct) = threshold_pct {
+                    auto.threshold_pct = threshold_pct;
+                }
             })?;
             Ok(true)
         }
@@ -1122,5 +1217,124 @@ mod tests {
         assert!(accounts[1].active, "the post-switch snapshot");
         let cached = handle.cached().expect("the cache stays");
         assert_eq!(cached, wire(&stale), "a direct read caches nothing");
+    }
+
+    fn set_auto_switch(
+        enabled: Option<bool>,
+        threshold_pct: Option<f64>,
+        id: &str,
+    ) -> ClientMessage {
+        ClientMessage::SetAutoSwitch {
+            enabled,
+            threshold_pct,
+            request_id: Some(id.to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_auto_switch_answers_accounts_with_the_request_id() {
+        let service = Arc::new(Writable::two_accounts());
+        let (hub, _scratch) = write_hub("set-auto-switch", &service);
+
+        let reply = ask_as(
+            &hub,
+            set_auto_switch(Some(true), Some(85.0), "a1"),
+            &AuthKind::Local,
+        )
+        .await;
+
+        assert!(
+            matches!(&reply, DaemonMessage::Accounts { request_id: Some(id), .. } if id == "a1"),
+            "not the accounts reply to a1: {reply:?}"
+        );
+        let auto = match reply {
+            DaemonMessage::Accounts { auto, .. } => auto,
+            _ => None,
+        }
+        .expect("the answer carries the auto-switch state");
+        assert!(auto.enabled, "{auto:?}");
+        assert!((auto.threshold_pct - 85.0).abs() < f64::EPSILON, "{auto:?}");
+        assert_eq!(service.calls(), ["auto Some(true) Some(85.0)"]);
+    }
+
+    #[tokio::test]
+    async fn set_auto_switch_with_nothing_to_change_is_refused() {
+        let service = Arc::new(Writable::two_accounts());
+        let (hub, _scratch) = write_hub("set-auto-switch-nothing", &service);
+
+        let reply = ask_as(&hub, set_auto_switch(None, None, "a1"), &AuthKind::Local).await;
+
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { code: Some(code), message, request_id: Some(id) }
+                    if code == error_codes::ACCOUNT_REFUSED
+                        && message == "nothing to change"
+                        && id == "a1"
+            ),
+            "{reply:?}"
+        );
+        assert!(service.calls().is_empty(), "{:?}", service.calls());
+    }
+
+    #[tokio::test]
+    async fn a_failed_set_auto_switch_answers_its_account_code() {
+        let cases = [
+            (AccountsFailureKind::Refused, error_codes::ACCOUNT_REFUSED),
+            (AccountsFailureKind::Busy, error_codes::ACCOUNT_BUSY),
+            (
+                AccountsFailureKind::Unsupported,
+                error_codes::ACCOUNT_UNSUPPORTED,
+            ),
+            (AccountsFailureKind::Failed, error_codes::ACCOUNT_FAILED),
+        ];
+        for (kind, want) in cases {
+            let service = Arc::new(Writable::two_accounts());
+            service.fail_with(AccountsFailure {
+                kind,
+                code: "plugin_code".to_owned(),
+                message: format!("{kind:?} said no"),
+            });
+            let (hub, _scratch) = write_hub("failed-set-auto-switch", &service);
+
+            let reply = ask_as(
+                &hub,
+                set_auto_switch(None, Some(10.0), "a1"),
+                &AuthKind::Local,
+            )
+            .await;
+
+            let said = format!("{kind:?} said no");
+            assert!(
+                matches!(
+                    &reply,
+                    DaemonMessage::Error { code: Some(code), message, request_id: Some(id) }
+                        if code == want && *message == said && id == "a1"
+                ),
+                "{kind:?}: {reply:?}"
+            );
+            assert_eq!(service.calls(), ["auto None Some(10.0)"], "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_manual_switch_broadcasts_a_switched_event() {
+        let service = Arc::new(Writable::two_accounts());
+        let (hub, _scratch) = write_hub("manual-switch-event", &service);
+        let mut events = hub.state_events.subscribe();
+
+        let reply = ask_as(&hub, switch(2, "w1"), &AuthKind::Local).await;
+
+        let _ = accounts_of(reply, "w1");
+        let event = events.try_recv().expect("the switch was broadcast");
+        assert!(
+            matches!(
+                &event,
+                crate::server::StateEvent::AccountEvent {
+                    event: protocol::AccountEventKind::Switched { from: Some(1), to: 2, trigger }
+                } if trigger == "manual"
+            ),
+            "{event:?}"
+        );
     }
 }

@@ -79,6 +79,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 
 ## Glossary
 
+- **Account event**: `DaemonMessage::AccountEvent`, the broadcast that something happened to the host's accounts (`switched`, `all_exhausted`, `quarantined`, `unquarantined`, `halted`), sent only when `Welcome.features` lists `account_events`.
 - **Account store**: rustling-tulip's own folder of saved logins (`accounts\` under its data folder: `accounts.json` and sealed `credentials/<n>.cred`), opened through the `claude-accounts` crate; it starts empty, and the user adds logins in Settings > Accounts.
 - **Accounts chip**: the footer chip (`footer-accounts`) showing the active account and its 5h and 7d usage; a click opens the accounts popover, where Switch changes the active account (`docs/native-client.md` "Accounts chip and popover").
 - **Active account**: the Claude login in `.credentials.json` that every Anthropic Claude session on the machine uses; a switch changes it for all of them at once.
@@ -249,6 +250,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Palette token**: a named colour in `apps/native/src/palette.rs`, the built-in look's data; views read it at runtime through the matching `UiTheme` field, not the const.
 - **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file (paths on the `tauri-last` tag); the native client reaches parity when it is all ticked.
 - **Passthrough variables**: the extra daemon-environment variables an agent plugin asks to reach its child beside the keep-list (`Agent::passthrough_vars`; Claude's are `ANTHROPIC_API_KEY` and `CLAUDE_CONFIG_DIR`).
+- **Paused reason**: `AutoState.paused_reason` (`auto` in `Accounts`), the text saying why auto-switch is not running: the engine lease's holder, the store's refusal, or an unreadable accounts `settings.json` (the defaults then stand in).
 - **Peer identity**: the tailnet peer's whois identity (node, user and stable id) attached to a connection that arrives on the tailnet listener.
 - **Pending create**: the native client's ordered queue of request ids for tabs it asked to create and will make active on arrival; a refusing `Error` or a new `Welcome` removes ids from it.
 - **Pending edit**: a Settings change outside the Appearance tab (a text, toggle, choice or reset) held as a draft until OK or Apply sends it, and discarded by Cancel, the title-bar X or Esc; OK and Apply are dimmed while none is pending or one fails local validation (`PendingSettings` in `apps/native/src/settings_view.rs`, `docs/native-client.md` "Settings").

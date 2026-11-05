@@ -18,7 +18,7 @@ The seal format's identifiers are rustling-tulip's own: the `RTSEAL` magic, the 
 
 ## Settings
 
-`Settings` is the store's `settings.json` (`AccountsRoot::settings`): an `autoswitch` section (`enabled`, `threshold`, `strategy`, `models`, `intervalSeconds`, `cooldownSeconds`, `hysteresisPct`, `unhealthyTicks`) and a `fleet` section (`rateWindowMinutes`: 30, 60, 120 or 180). `Settings::read` gives the defaults for a missing file and refuses an unknown field, a wrong type or a value out of range, naming the field. `Settings::write` checks the ranges first, then writes under `.settings.lock` through a temp file in the root, always with both sections. `AutoSwitchSection::to_engine` gives the engine's `AutoSwitchSettings`.
+`Settings` is the store's `settings.json` (`AccountsRoot::settings`): an `autoswitch` section (`enabled`, which is false when the file or the key is missing since auto-switch is opt-in, `threshold`, `strategy`, `models`, `intervalSeconds`, `cooldownSeconds`, `hysteresisPct`, `unhealthyTicks`) and a `fleet` section (`rateWindowMinutes`: 30, 60, 120 or 180). `Settings::read` gives the defaults for a missing file and refuses an unknown field, a wrong type or a value out of range, naming the field. `Settings::write` checks the ranges first, then writes under `.settings.lock` through a temp file in the root, always with both sections. `AutoSwitchSection::to_engine` gives the engine's `AutoSwitchSettings`.
 
 ## Platforms
 

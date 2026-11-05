@@ -797,6 +797,9 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::Accounts { accounts, auto }) => {
                     let _ = out_tx.send(DaemonMessage::AccountsUpdated { accounts, auto });
                 }
+                Ok(StateEvent::AccountEvent { event }) => {
+                    let _ = out_tx.send(DaemonMessage::AccountEvent { event });
+                }
                 Ok(StateEvent::DetailedLogging { enabled }) => {
                     let _ = out_tx.send(DaemonMessage::DetailedLogging { enabled });
                 }
@@ -2164,6 +2167,35 @@ mod tests {
         let (accounts, auto) = resent.expect("the lagged stream hears the cached accounts");
         assert_eq!(accounts, [account]);
         assert_eq!(auto, None);
+    }
+
+    #[tokio::test]
+    async fn an_account_event_reaches_a_connection() {
+        let (hub, _scratch) = test_hub("account-event");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            false,
+        );
+        let event = protocol::AccountEventKind::Switched {
+            from: Some(1),
+            to: 2,
+            trigger: "manual".to_owned(),
+        };
+
+        let _ = hub.state_events.send(StateEvent::AccountEvent {
+            event: event.clone(),
+        });
+
+        let message = next_message(&mut rx).await;
+        forwarder.abort();
+        assert!(
+            matches!(&message, DaemonMessage::AccountEvent { event: sent } if *sent == event),
+            "{message:?}"
+        );
     }
 
     #[tokio::test]

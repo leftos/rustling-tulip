@@ -275,6 +275,11 @@ pub enum StateEvent {
         accounts: Vec<protocol::AccountSnapshot>,
         auto: Option<protocol::AutoSwitchState>,
     },
+    /// Broadcast when something happens to the host's accounts, such as a
+    /// manual switch. Mirrors [`protocol::DaemonMessage::AccountEvent`].
+    AccountEvent {
+        event: protocol::AccountEventKind,
+    },
     /// Broadcast after every [`ClientMessage::SetDetailedLogging`] so every
     /// connected client's Settings UI shows the switch as it now stands.
     /// Mirrors [`protocol::DaemonMessage::DetailedLogging`].
@@ -802,7 +807,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::AddCurrentLogin { .. }
         | ClientMessage::RemoveAccount { .. }
         | ClientMessage::SetAccountAlias { .. }
-        | ClientMessage::SetAccountOrder { .. }) => accounts::handle(hub, m, ctx).await,
+        | ClientMessage::SetAccountOrder { .. }
+        | ClientMessage::SetAutoSwitch { .. }) => accounts::handle(hub, m, ctx).await,
         m @ (ClientMessage::ListRepos
         | ClientMessage::AddRepo { .. }
         | ClientMessage::RemoveRepo { .. }

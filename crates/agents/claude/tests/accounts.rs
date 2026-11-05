@@ -527,7 +527,11 @@ fn accounts_service_snapshot_of_empty_store_is_empty() {
         .expect("a missing store is an empty snapshot");
 
     assert!(snapshot.accounts.is_empty(), "{:?}", snapshot.accounts);
-    assert_eq!(snapshot.auto, None);
+    assert!(
+        !snapshot.auto.as_ref().is_some_and(|auto| auto.enabled),
+        "auto-switch is not on: {:?}",
+        snapshot.auto
+    );
 }
 
 #[test]
@@ -1099,4 +1103,118 @@ fn switch_to_another_account_switches() {
         .map(|row| row.number)
         .collect();
     assert_eq!(active, [first]);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn set_auto_switch_writes_the_settings_file() {
+    let dir = scratch("set_auto_switch_writes_the_settings_file");
+    let service = two_accounts(&dir);
+    let file = dir.join("accounts").join("settings.json");
+
+    let changed = service
+        .set_auto_switch(Some(true), Some(85.0))
+        .expect("auto-switch is set");
+
+    assert!(changed);
+    let written = claude_accounts::Settings::read(&file).expect("the settings file reads");
+    assert!(written.autoswitch.enabled);
+    assert!(
+        (written.autoswitch.threshold - 85.0).abs() < 1e-9,
+        "{written:?}"
+    );
+    let auto = service
+        .snapshot()
+        .expect("the store reads")
+        .auto
+        .expect("the snapshot carries the auto-switch state");
+    assert!(auto.enabled);
+    assert!((auto.threshold_pct - 85.0).abs() < 1e-9, "{auto:?}");
+
+    let changed = service
+        .set_auto_switch(None, Some(90.0))
+        .expect("the threshold is set");
+    assert!(changed);
+    let written = claude_accounts::Settings::read(&file).expect("the settings file reads");
+    assert!(
+        written.autoswitch.enabled,
+        "a threshold edit keeps the switch"
+    );
+    assert!(
+        (written.autoswitch.threshold - 90.0).abs() < 1e-9,
+        "{written:?}"
+    );
+
+    let unchanged = service
+        .set_auto_switch(Some(true), None)
+        .expect("the same switch is set again");
+    assert!(!unchanged);
+
+    assert_eq!(
+        failure_kind(service.set_auto_switch(None, Some(10.0))),
+        AccountsFailureKind::Refused
+    );
+    let written = claude_accounts::Settings::read(&file).expect("the settings file reads");
+    assert!(
+        (written.autoswitch.threshold - 90.0).abs() < 1e-9,
+        "a refused threshold writes nothing: {written:?}"
+    );
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn the_snapshot_carries_auto_switch_off_by_default() {
+    let dir = scratch("the_snapshot_carries_auto_switch_off_by_default");
+    let defaults = claude_accounts::Settings::default().autoswitch;
+
+    for snapshot in [
+        service(dir.join("missing")).snapshot(),
+        two_accounts(&dir).snapshot(),
+    ] {
+        let auto = snapshot
+            .expect("the store reads")
+            .auto
+            .expect("the snapshot carries the auto-switch state");
+        assert!(!auto.enabled, "{auto:?}");
+        assert!(
+            (auto.threshold_pct - defaults.threshold).abs() < 1e-9,
+            "{auto:?}"
+        );
+        assert!(
+            (auto.hysteresis_pct - defaults.hysteresis_pct).abs() < 1e-9,
+            "{auto:?}"
+        );
+        assert_eq!(auto.paused_reason, None);
+        assert!(!auto.warm_up_done);
+        assert_eq!(auto.last_decision, None);
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn an_unreadable_settings_file_pauses_auto_switch_with_its_reason() {
+    let dir = scratch("an_unreadable_settings_file_pauses_auto_switch_with_its_reason");
+    let service = two_accounts(&dir);
+    std::fs::write(
+        dir.join("accounts").join("settings.json"),
+        json!({"autoswitch": {"enabled": true, "threshold": 10}}).to_string(),
+    )
+    .expect("settings.json can be written");
+
+    let snapshot = service
+        .snapshot()
+        .expect("a bad settings file does not fail the snapshot");
+
+    assert_eq!(snapshot.accounts.len(), 2, "{snapshot:?}");
+    let auto = snapshot
+        .auto
+        .expect("the snapshot carries the auto-switch state");
+    assert!(!auto.enabled, "the defaults stand in: {auto:?}");
+    let reason = auto.paused_reason.expect("the state is paused");
+    assert!(
+        reason.starts_with(
+            "the auto-switch settings could not be read: settings.json is not valid: autoswitch.threshold"
+        ),
+        "{reason}"
+    );
 }

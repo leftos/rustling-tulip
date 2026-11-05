@@ -246,6 +246,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_DEFAULT_SHELL,
     protocol::FEATURE_AGENT_USER_HOOKS,
     protocol::FEATURE_ACCOUNTS,
+    protocol::FEATURE_ACCOUNT_EVENTS,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
@@ -556,6 +557,10 @@ mod tests {
                         && features == DAEMON_FEATURES
             ),
             "{welcome:?}"
+        );
+        assert!(
+            DAEMON_FEATURES.contains(&protocol::FEATURE_ACCOUNT_EVENTS),
+            "the daemon sends account events: {DAEMON_FEATURES:?}"
         );
     }
 

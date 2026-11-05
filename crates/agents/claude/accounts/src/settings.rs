@@ -147,7 +147,8 @@ fn field_failure<T: DeserializeOwned>(body: &Value) -> Option<(Option<&str>, Str
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AutoSwitchSection {
     /// Whether the engine may switch at all; while false it keeps reading usage and its records but moves nothing.
-    #[serde(default = "default_enabled")]
+    /// Off when the file or the key is missing: auto-switch is opt-in.
+    #[serde(default)]
     pub enabled: bool,
     /// The binding window's utilization, in percent, at which to switch ([`AutoSwitchSection::THRESHOLD`]).
     #[serde(default = "default_threshold")]
@@ -173,10 +174,6 @@ pub struct AutoSwitchSection {
     pub unhealthy_ticks: u32,
 }
 
-const fn default_enabled() -> bool {
-    true
-}
-
 fn default_threshold() -> f64 {
     AutoSwitchSettings::default().threshold
 }
@@ -200,7 +197,7 @@ fn default_unhealthy_ticks() -> u32 {
 impl Default for AutoSwitchSection {
     fn default() -> Self {
         Self {
-            enabled: default_enabled(),
+            enabled: false,
             threshold: default_threshold(),
             strategy: StrategyName::default(),
             models: Vec::new(),
@@ -329,6 +326,62 @@ const INVISIBLE_CONTROLS: [char; 16] = [
 /// Whether `character` is a control character or one of [`INVISIBLE_CONTROLS`].
 pub(crate) fn is_control_or_bidi(character: char) -> bool {
     character.is_control() || INVISIBLE_CONTROLS.contains(&character)
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a test fails with the message of the precondition it lost"
+)]
+mod tests {
+    use super::Settings;
+    use std::path::PathBuf;
+
+    /// A fresh scratch folder for `test`.
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "claude-accounts-settings-{test}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch folder can be made");
+        dir
+    }
+
+    /// The settings read from a `settings.json` holding `text`.
+    fn read_text(test: &str, text: &str) -> Settings {
+        let path = scratch(test).join("settings.json");
+        std::fs::write(&path, text).expect("settings.json can be written");
+        Settings::read(&path).expect("the settings read")
+    }
+
+    #[test]
+    fn auto_switch_is_off_without_a_settings_file() {
+        let path = scratch("no-file").join("settings.json");
+
+        let settings = Settings::read(&path).expect("a missing file is the defaults");
+
+        assert!(!settings.autoswitch.enabled, "auto-switch defaults to off");
+    }
+
+    #[test]
+    fn auto_switch_is_off_without_its_section() {
+        let settings = read_text("no-section", r#"{"fleet": {"rateWindowMinutes": 30}}"#);
+
+        assert!(
+            !settings.autoswitch.enabled,
+            "a missing section reads as off"
+        );
+        let settings = read_text("empty-section", r#"{"autoswitch": {"threshold": 90}}"#);
+        assert!(!settings.autoswitch.enabled, "a missing key reads as off");
+    }
+
+    #[test]
+    fn auto_switch_reads_on_when_the_file_says_so() {
+        let settings = read_text("on", r#"{"autoswitch": {"enabled": true}}"#);
+
+        assert!(settings.autoswitch.enabled);
+    }
 }
 
 /// `autoswitch.<key> is <value>, which is outside <low> to <high>`.

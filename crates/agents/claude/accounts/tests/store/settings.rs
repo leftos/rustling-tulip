@@ -21,7 +21,7 @@ fn read_text(scratch: &Scratch, text: &str) -> Result<Settings, String> {
 fn changed() -> Settings {
     Settings {
         autoswitch: AutoSwitchSection {
-            enabled: false,
+            enabled: true,
             threshold: 80.5,
             strategy: StrategyName::ConsumeFirst,
             models: vec!["opus".to_owned(), "all".to_owned()],
@@ -43,7 +43,7 @@ fn settings_missing_file_reads_defaults() {
     let settings = Settings::read(&scratch.root().settings()).expect("a missing file reads");
 
     assert_eq!(settings, Settings::default());
-    assert!(settings.autoswitch.enabled, "auto-switch defaults to on");
+    assert!(!settings.autoswitch.enabled, "auto-switch defaults to off");
     assert_eq!(settings.autoswitch.strategy, StrategyName::Best);
     assert_eq!(settings.autoswitch.unhealthy_ticks, 3);
     assert_eq!(settings.fleet.rate_window, RateWindow::OneHour);

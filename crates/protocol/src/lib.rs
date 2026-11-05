@@ -75,6 +75,11 @@ pub const FEATURE_AGENT_USER_HOOKS: &str = "agent_user_hooks";
 /// when the connected daemon lists it.
 pub const FEATURE_ACCOUNTS: &str = "accounts";
 
+/// `Welcome.features` entry: the daemon broadcasts
+/// [`DaemonMessage::AccountEvent`] when something happens to the host's
+/// accounts that a client may tell the user of, such as a switch.
+pub const FEATURE_ACCOUNT_EVENTS: &str = "account_events";
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -3220,6 +3225,37 @@ pub struct AutoSwitchState {
     pub fleet_verdict: Option<FleetVerdict>,
 }
 
+/// What happened to the host's accounts, as [`DaemonMessage::AccountEvent`]
+/// carries it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AccountEventKind {
+    /// The login moved from account `from` (`None` when it was no stored
+    /// account) to account `to`. `trigger` names what moved it: `manual`
+    /// for a user's switch, or the engine's reason, such as `at-limit`.
+    Switched {
+        from: Option<u32>,
+        to: u32,
+        trigger: String,
+    },
+    /// Every account is out of usage; `earliest_reset_at` is the first reset
+    /// among them, when known.
+    AllExhausted {
+        #[serde(default)]
+        earliest_reset_at: Option<DateTime<Utc>>,
+    },
+    /// Account `number` is held out of switching.
+    Quarantined { number: u32 },
+    /// Account `number` is back in switching.
+    Unquarantined { number: u32 },
+    /// The auto-switch engine stopped and will not run again until the
+    /// daemon restarts; `message` says why.
+    Halted { message: String },
+    /// Forward-compat fallback: an event the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
@@ -4528,6 +4564,19 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Turn auto-switch on or off, set the usage at which it switches away
+    /// (`threshold_pct`, in percent), or both; a field left out keeps its
+    /// value. Answered like [`ClientMessage::SwitchAccount`]; a request
+    /// that sets neither field, or a threshold the host refuses, is answered
+    /// `Error { code: account_refused }`. Served on any connection origin.
+    SetAutoSwitch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threshold_pct: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 }
 
 /// One history entry to recover, and how.
@@ -4856,7 +4905,8 @@ pub enum DaemonMessage {
     },
     /// Reply to [`ClientMessage::ListAccounts`], sent to the requester only:
     /// every account the host knows and the auto-switch state. `auto` is
-    /// `None` while no auto-switch engine runs on the host. `request_id`
+    /// `None` on a host that cannot run auto-switch, and carries
+    /// `enabled: false` while it is off. `request_id`
     /// echoes the id the request set (`None` when it set none).
     Accounts {
         #[serde(default)]
@@ -4873,6 +4923,12 @@ pub enum DaemonMessage {
         accounts: Vec<AccountSnapshot>,
         #[serde(default)]
         auto: Option<AutoSwitchState>,
+    },
+    /// Broadcast to every client when something happens to the host's
+    /// accounts, such as a switch. A daemon that sends it lists
+    /// [`FEATURE_ACCOUNT_EVENTS`].
+    AccountEvent {
+        event: AccountEventKind,
     },
     AuthFailed {
         reason: String,
@@ -7237,6 +7293,142 @@ mod tests {
                     if *accounts == [full_account_snapshot()] && *auto == full_auto_switch_state()
             ),
             "{back:?}"
+        );
+    }
+
+    #[test]
+    fn set_auto_switch_round_trips() {
+        let cases = [
+            (
+                Some(true),
+                Some(85.0),
+                Some("r1"),
+                r#"{"type":"set_auto_switch","enabled":true,"threshold_pct":85.0,"request_id":"r1"}"#,
+            ),
+            (
+                None,
+                Some(90.5),
+                None,
+                r#"{"type":"set_auto_switch","threshold_pct":90.5}"#,
+            ),
+            (
+                Some(false),
+                None,
+                Some("r2"),
+                r#"{"type":"set_auto_switch","enabled":false,"request_id":"r2"}"#,
+            ),
+            (None, None, None, r#"{"type":"set_auto_switch"}"#),
+        ];
+        for (enabled, threshold_pct, request_id, json) in cases {
+            let msg = ClientMessage::SetAutoSwitch {
+                enabled,
+                threshold_pct,
+                request_id: request_id.map(str::to_owned),
+            };
+            let sent = serde_json::to_string(&msg).expect("serializes");
+            assert_eq!(sent, json, "a field left out is omitted");
+            let back: ClientMessage = serde_json::from_str(json).expect("decodes");
+            assert!(
+                matches!(
+                    &back,
+                    ClientMessage::SetAutoSwitch { enabled: e, threshold_pct: t, request_id: id }
+                        if *e == enabled && *t == threshold_pct && id.as_deref() == request_id
+                ),
+                "{back:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn account_event_round_trips_each_kind() {
+        let at = DateTime::parse_from_rfc3339("2026-11-04T10:00:00Z")
+            .expect("a valid timestamp")
+            .with_timezone(&Utc);
+        let cases = [
+            (
+                AccountEventKind::Switched {
+                    from: Some(1),
+                    to: 2,
+                    trigger: "manual".to_owned(),
+                },
+                r#"{"type":"account_event","event":{"kind":"switched","from":1,"to":2,"trigger":"manual"}}"#,
+            ),
+            (
+                AccountEventKind::Switched {
+                    from: None,
+                    to: 3,
+                    trigger: "at-limit".to_owned(),
+                },
+                r#"{"type":"account_event","event":{"kind":"switched","from":null,"to":3,"trigger":"at-limit"}}"#,
+            ),
+            (
+                AccountEventKind::AllExhausted {
+                    earliest_reset_at: Some(at),
+                },
+                r#"{"type":"account_event","event":{"kind":"all_exhausted","earliest_reset_at":"2026-11-04T10:00:00Z"}}"#,
+            ),
+            (
+                AccountEventKind::AllExhausted {
+                    earliest_reset_at: None,
+                },
+                r#"{"type":"account_event","event":{"kind":"all_exhausted","earliest_reset_at":null}}"#,
+            ),
+            (
+                AccountEventKind::Quarantined { number: 4 },
+                r#"{"type":"account_event","event":{"kind":"quarantined","number":4}}"#,
+            ),
+            (
+                AccountEventKind::Unquarantined { number: 4 },
+                r#"{"type":"account_event","event":{"kind":"unquarantined","number":4}}"#,
+            ),
+            (
+                AccountEventKind::Halted {
+                    message: "a rollback failed".to_owned(),
+                },
+                r#"{"type":"account_event","event":{"kind":"halted","message":"a rollback failed"}}"#,
+            ),
+        ];
+        for (event, json) in cases {
+            let msg = DaemonMessage::AccountEvent {
+                event: event.clone(),
+            };
+            assert_eq!(serde_json::to_string(&msg).expect("serializes"), json);
+            let back: DaemonMessage = serde_json::from_str(json).expect("decodes");
+            assert!(
+                matches!(&back, DaemonMessage::AccountEvent { event: got } if *got == event),
+                "{back:?}"
+            );
+        }
+        let bare: DaemonMessage =
+            serde_json::from_str(r#"{"type":"account_event","event":{"kind":"all_exhausted"}}"#)
+                .expect("an exhaustion with no reset decodes");
+        assert!(
+            matches!(
+                &bare,
+                DaemonMessage::AccountEvent {
+                    event: AccountEventKind::AllExhausted {
+                        earliest_reset_at: None
+                    }
+                }
+            ),
+            "{bare:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_account_event_kind_reads_unknown() {
+        let later: DaemonMessage = serde_json::from_str(
+            r#"{"type":"account_event","event":{"kind":"later_kind","number":7}}"#,
+        )
+        .expect("an event this build does not know still decodes");
+        assert!(
+            matches!(
+                &later,
+                DaemonMessage::AccountEvent {
+                    event: AccountEventKind::Unknown
+                }
+            ),
+            "{later:?}"
         );
     }
 
