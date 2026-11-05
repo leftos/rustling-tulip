@@ -20,6 +20,8 @@ The daemon starts for no arguments or for `--detach` alone (the login Run entry 
 
 The client that started it ends its wait on that text instead of a generic timeout. `--detach` refuses the option, since the launcher hands over to a cached child that never sees it (`crates/daemon/src/detach.rs`, `crates/daemon-client/src/supervisor.rs`).
 
+**Login PATH on macOS.** In a start form that runs the daemon in this process (no arguments, or `--start-failure-file`; never `--detach` or a subcommand), a daemon whose inherited PATH is launchd-minimal (unset, empty, or only `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`) runs the user's login shell once before the async runtime starts: `$SHELL -ilc` (else `/bin/zsh`), printing `printenv PATH` between sentinel lines (`crates/daemon/src/login_path.rs`, called from `crates/daemon/src/main.rs`). It sets the process PATH to the login shell's entries followed by the inherited ones not already present. The probe has a 5 s deadline: the shell runs in its own process group, killed only if the shell is still running at the deadline, so an rc-file job left running after a good answer is left alone. A failure keeps the inherited PATH. Windows and Linux are unchanged.
+
 Any other argument list that no subcommand took prints one stderr line and exits 2, before any folder, lock, log or daemon start:
 
 `rustling-tulipd: unknown argument "<arg>"; usage: rustling-tulipd [--start-failure-file <path>] | --detach | --version | <command> ..., where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch`

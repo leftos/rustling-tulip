@@ -154,7 +154,7 @@ How it was built and launched:
 - Build: `.\rt.ps1 mac build --package rustling-tulip-native --package daemon --package tracer` builds the three debug binaries through the gate, gpui included. The output stays on the builder in the gate's work folder for the worktree, `~/gate-remote/work/<worktree>-<hash>/target/debug/`, so no separate clone is needed. The smoke copied `rustling-tulip-native`, `rustling-tulipd` and `rt-tracer` from there into one folder, so the daemon and tracer sit beside the client.
 - Launch form that worked from SSH: a `.command` file that sources the environment and runs `exec <folder>/rustling-tulip-native > <log> 2>&1`, opened with `open -n <file>.command`. It starts in the logged-in GUI session, through Terminal.app, which stays open beside the client.
 - Launch form that failed: `launchctl asuser $(id -u) env ... rustling-tulip-native` from an SSH login prints `Could not switch to audit session 0x186a2: 1: Operation not permitted`; it needs root.
-- `node` is not on the builder's SSH PATH (it lives under `~/gate-tools/node/bin` and only a login shell adds it), so the smoke put that folder on PATH for fake-claude. A Finder-launched client meets the same launchd-minimal PATH, which RT-1007 takes on.
+- `node` is not on the builder's SSH PATH (it lives under `~/gate-tools/node/bin` and only a login shell adds it), so the smoke put that folder on PATH for fake-claude. A Finder-launched client meets the same launchd-minimal PATH. RT-1022 answers it for the daemon: at start it takes the login shell's PATH when its own is launchd-minimal (`docs/daemon-cli.md`, "Login PATH on macOS"), so the agents, shells, git and gh it runs find their programs. The client's own `code` lookup is not covered.
 
 Checks:
 

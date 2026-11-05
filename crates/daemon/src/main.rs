@@ -47,6 +47,7 @@ mod integrity;
 mod keep_awake;
 mod lock_finder;
 mod logging;
+mod login_path;
 mod orphan;
 mod osc_title;
 mod paths;
@@ -148,8 +149,18 @@ async fn run_folderless_client_subcommand() -> anyhow::Result<Option<std::proces
     Ok(None)
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<std::process::ExitCode> {
+/// Give the process the login shell's `PATH` when launchd started it with a
+/// minimal one, before the runtime (and so its worker threads) exists, then
+/// run the daemon on a runtime built by hand.
+fn main() -> anyhow::Result<std::process::ExitCode> {
+    login_path::apply_at_start();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<std::process::ExitCode> {
     if let Some(code) = run_update_subcommand().await? {
         return Ok(code);
     }
@@ -237,6 +248,7 @@ async fn run_daemon(
     };
     init_tracing(&dirs);
     info!(config_dir = %dirs.config.display(), "starting rustling-tulipd");
+    login_path::log_outcome();
     #[cfg(feature = "e2e-loopback-peers")]
     tracing::warn!(
         "built with e2e-loopback-peers: the tailnet listener admits loopback peers; never ship this build"
