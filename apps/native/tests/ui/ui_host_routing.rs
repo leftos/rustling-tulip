@@ -1008,6 +1008,102 @@ fn an_offline_hosts_leaf_neither_drags_nor_binds(cx: &mut TestAppContext) {
     );
 }
 
+/// A window on This PC whose tab `t1` holds one empty pane `p2`, with the
+/// tailnet host connected beside it listing `b1` in a repo of its own.
+fn remote_leaf_beside_empty_pane<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let fixture = Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: vec![tab("t1", &pane("p2", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/r2")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").in_repo("r2").build()],
+    });
+    host.sent();
+    h.sent();
+    h
+}
+
+/// A point across the middle of tab `tab`'s pill.
+fn pill_middle(h: &mut Harness<'_>, tab: &str) -> Point<Pixels> {
+    let pill = h.bounds(&format!("tab-{tab}"));
+    assert!(pill.size.width > Pixels::ZERO, "{tab}'s pill is on screen");
+    point(pill.center().x, pill.center().y)
+}
+
+#[gpui::test]
+fn a_leaf_whose_host_drops_mid_drag_marks_every_pill_no_drop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_leaf_beside_empty_pane(cx, &dir);
+    let from = on_row(&mut h, &remote_leaf("", "b1"), 0.5);
+    h.start_drag(from);
+    let over = pill_middle(&mut h, "t1");
+    h.drag_to(over);
+    assert!(h.dragging(), "the online host's leaf drags");
+    assert!(
+        !h.root(|root, cx| root.pill_no_drop("t1", cx)),
+        "an online host's leaf drops on the pill"
+    );
+
+    close_host(&mut h, &remote());
+
+    assert!(
+        h.dragging(),
+        "the host's drop leaves the leaf's drag under way"
+    );
+    let tabs = h.root(|root, _| root.tab_ids());
+    assert!(!tabs.is_empty(), "the strip has pills");
+    for tab in tabs {
+        let name = tab.clone();
+        let refused = h.root(move |root, cx| root.pill_no_drop(&tab, cx));
+        assert!(
+            refused,
+            "{name}'s pill shows no drop for the dropped host's leaf"
+        );
+    }
+
+    h.host(&remote()).connect();
+
+    let tabs = h.root(|root, _| root.tab_ids());
+    for tab in tabs {
+        let name = tab.clone();
+        let refused = h.root(move |root, cx| root.pill_no_drop(&tab, cx));
+        assert!(
+            !refused,
+            "{name}'s pill takes the leaf again once its host is back"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_leaf_whose_host_drops_mid_drag_loses_its_pane_overlay(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_leaf_beside_empty_pane(cx, &dir);
+    let from = on_row(&mut h, &remote_leaf("", "b1"), 0.5);
+    h.start_drag(from);
+    let over = at(&mut h, "p2", 0.5, 0.5);
+    h.drag_to(over);
+    assert!(
+        h.root(rustling_tulip_native::RootView::pane_drop_overlay)
+            .is_some(),
+        "the leaf's drop over the pane shows its overlay"
+    );
+
+    close_host(&mut h, &remote());
+
+    assert_eq!(
+        h.root(rustling_tulip_native::RootView::pane_drop_overlay),
+        None,
+        "the overlay goes with the host, before the pointer moves again"
+    );
+}
+
 #[gpui::test]
 fn a_remote_session_popouts_orphan_banner_names_its_own_hosts_agent(cx: &mut TestAppContext) {
     let dir = TestDir::new();
