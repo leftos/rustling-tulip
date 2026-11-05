@@ -297,6 +297,35 @@ fn a_not_approved_host_shows_pair(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_connecting_host_header_keeps_its_status_clear_of_add_repo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(session("a1").in_repo("r1").build()),
+    );
+    let mut connecting = Connection::for_target(saved_remote());
+    connecting.on_connecting();
+    h.host(&saved_remote()).event(NetEvent::State(connecting));
+    h.root_update(|root, _, cx| root.set_ui_text_size(4, cx));
+
+    let status = h.bounds(&format!("host-status-{REMOTE}"));
+    let add_repo = h.bounds(&format!("host-add-repo-{REMOTE}"));
+    assert!(
+        status.size.width > px(0.0),
+        "a connecting host's status text is drawn: {status:?}"
+    );
+    assert!(
+        status.right() <= add_repo.left(),
+        "at text size +4 the status ends before + Repo begins: {status:?} and {add_repo:?}"
+    );
+}
+
+#[gpui::test]
 fn a_container_dragged_over_another_hosts_rows_shows_no_drop_line_and_drops_nothing(
     cx: &mut TestAppContext,
 ) {

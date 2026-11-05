@@ -163,6 +163,34 @@ fn sidebar_chips_grow_with_the_ui_text_size(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_view_switcher_fits_at_text_size_plus_four(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(session("s1").in_repo("r1").build()),
+    );
+    h.root_update(|root, _, cx| root.set_ui_text_size(4, cx));
+
+    let panel = h.bounds("sidebar-panel");
+    let tabs = h.bounds("sidebar-view-tabs");
+    assert!(
+        tabs.size.width > px(0.0),
+        "the Repos / Tabs toggle is drawn: {tabs:?}"
+    );
+    assert!(
+        tabs.right() <= panel.right(),
+        "at text size +4 the toggle stays inside the panel: {tabs:?} and {panel:?}"
+    );
+    let active = h.bounds("sidebar-filter-active");
+    let repos = h.bounds("sidebar-view-repos");
+    assert!(
+        active.right() <= repos.left(),
+        "All / Active ends before Repos / Tabs begins: {active:?} and {repos:?}"
+    );
+}
+
+#[gpui::test]
 fn containers_render_workspace_repo_shell_dir_detached_in_order(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = Fixture {

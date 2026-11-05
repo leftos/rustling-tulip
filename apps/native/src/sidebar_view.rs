@@ -864,6 +864,9 @@ impl HostHeaderState {
 const HOST_HEADER_HEIGHT: f32 = 26.0;
 /// A host header's state dot, across.
 const HOST_DOT_SIZE: f32 = 6.0;
+/// How hard a host header's name shrinks: far harder than its state text,
+/// which truncates only once the name has given way altogether.
+const HOST_NAME_SHRINK: f32 = 1000.0;
 
 /// `group`'s header: its fold (chevron, state dot, name and, unless online,
 /// its state), then `+ Repo` and `+ Shell`, or `Pair` on a host that has not approved
@@ -883,6 +886,7 @@ fn host_header(
     } else {
         SIDEBAR_CHEVRON_DOWN_ICON
     };
+    let name_id = format!("host-name-{key}");
     let fold = div()
         .id(SharedString::from(format!("host-fold-{key}")))
         .driver_id({
@@ -892,6 +896,7 @@ fn host_header(
         .flex()
         .flex_1()
         .min_w(px(0.0))
+        .overflow_hidden()
         .h_full()
         .items_center()
         .gap(px(6.0))
@@ -904,19 +909,30 @@ fn host_header(
                 .rounded_full()
                 .bg(gpui::rgb(state.dot(&t))),
         )
-        .child(
-            div()
-                .flex_none()
+        .child({
+            let mut name = ellipsized_box()
                 .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .text_color(gpui::rgb(t.text))
-                .child(group.label.clone()),
-        )
+                .children(ellipsized(
+                    &name_id,
+                    SharedString::from(group.label.clone()),
+                    StyledText::new(group.label.clone()),
+                ));
+            name.style().flex_shrink = Some(HOST_NAME_SHRINK);
+            let selector = name_id.clone();
+            name.driver_id(move || selector)
+        })
         .when_some(state.label(), |fold, text| {
+            let selector = format!("host-status-{key}");
             fold.child(
-                div()
-                    .flex_none()
+                ellipsized_box()
+                    .driver_id(move || selector)
                     .text_color(gpui::rgb(t.subtle))
-                    .child(text),
+                    .children(ellipsized(
+                        &format!("host-status-{key}"),
+                        SharedString::from(text),
+                        StyledText::new(text),
+                    )),
             )
         })
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1186,12 +1202,16 @@ fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> 
         .border_b_1()
         .border_color(gpui::rgb(t.line))
         .child(
-            div()
+            ellipsized_box()
                 .flex_1()
                 .text_size(ui_px(cx, 13.0))
                 .font_weight(crate::fonts::ui_weight(cx, FontWeight::BOLD))
                 .text_color(gpui::rgb(t.text))
-                .child("Sessions"),
+                .children(ellipsized(
+                    "sidebar-title",
+                    SharedString::from("Sessions"),
+                    StyledText::new("Sessions"),
+                )),
         )
         .children(filter_control)
         .child(view_control)
