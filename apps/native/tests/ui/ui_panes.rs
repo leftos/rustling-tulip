@@ -714,6 +714,61 @@ fn a_narrow_header_gives_up_the_branch_chip_before_the_title(cx: &mut TestAppCon
     );
 }
 
+/// The width of the row a tab's two panes share: both cards and the gutter
+/// between them.
+fn pane_row(h: &mut Harness<'_>) -> f32 {
+    width_of(h, "pane-frame-p1") + width_of(h, "pane-frame-p2") + PANE_GUTTER
+}
+
+/// A card narrow enough that a header's chips must give way at text size +4.
+const NARROW_CARD: f32 = 1200.0;
+
+/// What a pane title left alone by its chips still reads as, in pixels.
+const READABLE_TITLE: f32 = 24.0;
+
+#[gpui::test]
+fn a_pane_header_gives_up_its_chips_before_the_title_at_text_size_plus_four(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let named = |id: &str| {
+        session(id)
+            .label("Petal footer polish")
+            .members(&[(
+                "rustling-tulip",
+                "feat/a-rather-long-branch-name",
+                "C:/wt/x/rustling-tulip",
+            )])
+            .agent_chips(json!([{ "text": "DeepSeek", "tip": "Runs on DeepSeek" }]))
+            .build()
+    };
+    let fixture = Fixture {
+        sessions: vec![named("s1"), named("s2")],
+        tabs: vec![split_at(WHOLE_HEADER_RATIO)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.root_update(|root, _, cx| root.set_ui_text_size(4, cx));
+    let row = pane_row(&mut h);
+    h.send(DaemonMessage::TabUpdated {
+        tab: split_at((row - 32.0) / row),
+    });
+    let whole = width_of(&mut h, "pane-chip-p1-provider");
+    h.send(DaemonMessage::TabUpdated {
+        tab: split_at(NARROW_CARD / row),
+    });
+    let chip = width_of(&mut h, "pane-chip-p1-provider");
+    let title = width_of(&mut h, "pane-title-p1");
+    assert!(
+        chip < whole - 1.0,
+        "the provider chip truncates in a {NARROW_CARD} px card at text size +4: {chip} of {whole}"
+    );
+    assert!(
+        title >= READABLE_TITLE,
+        "the title keeps its room once the chips have given way: {title}, chip {chip} of {whole}"
+    );
+}
+
 #[gpui::test]
 fn pane_frame_colors_follow_the_focus(cx: &mut TestAppContext) {
     let dir = TestDir::new();

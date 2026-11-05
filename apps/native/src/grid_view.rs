@@ -72,8 +72,8 @@ const TITLE_TEXT_SIZE: f32 = 12.5;
 const CHIP_HEIGHT: f32 = 20.0;
 const CHIP_RADIUS: f32 = 5.0;
 const CHIP_TEXT_SIZE: f32 = 11.0;
-/// The repo:branch chip's flex shrink against the title's 1: large enough
-/// that the chip gives up nearly all its width before the title gives any.
+/// A header chip's text shrink against the title's 1: large enough that the
+/// chip gives up nearly all its width before the title gives any.
 const BRANCH_CHIP_SHRINK: f32 = 1000.0;
 const HEADER_BUTTON_SIZE: f32 = 26.0;
 const HEADER_BUTTON_RADIUS: f32 = 6.0;
@@ -2737,7 +2737,7 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
                 .px(px(0.0))
                 .justify_center()
                 .child(runtime_icon_view(icon, ui_px(cx, 12.0), &name, &t)),
-            None => base.child(text),
+            None => chip_text(&name, base, text),
         },
         HeaderChipKind::Branch => branch_chip(&name, base, text, &t),
         HeaderChipKind::Trusted => base
@@ -2753,9 +2753,23 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
                     .flex_none()
                     .text_color(gpui::rgb(t.text_2)),
             ),
-        HeaderChipKind::More | HeaderChipKind::Provider | HeaderChipKind::Host => base.child(text),
+        HeaderChipKind::More | HeaderChipKind::Provider | HeaderChipKind::Host => {
+            chip_text(&name, base, text)
+        }
     }
     .into_any_element()
+}
+
+/// A text chip's label: it shrinks and truncates with `…` before the title
+/// does, its tooltip keeping the whole text. `name` names its text for the
+/// ellipsis probe.
+fn chip_text(name: &str, base: Stateful<Div>, text: String) -> Stateful<Div> {
+    let mut chip = base
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .child(truncating(name, StyledText::new(text)));
+    chip.style().flex_shrink = Some(BRANCH_CHIP_SHRINK);
+    chip
 }
 
 /// The repo:branch chip, its repo name bright and its colon subtle. It is
