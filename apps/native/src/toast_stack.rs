@@ -24,6 +24,13 @@ pub fn key_of(host: &HostKey, id: &str) -> SessionKey {
 /// How long a Finished toast stays up.
 pub const FINISHED_FOR: Duration = Duration::from_secs(6);
 
+/// How long an account toast stays up.
+pub const ACCOUNT_FOR: Duration = Duration::from_secs(8);
+
+/// The second half of every account toast's key: a host has one account
+/// toast at a time, and a later one replaces it in place.
+pub const ACCOUNTS_TOAST_KEY: &str = "accounts";
+
 /// How long a Needs you toast without answer buttons stays up.
 pub const NEEDS_YOU_FOR: Duration = Duration::from_secs(30);
 
@@ -57,6 +64,9 @@ pub enum AppToastKind {
     },
     /// The session's turn ended with no background work left.
     Finished,
+    /// Something happened to the host's accounts; keyed by the host with
+    /// [`ACCOUNTS_TOAST_KEY`], as it reports no session.
+    Account,
 }
 
 impl AppToastKind {
@@ -66,6 +76,7 @@ impl AppToastKind {
             Self::NeedsYou { has_answers: true } => NEEDS_YOU_ANSWERABLE_CAP,
             Self::NeedsYou { has_answers: false } => NEEDS_YOU_FOR,
             Self::Finished => FINISHED_FOR,
+            Self::Account => ACCOUNT_FOR,
         }
     }
 }
@@ -485,6 +496,30 @@ mod tests {
         );
         assert_eq!(stack.items().len(), 1);
         assert_eq!(stack.items()[0].key, key("b"));
+    }
+
+    #[test]
+    fn an_account_toast_lasts_eight_seconds() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        let account = AppToast::new(
+            key_of(&HostKey::Local, ACCOUNTS_TOAST_KEY),
+            AppToastKind::Account,
+            "Accounts".to_owned(),
+            "Switched to home".to_owned(),
+            now,
+        );
+        stack.push_or_update(account, now);
+        assert_eq!(stack.next_deadline(now), Some(now + ACCOUNT_FOR));
+        assert_eq!(ACCOUNT_FOR, Duration::from_secs(8));
+        assert_eq!(
+            stack.expire(now + Duration::from_millis(7999)),
+            Vec::<SessionKey>::new()
+        );
+        assert_eq!(
+            stack.expire(now + ACCOUNT_FOR),
+            vec![key_of(&HostKey::Local, ACCOUNTS_TOAST_KEY)]
+        );
     }
 
     #[test]

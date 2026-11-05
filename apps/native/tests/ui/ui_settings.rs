@@ -74,7 +74,7 @@ fn the_finished_grace_row_hides_with_the_toggle(cx: &mut TestAppContext) {
     h.click_on("settings-tab-notifications");
     h.click_on("settings-notify-finished");
     assert_eq!(settings_focus(&mut h), Some("settings-notify-finished"));
-    h.keys("tab tab tab");
+    h.keys("tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-notify-skip-on-screen"),

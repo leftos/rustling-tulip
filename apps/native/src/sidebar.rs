@@ -998,6 +998,10 @@ pub struct NotificationSettings {
         deserialize_with = "grace_or_default"
     )]
     pub finished_grace_secs: u32,
+    /// Whether an auto-switch, every account used up or a stopped
+    /// auto-switch raises an account toast; on unless turned off, and a file
+    /// without the key, as every release before this one wrote, reads on.
+    pub account_switches: bool,
 }
 
 /// The sound a toast plays. Saved as `"off"`, `"default"`,
@@ -1147,6 +1151,7 @@ impl Default for NotificationSettings {
             finished_sound: ToastSound::default(),
             toast_style: ToastStyle::default(),
             finished_grace_secs: DEFAULT_FINISHED_GRACE_SECS,
+            account_switches: true,
         }
     }
 }
@@ -2354,6 +2359,11 @@ impl SidebarModel {
     /// Whether a session whose turn ended raises Finished.
     pub fn set_finished_notification(&mut self, on: bool) {
         self.ui.notifications.finished = on;
+    }
+
+    /// Whether an account event raises an account toast.
+    pub fn set_account_switches_notification(&mut self, on: bool) {
+        self.ui.notifications.account_switches = on;
     }
 
     /// Records when a notification for a session on screen is skipped;
@@ -5592,6 +5602,7 @@ pub(crate) mod tests {
                 finished_sound: ToastSound::Default,
                 toast_style: ToastStyle::Os,
                 finished_grace_secs: 10,
+                account_switches: false,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -5726,6 +5737,7 @@ pub(crate) mod tests {
                 finished_sound: ToastSound::Default,
                 toast_style: ToastStyle::Os,
                 finished_grace_secs: DEFAULT_FINISHED_GRACE_SECS,
+                account_switches: true,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -7777,6 +7789,36 @@ pub(crate) mod tests {
         );
         assert!(!ui.notifications.finished, "the saved toggle survives");
         assert_eq!(ui.notifications.skip_when, NotifySkip::Never);
+    }
+
+    #[test]
+    fn notification_settings_without_account_switches_reads_on() {
+        let dir = TestDir::new("notify-account-switches-released");
+        let mut file = v0_5_1_alpha_ui_file();
+        file["notifications"] = json!({
+            "awaiting_input": false,
+            "finished": false,
+            "skip_when": "never",
+            "needs_you_sound": "off",
+            "finished_sound": "off",
+            "toast_style": "app",
+            "finished_grace_secs": 2,
+        });
+        let ui = load_released(&dir, &file);
+        assert!(
+            ui.notifications.account_switches,
+            "no release before this one wrote account_switches"
+        );
+        assert!(
+            !ui.notifications.awaiting_input,
+            "the saved toggle survives"
+        );
+        assert!(!ui.notifications.finished, "the saved toggle survives");
+        assert_eq!(ui.notifications.skip_when, NotifySkip::Never);
+        assert_eq!(ui.notifications.needs_you_sound, ToastSound::Off);
+        assert_eq!(ui.notifications.finished_sound, ToastSound::Off);
+        assert_eq!(ui.notifications.toast_style, ToastStyle::App);
+        assert_eq!(ui.notifications.finished_grace_secs, 2);
     }
 
     #[test]

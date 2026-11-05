@@ -18,8 +18,8 @@ use std::fmt::Display;
 
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use protocol::{
-    AccountSnapshot, AccountUsageStatus, AccountUsageWindow, AutoSwitchState, AutoSwitchStrategy,
-    DaemonMessage,
+    AccountEventKind, AccountSnapshot, AccountUsageStatus, AccountUsageWindow, AutoSwitchState,
+    AutoSwitchStrategy, DaemonMessage,
 };
 
 use crate::target::HostKey;
@@ -33,6 +33,8 @@ pub(crate) const NO_ACTIVE_ACCOUNT: &str = "No active account";
 pub(crate) const RELOGIN_LINE: &str = "Log in again from Settings › Accounts";
 /// The line of a row whose store the daemon cannot write.
 pub(crate) const STORE_READ_ONLY: &str = "Store read-only";
+/// The trigger of a switch the user asked for, which raises no toast.
+const MANUAL_TRIGGER: &str = "manual";
 /// A row's Switch button, and its label while its switch is pending.
 const SWITCH_LABEL: &str = "Switch";
 const SWITCHING_LABEL: &str = "Switching…";
@@ -117,18 +119,56 @@ pub(crate) struct Folded {
 #[derive(Debug, Default)]
 pub(crate) struct AccountsState {
     hosts: HashMap<HostKey, HostAccounts>,
+    /// The `earliest_reset_at` of the last `AllExhausted` toast raised for
+    /// each host, until a switch or the host's `Welcome`: the engine sends
+    /// one on every tick that finds every account used up.
+    exhausted_raised: HashMap<HostKey, Option<DateTime<Utc>>>,
 }
 
 impl AccountsState {
+    /// The body of the account toast `event` from `host` raises, as
+    /// [`account_toast`] words it, `wanted` when the Account switches toggle
+    /// is on: an `AllExhausted` raises only when its reset differs from the
+    /// last one raised for the host, and any switch lets the next one raise.
+    pub(crate) fn account_event_toast<Tz: TimeZone>(
+        &mut self,
+        host: &HostKey,
+        event: &AccountEventKind,
+        wanted: bool,
+        now: DateTime<Utc>,
+        tz: &Tz,
+    ) -> Option<String>
+    where
+        Tz::Offset: Display,
+    {
+        if matches!(event, AccountEventKind::Switched { .. }) {
+            self.exhausted_raised.remove(host);
+        }
+        if !wanted {
+            return None;
+        }
+        if let AccountEventKind::AllExhausted { earliest_reset_at } = event {
+            if self.exhausted_raised.get(host) == Some(earliest_reset_at) {
+                return None;
+            }
+            self.exhausted_raised
+                .insert(host.clone(), *earliest_reset_at);
+        }
+        account_toast(event, self.accounts(host), now, tz)
+    }
+
     /// Folds what `msg` from `host` says about its accounts: a broadcast
     /// replaces them, a reply replaces them under the stale-reply rule, and
     /// a `Welcome` forgets everything the host's old connection said.
     pub(crate) fn fold(&mut self, host: &HostKey, msg: &DaemonMessage) -> Folded {
         match msg {
-            DaemonMessage::Welcome { .. } => Folded {
-                changed: self.hosts.remove(host).is_some(),
-                ask_again: false,
-            },
+            DaemonMessage::Welcome { .. } => {
+                self.exhausted_raised.remove(host);
+                Folded {
+                    changed: self.hosts.remove(host).is_some(),
+                    ask_again: false,
+                }
+            }
             DaemonMessage::AccountsUpdated { accounts, auto } => {
                 let state = self.hosts.entry(host.clone()).or_default();
                 state.updates_seen += 1;
@@ -578,6 +618,54 @@ where
     }
 }
 
+/// The body of the account toast `event` raises, its accounts named from
+/// `accounts` (a number not listed is `account {n}`) and a reset time read
+/// against `now` on the wall clock of `tz`; `None` for an event that raises
+/// no toast: a manual switch, a quarantine change or an unknown event.
+pub(crate) fn account_toast<Tz: TimeZone>(
+    event: &AccountEventKind,
+    accounts: &[AccountSnapshot],
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> Option<String>
+where
+    Tz::Offset: Display,
+{
+    let name = |number: u32| {
+        accounts
+            .iter()
+            .find(|account| account.number == number)
+            .map_or_else(
+                || format!("account {number}"),
+                |account| display_name(account).to_owned(),
+            )
+    };
+    match event {
+        AccountEventKind::Switched { trigger, .. } if trigger == MANUAL_TRIGGER => None,
+        AccountEventKind::Switched {
+            from: Some(from),
+            to,
+            ..
+        } => Some(format!("Switched from {} to {}", name(*from), name(*to))),
+        AccountEventKind::Switched { from: None, to, .. } => {
+            Some(format!("Switched to {}", name(*to)))
+        }
+        AccountEventKind::AllExhausted {
+            earliest_reset_at: Some(at),
+        } => Some(format!(
+            "All accounts are used up; the first is back {}",
+            clock(*at, now, tz)
+        )),
+        AccountEventKind::AllExhausted {
+            earliest_reset_at: None,
+        } => Some("All accounts are used up".to_owned()),
+        AccountEventKind::Halted { message } => Some(format!("Auto-switch stopped: {message}")),
+        AccountEventKind::Quarantined { .. }
+        | AccountEventKind::Unquarantined { .. }
+        | AccountEventKind::Unknown => None,
+    }
+}
+
 /// The popover's title: the agent's display name and " accounts", or
 /// "Accounts" before the host listed an agent.
 pub(crate) fn header(agent_label: Option<&str>) -> String {
@@ -837,15 +925,15 @@ pub(crate) fn age_text(elapsed: TimeDelta) -> String {
 mod tests {
     use chrono::{DateTime, TimeDelta, TimeZone, Utc};
     use protocol::{
-        AccountKind, AccountSnapshot, AccountUsageStatus, AccountUsageWindow, AutoSwitchState,
-        AutoSwitchStrategy, DaemonMessage, FleetVerdict, FleetWindow,
+        AccountEventKind, AccountKind, AccountSnapshot, AccountUsageStatus, AccountUsageWindow,
+        AutoSwitchState, AutoSwitchStrategy, DaemonMessage, FleetVerdict, FleetWindow,
     };
 
     use super::{
         AccountsState, AliasChange, Level, RELOGIN_LINE, Removal, RowActions, STORE_READ_ONLY,
-        Segment, Tag, WriteAction, add_login_note, age_text, alias_change, bar, checked_line, chip,
-        cooldown_segments, forecast, header, hysteresis_step, moved_order, paused_line, row,
-        row_actions, strategy_segments, threshold_step, window_segments,
+        Segment, Tag, WriteAction, account_toast, add_login_note, age_text, alias_change, bar,
+        checked_line, chip, cooldown_segments, forecast, header, hysteresis_step, moved_order,
+        paused_line, row, row_actions, strategy_segments, threshold_step, window_segments,
     };
     use crate::target::HostKey;
 
@@ -1556,5 +1644,203 @@ mod tests {
         assert!(!shown.dim);
         let levels: Vec<Level> = shown.windows.iter().map(|line| line.bar.level).collect();
         assert_eq!(levels, [Level::Normal, Level::Normal]);
+    }
+
+    /// Accounts 1 (`work`) and 2 (`home`), as a host lists them.
+    fn listed() -> Vec<AccountSnapshot> {
+        vec![account(1, "work"), account(2, "home")]
+    }
+
+    fn switched(from: Option<u32>, to: u32, trigger: &str) -> AccountEventKind {
+        AccountEventKind::Switched {
+            from,
+            to,
+            trigger: trigger.to_owned(),
+        }
+    }
+
+    #[test]
+    fn account_toast_names_both_accounts_of_an_auto_switch() {
+        let event = switched(Some(1), 2, "at-limit");
+        assert_eq!(
+            account_toast(&event, &listed(), now(), &Utc).as_deref(),
+            Some("Switched from work to home")
+        );
+    }
+
+    #[test]
+    fn account_toast_names_only_the_new_account_without_a_from() {
+        let event = switched(None, 2, "at-limit");
+        assert_eq!(
+            account_toast(&event, &listed(), now(), &Utc).as_deref(),
+            Some("Switched to home")
+        );
+    }
+
+    #[test]
+    fn account_toast_names_an_unlisted_account_by_number() {
+        let event = switched(Some(1), 7, "at-limit");
+        assert_eq!(
+            account_toast(&event, &listed(), now(), &Utc).as_deref(),
+            Some("Switched from work to account 7")
+        );
+        let mut no_alias = account(2, "home");
+        no_alias.alias = None;
+        assert_eq!(
+            account_toast(&event, &[no_alias], now(), &Utc).as_deref(),
+            Some("Switched from account 1 to account 7"),
+            "a number the list lacks is named by its number"
+        );
+        let to_email = switched(None, 2, "at-limit");
+        let mut no_alias = account(2, "home");
+        no_alias.alias = None;
+        assert_eq!(
+            account_toast(&to_email, &[no_alias], now(), &Utc).as_deref(),
+            Some("Switched to home@example.com"),
+            "a listed account without an alias goes by its email"
+        );
+    }
+
+    #[test]
+    fn account_toast_is_none_for_a_manual_switch() {
+        for from in [Some(1), None] {
+            let event = switched(from, 2, "manual");
+            assert_eq!(account_toast(&event, &listed(), now(), &Utc), None);
+        }
+    }
+
+    #[test]
+    fn account_toast_gives_the_first_reset_of_all_exhausted() {
+        let today = AccountEventKind::AllExhausted {
+            earliest_reset_at: Some(now() + TimeDelta::hours(3)),
+        };
+        assert_eq!(
+            account_toast(&today, &listed(), now(), &Utc).as_deref(),
+            Some("All accounts are used up; the first is back 15:00")
+        );
+        let tomorrow = AccountEventKind::AllExhausted {
+            earliest_reset_at: Some(now() + TimeDelta::hours(21)),
+        };
+        assert_eq!(
+            account_toast(&tomorrow, &listed(), now(), &Utc).as_deref(),
+            Some("All accounts are used up; the first is back Thu 09:00")
+        );
+    }
+
+    #[test]
+    fn account_toast_says_all_used_up_without_a_reset() {
+        let event = AccountEventKind::AllExhausted {
+            earliest_reset_at: None,
+        };
+        assert_eq!(
+            account_toast(&event, &listed(), now(), &Utc).as_deref(),
+            Some("All accounts are used up")
+        );
+    }
+
+    #[test]
+    fn account_toast_carries_the_halt_message() {
+        let event = AccountEventKind::Halted {
+            message: "the store is read-only".to_owned(),
+        };
+        assert_eq!(
+            account_toast(&event, &listed(), now(), &Utc).as_deref(),
+            Some("Auto-switch stopped: the store is read-only")
+        );
+    }
+
+    fn exhausted(at: Option<DateTime<Utc>>) -> AccountEventKind {
+        AccountEventKind::AllExhausted {
+            earliest_reset_at: at,
+        }
+    }
+
+    /// The account toast `event` from `host` raises through `state`, with
+    /// the toggle on.
+    fn raised(state: &mut AccountsState, host: &HostKey, event: &AccountEventKind) -> bool {
+        state
+            .account_event_toast(host, event, true, now(), &Utc)
+            .is_some()
+    }
+
+    #[test]
+    fn a_repeated_all_exhausted_with_the_same_reset_raises_once() {
+        let mut state = AccountsState::default();
+        let at = Some(now() + TimeDelta::hours(3));
+        assert!(raised(&mut state, &HostKey::Local, &exhausted(at)));
+        assert!(
+            !raised(&mut state, &HostKey::Local, &exhausted(at)),
+            "the next tick says the same"
+        );
+        let other = HostKey::Remote("box".to_owned());
+        assert!(
+            raised(&mut state, &other, &exhausted(at)),
+            "each host is told once"
+        );
+        let mut unknown = AccountsState::default();
+        assert!(raised(&mut unknown, &HostKey::Local, &exhausted(None)));
+        assert!(
+            !raised(&mut unknown, &HostKey::Local, &exhausted(None)),
+            "an unknown reset repeated is the same"
+        );
+    }
+
+    #[test]
+    fn an_all_exhausted_with_a_new_reset_raises_again() {
+        let mut state = AccountsState::default();
+        let first = Some(now() + TimeDelta::hours(3));
+        let later = Some(now() + TimeDelta::hours(5));
+        assert!(raised(&mut state, &HostKey::Local, &exhausted(first)));
+        assert_eq!(
+            state.account_event_toast(&HostKey::Local, &exhausted(later), true, now(), &Utc),
+            Some("All accounts are used up; the first is back 17:00".to_owned())
+        );
+        assert!(
+            raised(&mut state, &HostKey::Local, &exhausted(None)),
+            "a reset no longer known is new too"
+        );
+    }
+
+    #[test]
+    fn a_switch_lets_the_next_all_exhausted_raise() {
+        for trigger in ["manual", "at-limit"] {
+            let mut state = AccountsState::default();
+            let at = Some(now() + TimeDelta::hours(3));
+            assert!(raised(&mut state, &HostKey::Local, &exhausted(at)));
+            let switch = AccountEventKind::Switched {
+                from: Some(1),
+                to: 2,
+                trigger: trigger.to_owned(),
+            };
+            state.account_event_toast(&HostKey::Local, &switch, false, now(), &Utc);
+            assert!(
+                raised(&mut state, &HostKey::Local, &exhausted(at)),
+                "a {trigger} switch, even with the toggle off"
+            );
+        }
+    }
+
+    #[test]
+    fn a_welcome_lets_the_next_all_exhausted_raise() {
+        let mut state = AccountsState::default();
+        let at = Some(now() + TimeDelta::hours(3));
+        assert!(raised(&mut state, &HostKey::Local, &exhausted(at)));
+        state.fold(&HostKey::Local, &welcome());
+        assert!(raised(&mut state, &HostKey::Local, &exhausted(at)));
+    }
+
+    #[test]
+    fn account_toast_is_none_for_quarantine_and_unknown() {
+        for event in [
+            AccountEventKind::Quarantined { number: 1 },
+            AccountEventKind::Unquarantined { number: 1 },
+            AccountEventKind::Unknown,
+        ] {
+            assert_eq!(
+                account_toast(&event, &listed(), now(), &Utc),
+                None,
+                "{event:?}"
+            );
+        }
     }
 }

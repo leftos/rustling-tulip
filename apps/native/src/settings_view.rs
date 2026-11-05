@@ -593,6 +593,7 @@ pub(crate) enum SettingsControl {
     FinishedSoundField,
     FinishedSoundPlay,
     NotifyFinished,
+    NotifyAccountSwitches,
     NotifySkip(NotifySkip),
     FinishedGrace(u32),
     #[cfg_attr(not(windows), expect(dead_code, reason = "Windows-only toast style"))]
@@ -721,6 +722,7 @@ impl SettingsControl {
             Self::FinishedSoundField => "settings-finished-sound-field",
             Self::FinishedSoundPlay => "settings-finished-sound-play",
             Self::NotifyFinished => "settings-notify-finished",
+            Self::NotifyAccountSwitches => "settings-notify-account-switches",
             Self::NotifySkip(NotifySkip::OnScreen) => "settings-notify-skip-on-screen",
             Self::NotifySkip(NotifySkip::Focused) => "settings-notify-skip-focused",
             Self::NotifySkip(NotifySkip::Never) => "settings-notify-skip-never",
@@ -3532,6 +3534,7 @@ impl RootView {
             | SettingsControl::TitleSuffix
             | SettingsControl::NotifyNeedsYou
             | SettingsControl::NotifyFinished
+            | SettingsControl::NotifyAccountSwitches
             | SettingsControl::NotifySkip(_)
             | SettingsControl::FinishedGrace(_)
             | SettingsControl::ToastStyle(_)
@@ -3614,6 +3617,9 @@ impl RootView {
             SettingsControl::TitleSuffix => LocalPending::TitleSuffix(!title.suffix),
             SettingsControl::NotifyNeedsYou => LocalPending::NotifyNeedsYou(!notes.awaiting_input),
             SettingsControl::NotifyFinished => LocalPending::NotifyFinished(!notes.finished),
+            SettingsControl::NotifyAccountSwitches => {
+                LocalPending::NotifyAccountSwitches(!notes.account_switches)
+            }
             SettingsControl::NotifySkip(skip) => LocalPending::NotifySkip(skip),
             SettingsControl::FinishedGrace(secs) => LocalPending::FinishedGrace(secs),
             SettingsControl::ToastStyle(style) => LocalPending::ToastStyle(style),
@@ -4341,7 +4347,8 @@ impl RootView {
 
     /// The Notifications tab's stops: the link, Needs you with its sound
     /// field and that field's Play (not while the sound is off), Finished
-    /// with its own sound field and Play, then the skip choices and, on
+    /// with its own sound field and Play, the Finished grace choices while
+    /// Finished is on, Account switches, then the skip choices and, on
     /// Windows, the toast style choices.
     fn notifications_controls(&self) -> Vec<SettingsControl> {
         let shown = self.shown_local();
@@ -4362,6 +4369,7 @@ impl RootView {
         if settings.finished {
             controls.extend(FINISHED_GRACE_CHOICES.map(SettingsControl::FinishedGrace));
         }
+        controls.push(SettingsControl::NotifyAccountSwitches);
         controls.extend(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip));
         #[cfg(windows)]
         controls.extend(TOAST_STYLE_CHOICES.map(SettingsControl::ToastStyle));
@@ -4929,6 +4937,7 @@ impl RootView {
             LocalPending::NotifyNeedsYou(_)
             | LocalPending::NeedsYouSound(_)
             | LocalPending::NotifyFinished(_)
+            | LocalPending::NotifyAccountSwitches(_)
             | LocalPending::FinishedSound(_)
             | LocalPending::NotifySkip(_)
             | LocalPending::FinishedGrace(_)
@@ -4976,6 +4985,10 @@ impl RootView {
             }
             LocalPending::NotifyFinished(on) => {
                 self.sidebar.set_finished_notification(on);
+                true
+            }
+            LocalPending::NotifyAccountSwitches(on) => {
+                self.sidebar.set_account_switches_notification(on);
                 true
             }
             LocalPending::FinishedSound(sound) => {
@@ -5918,15 +5931,37 @@ impl RootView {
             crate::fonts::ui_text_size(cx),
             "Fire an OS notification when a session needs you (a question, \
                  a permission prompt or a plan approval) or finishes its turn \
-                 with no background work left.",
+                 with no background work left, and when auto-switch changes or \
+                 runs out of accounts.",
             &t,
         ))
         .children(kinds)
         .children(grace_row)
+        .child(Self::account_switches_row(settings, focused, cx))
         .child(skip_row);
         #[cfg(windows)]
         let section = section.child(Self::toast_style_row(settings.toast_style, focused, cx));
         vec![section.into_any_element()]
+    }
+
+    /// The Account switches switch, as `settings` holds it: the last of the
+    /// toggles, after the Finished grace row.
+    fn account_switches_row(
+        settings: &crate::sidebar::NotificationSettings,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        toggle(
+            SettingsControl::NotifyAccountSwitches,
+            ToggleState {
+                checked: settings.account_switches,
+                enabled: true,
+            },
+            "Account switches",
+            focused,
+            cx,
+        )
+        .into_any_element()
     }
 
     /// The Needs you switch and its sound rows, then the Finished switch
@@ -8379,6 +8414,7 @@ pub(crate) enum LocalPending {
     NotifyNeedsYou(bool),
     NeedsYouSound(ToastSound),
     NotifyFinished(bool),
+    NotifyAccountSwitches(bool),
     FinishedSound(ToastSound),
     NotifySkip(NotifySkip),
     FinishedGrace(u32),
@@ -8781,6 +8817,7 @@ impl ShownLocal {
             LocalPending::NotifyNeedsYou(on) => self.notifications.awaiting_input = on,
             LocalPending::NeedsYouSound(sound) => self.notifications.needs_you_sound = sound,
             LocalPending::NotifyFinished(on) => self.notifications.finished = on,
+            LocalPending::NotifyAccountSwitches(on) => self.notifications.account_switches = on,
             LocalPending::FinishedSound(sound) => self.notifications.finished_sound = sound,
             LocalPending::NotifySkip(skip) => self.notifications.skip_when = skip,
             LocalPending::FinishedGrace(secs) => self.notifications.finished_grace_secs = secs,
@@ -8813,6 +8850,9 @@ impl ShownLocal {
                 LocalPending::NeedsYouSound(notes.needs_you_sound.clone())
             }
             LocalPending::NotifyFinished(_) => LocalPending::NotifyFinished(notes.finished),
+            LocalPending::NotifyAccountSwitches(_) => {
+                LocalPending::NotifyAccountSwitches(notes.account_switches)
+            }
             LocalPending::FinishedSound(_) => {
                 LocalPending::FinishedSound(notes.finished_sound.clone())
             }

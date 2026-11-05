@@ -9,13 +9,18 @@
 
 use crate::support;
 
+use chrono::Utc;
 use gpui::{TestAppContext, px};
 use protocol::{
-    AlertKind, AttentionReason, DaemonMessage, KeyState, SessionSnapshot, SummarySource, TabEntry,
+    AccountEventKind, AlertKind, AttentionReason, DaemonMessage, KeyState, SessionSnapshot,
+    SummarySource, TabEntry,
 };
 use rustling_tulip_native::{BundledSound, ClipSource, NotifyKind, NotifyState};
 use std::time::Duration;
-use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, summarizer_status, tab};
+use support::{
+    Fixture, Harness, Opened, TestDir, account, accounts_updated, pane, repo, session,
+    summarizer_status, tab,
+};
 
 fn attention(id: &str, reason: AttentionReason) -> DaemonMessage {
     DaemonMessage::Attention {
@@ -362,6 +367,7 @@ fn notifications_tab_has_needs_you_and_finished_toggles(cx: &mut TestAppContext)
     for stop in [
         "settings-finished-sound-field",
         "settings-finished-sound-play",
+        "settings-notify-account-switches",
         "settings-notify-skip-on-screen",
         "settings-notify-skip-focused",
         "settings-notify-skip-never",
@@ -1824,5 +1830,190 @@ fn play_previews_the_finished_sound_once(cx: &mut TestAppContext) {
     assert_eq!(
         h.sounds(),
         [ClipSource::Bundled(BundledSound::MalletFallingFifth)]
+    );
+}
+
+fn account_event(event: AccountEventKind) -> DaemonMessage {
+    DaemonMessage::AccountEvent { event }
+}
+
+fn switched(from: Option<u32>, to: u32, trigger: &str) -> DaemonMessage {
+    account_event(AccountEventKind::Switched {
+        from,
+        to,
+        trigger: trigger.to_owned(),
+    })
+}
+
+/// [`opened`] with the host's accounts 1 (`work`) and 2 (`home`) listed.
+fn with_accounts<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = opened(cx, dir);
+    h.send(accounts_updated(vec![
+        account(1, "work").active().build(),
+        account(2, "home").build(),
+    ]));
+    h
+}
+
+#[gpui::test]
+fn an_auto_switch_raises_an_account_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_accounts(cx, &dir);
+    h.send(switched(Some(1), 2, "at-limit"));
+    assert_eq!(
+        h.notified(),
+        [shown("Accounts", "Switched from work to home")]
+    );
+    assert!(h.sounds().is_empty(), "an account toast plays no sound");
+}
+
+#[gpui::test]
+fn the_account_switches_toggle_off_silences_account_toasts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "account_switches": false }));
+    let mut h = with_accounts(cx, &dir);
+    h.send(switched(Some(1), 2, "at-limit"));
+    h.send(account_event(AccountEventKind::AllExhausted {
+        earliest_reset_at: None,
+    }));
+    h.send(account_event(AccountEventKind::Halted {
+        message: "the store is read-only".to_owned(),
+    }));
+    assert!(h.notified().is_empty(), "the toggle is off");
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "review: Waiting for input")],
+        "Needs you still fires"
+    );
+}
+
+#[gpui::test]
+fn a_manual_switch_raises_no_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_accounts(cx, &dir);
+    h.send(switched(Some(1), 2, "manual"));
+    assert!(h.notified().is_empty(), "the user made that switch");
+}
+
+#[gpui::test]
+fn all_exhausted_toasts_the_first_reset(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_accounts(cx, &dir);
+    let at = Utc::now() + chrono::Duration::hours(2);
+    h.send(account_event(AccountEventKind::AllExhausted {
+        earliest_reset_at: Some(at),
+    }));
+    let notified = h.notified();
+    assert_eq!(notified.len(), 1, "{notified:?}");
+    let (title, body) = &notified[0];
+    assert_eq!(title, "Accounts");
+    let prefix = "All accounts are used up; the first is back ";
+    assert!(body.starts_with(prefix), "{body}");
+    let local = at.with_timezone(&chrono::Local).format("%H:%M").to_string();
+    assert!(body.ends_with(&local), "{body} gives the reset at {local}");
+}
+
+#[gpui::test]
+fn a_second_all_exhausted_with_the_same_reset_raises_no_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_accounts(cx, &dir);
+    let at = Utc::now() + chrono::Duration::hours(2);
+    for _ in 0..2 {
+        h.send(account_event(AccountEventKind::AllExhausted {
+            earliest_reset_at: Some(at),
+        }));
+    }
+    assert_eq!(
+        h.notified().len(),
+        1,
+        "the engine's next tick says the same"
+    );
+}
+
+#[gpui::test]
+fn halted_toasts_its_message(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_accounts(cx, &dir);
+    h.send(account_event(AccountEventKind::Halted {
+        message: "the store is read-only".to_owned(),
+    }));
+    assert_eq!(
+        h.notified(),
+        [shown(
+            "Accounts",
+            "Auto-switch stopped: the store is read-only"
+        )]
+    );
+}
+
+#[gpui::test]
+fn quarantine_raises_no_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_accounts(cx, &dir);
+    h.send(account_event(AccountEventKind::Quarantined { number: 2 }));
+    h.send(account_event(AccountEventKind::Unquarantined { number: 2 }));
+    h.send(account_event(AccountEventKind::Unknown));
+    assert!(h.notified().is_empty(), "no account toast for these");
+}
+
+#[gpui::test]
+fn an_app_style_account_toast_has_no_go_to_pane_and_survives_a_sessions_list(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "toast_style": "app" }));
+    let mut h = with_accounts(cx, &dir);
+    h.send(switched(Some(1), 2, "at-limit"));
+
+    assert!(h.notified().is_empty(), "never the OS's toast beside it");
+    assert!(h.sounds().is_empty(), "an account toast plays no sound");
+    let up = vec![("accounts".to_owned(), "Accounts".to_owned())];
+    assert_eq!(h.root(|root, _| root.shown_toasts()), up);
+    assert_eq!(h.window_count(), 2, "the toast has a window of its own");
+    let mut toast = h.popout_window();
+    toast.run_until_parked();
+    assert!(
+        toast.debug_bounds("toast-card").is_some(),
+        "the card is drawn"
+    );
+    assert!(
+        toast.debug_bounds("toast-dismiss").is_some(),
+        "its dismiss button is drawn"
+    );
+    assert!(
+        toast.debug_bounds("toast-go-to-pane").is_none(),
+        "an account toast has no pane to go to"
+    );
+
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("s1").user_label("fix login").build(),
+            session("s2").user_label("review").build(),
+        ],
+    });
+    assert_eq!(
+        h.root(|root, _| root.shown_toasts()),
+        up,
+        "a relist names no session of the account toast"
+    );
+}
+
+#[gpui::test]
+fn the_notifications_tab_has_the_account_switches_toggle_and_saves_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    assert!(
+        h.bounds("settings-notify-account-switches").origin.x >= px(0.0),
+        "the toggle is painted"
+    );
+
+    h.click_on("settings-notify-account-switches");
+    h.click_on("settings-apply");
+    let saved = saved_ui(&dir);
+    assert_eq!(saved["notifications"]["account_switches"], false);
+    assert_eq!(
+        saved["notifications"]["finished"], true,
+        "the Finished toggle is untouched"
     );
 }

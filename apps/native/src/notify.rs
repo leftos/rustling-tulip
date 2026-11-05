@@ -11,14 +11,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, DisplayId, Task, WeakEntity,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px,
     size,
 };
 use protocol::{
-    AgentDescriptor, AlertKind, AttentionReason, DaemonMessage, KeyState, PendingInput,
-    SessionMode, SessionSnapshot, SessionStatus, SummarizerKey, SummarizerSettings,
+    AccountEventKind, AgentDescriptor, AlertKind, AttentionReason, DaemonMessage, KeyState,
+    PendingInput, SessionMode, SessionSnapshot, SessionStatus, SummarizerKey, SummarizerSettings,
 };
 
 use crate::RootView;
@@ -33,8 +34,8 @@ use crate::target::HostKey;
 #[cfg(windows)]
 use crate::toast_activation;
 use crate::toast_stack::{
-    AppToast, AppToastKind, MAX_TOAST_CHOICES, SessionKey, ToastStack, WIDTH, WorkArea, key_of,
-    place,
+    ACCOUNTS_TOAST_KEY, AppToast, AppToastKind, MAX_TOAST_CHOICES, SessionKey, ToastStack, WIDTH,
+    WorkArea, key_of, place,
 };
 use crate::toast_view::{ToastView, card_height};
 use crate::toast_window::{PhysicalRect, ToastPlacer, to_physical};
@@ -557,6 +558,9 @@ pub(crate) const NEEDS_YOU_TITLE: &str = "Needs you";
 /// The title of the notification a session raises when its turn ends.
 pub(crate) const FINISHED_TITLE: &str = "Finished";
 
+/// The title of every account toast.
+pub(crate) const ACCOUNTS_TITLE: &str = "Accounts";
+
 /// How long after its turn ended a Finished toast waits for its session's
 /// `WaitingAlert` before it falls back to the plain wording.
 pub(crate) const FINISHED_HOLD: Duration = Duration::from_secs(12);
@@ -867,8 +871,75 @@ impl RootView {
                 // running, so the alert for that turn can beat its end.
                 self.notifications.alerts.insert(key, alert);
             }
+            DaemonMessage::AccountEvent { event } => self.raise_account_toast(host, event, cx),
             _ => {}
         }
+    }
+
+    /// Raises the account toast `event` from `host` calls for, unless the
+    /// Account switches toggle is off. No skip rule, as it names no session
+    /// on screen, and no sound.
+    fn raise_account_toast(
+        &mut self,
+        host: &HostKey,
+        event: &AccountEventKind,
+        cx: &mut Context<Self>,
+    ) {
+        let notifications = &self.sidebar.ui_state().notifications;
+        let (wanted, style) = (notifications.account_switches, notifications.toast_style);
+        let body =
+            self.accounts
+                .account_event_toast(host, event, wanted, Utc::now(), &chrono::Local);
+        let Some(body) = body else {
+            return;
+        };
+        let title = self.host_title(ACCOUNTS_TITLE, host);
+        if style == ToastStyle::App {
+            self.raise_app_account_toast(host, title, body, cx);
+            return;
+        }
+        let notifier = Arc::clone(&self.notifications.notifier);
+        cx.background_executor()
+            .spawn(async move {
+                notifier.notify(&title, &body, true);
+            })
+            .detach();
+    }
+
+    /// Raises the account toast `title` and `body` about `host` as the app's
+    /// own, under the same guards as [`Self::raise_app_toast`]: it replaces
+    /// the host's account toast already up.
+    fn raise_app_account_toast(
+        &self,
+        host: &HostKey,
+        title: String,
+        body: String,
+        cx: &mut Context<Self>,
+    ) {
+        if offscreen::requested() && !driven_toasts() {
+            tracing::debug!("offscreen window: toast {title:?} not shown");
+            return;
+        }
+        let key = (host.clone(), ACCOUNTS_TOAST_KEY.to_owned());
+        let notifier = Arc::clone(&self.notifications.notifier);
+        cx.spawn(async move |this, cx| {
+            let busy = cx
+                .background_executor()
+                .spawn(async move { notifier.user_busy() })
+                .await;
+            if busy {
+                tracing::debug!("the user is busy: toast {title:?} not shown");
+                return;
+            }
+            // Fails only when the view is gone, and its toasts with it.
+            this.update(cx, |this, cx| {
+                let now = cx.background_executor().now();
+                let toast = AppToast::new(key, AppToastKind::Account, title, body, now);
+                this.show_app_toast(toast, None, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Whether a Finished toast about `session` on `host` waits for its
@@ -1194,7 +1265,7 @@ impl RootView {
                 if let Some((ask, pending)) = wait {
                     toast = toast.waiting_on(ask, pending);
                 }
-                this.show_app_toast(toast, sound, cx);
+                this.show_app_toast(toast, Some(sound), cx);
             })
             .ok();
         })
@@ -1249,16 +1320,27 @@ impl RootView {
 
     /// `toast`'s title line, naming the session's host unless it is This PC.
     fn app_toast_title(&self, toast: &Toast<'_>) -> String {
-        if *toast.host == HostKey::Local {
-            return toast.title.to_owned();
+        self.host_title(toast.title, toast.host)
+    }
+
+    /// `title`, naming `host` unless it is This PC.
+    fn host_title(&self, title: &str, host: &HostKey) -> String {
+        if *host == HostKey::Local {
+            return title.to_owned();
         }
-        format!("{} · {}", toast.title, self.host_name(toast.host))
+        format!("{title} · {}", self.host_name(host))
     }
 
     /// Puts `toast` on the stack, in a new window or in place of the
-    /// session's toast, and plays its `sound` if it is still up once placed;
-    /// with no work area to place it on, there is no toast.
-    fn show_app_toast(&mut self, toast: AppToast, sound: NotifyKind, cx: &mut Context<Self>) {
+    /// session's toast, and plays its `sound`, when it has one, if it is
+    /// still up once placed; with no work area to place it on, there is no
+    /// toast.
+    fn show_app_toast(
+        &mut self,
+        toast: AppToast,
+        sound: Option<NotifyKind>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(screen) = self.toast_screen(cx) else {
             return;
         };
@@ -1272,7 +1354,9 @@ impl RootView {
         self.place_app_toasts(&screen, cx);
         self.refresh_app_toasts(cx);
         let stack = &self.notifications.toasts.stack;
-        if stack.items().iter().any(|item| item.key == key) {
+        if let Some(sound) = sound
+            && stack.items().iter().any(|item| item.key == key)
+        {
             self.play_sound(sound, cx);
         }
     }
@@ -1473,16 +1557,22 @@ impl RootView {
             let items = self.notifications.toasts.stack.items().iter();
             items.filter(|toast| toast.key.0 == *host)
         };
+        // An account toast's key names no session, so no session message
+        // takes it down.
+        let of_session = |toast: &&AppToast| toast.kind != AppToastKind::Account;
         let stale: Vec<SessionKey> = match msg {
             DaemonMessage::SessionRemoved { session_id } => of_host()
+                .filter(of_session)
                 .filter(|toast| toast.key.1 == *session_id)
                 .map(|toast| toast.key.clone())
                 .collect(),
             DaemonMessage::SessionUpdated { session, .. } => of_host()
+                .filter(of_session)
                 .filter(|toast| toast.key.1 == session.id && wait_is_over(toast, session))
                 .map(|toast| toast.key.clone())
                 .collect(),
             DaemonMessage::Sessions { sessions } => of_host()
+                .filter(of_session)
                 .filter(|toast| {
                     let listed = sessions.iter().find(|session| session.id == toast.key.1);
                     listed.is_none_or(|session| wait_is_over(toast, session))

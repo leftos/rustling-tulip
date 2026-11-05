@@ -477,6 +477,13 @@ fn notifications_entries() -> Vec<Entry> {
         ),
         entry(
             SettingsTab::Notifications,
+            "settings-notify-account-switches",
+            "Account switches",
+            "Notifications",
+            Gate::Always,
+        ),
+        entry(
+            SettingsTab::Notifications,
             "settings-finished-sound-field",
             "Finished sound",
             "Notifications",
