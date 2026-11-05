@@ -159,7 +159,12 @@ async fn read_hello<R: Inbound>(
         client_id = client_id.as_deref().unwrap_or("(legacy)"),
         "handshake negotiated protocol version"
     );
-    let _ = out_tx.send(welcome_message(negotiated, &hub.daemon_id, origin_of(auth)));
+    let _ = out_tx.send(welcome_message(
+        negotiated,
+        &hub.daemon_id,
+        origin_of(auth),
+        hub.accounts.is_some(),
+    ));
     Ok(Handshake {
         negotiated_version: negotiated,
         client_id,
@@ -234,6 +239,9 @@ fn authorize_device(
 /// with a session's grid and the trace of its screen rules over it.
 const FEATURE_SCREEN_DUMP: &str = "screen_dump";
 
+/// The features every daemon lists, whatever its state. The account features
+/// are not here: they join in [`welcome_message`] only when the hub holds an
+/// accounts service, since a daemon without one cannot honour them.
 const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_AGENT_COMMANDS,
     protocol::FEATURE_DEVICE_PAIRING,
@@ -245,21 +253,33 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_DETAILED_LOGGING,
     protocol::FEATURE_DEFAULT_SHELL,
     protocol::FEATURE_AGENT_USER_HOOKS,
-    protocol::FEATURE_ACCOUNTS,
-    protocol::FEATURE_ACCOUNT_EVENTS,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
 /// version this daemon speaks, [`DAEMON_FEATURES`], this daemon's stable id
 /// and the connection's `origin`, which only the accepting listener decides.
-fn welcome_message(negotiated: u32, daemon_id: &str, origin: ConnectionOrigin) -> DaemonMessage {
+/// `accounts` appends `protocol::FEATURE_ACCOUNTS` and
+/// `protocol::FEATURE_ACCOUNT_EVENTS`, in that order, after those entries:
+/// the hub holds an accounts service only where the agent's account store
+/// works, and a daemon without one lists neither.
+fn welcome_message(
+    negotiated: u32,
+    daemon_id: &str,
+    origin: ConnectionOrigin,
+    accounts: bool,
+) -> DaemonMessage {
+    let mut features: Vec<String> = DAEMON_FEATURES
+        .iter()
+        .map(|feature| (*feature).to_owned())
+        .collect();
+    if accounts {
+        features.push(protocol::FEATURE_ACCOUNTS.to_owned());
+        features.push(protocol::FEATURE_ACCOUNT_EVENTS.to_owned());
+    }
     DaemonMessage::Welcome {
         protocol_version: negotiated,
         supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
-        features: DAEMON_FEATURES
-            .iter()
-            .map(|feature| (*feature).to_owned())
-            .collect(),
+        features,
         daemon_id: Some(daemon_id.to_owned()),
         origin: Some(origin),
     }
@@ -512,7 +532,7 @@ mod tests {
     #[test]
     fn welcome_lists_detailed_logging_and_the_initial_state_carries_the_switch() {
         let (hub, _scratch) = test_hub("detailed-logging-initial");
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
         assert!(
             matches!(
                 &welcome,
@@ -548,19 +568,25 @@ mod tests {
     }
     #[test]
     fn welcome_carries_the_daemon_features_and_the_negotiated_version() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
+        let mut expected: Vec<String> = DAEMON_FEATURES
+            .iter()
+            .map(|feature| (*feature).to_owned())
+            .collect();
+        expected.push(protocol::FEATURE_ACCOUNTS.to_owned());
+        expected.push(protocol::FEATURE_ACCOUNT_EVENTS.to_owned());
         assert!(
             matches!(
                 &welcome,
                 DaemonMessage::Welcome { protocol_version: 22, supported_versions, features, .. }
                     if supported_versions == SUPPORTED_PROTOCOL_VERSIONS
-                        && features == DAEMON_FEATURES
+                        && features == &expected
             ),
             "{welcome:?}"
         );
         assert!(
-            DAEMON_FEATURES.contains(&protocol::FEATURE_ACCOUNT_EVENTS),
-            "the daemon sends account events: {DAEMON_FEATURES:?}"
+            !DAEMON_FEATURES.contains(&protocol::FEATURE_ACCOUNT_EVENTS),
+            "the account events feature joins only with the accounts feature"
         );
     }
 
@@ -616,7 +642,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_default_shell() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
         assert!(
             matches!(
                 &welcome,
@@ -629,7 +655,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_agent_commands() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
         assert!(
             matches!(
                 &welcome,
@@ -858,7 +884,7 @@ mod tests {
 
     #[test]
     fn welcome_advertises_device_pairing() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
         assert!(
             matches!(
                 &welcome,
@@ -871,7 +897,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_device_block() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
         assert!(
             matches!(
                 &welcome,
@@ -886,7 +912,7 @@ mod tests {
 
     #[test]
     fn welcome_carries_the_daemon_id() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
         assert!(
             matches!(
                 &welcome,
@@ -898,7 +924,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_daemon_id_feature() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
         assert!(
             matches!(
                 &welcome,
@@ -911,12 +937,28 @@ mod tests {
 
     #[test]
     fn welcome_lists_accounts_feature() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
         assert!(
             matches!(
                 &welcome,
                 DaemonMessage::Welcome { features, .. }
                     if features.iter().any(|f| f == protocol::FEATURE_ACCOUNTS)
+                        && features.iter().any(|f| f == protocol::FEATURE_ACCOUNT_EVENTS)
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    #[test]
+    fn welcome_without_an_accounts_service_lists_no_account_features() {
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if !features.iter().any(|f| f == protocol::FEATURE_ACCOUNTS)
+                        && !features.iter().any(|f| f == protocol::FEATURE_ACCOUNT_EVENTS)
+                        && DAEMON_FEATURES.iter().all(|f| features.iter().any(|seen| seen == f))
             ),
             "{welcome:?}"
         );

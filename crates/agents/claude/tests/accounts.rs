@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 use agent_api::accounts::EngineTick;
 use agent_api::{
     AccountKindRow, AccountsConfig, AccountsFailure, AccountsFailureKind, AccountsService, Agent,
@@ -283,7 +283,7 @@ fn scratch(test: &str) -> PathBuf {
 /// Off Windows makes the store at `root` owner-only, as the store makes its own folders and files: the folders a test
 /// writes there are 0755 and its files 0644 under the usual umask, which the store refuses. On Windows the scratch
 /// folder's DACL already covers them.
-#[cfg(unix)]
+#[cfg(all(unix, accounts_locks))]
 fn restrict(root: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -302,7 +302,7 @@ fn restrict(root: &Path) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), accounts_locks))]
 fn restrict(_root: &Path) {}
 
 #[cfg(windows)]
@@ -338,6 +338,7 @@ fn make_private(dir: &Path) {
 #[cfg(not(any(unix, windows)))]
 fn make_private(_dir: &Path) {}
 
+#[cfg(accounts_locks)]
 fn service(root: PathBuf) -> Arc<dyn AccountsService> {
     let home = root.with_file_name("claude");
     service_at(root, home, None)
@@ -345,6 +346,7 @@ fn service(root: PathBuf) -> Arc<dyn AccountsService> {
 
 /// The plugin's service over the store at `root`, with Claude Code's home at
 /// `home` and its requests sent to `origin` when one is given.
+#[cfg(accounts_locks)]
 fn service_at(root: PathBuf, home: PathBuf, origin: Option<&str>) -> Arc<dyn AccountsService> {
     restrict(&root);
     let mut cfg = AccountsConfig::new(root);
@@ -353,8 +355,35 @@ fn service_at(root: PathBuf, home: PathBuf, origin: Option<&str>) -> Arc<dyn Acc
     Agent::accounts(&agent_claude::CLAUDE, &cfg).expect("the plugin keeps accounts")
 }
 
+/// The daemon lists the account features only where the plugin has a service
+/// over the store, so the service exists exactly where the account locks work.
+#[cfg(accounts_locks)]
+#[test]
+fn accounts_service_exists_where_the_locks_work() {
+    let dir = scratch("accounts_service_exists_where_the_locks_work");
+    let cfg = AccountsConfig::new(dir.join("accounts"));
+
+    assert!(
+        Agent::accounts(&agent_claude::CLAUDE, &cfg).is_some(),
+        "the plugin serves the store where the locks work"
+    );
+}
+
+#[cfg(not(accounts_locks))]
+#[test]
+fn no_accounts_service_where_the_locks_do_not_work() {
+    let dir = scratch("no_accounts_service_where_the_locks_do_not_work");
+    let cfg = AccountsConfig::new(dir.join("accounts"));
+
+    assert!(
+        Agent::accounts(&agent_claude::CLAUDE, &cfg).is_none(),
+        "the plugin serves no store where the locks are refused"
+    );
+}
+
 /// A store at `dir/accounts` holding account 1, active, with a credential
 /// that has not expired and no usage read yet.
+#[cfg(accounts_locks)]
 fn store_with_one_account(dir: &Path) -> PathBuf {
     let root = write_store(dir, &[1], &[1], 1, &json!({}));
     let store = Store::open(AccountsRoot::new(root.clone())).expect("the scratch store opens");
@@ -398,6 +427,7 @@ fn usage_transport_honours_an_http_date_retry_after() {
 
 /// A store at `dir/accounts` with `accounts` as its `accounts.json`, `rows`
 /// as its usage table's rows and `settings` as its `settings.json`.
+#[cfg(accounts_locks)]
 fn write_raw_store(
     dir: &Path,
     accounts: &serde_json::Value,
@@ -416,6 +446,7 @@ fn write_raw_store(
     root
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn poll_with_no_planned_poll_keeps_the_floor() {
     let dir = scratch("poll_with_no_planned_poll_keeps_the_floor");
@@ -447,6 +478,7 @@ fn poll_with_no_planned_poll_keeps_the_floor() {
     assert!(next >= Duration::from_secs(60), "{next:?}");
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn a_disabled_accounts_old_plan_does_not_set_the_next_poll() {
     let dir = scratch("a_disabled_accounts_old_plan_does_not_set_the_next_poll");
@@ -484,6 +516,7 @@ fn a_disabled_accounts_old_plan_does_not_set_the_next_poll() {
     assert_eq!(report.next_poll_in, Some(Duration::from_secs(600)));
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn accounts_service_poll_of_empty_store_parks() {
     let dir = scratch("accounts_service_poll_of_empty_store_parks");
@@ -496,6 +529,7 @@ fn accounts_service_poll_of_empty_store_parks() {
     assert_eq!(report.next_poll_in, None);
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn accounts_service_poll_fetches_usage() {
     let dir = scratch("accounts_service_poll_fetches_usage");
@@ -527,6 +561,7 @@ fn accounts_service_poll_fetches_usage() {
     assert!(next >= Duration::from_secs(60), "{next:?}");
 }
 
+#[cfg(accounts_locks)]
 #[tokio::test]
 async fn dropping_a_used_service_on_a_runtime_thread_does_not_panic() {
     let dir = scratch("dropping_a_used_service_on_a_runtime_thread_does_not_panic");
@@ -545,6 +580,7 @@ async fn dropping_a_used_service_on_a_runtime_thread_does_not_panic() {
     drop(service);
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn begin_shutdown_with_nothing_in_flight_is_idle() {
     let dir = scratch("begin_shutdown_with_nothing_in_flight_is_idle");
@@ -553,6 +589,7 @@ fn begin_shutdown_with_nothing_in_flight_is_idle() {
     assert!(service.begin_shutdown(Duration::ZERO));
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn accounts_service_snapshot_of_empty_store_is_empty() {
     let dir = scratch("accounts_service_snapshot_of_empty_store_is_empty");
@@ -569,6 +606,7 @@ fn accounts_service_snapshot_of_empty_store_is_empty() {
     );
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn accounts_service_snapshot_lists_accounts_in_order() {
     let dir = scratch("accounts_service_snapshot_lists_accounts_in_order");
@@ -649,6 +687,7 @@ fn accounts_service_snapshot_lists_accounts_in_order() {
 /// A store at `dir/accounts` holding OAuth accounts `numbers` (account `n`
 /// is `user<n>@example.com`), in rotation `order`, with `active` in use and
 /// `rows` as its usage table's rows.
+#[cfg(accounts_locks)]
 fn write_store(
     dir: &Path,
     numbers: &[u32],
@@ -686,6 +725,7 @@ fn write_store(
     root
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn snapshot_lists_records_missing_from_the_order() {
     let dir = scratch("snapshot_lists_records_missing_from_the_order");
@@ -704,6 +744,7 @@ fn snapshot_lists_records_missing_from_the_order() {
     assert_eq!(active, [4]);
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn snapshot_status_follows_the_latest_failed_poll() {
     let dir = scratch("snapshot_status_follows_the_latest_failed_poll");
@@ -752,6 +793,7 @@ fn snapshot_status_follows_the_latest_failed_poll() {
 }
 
 /// The kind of the failure `result` must be.
+#[cfg(accounts_locks)]
 fn failure_kind<T: std::fmt::Debug>(result: Result<T, AccountsFailure>) -> AccountsFailureKind {
     result.expect_err("the write is refused").kind
 }
@@ -762,6 +804,7 @@ const TEST_ORG: &str = "00000000-0000-4000-8000-0000000000a1";
 /// Claude Code at `home` logged in as `user<number>@example.com` in
 /// [`TEST_ORG`], with `fake-access-<number>` as its live credential when
 /// `with_credential`.
+#[cfg(accounts_locks)]
 fn log_in(home: &Path, number: u32, with_credential: bool) {
     std::fs::create_dir_all(home).expect("Claude Code's home can be made");
     let global = home.join(".claude.json");
@@ -790,6 +833,7 @@ fn log_in(home: &Path, number: u32, with_credential: bool) {
 /// A profile endpoint naming `user<number>@example.com` in [`TEST_ORG`], as
 /// [`log_in`] logs in: its origin, and the requests it reads, which it
 /// answers only while the receiver is kept.
+#[cfg(accounts_locks)]
 fn profile_of(number: u32) -> (String, mpsc::Receiver<String>) {
     let body = json!({
         "account": {
@@ -805,12 +849,13 @@ fn profile_of(number: u32) -> (String, mpsc::Receiver<String>) {
 /// A store holding accounts 1 and 2 in that order, 1 active, and the service
 /// over it with Claude Code's home at `dir/claude` and its requests sent to a
 /// local server.
+#[cfg(accounts_locks)]
 fn two_accounts(dir: &Path) -> Arc<dyn AccountsService> {
     let root = write_store(dir, &[1, 2], &[1, 2], 1, &json!({}));
     service_at(root, dir.join("claude"), Some(&profile_of(1).0))
 }
 
-#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
+#[cfg(accounts_locks)]
 #[test]
 fn set_alias_renames_and_reports_a_change() {
     let dir = scratch("set_alias_renames_and_reports_a_change");
@@ -830,7 +875,7 @@ fn set_alias_renames_and_reports_a_change() {
     assert_eq!(aliases, [None, Some("work")]);
 }
 
-#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
+#[cfg(accounts_locks)]
 #[test]
 fn set_alias_unchanged_reports_no_change() {
     let dir = scratch("set_alias_unchanged_reports_no_change");
@@ -846,7 +891,7 @@ fn set_alias_unchanged_reports_no_change() {
     assert!(!changed);
 }
 
-#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
+#[cfg(accounts_locks)]
 #[test]
 fn set_order_with_a_wrong_permutation_is_refused() {
     let dir = scratch("set_order_with_a_wrong_permutation_is_refused");
@@ -863,7 +908,7 @@ fn set_order_with_a_wrong_permutation_is_refused() {
     assert_eq!(numbers, [1, 2]);
 }
 
-#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
+#[cfg(accounts_locks)]
 #[test]
 fn remove_unknown_account_is_unknown() {
     let dir = scratch("remove_unknown_account_is_unknown");
@@ -881,7 +926,7 @@ fn remove_unknown_account_is_unknown() {
     assert_eq!(failure.code, "unknown_account");
 }
 
-#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
+#[cfg(accounts_locks)]
 #[test]
 fn remove_the_active_account_is_refused() {
     let dir = scratch("remove_the_active_account_is_refused");
@@ -901,7 +946,7 @@ fn remove_the_active_account_is_refused() {
     assert_eq!(snapshot.accounts.len(), 2);
 }
 
-#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
+#[cfg(accounts_locks)]
 #[test]
 fn writes_after_begin_shutdown_are_draining() {
     let dir = scratch("writes_after_begin_shutdown_are_draining");
@@ -931,6 +976,7 @@ fn writes_after_begin_shutdown_are_draining() {
 
 /// A store holding accounts 1 and 2, 1 active, and Claude Code logged in as
 /// account 1 with no live credential, so a switch asks no oracle.
+#[cfg(accounts_locks)]
 fn logged_in_as_one(dir: &Path) -> Arc<dyn AccountsService> {
     let root = write_roster_of_two(dir);
     log_in(&dir.join("claude"), 1, false);
@@ -939,6 +985,7 @@ fn logged_in_as_one(dir: &Path) -> Arc<dyn AccountsService> {
 
 /// A store at `dir/accounts` holding accounts 1 and 2 of [`TEST_ORG`], 1
 /// active, with no stored credential.
+#[cfg(accounts_locks)]
 fn write_roster_of_two(dir: &Path) -> PathBuf {
     let root = dir.join("accounts");
     std::fs::create_dir_all(root.join("cache")).expect("the store folders can be made");
@@ -963,6 +1010,7 @@ fn write_roster_of_two(dir: &Path) -> PathBuf {
     root
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn switch_to_the_active_account_is_a_no_op() {
     let dir = scratch("switch_to_the_active_account_is_a_no_op");
@@ -983,6 +1031,7 @@ fn switch_to_the_active_account_is_a_no_op() {
     );
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn switch_to_an_unknown_number_is_unknown_account() {
     let dir = scratch("switch_to_an_unknown_number_is_unknown_account");
@@ -998,6 +1047,7 @@ fn switch_to_an_unknown_number_is_unknown_account() {
     assert_eq!(failure.code, "unknown_account");
 }
 
+#[cfg(accounts_locks)]
 #[test]
 fn an_unknown_switch_sends_no_request() {
     let dir = scratch("an_unknown_switch_sends_no_request");
@@ -1023,7 +1073,7 @@ fn an_unknown_switch_sends_no_request() {
 /// shutdown begun meanwhile must not report idle while that write can still
 /// land. Either the write landed before the shutdown returned, or it was
 /// refused as draining and never lands.
-#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
+#[cfg(accounts_locks)]
 #[test]
 fn begin_shutdown_waits_for_an_alias_write_in_flight() {
     let dir = scratch("begin_shutdown_waits_for_an_alias_write_in_flight");
@@ -1082,7 +1132,7 @@ fn begin_shutdown_waits_for_an_alias_write_in_flight() {
     }
 }
 
-#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
+#[cfg(accounts_locks)]
 #[test]
 fn add_current_login_adds_the_live_login() {
     let dir = scratch("add_current_login_adds_the_live_login");
@@ -1104,7 +1154,7 @@ fn add_current_login_adds_the_live_login() {
     assert_eq!(rows, [(number, "user1@example.com", true)]);
 }
 
-#[cfg(any(all(windows, target_pointer_width = "64"), target_os = "macos"))]
+#[cfg(accounts_locks)]
 #[test]
 fn switch_to_another_account_switches() {
     let dir = scratch("switch_to_another_account_switches");
@@ -1141,7 +1191,7 @@ fn switch_to_another_account_switches() {
     assert_eq!(active, [first]);
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn set_auto_switch_writes_the_settings_file() {
     let dir = scratch("set_auto_switch_writes_the_settings_file");
@@ -1197,7 +1247,7 @@ fn set_auto_switch_writes_the_settings_file() {
     );
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn set_auto_switch_rules_writes_the_rules() {
     let dir = scratch("set_auto_switch_rules_writes_the_rules");
@@ -1243,7 +1293,7 @@ fn set_auto_switch_rules_writes_the_rules() {
     assert_eq!(auto.rate_window_minutes, Some(120));
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn set_auto_switch_rules_refuses_an_off_list_forecast_window() {
     let dir = scratch("set_auto_switch_rules_refuses_an_off_list_forecast_window");
@@ -1265,7 +1315,7 @@ fn set_auto_switch_rules_refuses_an_off_list_forecast_window() {
     );
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn set_auto_switch_rules_refuses_an_out_of_range_hysteresis() {
     let dir = scratch("set_auto_switch_rules_refuses_an_out_of_range_hysteresis");
@@ -1287,7 +1337,7 @@ fn set_auto_switch_rules_refuses_an_out_of_range_hysteresis() {
     );
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn set_auto_switch_rules_with_the_same_values_changes_nothing() {
     let dir = scratch("set_auto_switch_rules_with_the_same_values_changes_nothing");
@@ -1316,7 +1366,7 @@ fn set_auto_switch_rules_with_the_same_values_changes_nothing() {
 /// so a switch and a rules change started together both land; without it the
 /// later write puts back the other's old field, and `enabled` can come back
 /// true after the engine was retired.
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn concurrent_auto_switch_and_rules_writes_keep_both_changes() {
     use std::sync::Barrier;
@@ -1375,7 +1425,7 @@ fn concurrent_auto_switch_and_rules_writes_keep_both_changes() {
     }
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn the_snapshot_carries_auto_switch_off_by_default() {
     let dir = scratch("the_snapshot_carries_auto_switch_off_by_default");
@@ -1405,12 +1455,12 @@ fn the_snapshot_carries_auto_switch_off_by_default() {
 }
 
 /// The engine lease file of the store at `dir/accounts`.
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 fn engine_lease(dir: &Path) -> PathBuf {
     AccountsRoot::new(dir.join("accounts")).engine_lease()
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn engine_tick_is_off_by_default_and_claims_no_lease() {
     let dir = scratch("engine_tick_is_off_by_default_and_claims_no_lease");
@@ -1425,7 +1475,7 @@ fn engine_tick_is_off_by_default_and_claims_no_lease() {
     );
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn engine_tick_runs_when_on_and_releases_its_lease_when_turned_off() {
     let dir = scratch("engine_tick_runs_when_on_and_releases_its_lease_when_turned_off");
@@ -1457,7 +1507,7 @@ fn engine_tick_runs_when_on_and_releases_its_lease_when_turned_off() {
     );
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn an_unreadable_settings_file_fails_the_tick_and_keeps_the_engine() {
     let dir = scratch("an_unreadable_settings_file_fails_the_tick_and_keeps_the_engine");
@@ -1497,12 +1547,13 @@ fn an_unreadable_settings_file_fails_the_tick_and_keeps_the_engine() {
     );
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn engine_tick_off_does_not_open_the_store() {
     let dir = scratch("engine_tick_off_does_not_open_the_store");
     let root = dir.join("accounts");
-    std::fs::write(&root, "not a folder").expect("the file can be written");
+    std::fs::create_dir_all(&root).expect("the store folder can be made");
+    std::fs::write(root.join("accounts.json"), "not a store").expect("the file can be written");
     let service = service(root);
     assert!(service.snapshot().is_err(), "the store cannot be opened");
 
@@ -1511,7 +1562,7 @@ fn engine_tick_off_does_not_open_the_store() {
     assert_eq!(ticked, EngineTick::Off);
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn begin_shutdown_releases_the_engine_lease() {
     let dir = scratch("begin_shutdown_releases_the_engine_lease");
@@ -1536,7 +1587,7 @@ fn begin_shutdown_releases_the_engine_lease() {
     );
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn an_unreadable_settings_file_pauses_auto_switch_with_its_reason() {
     let dir = scratch("an_unreadable_settings_file_pauses_auto_switch_with_its_reason");
@@ -1567,6 +1618,7 @@ fn an_unreadable_settings_file_pauses_auto_switch_with_its_reason() {
 
 /// Account `number`'s usage row, its 5-hour window at `pct` resetting at
 /// `resets_at`, fetched at `fetched` (seconds since the epoch).
+#[cfg(accounts_locks)]
 fn usage_row(number: u32, pct: f64, resets_at: &str, fetched: i64) -> serde_json::Value {
     json!({
         "email": format!("user{number}@example.com"),
@@ -1576,7 +1628,7 @@ fn usage_row(number: u32, pct: f64, resets_at: &str, fetched: i64) -> serde_json
     })
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn the_snapshot_carries_a_fleet_verdict_with_accounts() {
     let dir = scratch("the_snapshot_carries_a_fleet_verdict_with_accounts");
@@ -1608,7 +1660,7 @@ fn the_snapshot_carries_a_fleet_verdict_with_accounts() {
     assert!((fleet.remaining - 150.0).abs() < 1e-6, "{fleet:?}");
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn a_second_snapshot_without_a_new_fetch_adds_no_sample() {
     let dir = scratch("a_second_snapshot_without_a_new_fetch_adds_no_sample");
@@ -1635,7 +1687,7 @@ fn a_second_snapshot_without_a_new_fetch_adds_no_sample() {
     );
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn a_failed_poll_keeps_the_account_in_the_forecast_and_its_history() {
     let dir = scratch("a_failed_poll_keeps_the_account_in_the_forecast_and_its_history");
@@ -1698,7 +1750,7 @@ fn a_failed_poll_keeps_the_account_in_the_forecast_and_its_history() {
     );
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(accounts_locks)]
 #[test]
 fn the_fleet_rate_window_follows_the_setting() {
     let dir = scratch("the_fleet_rate_window_follows_the_setting");

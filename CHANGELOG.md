@@ -6,7 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
-- The footer shows the Claude account in use and its usage; click it to switch accounts, set auto-switch and see when they run dry.
+- On Windows and macOS hosts, the footer shows the Claude account in use and its usage; click it to switch accounts, set auto-switch and see when they run dry.
 - Settings › Accounts lists your saved accounts to switch, rename, reorder, remove or add, and sets auto-switch's threshold, cooldown, strategy and forecast window.
 - A toast tells you when auto-switch changes accounts, finds every account used up, or stops; Settings › Notifications › Account switches turns them off.
 - Settings › General picks each host's default shell for new sessions, from its installed shells or a custom command.

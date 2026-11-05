@@ -557,12 +557,16 @@ impl Agent for ClaudePlugin {
         activity::reader(source)
     }
 
-    /// The account store's service: snapshots now, polls and switches as
-    /// their items land.
+    /// The account store's service, on the platforms whose locks work;
+    /// `None` elsewhere, so the daemon lists no accounts feature there. It
+    /// snapshots now and polls and switches as their items land.
     fn accounts(
         &self,
         cfg: &agent_api::AccountsConfig,
     ) -> Option<std::sync::Arc<dyn agent_api::AccountsService>> {
+        if !accounts::LOCKS_SUPPORTED {
+            return None;
+        }
         Some(std::sync::Arc::new(accounts::ClaudeAccounts::new(
             cfg.clone(),
         )))

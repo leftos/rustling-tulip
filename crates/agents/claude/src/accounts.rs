@@ -738,9 +738,10 @@ fn active_next_poll_at(store: &Store) -> Option<jiff::Timestamp> {
         .next_poll_at
 }
 
-/// Whether this platform's account locks work: off 64-bit Windows every
-/// lock is refused, so auto-switch cannot run there.
-const LOCKS_SUPPORTED: bool = cfg!(all(windows, target_pointer_width = "64"));
+/// Whether this platform's account locks work, as the store crate declares
+/// them: on 64-bit Windows and macOS. Everywhere else every lock is refused,
+/// so auto-switch cannot run there.
+pub(crate) const LOCKS_SUPPORTED: bool = cfg!(accounts_locks);
 
 /// The auto-switch state the settings in `root` give while no engine runs:
 /// their switch, threshold and rules, the defaults when the file or its
@@ -1461,7 +1462,7 @@ pub fn process_table() -> Box<dyn proc_table::ProcessTable + Send + Sync> {
     {
         Box::new(MacProcessTable)
     }
-    #[cfg(not(any(all(windows, target_pointer_width = "64"), target_os = "macos")))]
+    #[cfg(not(accounts_locks))]
     {
         Box::new(proc_table::EmptyTable)
     }
