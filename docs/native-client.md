@@ -190,6 +190,8 @@ This doc records the decisions a change to the client needs to know; what each f
 
   **Rehost** (`hosts.rs` `rehost_target`, `rehost_stranded_panes`): panes keep a fixed owner. When a dedupe drops a key, when This PC's tab list arrives and before each prune, the client sends `RehostPanes { from, to, session_ids }` to This PC, which rewrites the host of each pane in this client's layout only whose host is still `from` and whose session is in `session_ids` (`to` absent is This PC).
 
+  The moved sessions' remembered views (`session_views`) move with them to the target's key as the message is sent, the target's own entry winning, so a session remembered in Chat or Summary reopens there.
+
   A changed tab answers with its `TabUpdated`. No match sends nothing, and a failed layout write answers `Error` code `tab_refused`. A refusal that holds a session refused for the first time is sent again at once; one naming only sessions refused before waits for the next pass.
 
   `session_ids` holds only sessions the owner currently lists, so a pane of an ended session stays on its old key and is pruned there.

@@ -94,6 +94,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   Its `session_views` map holds each session's remembered pane view per host: `{"<host key>": {"<session id>": "chat" | "summary"}}`, the host key `"local"` for this PC, else the key `host_session_counts` uses; only chat and summary entries are written (a terminal is the default), a host with none is left out, and a save prunes only the connected host's ended sessions, once its session list has arrived (a missing or malformed value loads as empty, with a warning for a wrong type).
 
+  When the window moves a dropped duplicate host's panes to the host that owns their daemon, the moved sessions' `session_views` entries move to that host's key, an entry it already has winning.
+
   Its `chat_mode` field is the chat's density, `"compact"` or `"comfortable"`, app-level and not per session; a missing or unknown value loads as compact (an unknown one with a warning), and a click on the pane header's Compact button writes it at once; Settings > General's `Chat view` writes it on OK or Apply.
 
   Its `chat_max_width` field is the widest a chat pane's column draws, a whole number of logical px, `0` for no cap; a missing value or `null` loads as 960, and a value that is not a whole number logs `saved chat width {value} is not a whole number of px; chats cap at 960` and loads as 960 without failing the rest of the file. Settings > General's `Maximum chat width` writes it on OK or Apply.

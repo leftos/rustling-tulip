@@ -2970,6 +2970,12 @@ const SSH_KEY: &str = "ssh:me@devbox";
 /// Saves [`REMOTE`] and the SSH host `me@devbox`, both switched on, the
 /// tailnet host first unless `ssh_first`.
 fn seed_two_paths(dir: &TestDir, ssh_first: bool) {
+    seed_two_paths_with(dir, ssh_first, serde_json::json!({}));
+}
+
+/// [`seed_two_paths`], with each field of `extra` written into the same
+/// `native-ui.json`.
+fn seed_two_paths_with(dir: &TestDir, ssh_first: bool, extra: serde_json::Value) {
     let tailnet = serde_json::json!({ "name": REMOTE, "port": 8787 });
     let ssh = serde_json::json!({ "kind": "ssh", "name": "me@devbox" });
     let saved = if ssh_first {
@@ -2977,7 +2983,21 @@ fn seed_two_paths(dir: &TestDir, ssh_first: bool) {
     } else {
         [tailnet, ssh]
     };
-    seed_ui(dir, &serde_json::json!({ "saved_hosts": saved }));
+    let mut ui = serde_json::json!({ "saved_hosts": saved });
+    if let (Some(ui), serde_json::Value::Object(extra)) = (ui.as_object_mut(), extra) {
+        ui.extend(extra);
+    }
+    seed_ui(dir, &ui);
+}
+
+/// A `session_views` value holding host `host`'s single remembered `view`
+/// of session `session_id`.
+fn remembered_views(host: &str, session_id: &str, view: &str) -> serde_json::Value {
+    let mut sessions = serde_json::Map::new();
+    sessions.insert(session_id.to_owned(), serde_json::json!(view));
+    let mut hosts = serde_json::Map::new();
+    hosts.insert(host.to_owned(), serde_json::Value::Object(sessions));
+    serde_json::Value::Object(hosts)
 }
 
 /// A pane showing `session` of the SSH host `me@devbox`.
@@ -3021,7 +3041,19 @@ fn ssh_dropped_over<'a>(
     fixture: &Fixture,
     listed: &[&str],
 ) -> Harness<'a> {
-    seed_two_paths(dir, false);
+    ssh_dropped_over_with(cx, dir, fixture, listed, serde_json::json!({}))
+}
+
+/// [`ssh_dropped_over`], with each field of `extra` seeded into the same
+/// `native-ui.json`.
+fn ssh_dropped_over_with<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    fixture: &Fixture,
+    listed: &[&str],
+    extra: serde_json::Value,
+) -> Harness<'a> {
+    seed_two_paths_with(dir, false, extra);
     let mut h = Harness::with(cx, dir, fixture);
     welcome_as(&mut h, &saved_remote(), Some(DAEMON));
     remote_lists(&mut h, listed);
@@ -3145,6 +3177,49 @@ fn a_dropped_duplicates_panes_move_to_its_owner(cx: &mut TestAppContext) {
     h.click(at, Modifiers::none());
     h.keys("a");
     assert_eq!(h.host(&saved_remote()).sent_input("d1"), b"a");
+}
+
+#[gpui::test]
+fn a_rehosted_sessions_chat_view_is_kept(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        remote_pane("p2", "b1"),
+        ssh_pane("p9", "d1"),
+    );
+    let mut h = ssh_dropped_over_with(
+        cx,
+        &dir,
+        &one_tab(&grid),
+        &["b1", "d1"],
+        serde_json::json!({ "session_views": remembered_views(SSH_KEY, "d1", "chat") }),
+    );
+
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        [rehost(SSH_KEY, Some(REMOTE), &["d1"])],
+        "the dropped key's pane moves to the key that owns its daemon"
+    );
+
+    let moved = split(
+        SplitDirection::Horizontal,
+        remote_pane("p2", "b1"),
+        remote_pane("p9", "d1"),
+    );
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &moved),
+    });
+    remote_lists(&mut h, &["b1", "d1"]);
+
+    assert!(
+        h.root(|root, _| root.pane_shows_chat("p9")),
+        "the moved pane opens in the chat its session was remembered in"
+    );
+    assert_eq!(
+        saved_ui(&dir)["session_views"],
+        remembered_views(REMOTE, "d1", "chat"),
+        "the remembered view moved to the owning host's key"
+    );
 }
 
 #[gpui::test]

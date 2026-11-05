@@ -673,6 +673,42 @@ impl SessionViews {
         }
         changed
     }
+
+    /// Moves the remembered views of `session_ids` from host `from` to host
+    /// `to`, keeping any view `to` already has for a session; returns whether
+    /// anything moved or was dropped.
+    pub fn move_sessions(&mut self, from: &str, to: &str, session_ids: &[String]) -> bool {
+        if from == to {
+            return false;
+        }
+        let Some(views) = self.hosts.get(from) else {
+            return false;
+        };
+        let moving: Vec<(String, PaneView)> = session_ids
+            .iter()
+            .filter_map(|session_id| {
+                views
+                    .get(session_id)
+                    .map(|view| (session_id.clone(), *view))
+            })
+            .collect();
+        if moving.is_empty() {
+            return false;
+        }
+        if let Some(views) = self.hosts.get_mut(from) {
+            for (session_id, _) in &moving {
+                views.remove(session_id);
+            }
+        }
+        let target = self.hosts.entry(to.to_owned()).or_default();
+        for (session_id, view) in moving {
+            target.entry(session_id).or_insert(view);
+        }
+        if self.hosts.get(from).is_some_and(BTreeMap::is_empty) {
+            self.hosts.remove(from);
+        }
+        true
+    }
 }
 
 /// One host's remembered views as written: `{"<session id>": "chat"}`.
@@ -2396,6 +2432,22 @@ impl SidebarModel {
     /// returns whether that changed what is saved.
     pub fn remember_session_view(&mut self, host: &str, session_id: &str, view: PaneView) -> bool {
         self.ui.session_views.remember(host, session_id, view)
+    }
+
+    /// Moves the remembered views of `session_ids` from host `from` to host
+    /// `to`, keeping the view `to` already has for a session; returns
+    /// whether that changed what is saved.
+    pub fn move_session_views(
+        &mut self,
+        from: &HostKey,
+        to: &HostKey,
+        session_ids: &[String],
+    ) -> bool {
+        self.ui.session_views.move_sessions(
+            &session_view_key(from),
+            &session_view_key(to),
+            session_ids,
+        )
     }
 
     /// Forgets the view of every session of host `host`, the one whose
@@ -5962,6 +6014,80 @@ pub(crate) mod tests {
         assert_eq!(
             serde_json::to_value(&model.ui_state().session_views).expect("serialize"),
             json!({ "local": { "s1": "chat" }, "ssh:dev": { "gone": "chat" } })
+        );
+    }
+
+    #[test]
+    fn move_sessions_moves_a_view_to_the_target_host() {
+        let mut views = SessionViews::default();
+        assert!(views.remember("ssh:dev", "d1", PaneView::Chat));
+        assert!(views.remember("ssh:dev", "d2", PaneView::Summary));
+        assert!(views.move_sessions("ssh:dev", "box.tail.ts.net", &["d1".to_owned()]));
+        assert_eq!(views.get("box.tail.ts.net", "d1"), PaneView::Chat);
+        assert_eq!(
+            views.get("ssh:dev", "d1"),
+            PaneView::Terminal,
+            "moved, not copied"
+        );
+        assert_eq!(
+            views.get("ssh:dev", "d2"),
+            PaneView::Summary,
+            "an id not named stays under its host"
+        );
+        assert_eq!(
+            serde_json::to_value(&views).expect("serialize"),
+            json!({
+                "box.tail.ts.net": { "d1": "chat" },
+                "ssh:dev": { "d2": "summary" },
+            })
+        );
+    }
+
+    #[test]
+    fn move_sessions_keeps_the_targets_own_view() {
+        let mut views = SessionViews::default();
+        assert!(views.remember("ssh:dev", "d1", PaneView::Chat));
+        assert!(views.remember("box.tail.ts.net", "d1", PaneView::Summary));
+        assert!(views.move_sessions("ssh:dev", "box.tail.ts.net", &["d1".to_owned()]));
+        assert_eq!(views.get("box.tail.ts.net", "d1"), PaneView::Summary);
+        assert_eq!(
+            serde_json::to_value(&views).expect("serialize"),
+            json!({ "box.tail.ts.net": { "d1": "summary" } }),
+            "the target's own view wins and the old one is dropped"
+        );
+    }
+
+    #[test]
+    fn move_sessions_leaves_ids_not_named_under_the_old_host() {
+        let mut views = SessionViews::default();
+        assert!(views.remember("ssh:dev", "d1", PaneView::Chat));
+        assert!(
+            !views.move_sessions("ssh:dev", "local", &["s9".to_owned()]),
+            "an id the old host does not hold moves nothing"
+        );
+        assert!(
+            !views.move_sessions("gone", "local", &["d1".to_owned()]),
+            "a host with no views moves nothing"
+        );
+        assert!(
+            !views.move_sessions("ssh:dev", "ssh:dev", &["d1".to_owned()]),
+            "moving a host onto itself changes nothing"
+        );
+        assert_eq!(
+            serde_json::to_value(&views).expect("serialize"),
+            json!({ "ssh:dev": { "d1": "chat" } })
+        );
+    }
+
+    #[test]
+    fn move_sessions_drops_an_emptied_host() {
+        let mut views = SessionViews::default();
+        assert!(views.remember("ssh:dev", "d1", PaneView::Chat));
+        assert!(views.move_sessions("ssh:dev", "local", &["d1".to_owned()]));
+        assert_eq!(
+            serde_json::to_value(&views).expect("serialize"),
+            json!({ "local": { "d1": "chat" } }),
+            "the emptied host key is not written"
         );
     }
 

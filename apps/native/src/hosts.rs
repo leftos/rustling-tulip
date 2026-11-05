@@ -1130,6 +1130,9 @@ impl RootView {
             ?ids,
             "moving the panes of a host the window let go to the host that reaches its daemon"
         );
+        if self.sidebar.move_session_views(host, target, &ids) {
+            self.save_ui();
+        }
         self.send_to(
             &HostKey::Local,
             ClientMessage::RehostPanes {
