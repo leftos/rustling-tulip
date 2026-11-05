@@ -19,6 +19,8 @@ use agent_api::{
     AccountKindRow, AccountsConfig, AccountsFailure, AccountsFailureKind, AccountsService, Agent,
     AutoSwitchRules, FleetWindowRow, PollScope, UsageStatus,
 };
+#[cfg(accounts_locks)]
+use agent_api::{LoginCapture, LoginCommand};
 use agent_claude::accounts::{BODY_CAP, ClaudeAccounts, ProfileClient, RefreshClient, UsageClient};
 use claude_accounts::{
     AccessToken, AccountLock, AccountsRoot, ClaudePaths, CredentialBlob, ProfileTransport,
@@ -1152,6 +1154,200 @@ fn add_current_login_adds_the_live_login() {
         .map(|row| (row.number, row.email.as_str(), row.active))
         .collect();
     assert_eq!(rows, [(number, "user1@example.com", true)]);
+}
+
+/// Each account in `service`'s store as its number, email and whether it is the active one.
+#[cfg(accounts_locks)]
+fn roster(service: &dyn AccountsService) -> Vec<(u32, String, bool)> {
+    service
+        .snapshot()
+        .expect("the store reads")
+        .accounts
+        .into_iter()
+        .map(|row| (row.number, row.email, row.active))
+        .collect()
+}
+
+/// Claude Code's two files in `home`, as bytes: its global config and its live credential.
+#[cfg(accounts_locks)]
+fn login_files(home: &Path) -> (Vec<u8>, Vec<u8>) {
+    let paths = ClaudePaths::new(home.to_path_buf(), home.join(".claude.json"));
+    (
+        std::fs::read(paths.global_config()).expect("the global config reads"),
+        std::fs::read(paths.credentials_file()).expect("the live credential reads"),
+    )
+}
+
+#[cfg(accounts_locks)]
+#[test]
+fn login_command_runs_auth_login_in_the_scratch_dir() {
+    let dir = scratch("login_command_runs_auth_login_in_the_scratch_dir");
+    let service = service_at(dir.join("accounts"), dir.join("claude"), None);
+    let login = dir.join("login");
+
+    let command = service
+        .login_command(&login)
+        .expect("a scratch folder gets a login command");
+
+    assert_eq!(
+        command,
+        LoginCommand {
+            args: vec![
+                "auth".to_owned(),
+                "login".to_owned(),
+                "--claudeai".to_owned()
+            ],
+            env: vec![(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                login.to_str().expect("the scratch path is text").to_owned()
+            )],
+            env_remove: vec!["CLAUDE_SECURESTORAGE_CONFIG_DIR".to_owned()],
+        }
+    );
+}
+
+#[cfg(accounts_locks)]
+#[test]
+fn login_command_refuses_a_relative_or_live_dir() {
+    let dir = scratch("login_command_refuses_a_relative_or_live_dir");
+    let home = dir.join("claude");
+    let service = service_at(dir.join("accounts"), home.clone(), None);
+
+    for refused in [Path::new("login"), home.as_path()] {
+        let command = service.login_command(refused);
+        assert!(
+            matches!(&command, Err(failure) if failure.kind == AccountsFailureKind::Refused),
+            "{}: {command:?}",
+            refused.display()
+        );
+        let captured = service.capture_login_from(refused);
+        assert!(
+            matches!(&captured, Err(failure) if failure.kind == AccountsFailureKind::Refused),
+            "{}: {captured:?}",
+            refused.display()
+        );
+    }
+}
+
+/// With no test home, the live global config is `<user home>/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json` when
+/// that is set: its folder is refused as a scratch dir. Only the command is asked for, so nothing reads the folder.
+#[cfg(accounts_locks)]
+#[test]
+fn login_command_refuses_the_folder_holding_the_live_global_config() {
+    let dir = scratch("login_command_refuses_the_folder_holding_the_live_global_config");
+    let root = dir.join("accounts");
+    restrict(&root);
+    let service = Agent::accounts(&agent_claude::CLAUDE, &AccountsConfig::new(root))
+        .expect("the plugin keeps accounts");
+    let holder = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map_or_else(
+            || {
+                directories::UserDirs::new()
+                    .expect("the user has a home folder")
+                    .home_dir()
+                    .to_path_buf()
+            },
+            PathBuf::from,
+        );
+
+    let command = service.login_command(&holder);
+
+    assert!(
+        matches!(
+            &command,
+            Err(failure) if failure.kind == AccountsFailureKind::Refused
+                && failure.code == "scratch_is_live_home"
+        ),
+        "{}: {command:?}",
+        holder.display()
+    );
+}
+
+#[cfg(accounts_locks)]
+#[test]
+fn capture_login_from_adds_the_scratch_login_without_activating_it() {
+    let dir = scratch("capture_login_from_adds_the_scratch_login_without_activating_it");
+    let root = dir.join("accounts");
+    let home = dir.join("claude");
+    log_in(&home, 1, true);
+    let (live_origin, _live_requests) = profile_of(1);
+    let first = service_at(root.clone(), home.clone(), Some(&live_origin))
+        .add_current_login()
+        .expect("the live login is added");
+    let live_before = login_files(&home);
+    let login = dir.join("login");
+    log_in(&login, 2, true);
+    let (origin, _requests) = profile_of(2);
+    let service = service_at(root, home.clone(), Some(&origin));
+
+    let captured = service
+        .capture_login_from(&login)
+        .expect("the scratch login is added");
+
+    assert!(captured.added, "{captured:?}");
+    assert_ne!(captured.number, first);
+    assert_eq!(
+        roster(service.as_ref()),
+        [
+            (first, "user1@example.com".to_owned(), true),
+            (captured.number, "user2@example.com".to_owned(), false),
+        ],
+        "the live login's account stays the active one"
+    );
+    assert_eq!(
+        login_files(&home),
+        live_before,
+        "the live login is untouched"
+    );
+    assert!(login.is_dir(), "the scratch folder is left to the caller");
+}
+
+#[cfg(accounts_locks)]
+#[test]
+fn capture_login_from_a_stored_login_names_the_existing_account() {
+    let dir = scratch("capture_login_from_a_stored_login_names_the_existing_account");
+    let home = dir.join("claude");
+    log_in(&home, 1, true);
+    let (origin, _requests) = profile_of(1);
+    let service = service_at(dir.join("accounts"), home, Some(&origin));
+    let number = service
+        .add_current_login()
+        .expect("the live login is added");
+    let login = dir.join("login");
+    log_in(&login, 1, true);
+
+    let captured = service
+        .capture_login_from(&login)
+        .expect("a stored login is found");
+
+    assert_eq!(
+        captured,
+        LoginCapture {
+            number,
+            added: false
+        }
+    );
+}
+
+#[cfg(accounts_locks)]
+#[test]
+fn capture_login_from_an_empty_scratch_dir_is_refused() {
+    let dir = scratch("capture_login_from_an_empty_scratch_dir_is_refused");
+    let service = service_at(dir.join("accounts"), dir.join("claude"), None);
+    let login = dir.join("login");
+    std::fs::create_dir_all(&login).expect("the scratch folder can be made");
+
+    let captured = service.capture_login_from(&login);
+
+    assert!(
+        matches!(
+            &captured,
+            Err(failure) if failure.kind == AccountsFailureKind::Refused && failure.code == "no_login"
+        ),
+        "{captured:?}"
+    );
+    assert!(login.is_dir(), "the scratch folder is left to the caller");
 }
 
 #[cfg(accounts_locks)]

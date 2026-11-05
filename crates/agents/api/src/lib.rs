@@ -27,8 +27,8 @@ pub mod test_agent;
 pub use accounts::{
     AccountKindRow, AccountRef, AccountRow, AccountsConfig, AccountsError, AccountsFailure,
     AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, AutoSwitchRules,
-    ExtraUsageRow, FleetRow, FleetWindowRow, ModelLimitRow, PollReport, PollScope, SwitchReport,
-    UsageRow, UsageStatus, UsageWindowRow,
+    ExtraUsageRow, FleetRow, FleetWindowRow, LoginCapture, LoginCommand, ModelLimitRow, PollReport,
+    PollScope, SwitchReport, UsageRow, UsageStatus, UsageWindowRow,
 };
 pub use activity::{
     ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, ContextReading, EndedTask,

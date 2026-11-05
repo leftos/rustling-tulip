@@ -10,7 +10,7 @@
 use chrono::{DateTime, Utc};
 use protocol::AutoSwitchStrategy;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Where a plugin's account service keeps its store, and where its requests
@@ -161,6 +161,27 @@ pub struct SwitchReport {
     pub takes_effect_within: Option<Duration>,
 }
 
+/// How to run an agent's own login in a scratch config dir: the arguments
+/// after the agent's program, and the environment the child gets. The
+/// program itself is resolved by the daemon as for any spawn of that agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginCommand {
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// The variables the login child must not inherit from the daemon's
+    /// environment, removed before `env` is applied: ones that would point
+    /// the login away from the scratch dir, at the user's live login.
+    pub env_remove: Vec<String>,
+}
+
+/// What a login capture found: the account's number, and whether it is new
+/// to the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoginCapture {
+    pub number: u32,
+    pub added: bool,
+}
+
 /// A plugin's accounts, as the daemon holds them: shared, and called from
 /// several threads at once, so it holds no lock across calls. Every method
 /// blocks. Every write defaults to [`AccountsFailure::unsupported`]; a write
@@ -209,6 +230,32 @@ pub trait AccountsService: Send + Sync {
     ///
     /// The login could not be added.
     fn add_current_login(&self) -> Result<u32, AccountsFailure> {
+        Err(AccountsFailure::unsupported())
+    }
+
+    /// The command that runs the agent's own login with its config in
+    /// `scratch`, an absolute folder the daemon made for it. Sends nothing
+    /// and runs nothing.
+    ///
+    /// # Errors
+    ///
+    /// `scratch` is refused (not absolute, or the agent's live config home),
+    /// or the agent has no such login.
+    fn login_command(&self, scratch: &Path) -> Result<LoginCommand, AccountsFailure> {
+        let _ = scratch;
+        Err(AccountsFailure::unsupported())
+    }
+
+    /// Adds the login that [`AccountsService::login_command`] left in
+    /// `scratch` to the store, or finds the stored account it already is,
+    /// without changing the store's active account, since the live login did
+    /// not change. Leaves `scratch` itself to the caller. Blocks.
+    ///
+    /// # Errors
+    ///
+    /// `scratch` is refused, holds no login to keep, or the capture failed.
+    fn capture_login_from(&self, scratch: &Path) -> Result<LoginCapture, AccountsFailure> {
+        let _ = scratch;
         Err(AccountsFailure::unsupported())
     }
 

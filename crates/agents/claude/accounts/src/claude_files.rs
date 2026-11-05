@@ -615,6 +615,26 @@ pub(crate) fn remove_live_credentials(
     }
 }
 
+/// Deletes the Keychain item `paths` keeps the live login in, with no lock: the cleanup of a login that ran in a scratch
+/// config dir of its own, whose item nothing else reads. An item that is not there counts as deleted. `Ok(false)` with
+/// [`LiveStore::File`], which keeps no item, and nothing is touched then; the live credential file is never removed.
+///
+/// # Errors
+///
+/// [`ClaudeFileError::CredentialStore`] when `security` failed or did not answer within its bound; the item may remain.
+pub fn delete_live_keychain_item(paths: &ClaudePaths) -> Result<bool, ClaudeFileError> {
+    let LiveStore::Keychain {
+        service,
+        account,
+        security,
+    } = paths.live_store()
+    else {
+        return Ok(false);
+    };
+    keychain::delete(security, service, account).map_err(store_failed)?;
+    Ok(true)
+}
+
 /// Removes `paths`' `~/.claude.json` while `guard`, its config lock, is still held, and only while it holds exactly
 /// `written`: the rollback of a switch that created it with those bytes. `Ok(true)` when the file is gone (one already
 /// gone included), `Ok(false)` when it holds other bytes, written since, and was left.
@@ -1074,6 +1094,64 @@ mod rewrite_tests {
             "a file holding the expected bytes is rewritten"
         );
         assert_eq!(held, NEW.as_bytes(), "the file holds the new credential");
+    }
+}
+
+/// The scratch Keychain item's deletion, against the fake `security`; it takes no lock.
+#[cfg(all(test, unix))]
+#[expect(
+    clippy::expect_used,
+    reason = "a test that cannot set up its files must fail loudly"
+)]
+mod keychain_delete_tests {
+    use std::fs;
+
+    use super::delete_live_keychain_item;
+    use crate::keychain::fake::FakeKeychain;
+    use crate::paths::ClaudePaths;
+
+    const ITEM: &[u8] = br#"{"claudeAiOauth": {"accessToken": "fake-access-item", "refreshToken": "fake-refresh-item"}}"#;
+
+    #[test]
+    fn delete_live_keychain_item_deletes_the_item_and_leaves_the_file() {
+        let fake = FakeKeychain::new("delete-item");
+        let paths = fake.paths();
+        fake.put(ITEM);
+        fs::create_dir_all(
+            paths
+                .credentials_file()
+                .parent()
+                .expect("the file has a folder"),
+        )
+        .expect("the config home can be made");
+        fs::write(paths.credentials_file(), ITEM).expect("the live file can be written");
+
+        assert_eq!(delete_live_keychain_item(&paths).ok(), Some(true));
+        assert_eq!(fake.item(), None, "the item is gone");
+        assert!(paths.credentials_file().exists(), "the file is left");
+        assert_eq!(
+            delete_live_keychain_item(&paths).ok(),
+            Some(true),
+            "an item that is not there counts as deleted"
+        );
+    }
+
+    #[test]
+    fn delete_live_keychain_item_touches_nothing_without_a_keychain() {
+        let fake = FakeKeychain::new("delete-file-only");
+        fake.put(ITEM);
+        let keychain = fake.paths();
+        let file_only = ClaudePaths::new(
+            keychain
+                .credentials_file()
+                .parent()
+                .expect("the file has a folder")
+                .to_path_buf(),
+            keychain.global_config().to_path_buf(),
+        );
+
+        assert_eq!(delete_live_keychain_item(&file_only).ok(), Some(false));
+        assert_eq!(fake.item().as_deref(), Some(ITEM), "the item is untouched");
     }
 }
 

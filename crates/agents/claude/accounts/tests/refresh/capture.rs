@@ -118,7 +118,7 @@ fn capture_adds_a_new_login_as_the_next_number_and_makes_it_active() {
         vec![profile(THREE_UUID, THREE, THREE_ORG)],
     );
 
-    let captured = capture_live_login(&rig.context()).expect("the new login is added");
+    let captured = capture_live_login(&rig.context(), true).expect("the new login is added");
 
     assert_eq!(captured, outcome(CaptureKind::Added, 3, THREE));
     let sequence = accounts_json(&rig);
@@ -150,6 +150,93 @@ fn capture_adds_a_new_login_as_the_next_number_and_makes_it_active() {
     );
 }
 
+/// A rig logged in as a login no account has, [`THREE`], with account 1 active.
+fn logged_in_as_three(test: &str) -> Rig {
+    let live = credential(
+        "fake-access-three",
+        Some("fake-refresh-three"),
+        ms_after(3600),
+    );
+    let rig = logged_in(
+        test,
+        (THREE, THREE_ORG, THREE_UUID),
+        &live,
+        vec![profile(THREE_UUID, THREE, THREE_ORG)],
+    );
+    rig.scratch.set_active(1);
+    rig
+}
+
+#[test]
+fn capture_without_activate_keeps_the_active_account() {
+    let rig = logged_in_as_three("capture_without_activate_keeps_the_active_account");
+
+    let captured = capture_live_login(&rig.context(), false).expect("the new login is added");
+
+    assert_eq!(captured, outcome(CaptureKind::Added, 3, THREE));
+    let sequence = accounts_json(&rig);
+    assert_eq!(
+        sequence["accounts"]["3"]["email"],
+        json!(THREE),
+        "the store holds it"
+    );
+    assert_eq!(
+        sequence["active"],
+        json!(1),
+        "account 1 is still the active one"
+    );
+}
+
+/// A login from a scratch dir that is the active account's leaves its stored copy alone, even a later one: the live login
+/// stays the active account's source.
+#[test]
+fn capture_without_activate_keeps_the_active_accounts_credential() {
+    let live = credential(
+        "fake-access-one-new",
+        Some("fake-refresh-one-new"),
+        AFTER_FIXTURE_MS,
+    );
+    let rig = logged_in_as_one(
+        "capture_without_activate_keeps_the_active_accounts_credential",
+        &live,
+    );
+    let before = accounts_bytes(&rig);
+
+    let captured = capture_live_login(&rig.context(), false).expect("the capture answers");
+
+    assert_eq!(captured, outcome(CaptureKind::Kept, 1, ONE));
+    assert_eq!(
+        stored(&rig, 1),
+        Some(fixture_credential_one()),
+        "the active account's stored copy is untouched"
+    );
+    assert_eq!(accounts_bytes(&rig), before, "nothing is written");
+    assert!(
+        !rig.scratch.root().config_path(1).exists(),
+        "no config backup is written"
+    );
+}
+
+#[test]
+fn capture_with_activate_makes_it_active() {
+    let rig = logged_in_as_three("capture_with_activate_makes_it_active");
+
+    let captured = capture_live_login(&rig.context(), true).expect("the new login is added");
+
+    assert_eq!(captured, outcome(CaptureKind::Added, 3, THREE));
+    let sequence = accounts_json(&rig);
+    assert_eq!(
+        sequence["accounts"]["3"]["email"],
+        json!(THREE),
+        "the store holds it"
+    );
+    assert_eq!(
+        sequence["active"],
+        json!(3),
+        "the added account is the active one"
+    );
+}
+
 #[test]
 fn capture_refreshes_a_matched_account_when_the_live_copy_is_later() {
     let live = credential(
@@ -160,7 +247,8 @@ fn capture_refreshes_a_matched_account_when_the_live_copy_is_later() {
     let rig = logged_in_as_one("capture_refreshes_a_matched_account", &live);
     rig.scratch.set_active(2);
 
-    let captured = capture_live_login(&rig.context()).expect("the matched account is refreshed");
+    let captured =
+        capture_live_login(&rig.context(), true).expect("the matched account is refreshed");
 
     assert_eq!(captured, outcome(CaptureKind::Refreshed, 1, ONE));
     assert_eq!(stored(&rig, 1), Some(live), "the live copy is stored");
@@ -220,7 +308,8 @@ fn a_capture_that_stores_a_new_login_retires_the_entries_that_held_the_old_one()
         .expect("the manifest can be written");
     let foreign_bytes = rig.scratch.stash_bytes(FOREIGN_ID);
 
-    let captured = capture_live_login(&rig.context()).expect("the matched account is refreshed");
+    let captured =
+        capture_live_login(&rig.context(), true).expect("the matched account is refreshed");
 
     assert_eq!(captured, outcome(CaptureKind::Refreshed, 1, ONE));
     assert_eq!(
@@ -274,7 +363,8 @@ fn a_capture_removes_a_held_entry_that_is_a_junction_and_never_what_it_points_at
     junction(&rig.scratch.stash_path(HELD_ID), &outside);
     let before = snapshot(&outside);
 
-    let captured = capture_live_login(&rig.context()).expect("the matched account is refreshed");
+    let captured =
+        capture_live_login(&rig.context(), true).expect("the matched account is refreshed");
 
     assert_eq!(captured, outcome(CaptureKind::Refreshed, 1, ONE));
     assert!(
@@ -308,7 +398,8 @@ fn a_capture_keeps_the_row_of_a_held_entry_whose_file_cannot_be_removed() {
         .open(&path)
         .expect("the entry can be held open");
 
-    let captured = capture_live_login(&rig.context()).expect("the matched account is refreshed");
+    let captured =
+        capture_live_login(&rig.context(), true).expect("the matched account is refreshed");
 
     drop(handle);
     assert_eq!(captured, outcome(CaptureKind::Refreshed, 1, ONE));
@@ -330,7 +421,7 @@ fn capture_keeps_a_stored_copy_newer_than_the_live_one() {
     let rig = logged_in_as_one("capture_keeps_a_newer_stored_copy", &live);
     let before = accounts_bytes(&rig);
 
-    let captured = capture_live_login(&rig.context()).expect("the capture answers");
+    let captured = capture_live_login(&rig.context(), true).expect("the capture answers");
 
     assert_eq!(captured, outcome(CaptureKind::Kept, 1, ONE));
     assert_eq!(
@@ -352,7 +443,7 @@ fn capture_writes_nothing_when_the_live_copy_is_the_stored_one() {
     let credential_before =
         fs::read(rig.scratch.credential_file()).expect("account 1's file can be read");
 
-    let captured = capture_live_login(&rig.context()).expect("the capture answers");
+    let captured = capture_live_login(&rig.context(), true).expect("the capture answers");
 
     assert_eq!(captured, outcome(CaptureKind::Unchanged, 1, ONE));
     assert_eq!(accounts_bytes(&rig), before, "accounts.json is untouched");
@@ -387,9 +478,9 @@ fn capture_refuses_an_unverified_login_before_any_lock_or_write() {
     // Held for the whole test: a capture that waited for the account lock would answer locks busy, not unverified.
     let _held = AccountLock::acquire(&rig.scratch.root()).expect("the account lock is free");
 
-    let offline = capture_live_login(&rig.context())
+    let offline = capture_live_login(&rig.context(), true)
         .expect_err("an oracle that does not answer confirms nothing");
-    let foreign = capture_live_login(&rig.context())
+    let foreign = capture_live_login(&rig.context(), true)
         .expect_err("an oracle naming another account confirms nothing");
 
     assert_eq!(offline, CaptureError::Unverified);
@@ -416,8 +507,8 @@ fn capture_refuses_an_api_key_login_and_a_login_without_a_refresh_token() {
         &json!({"primaryApiKey": "fake-api-key", "oauthAccount": oauth_account(ONE, ONE_ORG, ONE_UUID)}),
     );
 
-    let api_key =
-        capture_live_login(&rig.context()).expect_err("an API-key login is no subscription login");
+    let api_key = capture_live_login(&rig.context(), true)
+        .expect_err("an API-key login is no subscription login");
 
     write_global(
         &rig.scratch,
@@ -427,8 +518,8 @@ fn capture_refuses_an_api_key_login_and_a_login_without_a_refresh_token() {
         &rig.scratch,
         &credential("fake-access-one-new", None, AFTER_FIXTURE_MS),
     );
-    let no_refresh =
-        capture_live_login(&rig.context()).expect_err("a login without a refresh token is refused");
+    let no_refresh = capture_live_login(&rig.context(), true)
+        .expect_err("a login without a refresh token is refused");
 
     assert_eq!(api_key, CaptureError::ApiKeyLogin);
     assert_eq!(no_refresh, CaptureError::NoRefreshToken);
@@ -455,7 +546,7 @@ fn capture_refuses_when_the_stored_credential_does_not_open() {
         .expect("account 1's file can be replaced");
     let before = accounts_bytes(&rig);
 
-    let error = capture_live_login(&rig.context())
+    let error = capture_live_login(&rig.context(), true)
         .expect_err("an unopenable stored credential is not replaced");
 
     assert_eq!(error, CaptureError::StoredUnopenable { number: 1 });
@@ -483,7 +574,7 @@ fn capture_refuses_an_oauth_login_that_collides_with_an_api_key_record() {
     rig.scratch.set_account(2, "kind", json!("api_key"));
     let before = accounts_bytes(&rig);
 
-    let error = capture_live_login(&rig.context())
+    let error = capture_live_login(&rig.context(), true)
         .expect_err("an OAuth login never matches an API-key record");
 
     assert_eq!(error, CaptureError::StoredAsApiKey);
@@ -507,7 +598,8 @@ fn capture_keeps_disabled_alias_and_credits_on_a_matched_account() {
     rig.scratch.set_account(1, "maySpendCredits", json!(true));
     rig.scratch.set_account(1, "uuid", json!(""));
 
-    let captured = capture_live_login(&rig.context()).expect("the matched account is refreshed");
+    let captured =
+        capture_live_login(&rig.context(), true).expect("the matched account is refreshed");
 
     assert_eq!(captured, outcome(CaptureKind::Refreshed, 1, ONE));
     let record = &accounts_json(&rig)["accounts"]["1"];
@@ -536,7 +628,7 @@ fn capture_records_the_resolved_uuid_on_a_new_login_without_one() {
         vec![profile(THREE_UUID, THREE, THREE_ORG)],
     );
 
-    let captured = capture_live_login(&rig.context()).expect("the new login is added");
+    let captured = capture_live_login(&rig.context(), true).expect("the new login is added");
 
     assert_eq!(captured, outcome(CaptureKind::Added, 3, THREE));
     let sequence = accounts_json(&rig);
@@ -567,7 +659,8 @@ fn capture_backfills_a_matched_account_without_a_uuid_from_the_profile() {
     );
     rig.scratch.set_account(1, "uuid", json!(""));
 
-    let captured = capture_live_login(&rig.context()).expect("the matched account is refreshed");
+    let captured =
+        capture_live_login(&rig.context(), true).expect("the matched account is refreshed");
 
     assert_eq!(captured, outcome(CaptureKind::Refreshed, 1, ONE));
     assert_eq!(
@@ -592,7 +685,7 @@ fn capture_backfills_the_uuid_when_the_stored_copy_is_kept() {
     );
     rig.scratch.set_account(1, "uuid", json!(""));
 
-    let captured = capture_live_login(&rig.context()).expect("the capture answers");
+    let captured = capture_live_login(&rig.context(), true).expect("the capture answers");
 
     assert_eq!(captured, outcome(CaptureKind::Kept, 1, ONE));
     assert_eq!(
@@ -619,7 +712,7 @@ fn capture_backfills_the_uuid_when_the_live_copy_is_unchanged() {
     let credential_before =
         fs::read(rig.scratch.credential_file()).expect("account 1's file can be read");
 
-    let captured = capture_live_login(&rig.context()).expect("the capture answers");
+    let captured = capture_live_login(&rig.context(), true).expect("the capture answers");
 
     assert_eq!(captured, outcome(CaptureKind::Unchanged, 1, ONE));
     assert_eq!(
@@ -657,7 +750,7 @@ fn capture_refuses_a_matched_account_whose_uuid_differs_from_the_resolved_one() 
     let credential_before =
         fs::read(rig.scratch.credential_file()).expect("account 1's file can be read");
 
-    let error = capture_live_login(&rig.context())
+    let error = capture_live_login(&rig.context(), true)
         .expect_err("a record naming another account id is not refreshed");
 
     assert_eq!(error, CaptureError::AnotherAccountId { number: 1 });
@@ -690,8 +783,8 @@ fn capture_refuses_a_pure_api_key_login() {
     );
     let before = accounts_bytes(&rig);
 
-    let error =
-        capture_live_login(&rig.context()).expect_err("a login that is only an API key is refused");
+    let error = capture_live_login(&rig.context(), true)
+        .expect_err("a login that is only an API key is refused");
 
     assert_eq!(
         error,
@@ -713,7 +806,7 @@ fn capture_keeps_a_same_lineage_stored_copy_with_a_later_expiry() {
     let rig = logged_in_as_one("capture_keeps_a_same_lineage_stored_copy", &live);
     let before = accounts_bytes(&rig);
 
-    let captured = capture_live_login(&rig.context()).expect("the capture answers");
+    let captured = capture_live_login(&rig.context(), true).expect("the capture answers");
 
     assert_eq!(captured, outcome(CaptureKind::Kept, 1, ONE));
     assert_eq!(
@@ -736,7 +829,7 @@ fn capture_keeps_a_stored_copy_with_no_expiry() {
     crate::support::put_credentials(&rig.scratch.root(), no_expiry);
     let before = accounts_bytes(&rig);
 
-    let captured = capture_live_login(&rig.context()).expect("the capture answers");
+    let captured = capture_live_login(&rig.context(), true).expect("the capture answers");
 
     assert_eq!(captured, outcome(CaptureKind::Kept, 1, ONE));
     assert_eq!(
@@ -757,7 +850,7 @@ fn capture_unchanged_makes_the_matched_account_active() {
     let credential_before =
         fs::read(rig.scratch.credential_file()).expect("account 1's file can be read");
 
-    let captured = capture_live_login(&rig.context()).expect("the capture answers");
+    let captured = capture_live_login(&rig.context(), true).expect("the capture answers");
 
     assert_eq!(captured, outcome(CaptureKind::Unchanged, 1, ONE));
     assert_eq!(
@@ -811,7 +904,7 @@ fn capture_refuses_a_login_that_changes_between_the_reads() {
         ..rig.context()
     };
 
-    let error = capture_live_login(&context)
+    let error = capture_live_login(&context, true)
         .expect_err("a login that changed under the capture is refused");
 
     assert_eq!(error, CaptureError::LoginChanged);
@@ -833,7 +926,8 @@ fn capture_refreshes_a_same_lineage_live_copy_with_a_later_expiry() {
     );
     let rig = logged_in_as_one("capture_refreshes_a_same_lineage_live_copy", &live);
 
-    let captured = capture_live_login(&rig.context()).expect("the matched account is refreshed");
+    let captured =
+        capture_live_login(&rig.context(), true).expect("the matched account is refreshed");
 
     assert_eq!(captured, outcome(CaptureKind::Refreshed, 1, ONE));
     assert_eq!(stored(&rig, 1), Some(live), "the later live copy is stored");

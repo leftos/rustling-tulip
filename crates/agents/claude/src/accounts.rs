@@ -11,7 +11,7 @@ mod history;
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::Duration;
 
@@ -20,7 +20,8 @@ use agent_api::accounts::{AccountEventRow, EngineTick};
 use agent_api::{
     AccountKindRow, AccountRef, AccountRow, AccountsConfig, AccountsError, AccountsFailure,
     AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, AutoSwitchRules, FleetRow,
-    FleetWindowRow, PollReport, PollScope, SwitchReport, UsageRow, UsageStatus, UsageWindowRow,
+    FleetWindowRow, LoginCapture, LoginCommand, PollReport, PollScope, SwitchReport, UsageRow,
+    UsageStatus, UsageWindowRow,
 };
 use chrono::{DateTime, Utc};
 use claude_accounts::engine::{
@@ -32,13 +33,14 @@ use claude_accounts::pace::{
 };
 use claude_accounts::{
     AccessToken, AccountKind, AccountLock, AccountRecord, AccountsRoot, AutoSwitchSection,
-    AutoswitchState, CaptureError, ClaudePaths, Drain, FetchScope, Identity, LockError, LockTiming,
-    PROFILE_TIMEOUT, PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts, ProfileTransport, RateWindow,
-    RawProfile, RawToken, RawUsage, RefreshContext, RefreshRequest, RefreshTransport, Secret,
-    Settings, SettingsError, Store, StoreError, StoreErrorKind, StrategyName, SwitchAccount,
-    SwitchError, SwitchErrorKind, SwitchOutcome, SwitchPrecondition, TOKEN_URL, TransportError,
-    USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable, UsageTransport,
-    UsageWindow, capture_live_login, poll_with_refresh, probe_outgoing,
+    AutoswitchState, CaptureError, CaptureKind, ClaudePaths, Drain, FetchScope, Identity,
+    LockError, LockTiming, PROFILE_TIMEOUT, PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts,
+    ProfileTransport, RateWindow, RawProfile, RawToken, RawUsage, RefreshContext, RefreshRequest,
+    RefreshTransport, Secret, Settings, SettingsError, Store, StoreError, StoreErrorKind,
+    StrategyName, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome, SwitchPrecondition,
+    TOKEN_URL, TransportError, USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable,
+    UsageTransport, UsageWindow, capture_live_login, delete_live_keychain_item, poll_with_refresh,
+    probe_outgoing,
 };
 use directories::UserDirs;
 use protocol::AutoSwitchStrategy;
@@ -205,7 +207,8 @@ impl ClaudeAccounts {
             guard: &self.switch_guard,
         };
         let was_halted = engine.halted();
-        let report = self.with_context(store, |context, usage| {
+        let claude = self.claude_paths()?;
+        let report = self.with_context(store, &claude, |context, usage| {
             let collector = TransportCollector(usage);
             engine.tick(&TickInputs {
                 context,
@@ -236,6 +239,23 @@ impl ClaudeAccounts {
     /// test's own home, where it stays in the live credential file, so no
     /// test reaches the user's Keychain.
     fn claude_paths(&self) -> Result<ClaudePaths, AccountsError> {
+        self.claude_paths_in(None)
+    }
+
+    /// Claude Code's files with its home at `home`: `None` is the live home
+    /// ([`ClaudeAccounts::claude_paths`]); `Some(scratch)` is a scratch
+    /// config dir a login ran in, its global config `<scratch>/.claude.json`
+    /// and, on macOS, its live login in the Keychain item Claude Code picks
+    /// for that dir, except under the config's `agent_home`, as for the live
+    /// home.
+    fn claude_paths_in(&self, home: Option<&Path>) -> Result<ClaudePaths, AccountsError> {
+        if let Some(scratch) = home {
+            let paths = ClaudePaths::new(scratch.to_path_buf(), scratch.join(".claude.json"));
+            if self.cfg.agent_home.is_some() {
+                return Ok(paths);
+            }
+            return Ok(with_live_store(paths, None, Some(scratch.as_os_str())));
+        }
         let missing = || AccountsError::new("Claude Code's home folder could not be found");
         let moved = self.cfg.agent_home.clone().or_else(|| {
             std::env::var_os(CONFIG_DIR_VAR)
@@ -253,7 +273,7 @@ impl ClaudeAccounts {
             return Ok(paths);
         }
         let config_dir = std::env::var_os(CONFIG_DIR_VAR);
-        Ok(with_live_store(paths, config_dir.as_deref()))
+        Ok(with_live_store(paths, config_dir.as_deref(), None))
     }
 
     fn open_store(&self) -> Result<Store, AccountsError> {
@@ -265,17 +285,17 @@ impl ClaudeAccounts {
     }
 
     /// Runs `run` with the context a store transaction over `store` needs
-    /// (Claude Code's files, the refresh and profile transports, the drain,
-    /// the ownership verdicts, Claude Code's lock timing) and the usage
-    /// transport, all sending with the shared client.
+    /// (Claude Code's files at `claude`, the refresh and profile transports,
+    /// the drain, the ownership verdicts, Claude Code's lock timing) and the
+    /// usage transport, all sending with the shared client.
     ///
     /// # Errors
     ///
-    /// The client could not be built, or Claude Code's home could not be
-    /// found; `run` did not run then.
+    /// The client could not be built; `run` did not run then.
     fn with_context<T>(
         &self,
         store: &Store,
+        claude: &ClaudePaths,
         run: impl FnOnce(&RefreshContext<'_>, &UsageClient) -> T,
     ) -> Result<T, AccountsError> {
         let origin = self.cfg.base_url.as_deref();
@@ -283,10 +303,9 @@ impl ClaudeAccounts {
         let usage = UsageClient::with_client(client.clone(), origin);
         let refresh = RefreshClient::with_client(client.clone(), origin);
         let profile = ProfileClient::with_client(client.clone(), origin);
-        let claude = self.claude_paths()?;
         let context = RefreshContext {
             store,
-            claude: &claude,
+            claude,
             transport: &refresh,
             drain: &self.drain,
             securestorage_dir_set: std::env::var_os(SECURESTORAGE_DIR_VAR).is_some(),
@@ -296,6 +315,42 @@ impl ClaudeAccounts {
             claude_locks: LockTiming::CLAUDE,
         };
         Ok(run(&context, &usage))
+    }
+
+    /// The refusal of `scratch` as a login's scratch config dir, against
+    /// Claude Code's live files as this service resolves them
+    /// ([`scratch_refusal_against`]).
+    fn scratch_refusal(&self, scratch: &Path) -> Option<AccountsFailure> {
+        scratch_refusal_against(self.claude_paths().ok().as_ref(), scratch)
+    }
+
+    /// Captures the login in the scratch config dir `claude` names into the
+    /// store without changing the active account, then deletes the dir's
+    /// Keychain item, where it keeps one, whatever the capture came to: a
+    /// failure of that deletion is logged and never replaces the capture's
+    /// result. The dir itself is left to the caller.
+    fn capture_scratch_login(&self, claude: &ClaudePaths) -> Result<LoginCapture, AccountsFailure> {
+        let captured = self.capture_without_activating(claude);
+        if let Err(error) = delete_live_keychain_item(claude) {
+            tracing::warn!(%error, "the login's scratch Keychain item could not be deleted");
+        }
+        captured
+    }
+
+    fn capture_without_activating(
+        &self,
+        claude: &ClaudePaths,
+    ) -> Result<LoginCapture, AccountsFailure> {
+        let store = self.store().map_err(|error| store_failure(&error))?;
+        self.with_context(&store, claude, |context, _| {
+            capture_live_login(context, false)
+        })
+        .map_err(|error| service_failure(&error))?
+        .map(|outcome| LoginCapture {
+            number: outcome.number,
+            added: outcome.kind == CaptureKind::Added,
+        })
+        .map_err(|error| capture_failure(&error, false))
     }
 }
 
@@ -351,7 +406,8 @@ impl AccountsService for ClaudeAccounts {
             })?
             .autoswitch
             .to_engine();
-        self.with_context(&store, |context, usage| {
+        let claude = self.claude_paths()?;
+        self.with_context(&store, &claude, |context, usage| {
             poll_with_refresh(usage, &settings, context, fetch)
         })?
         .map_err(|error| AccountsError::new(error.to_string()))?;
@@ -396,7 +452,10 @@ impl AccountsService for ClaudeAccounts {
     /// login is live.
     fn switch_to(&self, number: u32) -> Result<SwitchReport, AccountsFailure> {
         let store = self.store().map_err(|error| store_failure(&error))?;
-        self.with_context(&store, |context, _| {
+        let claude = self
+            .claude_paths()
+            .map_err(|error| service_failure(&error))?;
+        self.with_context(&store, &claude, |context, _| {
             if let Some(answer) = roster_answer(context, number) {
                 return answer;
             }
@@ -410,10 +469,51 @@ impl AccountsService for ClaudeAccounts {
 
     fn add_current_login(&self) -> Result<u32, AccountsFailure> {
         let store = self.store().map_err(|error| store_failure(&error))?;
-        self.with_context(&store, |context, _| capture_live_login(context))
-            .map_err(|error| service_failure(&error))?
-            .map(|outcome| outcome.number)
-            .map_err(|error| capture_failure(&error))
+        let claude = self
+            .claude_paths()
+            .map_err(|error| service_failure(&error))?;
+        self.with_context(&store, &claude, |context, _| {
+            capture_live_login(context, true)
+        })
+        .map_err(|error| service_failure(&error))?
+        .map(|outcome| outcome.number)
+        .map_err(|error| capture_failure(&error, true))
+    }
+
+    /// `claude auth login --claudeai` with `CLAUDE_CONFIG_DIR` at `scratch`,
+    /// so the login lands there and never in the live home.
+    fn login_command(&self, scratch: &Path) -> Result<LoginCommand, AccountsFailure> {
+        if let Some(refusal) = self.scratch_refusal(scratch) {
+            return Err(refusal);
+        }
+        let Some(dir) = scratch.to_str() else {
+            return Err(failure(
+                AccountsFailureKind::Refused,
+                "scratch_not_text",
+                "the login's scratch folder's path is not text".to_owned(),
+            ));
+        };
+        Ok(LoginCommand {
+            args: ["auth", "login", "--claudeai"].map(str::to_owned).to_vec(),
+            env: vec![(CONFIG_DIR_VAR.to_owned(), dir.to_owned())],
+            // Set, it would pick the Keychain item over `CLAUDE_CONFIG_DIR`,
+            // possibly the user's live one.
+            env_remove: vec![SECURESTORAGE_DIR_VAR.to_owned()],
+        })
+    }
+
+    /// Captures the login `claude auth login` left in `scratch` with the
+    /// same codes as [`AccountsService::add_current_login`], leaving the
+    /// store's active account as it was; on macOS the scratch dir's Keychain
+    /// item is deleted afterwards whatever the capture came to.
+    fn capture_login_from(&self, scratch: &Path) -> Result<LoginCapture, AccountsFailure> {
+        if let Some(refusal) = self.scratch_refusal(scratch) {
+            return Err(refusal);
+        }
+        let claude = self
+            .claude_paths_in(Some(scratch))
+            .map_err(|error| service_failure(&error))?;
+        self.capture_scratch_login(&claude)
     }
 
     /// Holds a drain guard across the removal, which takes none of its own,
@@ -1009,15 +1109,21 @@ const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 const KEYCHAIN_FALLBACK_ACCOUNT: &str = "claude-code-user";
 
 /// `paths` with the live login where Claude Code keeps it on this platform:
-/// on macOS the Keychain item of the service the config dir picks
-/// (`config_dir`, `CLAUDE_CONFIG_DIR` as the process has it) and
-/// of the user's name, read and written through `/usr/bin/security`.
+/// on macOS the Keychain item of the service [`store_keychain_service`]
+/// picks (for the live home from `config_dir`, `CLAUDE_CONFIG_DIR` as the
+/// process has it, and `CLAUDE_SECURESTORAGE_CONFIG_DIR`; for a login's
+/// `scratch` dir from that dir alone) and of the user's name, read and
+/// written through `/usr/bin/security`.
 #[cfg(target_os = "macos")]
-fn with_live_store(paths: ClaudePaths, config_dir: Option<&std::ffi::OsStr>) -> ClaudePaths {
+fn with_live_store(
+    paths: ClaudePaths,
+    config_dir: Option<&std::ffi::OsStr>,
+    scratch: Option<&std::ffi::OsStr>,
+) -> ClaudePaths {
     let secure = std::env::var_os(SECURESTORAGE_DIR_VAR);
     let user = std::env::var_os("USER");
     paths.with_keychain(
-        keychain_service(secure.as_deref(), config_dir),
+        store_keychain_service(secure.as_deref(), config_dir, scratch),
         keychain_account(user.as_deref(), claude_accounts::os_user_name),
         SECURITY_TOOL,
     )
@@ -1026,8 +1132,30 @@ fn with_live_store(paths: ClaudePaths, config_dir: Option<&std::ffi::OsStr>) -> 
 /// `paths` with the live login where Claude Code keeps it on this platform:
 /// off macOS the live credential file, as `paths` already says.
 #[cfg(not(target_os = "macos"))]
-fn with_live_store(paths: ClaudePaths, _config_dir: Option<&std::ffi::OsStr>) -> ClaudePaths {
+fn with_live_store(
+    paths: ClaudePaths,
+    _config_dir: Option<&std::ffi::OsStr>,
+    _scratch: Option<&std::ffi::OsStr>,
+) -> ClaudePaths {
     paths
+}
+
+/// The Keychain service of the live login [`with_live_store`] reads: for a
+/// login's `scratch` config dir, the one Claude Code picks with only
+/// `CLAUDE_CONFIG_DIR` set to it, `secure` (`CLAUDE_SECURESTORAGE_CONFIG_DIR`)
+/// ignored, so it never names the live login's item (the login child runs
+/// without that variable); otherwise [`keychain_service`] of `secure` and
+/// `config_dir`.
+#[cfg(any(target_os = "macos", test))]
+fn store_keychain_service(
+    secure: Option<&std::ffi::OsStr>,
+    config_dir: Option<&std::ffi::OsStr>,
+    scratch: Option<&std::ffi::OsStr>,
+) -> String {
+    match scratch {
+        Some(scratch) => keychain_service(None, Some(scratch)),
+        None => keychain_service(secure, config_dir),
+    }
 }
 
 /// The Keychain service Claude Code keeps its live login under, as it picks
@@ -1076,6 +1204,40 @@ fn keychain_account(
         .unwrap_or_else(|| KEYCHAIN_FALLBACK_ACCOUNT.to_owned())
 }
 
+/// The refusal of `scratch` as a login's scratch config dir, `live` being
+/// Claude Code's live files (`None` when they could not be resolved): one
+/// that is not absolute, a live home that cannot be resolved (so it cannot
+/// be checked), or a folder that is the live home or holds the live global
+/// config, as `<scratch>/.claude.json`. Paths compare by their components.
+/// `None` when it may be one.
+fn scratch_refusal_against(live: Option<&ClaudePaths>, scratch: &Path) -> Option<AccountsFailure> {
+    if !scratch.is_absolute() {
+        return Some(failure(
+            AccountsFailureKind::Refused,
+            "scratch_not_absolute",
+            "the login's scratch folder is not an absolute path".to_owned(),
+        ));
+    }
+    let Some(live) = live else {
+        return Some(failure(
+            AccountsFailureKind::Refused,
+            "scratch_live_home_unknown",
+            "the live Claude home could not be resolved, so the login's scratch folder cannot be checked"
+                .to_owned(),
+        ));
+    };
+    let is_home = live.credentials_file().parent() == Some(scratch);
+    let holds_global = live.global_config() == scratch.join(".claude.json");
+    if is_home || holds_global {
+        return Some(failure(
+            AccountsFailureKind::Refused,
+            "scratch_is_live_home",
+            "the login's scratch folder is Claude Code's own home".to_owned(),
+        ));
+    }
+    None
+}
+
 /// A failure of the service around a write (its HTTP client, Claude Code's
 /// home), before the write ran.
 fn service_failure(error: &AccountsError) -> AccountsFailure {
@@ -1117,8 +1279,9 @@ fn switch_failure(error: SwitchError) -> AccountsFailure {
 
 /// A capture's failure: a `snake_case` name of the crate's variant as the code
 /// (a store refusal's own kind name), its text as the message. A plain
-/// failure is logged whole first.
-fn capture_failure(error: &CaptureError) -> AccountsFailure {
+/// failure is logged whole first, naming the live login when `live` (Add
+/// this login) and a login otherwise (one from a scratch dir).
+fn capture_failure(error: &CaptureError, live: bool) -> AccountsFailure {
     let (kind, code) = match error {
         CaptureError::NoLogin => (AccountsFailureKind::Refused, "no_login"),
         CaptureError::ApiKeyLogin => (AccountsFailureKind::Refused, "api_key_login"),
@@ -1141,7 +1304,11 @@ fn capture_failure(error: &CaptureError) -> AccountsFailure {
         _ => (AccountsFailureKind::Failed, "capture_failed"),
     };
     if kind == AccountsFailureKind::Failed {
-        tracing::error!(?error, "adding the live login failed");
+        if live {
+            tracing::error!(?error, "adding the live login failed");
+        } else {
+            tracing::error!(?error, "adding a login failed");
+        }
     }
     failure(kind, code, error.to_string())
 }
@@ -1784,6 +1951,150 @@ impl ProfileTransport for ProfileClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A login capture from a scratch dir whose login sits in a Keychain item
+    /// deletes that item whatever the capture came to: here the profile
+    /// endpoint does not answer, so the capture fails, and the item still
+    /// goes. Runs the crate's fake `security` through a wrapper naming its
+    /// folder.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a test that cannot set up its files must fail loudly"
+    )]
+    fn capture_login_from_deletes_the_scratch_keychain_item() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let hex = |bytes: &[u8]| -> String {
+            bytes
+                .iter()
+                .flat_map(|byte| [byte >> 4, byte & 0x0f])
+                .map(|digit| char::from_digit(u32::from(digit), 16).unwrap_or('0'))
+                .collect()
+        };
+        let base = std::env::temp_dir().join(format!(
+            "agent-claude-scratch-keychain-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("the test's folder can be made");
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700))
+            .expect("the test's folder can be made private");
+        let base = fs::canonicalize(&base).expect("the test's folder has a real path");
+        let keychain = base.join("keychain");
+        fs::create_dir_all(keychain.join("items")).expect("the fake Keychain's folder can be made");
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("accounts/tests/support/fake-security.sh");
+        let security = keychain.join("security");
+        fs::write(
+            &security,
+            format!(
+                "#!/bin/sh\nexport FAKE_SECURITY_DIR='{}'\nexec /bin/sh '{}' \"$@\"\n",
+                keychain.display(),
+                script.display()
+            ),
+        )
+        .expect("the fake's wrapper can be written");
+        fs::set_permissions(&security, fs::Permissions::from_mode(0o700))
+            .expect("the fake's wrapper can be made runnable");
+        let scratch = base.join("login");
+        fs::create_dir_all(&scratch).expect("the scratch folder can be made");
+        let oauth = serde_json::json!({"oauthAccount": {
+            "emailAddress": "user1@example.com",
+            "organizationUuid": "00000000-0000-4000-8000-0000000000a1",
+            "accountUuid": "00000000-0000-4000-8000-000000000011",
+            "organizationName": "Org"
+        }});
+        fs::write(scratch.join(".claude.json"), oauth.to_string())
+            .expect("the scratch global config can be written");
+        let service = keychain_service(None, Some(scratch.as_os_str()));
+        let item = keychain
+            .join("items")
+            .join(hex(format!("{service}\ntester").as_bytes()));
+        let login = r#"{"claudeAiOauth":{"accessToken":"fake-access-1","refreshToken":"fake-refresh-1","expiresAt":4102444800000}}"#;
+        fs::write(&item, hex(login.as_bytes())).expect("the fake item can be written");
+        let mut cfg = AccountsConfig::new(base.join("accounts"));
+        // Nothing listens there, so the profile endpoint never confirms the login.
+        cfg.base_url = Some("http://127.0.0.1:9".to_owned());
+        let accounts = ClaudeAccounts::new(cfg);
+        let paths = ClaudePaths::new(scratch.clone(), scratch.join(".claude.json"))
+            .with_keychain(service, "tester", &security);
+
+        let captured = accounts.capture_scratch_login(&paths);
+
+        assert!(captured.is_err(), "{captured:?}");
+        assert!(!item.exists(), "the scratch Keychain item is deleted");
+        assert!(scratch.is_dir(), "the scratch folder is left to the caller");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_scratch_dir_is_refused_when_the_live_home_is_unknown() {
+        // Absolute on every platform, unlike `/Users/me` on Windows.
+        let scratch = std::env::temp_dir().join("me/data/account-login/7");
+        let refusal =
+            scratch_refusal_against(None, &scratch).map(|failure| (failure.kind, failure.code));
+
+        assert_eq!(
+            refusal,
+            Some((
+                AccountsFailureKind::Refused,
+                "scratch_live_home_unknown".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_scratch_dir_holding_the_live_global_config_is_refused() {
+        let user = std::env::temp_dir().join("me");
+        let user = user.as_path();
+        let live = ClaudePaths::new(user.join(".claude"), user.join(".claude.json"));
+
+        for refused in [user.to_path_buf(), user.join(".claude")] {
+            let refusal = scratch_refusal_against(Some(&live), &refused)
+                .map(|failure| (failure.kind, failure.code));
+            assert_eq!(
+                refusal,
+                Some((
+                    AccountsFailureKind::Refused,
+                    "scratch_is_live_home".to_owned()
+                )),
+                "{}",
+                refused.display()
+            );
+        }
+        assert_eq!(
+            scratch_refusal_against(Some(&live), &user.join("data/account-login/7")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_scratch_dirs_keychain_service_ignores_the_securestorage_dir() {
+        use std::ffi::OsStr;
+
+        let secure = OsStr::new("/Users/me/.claude-secure");
+        let scratch = OsStr::new("/Users/me/data/account-login/7");
+        let live = OsStr::new("/Users/me/.claude-work");
+
+        assert_eq!(
+            store_keychain_service(Some(secure), None, Some(scratch)),
+            keychain_service(None, Some(scratch)),
+            "a scratch dir's service comes from the scratch path alone"
+        );
+        assert_ne!(
+            store_keychain_service(Some(secure), None, Some(scratch)),
+            keychain_service(Some(secure), None),
+            "a scratch dir never names the secure-storage dir's item"
+        );
+        assert_eq!(
+            store_keychain_service(Some(secure), Some(live), None),
+            keychain_service(Some(secure), Some(live)),
+            "the live home keeps the secure-storage dir's rule"
+        );
+    }
 
     #[test]
     fn the_keychain_service_name_follows_the_config_dir_rule() {

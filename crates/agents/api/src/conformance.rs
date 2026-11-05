@@ -85,14 +85,15 @@ pub fn check_accounts<A: Agent>(agent: &A) {
 /// service answers them, and the poll asks for no next poll; a refusal (the
 /// folder it would live in is not private) is an error, never a panic. A
 /// switch to account 1 there is refused as an unknown account (or a refusal,
-/// or fails) and writes nothing. A shutdown with nothing in flight is idle at
-/// once.
+/// or fails) and writes nothing. A login capture from a missing folder is
+/// unsupported or refused. A shutdown with nothing in flight is idle at once.
 ///
 /// # Panics
 ///
 /// Panics when the snapshot or the poll lists an account, the poll asks for
 /// a next poll, the switch succeeds, is unsupported, is busy or draining, or
-/// leaves an account behind, or the shutdown is not idle.
+/// leaves an account behind, the login capture is neither unsupported nor
+/// refused, or the shutdown is not idle.
 pub fn check_accounts_service(service: &dyn AccountsService) {
     if let Ok(snapshot) = service.snapshot() {
         assert!(
@@ -113,6 +114,7 @@ pub fn check_accounts_service(service: &dyn AccountsService) {
         );
     }
     check_switch_on_a_missing_store(service);
+    check_login_capture_from_a_missing_dir(service);
     assert!(
         service.begin_shutdown(Duration::ZERO),
         "a shutdown with nothing in flight is not idle"
@@ -144,6 +146,26 @@ fn check_switch_on_a_missing_store(service: &dyn AccountsService) {
             snapshot.accounts
         );
     }
+}
+
+/// A login capture from an absolute folder under the system temp dir that
+/// does not exist answers unsupported or a refusal, never a success.
+fn check_login_capture_from_a_missing_dir(service: &dyn AccountsService) {
+    let scratch = std::env::temp_dir().join(format!(
+        "agent-api-conformance-login-{}-missing",
+        std::process::id()
+    ));
+    let captured = service.capture_login_from(&scratch);
+    assert!(
+        matches!(
+            &captured,
+            Err(failure) if matches!(
+                failure.kind,
+                AccountsFailureKind::Unsupported | AccountsFailureKind::Refused
+            )
+        ),
+        "a login capture from a missing folder is not unsupported or refused: {captured:?}"
+    );
 }
 
 /// The largest runtime icon a descriptor may carry, in bytes.
@@ -642,6 +664,35 @@ mod tests {
             Err(unsupported.clone())
         );
         assert_eq!(service.set_order(vec![1]), Err(unsupported));
+    }
+
+    #[test]
+    fn login_methods_default_to_unsupported() {
+        let service = RequiredOnly;
+        let scratch = std::env::temp_dir().join("agent-api-login-default");
+
+        assert_eq!(
+            service.login_command(&scratch),
+            Err(crate::AccountsFailure::unsupported())
+        );
+        assert_eq!(
+            service.capture_login_from(&scratch),
+            Err(crate::AccountsFailure::unsupported())
+        );
+    }
+
+    #[test]
+    fn check_accounts_passes_a_service_without_login_support() {
+        let service = FakeAccounts(Vec::new());
+        assert_eq!(
+            service
+                .capture_login_from(&std::env::temp_dir())
+                .map_err(|failure| failure.kind),
+            Err(crate::AccountsFailureKind::Unsupported),
+            "the fake keeps the default login capture"
+        );
+
+        check_accounts_service(&service);
     }
 
     #[test]

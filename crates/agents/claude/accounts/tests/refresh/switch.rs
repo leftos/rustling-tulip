@@ -459,7 +459,7 @@ fn a_keychain_write_of_a_newline_ended_login_stores_it_compact() {
         Some(json_of(&own).to_string().as_str()),
         "the item holds the compact JSON, which `security -w` reads back raw"
     );
-    let captured = capture_live_login(&rig.context())
+    let captured = capture_live_login(&rig.context(), true)
         .expect("the crate reads the item back as the login it wrote");
     assert_eq!(
         captured.number, 1,

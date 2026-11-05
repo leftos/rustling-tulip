@@ -61,7 +61,8 @@ mod win32;
 
 pub use capture::{CaptureError, CaptureKind, CaptureOutcome, capture_live_login};
 pub use claude_files::{
-    ClaudeFileError, clear_primary_api_key, update_global_config, write_live_credentials,
+    ClaudeFileError, clear_primary_api_key, delete_live_keychain_item, update_global_config,
+    write_live_credentials,
 };
 pub use drain::{Drain, Draining, WorkGuard};
 pub use engine::{

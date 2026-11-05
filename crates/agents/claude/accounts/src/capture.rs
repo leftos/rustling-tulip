@@ -8,8 +8,8 @@
 //! files again: a login that changed meanwhile is refused, and only the locked read is written.
 //!
 //! A login no account has is added as the next account number, carrying the uuid the oracle resolved when the login has
-//! none, and made the active account. A login an account has is written into it only when the live copy is later than
-//! the stored one, so a stored copy is never rolled back; a stored credential that does not open is left as it is, and
+//! none, and made the active account when the capture activates. A login an account has is written into it only when the
+//! live copy is later than the stored one, so a stored copy is never rolled back; a stored credential that does not open is left as it is, and
 //! the account's uuid is filled from the login's whatever the verdict. No outcome, error or log line carries a token or
 //! a path.
 
@@ -38,15 +38,17 @@ use crate::usage::Identity;
 /// What a capture did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureKind {
-    /// The login was added as a new account and made the active account.
+    /// The login was added as a new account, made the active account when the capture activates.
     Added,
-    /// The live copy was later than the stored one and was written into the account, which was made active.
+    /// The live copy was later than the stored one and was written into the account, made active when the capture
+    /// activates.
     Refreshed,
-    /// The stored copy is newer than the live one, or another credential whose age cannot be told against it, and was
-    /// kept; nothing was written but the active account, set to this one, and the uuid when the record has none.
+    /// The stored copy is newer than the live one, or another credential whose age cannot be told against it, or it is
+    /// the active account's and the capture does not activate, and was kept; nothing was written but the active account, set to this one when the capture activates, and the uuid when
+    /// the record has none.
     Kept,
     /// The stored copy is the live one, or its lineage at the same expiry; nothing was written but the active account,
-    /// set to this one, and the uuid when the record has none.
+    /// set to this one when the capture activates, and the uuid when the record has none.
     Unchanged,
 }
 
@@ -151,6 +153,11 @@ pub enum CaptureError {
 /// context's store, Claude Code files, profile endpoint, drain and clock, and nothing else. Every lock is released
 /// before it returns.
 ///
+/// With `activate`, the account the login is (added or matched) becomes the store's active account, as "Add this login"
+/// wants, since the login is the live one. Without it the active account is left as it was: a login captured from a
+/// scratch config dir is not the live login, which did not change. Nor is such a login written into the active account
+/// itself, which the live login keeps: a match on it is [`CaptureKind::Kept`] where it would be refreshed.
+///
 /// # Errors
 ///
 /// A [`CaptureError`] saying why: the refusals of the unlocked read ([`CaptureError::NoLogin`],
@@ -165,7 +172,10 @@ pub enum CaptureError {
 ///
 /// A login whose `oauthAccount` has no `accountUuid` keeps the uuid the profile endpoint resolved for it, on the record
 /// it adds or on the matched one that has none.
-pub fn capture_live_login(context: &RefreshContext<'_>) -> Result<CaptureOutcome, CaptureError> {
+pub fn capture_live_login(
+    context: &RefreshContext<'_>,
+    activate: bool,
+) -> Result<CaptureOutcome, CaptureError> {
     let first =
         Login::of(read_live_login(context.claude).map_err(|error| live_read_error(&error))?)?;
     let resolved_uuid = verify(context, &first)?;
@@ -183,8 +193,8 @@ pub fn capture_live_login(context: &RefreshContext<'_>) -> Result<CaptureOutcome
     // After the locked read's comparison with `first`, which includes the uuid: `first` is the login as read.
     login.record_uuid(resolved_uuid);
     match candidate {
-        None => add_new(context, &locks.lock, &login),
-        Some(number) => refresh_matched(context, &locks.lock, &login, number),
+        None => add_new(context, &locks.lock, &login, activate),
+        Some(number) => refresh_matched(context, &locks.lock, &login, number, activate),
     }
 }
 
@@ -407,11 +417,12 @@ fn locked_login(
     Ok(login)
 }
 
-/// Adds `login` as the next account number, then makes it the active account.
+/// Adds `login` as the next account number, then, with `activate`, makes it the active account.
 fn add_new(
     context: &RefreshContext<'_>,
     lock: &AccountLockGuard,
     login: &Login,
+    activate: bool,
 ) -> Result<CaptureOutcome, CaptureError> {
     let account = NewAccount {
         number: AccountNumber::Next,
@@ -437,14 +448,18 @@ fn add_new(
             account: None,
         });
     };
-    context
-        .store
-        .set_active(lock, number)
-        .map_err(|error| store_error(&error))?;
-    tracing::info!(
-        account = number,
-        "the live login was added to the account store"
-    );
+    if activate {
+        context
+            .store
+            .set_active(lock, number)
+            .map_err(|error| store_error(&error))?;
+        tracing::info!(
+            account = number,
+            "the live login was added to the account store"
+        );
+    } else {
+        tracing::info!(account = number, "a login was added to the account store");
+    }
     Ok(CaptureOutcome {
         kind: CaptureKind::Added,
         number,
@@ -454,43 +469,70 @@ fn add_new(
 
 /// Writes `login` into account `number` when the live copy is later than the stored one, and only then; a stored
 /// credential that does not open is left as it is. A stored copy kept or unchanged writes nothing but the active
-/// account, which is set to `number` when it is not already, since `number` is the live login. The account's uuid is
+/// account, which with `activate` is set to `number` when it is not already, since `number` is the live login. Without
+/// `activate`, a login that is the store's active account's is never written into it, however late: the live login,
+/// not this one, is that account's source, so a verdict to write is [`CaptureKind::Kept`]. The account's uuid is
 /// filled from the login's when the record has none, whatever the verdict.
 fn refresh_matched(
     context: &RefreshContext<'_>,
     lock: &AccountLockGuard,
     login: &Login,
     number: u32,
+    activate: bool,
 ) -> Result<CaptureOutcome, CaptureError> {
     let stored = context.store.read_credentials(number).map_err(|error| {
         tracing::warn!(account = number, %error, "the account's stored credential does not open; the live login is not written over it");
         CaptureError::StoredUnopenable { number }
     })?;
-    let kind = stored_verdict(stored.as_ref(), &login.credential);
+    let mut kind = stored_verdict(stored.as_ref(), &login.credential);
+    if !activate && kind == CaptureKind::Refreshed && active_account(context)? == Some(number) {
+        tracing::info!(
+            account = number,
+            "a login is the active account's; its stored copy is left to the live login"
+        );
+        kind = CaptureKind::Kept;
+    }
     context
         .store
         .backfill_uuid(lock, number, &login.uuid, &login.identity())
         .map_err(|error| store_error(&error))?;
     if kind == CaptureKind::Refreshed {
         let old_fp = stored.as_ref().and_then(credential_fingerprint);
-        write_matched(context, lock, login, number, old_fp.as_deref())?;
-    } else {
+        write_matched(context, lock, login, number, old_fp.as_deref(), activate)?;
+    } else if activate {
         // Writes nothing when the account already is the active one.
         context
             .store
             .set_active(lock, number)
             .map_err(|error| store_error(&error))?;
     }
-    tracing::info!(
-        account = number,
-        outcome = kind.as_str(),
-        "the live login was captured into its account"
-    );
+    if activate {
+        tracing::info!(
+            account = number,
+            outcome = kind.as_str(),
+            "the live login was captured into its account"
+        );
+    } else {
+        tracing::info!(
+            account = number,
+            outcome = kind.as_str(),
+            "a login was captured into its account"
+        );
+    }
     Ok(CaptureOutcome {
         kind,
         number,
         email: login.email.clone(),
     })
+}
+
+/// The store's active account, as `accounts.json` says it now, read under the account lock the caller holds.
+fn active_account(context: &RefreshContext<'_>) -> Result<Option<u32>, CaptureError> {
+    Ok(context
+        .store
+        .read_sequence()
+        .map_err(|error| store_error(&error))?
+        .and_then(|sequence| sequence.active()))
 }
 
 /// What a capture does with `live` for an account whose stored copy is `stored`, never rolling the stored copy back:
@@ -521,7 +563,8 @@ fn expiry(blob: &CredentialBlob) -> f64 {
     oauth_expiry(blob).ok().flatten().unwrap_or(0.0)
 }
 
-/// The matched account's write, under every lock: its credential, its config backup and the active account;
+/// The matched account's write, under every lock: its credential, its config backup and, with `activate`, the active
+/// account;
 /// `disabled`, `alias` and `maySpendCredits` are kept as they are. Its uuid is filled by [`refresh_matched`] whatever
 /// the verdict. Once the credential is written, the stash rows that held up the replaced one, whose fingerprint was
 /// `old_fp` (none for an account that stored none), are retired ([`stash::retire_superseded`]).
@@ -531,6 +574,7 @@ fn write_matched(
     login: &Login,
     number: u32,
     old_fp: Option<&str>,
+    activate: bool,
 ) -> Result<(), CaptureError> {
     let store = context.store;
     let failed = |error: StoreError| store_error(&error);
@@ -557,7 +601,9 @@ fn write_matched(
     store
         .write_account_config(lock, number, &login.oauth_account)
         .map_err(failed)?;
-    store.set_active(lock, number).map_err(failed)?;
+    if activate {
+        store.set_active(lock, number).map_err(failed)?;
+    }
     Ok(())
 }
 
