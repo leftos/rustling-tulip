@@ -17,8 +17,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
-#[cfg(not(windows))]
-use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -1838,6 +1836,31 @@ fn spawn_daemon_with_flags(
 const DAEMON_STD_HANDLES: crate::spawn_detached::StdHandles =
     crate::spawn_detached::StdHandles::Nul;
 
+/// The daemon's command line: `bin`, its start arguments, the templates
+/// directory in the environment, and null stdio, in a process group of its
+/// own, so a signal to the caller's group (a terminal's Ctrl-C, a hang-up)
+/// never reaches the daemon.
+#[cfg(not(windows))]
+fn daemon_command(
+    bin: &std::path::Path,
+    args: &[std::ffi::OsString],
+    template_dir: &std::path::Path,
+) -> std::process::Command {
+    use std::os::unix::process::CommandExt as _;
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(args);
+    cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.process_group(0);
+    cmd
+}
+
+/// Starts the daemon in a process group of its own, then hands the child to a
+/// reaper thread: the wait keeps it from staying a zombie while the client
+/// runs, and the client outlives neither a failure to start the thread nor an
+/// exiting daemon.
 #[cfg(not(windows))]
 #[expect(
     clippy::unused_async,
@@ -1848,17 +1871,19 @@ async fn spawn_daemon(
     template_dir: &std::path::Path,
     start_failure: &Path,
 ) -> anyhow::Result<()> {
-    let mut cmd = Command::new(bin);
-    cmd.args(daemon_start_args(start_failure));
-    cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    cmd.spawn()
-        .map(|child| {
-            drop(child);
-        })
-        .context("failed to spawn daemon")
+    let mut cmd = daemon_command(bin, &daemon_start_args(start_failure), template_dir);
+    let mut child = cmd.spawn().context("failed to spawn daemon")?;
+    let pid = child.id();
+    let reaper = std::thread::Builder::new()
+        .name("daemon-reaper".into())
+        .spawn(move || match child.wait() {
+            Ok(status) => debug!(pid, %status, "the daemon ended"),
+            Err(err) => warn!("waiting on the daemon (pid {pid}) failed: {err:#}"),
+        });
+    if let Err(err) = reaper {
+        warn!("could not start the daemon reaper thread: {err:#}; the daemon runs unreaped");
+    }
+    Ok(())
 }
 
 /// What reading `daemon.json` found.
@@ -2088,6 +2113,8 @@ async fn wait_for_handshake_among(
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
+    #[cfg(unix)]
+    use super::daemon_command;
     use super::{
         Action, Client, DaemonIsElevated, ElevatedStep, ExistingDaemon, ExistingKind,
         HandshakeRead, OrdinaryDaemonIncompatible, action_for, classify_existing_daemon_in,
@@ -3016,6 +3043,43 @@ mod tests {
                 std::ffi::OsString::from("--start-failure-file"),
                 std::ffi::OsString::from(r"C:\cfg\logs\daemon-start-failure-4242-0.txt"),
             ]
+        );
+    }
+
+    /// A terminal sends Ctrl-C and a hang-up to its foreground process group,
+    /// so a daemon sharing the caller's group would take the client's signal
+    /// with it. Its group is its own, named by its pid.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_command_starts_its_own_process_group() {
+        let scratch = ScratchDir::new("daemon-process-group");
+        let mut child = daemon_command(
+            Path::new("/bin/sleep"),
+            &[std::ffi::OsString::from("30")],
+            &scratch.0,
+        )
+        .spawn()
+        .expect("spawn the stand-in daemon");
+        let pid = child.id();
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .expect("read the stand-in's process group");
+        assert!(
+            ps.status.success(),
+            "ps failed reading the group of {pid}: {}",
+            String::from_utf8_lossy(&ps.stderr)
+        );
+        let pgid: u32 = String::from_utf8_lossy(&ps.stdout)
+            .trim()
+            .parse()
+            .expect("ps prints the process group as a number");
+        child.kill().expect("kill the stand-in daemon");
+        child.wait().expect("reap the stand-in daemon");
+
+        assert_eq!(
+            pgid, pid,
+            "the daemon shares the process group of whoever started it"
         );
     }
 
