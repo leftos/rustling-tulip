@@ -48,6 +48,10 @@ When the user is also logged on at the host (an Active or Disconnected session),
 
 The summarizer's stored key reads as `unreachable` rather than `missing`, and saving or clearing one, or running the Test summary, fails with the same message. To avoid it, be logged on at the host, or start the daemon there from the desktop app or the login autostart before connecting over SSH; the bridge then uses or starts an ordinary daemon.
 
+## macOS
+
+There is no Keychain store yet: the store is installed only for Windows Credential Manager (`env_secrets.rs`), and off Windows it fails with "the secret store is Windows Credential Manager; there is no store off Windows". The daemon logs `the secret store could not be installed` at start, and a spawn that has a row to seal, or a `${secret:<id>}` to resolve, is refused. Give a session a secret with an `${env:NAME}` row, resolved from the daemon's environment at spawn. The Dashboard summarizer cannot read a saved key there either. The native client keeps no tailnet device tokens on macOS for the same reason ([native-client.md](./native-client.md) "macOS").
+
 ## Existing files and cleanup
 
 At startup, before orphan recovery reads the sidecars, the daemon seals every literal secret row in `state.json`'s `last_spawn_config`s, every `sessions/<id>/meta.json` and every `history/<id>.json` (`main.rs`: `seal_stored_secrets`, `prune_and_seal_history`), rewriting each file that changed. Only the name pattern applies, since old files have no toggle, and other rows (`RUST_LOG`) are untouched.

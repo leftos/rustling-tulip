@@ -4,7 +4,7 @@ Where the daemon and the native client keep their files, what each file holds, a
 
 ## Config dir
 
-Both sides resolve the config dir via the `directories` crate as `ProjectDirs::from("dev", "leftos", "rustling-tulip").config_dir()`. On Windows that expands to `%APPDATA%\leftos\rustling-tulip\config\` (note the `leftos\` + `\config\` segments — `directories` inserts them, so a plain `%APPDATA%\rustling-tulip\` path is wrong). Layout under that root:
+Both sides resolve the config dir via the `directories` crate as `ProjectDirs::from("dev", "leftos", "rustling-tulip").config_dir()`. On Windows that expands to `%APPDATA%\leftos\rustling-tulip\config\` (note the `leftos\` + `\config\` segments — `directories` inserts them, so a plain `%APPDATA%\rustling-tulip\` path is wrong). On macOS it is `~/Library/Application Support/dev.leftos.rustling-tulip/` and the data-local dir below is the same folder, so `daemon.json`, `binaries/`, `worktrees/`, `updates/` and the rest sit side by side there (the path holds a space). Layout under that root:
 
 - `state.json` — persisted repos + workspaces + tabs, plus daemon-side host settings that must apply with no window open (see `crates/daemon/src/state.rs`).
 

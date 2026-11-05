@@ -1007,6 +1007,17 @@ Menus and modals keep to the window and hand the keyboard back. A context menu o
 
 Esc has deliberate exceptions. It never dismisses the layout chooser (the import modal in "Tab layouts" does: Esc and its ✕ both keep the layout), and it is ignored while a recovery or an exit is in flight. In a session rename it leaves the menu open and returns to its rows rather than closing them.
 
+## macOS
+
+The client builds and runs on macOS (arm64), packed as an unsigned app bundle (`tools/installer/README.md` "macOS app and disk image"); the open work and the Mac mini runs are in [plans/macos-compat.md](./plans/macos-compat.md) "Native client". What is true off Windows today:
+
+- The daemon and tracer sit beside the client exe (`Contents/MacOS/` in the bundle), and the daemon runs from a cached copy under the binaries folder, as on Windows. Config, data, binaries, worktrees and updates all share `~/Library/Application Support/dev.leftos.rustling-tulip/` (a path with a space; [on-disk.md](./on-disk.md)).
+- Sessions work: a shell and a Claude session start under `rt-tracer`, which the daemon reaches over a Unix socket in the temp folder, and a Claude session's hooks reach the daemon.
+- Autostart is a LaunchAgent (`daemon_client::autostart`).
+- Notifications: the OS toast code is Windows only, so macOS shows no OS notification; in-app toasts are the plan (RT-1008), not built.
+- Secrets: the daemon refuses to seal an env secret, so a secret reaches a session as an `${env:NAME}` row, and the summarizer cannot read a saved key ([env-secrets.md](./env-secrets.md) "macOS"). Tailnet device tokens are not stored either; the client logs that there is no store off Windows.
+- Signing and notarization are deferred (RT-665).
+
 ## Tests
 
 Three tiers, all Rust tests:
