@@ -10,8 +10,10 @@
 //! of their own, so a write never holds the connection's later messages, and
 //! call the service's seam method on a blocking thread; every one but the
 //! switch and `SetAutoSwitch` is local-only, refused before it gets here
-//! (`remote::host_only_refusal`). A `SetAutoSwitch` that sets neither field
-//! is refused `account_refused` before any seam call. After the write returns,
+//! (`remote::host_only_refusal`). On a host with an account service, a
+//! `SetAutoSwitch` that sets neither field is refused `account_refused` before
+//! any seam call; a successful one wakes the engine task after its refresh.
+//! After the write returns,
 //! whether it succeeded or not, the handler asks the driver for a refresh
 //! and waits up to [`REFRESH_WAIT`] for it, so the driver stays the cache's
 //! only writer. A success answers `Accounts` from the cache (or, with no
@@ -24,11 +26,12 @@
 use super::Hub;
 use super::StateEvent;
 use super::connection::ConnCtx;
+use crate::accounts::engine::account_event;
 use crate::accounts::snapshot::{Wire, wire};
 use crate::accounts::{Accounts, SharedAccounts};
 use agent_api::accounts::AccountEventRow;
 use agent_api::{AccountsConfig, AccountsFailure, AccountsFailureKind, AccountsSnapshot};
-use protocol::{AccountEventKind, ClientMessage, DaemonMessage, error_codes};
+use protocol::{ClientMessage, DaemonMessage, error_codes};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,21 +49,6 @@ const NOTHING_TO_CHANGE: &str = "nothing to change";
 
 /// The trigger of a switch a user asked for.
 const MANUAL: &str = "manual";
-
-/// `row` on the wire.
-fn account_event(row: AccountEventRow) -> AccountEventKind {
-    match row {
-        AccountEventRow::Switched { from, to, trigger } => {
-            AccountEventKind::Switched { from, to, trigger }
-        }
-        AccountEventRow::AllExhausted { earliest_reset_at } => {
-            AccountEventKind::AllExhausted { earliest_reset_at }
-        }
-        AccountEventRow::Quarantined { number } => AccountEventKind::Quarantined { number },
-        AccountEventRow::Unquarantined { number } => AccountEventKind::Unquarantined { number },
-        AccountEventRow::Halted { message } => AccountEventKind::Halted { message },
-    }
-}
 
 /// The accounts handle over the service the registered plugins offer for
 /// this host's account store, or `None` when the daemon runs elevated, the
@@ -156,7 +144,9 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             threshold_pct,
             request_id,
         } => {
-            if enabled.is_none() && threshold_pct.is_none() {
+            // After the no-service check `write` makes: a host with no
+            // account service answers `account_unsupported` either way.
+            if hub.accounts.is_some() && enabled.is_none() && threshold_pct.is_none() {
                 let _ = ctx.out_tx.send(error(
                     error_codes::ACCOUNT_REFUSED,
                     NOTHING_TO_CHANGE.to_owned(),
@@ -164,11 +154,18 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
                 ));
                 return;
             }
-            write(hub, ctx, request_id, "set auto-switch", move |service| {
-                service
-                    .set_auto_switch(enabled, threshold_pct)
-                    .map(|_| None)
-            });
+            write_then(
+                hub,
+                ctx,
+                request_id,
+                "set auto-switch",
+                AfterWrite::WakeEngine,
+                move |service| {
+                    service
+                        .set_auto_switch(enabled, threshold_pct)
+                        .map(|_| None)
+                },
+            );
         }
         other => warn!(?other, "accounts::handle: routed a message it does not own"),
     }
@@ -210,6 +207,26 @@ fn write(
     what: &'static str,
     op: impl FnOnce(&dyn agent_api::AccountsService) -> WriteOutcome + Send + 'static,
 ) {
+    write_then(hub, ctx, request_id, what, AfterWrite::Nothing, op);
+}
+
+/// What a successful write does after its refresh, before it answers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AfterWrite {
+    Nothing,
+    /// Wakes the engine task, for a write to the auto-switch settings.
+    WakeEngine,
+}
+
+/// [`write`], doing `after` once a successful `op`'s refresh is in.
+fn write_then(
+    hub: &Hub,
+    ctx: &ConnCtx<'_>,
+    request_id: Option<String>,
+    what: &'static str,
+    after: AfterWrite,
+    op: impl FnOnce(&dyn agent_api::AccountsService) -> WriteOutcome + Send + 'static,
+) {
     let Some(handle) = &hub.accounts else {
         let _ = ctx.out_tx.send(error(
             error_codes::ACCOUNT_UNSUPPORTED,
@@ -222,7 +239,7 @@ fn write(
     let out_tx = ctx.out_tx.clone();
     let events = hub.state_events.clone();
     tokio::spawn(async move {
-        let reply = write_reply(&handle, &events, request_id, what, op).await;
+        let reply = write_reply(&handle, &events, request_id, what, after, op).await;
         let _ = out_tx.send(reply);
     });
 }
@@ -235,6 +252,7 @@ async fn write_reply(
     events: &tokio::sync::broadcast::Sender<StateEvent>,
     request_id: Option<String>,
     what: &'static str,
+    after: AfterWrite,
     op: impl FnOnce(&dyn agent_api::AccountsService) -> WriteOutcome + Send + 'static,
 ) -> DaemonMessage {
     let service = Arc::clone(handle.service());
@@ -264,6 +282,9 @@ async fn write_reply(
     let lane_open = refreshed(handle, what).await;
     match outcome {
         Ok(event) => {
+            if after == AfterWrite::WakeEngine {
+                handle.engine_wake.notify_one();
+            }
             if let Some(row) = event {
                 let _ = events.send(StateEvent::AccountEvent {
                     event: account_event(row),

@@ -337,13 +337,16 @@ mod tests {
     use super::Settings;
     use std::path::PathBuf;
 
-    /// A fresh scratch folder for `test`.
+    /// A fresh scratch folder for `test`, emptied first, as the integration
+    /// tests' scratch folders are.
     fn scratch(test: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "claude-accounts-settings-{test}-{}",
             std::process::id()
         ));
-        let _ = std::fs::remove_dir_all(&dir);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("the test's old folder can be removed");
+        }
         std::fs::create_dir_all(&dir).expect("the scratch folder can be made");
         dir
     }

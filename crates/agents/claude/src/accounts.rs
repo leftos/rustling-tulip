@@ -10,23 +10,29 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::Duration;
 
+use agent_api::accounts::{AccountEventRow, EngineTick};
 use agent_api::{
     AccountKindRow, AccountRef, AccountRow, AccountsConfig, AccountsError, AccountsFailure,
     AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, PollReport, PollScope,
     SwitchReport, UsageRow, UsageStatus, UsageWindowRow,
 };
 use chrono::{DateTime, Utc};
+use claude_accounts::engine::{
+    Engine, EventBody, Lease, LeaseHolder, LiveSwitch, SwitchFailure, SwitchFn, TickInputs,
+    TickOutcome, TickReport, TransportCollector, WhileOn, next_delay,
+};
 use claude_accounts::{
     AccessToken, AccountKind, AccountLock, AccountRecord, AccountsRoot, AutoSwitchSection,
     CaptureError, ClaudePaths, Drain, FetchScope, Identity, LockError, LockTiming, PROFILE_TIMEOUT,
     PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts, ProfileTransport, RawProfile, RawToken,
     RawUsage, RefreshContext, RefreshRequest, RefreshTransport, Secret, Settings, SettingsError,
     Store, StoreError, StoreErrorKind, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome,
-    TOKEN_URL, TransportError, USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable,
-    UsageTransport, UsageWindow, capture_live_login, poll_with_refresh, probe_outgoing,
+    SwitchPrecondition, TOKEN_URL, TransportError, USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL,
+    UsageEntry, UsageTable, UsageTransport, UsageWindow, capture_live_login, poll_with_refresh,
+    probe_outgoing,
 };
 use directories::UserDirs;
 use reqwest::blocking::{Body, Client, RequestBuilder};
@@ -49,18 +55,45 @@ const SECURESTORAGE_DIR_VAR: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
 /// cadence, the floor no planned poll is tightened below.
 const POLL_FLOOR_S: f64 = claude_accounts::engine::URGENT_INTERVAL_S;
 
+/// The auto-switch engine's name in the lease it holds.
+const ENGINE_OWNER: &str = "rustling-tulip";
+
+/// Why a halted engine stands by, for the snapshot and the halt event.
+const HALTED: &str = "a switch failed and so did putting the live login back; auto-switch is halted until it is turned off and on again or the daemon restarts";
+
+/// The paused reason of a cooldown setting that is no duration.
+const COOLDOWN_UNREADABLE: &str = "the auto-switch cooldown could not be read";
+
+/// What the last engine tick left for the snapshot's auto-switch state.
+#[derive(Debug, Default)]
+struct EngineView {
+    paused_reason: Option<String>,
+    last_decision: Option<String>,
+    warm_up_done: bool,
+}
+
 /// The account service over the store at an [`AccountsConfig`]'s root. It
-/// opens the store on each call and holds no lock across calls; what it keeps
-/// is the HTTP client, the stop drain, the ownership verdicts and the process
-/// table, each safe to share between threads.
+/// opens the store on each call and holds no lock across calls but the
+/// engine's own, during a tick; what it keeps is the HTTP client, the stop
+/// drain, the ownership verdicts, the process table and the auto-switch
+/// engine, each safe to share between threads.
 pub struct ClaudeAccounts {
     cfg: AccountsConfig,
     /// Built by the first call that sends, never on an async thread.
     client: OnceLock<Client>,
     drain: Arc<Drain>,
     verdicts: ProbeVerdicts,
-    #[expect(dead_code, reason = "the auto-switch engine (RT-912) reads it")]
     processes: Box<dyn proc_table::ProcessTable + Send + Sync>,
+    /// The auto-switch engine while auto-switch is on, made by the first
+    /// tick that finds it on; held across a tick, so one runs at a time.
+    engine: Mutex<Option<Engine>>,
+    /// What the last tick left for [`AccountsService::snapshot`]; `None`
+    /// while no engine runs.
+    view: Mutex<Option<EngineView>>,
+    /// Held by an engine switch across its re-read of the settings and the
+    /// switch, and by a settings write: a tick under way when auto-switch is
+    /// turned off makes no switch after the write.
+    switch_guard: Mutex<()>,
 }
 
 impl ClaudeAccounts {
@@ -73,7 +106,73 @@ impl ClaudeAccounts {
             drain: Arc::new(Drain::new()),
             verdicts: ProbeVerdicts::new(),
             processes: process_table(),
+            engine: Mutex::new(None),
+            view: Mutex::new(None),
+            switch_guard: Mutex::new(()),
         }
+    }
+
+    /// The auto-switch state for a snapshot: the settings' ([`auto_state`]),
+    /// with what the last tick left while auto-switch is on.
+    fn auto_snapshot(&self, root: &AccountsRoot) -> Option<AutoState> {
+        let mut auto = auto_state(root)?;
+        if auto.enabled
+            && let Some(view) = &*lock(&self.view)
+        {
+            // A running engine's own reason, or none, stands over the
+            // settings' cooldown reason.
+            auto.paused_reason.clone_from(&view.paused_reason);
+            auto.warm_up_done = view.warm_up_done;
+            auto.last_decision.clone_from(&view.last_decision);
+        }
+        Some(auto)
+    }
+
+    /// Halts the engine in `slot`, if any, and releases its lease in the
+    /// store, so another engine can take over at once.
+    fn retire(&self, slot: &mut Option<Engine>) {
+        let Some(mut engine) = slot.take() else {
+            return;
+        };
+        engine.halt();
+        *lock(&self.view) = None;
+        // A release names the holder by its owner and pid alone; the
+        // interval is not read.
+        let holder = LeaseHolder::new(ENGINE_OWNER, std::process::id(), 0.0);
+        let root = AccountsRoot::new(self.cfg.root.clone());
+        if let Err(error) = Lease::new(&root).release(&holder) {
+            tracing::warn!(%error, "the auto-switch engine could not release its lease");
+        }
+    }
+
+    /// Ticks `engine` once over `store` with `section`'s settings, and
+    /// returns its report with whether the engine was halted before it.
+    fn run_tick(
+        &self,
+        store: &Store,
+        engine: &mut Engine,
+        section: &AutoSwitchSection,
+    ) -> Result<(TickReport, bool), AccountsError> {
+        let settings = section.to_engine();
+        let switcher = WhileEnabled {
+            settings: store.root().settings(),
+            guard: &self.switch_guard,
+        };
+        let was_halted = engine.halted();
+        let report = self.with_context(store, |context, usage| {
+            let collector = TransportCollector(usage);
+            engine.tick(&TickInputs {
+                context,
+                collector: &collector,
+                processes: &*self.processes,
+                switcher: &switcher,
+                claude_config_dir_set: std::env::var_os(CONFIG_DIR_VAR)
+                    .is_some_and(|dir| !dir.is_empty()),
+                settings: &settings,
+                auto_switch_enabled: true,
+            })
+        })?;
+        Ok((report, was_halted))
     }
 
     /// The shared client, built now when no call has built it yet. A failed
@@ -167,7 +266,7 @@ impl AccountsService for ClaudeAccounts {
     fn snapshot(&self) -> Result<AccountsSnapshot, AccountsError> {
         let store = self.open_store()?;
         let mut snapshot = read_store(&store)?.snapshot;
-        snapshot.auto = auto_state(store.root());
+        snapshot.auto = self.auto_snapshot(store.root());
         Ok(snapshot)
     }
 
@@ -185,7 +284,7 @@ impl AccountsService for ClaudeAccounts {
             return Ok(PollReport {
                 snapshot: AccountsSnapshot {
                     accounts: Vec::new(),
-                    auto: auto_state(store.root()),
+                    auto: self.auto_snapshot(store.root()),
                 },
                 next_poll_in: None,
             });
@@ -201,7 +300,7 @@ impl AccountsService for ClaudeAccounts {
         })?
         .map_err(|error| AccountsError::new(error.to_string()))?;
         let mut read = read_store(&store)?;
-        read.snapshot.auto = auto_state(store.root());
+        read.snapshot.auto = self.auto_snapshot(store.root());
         let next_poll_in = if read.snapshot.accounts.is_empty() {
             None
         } else {
@@ -217,9 +316,21 @@ impl AccountsService for ClaudeAccounts {
         })
     }
 
+    /// After the wait, halts the auto-switch engine and releases its lease.
+    /// A tick takes its drain guard before the engine, so once the wait
+    /// returns idle no tick holds the engine; one still running past the
+    /// bound keeps it, and its lease goes stale on its own.
     fn begin_shutdown(&self, bound: Duration) -> bool {
         let _held = self.drain.start();
-        self.drain.wait_idle(bound)
+        let idle = self.drain.wait_idle(bound);
+        match self.engine.try_lock() {
+            Ok(mut slot) => self.retire(&mut slot),
+            Err(TryLockError::Poisoned(poisoned)) => self.retire(&mut poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => tracing::warn!(
+                "an auto-switch tick still runs at shutdown; its lease is left to go stale"
+            ),
+        }
+        idle
     }
 
     /// Reads the roster first, so an unknown number or the live login's own
@@ -317,9 +428,214 @@ impl AccountsService for ClaudeAccounts {
         let Ok(_work) = self.drain.begin() else {
             return Err(draining());
         };
+        // An engine switch in flight finishes first; one after this write
+        // reads what it wrote.
+        let switching = lock(&self.switch_guard);
         Settings::write(root, &settings).map_err(|error| settings_failure(&error))?;
+        // A tick holds the engine while its switch takes the guard, so the
+        // guard is let go before the engine is taken.
+        drop(switching);
+        // Turned off: the engine is retired now, its halt cleared and its
+        // lease released, so turning it on again starts a fresh one.
+        if !settings.autoswitch.enabled {
+            self.retire(&mut lock(&self.engine));
+        }
         Ok(true)
     }
+
+    /// Reads the settings each call, before the store. Off, unsupported where
+    /// the account locks are, or once the drain has begun: no tick and no
+    /// lease claim, the store is not opened, and an engine left from when it
+    /// was on is halted and its lease released. On: the engine is made on
+    /// first use, with a warm-up from now, and ticked under a drain guard
+    /// taken before the engine; a tick that finds the drain begun when it
+    /// ends retires the engine before it returns.
+    fn engine_tick(&self) -> Result<EngineTick, AccountsError> {
+        if !LOCKS_SUPPORTED {
+            return Ok(EngineTick::Off);
+        }
+        let Ok(_work) = self.drain.begin() else {
+            self.retire(&mut lock(&self.engine));
+            return Ok(EngineTick::Off);
+        };
+        let settings_path = AccountsRoot::new(self.cfg.root.clone()).settings();
+        let section = Settings::read(&settings_path)
+            .map_err(|error| {
+                AccountsError::new(format!("the account settings could not be read: {error}"))
+            })?
+            .autoswitch;
+        let mut slot = lock(&self.engine);
+        if !section.enabled || self.drain.is_draining() {
+            self.retire(&mut slot);
+            return Ok(EngineTick::Off);
+        }
+        let store = self.open_store()?;
+        let engine = slot.get_or_insert_with(|| {
+            Engine::new(
+                ENGINE_OWNER,
+                std::process::id(),
+                Some(jiff::Timestamp::now()),
+            )
+        });
+        let (report, was_halted) = self.run_tick(&store, engine, &section)?;
+        let now = jiff::Timestamp::now();
+        let delay_s = next_delay(
+            &report,
+            section.interval_seconds,
+            now,
+            active_next_poll_at(&store),
+            f64::from(now.subsec_nanosecond().unsigned_abs()) / 1e9,
+        );
+        let delay = Duration::try_from_secs_f64(delay_s)
+            .or_else(|_| Duration::try_from_secs_f64(section.interval_seconds))
+            .unwrap_or(Duration::from_secs(60));
+        let halted = report.outcome == TickOutcome::Halted;
+        let mut events: Vec<AccountEventRow> = report
+            .events
+            .iter()
+            .filter_map(|event| event_row(&event.body))
+            .collect();
+        if halted && !was_halted {
+            events.push(AccountEventRow::Halted {
+                message: HALTED.to_owned(),
+            });
+        }
+        let paused = match &report.outcome {
+            TickOutcome::Paused { reason } => Some(reason.clone()),
+            TickOutcome::Halted => Some(HALTED.to_owned()),
+            _ => None,
+        };
+        {
+            let mut held = lock(&self.view);
+            let view = held.get_or_insert_with(EngineView::default);
+            view.paused_reason.clone_from(&paused);
+            if let Some(decision) = decision(&report) {
+                view.last_decision = Some(decision.to_owned());
+            }
+            view.warm_up_done = !engine.warming();
+        }
+        // A shutdown that found this tick running could not release the
+        // lease; the tick does it now.
+        if self.drain.is_draining() {
+            self.retire(&mut slot);
+        }
+        Ok(EngineTick::Ran {
+            events,
+            delay,
+            paused,
+            halted: halted.then(|| HALTED.to_owned()),
+        })
+    }
+}
+
+/// `mutex`'s guard, poisoned or not.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The crate's live switch, made only while `autoswitch.enabled` reads on
+/// in the settings file at `settings`, re-read under `guard`, which a
+/// settings write also holds; a settings file that cannot be read reads off.
+struct WhileEnabled<'a> {
+    settings: PathBuf,
+    guard: &'a Mutex<()>,
+}
+
+impl WhileEnabled<'_> {
+    fn enabled(&self) -> bool {
+        Settings::read(&self.settings).is_ok_and(|settings| settings.autoswitch.enabled)
+    }
+}
+
+impl SwitchFn for WhileEnabled<'_> {
+    fn switch(
+        &self,
+        context: &RefreshContext<'_>,
+        number: u32,
+        precondition: Option<SwitchPrecondition>,
+    ) -> Result<claude_accounts::engine::SwitchReport, SwitchFailure> {
+        let _guard = lock(self.guard);
+        if !self.enabled() {
+            return Err(SwitchFailure {
+                kind: SwitchErrorKind::AutoSwitchOff,
+                login: None,
+            });
+        }
+        LiveSwitch.switch(context, number, precondition)
+    }
+
+    fn write_while_on(&self, write: &mut dyn FnMut()) -> WhileOn {
+        let _guard = match self.guard.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return WhileOn::Busy,
+        };
+        if !self.enabled() {
+            return WhileOn::Off;
+        }
+        write();
+        WhileOn::Ran
+    }
+}
+
+/// An engine event a client may tell the user of, as a row; `None` for the
+/// rest, and for a switch to a login no stored account has.
+fn event_row(body: &EventBody) -> Option<AccountEventRow> {
+    match body {
+        EventBody::Switch {
+            trigger, from, to, ..
+        } => Some(AccountEventRow::Switched {
+            from: from.as_ref().and_then(|from| from.number),
+            to: to.number?,
+            trigger: trigger.as_str().to_owned(),
+        }),
+        EventBody::AllExhausted { earliest_reset_at } => Some(AccountEventRow::AllExhausted {
+            earliest_reset_at: earliest_reset_at.and_then(|at| chrono_time(at.as_nanosecond())),
+        }),
+        EventBody::Quarantined { number, .. } => {
+            Some(AccountEventRow::Quarantined { number: *number })
+        }
+        EventBody::Unquarantined { number, .. } => number
+            .parse()
+            .ok()
+            .map(|number| AccountEventRow::Unquarantined { number }),
+        _ => None,
+    }
+}
+
+/// The decision a tick came to, as the snapshot names it: its outcome, or
+/// for no action the reason the tick gave; `None` for a pause or a halt,
+/// which keep the last decision.
+fn decision(report: &TickReport) -> Option<&'static str> {
+    match report.outcome {
+        TickOutcome::Switched => Some("switched"),
+        TickOutcome::Error => Some("error"),
+        TickOutcome::Blocked => Some("blocked"),
+        TickOutcome::NoAction => Some(
+            report
+                .events
+                .iter()
+                .rev()
+                .find_map(|event| match event.body {
+                    EventBody::NoSwitch { reason, .. } => Some(reason),
+                    _ => None,
+                })
+                .unwrap_or("no-action"),
+        ),
+        _ => None,
+    }
+}
+
+/// The usage table's planned next poll of the live login's account; `None`
+/// when there is no active account, no plan, or the store cannot say.
+fn active_next_poll_at(store: &Store) -> Option<jiff::Timestamp> {
+    let sequence = store.read_sequence().ok()??;
+    let active = sequence.active()?;
+    let record = sequence.account(active)?;
+    let identities = BTreeMap::from([(active, Identity::of(&record))]);
+    UsageTable::entries(store.root(), &identities)
+        .remove(&active)?
+        .next_poll_at
 }
 
 /// Whether this platform's account locks work: off 64-bit Windows every
@@ -329,7 +645,8 @@ const LOCKS_SUPPORTED: bool = cfg!(all(windows, target_pointer_width = "64"));
 /// The auto-switch state the settings in `root` give while no engine runs:
 /// their switch, threshold and rules, the defaults when the file or its
 /// section is missing. A settings file that cannot be read gives the
-/// defaults, paused with the reason. `None` where the account locks are
+/// defaults, paused with the reason; a cooldown that is no duration reads 0,
+/// paused with [`COOLDOWN_UNREADABLE`]. `None` where the account locks are
 /// unsupported.
 fn auto_state(root: &AccountsRoot) -> Option<AutoState> {
     if !LOCKS_SUPPORTED {
@@ -344,12 +661,14 @@ fn auto_state(root: &AccountsRoot) -> Option<AutoState> {
             )),
         ),
     };
+    let cooldown = Duration::try_from_secs_f64(section.cooldown_seconds);
+    let paused_reason =
+        paused_reason.or_else(|| cooldown.is_err().then(|| COOLDOWN_UNREADABLE.to_owned()));
     Some(AutoState {
         enabled: section.enabled,
         threshold_pct: section.threshold,
         hysteresis_pct: section.hysteresis_pct,
-        cooldown_secs: Duration::try_from_secs_f64(section.cooldown_seconds)
-            .map_or(0, |cooldown| cooldown.as_secs()),
+        cooldown_secs: cooldown.map_or(0, |cooldown| cooldown.as_secs()),
         paused_reason,
         warm_up_done: false,
         last_decision: None,
@@ -1202,6 +1521,159 @@ mod tests {
         let secs = retry_after_secs("Sun, 06 Nov 1994 08:49:00 GMT", example_now());
 
         assert_eq!(secs, Some(0.0));
+    }
+
+    /// The engine's lifecycle, which only the service's own engine mutex and
+    /// drain can stage; a real store, so gated as the store-writing tests are.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[expect(
+        clippy::expect_used,
+        reason = "a test fails with the message of the precondition it lost"
+    )]
+    mod engine_tick {
+        use super::super::*;
+        use std::path::Path;
+
+        /// A private scratch folder for `test`, emptied first.
+        fn scratch(test: &str) -> PathBuf {
+            let dir = std::env::temp_dir()
+                .join(format!("agent-claude-engine-{test}-{}", std::process::id()));
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).expect("the test's old folder can be removed");
+            }
+            std::fs::create_dir_all(&dir).expect("the test's folder can be made");
+            let whoami = std::process::Command::new("whoami")
+                .output()
+                .expect("whoami can be started");
+            let user = String::from_utf8(whoami.stdout).expect("whoami prints text");
+            let output = std::process::Command::new("icacls")
+                .arg(&dir)
+                .args([
+                    "/inheritance:r",
+                    "/grant:r",
+                    &format!("{}:(OI)(CI)F", user.trim()),
+                ])
+                .output()
+                .expect("icacls can be started");
+            assert!(output.status.success(), "icacls failed");
+            dir
+        }
+
+        /// The service over a store at `dir/accounts` holding accounts 1
+        /// (active) and 2, with no credential, Claude Code's home at
+        /// `dir/claude`, and auto-switch turned on.
+        fn service_on(dir: &Path) -> Arc<ClaudeAccounts> {
+            let root = dir.join("accounts");
+            std::fs::create_dir_all(root.join("cache")).expect("the store folders can be made");
+            let record = |number: u32| {
+                serde_json::json!({
+                    "email": format!("user{number}@example.com"),
+                    "uuid": format!("00000000-0000-4000-8000-00000000000{number}"),
+                    "added": "2026-09-01T10:00:00Z"
+                })
+            };
+            let accounts = serde_json::json!({
+                "schemaVersion": 1,
+                "order": [1, 2],
+                "active": 1,
+                "accounts": {"1": record(1), "2": record(2)}
+            });
+            std::fs::write(root.join("accounts.json"), accounts.to_string())
+                .expect("accounts.json can be written");
+            let mut cfg = AccountsConfig::new(root);
+            cfg.agent_home = Some(dir.join("claude"));
+            cfg.base_url = Some("http://127.0.0.1:9".to_owned());
+            let service = Arc::new(ClaudeAccounts::new(cfg));
+            service
+                .set_auto_switch(Some(true), None)
+                .expect("auto-switch is turned on");
+            service
+        }
+
+        fn lease(dir: &Path) -> PathBuf {
+            AccountsRoot::new(dir.join("accounts")).engine_lease()
+        }
+
+        /// Lets a thread just started reach the engine mutex the test holds;
+        /// the assertions after it hold whatever the interleaving.
+        fn let_it_reach_the_engine() {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+
+        #[test]
+        fn turning_auto_switch_off_and_on_clears_a_halt() {
+            let dir = scratch("off-on-clears-a-halt");
+            let service = service_on(&dir);
+            let ticked = service.engine_tick().expect("the tick answers");
+            assert!(matches!(ticked, EngineTick::Ran { .. }), "{ticked:?}");
+            lock(&service.engine)
+                .as_mut()
+                .expect("the tick made the engine")
+                .halt();
+
+            service
+                .set_auto_switch(Some(false), None)
+                .expect("auto-switch is turned off");
+            assert!(lock(&service.engine).is_none(), "the write retired it");
+            assert!(!lease(&dir).exists(), "the write released the lease");
+            service
+                .set_auto_switch(Some(true), None)
+                .expect("auto-switch is turned on again");
+            let ticked = service.engine_tick().expect("the tick answers");
+
+            assert!(
+                matches!(ticked, EngineTick::Ran { halted: None, .. }),
+                "a fresh engine ticks: {ticked:?}"
+            );
+        }
+
+        #[test]
+        fn no_engine_is_created_once_the_drain_has_started() {
+            let dir = scratch("no-engine-once-draining");
+            let service = service_on(&dir);
+            let held = lock(&service.engine);
+            let ticker = Arc::clone(&service);
+            let tick = std::thread::spawn(move || ticker.engine_tick());
+            let_it_reach_the_engine();
+            let _ = service.drain.start();
+            drop(held);
+
+            let ticked = tick
+                .join()
+                .expect("the tick did not panic")
+                .expect("the tick answers");
+
+            assert_eq!(ticked, EngineTick::Off);
+            assert!(lock(&service.engine).is_none(), "no engine was made");
+            assert!(!lease(&dir).exists(), "no lease was claimed");
+        }
+
+        #[test]
+        fn a_tick_finishing_after_shutdown_releases_the_lease() {
+            let dir = scratch("tick-after-shutdown-releases");
+            let service = service_on(&dir);
+            let ticked = service.engine_tick().expect("the tick answers");
+            assert!(matches!(ticked, EngineTick::Ran { .. }), "{ticked:?}");
+            assert!(lease(&dir).exists(), "the tick claimed the lease");
+            let held = lock(&service.engine);
+            let ticker = Arc::clone(&service);
+            let tick = std::thread::spawn(move || ticker.engine_tick());
+            let_it_reach_the_engine();
+
+            let _ = service.begin_shutdown(Duration::ZERO);
+            assert!(
+                lease(&dir).exists(),
+                "the shutdown could not take the engine from the tick"
+            );
+            drop(held);
+            let _ = tick
+                .join()
+                .expect("the tick did not panic")
+                .expect("the tick answers");
+
+            assert!(!lease(&dir).exists(), "the tick released the lease");
+            assert!(lock(&service.engine).is_none(), "the tick retired it");
+        }
     }
 
     #[test]

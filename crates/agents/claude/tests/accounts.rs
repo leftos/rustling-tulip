@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+#[cfg(all(windows, target_pointer_width = "64"))]
+use agent_api::accounts::EngineTick;
 use agent_api::{
     AccountKindRow, AccountsConfig, AccountsFailure, AccountsFailureKind, AccountsService, Agent,
     PollScope, UsageStatus,
@@ -1221,6 +1223,138 @@ fn the_snapshot_carries_auto_switch_off_by_default() {
         assert!(!auto.warm_up_done);
         assert_eq!(auto.last_decision, None);
     }
+}
+
+/// The engine lease file of the store at `dir/accounts`.
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn engine_lease(dir: &Path) -> PathBuf {
+    AccountsRoot::new(dir.join("accounts")).engine_lease()
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn engine_tick_is_off_by_default_and_claims_no_lease() {
+    let dir = scratch("engine_tick_is_off_by_default_and_claims_no_lease");
+    let service = two_accounts(&dir);
+
+    let ticked = service.engine_tick().expect("the tick answers");
+
+    assert_eq!(ticked, EngineTick::Off);
+    assert!(
+        !engine_lease(&dir).exists(),
+        "an engine that is off claims no lease"
+    );
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn engine_tick_runs_when_on_and_releases_its_lease_when_turned_off() {
+    let dir = scratch("engine_tick_runs_when_on_and_releases_its_lease_when_turned_off");
+    let service = two_accounts(&dir);
+    service
+        .set_auto_switch(Some(true), None)
+        .expect("auto-switch is turned on");
+
+    let ticked = service.engine_tick().expect("the tick answers");
+
+    assert!(matches!(ticked, EngineTick::Ran { .. }), "{ticked:?}");
+    assert!(engine_lease(&dir).exists(), "the tick claimed the lease");
+    let auto = service
+        .snapshot()
+        .expect("the store reads")
+        .auto
+        .expect("the snapshot carries the auto-switch state");
+    assert!(auto.enabled, "{auto:?}");
+
+    service
+        .set_auto_switch(Some(false), None)
+        .expect("auto-switch is turned off");
+    let ticked = service.engine_tick().expect("the tick answers");
+
+    assert_eq!(ticked, EngineTick::Off);
+    assert!(
+        !engine_lease(&dir).exists(),
+        "turning auto-switch off released the lease"
+    );
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn an_unreadable_settings_file_fails_the_tick_and_keeps_the_engine() {
+    let dir = scratch("an_unreadable_settings_file_fails_the_tick_and_keeps_the_engine");
+    let service = two_accounts(&dir);
+    service
+        .set_auto_switch(Some(true), None)
+        .expect("auto-switch is turned on");
+    let ticked = service.engine_tick().expect("the tick answers");
+    assert!(matches!(ticked, EngineTick::Ran { .. }), "{ticked:?}");
+    let settings = dir.join("accounts").join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"autoswitch": {"enabled": true, "threshold": 10}}).to_string(),
+    )
+    .expect("settings.json can be written");
+
+    let failed = service
+        .engine_tick()
+        .expect_err("an unreadable settings file fails the tick");
+
+    assert!(
+        failed
+            .message
+            .starts_with("the account settings could not be read"),
+        "{failed}"
+    );
+    assert!(engine_lease(&dir).exists(), "the engine keeps its lease");
+    std::fs::write(
+        &settings,
+        json!({"autoswitch": {"enabled": true}}).to_string(),
+    )
+    .expect("settings.json can be written");
+    let ticked = service.engine_tick().expect("the tick answers");
+    assert!(
+        matches!(ticked, EngineTick::Ran { halted: None, .. }),
+        "{ticked:?}"
+    );
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn engine_tick_off_does_not_open_the_store() {
+    let dir = scratch("engine_tick_off_does_not_open_the_store");
+    let root = dir.join("accounts");
+    std::fs::write(&root, "not a folder").expect("the file can be written");
+    let service = service(root);
+    assert!(service.snapshot().is_err(), "the store cannot be opened");
+
+    let ticked = service.engine_tick().expect("an off tick opens no store");
+
+    assert_eq!(ticked, EngineTick::Off);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn begin_shutdown_releases_the_engine_lease() {
+    let dir = scratch("begin_shutdown_releases_the_engine_lease");
+    let service = two_accounts(&dir);
+    service
+        .set_auto_switch(Some(true), None)
+        .expect("auto-switch is turned on");
+    let ticked = service.engine_tick().expect("the tick answers");
+    assert!(matches!(ticked, EngineTick::Ran { .. }), "{ticked:?}");
+    assert!(engine_lease(&dir).exists(), "the tick claimed the lease");
+
+    assert!(service.begin_shutdown(Duration::from_secs(30)), "idle");
+
+    assert!(
+        !engine_lease(&dir).exists(),
+        "the shutdown released the lease"
+    );
+    assert_eq!(
+        service.engine_tick().expect("the tick answers"),
+        EngineTick::Off,
+        "no tick runs once the drain has begun"
+    );
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]

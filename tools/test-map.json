@@ -123,6 +123,7 @@
       "paths": [
         "crates/daemon/src/accounts/mod.rs",
         "crates/daemon/src/accounts/driver.rs",
+        "crates/daemon/src/accounts/engine.rs",
         "crates/daemon/src/accounts/snapshot.rs"
       ],
       "filter": "package(daemon) & (test(/^(accounts|server::accounts)::/) | test(/accounts_event_reaches_a_connection/) | test(/^server::remote::tests::a_tailnet_connection_(is_refused_account_administration|may_switch_accounts)$/))"

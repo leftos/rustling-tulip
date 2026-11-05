@@ -1130,8 +1130,9 @@ fn chat_hub(
     (client_count, client_count_rx, live_lines, outlets)
 }
 
-/// Let the accounts driver drain its credential spends and end before the
-/// process exits. Whichever path flipped the shutdown watch, the driver is
+/// Let the accounts driver drain its credential spends (which also releases
+/// the auto-switch engine's lease) and end, and the engine task end, before
+/// the process exits. Whichever path flipped the shutdown watch, both are
 /// ending; a serve that failed flipped nothing, so the watch is flipped here.
 async fn stop_accounts(hub: &Hub) {
     if let Some(accounts) = &hub.accounts {
@@ -1159,7 +1160,9 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
         Arc::clone(&hub.turns),
     );
     // The accounts poller; it parks while no client is connected and ends,
-    // after draining the service, when the shutdown watch flips.
+    // after draining the service, when the shutdown watch flips. Beside it
+    // the engine task ticks auto-switch, clients or not, broadcasting the
+    // engine's events, and ends when the shutdown watch flips.
     if let Some(accounts) = &hub.accounts {
         accounts.start_driver(
             hub.state_events.clone(),
@@ -1168,6 +1171,7 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
                 shutdown: hub.shutdown_tx.subscribe(),
             },
         );
+        accounts.start_engine(hub.state_events.clone(), hub.shutdown_tx.subscribe());
     }
     // Idle self-exit: once the last client disconnects and no session has a
     // live child for a full grace period, flip the shutdown watch so a

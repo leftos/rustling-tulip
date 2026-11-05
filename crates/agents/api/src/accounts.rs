@@ -253,6 +253,40 @@ pub trait AccountsService: Send + Sync {
         let _ = (enabled, threshold_pct);
         Err(AccountsFailure::unsupported())
     }
+
+    /// Runs one auto-switch engine tick when auto-switch is on: the engine
+    /// is made on first use, claims and heartbeats its lease, and may switch
+    /// the login. While auto-switch is off, or where it cannot run, nothing
+    /// runs and no lease is claimed ([`EngineTick::Off`]); turning it off
+    /// halts the engine and releases its lease at the next call. Blocks.
+    ///
+    /// # Errors
+    ///
+    /// The store could not be opened, or the tick's context could not be
+    /// built; no tick ran.
+    fn engine_tick(&self) -> Result<EngineTick, AccountsError> {
+        Ok(EngineTick::Off)
+    }
+}
+
+/// What one [`AccountsService::engine_tick`] came to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EngineTick {
+    /// Auto-switch is off or cannot run here: nothing ran and no lease was
+    /// claimed. Nothing is worth calling again until the settings change.
+    Off,
+    /// A tick ran.
+    Ran {
+        /// What the tick did that a client may tell the user of, in order.
+        events: Vec<AccountEventRow>,
+        /// How long until the next tick.
+        delay: Duration,
+        /// Why the engine stands by; `None` while it decides.
+        paused: Option<String>,
+        /// Why the engine halted for good; `None` while it runs. A halted
+        /// engine is not worth ticking again until the settings change.
+        halted: Option<String>,
+    },
 }
 
 /// Something that happened to a store's accounts that a client may tell the
