@@ -32,15 +32,18 @@
 - [ ] RT-676 Let a manual install over a running client finish when the close dialog takes over 30 s
 - [ ] RT-689 Reset the remembered Trusted choice when Settings' trusted default changes, and fix its hint
 - [ ] RT-690 Cut a dimmed headless Last row's summary with an ellipsis in the Spawn submenu
-- [ ] RT-692 Scroll the spawn dialog's Target list to its highlight and keep clicks inside it from closing it
 - [ ] RT-694 Keep the footer from clipping in a narrow window and clear a stale not-found status
 - [ ] RT-699 Keep the terminal link tip off dialogs and the link, and name Cmd on macOS
 - [ ] RT-844 Choose the default shell in Settings, with installed shells and a custom command · release vNext
-  - [ ] RT-852 Default shell: native Settings row (DS.2) · release vNext
   - [ ] RT-853 Default shell: host agent sessions in WSL, Nushell and fish (DS.3) · release vNext
 - [ ] RT-918 Split the agent launch command by Windows rules on Windows, so backslash paths survive
 - [ ] RT-921 Default shell: move the save check off the runtime, and detect WSL that is really installed
-- [ ] RT-929 Highlight a terminal path that wraps under the cui theme or holds spaces (C:\Program Files\...) · release vNext
+- [ ] RT-930 Jump to a pane, tab or sidebar repo or workspace with a Ctrl+Shift+P palette · release vNext+1
+- [ ] RT-932 Add non-git folders to the sidebar, with no worktree or branch choice when spawning into one · release vNext+1
+- [ ] RT-940 Offer an opt-in install of rustling-tulip's hooks in Claude Code's user settings · release vNext
+  - [ ] RT-941 User hooks: the tracer's env-driven hook shim and plain-shell promotion by hook · release vNext
+  - [ ] RT-942 User hooks: install and remove in Claude Code's user settings, with the protocol pair · release vNext
+  - [ ] RT-943 User hooks: the Settings toggle and a live spec · release vNext
 
 ## Wave 2b — Hook status
 
@@ -50,7 +53,6 @@
 - [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI
 - [ ] RT-754 Decide whether the screen may end a hook-driven turn, or a working title vetoes it
 - [ ] RT-755 Log every status writer and every toast decision
-- [ ] RT-758 Make a plain shell an agent session while a hand-typed claude runs in it
 - [ ] RT-764 Stop subagent hook events starving the screen's demotion after an Esc
 - [ ] RT-766 Stop the status watcher spinning on a ShellAgent frame with no agent and no prompt
 - [ ] RT-767 Work through the held turn end's leftover cases
@@ -158,7 +160,6 @@
 ## Wave 12 — Claude accounts and artifacts by account
 
 - [ ] RT-39 Built-in Claude account switching: several logins, usage polling and switching · release vNext
-  - [ ] RT-909 Accounts: connection origin and the read-only protocol messages (CA.1, CA.5 read half) · release vNext
   - [ ] RT-910 Accounts: usage poller, snapshot and drain (CA.4) · release vNext
   - [ ] RT-911 Accounts: manual switch, add current login and the admin messages (CA.5 write half, CA.6) · release vNext
   - [ ] RT-912 Accounts: auto-switch driver (CA.9) · release vNext
@@ -168,7 +169,6 @@
   - [ ] RT-916 Accounts on macOS: Unix locks and the Keychain credential in the forked claude-accounts crate · release vNext
   - [ ] RT-919 Accounts: store writers, the daemon's accounts dir and transports (CA.0, CA.3) · release vNext
   - [ ] RT-924 Merge feat/claude-accounts to main (#205)
-  - [ ] RT-927 Scrub ops-tower from the forked claude-accounts crate: own seal identifiers, names and docs · release vNext
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-113 Open Claude artifact links in the account that published them
 - [ ] RT-115 Host-approved extra roots for file fetch
@@ -400,10 +400,6 @@
 - [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
 - [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
 - [ ] RT-640 Polish found by the v0.6.0-alpha smoke test · release vNext
-  - [ ] RT-641 Wrap a tailscale CLI error inside the Connections dialog · release vNext
-  - [ ] RT-642 Draw This PC's empty state under its host header · release vNext
-  - [ ] RT-643 Stop the On switch clipping a saved host's session count · release vNext
-  - [ ] RT-644 Name the selected host in Settings' keep-awake label · release vNext
   - [ ] RT-645 Keep the host header's Connecting… clear of + Repo · release vNext
   - [ ] RT-646 Keep a reconnecting host's Claude pane titles · release vNext
   - [ ] RT-647 Fit the sidebar view switcher and pane titles at text size +4 · release vNext
@@ -464,16 +460,21 @@
 - [ ] RT-894 Compute Settings search hits once per query change, not on every frame
 - [ ] RT-895 Bound StatPath work per connection and resolve a fetch's canonical root once
 - [ ] RT-928 Disable ops-tower on the owner's PC once the daemon replicates it · release vNext
+- [ ] RT-936 Sweep a removed account's leftover credential and config files
+- [ ] RT-937 Update account settings under one lock hold, so concurrent edits keep both changes
+- [ ] RT-938 Keep test and bench daemons off an inherited account store override
+- [ ] RT-939 Keep each host's Custom shell command draft in Settings
+- [ ] RT-944 Draw the sidebar's Active-filter empty line under its host header
 
 ## Design files
 
-- [accounts.md](accounts.md) — RT-39, RT-277, RT-909, RT-910, RT-911, RT-912, RT-913, RT-914, RT-915, RT-919
+- [accounts.md](accounts.md) — RT-39, RT-277, RT-910, RT-911, RT-912, RT-913, RT-914, RT-915, RT-919
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-853
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
 - [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-760, RT-779, RT-789, RT-858
-- [default-shell.md](default-shell.md) — RT-844, RT-852, RT-853
+- [default-shell.md](default-shell.md) — RT-844, RT-853
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-786, RT-787, RT-867, RT-868, RT-869
@@ -487,7 +488,9 @@
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
+- [non-git-folders.md](non-git-folders.md) — RT-932
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-101, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
+- [quick-jump.md](quick-jump.md) — RT-930
 - [remote-access.md](remote-access.md) — RT-686, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
 - [screen-status.md](screen-status.md) — RT-289, RT-754
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-686, RT-792
