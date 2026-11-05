@@ -1191,19 +1191,25 @@ fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> 
     let view_control = segmented(&VIEW_CHOICES, view, pad, cx, |this, choice, cx| {
         this.set_sidebar_view(choice, cx);
     });
+    let gap = if filtering { 6.0 } else { 8.0 };
     div()
         .flex()
         .flex_none()
+        .flex_wrap()
         .items_center()
-        .gap(px(if filtering { 6.0 } else { 8.0 }))
-        .h(ui_px(cx, 44.0))
+        .gap(px(gap))
+        .gap_y(px(6.0))
+        .min_h(ui_px(cx, 44.0))
         .pl(px(14.0))
         .pr(px(10.0))
         .border_b_1()
         .border_color(gpui::rgb(t.line))
         .child(
             ellipsized_box()
-                .flex_1()
+                .driver_id(|| "sidebar-title".to_owned())
+                .flex_basis(px(0.0))
+                .flex_grow()
+                .min_w(ui_px(cx, 48.0))
                 .text_size(ui_px(cx, 13.0))
                 .font_weight(crate::fonts::ui_weight(cx, FontWeight::BOLD))
                 .text_color(gpui::rgb(t.text))
@@ -1213,8 +1219,16 @@ fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> 
                     StyledText::new("Sessions"),
                 )),
         )
-        .children(filter_control)
-        .child(view_control)
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .max_w_full()
+                .gap(px(gap))
+                .children(filter_control)
+                .child(view_control),
+        )
 }
 
 /// The drag handle; a press starts a resize the root follows until release.

@@ -185,9 +185,74 @@ fn the_view_switcher_fits_at_text_size_plus_four(cx: &mut TestAppContext) {
     let active = h.bounds("sidebar-filter-active");
     let repos = h.bounds("sidebar-view-repos");
     assert!(
-        active.right() <= repos.left(),
-        "All / Active ends before Repos / Tabs begins: {active:?} and {repos:?}"
+        active.right() <= repos.left() || active.bottom() <= repos.top(),
+        "All / Active and Repos / Tabs do not overlap: {active:?} and {repos:?}"
     );
+}
+
+#[gpui::test]
+fn the_header_fits_at_the_minimum_width_and_text_size_plus_four(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(session("s1").in_repo("r1").build()),
+    );
+
+    // While the title and both controls fit on one row, the toggle's centre
+    // sits on the title's.
+    let panel = h.bounds("sidebar-panel");
+    let title = h.bounds("sidebar-title");
+    let tabs = h.bounds("sidebar-view-tabs");
+    let all = h.bounds("sidebar-filter-all");
+    let repos = h.bounds("sidebar-view-repos");
+    let off = (title.center().y - tabs.center().y) / px(1.0);
+    assert!(
+        off.abs() <= 1.0,
+        "at the default width the header is one row: {title:?} {tabs:?} {all:?} {repos:?} {panel:?}"
+    );
+
+    // Narrow the panel to its minimum, then raise the text size.
+    let from = h.center("sidebar-divider");
+    h.drag(from, point(px(50.0), from.y), [Modifiers::none(); 2]);
+    let panel = h.bounds("sidebar-panel");
+    assert!(
+        (panel.size.width / px(1.0) - 200.0).abs() < 0.5,
+        "the panel is at its minimum width: {panel:?}"
+    );
+    h.root_update(|root, _, cx| root.set_ui_text_size(4, cx));
+
+    let panel = h.bounds("sidebar-panel");
+    let title = h.bounds("sidebar-title");
+    let controls = [
+        "sidebar-filter-all",
+        "sidebar-filter-active",
+        "sidebar-view-repos",
+        "sidebar-view-tabs",
+    ];
+    for selector in controls {
+        let bounds = h.bounds(selector);
+        assert!(
+            bounds.left() >= panel.left() && bounds.right() <= panel.right(),
+            "at the minimum width and text size +4, {selector} stays inside the panel: \
+             {bounds:?} and {panel:?}"
+        );
+    }
+    let active = h.bounds("sidebar-filter-active");
+    let repos = h.bounds("sidebar-view-repos");
+    assert!(
+        active.right() <= repos.left() || active.bottom() <= repos.top(),
+        "All / Active and Repos / Tabs do not overlap: {active:?} and {repos:?}"
+    );
+    for selector in controls {
+        let bounds = h.bounds(selector);
+        assert!(
+            bounds.top() >= title.bottom()
+                || bounds.right() <= title.left()
+                || bounds.left() >= title.right(),
+            "{selector} is below the title or beside it, never over it: {bounds:?} and {title:?}"
+        );
+    }
 }
 
 #[gpui::test]
