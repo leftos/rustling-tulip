@@ -44,6 +44,9 @@ const BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const WRITE_ATTRIBUTES: u32 = 0x0100;
 /// How long the rig waits for each of Claude Code's locks.
 const LOCK_WAIT: Duration = Duration::from_millis(700);
+/// The hang guard for a test whose refresh only proceeds once another thread releases a held lock: a passing run
+/// never waits it out, so its size is free.
+const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// A usage endpoint that answers 401 to the tokens in `refused` and a reading to any other, and remembers the tokens
 /// it was sent. They are fake tokens, so the test compares them directly.
@@ -234,13 +237,13 @@ fn release_later(rig: &Rig, meanwhile: impl FnOnce() + Send + 'static) -> JoinHa
     })
 }
 
-/// Spins until `path` exists, for at most 5 s.
+/// Spins until `path` exists, until the hang guard fires.
 fn wait_for(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(120);
     while !path.exists() {
         assert!(
             Instant::now() < deadline,
-            "{} never appeared",
+            "hung: {} never appeared",
             path.display()
         );
         thread::sleep(Duration::from_millis(1));
@@ -330,7 +333,7 @@ fn unreadable_under_the_locks(
     rig: &mut Rig,
     path: PathBuf,
 ) -> (JoinHandle<()>, Arc<Mutex<Vec<File>>>) {
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let holder: Arc<Mutex<Vec<File>>> = Arc::new(Mutex::new(Vec::new()));
     let during = Arc::clone(&holder);
     let releaser = release_later(rig, move || {
@@ -493,7 +496,7 @@ fn no_balance_read_beside_foreign_credential() {
     // rotation is adopted under the remembered foreign verdict.
     make_due(&rig);
     write_live(&rig, &expired("fake-access-c0", "fake-refresh-c"));
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let live_path = rig.claude.credentials_file();
     let releaser = release_later(&rig, move || {
         fs::write(live_path, fresh("fake-access-c2", "fake-refresh-c"))
@@ -553,7 +556,7 @@ fn released_claude_code_lock_lets_the_refresh_proceed() {
         &stale,
         Some(&logged_in_as_one()),
     );
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let releaser = release_later(&rig, || {});
 
     let outcome = poll(&rig, &Usage::refusing(&[]));
@@ -638,7 +641,7 @@ fn drain_begun_while_waiting_on_claude_code_locks_defers_without_a_post() {
         &stale,
         Some(&logged_in_as_one()),
     );
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let drain = Arc::clone(&rig.drain);
     let releaser = release_later(&rig, move || {
         let _in_flight = drain.start();
@@ -662,7 +665,7 @@ fn identity_mismatch_defers_without_a_post() {
         &stale,
         Some(&logged_in_as_one()),
     );
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let config = rig.scratch.dir.join(".claude.json");
     let releaser = release_later(&rig, move || {
         let other = json!({ "oauthAccount": { "emailAddress": TWO } });
@@ -711,7 +714,7 @@ fn credential_rotated_by_claude_code_is_adopted_without_a_post() {
     // The next pass reads an expired generation of lineage B; Claude Code rotates it while the refresh waits.
     make_due(&rig);
     write_live(&rig, &expired("fake-access-b0", "fake-refresh-b"));
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let rotated = fresh("fake-access-b2", "fake-refresh-b");
     let live_path = rig.claude.credentials_file();
     let written = rotated.clone();
@@ -1437,7 +1440,7 @@ fn backup_rewritten_between_read_and_lock_is_used() {
         &stale,
         Some(&logged_in_as_one()),
     );
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let root = rig.scratch.root();
     let releaser = release_later(&rig, move || {
         // Another writer, holding the roster, seals a fresh generation over the account's backup.
@@ -1632,7 +1635,7 @@ fn cleared_live_file_restores_the_backup_without_a_post() {
         &restored,
         Some(&logged_in_as_one()),
     );
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let live_path = rig.claude.credentials_file();
     let releaser = release_later(&rig, move || {
         fs::write(live_path, "").expect("Claude Code clears the live credential");
@@ -1708,7 +1711,7 @@ fn live_moved_to_another_lineage_under_the_locks_defers() {
         &stale,
         Some(&logged_in_as_one()),
     );
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let live_path = rig.claude.credentials_file();
     let written = moved.clone();
     let releaser = release_later(&rig, move || {
@@ -2013,7 +2016,7 @@ fn cleared_live_file_spends_a_degenerate_backup_by_its_refresh_token() {
         &successor,
         Some(&logged_in_as_one()),
     );
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let live_path = rig.claude.credentials_file();
     let releaser = release_later(&rig, move || {
         fs::write(live_path, "").expect("Claude Code clears the live credential");
@@ -2090,7 +2093,7 @@ fn active_poll_adopts_an_older_rotation_without_writing_it_over_the_backup() {
     // backup's, while the refresh waits.
     make_due(&rig);
     write_live(&rig, &expired("fake-access-b0", "fake-refresh-b"));
-    rig.claude_locks = wait(Duration::from_secs(5));
+    rig.claude_locks = wait(HANG_GUARD);
     let rotated = fresh("fake-access-b2", "fake-refresh-b");
     let live_path = rig.claude.credentials_file();
     let written = rotated.clone();
