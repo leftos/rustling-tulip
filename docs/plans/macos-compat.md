@@ -135,10 +135,8 @@ Note: the Tauri app is no longer on `main`; it lives on the `tauri` branch (tag 
 ## 4. Build, bundle, packaging
 
 - The shipped client is `apps/native` (GPUI); its installer is Phase 6 (Wave 3), Windows-first.
-- [x] Add a macOS bundle for `apps/native` (an `.app` carrying `rustling-tulipd` and `rt-tracer`, then a `.dmg`) beside the Windows installer that Phase 6 builds: `tools/installer/pack-macos.ps1`, run on a Mac, makes an ad-hoc signed arm64 bundle, its dmg and the update zip (`tools/installer/README.md` "macOS app and disk image"). Unsigned for distribution: Developer ID signing and notarization stay open below.
-- [ ] Code-signing + notarization (Developer ID cert, `entitlements.plist`,
-      `notarytool`). Build-machine/CI concern, not source. Needed for distribution
-      but not for local dev runs.
+- [x] Add a macOS bundle for `apps/native` (an `.app` carrying `rustling-tulipd` and `rt-tracer`, then a `.dmg`) beside the Windows installer that Phase 6 builds: `tools/installer/pack-macos.ps1`, run on a Mac, makes an ad-hoc signed arm64 bundle, its dmg and the update zip (`tools/installer/README.md` "macOS app and disk image").
+- [x] Code-signing + notarization: `tools/installer/pack-macos-signed.ps1`, run on this PC, runs `pack-macos.ps1 -Sign` on the Mac mini, which signs the binaries, the `.app` and the `.dmg` with the Developer ID Application certificate yaat uses (hardened runtime, no entitlements file), notarizes and staples the app and the dmg with its App Store Connect notary key, and checks `codesign --verify`, `spctl` and `stapler validate` (`tools/installer/README.md` "macOS code signing").
 - The macOS dev loop runs from the Windows PC: `.\rt.ps1 mac check|build|clippy|test [<extra>]` sends one cargo command to the Mac mini builder (`builder@mac-mini`) as a pinned heavy gate run, logged at `.tmp\rt-mac-<sub-verb>.log`. Extra cargo arguments use long forms (`--package <crate>`), since `-p` binds to `rt.ps1`'s `-PrintOnly`. There is no `rt.sh`.
 - [x] The Mac mini builder has Xcode's Metal Toolchain, so gpui's build script compiles its shaders there.
 - [x] `mac clippy` runs clean with `-D warnings`.

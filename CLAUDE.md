@@ -74,7 +74,8 @@ pwsh -NoProfile -File tools/rt-mac.ps1 check|build|clippy|test [<cargo args>]   
 .\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md, dashboard, dashboard-compact, connections, connections-ssh, menu, update, chat, summary, themes, themes-edit, multi-host, spawn-hosts, settings-hosts, settings-sounds, update-notes, chat-compact) in .tmp\shots\
 .\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe and its .sha256 beside it, which the app's updater checks a download against, signed with Azure Artifact Signing; `-Unsigned` for a test build (needs NSIS 3; tools/installer/README.md)
 .\rt.ps1 help             # usage summary
-pwsh -NoProfile -File tools/installer/pack-macos.ps1 [-OutDir <dir>] [-SkipBuild]   # run on a Mac (from SSH, in a login shell: `zsh -lc`, to find pwsh): release build, then target/installer/rustling-tulip.app (arm64, ad-hoc signed) and the macos-arm64 .dmg, .zip and .zip.sha256; no rt.ps1 verb yet (tools/installer/README.md)
+pwsh -NoProfile -File tools/installer/pack-macos.ps1 [-OutDir <dir>] [-SkipBuild] [-Sign]   # run on a Mac (from SSH, in a login shell: `zsh -lc`, to find pwsh): release build, then target/installer/rustling-tulip.app (arm64, ad-hoc signed; -Sign: Developer ID signed, notarized and stapled, needing the MACOS_* signing variables) and the macos-arm64 .dmg, .zip and .zip.sha256; no rt.ps1 verb yet (tools/installer/README.md)
+pwsh -NoProfile -File tools/installer/pack-macos-signed.ps1   # on this PC: read the macOS signing set from Private Config on G: into this process only, then run `pack-macos.ps1 -Sign` on builder@mac-mini as one pinned heavy gate run (log .tmp\pack-macos.log; the three assets come back to target\installer) (tools/installer/README.md "macOS code signing")
 pwsh -NoProfile -File tools/rt-driver-mcp/install.ps1   # build and install the rt-driver MCP server that .mcp.json starts (release build through the gate)
 pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1   # the driver MCP's live spec; run it as one gate job with --slot heavy (docs/testing.md)
 ```
@@ -183,5 +184,4 @@ Once nothing open links a design file, its durable decisions are promoted into `
 
 Don't go looking for these — they're explicitly out of scope until their plan item comes up:
 
-- **Notarization and macOS code signing** (RT-665). Windows signing is done: `.\rt.ps1 installer` signs the binaries and the setup exe (`tools/installer/README.md`).
 - **Sub-agent / Task-tool interception**, **attach from outside the tailnet** by internet exposure or a relay, **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine over the network, and clients over OpenSSH are being built (`docs/plans/ssh-remote.md`; `docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`). Viewing a subagent's transcript read-only is planned (Wave 10, "Subagent streams"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.

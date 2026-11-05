@@ -109,11 +109,12 @@ It is built from the SVGs in `icon/`: `icon.svg` for 24 px and up, and `icon-16.
 `pack-macos.ps1` builds the macOS app bundle `rustling-tulip.app` (Apple Silicon, arm64 only), a disk image holding it and the zip the app's updater downloads. It runs on a Mac with PowerShell 7 (`pwsh`), Rust and the Xcode command-line tools; it refuses to run anywhere else. From another machine over SSH, copy or clone the tree to the Mac first and run it there:
 
 ```sh
-pwsh -NoProfile -File tools/installer/pack-macos.ps1 [-OutDir <dir>] [-SkipBuild]
+pwsh -NoProfile -File tools/installer/pack-macos.ps1 [-OutDir <dir>] [-SkipBuild] [-Sign]
 ```
 
 - `-OutDir <dir>`: where the staging folder and the assets go; default `target/installer` under the repo root.
 - `-SkipBuild`: use the binaries already in `target/release` instead of running `cargo build --release -p rustling-tulip-native -p daemon -p tracer`.
+- `-Sign`: sign with the Developer ID, notarize and staple instead of ad-hoc signing ("macOS code signing" below).
 
 The script stops at the first native command that fails. It assembles the bundle in a fresh `macos-staging/dmg-root/` under `-OutDir`:
 
@@ -124,15 +125,59 @@ The script stops at the first native command that fails. It assembles the bundle
 | `Contents/Resources/icon.icns` | the app icon, built with `sips` and `iconutil` from `icon/icon-1024.png` |
 | `Contents/Info.plist` | from `macos/Info.plist.template`: bundle id `dev.leftos.rustling-tulip`, minimum macOS 13.0, both version keys set to the numeric part of the workspace version (`0.9.0` for `0.9.0-alpha`) |
 
-It ad-hoc signs (`codesign --force --sign -`) the three binaries and then the bundle, and writes into `-OutDir`, printing the three paths last:
+Without `-Sign` it ad-hoc signs (`codesign --force --sign -`) the three binaries and then the bundle. It writes into `-OutDir`, printing the three paths last:
 
 - `rustling-tulip-<version>-macos-arm64.dmg`: volume `rustling-tulip` holding the app and an `Applications` link to drag it onto, for a first install;
 - `rustling-tulip-<version>-macos-arm64.zip`: the app zipped with `ditto -c -k --keepParent`, the update payload;
 - `rustling-tulip-<version>-macos-arm64.zip.sha256`: `<hex>  <zip file name>`, which the updater checks the zip against.
 
-`<version>` is `[workspace.package] version` in `Cargo.toml`, pre-release suffix included. Developer ID signing and notarization are added by a later step; an ad-hoc signed app opened from a downloaded disk image is stopped by Gatekeeper.
+`<version>` is `[workspace.package] version` in `Cargo.toml`, pre-release suffix included. An ad-hoc signed app opened from a downloaded disk image is stopped by Gatekeeper; a release is built with `-Sign`.
 
 `icon/icon-1024.png` is written by `icon/build_icon.py` beside `icon.ico`; rebuild and commit both after changing `icon.svg`.
+
+## macOS code signing
+
+A release's macOS assets are signed with the owner's Developer ID **Application** certificate and notarized with the App Store Connect notary API key that `leftos/yaat` already uses. There is no CI here, so signing follows yaat's local release route: it runs on the Mac mini builder, started from this PC. A bare Mach-O cannot be stapled, which is why the binaries ship in a `.app`; the app and the `.dmg` are both signed with the Application identity, and there is no Installer certificate (no `.pkg`).
+
+From the repo root on this PC:
+
+```powershell
+pwsh -NoProfile -File tools/installer/pack-macos-signed.ps1
+```
+
+It reads the signing set into its own process environment, then starts one pinned heavy gate run on `builder@mac-mini` of `pwsh -NoProfile -File tools/installer/pack-macos.ps1 -Sign`, logging to `.tmp/pack-macos.log`; the gate brings the three assets back into `target/installer`. The variables cross to the Mac as bare `--env NAME` gate flags, so no value is on a command line, in a log or in a file in the repo.
+
+`pack-macos.ps1 -Sign` needs these variables, yaat's names (its `release-macos.yml` secrets), and fails naming the first one missing:
+
+| Variable | What | Read from |
+|---|---|---|
+| `MACOS_DEVID_APP_CERT_P12_BASE64` | the Developer ID Application certificate and key, base64 | `devid-application.p12` |
+| `MACOS_DEVID_CERT_PASSWORD` | the `.p12` password | `p12-password.txt` |
+| `MACOS_SIGN_APP_IDENTITY` | the identity name, `Developer ID Application: <name> (<team>)` | `SIGN_APP_IDENTITY` in `ids.env` |
+| `MACOS_NOTARY_API_KEY_P8_BASE64` | the App Store Connect API key, base64 | `AuthKey_*.p8` |
+| `MACOS_NOTARY_API_KEY_ID` | the key's id | `NOTARY_API_KEY_ID` in `ids.env` |
+| `MACOS_NOTARY_API_ISSUER_ID` | the key's issuer id | `NOTARY_API_ISSUER_ID` in `ids.env` |
+
+The files live in the owner's Private Config on Google Drive, `G:\My Drive\Private Config\yaat\secrets\macos-signing\`, shared with yaat; `pack-macos-signed.ps1` stops naming the folder or the file when one is missing.
+
+With `-Sign` the script, after assembling the bundle:
+
+1. decodes the `.p12` into a temporary keychain under the Mac's temp folder (`security create-keychain`, `import`, `set-key-partition-list`) and adds it beside the user's keychain search list;
+2. signs inside out with the hardened runtime and a timestamp (`codesign --force --options runtime --timestamp`): `rt-tracer`, `rustling-tulipd`, `rustling-tulip-native`, then the `.app` without `--deep`; no entitlements file;
+3. zips the app with `ditto -c -k --keepParent`, notarizes it with `xcrun notarytool submit --wait` and the API key, and staples the app (`xcrun stapler staple`, up to three tries a minute apart, since a fresh ticket can take a moment to propagate);
+4. writes the update zip and its `.sha256` from the stapled app, builds the `.dmg` around it, signs the `.dmg`, notarizes and staples it;
+5. checks, failing on any refusal: `codesign --verify --deep --strict --verbose=2` on the app, `spctl --assess -vvv --type execute` on the app (it must say `accepted` and `source=Notarized Developer ID`), `spctl --assess -vvv --type open --context context:primary-signature` on the `.dmg` (`accepted`), and `xcrun stapler validate` on both.
+
+Whatever happens, the user's keychain search list is put back and the temporary keychain, the decoded `.p12` and `.p8` and the notarization zip are deleted. A notarization Apple does not accept prints Apple's log for the submission and fails the run.
+
+`notarytool` answering 403 about a required agreement is an Apple account matter, not a fault here: the Account Holder accepts the new agreement in App Store Connect (Agreements, Tax, and Banking), then the run is repeated (yaat's `docs/macos-code-signing.md`).
+
+To check a downloaded asset on a Mac:
+
+```sh
+spctl --assess -vvv --type open --context context:primary-signature rustling-tulip-<version>-macos-arm64.dmg
+xcrun stapler validate rustling-tulip-<version>-macos-arm64.dmg
+```
 
 ## Hand test
 
