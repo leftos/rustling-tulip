@@ -464,6 +464,11 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
         | ClientMessage::ListDevices
         | ClientMessage::RevokeDevice { .. }
         | ClientMessage::ForgetDevice { .. } => Some("device approval is local-only"),
+        // A switch stays open to every origin.
+        ClientMessage::AddCurrentLogin { .. }
+        | ClientMessage::RemoveAccount { .. }
+        | ClientMessage::SetAccountAlias { .. }
+        | ClientMessage::SetAccountOrder { .. } => Some("account administration is local-only"),
         _ => None,
     }
 }
@@ -497,6 +502,76 @@ mod tests {
             );
         }
         headers
+    }
+
+    /// A hub whose account service is a recording fake over two accounts.
+    fn accounts_hub(
+        tag: &str,
+    ) -> (
+        crate::server::Hub,
+        ScratchDir,
+        std::sync::Arc<crate::server::accounts::fake::Writable>,
+    ) {
+        let (mut hub, scratch) = test_hub(tag);
+        let service = std::sync::Arc::new(crate::server::accounts::fake::Writable::two_accounts());
+        hub.accounts = Some(crate::accounts::Accounts::new(
+            std::sync::Arc::clone(&service) as crate::accounts::SharedAccounts,
+        ));
+        (hub, scratch, service)
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_connection_is_refused_account_administration() {
+        let (hub, _scratch, service) = accounts_hub("tailnet-account-admin");
+        let admin = [
+            ClientMessage::AddCurrentLogin {
+                request_id: Some("a1".to_owned()),
+            },
+            ClientMessage::RemoveAccount {
+                number: 2,
+                request_id: Some("a2".to_owned()),
+            },
+            ClientMessage::SetAccountAlias {
+                number: 1,
+                alias: Some("work".to_owned()),
+                request_id: Some("a3".to_owned()),
+            },
+            ClientMessage::SetAccountOrder {
+                order: vec![2, 1],
+                request_id: Some("a4".to_owned()),
+            },
+        ];
+        for msg in admin {
+            let reply = dispatch_one_as(&hub, msg, &AuthKind::Tailnet(test_peer())).await;
+            assert!(
+                matches!(&reply, DaemonMessage::Error { message, code: Some(code), .. }
+                    if message == "account administration is local-only"
+                        && code == protocol::error_codes::LOCAL_ONLY),
+                "{reply:?}"
+            );
+        }
+        assert!(service.calls().is_empty(), "{:?}", service.calls());
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_connection_may_switch_accounts() {
+        let (hub, _scratch, service) = accounts_hub("tailnet-account-switch");
+
+        let reply = crate::server::accounts::fake::ask_as(
+            &hub,
+            ClientMessage::SwitchAccount {
+                number: 2,
+                request_id: Some("s1".to_owned()),
+            },
+            &AuthKind::Tailnet(test_peer()),
+        )
+        .await;
+
+        assert!(
+            matches!(&reply, DaemonMessage::Accounts { request_id: Some(id), .. } if id == "s1"),
+            "{reply:?}"
+        );
+        assert_eq!(service.calls(), ["switch 2"]);
     }
 
     /// A WebSocket upgrade request, with any extra headers a case needs.

@@ -10,15 +10,24 @@
 //! [`SHUTDOWN_DRAIN`] for the ones in flight, and ends.
 //!
 //! Every wait is one `select!` over the next poll, the client count, the
-//! wake and the shutdown watch, so a later engine tick joins the same loop.
+//! wake, the refresh lane and the shutdown watch, so a later engine tick
+//! joins the same loop.
+//!
+//! A refresh ([`super::Accounts::request_refresh`]) re-reads the store with
+//! no network, caches and broadcasts what changed, then acks; it is served
+//! whether or not a client is connected. A poll is awaited outside the
+//! `select!`, so a refresh asked while one runs waits for it and reads after
+//! the poll's snapshot was cached. Once shutdown begins the lane is dropped,
+//! with every refresh still queued in it, before the drain: the requester
+//! sees its ack dropped rather than waiting.
 
-use super::Accounts;
-use super::snapshot::wire;
+use super::snapshot::{Wire, wire};
+use super::{Accounts, RefreshAck};
 use crate::server::StateEvent;
 use agent_api::{AccountsError, PollReport, PollScope};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
@@ -42,10 +51,33 @@ pub(crate) fn spawn(
     events: broadcast::Sender<StateEvent>,
     watches: Watches,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run(accounts, events, watches))
+    // Taken before the task starts, so a refresh asked right after the start
+    // queues for this driver instead of finding the lane closed.
+    let refreshes = accounts.take_refreshes();
+    if refreshes.is_none() {
+        warn!("the accounts refresh lane was already taken; this driver serves no refresh");
+    }
+    tokio::spawn(run(accounts, events, watches, refreshes))
 }
 
-async fn run(accounts: Arc<Accounts>, events: broadcast::Sender<StateEvent>, watches: Watches) {
+/// The refresh lane; `None` once shutdown dropped it (or a driver started
+/// without it).
+type Lane = Option<mpsc::UnboundedReceiver<RefreshAck>>;
+
+/// The next refresh asked on `lane`; never resolves without one.
+async fn next_refresh(lane: &mut Lane) -> Option<RefreshAck> {
+    match lane {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn run(
+    accounts: Arc<Accounts>,
+    events: broadcast::Sender<StateEvent>,
+    watches: Watches,
+    mut lane: Lane,
+) {
     let Watches {
         mut clients,
         mut shutdown,
@@ -61,14 +93,16 @@ async fn run(accounts: Arc<Accounts>, events: broadcast::Sender<StateEvent>, wat
         let count = *clients.borrow_and_update();
         let connected = count > 0;
         if connected && due.is_some_and(|at| at <= Instant::now()) {
-            match poll(&accounts, &events, &mut failing, &mut shutdown).await {
+            match poll(&accounts, &events, &mut failing, &mut shutdown, &mut lane).await {
                 Polled::Next(wait) => due = wait.map(|wait| Instant::now() + wait),
                 // The poll was cut by shutdown, which already drained.
                 Polled::ShutDown => return,
             }
             continue;
         }
-        tokio::select! {
+        // A refresh is served after the `select!`, whose output may hold the
+        // shutdown watch's guard, which no await may cross.
+        let asked = tokio::select! {
             biased;
             _ = shutdown.wait_for(|stop| *stop) => break,
             changed = clients.changed() => {
@@ -80,15 +114,46 @@ async fn run(accounts: Arc<Accounts>, events: broadcast::Sender<StateEvent>, wat
                 if due.is_none() && *clients.borrow_and_update() > count {
                     due = Some(Instant::now());
                 }
+                None
             }
             () = accounts.wake.notified(), if connected && due.is_none() => {
                 due = Some(Instant::now());
+                None
             }
+            Some(ack) = next_refresh(&mut lane) => Some(ack),
             () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)),
-                if connected && due.is_some() => {}
+                if connected && due.is_some() => None,
+        };
+        if let Some(ack) = asked {
+            refresh(&accounts, &events).await;
+            let _ = ack.send(());
         }
     }
+    drop(lane);
     drain(&accounts).await;
+}
+
+/// Cache `wire` and broadcast it when it changed.
+fn cache_and_broadcast(accounts: &Accounts, events: &broadcast::Sender<StateEvent>, wire: Wire) {
+    if accounts.store_if_changed(wire.clone()) {
+        let _ = events.send(StateEvent::Accounts {
+            accounts: wire.accounts,
+            auto: wire.auto,
+        });
+    }
+}
+
+/// Re-read the store on a blocking thread, with no network, and cache and
+/// broadcast what changed; a read that fails keeps the cache.
+async fn refresh(accounts: &Accounts, events: &broadcast::Sender<StateEvent>) {
+    let service = Arc::clone(accounts.service());
+    match tokio::task::spawn_blocking(move || service.snapshot()).await {
+        Ok(Ok(snapshot)) => cache_and_broadcast(accounts, events, wire(&snapshot)),
+        Ok(Err(err)) => {
+            warn!(%err, "the account refresh could not read the store; keeping the cache");
+        }
+        Err(err) => warn!(%err, "the account refresh stopped; keeping the cache"),
+    }
 }
 
 /// How a poll ended.
@@ -105,12 +170,14 @@ enum Polled {
 /// poll runs, the service is drained while the poll is still in flight (the
 /// drain refuses its new credential spends and waits for the ones it
 /// started), the poll is given what is left of [`SHUTDOWN_DRAIN`] to return,
-/// and nothing it read is cached or broadcast.
+/// and nothing it read is cached or broadcast; the refresh `lane` is dropped
+/// before the drain.
 async fn poll(
     accounts: &Accounts,
     events: &broadcast::Sender<StateEvent>,
     failing: &mut bool,
     shutdown: &mut watch::Receiver<bool>,
+    lane: &mut Lane,
 ) -> Polled {
     let service = Arc::clone(accounts.service());
     let mut task = tokio::task::spawn_blocking(move || service.poll(PollScope::OnDemand));
@@ -125,6 +192,7 @@ async fn poll(
     };
     let Some(joined) = joined else {
         let started = Instant::now();
+        drop(lane.take());
         drain(accounts).await;
         let left = SHUTDOWN_DRAIN.saturating_sub(started.elapsed());
         if tokio::time::timeout(left, task).await.is_err() {
@@ -143,13 +211,7 @@ async fn poll(
                 info!("the account poll answers again");
                 *failing = false;
             }
-            let wire = wire(&snapshot);
-            if accounts.store_if_changed(wire.clone()) {
-                let _ = events.send(StateEvent::Accounts {
-                    accounts: wire.accounts,
-                    auto: wire.auto,
-                });
-            }
+            cache_and_broadcast(accounts, events, wire(&snapshot));
             next_poll_in.map(|wait| wait.max(POLL_FLOOR))
         }
         Err(err) => {
@@ -224,6 +286,12 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
+        }
+
+        /// What the store holds from now on, as a write would leave it: the
+        /// next `snapshot()` answers it.
+        fn set_snapshot(&self, snapshot: AccountsSnapshot) {
+            *self.last.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
         }
     }
 
@@ -572,5 +640,109 @@ mod tests {
             .clone();
         assert_eq!(drains, [SHUTDOWN_DRAIN], "one drain, with the bound");
         assert_eq!(rig.polls(), 1);
+    }
+
+    /// Ask for a refresh and wait for its ack.
+    async fn refreshed(accounts: &Accounts, guard: Duration) {
+        let ack = accounts.request_refresh().expect("the lane is open");
+        tokio::time::timeout(guard, ack)
+            .await
+            .expect("the refresh was acked")
+            .expect("the driver acked, not dropped");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refresh_caches_and_broadcasts_the_new_snapshot() {
+        let mut rig = rig(vec![Ok(report(10.0, None))], 1);
+        rig.next_call().await;
+        assert_eq!(pct_of(&rig.next_event().await), Some(10.0));
+
+        rig.fake.set_snapshot(report(30.0, None).snapshot);
+        refreshed(&rig.accounts, GUARD).await;
+
+        assert_eq!(pct_of(&rig.next_event().await), Some(30.0));
+        let cached = rig.accounts.cached().expect("the refresh is cached");
+        assert_eq!(pct_of(&cached.accounts), Some(30.0));
+        assert_eq!(rig.polls(), 1, "a refresh is not a poll");
+        rig.task.abort();
+    }
+
+    /// On the real clock: the poll blocks a real thread, and the waits are
+    /// hang guards on its events.
+    #[tokio::test]
+    async fn a_refresh_waits_for_a_poll_in_flight_and_wins() {
+        const HANG: Duration = Duration::from_mins(1);
+        let (release, gate) = std::sync::mpsc::channel();
+        let mut rig = rig_with(vec![Ok(report(10.0, None))], 1, Some(gate));
+        tokio::time::timeout(HANG, rig.calls.recv())
+            .await
+            .expect("the poll started")
+            .expect("the fake is alive");
+
+        let ack = rig.accounts.request_refresh().expect("the lane is open");
+        rig.fake.set_snapshot(report(50.0, None).snapshot);
+        release.send(()).expect("the poll is still waiting");
+        tokio::time::timeout(HANG, ack)
+            .await
+            .expect("the refresh was acked")
+            .expect("the driver acked, not dropped");
+
+        let cached = rig.accounts.cached().expect("something is cached");
+        assert_eq!(
+            pct_of(&cached.accounts),
+            Some(50.0),
+            "the refresh, not the poll, holds the cache"
+        );
+        let mut last = None;
+        while let Ok(event) = rig.events.try_recv() {
+            if let StateEvent::Accounts { accounts, .. } = event {
+                last = pct_of(&accounts);
+            }
+        }
+        assert_eq!(last, Some(50.0), "the last broadcast carries the refresh");
+        rig.task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refresh_with_nothing_changed_acks_without_a_broadcast() {
+        let mut rig = rig(vec![Ok(report(10.0, None))], 1);
+        rig.next_call().await;
+        assert_eq!(pct_of(&rig.next_event().await), Some(10.0));
+
+        refreshed(&rig.accounts, GUARD).await;
+
+        assert!(rig.no_event(), "an unchanged refresh broadcasts nothing");
+        let cached = rig.accounts.cached().expect("the cache stays");
+        assert_eq!(pct_of(&cached.accounts), Some(10.0));
+        rig.task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refresh_after_shutdown_is_dropped_not_hung() {
+        // Far inside the handler's ten-second refresh wait.
+        const PROMPT: Duration = Duration::from_secs(1);
+        let (release, gate) = std::sync::mpsc::channel();
+        let mut rig = rig_with(vec![Ok(report(10.0, Some(POLL_FLOOR)))], 1, Some(gate));
+        rig.next_call().await;
+
+        // Queued behind the gated poll, so the driver has not served it.
+        let ack = rig.accounts.request_refresh().expect("the lane is open");
+        rig.shutdown.send_replace(true);
+
+        let answered = tokio::time::timeout(PROMPT, ack)
+            .await
+            .expect("the queued refresh was dropped at shutdown, not left to wait");
+        assert!(answered.is_err(), "the ack's sender was dropped, not sent");
+        assert!(
+            rig.accounts.request_refresh().is_none(),
+            "a refresh asked after shutdown finds the lane closed"
+        );
+
+        release.send(()).expect("the poll is still waiting");
+        tokio::time::timeout(GUARD, &mut rig.task)
+            .await
+            .expect("the driver ended")
+            .expect("the driver did not panic");
+        assert_eq!(rig.accounts.cached(), None, "the refresh never ran");
     }
 }

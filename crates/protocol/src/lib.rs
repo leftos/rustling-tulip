@@ -4481,6 +4481,53 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Switch the host agent's login to account `number`. Answered to the
+    /// requester alone with [`DaemonMessage::Accounts`] after the switch,
+    /// or with [`DaemonMessage::Error`] and an `account_*` code; both echo
+    /// `request_id`. Served on any connection origin.
+    SwitchAccount {
+        number: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Add the host agent's current login to the account store, or refresh
+    /// the stored account it already is. Answered like
+    /// [`ClientMessage::SwitchAccount`]. Local only.
+    /// A tailnet connection is refused with `Error { code: local_only }`,
+    /// which does not echo `request_id`.
+    AddCurrentLogin {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Remove account `number` from the store. Answered like
+    /// [`ClientMessage::SwitchAccount`]. Local only.
+    /// A tailnet connection is refused with `Error { code: local_only }`,
+    /// which does not echo `request_id`.
+    RemoveAccount {
+        number: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Set account `number`'s alias; `None` or a blank alias removes it.
+    /// Answered like [`ClientMessage::SwitchAccount`]. Local only.
+    /// A tailnet connection is refused with `Error { code: local_only }`,
+    /// which does not echo `request_id`.
+    SetAccountAlias {
+        number: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Set the store's rotation order; `order` names every account once.
+    /// Answered like [`ClientMessage::SwitchAccount`]. Local only.
+    /// A tailnet connection is refused with `Error { code: local_only }`,
+    /// which does not echo `request_id`.
+    SetAccountOrder {
+        order: Vec<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 }
 
 /// One history entry to recover, and how.
@@ -6964,6 +7011,108 @@ mod tests {
             matches!(&back, ClientMessage::ListAccounts { request_id: Some(id) } if id == "acc-1"),
             "{back:?}"
         );
+    }
+
+    #[test]
+    fn account_write_messages_round_trip() {
+        let cases: Vec<(ClientMessage, &str, &str)> = vec![
+            (
+                ClientMessage::SwitchAccount {
+                    number: 2,
+                    request_id: Some("r1".to_owned()),
+                },
+                r#"{"type":"switch_account","number":2,"request_id":"r1"}"#,
+                r#"{"type":"switch_account","number":2}"#,
+            ),
+            (
+                ClientMessage::AddCurrentLogin {
+                    request_id: Some("r1".to_owned()),
+                },
+                r#"{"type":"add_current_login","request_id":"r1"}"#,
+                r#"{"type":"add_current_login"}"#,
+            ),
+            (
+                ClientMessage::RemoveAccount {
+                    number: 3,
+                    request_id: Some("r1".to_owned()),
+                },
+                r#"{"type":"remove_account","number":3,"request_id":"r1"}"#,
+                r#"{"type":"remove_account","number":3}"#,
+            ),
+            (
+                ClientMessage::SetAccountAlias {
+                    number: 1,
+                    alias: Some("work".to_owned()),
+                    request_id: Some("r1".to_owned()),
+                },
+                r#"{"type":"set_account_alias","number":1,"alias":"work","request_id":"r1"}"#,
+                r#"{"type":"set_account_alias","number":1}"#,
+            ),
+            (
+                ClientMessage::SetAccountOrder {
+                    order: vec![2, 1],
+                    request_id: Some("r1".to_owned()),
+                },
+                r#"{"type":"set_account_order","order":[2,1],"request_id":"r1"}"#,
+                r#"{"type":"set_account_order","order":[2,1]}"#,
+            ),
+        ];
+        for (msg, json, bare) in cases {
+            let sent = serde_json::to_string(&msg).expect("serializes");
+            assert_eq!(sent, json);
+            let back: ClientMessage = serde_json::from_str(&sent).expect("round-trips");
+            assert_eq!(
+                serde_json::to_string(&back).expect("serializes"),
+                json,
+                "{back:?}"
+            );
+
+            let old: ClientMessage =
+                serde_json::from_str(bare).expect("a request without an id decodes");
+            let id = match &old {
+                ClientMessage::SwitchAccount { request_id, .. }
+                | ClientMessage::AddCurrentLogin { request_id }
+                | ClientMessage::RemoveAccount { request_id, .. }
+                | ClientMessage::SetAccountAlias { request_id, .. }
+                | ClientMessage::SetAccountOrder { request_id, .. } => request_id.clone(),
+                other => panic!("not an account write: {other:?}"),
+            };
+            assert_eq!(id, None, "{old:?}");
+            assert_eq!(
+                serde_json::to_string(&old).expect("serializes"),
+                bare,
+                "None is omitted"
+            );
+        }
+        let cleared: ClientMessage =
+            serde_json::from_str(r#"{"type":"set_account_alias","number":1}"#)
+                .expect("an alias-less request decodes");
+        assert!(
+            matches!(
+                cleared,
+                ClientMessage::SetAccountAlias {
+                    number: 1,
+                    alias: None,
+                    ..
+                }
+            ),
+            "{cleared:?}"
+        );
+    }
+
+    #[test]
+    fn error_codes_list_the_account_codes() {
+        for code in [
+            error_codes::ACCOUNT_BUSY,
+            error_codes::ACCOUNT_DRAINING,
+            error_codes::ACCOUNT_UNKNOWN,
+            error_codes::ACCOUNT_REFUSED,
+            error_codes::ACCOUNT_UNSUPPORTED,
+            error_codes::ACCOUNT_FAILED,
+        ] {
+            assert!(code.starts_with("account_"), "{code}");
+            assert!(error_codes::ALL.contains(&code), "{code} is not in ALL");
+        }
     }
 
     /// An account snapshot with every field set, so a test sees each key.

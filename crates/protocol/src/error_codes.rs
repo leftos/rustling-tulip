@@ -54,6 +54,20 @@ pub const CHAT_REFUSED: &str = "chat_refused";
 /// A per-connection limit was reached, such as a fifth file follow
 /// ([`crate::ClientMessage::TailFile`]) on one connection; stop one first.
 pub const LIMIT_REACHED: &str = "limit_reached";
+/// An account write met a lock that stayed held; retry in a few seconds.
+pub const ACCOUNT_BUSY: &str = "account_busy";
+/// An account write was refused because the host is shutting down.
+pub const ACCOUNT_DRAINING: &str = "account_draining";
+/// An account write named an account number the store does not have.
+pub const ACCOUNT_UNKNOWN: &str = "account_unknown";
+/// An account write was refused as asked: the active account, a store that
+/// takes no write, a login that cannot be added, an invalid value.
+pub const ACCOUNT_REFUSED: &str = "account_refused";
+/// The host keeps no accounts, or its agent's accounts do not support the
+/// write.
+pub const ACCOUNT_UNSUPPORTED: &str = "account_unsupported";
+/// An account write failed.
+pub const ACCOUNT_FAILED: &str = "account_failed";
 
 /// Every code in the catalogue.
 pub const ALL: &[&str] = &[
@@ -80,6 +94,12 @@ pub const ALL: &[&str] = &[
     BUSY,
     CHAT_REFUSED,
     LIMIT_REACHED,
+    ACCOUNT_BUSY,
+    ACCOUNT_DRAINING,
+    ACCOUNT_UNKNOWN,
+    ACCOUNT_REFUSED,
+    ACCOUNT_UNSUPPORTED,
+    ACCOUNT_FAILED,
 ];
 
 #[cfg(test)]

@@ -797,7 +797,12 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::ChatAnswer { .. }) => {
             chat::handle(hub, m, ctx);
         }
-        m @ ClientMessage::ListAccounts { .. } => accounts::handle(hub, m, ctx).await,
+        m @ (ClientMessage::ListAccounts { .. }
+        | ClientMessage::SwitchAccount { .. }
+        | ClientMessage::AddCurrentLogin { .. }
+        | ClientMessage::RemoveAccount { .. }
+        | ClientMessage::SetAccountAlias { .. }
+        | ClientMessage::SetAccountOrder { .. }) => accounts::handle(hub, m, ctx).await,
         m @ (ClientMessage::ListRepos
         | ClientMessage::AddRepo { .. }
         | ClientMessage::RemoveRepo { .. }
