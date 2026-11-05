@@ -4,14 +4,12 @@
 
 ## Wave 17 — Themes
 
-- [ ] RT-606 Answer terminal colour queries (OSC 4/10/11/12) from the pane's palette · release vNext
 - [ ] RT-587 Carry the Contrast look into the HTML viewer template, modal inputs, the installer icon and hovered icons · release vNext
 - [ ] RT-619 Match italic terminal text to the Medium and SemiBold terminal weights · release vNext
 - [ ] RT-674 Step the appearance editor from in-flight values and save an app change once
 
 ## Wave 16 — Several hosts in one window
 
-- [ ] RT-622 Clear tab-pill and pane drop marks when a dragged leaf's host goes offline · release vNext
 - [ ] RT-626 Keep a session's remembered chat view when its pane moves to the owning host · release vNext
 - [ ] RT-628 Set the Settings host selector apart from the tab list and dim offline hosts · release vNext
 - [ ] RT-839 Give the keyboard back to the dialog under a closed cleanup failure, and scope the launch highlight to its host
@@ -40,8 +38,6 @@
 - [ ] RT-921 Default shell: move the save check off the runtime, and detect WSL that is really installed
 - [ ] RT-930 Jump to a pane, tab or sidebar repo or workspace with a Ctrl+Shift+P palette · release vNext+1
 - [ ] RT-932 Add non-git folders to the sidebar, with no worktree or branch choice when spawning into one · release vNext+1
-- [ ] RT-940 Offer an opt-in install of rustling-tulip's hooks in Claude Code's user settings · release vNext
-  - [ ] RT-943 User hooks: the Settings toggle and a live spec · release vNext
 - [ ] RT-959 Default shell: verify Nushell raw-string programs, give the resume the launch's .cmd checks, and skip a familyless Automatic shell
 
 ## Wave 2b — Hook status
@@ -159,18 +155,24 @@
 ## Wave 12 — Claude accounts and artifacts by account
 
 - [ ] RT-39 Built-in Claude account switching: several logins, usage polling and switching · release vNext
-  - [/] RT-911 Accounts: manual switch, add current login and the admin messages (CA.5 write half, CA.6) · release vNext
   - [ ] RT-912 Accounts: auto-switch driver (CA.9) · release vNext
-  - [ ] RT-913 Accounts: footer chip and popover (CA.7) · release vNext
+    - [/] RT-968 Auto-switch: the engine loop under its lease · release vNext
   - [ ] RT-914 Accounts: Settings > Accounts page and toasts (CA.8, CA.10) · release vNext
   - [ ] RT-915 Accounts: daemon-driven login and the docs (CA.11, CA.12) · release vNext
   - [ ] RT-916 Accounts on macOS: Unix locks and the Keychain credential in the forked claude-accounts crate · release vNext
+    - [/] RT-962 Accounts on macOS: the live login through the Keychain · release vNext
+    - [ ] RT-964 Accounts: list the accounts feature only where accounts work · release vNext
+    - [ ] RT-965 Accounts on macOS: a switch smoke run on the Mac mini · release vNext
   - [ ] RT-924 Merge feat/claude-accounts to main (#205)
   - [ ] RT-958 Accounts: answer Draining at once for switch and capture, Unsupported for an unsupported lock, and fix the remove-timeout text
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-113 Open Claude artifact links in the account that published them
 - [ ] RT-115 Host-approved extra roots for file fetch
 - [ ] RT-114 Artifacts list, with read-only local copies served by the daemon
+- [ ] RT-969 Polish found in the accounts chip and popover shots
+  - [ ] RT-970 Keep the footer's version text whole beside the accounts chip
+  - [ ] RT-971 Draw the accounts popover's sign-in refused tag in the danger colour
+- [ ] RT-975 Auto-switch: pin the mid-tick off check, the engine wake and the tick tests' environment
 
 ## Wave 13 — ops-tower views: gates, board and dock
 
@@ -402,7 +404,6 @@
   - [ ] RT-645 Keep the host header's Connecting… clear of + Repo · release vNext
   - [ ] RT-646 Keep a reconnecting host's Claude pane titles · release vNext
   - [ ] RT-647 Fit the sidebar view switcher and pane titles at text size +4 · release vNext
-  - [ ] RT-648 Stop the prompt-box draft note flashing after a successful chat send · release vNext
   - [ ] RT-649 Keep the pane header tooltip off the Terminal, Chat and Summary labels · release vNext
 - [ ] RT-701 Replace the Fetching toast with the error when a page fetch fails
 - [ ] RT-702 Close a chat's Tail boxes when its load is refused or its host lacks file_tail
@@ -473,10 +474,15 @@
 - [ ] RT-954 Read a screen's rows once per status check instead of once per reader
 - [ ] RT-955 User hooks: refresh matchers and prune dropped events on install, and read a settings file with a BOM
 - [ ] RT-957 User hooks: write the settings backup without a torn window
+- [ ] RT-960 Accounts: stop a poll in flight broadcasting the pre-write snapshot before a write's refresh
+- [ ] RT-966 User hooks: keep the Hooks switch truthful after a failed write
+- [ ] RT-972 Accounts chip: stop asking for the list again after every switch
+- [ ] RT-973 Accounts settings: read, change and write under one lock hold
+- [ ] RT-974 Auto-switch: let a bad accounts settings file be repaired
 
 ## Design files
 
-- [accounts.md](accounts.md) — RT-39, RT-277, RT-911, RT-912, RT-913, RT-914, RT-915
+- [accounts.md](accounts.md) — RT-39, RT-277, RT-912, RT-914, RT-915, RT-964
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
@@ -491,7 +497,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [macos-compat.md](macos-compat.md) — RT-665, RT-906
+- [macos-compat.md](macos-compat.md) — RT-665, RT-906, RT-964
 - [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-364, RT-365, RT-366, RT-367, RT-368, RT-369, RT-370, RT-881, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
