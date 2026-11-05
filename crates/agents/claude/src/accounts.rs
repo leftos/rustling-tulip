@@ -696,16 +696,67 @@ fn chrono_time(nanos: i128) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp(second, subsec)
 }
 
+/// The live process table on macOS: one `sysinfo` refresh of the process list
+/// per snapshot.
+#[cfg(target_os = "macos")]
+struct MacProcessTable;
+
+#[cfg(target_os = "macos")]
+impl proc_table::ProcessTable for MacProcessTable {
+    fn snapshot(&self) -> Vec<proc_table::ProcessInfo> {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
+
+        let refresh = ProcessRefreshKind::new().with_cmd(UpdateKind::Always);
+        let mut system = System::new_with_specifics(RefreshKind::new().with_processes(refresh));
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+        system
+            .processes()
+            .values()
+            .map(|process| proc_table::ProcessInfo {
+                pid: process.pid().as_u32(),
+                parent_pid: process.parent().map_or(0, sysinfo::Pid::as_u32),
+                name: process.name().to_string_lossy().into_owned(),
+                command_line: mac_command_line(process.cmd()),
+                created: mac_started_at(process.start_time()),
+            })
+            .collect()
+    }
+}
+
+/// A process's arguments joined with single spaces, `None` when it has none.
+#[cfg(target_os = "macos")]
+fn mac_command_line(args: &[std::ffi::OsString]) -> Option<String> {
+    let joined = args
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!joined.is_empty()).then_some(joined)
+}
+
+/// `seconds` past the epoch as a [`jiff::Timestamp`], `None` when no timestamp
+/// holds it.
+#[cfg(target_os = "macos")]
+fn mac_started_at(seconds: u64) -> Option<jiff::Timestamp> {
+    let seconds = i64::try_from(seconds).ok()?;
+    jiff::Timestamp::from_second(seconds).ok()
+}
+
 /// The process table the account engine checks a lease holder against: the
-/// live Windows table where the store's locks work, an empty one elsewhere,
-/// where a crashed holder's lease waits out its heartbeat.
+/// live Windows table where the store's locks work, the live macOS one, and an
+/// empty table elsewhere, where a crashed holder's lease waits out its
+/// heartbeat.
 #[must_use]
 pub fn process_table() -> Box<dyn proc_table::ProcessTable + Send + Sync> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     {
         Box::new(proc_table::Win32ProcessTable)
     }
-    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(MacProcessTable)
+    }
+    #[cfg(not(any(all(windows, target_pointer_width = "64"), target_os = "macos")))]
     {
         Box::new(proc_table::EmptyTable)
     }
@@ -1068,5 +1119,29 @@ mod tests {
         for text in ["NaN", "inf", "-5", "soon", ""] {
             assert_eq!(retry_after_secs(text, example_now()), None, "{text:?}");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a snapshot without this process must fail loudly"
+    )]
+    fn the_macos_table_lists_this_process() {
+        let snapshot = process_table().snapshot();
+        let me = snapshot
+            .iter()
+            .find(|process| process.pid == std::process::id())
+            .expect("the snapshot lists this process");
+        assert_eq!(
+            me.parent_pid,
+            std::os::unix::process::parent_id(),
+            "this process's parent"
+        );
+        let created = me.created.expect("this process's start time is known");
+        assert!(
+            created <= jiff::Timestamp::now(),
+            "a start time is not after now"
+        );
     }
 }

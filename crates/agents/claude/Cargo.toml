@@ -49,3 +49,9 @@ zeroize = "1.9.0"
 agent-api = { workspace = true, features = ["test-support"] }
 # The runtime thread the account service is dropped on in its drop test.
 tokio = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The live process table the account engine checks a lease holder against on
+# macOS. The same version and features the daemon reads its process list with,
+# so the lockfile gains no second copy.
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
