@@ -331,8 +331,8 @@ impl ClaudeAccounts {
     /// result. The dir itself is left to the caller.
     fn capture_scratch_login(&self, claude: &ClaudePaths) -> Result<LoginCapture, AccountsFailure> {
         let captured = self.capture_without_activating(claude);
-        if let Err(error) = delete_live_keychain_item(claude) {
-            tracing::warn!(%error, "the login's scratch Keychain item could not be deleted");
+        if let Err(failure) = delete_scratch_keychain_item(claude) {
+            tracing::warn!(error = %failure.message, "the login's scratch Keychain item could not be deleted");
         }
         captured
     }
@@ -514,6 +514,22 @@ impl AccountsService for ClaudeAccounts {
             .claude_paths_in(Some(scratch))
             .map_err(|error| service_failure(&error))?;
         self.capture_scratch_login(&claude)
+    }
+
+    /// Deletes the Keychain item a login run in `scratch` left on macOS, as
+    /// [`AccountsService::capture_login_from`] does after a capture; nothing
+    /// to do on other systems, where the login stays in the folder.
+    fn discard_login(&self, scratch: &Path) -> Result<(), AccountsFailure> {
+        if !cfg!(target_os = "macos") {
+            return Ok(());
+        }
+        if let Some(refusal) = self.scratch_refusal(scratch) {
+            return Err(refusal);
+        }
+        let claude = self
+            .claude_paths_in(Some(scratch))
+            .map_err(|error| service_failure(&error))?;
+        delete_scratch_keychain_item(&claude)
     }
 
     /// Holds a drain guard across the removal, which takes none of its own,
@@ -1236,6 +1252,19 @@ fn scratch_refusal_against(live: Option<&ClaudePaths>, scratch: &Path) -> Option
         ));
     }
     None
+}
+
+/// Deletes the scratch login's Keychain item in `claude`, where it keeps one.
+fn delete_scratch_keychain_item(claude: &ClaudePaths) -> Result<(), AccountsFailure> {
+    delete_live_keychain_item(claude)
+        .map(|_| ())
+        .map_err(|error| {
+            failure(
+                AccountsFailureKind::Failed,
+                "keychain_delete_failed",
+                format!("the login's scratch Keychain item could not be deleted: {error}"),
+            )
+        })
 }
 
 /// A failure of the service around a write (its HTTP client, Claude Code's

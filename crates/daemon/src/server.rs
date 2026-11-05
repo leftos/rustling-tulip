@@ -41,6 +41,9 @@ mod tail;
 pub(crate) use self::recovery::RecoveryClaims;
 
 mod sessions;
+/// What the account login's runner and its start-up sweep stop, wait on and
+/// discard sessions with.
+pub(crate) use self::sessions::{child_gone, discard_session, stop_session_if_live};
 
 mod spawn;
 pub(crate) use self::spawn::resolve_agent_program;
@@ -50,6 +53,8 @@ pub(crate) use self::spawn::resolve_agent_program;
 )]
 pub(crate) use self::spawn::resolve_env_refs;
 pub(crate) use self::spawn::spawn_session;
+/// The account login's own terminal session.
+pub(crate) use self::spawn::{CommandSession, CommandSpec, agent_program, spawn_command_session};
 
 use self::connection::{AuthKind, ConnCtx, cancel_fetch, client_session, start_fetch};
 use self::git::repo_target_or_err;
@@ -507,6 +512,8 @@ pub async fn run(
     outlets.chat.set_summarizer(Arc::clone(&summarizer));
     let turns =
         crate::summarizer::turns::Turns::new(Arc::clone(&sessions), Arc::clone(&summarizer));
+    // The account login runs its sessions on this hub, set once it is built.
+    let login_hub = Arc::new(std::sync::OnceLock::new());
     let hub = Hub {
         state,
         sessions,
@@ -544,9 +551,10 @@ pub async fn run(
         turns,
         integrity,
         peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
-        accounts: accounts::start_service(),
+        accounts: accounts::start_service(&login_hub),
     };
     start_hub_tasks(&hub, client_count_rx);
+    let resume_ids = start_logins(&hub, &login_hub, resume_ids).await;
 
     let app = loopback_service(hub.clone());
 
@@ -953,6 +961,11 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         ClientMessage::Shutdown { drain } => {
             info!(drain, "dispatch: ClientMessage::Shutdown received");
             if drain {
+                // Claimed first, so the login's run reads the stop below as
+                // the shutdown, not as a stop from outside.
+                if let Some(accounts) = &hub.accounts {
+                    crate::accounts::login::claim_shutdown(accounts);
+                }
                 shutdown_all(hub).await;
                 info!("dispatch: shutdown_all returned; flipping watch");
             } else {
@@ -1158,11 +1171,36 @@ fn chat_hub(
 /// the auto-switch engine's lease) and end, and the engine task end, before
 /// the process exits. Whichever path flipped the shutdown watch, both are
 /// ending; a serve that failed flipped nothing, so the watch is flipped here.
-async fn stop_accounts(hub: &Hub) {
+/// A login's run task is joined too, under the same bound.
+pub(crate) async fn stop_accounts(hub: &Hub) {
     if let Some(accounts) = &hub.accounts {
         hub.shutdown_tx.send_replace(true);
         accounts.join_driver(crate::accounts::DRIVER_JOIN).await;
     }
+}
+
+/// Give the account login its hub through `login_hub`, then clear a login
+/// the last run left behind, before any client can see its session or
+/// folder; `resume_ids` without the swept sessions, which are never resumed.
+async fn start_logins(
+    hub: &Hub,
+    login_hub: &std::sync::OnceLock<Hub>,
+    resume_ids: Vec<String>,
+) -> Vec<String> {
+    let _ = login_hub.set(hub.clone());
+    let login_root = hub
+        .accounts
+        .as_ref()
+        .and_then(|accounts| accounts.login_setup())
+        .map(|setup| setup.root.clone());
+    let Some(root) = login_root else {
+        return resume_ids;
+    };
+    let swept = crate::accounts::login::sweep(hub, &root).await;
+    resume_ids
+        .into_iter()
+        .filter(|id| !swept.contains(id))
+        .collect()
 }
 
 /// Start the tasks that watch the hub for the daemon's lifetime.

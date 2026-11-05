@@ -733,7 +733,7 @@ async fn wait_for_source_exit(hub: &Hub, session_id: &str) -> anyhow::Result<()>
 /// Whether `rec`'s PTY child has exited: it holds no pty, and its exit
 /// watcher has run (it drops the scrollback request, which a Stop leaves).
 /// A headless record keeps no such trace, so it never waits.
-fn child_gone(rec: &crate::session::SessionRecord) -> bool {
+pub(crate) fn child_gone(rec: &crate::session::SessionRecord) -> bool {
     rec.pty.is_none() && rec.scrollback_snapshot_req.is_none()
 }
 
@@ -1156,7 +1156,7 @@ pub(super) fn write_meta_then_sync(hub: &Hub, meta: &orphan::OrphanMeta) {
     hub.sessions.write_sidecar(meta);
 }
 
-async fn discard_session(
+pub(crate) async fn discard_session(
     hub: &Hub,
     session_id: &str,
     cleanup: &[protocol::CleanupAction],
@@ -1296,7 +1296,46 @@ async fn discard_session(
     }
 }
 
-pub(super) async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
+/// [`stop_session`] for a session whose record still holds its live pty or
+/// headless handle; one that holds none (stopped already, or gone) is left
+/// as it is, with no orphan kill, no history entry and no record change.
+/// Whether it stopped the session.
+pub(crate) async fn stop_session_if_live(hub: &Hub, session_id: &str) -> bool {
+    let mut pty = None;
+    let mut headless_handle = None;
+    // The handles are taken in the update that checks them, so the exit
+    // watcher either took them first or finds them released.
+    hub.sessions.update_if_changed(session_id, |r| {
+        if r.pty.is_none() && r.headless.is_none() {
+            return false;
+        }
+        r.status = protocol::SessionStatus::Stopped;
+        r.pending_input = None;
+        r.background = false;
+        pty = r.pty.take();
+        headless_handle = r.headless.take();
+        r.input_notifier = None;
+        r.is_inactive = false;
+        push_recent_action(r, "stopped by user".to_string());
+        true
+    });
+    if pty.is_none() && headless_handle.is_none() {
+        return false;
+    }
+    // Before the kill, so this wins over the exit watcher's `Exited`.
+    record_end(hub, session_id, SessionEnd::StoppedByUser);
+    if let Some(pty) = pty {
+        pty.kill();
+    }
+    if let Some(h) = headless_handle {
+        h.kill().await;
+    }
+    hub.sessions.delete_sidecar(session_id);
+    remove_hook_settings(hub, session_id);
+    true
+}
+
+pub(crate) async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
     if hub.sessions.get(session_id).is_none() {
         return Err(anyhow!("unknown session: {session_id}"));
     }

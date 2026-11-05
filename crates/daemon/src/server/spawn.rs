@@ -765,7 +765,8 @@ struct NewPlainShell {
     workspace_id: Option<String>,
     shell_label: String,
     cwd: String,
-    stored_config: protocol::SpawnConfig,
+    /// `None` for a session that Restart, Duplicate and history never rerun.
+    stored_config: Option<protocol::SpawnConfig>,
     started_at: chrono::DateTime<Utc>,
     busy_excluded: bool,
     /// The agent a recovered shell's hook events are mapped with.
@@ -810,10 +811,14 @@ fn plain_shell_record(
         program_name: Some(new.shell_label.clone()),
         current_cwd: Some(new.cwd),
         appearance: AppearanceOverrides::default(),
-        spawn_config: Some(new.stored_config.clone()),
+        spawn_config: new.stored_config.clone(),
         is_abandoned: false,
         is_inactive: false,
-        worktree_paths: worktree_paths_for_config(&new.stored_config, &new.members),
+        worktree_paths: new
+            .stored_config
+            .as_ref()
+            .map(|config| worktree_paths_for_config(config, &new.members))
+            .unwrap_or_default(),
         // Plain shells never carry a kickoff prompt.
         last_prompt: None,
         input_notifier: None,
@@ -1564,7 +1569,7 @@ async fn spawn_plain_shell_session(
             workspace_id: workspace_id.clone(),
             shell_label: shell.label.clone(),
             cwd: initial_cwd.clone(),
-            stored_config: stored_config.clone(),
+            stored_config: Some(stored_config.clone()),
             started_at,
             busy_excluded,
             hook_agent: cfg.extras.hook_agent.clone(),
@@ -1661,6 +1666,203 @@ async fn spawn_plain_shell_session(
         );
     }
     Ok(snap)
+}
+
+/// A program the daemon runs for itself in a terminal session of its own,
+/// with no shell around it, so the child's exit is the program's.
+pub(crate) struct CommandSpec {
+    /// The session's id, picked by the caller.
+    pub(crate) session_id: String,
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
+    /// The agent's passthrough variables, read from the daemon's
+    /// environment as for any spawn of that agent.
+    pub(crate) passthrough: &'static [&'static str],
+    /// Set in the child's environment; never stored.
+    pub(crate) env: Vec<(String, String)>,
+    /// Removed from the child's environment, after `env` is applied.
+    pub(crate) env_remove: Vec<String>,
+    pub(crate) cwd: PathBuf,
+    /// The session's title.
+    pub(crate) label: String,
+}
+
+/// A published command session: its snapshot, how its exit was handled
+/// (dropped unsent when nobody could learn it), and its output from the
+/// first chunk, for a screen of `cols` by `rows`.
+pub(crate) struct CommandSession {
+    pub(crate) snapshot: protocol::SessionSnapshot,
+    pub(crate) exit: tokio::sync::oneshot::Receiver<crate::session::ExitFacts>,
+    pub(crate) output: tokio::sync::broadcast::Receiver<Vec<u8>>,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+}
+
+/// The program `agent`'s sessions run, resolved as any spawn resolves it
+/// (the plugin's override variable, then the host's launch command, then the
+/// plugin's own program), and the arguments it needs before its own. The
+/// launch command's extra arguments are not applied.
+pub(crate) fn agent_program(hub: &Hub, agent: &AgentId) -> anyhow::Result<(String, Vec<String>)> {
+    let plugin = agent_registry::plugin(agent)
+        .ok_or_else(|| anyhow!("no agent plugin `{}` is registered", agent.0))?;
+    let command = choose_agent_command(plugin, &hub.state.agent_command(agent), &|name| {
+        std::env::var(name).ok()
+    })?;
+    Ok(resolve_agent_program(&command.program))
+}
+
+/// Run `spec` directly in a PTY as a standalone plain-shell session with no
+/// stored spawn config, so Restart, Duplicate and history never rerun it.
+/// The exit notice is wired before the session's lifecycle task starts and
+/// the output is subscribed before the session is published, so neither an
+/// early exit nor an early chunk is missed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the plain-shell spawn's wiring, kept in the same order as spawn_plain_shell_session"
+)]
+pub(crate) async fn spawn_command_session(
+    hub: &Hub,
+    spec: CommandSpec,
+) -> anyhow::Result<CommandSession> {
+    let CommandSpec {
+        session_id,
+        program,
+        args,
+        passthrough,
+        env,
+        env_remove,
+        cwd,
+        label,
+    } = spec;
+    // The plain shell's environment (the keep-list, the passthrough
+    // variables, TERM), the command's own values on top, its removals last.
+    let plan = EnvPlan {
+        set: env,
+        remove: env_remove,
+    };
+    let env = crate::child_env::compose(passthrough, &ResolvedRows::default(), &plan, |name| {
+        std::env::var(name).ok()
+    });
+    let env_remove = plan.remove;
+    let program_label = Path::new(&program).file_stem().map_or_else(
+        || program.clone(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
+    let initial_cwd = cwd.to_string_lossy().into_owned();
+    let spec = PtySpawnSpec {
+        session_id: session_id.clone(),
+        program,
+        args,
+        cwd,
+        env,
+        env_remove,
+        cols: 120,
+        rows: 32,
+        agent_note: None,
+    };
+    let (cols, rows) = (spec.cols, spec.rows);
+    #[cfg(test)]
+    super::child_env_probe::record(&spec.env, &spec.env_remove);
+    // The plain shell's two watchers, and the caller's output receiver.
+    let expected_subscribers = expected_output_subscribers(SessionMode::PlainShell) + 1;
+    let tracer_spawn = tracer_client::spawn(&hub.dirs, spec, expected_subscribers)
+        .await
+        .map_err(|err| err.context("spawning a command session via tracer"))?;
+    let pty = tracer_spawn.handle;
+    let pid = pty.pid();
+    let started_at = Utc::now();
+    let record = plain_shell_record(
+        NewPlainShell {
+            session_id: session_id.clone(),
+            label: label.clone(),
+            kind: SessionKind::Standalone,
+            members: Vec::new(),
+            workspace_id: None,
+            shell_label: program_label.clone(),
+            cwd: initial_cwd.clone(),
+            stored_config: None,
+            started_at,
+            busy_excluded: false,
+            hook_agent: None,
+            hook_options: OptionValues::new(),
+            hook_trusted: false,
+            resumed_from: Vec::new(),
+        },
+        Some(Arc::clone(&pty)),
+    );
+    let pending = hub.sessions.insert_pending(record);
+    let (notice, exit) = tokio::sync::oneshot::channel();
+    let snap_tx = crate::session::attach_lifecycle_notifying(
+        &hub.sessions,
+        session_id.clone(),
+        &pty,
+        Some(hub.dirs.clone()),
+        notice,
+    );
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+    let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(cols, rows)));
+    {
+        let mut guard = crate::sync::lock(pending.arc());
+        guard.scrollback_snapshot_req = Some(snap_tx);
+        guard.input_notifier = Some(in_tx);
+        guard.screen = Some(Arc::clone(&screen));
+    }
+    let output = pty.output.subscribe();
+    pty_state::watch_plain_shell(
+        &hub.sessions,
+        session_id.clone(),
+        pty_state::ShellStreams {
+            output: pty.output.subscribe(),
+            input_pulses: in_rx,
+            screen,
+            rules: rules_for(&default_agent()),
+            chat: hub.chat_mirror.tap(&session_id, &default_agent()),
+        },
+        hub.attention_tx.clone(),
+        SessionStatus::Idle,
+        pty_state::ShellLaunch::Plain,
+    );
+    osc_title::watch(
+        &hub.sessions,
+        session_id.clone(),
+        pty.output.subscribe(),
+        true,
+    );
+    let snapshot = crate::sync::lock(pending.arc()).snapshot();
+    // The sidecar is on disk before any client hears of the session, so a
+    // daemon restart reattaches it.
+    if let Some(pid) = pid
+        && let Ok(mut meta) = plain_shell_meta(
+            session_id,
+            pid,
+            label,
+            SessionKind::Standalone,
+            Vec::new(),
+            started_at,
+            None,
+            Some(program_label),
+            None,
+            Some(initial_cwd),
+            TracerSidecar {
+                pid: tracer_spawn.tracer_pid,
+                pipe: tracer_spawn.pipe_name,
+                exe_path: tracer_spawn.tracer_exe_path.to_string_lossy().into_owned(),
+            },
+        )
+    {
+        meta.status = Some(snapshot.status);
+        meta.status_since = snapshot.status_since;
+        meta.status_seq = snapshot.status_seq;
+        write_meta_then_sync(hub, &meta);
+    }
+    pending.publish();
+    Ok(CommandSession {
+        snapshot,
+        exit,
+        output,
+        cols,
+        rows,
+    })
 }
 
 /// A headless run's child: the plugin's own program and arguments. The host's
@@ -2410,6 +2612,38 @@ mod tests {
     };
     use protocol::SessionEnd;
     use tokio::sync::broadcast;
+
+    #[tokio::test]
+    async fn command_session_env_carries_term_and_the_login_env() {
+        let (hub, scratch) = spawnless_test_hub("command-session-env");
+        let spawned = spawn_command_session(
+            &hub,
+            CommandSpec {
+                session_id: "cmd-env".to_owned(),
+                program: "login-cli".to_owned(),
+                args: vec!["login".to_owned()],
+                passthrough: &[],
+                env: vec![("FAKE_CONFIG_DIR".to_owned(), "scratch".to_owned())],
+                // PATH is on the keep-list, so only the removal keeps it out.
+                env_remove: vec!["PATH".to_owned()],
+                cwd: scratch.path().to_owned(),
+                label: "login".to_owned(),
+            },
+        )
+        .await;
+        assert!(spawned.is_err(), "the spawnless hub starts no child");
+
+        let (env, remove) = child_env_probe::take_both().expect("the spawn built its spec");
+        let value = |name: &str| {
+            env.iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value("TERM"), Some("xterm-256color"), "{env:?}");
+        assert_eq!(value("FAKE_CONFIG_DIR"), Some("scratch"), "{env:?}");
+        assert_eq!(value("PATH"), None, "a removed name is not set: {env:?}");
+        assert_eq!(remove, ["PATH"], "the removal reaches the tracer too");
+    }
 
     /// The text after `id: ` on the first line that holds it.
     #[cfg(windows)]
@@ -4570,7 +4804,7 @@ mod tests {
                 workspace_id: None,
                 shell_label: "pwsh".to_owned(),
                 cwd: "C:\\work".to_owned(),
-                stored_config: standalone_config(SessionMode::PlainShell),
+                stored_config: Some(standalone_config(SessionMode::PlainShell)),
                 started_at: Utc::now(),
                 busy_excluded: false,
                 hook_agent: None,
@@ -4658,7 +4892,7 @@ mod tests {
                 workspace_id: None,
                 shell_label: "pwsh".to_owned(),
                 cwd: "C:\\work".to_owned(),
-                stored_config: standalone_config(SessionMode::PlainShell),
+                stored_config: Some(standalone_config(SessionMode::PlainShell)),
                 started_at: Utc::now(),
                 busy_excluded: false,
                 hook_agent: None,
@@ -4711,7 +4945,7 @@ mod tests {
                 workspace_id: None,
                 shell_label: "pwsh".to_owned(),
                 cwd: hub.dirs.config.to_string_lossy().into_owned(),
-                stored_config: protocol::SpawnConfig::from_request(&request),
+                stored_config: Some(protocol::SpawnConfig::from_request(&request)),
                 started_at: Utc::now(),
                 busy_excluded: true,
                 hook_agent: None,

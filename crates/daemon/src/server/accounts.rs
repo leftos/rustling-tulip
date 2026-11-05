@@ -62,8 +62,11 @@ const MANUAL: &str = "manual";
 
 /// The accounts handle over the service the registered plugins offer for
 /// this host's account store, or `None` when the daemon runs elevated, the
-/// store's folder cannot be resolved, or no plugin keeps accounts.
-pub(crate) fn start_service() -> Option<Arc<Accounts>> {
+/// store's folder cannot be resolved, or no plugin keeps accounts. Its
+/// account login runs its sessions on the hub `login_hub` is set to.
+pub(crate) fn start_service(
+    login_hub: &Arc<std::sync::OnceLock<super::Hub>>,
+) -> Option<Arc<Accounts>> {
     let dir = match crate::paths::resolve_accounts_dir() {
         Ok(dir) => dir,
         Err(err) => {
@@ -93,8 +96,11 @@ pub(crate) fn start_service() -> Option<Arc<Accounts>> {
             service,
             login::LoginSetup {
                 root,
+                runner: Arc::new(login::SessionRunner::new(
+                    agent.clone(),
+                    Arc::clone(login_hub),
+                )),
                 agent,
-                runner: Arc::new(login::NoRunner),
             },
         ),
         _ => Accounts::new(service),

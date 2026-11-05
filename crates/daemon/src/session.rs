@@ -1535,6 +1535,30 @@ pub fn attach_lifecycle(
     pty: &Arc<PtyHandle>,
     dirs: Option<Dirs>,
 ) -> ScrollbackSnapshotReq {
+    attach_lifecycle_inner(registry, session_id, pty, dirs, None)
+}
+
+/// [`attach_lifecycle`], which also sends `notice` how the session's exit
+/// was handled, once [`handle_exit_with`] has run. An exit that comes before
+/// anyone waits on the notice is kept in it. `notice` is dropped unsent when
+/// the session's lifecycle queue was already taken.
+pub(crate) fn attach_lifecycle_notifying(
+    registry: &Arc<SessionRegistry>,
+    session_id: String,
+    pty: &Arc<PtyHandle>,
+    dirs: Option<Dirs>,
+    notice: oneshot::Sender<ExitFacts>,
+) -> ScrollbackSnapshotReq {
+    attach_lifecycle_inner(registry, session_id, pty, dirs, Some(notice))
+}
+
+fn attach_lifecycle_inner(
+    registry: &Arc<SessionRegistry>,
+    session_id: String,
+    pty: &Arc<PtyHandle>,
+    dirs: Option<Dirs>,
+    notice: Option<oneshot::Sender<ExitFacts>>,
+) -> ScrollbackSnapshotReq {
     let (snap_tx, mut snap_rx) = mpsc::unbounded_channel::<oneshot::Sender<ScrollbackSnapshot>>();
     let output = pty.take_lifecycle_output();
     let gate = registry.scrollback_gate(&session_id);
@@ -1622,10 +1646,27 @@ pub fn attach_lifecycle(
         drop(clients);
         drop(snap_rx);
         gate.close_writer();
-        handle_exit(&registry, &session_id, exit, dirs.as_ref());
+        let facts = handle_exit(&registry, &session_id, exit, dirs.as_ref());
+        if let Some(notice) = notice {
+            let _ = notice.send(facts);
+        }
     });
 
     snap_tx
+}
+
+/// How [`handle_exit_with`] found a session at its exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExitFacts {
+    /// The child exited by itself with `code`.
+    Exited { code: i32 },
+    /// The session was stopped (its pty released) before the exit came.
+    StoppedFirst,
+    /// The session was left abandoned: its tracer was lost, or the host is
+    /// shutting down. The child's fate is unknown.
+    Abandoned,
+    /// The registry no longer held the session's record.
+    RecordGone,
 }
 
 /// One PTY chunk on its way through `attach_lifecycle`'s task: every attached
@@ -1677,14 +1718,14 @@ fn handle_exit(
     session_id: &str,
     exit: PtyExit,
     dirs: Option<&Dirs>,
-) {
+) -> ExitFacts {
     handle_exit_with(
         registry,
         session_id,
         exit,
         dirs,
         host_shutdown::in_progress(),
-    );
+    )
 }
 
 /// [`handle_exit`] with the host's shutdown state passed in, so a test drives
@@ -1695,13 +1736,16 @@ fn handle_exit(
 /// and writes no history entry: the next start records it lost and
 /// auto-resumes it, as it does after a reboot. A Stop or a Park released the
 /// pty before the kill, so a user's own stop during a shutdown stays a stop.
+///
+/// Answers how it found the session: gone from the registry, stopped first,
+/// abandoned, or exited with its code.
 pub(crate) fn handle_exit_with(
     registry: &Arc<SessionRegistry>,
     session_id: &str,
     exit: PtyExit,
     dirs: Option<&Dirs>,
     shutting_down: bool,
-) {
+) -> ExitFacts {
     let code = exit.code();
     // A shutdown or logoff kills the tracers too, so an exit the daemon
     // still sees during one means the session was lost, not ended: keep its
@@ -1734,7 +1778,7 @@ pub(crate) fn handle_exit_with(
     }
     let mut abandoned = false;
     let mut user_stopped = false;
-    registry.update(session_id, |rec| {
+    let held = registry.update_from(session_id, None, |rec| {
         abandoned = rec.pty.is_some() && (kept_for_shutdown || matches!(exit, PtyExit::TracerLost));
         // A Stop or a Park claims the session (stopped, pty taken) before the
         // kill, so this exit is the kill's: no code of its own, no attention.
@@ -1771,15 +1815,22 @@ pub(crate) fn handle_exit_with(
                 %session_id,
                 "the host is shutting down; keeping the session for the next start"
             );
-            return;
+            return ExitFacts::Abandoned;
         }
         registry.fan_out_attention(session_id.to_owned(), protocol::AttentionReason::Error);
-        return;
+        return ExitFacts::Abandoned;
     }
     if !user_stopped {
         registry.fan_out_attention(session_id.to_owned(), protocol::AttentionReason::Stopped);
     }
     registry.delete_sidecar(session_id);
+    if !held {
+        ExitFacts::RecordGone
+    } else if user_stopped {
+        ExitFacts::StoppedFirst
+    } else {
+        ExitFacts::Exited { code }
+    }
 }
 
 /// Mark `session_id`'s sidecar as one the host's shutdown ended, so the next

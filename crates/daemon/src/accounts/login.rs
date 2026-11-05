@@ -23,16 +23,17 @@
 //! The slot's lock is never held across an `.await`, a spawn of the login,
 //! the capture, or a send.
 use super::Accounts;
-use crate::server::StateEvent;
+use crate::server::{CommandSession, CommandSpec, Hub, StateEvent};
 use agent_api::{AccountsFailure, LoginCapture, LoginCommand};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use protocol::{AccountLoginState, DaemonMessage};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::{Notify, broadcast, mpsc, watch};
-use tracing::{info, warn};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
+use tracing::{debug, info, warn};
 
 /// How long a login may run before the daemon stops it as timed out.
 pub(crate) const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
@@ -59,10 +60,6 @@ impl RunId {
 
 /// How the login's session ended, as its exit notice reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    dead_code,
-    reason = "the facts a session runner reports about a login's exit; only the tests build them while no session runner reports exits"
-)]
 pub(crate) enum ExitFacts {
     /// The child exited by itself with `code`.
     Exited { code: i32 },
@@ -110,29 +107,299 @@ pub(crate) trait LoginRunner: Send + Sync + 'static {
     fn discard(&self, session_id: &str) -> BoxFuture<'static, ()>;
 }
 
-/// The runner of a daemon with no session runner: every spawn fails.
-pub(crate) struct NoRunner;
-
-/// What [`NoRunner`]'s spawn answers.
+/// What a spawn answers on a runner whose hub is not set yet.
 const NO_RUNNER: &str = "this daemon cannot run an account login";
 
-impl LoginRunner for NoRunner {
+/// The login session's title.
+const LOGIN_TITLE: &str = "Log in a new account";
+
+/// The daemon's runner: the agent's program, resolved as for any spawn, run
+/// directly in a terminal session of its own on the hub, stopped with
+/// `stop_session_if_live` and discarded as a pane close discards a session.
+pub(crate) struct SessionRunner {
+    agent: protocol::AgentId,
+    /// The hub, set once it is built; a spawn before that fails.
+    hub: Arc<OnceLock<Hub>>,
+    #[cfg(test)]
+    spawner: Option<Arc<dyn TestSpawner>>,
+}
+
+/// A test's stand-in for [`crate::server::spawn_command_session`].
+#[cfg(test)]
+pub(crate) trait TestSpawner: Send + Sync {
+    fn spawn(&self, hub: &Hub, spec: CommandSpec) -> anyhow::Result<CommandSession>;
+}
+
+impl SessionRunner {
+    /// The runner of `agent`'s login, on the hub `hub` is set to.
+    pub(crate) fn new(agent: protocol::AgentId, hub: Arc<OnceLock<Hub>>) -> Self {
+        Self {
+            agent,
+            hub,
+            #[cfg(test)]
+            spawner: None,
+        }
+    }
+
+    /// This runner, spawning its sessions through `spawner`.
+    #[cfg(test)]
+    pub(crate) fn spawning_with(mut self, spawner: Arc<dyn TestSpawner>) -> Self {
+        self.spawner = Some(spawner);
+        self
+    }
+}
+
+impl LoginRunner for SessionRunner {
     fn spawn(
         &self,
-        _run: &str,
-        _scratch: &Path,
-        _cmd: LoginCommand,
+        run: &str,
+        scratch: &Path,
+        cmd: LoginCommand,
     ) -> BoxFuture<'static, anyhow::Result<LoginSession>> {
-        Box::pin(async { Err(anyhow::anyhow!(NO_RUNNER)) })
+        let hub = self.hub.get().cloned();
+        let agent = self.agent.clone();
+        let session_id = run.to_owned();
+        let cwd = scratch.to_owned();
+        #[cfg(test)]
+        let spawner = self.spawner.clone();
+        Box::pin(async move {
+            let hub = hub.ok_or_else(|| anyhow::anyhow!(NO_RUNNER))?;
+            let (program, mut args) = crate::server::agent_program(&hub, &agent)?;
+            args.extend(cmd.args);
+            let passthrough: &'static [&'static str] =
+                agent_registry::plugin(&agent).map_or(&[], |plugin| plugin.passthrough_vars());
+            let spec = CommandSpec {
+                session_id,
+                program,
+                args,
+                passthrough,
+                env: cmd.env,
+                env_remove: cmd.env_remove,
+                cwd,
+                label: LOGIN_TITLE.to_owned(),
+            };
+            #[cfg(test)]
+            if let Some(spawner) = spawner {
+                return Ok(login_session(spawner.spawn(&hub, spec)?));
+            }
+            let session = crate::server::spawn_command_session(&hub, spec).await?;
+            Ok(login_session(session))
+        })
     }
 
-    fn stop(&self, _session_id: &str) -> BoxFuture<'static, ()> {
-        Box::pin(async {})
+    fn stop(&self, session_id: &str) -> BoxFuture<'static, ()> {
+        let hub = self.hub.get().cloned();
+        let session_id = session_id.to_owned();
+        Box::pin(async move {
+            let Some(hub) = hub else {
+                return;
+            };
+            // A session already stopped (a drain, a user's Stop) or discarded
+            // is expected: its exit still comes, and it is never orphan-killed.
+            if !crate::server::stop_session_if_live(&hub, &session_id).await {
+                debug!(%session_id, "the login session holds no live handle to stop; waiting for its exit");
+            }
+        })
     }
 
-    fn discard(&self, _session_id: &str) -> BoxFuture<'static, ()> {
-        Box::pin(async {})
+    fn discard(&self, session_id: &str) -> BoxFuture<'static, ()> {
+        let hub = self.hub.get().cloned();
+        let session_id = session_id.to_owned();
+        Box::pin(async move {
+            if let Some(hub) = hub {
+                discard_record(&hub, &session_id).await;
+            }
+        })
     }
+}
+
+/// Discard `session_id`'s record, its sidecar and its session dir, as a
+/// pane close does; one already gone is a no-op.
+async fn discard_record(hub: &Hub, session_id: &str) {
+    // Nothing a standalone session's discard sends is for anyone.
+    let (out_tx, _unread) = mpsc::unbounded_channel();
+    crate::server::discard_session(hub, session_id, &[], &out_tx).await;
+}
+
+/// The run's view of a spawned command session: its exit future feeds the
+/// session's output into a screen of its own until the exit notice comes,
+/// then reads that screen's rows as the tail.
+fn login_session(session: CommandSession) -> LoginSession {
+    let CommandSession {
+        snapshot,
+        exit,
+        output,
+        cols,
+        rows,
+    } = session;
+    LoginSession {
+        session_id: snapshot.id,
+        exit: exit_future(exit, output, cols, rows),
+    }
+}
+
+/// See [`login_session`]. Every chunk reaches the output before the exit is
+/// handled, so the drain after the notice reads the last one too; a lagged
+/// receiver only loses older chunks.
+fn exit_future(
+    mut exit: oneshot::Receiver<crate::session::ExitFacts>,
+    mut output: broadcast::Receiver<Vec<u8>>,
+    cols: u16,
+    rows: u16,
+) -> BoxFuture<'static, LoginExit> {
+    use broadcast::error::{RecvError, TryRecvError};
+    Box::pin(async move {
+        let mut screen = crate::screen::Screen::new(cols, rows);
+        let mut reading = true;
+        let facts = loop {
+            tokio::select! {
+                biased;
+                facts = &mut exit => break facts.ok(),
+                chunk = output.recv(), if reading => match chunk {
+                    Ok(bytes) => screen.feed(&bytes),
+                    Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => reading = false,
+                },
+            }
+        };
+        loop {
+            match output.try_recv() {
+                Ok(bytes) => screen.feed(&bytes),
+                Err(TryRecvError::Lagged(_)) => {}
+                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+            }
+        }
+        LoginExit {
+            facts: facts.map(exit_facts),
+            tail: screen.rows(),
+        }
+    })
+}
+
+/// The run's reading of how the session's exit was handled.
+fn exit_facts(facts: crate::session::ExitFacts) -> ExitFacts {
+    use crate::session::ExitFacts as Handled;
+    match facts {
+        Handled::Exited { code } => ExitFacts::Exited { code },
+        Handled::StoppedFirst => ExitFacts::StoppedFirst,
+        Handled::Abandoned => ExitFacts::Abandoned,
+        Handled::RecordGone => ExitFacts::RecordGone,
+    }
+}
+
+/// Claim a starting or running login's end for the daemon's shutdown and
+/// wake its run, before a drain stops every session: the run then reads its
+/// session's stop as the shutdown, not as a stop from outside. A login being
+/// captured or already ending keeps its end.
+pub(crate) fn claim_shutdown(accounts: &Accounts) {
+    let mut slot = crate::sync::lock(&accounts.login);
+    let (run, session_id, wake) = match std::mem::replace(&mut *slot, LoginSlot::Idle) {
+        LoginSlot::Starting { run } => (run, None, None),
+        LoginSlot::Running {
+            run,
+            session_id,
+            wake,
+        } => (run, Some(session_id), Some(wake)),
+        other => {
+            *slot = other;
+            return;
+        }
+    };
+    info!(
+        run = run.as_str(),
+        "the account login ends for the daemon's shutdown"
+    );
+    *slot = LoginSlot::Ending {
+        run,
+        session_id,
+        reason: EndReason::Shutdown,
+    };
+    drop(slot);
+    if let Some(wake) = wake {
+        wake.notify_one();
+    }
+}
+
+/// The start-up sweep, before any client connects: for each entry under
+/// the login `root`, the login a previous run left there. Its session is
+/// stopped and waited for when it still runs, then discarded with its
+/// sidecar and session dir; the service's scratch login is cleaned up and
+/// the entry removed. An entry whose child does not end within
+/// [`STOP_WAIT`] is left for the next start. Returns every entry's id, none
+/// of which may be resumed.
+pub(crate) async fn sweep(hub: &Hub, root: &Path) -> HashSet<String> {
+    let mut swept = HashSet::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return swept,
+        Err(err) => {
+            warn!(%err, root = %root.display(), "could not read the account login folder");
+            return swept;
+        }
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            warn!(entry = %path.display(), "an account login folder whose name is not text is left");
+            continue;
+        };
+        info!(session_id = %id, "the start-up sweep clears a login left by an earlier run");
+        swept.insert(id.clone());
+        if !sweep_session(hub, &id).await {
+            warn!(
+                session_id = %id,
+                bound = ?STOP_WAIT,
+                "a left login's child did not end in time; its folder is left for the next start"
+            );
+            continue;
+        }
+        if let Some(accounts) = &hub.accounts {
+            discard_login(Arc::clone(accounts.service()), path.clone()).await;
+        }
+        remove_scratch(path).await;
+    }
+    swept
+}
+
+/// Stop the session `session_id` names when its child still runs and wait
+/// until it is gone, then discard it; with no session, drop any sidecar and
+/// session dir it left. Whether the child is confirmed gone.
+async fn sweep_session(hub: &Hub, session_id: &str) -> bool {
+    let Some(rec) = hub.sessions.get(session_id) else {
+        hub.sessions.delete_sidecar(session_id);
+        hub.sessions.delete_session_dir(session_id);
+        return true;
+    };
+    let live = crate::sync::lock(&rec).pty.is_some();
+    drop(rec);
+    if live {
+        // Subscribed before the stop, then the record re-read after each
+        // event, so the exit is never missed. No client can discard the
+        // record before the bind, so a missing one is a handled exit.
+        let mut events = hub.sessions.subscribe();
+        if !crate::server::stop_session_if_live(hub, session_id).await {
+            debug!(%session_id, "the left login holds no live handle to stop");
+        }
+        let gone = || {
+            hub.sessions
+                .get(session_id)
+                .is_none_or(|rec| crate::server::child_gone(&crate::sync::lock(&rec)))
+        };
+        let wait = async {
+            while !gone() {
+                match events.recv().await {
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return false,
+                }
+            }
+            true
+        };
+        if !tokio::time::timeout(STOP_WAIT, wait).await.unwrap_or(false) {
+            return false;
+        }
+    }
+    discard_record(hub, session_id).await;
+    true
 }
 
 /// What a handle that runs logins holds: the login root (`<data
@@ -1033,13 +1300,18 @@ async fn remove_scratch(scratch: PathBuf) {
 mod tests {
     use super::*;
     use crate::accounts::SharedAccounts;
-    use crate::server::Hub;
+    use crate::history::test_support::{
+        ScriptedExit, insert_live, insert_live_notifying, record, scripted_pty, write_meta_for,
+    };
+    use crate::pty::PtyExit;
     use crate::server::accounts_fake::{ADDED, HANG, account, dispatch_local, next_reply};
     use crate::server::test_support::{ScratchDir, test_hub};
+    use crate::server::{CommandSession, CommandSpec, Hub};
     use agent_api::{
         AccountRow, AccountsError, AccountsFailureKind, AccountsService, AccountsSnapshot,
         PollReport, PollScope,
     };
+    use protocol::SessionMode;
     use protocol::{ClientMessage, error_codes};
     use std::collections::{HashMap, VecDeque};
     use std::sync::{Mutex, PoisonError};
@@ -1336,21 +1608,36 @@ mod tests {
     }
 
     fn rig(tag: &str) -> Rig {
+        rig_with(tag, None)
+    }
+
+    /// [`rig`], whose logins run through the daemon's [`SessionRunner`] with
+    /// `sessions` playing the spawned terminals, when given.
+    fn rig_with(tag: &str, sessions: Option<&Arc<FakeSessions>>) -> Rig {
         let (mut hub, scratch) = test_hub(tag);
         let root = scratch.path().join("account-login");
         let service = Arc::new(FakeService::default());
         let runner = Arc::new(FakeRunner::default());
         let (notes_tx, notes) = mpsc::unbounded_channel();
         *locked(&runner.notes) = Some(notes_tx);
+        let hub_slot = Arc::new(OnceLock::new());
+        let used: Arc<dyn LoginRunner> = match sessions {
+            Some(sessions) => Arc::new(
+                SessionRunner::new(agent_registry::default_agent(), Arc::clone(&hub_slot))
+                    .spawning_with(Arc::clone(sessions) as Arc<dyn TestSpawner>),
+            ),
+            None => Arc::clone(&runner) as Arc<dyn LoginRunner>,
+        };
         let accounts = Accounts::with_login(
             Arc::clone(&service) as SharedAccounts,
             LoginSetup {
                 root: root.clone(),
-                agent: protocol::AgentId("fake".to_owned()),
-                runner: Arc::clone(&runner) as Arc<dyn LoginRunner>,
+                agent: agent_registry::default_agent(),
+                runner: used,
             },
         );
         hub.accounts = Some(Arc::clone(&accounts));
+        let _ = hub_slot.set(hub.clone());
         let events = hub.state_events.subscribe();
         Rig {
             hub,
@@ -2428,5 +2715,472 @@ mod tests {
         );
         assert_eq!(rig.slot(), "idle");
         assert_eq!(rig.dirs(), [session], "left for the sweep");
+    }
+
+    /// The terminals a [`SessionRunner`] spawns in a test: each a live
+    /// session on the hub, wired as a command session is, whose tracer the
+    /// test scripts. A kill reports `on_kill`, if set.
+    struct FakeSessions {
+        on_kill: Option<PtyExit>,
+        scripts: Mutex<HashMap<String, ScriptedExit>>,
+    }
+
+    impl FakeSessions {
+        fn new(on_kill: Option<PtyExit>) -> Arc<Self> {
+            Arc::new(Self {
+                on_kill,
+                scripts: Mutex::new(HashMap::new()),
+            })
+        }
+
+        fn with_script<T>(&self, session_id: &str, f: impl FnOnce(&ScriptedExit) -> T) -> T {
+            f(locked(&self.scripts)
+                .get(session_id)
+                .expect("the session was spawned"))
+        }
+
+        fn chunk(&self, session_id: &str, bytes: &[u8]) {
+            self.with_script(session_id, |script| script.chunk(bytes));
+        }
+
+        fn finish(&self, session_id: &str, exit: PtyExit) {
+            self.with_script(session_id, |script| script.finish(exit));
+        }
+    }
+
+    impl TestSpawner for FakeSessions {
+        fn spawn(&self, hub: &Hub, spec: CommandSpec) -> anyhow::Result<CommandSession> {
+            let (pty, script) = scripted_pty(self.on_kill);
+            let output = pty.output.subscribe();
+            let mut rec = record(&spec.session_id, SessionMode::PlainShell);
+            rec.label.clone_from(&spec.label);
+            let exit = insert_live_notifying(&hub.sessions, &hub.dirs, rec, &pty);
+            let snapshot = crate::sync::lock(
+                &hub.sessions
+                    .get(&spec.session_id)
+                    .expect("the session was inserted"),
+            )
+            .snapshot();
+            locked(&self.scripts).insert(spec.session_id, script);
+            Ok(CommandSession {
+                snapshot,
+                exit,
+                output,
+                cols: 40,
+                rows: 10,
+            })
+        }
+    }
+
+    impl Rig {
+        /// The `AccountLogin` broadcasts already sent, in order.
+        fn login_events_now(&mut self) -> Vec<(AccountLoginState, Option<String>, Option<String>)> {
+            let mut seen = Vec::new();
+            loop {
+                match self.events.try_recv() {
+                    Ok(StateEvent::AccountLogin {
+                        state,
+                        session_id,
+                        message,
+                    }) => seen.push((state, session_id, message)),
+                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                    Err(_) => return seen,
+                }
+            }
+        }
+
+        fn has_session(&self, session_id: &str) -> bool {
+            self.hub.sessions.get(session_id).is_some()
+        }
+    }
+
+    /// A scratch login root under `hub`'s scratch folder, with one folder
+    /// per id.
+    fn login_root(scratch: &ScratchDir, ids: &[&str]) -> PathBuf {
+        let root = scratch.path().join("account-login");
+        for id in ids {
+            std::fs::create_dir_all(root.join(id)).expect("the login folder can be made");
+            std::fs::write(root.join(id).join(".credentials.json"), "{}")
+                .expect("the login folder takes a file");
+        }
+        root
+    }
+
+    fn ids(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    #[tokio::test]
+    async fn command_session_exit_before_await_is_kept() {
+        let (hub, _scratch) = test_hub("command-session-early-exit");
+        let (pty, script) = scripted_pty(None);
+        let exit = insert_live_notifying(
+            &hub.sessions,
+            &hub.dirs,
+            record("cmd-1", SessionMode::PlainShell),
+            &pty,
+        );
+
+        script.finish(PtyExit::Code(3));
+        tokio::time::timeout(HANG, async {
+            loop {
+                let rec = hub.sessions.get("cmd-1").expect("the record stays");
+                if crate::sync::lock(&rec).exit_code == Some(3) {
+                    return;
+                }
+                drop(rec);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("hung: the exit was not handled");
+
+        assert_eq!(
+            tokio::time::timeout(HANG, exit)
+                .await
+                .expect("hung: the exit notice never came"),
+            Ok(crate::session::ExitFacts::Exited { code: 3 })
+        );
+    }
+
+    #[tokio::test]
+    async fn login_failed_message_carries_last_screen_lines() {
+        let sessions = FakeSessions::new(Some(PtyExit::Code(1)));
+        let mut rig = rig_with("login-screen-tail", Some(&sessions));
+        let session = rig.start_running("l1").await;
+        let _ = rig.login_event().await;
+
+        sessions.chunk(
+            &session,
+            b"line 1\r\nline 2\r\n\r\nline 3\r\nline 4\r\nline 5\r\nline 6\r\nline 7\r\n",
+        );
+        sessions.finish(&session, PtyExit::Code(3));
+
+        assert_eq!(
+            rig.login_event().await,
+            (
+                AccountLoginState::Failed,
+                Some(session.clone()),
+                Some(
+                    "the login exited with code 3\nline 3\nline 4\nline 5\nline 6\nline 7"
+                        .to_owned()
+                )
+            )
+        );
+        assert!(rig.dirs().is_empty(), "{:?}", rig.dirs());
+        assert_eq!(rig.slot(), "idle");
+    }
+
+    #[tokio::test]
+    async fn login_drain_shutdown_claims_before_shutdown_all() {
+        let sessions = FakeSessions::new(Some(PtyExit::Code(1)));
+        let mut rig = rig_with("login-drain-shutdown", Some(&sessions));
+        let session = rig.start_running("l1").await;
+        let _ = rig.login_event().await;
+        let at_kill = Arc::new(Mutex::new(Vec::new()));
+        {
+            let at_kill = Arc::clone(&at_kill);
+            let accounts = Arc::clone(&rig.accounts);
+            sessions.with_script(&session, |script| {
+                script.on_kill(move || {
+                    let held = match &*crate::sync::lock(&accounts.login) {
+                        LoginSlot::Ending {
+                            reason: EndReason::Shutdown,
+                            ..
+                        } => "ending for the shutdown",
+                        LoginSlot::Ending { .. } => "ending",
+                        LoginSlot::Running { .. } => "running",
+                        _ => "other",
+                    };
+                    locked(&at_kill).push(held);
+                });
+            });
+        }
+
+        let _acks = rig.send(ClientMessage::Shutdown { drain: true }).await;
+
+        assert_eq!(
+            rig.login_event().await,
+            (
+                AccountLoginState::Cancelled,
+                Some(session.clone()),
+                Some("the daemon is shutting down".to_owned())
+            )
+        );
+        assert_eq!(*locked(&at_kill), ["ending for the shutdown"]);
+        rig.accounts.join_driver(HANG).await;
+        assert_eq!(rig.slot(), "idle");
+        assert!(rig.dirs().is_empty(), "{:?}", rig.dirs());
+        assert!(!rig.has_session(&session), "the run discarded its session");
+    }
+
+    #[tokio::test]
+    async fn stop_accounts_joins_the_login_run() {
+        let sessions = FakeSessions::new(Some(PtyExit::Code(1)));
+        let mut rig = rig_with("login-stop-accounts", Some(&sessions));
+        let session = rig.start_running("l1").await;
+        let _ = rig.login_event().await;
+
+        tokio::time::timeout(HANG, crate::server::stop_accounts(&rig.hub))
+            .await
+            .expect("hung: stop_accounts did not return");
+
+        assert_eq!(
+            rig.slot(),
+            "idle",
+            "the run ended before stop_accounts returned"
+        );
+        assert!(crate::sync::lock(&rig.accounts.login_task).is_none());
+        assert_eq!(
+            rig.login_events_now(),
+            [(
+                AccountLoginState::Cancelled,
+                Some(session.clone()),
+                Some("the daemon is shutting down".to_owned())
+            )]
+        );
+        assert!(rig.dirs().is_empty(), "{:?}", rig.dirs());
+        assert!(!rig.has_session(&session), "the run discarded its session");
+    }
+
+    #[tokio::test]
+    async fn login_outside_stop_cancels() {
+        let sessions = FakeSessions::new(Some(PtyExit::Code(1)));
+        let mut rig = rig_with("login-outside-stop", Some(&sessions));
+        let session = rig.start_running("l1").await;
+        let _ = rig.login_event().await;
+
+        let _replies = rig
+            .send(ClientMessage::StopSession {
+                session_id: session.clone(),
+                cleanup: Vec::new(),
+            })
+            .await;
+
+        assert_eq!(
+            rig.login_event().await,
+            (
+                AccountLoginState::Cancelled,
+                Some(session.clone()),
+                Some("the login session was stopped".to_owned())
+            )
+        );
+        assert_eq!(rig.slot(), "idle");
+        assert!(rig.dirs().is_empty(), "{:?}", rig.dirs());
+        assert!(!rig.has_session(&session), "the run discarded its session");
+        assert_eq!(rig.service.discards(), 1, "the scratch login is cleaned up");
+    }
+
+    #[tokio::test]
+    async fn login_discard_before_exit_waits_for_exit_facts() {
+        let sessions = FakeSessions::new(None);
+        let mut rig = rig_with("login-discard-before-exit", Some(&sessions));
+        let session = rig.start_running("l1").await;
+        let _ = rig.login_event().await;
+
+        let _stopped = rig
+            .send(ClientMessage::StopSession {
+                session_id: session.clone(),
+                cleanup: Vec::new(),
+            })
+            .await;
+        let _discarded = rig
+            .send(ClientMessage::DiscardSession {
+                session_id: session.clone(),
+                cleanup: Vec::new(),
+            })
+            .await;
+        assert!(
+            !rig.has_session(&session),
+            "the pane close removed the record"
+        );
+        yield_a_few().await;
+
+        assert_eq!(rig.slot(), "running", "no exit facts yet");
+        assert_eq!(rig.dirs(), [session.as_str()], "the child may still run");
+        rig.no_login_event();
+
+        sessions.finish(&session, PtyExit::Code(1));
+
+        assert_eq!(
+            rig.login_event().await,
+            (
+                AccountLoginState::Cancelled,
+                Some(session.clone()),
+                Some("the login session was stopped".to_owned())
+            )
+        );
+        assert_eq!(rig.slot(), "idle");
+        assert!(rig.dirs().is_empty(), "{:?}", rig.dirs());
+    }
+
+    #[tokio::test]
+    async fn login_stop_after_pty_taken_never_orphan_kills() {
+        let sessions = FakeSessions::new(None);
+        let mut rig = rig_with("login-stop-after-pty-taken", Some(&sessions));
+        let session = rig.start_running("l1").await;
+        let _ = rig.login_event().await;
+        let stops = || {
+            let rec = rig.hub.sessions.get(&session).expect("the record stays");
+            let rec = crate::sync::lock(&rec);
+            rec.recent_actions
+                .iter()
+                .filter(|action| action.contains("stopped by user"))
+                .count()
+        };
+
+        // The drain's stop takes the pty; the run's own stop comes after it,
+        // while the exit is not in yet.
+        let _acks = rig.send(ClientMessage::Shutdown { drain: true }).await;
+        yield_a_few().await;
+
+        assert_eq!(stops(), 1, "only the drain stopped the session");
+        assert_eq!(rig.slot(), "ending", "the run waits for the exit facts");
+        sessions.finish(&session, PtyExit::Code(1));
+        assert_eq!(
+            rig.login_event().await,
+            (
+                AccountLoginState::Cancelled,
+                Some(session.clone()),
+                Some("the daemon is shutting down".to_owned())
+            )
+        );
+        assert!(rig.dirs().is_empty(), "{:?}", rig.dirs());
+    }
+
+    #[tokio::test]
+    async fn login_tracer_lost_fails() {
+        let sessions = FakeSessions::new(Some(PtyExit::Code(1)));
+        let mut rig = rig_with("login-tracer-lost", Some(&sessions));
+        let session = rig.start_running("l1").await;
+        let _ = rig.login_event().await;
+
+        sessions.chunk(&session, b"waiting for the browser\r\n");
+        sessions.finish(&session, PtyExit::TracerLost);
+
+        assert_eq!(
+            rig.login_event().await,
+            (
+                AccountLoginState::Failed,
+                Some(session.clone()),
+                Some("lost the login terminal\nwaiting for the browser".to_owned())
+            )
+        );
+        assert_eq!(rig.slot(), "idle");
+        assert!(rig.dirs().is_empty(), "{:?}", rig.dirs());
+        assert!(
+            !rig.has_session(&session),
+            "the run discarded the abandoned session"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_stops_a_reattached_login_session() {
+        let (hub, scratch) = test_hub("sweep-reattached");
+        let root = login_root(&scratch, &["login-1"]);
+        let (pty, script) = scripted_pty(None);
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("login-1", SessionMode::PlainShell),
+            &pty,
+        );
+        drop(pty);
+        write_meta_for(&hub.dirs, "login-1");
+        let killed = Arc::new(tokio::sync::Notify::new());
+        {
+            let killed = Arc::clone(&killed);
+            script.on_kill(move || killed.notify_one());
+        }
+
+        let sweep = sweep(&hub, &root);
+        tokio::pin!(sweep);
+        tokio::select! {
+            _ = &mut sweep => unreachable!("the sweep ended before the child was gone"),
+            () = killed.notified() => {}
+        }
+        assert!(
+            root.join("login-1").is_dir(),
+            "kept while the child may run"
+        );
+        script.finish(PtyExit::Code(1));
+        let swept = tokio::time::timeout(HANG, sweep)
+            .await
+            .expect("hung: the sweep did not end");
+
+        assert_eq!(swept, ids(&["login-1"]));
+        assert!(hub.sessions.get("login-1").is_none(), "the record is gone");
+        assert!(
+            !hub.dirs.sessions_dir.join("login-1").exists(),
+            "the session dir is gone"
+        );
+        assert!(!root.join("login-1").exists(), "the login folder is gone");
+    }
+
+    #[tokio::test]
+    async fn sweep_discards_an_abandoned_login_and_its_resume() {
+        let (hub, scratch) = test_hub("sweep-abandoned");
+        let root = login_root(&scratch, &["login-1"]);
+        let mut rec = record("login-1", SessionMode::PlainShell);
+        rec.status = protocol::SessionStatus::Stopped;
+        rec.is_abandoned = true;
+        hub.sessions.insert_pending(rec).publish();
+        write_meta_for(&hub.dirs, "login-1");
+
+        let swept = tokio::time::timeout(HANG, sweep(&hub, &root))
+            .await
+            .expect("hung: the sweep did not end");
+
+        assert_eq!(swept, ids(&["login-1"]), "its id leaves the resume list");
+        assert!(hub.sessions.get("login-1").is_none(), "the record is gone");
+        assert!(
+            !hub.dirs.sessions_dir.join("login-1").exists(),
+            "the sidecar is gone"
+        );
+        assert!(!root.join("login-1").exists(), "the login folder is gone");
+    }
+
+    #[tokio::test]
+    async fn sweep_removes_a_scratch_dir_with_no_session() {
+        let (hub, scratch) = test_hub("sweep-no-session");
+        let root = login_root(&scratch, &["login-1"]);
+
+        let swept = tokio::time::timeout(HANG, sweep(&hub, &root))
+            .await
+            .expect("hung: the sweep did not end");
+
+        assert_eq!(swept, ids(&["login-1"]));
+        assert!(!root.join("login-1").exists(), "the login folder is gone");
+        assert!(root.is_dir(), "the root stays");
+    }
+
+    #[tokio::test]
+    async fn sweep_leaves_other_sessions_alone() {
+        let (hub, scratch) = test_hub("sweep-others");
+        let root = login_root(&scratch, &["login-1"]);
+        let (pty, _script) = scripted_pty(Some(PtyExit::Code(1)));
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("other-live", SessionMode::PlainShell),
+            &pty,
+        );
+        let mut abandoned = record("other-abandoned", SessionMode::PlainShell);
+        abandoned.status = protocol::SessionStatus::Stopped;
+        abandoned.is_abandoned = true;
+        hub.sessions.insert_pending(abandoned).publish();
+
+        let swept = tokio::time::timeout(HANG, sweep(&hub, &root))
+            .await
+            .expect("hung: the sweep did not end");
+
+        assert_eq!(swept, ids(&["login-1"]));
+        let live = hub
+            .sessions
+            .get("other-live")
+            .expect("the live session stays");
+        assert!(crate::sync::lock(&live).pty.is_some(), "and keeps running");
+        assert!(hub.sessions.get("other-abandoned").is_some());
+        assert!(!root.join("login-1").exists());
     }
 }

@@ -1728,6 +1728,133 @@ pub(crate) mod test_support {
         .unwrap_or_else(|_| panic!("hung: no history writer reached the write lock"));
     }
 
+    /// What a [`scripted_pty`]'s tracer does next, in order.
+    enum Script {
+        Chunk(Vec<u8>),
+        Finish(PtyExit),
+    }
+
+    /// What a [`scripted_pty`]'s kill calls first, if set.
+    type KillHook = Arc<std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
+    /// Kills a [`scripted_pty`]: calls the hook, then reports `on_kill` as
+    /// the exit, if set, after every chunk scripted before the kill.
+    #[derive(Clone)]
+    struct ScriptKiller {
+        script: mpsc::UnboundedSender<Script>,
+        on_kill: Option<PtyExit>,
+        hook: KillHook,
+    }
+
+    impl std::fmt::Debug for ScriptKiller {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ScriptKiller")
+                .field("on_kill", &self.on_kill)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl ChildKiller for ScriptKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            let hook = crate::sync::lock(&self.hook).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+            if let Some(exit) = self.on_kill {
+                let _ = self.script.send(Script::Finish(exit));
+            }
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// The tracer of a [`scripted_pty`]: chunks and the exit go out in the
+    /// order they are scripted. Once it and the handle's killer are dropped
+    /// with no exit scripted, the reader is gone without one, a lost tracer.
+    pub struct ScriptedExit {
+        script: mpsc::UnboundedSender<Script>,
+        hook: KillHook,
+    }
+
+    impl ScriptedExit {
+        /// Have every later kill call `hook` first, on the killing thread.
+        pub fn on_kill(&self, hook: impl Fn() + Send + Sync + 'static) {
+            *crate::sync::lock(&self.hook) = Some(Arc::new(hook));
+        }
+
+        /// Sends one output chunk, as the tracer reader does.
+        pub fn chunk(&self, bytes: &[u8]) {
+            let _ = self.script.send(Script::Chunk(bytes.to_vec()));
+        }
+
+        /// Reports `exit` after every chunk scripted before it.
+        pub fn finish(&self, exit: PtyExit) {
+            let _ = self.script.send(Script::Finish(exit));
+        }
+    }
+
+    /// A PTY handle whose tracer the returned [`ScriptedExit`] plays; a kill
+    /// reports `on_kill` as the exit, or nothing when it is `None`. Needs a
+    /// runtime: the tracer is a task.
+    pub fn scripted_pty(on_kill: Option<PtyExit>) -> (Arc<PtyHandle>, ScriptedExit) {
+        let (producer, lifecycle_output) = PtyProducer::channel(64);
+        let (input_tx, _) = mpsc::unbounded_channel();
+        let (resize_tx, _) = mpsc::unbounded_channel();
+        let (script, mut steps) = mpsc::unbounded_channel();
+        let hook = KillHook::default();
+        let handle = PtyHandle::from_parts(PtyHandleParts {
+            output: producer.output(),
+            lifecycle_output,
+            input_tx,
+            resize_tx,
+            killer: Box::new(ScriptKiller {
+                script: script.clone(),
+                on_kill,
+                hook: Arc::clone(&hook),
+            }),
+            pid: None,
+        });
+        tokio::spawn(async move {
+            while let Some(step) = steps.recv().await {
+                match step {
+                    Script::Chunk(bytes) => producer.send(bytes).await,
+                    Script::Finish(exit) => {
+                        producer.finish(exit).await;
+                        return;
+                    }
+                }
+            }
+        });
+        (Arc::new(handle), ScriptedExit { script, hook })
+    }
+
+    /// [`insert_live`], with the exit watcher a command session gets: the
+    /// returned receiver learns how the exit was handled.
+    pub fn insert_live_notifying(
+        registry: &Arc<SessionRegistry>,
+        dirs: &Dirs,
+        mut rec: SessionRecord,
+        pty: &Arc<PtyHandle>,
+    ) -> tokio::sync::oneshot::Receiver<crate::session::ExitFacts> {
+        let id = rec.id.clone();
+        rec.pty = Some(Arc::clone(pty));
+        let pending = registry.insert_pending(rec);
+        let (notice, exit) = tokio::sync::oneshot::channel();
+        let snap_tx = crate::session::attach_lifecycle_notifying(
+            registry,
+            id,
+            pty,
+            Some(dirs.clone()),
+            notice,
+        );
+        crate::sync::lock(pending.arc()).scrollback_snapshot_req = Some(snap_tx);
+        pending.publish();
+        exit
+    }
+
     /// Insert `rec` wired to `pty` the way a spawn does, exit watcher included.
     pub fn insert_live(
         registry: &Arc<SessionRegistry>,
