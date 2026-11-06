@@ -71,22 +71,51 @@ pub enum KeyAction {
     Consume,
 }
 
+/// Which keys copy and paste in the terminal pane: Ctrl on Windows and
+/// Linux, Cmd on macOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyKeys {
+    Ctrl,
+    Cmd,
+}
+
+impl CopyKeys {
+    /// The shortcut modifier the platform uses for copy and paste.
+    pub fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Cmd
+        } else {
+            Self::Ctrl
+        }
+    }
+}
+
 /// Decides what a keystroke does. `None` means the terminal does not handle
-/// it. Ctrl+C copies when there is a selection and interrupts otherwise;
-/// Ctrl+Shift+C only ever copies; Ctrl+V and Ctrl+Shift+V paste. Shift+Enter
-/// sends the bytes `shift_enter` names.
+/// it. Shift+Enter sends the bytes `shift_enter` names.
+///
+/// With [`CopyKeys::Ctrl`], Ctrl+C copies when there is a selection and
+/// interrupts otherwise; Ctrl+Shift+C only ever copies; Ctrl+V and
+/// Ctrl+Shift+V paste. With [`CopyKeys::Cmd`], Cmd+C copies a selection and
+/// is otherwise swallowed, Cmd+Shift+C copies without clearing it, and Cmd+V
+/// pastes; Ctrl keys send their own control bytes as on Windows, so Ctrl+C
+/// always interrupts.
 pub fn key_action(
     ks: &Keystroke,
     app_cursor: bool,
     has_selection: bool,
     shift_enter: ShiftEnter,
+    copy_keys: CopyKeys,
 ) -> Option<KeyAction> {
     let m = ks.modifiers;
     let key = ks.key.to_ascii_lowercase();
     if m.shift && !m.control && !m.platform && key == "enter" {
         return Some(KeyAction::Send(shift_enter_bytes(shift_enter).to_vec()));
     }
-    if m.control && !m.alt && !m.platform {
+    let copied = match copy_keys {
+        CopyKeys::Ctrl => m.control && !m.alt && !m.platform,
+        CopyKeys::Cmd => m.platform && !m.control && !m.alt,
+    };
+    if copied {
         match key.as_str() {
             "v" => return Some(KeyAction::Paste),
             "c" if has_selection => {
@@ -94,7 +123,7 @@ pub fn key_action(
                     clear_selection: !m.shift,
                 });
             }
-            "c" if m.shift => return Some(KeyAction::Consume),
+            "c" if m.shift || copy_keys == CopyKeys::Cmd => return Some(KeyAction::Consume),
             _ => {}
         }
     }
@@ -181,7 +210,7 @@ mod tests {
         AgentDescriptor, AgentId, SessionMode, SessionSnapshot, SessionStatus, ShiftEnter,
     };
 
-    use super::{KeyAction, SessionContext, key_action, paste_bytes, paste_input};
+    use super::{CopyKeys, KeyAction, SessionContext, key_action, paste_bytes, paste_input};
 
     fn session(mode: SessionMode) -> SessionContext {
         SessionContext {
@@ -260,6 +289,15 @@ mod tests {
         }
     }
 
+    /// Cmd on macOS, the `platform` modifier of a keystroke.
+    fn cmd(shift: bool) -> Modifiers {
+        Modifiers {
+            platform: true,
+            shift,
+            ..Default::default()
+        }
+    }
+
     fn shift() -> Modifiers {
         Modifiers {
             shift: true,
@@ -292,7 +330,18 @@ mod tests {
         has_selection: bool,
         shift_enter: ShiftEnter,
     ) -> Option<KeyAction> {
-        key_action(ks, false, has_selection, shift_enter)
+        key_action(ks, false, has_selection, shift_enter, CopyKeys::Ctrl)
+    }
+
+    /// What a keystroke does where Cmd copies and pastes.
+    fn action_cmd(ks: &Keystroke, has_selection: bool) -> Option<KeyAction> {
+        key_action(
+            ks,
+            false,
+            has_selection,
+            ShiftEnter::BackslashCr,
+            CopyKeys::Cmd,
+        )
     }
 
     #[expect(
@@ -445,6 +494,65 @@ mod tests {
             Some(KeyAction::Paste)
         );
         assert_eq!(action(&key("v", ctrl(true)), false), Some(KeyAction::Paste));
+    }
+
+    #[test]
+    fn cmd_c_copies_a_selection_and_never_sends_an_interrupt() {
+        let cmd_c = key("c", cmd(false));
+        assert_eq!(
+            action_cmd(&cmd_c, true),
+            Some(KeyAction::Copy {
+                clear_selection: true
+            })
+        );
+        assert_eq!(action_cmd(&cmd_c, false), Some(KeyAction::Consume));
+    }
+
+    #[test]
+    fn cmd_shift_c_copies_without_clearing_the_selection() {
+        assert_eq!(
+            action_cmd(&key("c", cmd(true)), true),
+            Some(KeyAction::Copy {
+                clear_selection: false
+            })
+        );
+    }
+
+    #[test]
+    fn cmd_v_pastes() {
+        assert_eq!(
+            action_cmd(&key("v", cmd(false)), false),
+            Some(KeyAction::Paste)
+        );
+    }
+
+    #[test]
+    fn ctrl_keys_keep_their_control_bytes_where_cmd_copies() {
+        assert_eq!(
+            action_cmd(&key("c", ctrl(false)), true),
+            Some(KeyAction::Send(vec![0x03]))
+        );
+        assert_eq!(
+            action_cmd(&key("v", ctrl(false)), true),
+            Some(KeyAction::Send(vec![0x16]))
+        );
+    }
+
+    #[test]
+    fn cmd_c_is_not_a_copy_where_ctrl_copies() {
+        assert!(
+            !matches!(
+                action(&key("c", cmd(false)), true),
+                Some(KeyAction::Copy { .. })
+            ),
+            "Windows leaves Cmd+C to the terminal, and never copies with it"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_current_copy_keys_are_ctrl_off_macos() {
+        assert_eq!(CopyKeys::current(), CopyKeys::Ctrl);
     }
 
     #[test]

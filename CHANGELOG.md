@@ -22,6 +22,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- On macOS, Cmd+C and Cmd+V copy and paste in terminals and text fields, and Ctrl+C always interrupts the program.
 - On macOS, an app opened from Finder or the Dock finds Claude, node, git and gh on your login shell's PATH.
 - Opening a subagent's view in Claude no longer raises a false Finished notification or drops the session's background-work ring.
 - Chat no longer flashes "The prompt box has a draft" right after you send a message.

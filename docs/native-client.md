@@ -495,7 +495,9 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
   ConPTY repaints the whole screen on every resize, even one to the size the PTY already has, so the daemon skips a `Resize` that matches the size it last applied (a skipped claim still makes its client the size owner). A pane whose grid differs from the PTY's applied size misdraws all ConPTY output, history and live alike, until a resize that is actually applied. A test that parses the PTY stream must replay it through a terminal grid rather than strip escapes.
 
   A query that ends the loaded history is answered unless live output follows it, which covers a session on an older tracer: a current tracer answers ConPTY's startup query itself.
-- **Copy and paste**: Ctrl+C copies with a selection, else sends ^C; Ctrl+Shift+C copies; copy on select is a saved setting (default on); paste on Ctrl+V and Ctrl+Shift+V, bracketed when the child asks. Shift+drag selects even under mouse reporting. OSC 52 `c` stores reach the system clipboard; reads are answered empty and stores in replayed history are dropped.
+- **Copy and paste**: Ctrl+C copies with a selection, else sends ^C; Ctrl+Shift+C copies; copy on select is a saved setting (default on); paste on Ctrl+V and Ctrl+Shift+V, bracketed when the child asks.
+
+  On macOS Cmd takes those roles (`term_input::CopyKeys`): Cmd+C copies a selection and otherwise does nothing, Cmd+Shift+C copies without clearing it, Cmd+V pastes, and Ctrl keys always send their control bytes, so Ctrl+C always interrupts. Text fields bind select all, copy, cut and paste with GPUI's `secondary` modifier: Cmd on macOS, Ctrl elsewhere. Shift+drag selects even under mouse reporting. OSC 52 `c` stores reach the system clipboard; reads are answered empty and stores in replayed history are dropped.
 
   A selection that crosses a box-drawn TUI panel (such as Claude Code's) copies only its text, via `strip_box` in `copy_text.rs` (called from `Term::selection_text`). The panel's borders, rules and padding are left out, the text keeps its relative indent, and the top rule's title is kept as the first line.
 

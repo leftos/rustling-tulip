@@ -1363,6 +1363,7 @@ impl TerminalPane {
             self.term.app_cursor(),
             self.term.has_selection(),
             session.shift_enter,
+            term_input::CopyKeys::current(),
         );
         let Some(action) = action else {
             self.last_key_char = ks.key_char.clone().filter(|text| text.chars().count() == 1);
