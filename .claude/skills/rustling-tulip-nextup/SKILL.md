@@ -35,6 +35,8 @@ The goal is each release as soon as possible, through Release 2; this overrides 
 
   Two questions still go to the owner, as the user-level rules ask them: where a task asked for in the session goes (`plan-operations.md`, "Release fence"), and the next release's scope after a cut (the **release** operation).
 
+  The no-questions rule covers decisions only. A step that needs the owner's hands or presence (a click over RustDesk, an unlocked console, a sign-in, a hand-test a release waits on) is asked with `AskUserQuestion` the moment it is known, never left as a Blocked issue or a checkpoint line alone.
+
 - **Per item:** the implementer's gates are `cargo fmt --all --check`, `cargo clippy` on the touched crates, and the item's own new or changed tests by name. No reached tests, no full suite, no load-burn, no `--slot critical`.
 - **Review:** one `code-review` pass per item. Only real bugs in the item's own change that block the item go back (one fix round). Every other real bug, a pre-existing one or a non-critical one in the change, gets an **add** in `Backlog` (`--kind bug`) and never holds the landing. Hardening, style, coverage wishes and behaviour not asked for are dropped. Nits ride the next change touching their file.
 - **Releases:** once a milestone set with the owner is complete (every item of `vHotfix`, or of `vNext`, Done), the orchestrator cuts and publishes its release by `docs/release.md` without asking, and never before every new feature has passed its agent-run smoke test in the real runtime (`docs/release.md` step 4, a remote feature on a real second machine such as `builder@leftos-buildbox`). A release runs no installer hand test.
