@@ -175,7 +175,7 @@ The app's own toasts on the Mac mini (macOS 27.0, one 1920×1080 display at scal
 - [x] Toasts stack and close: a new toast takes the corner and pushes the older ones up by its height plus 8 points; closing one moves the rest back; a Finished toast expires after 6 s and the stack settles.
 - [x] With another app's window opened, a toast stays on screen at layer 101 and the client stays inactive.
 - [x] The logs hold no `already borrowed`, panic or toast-placer warning.
-- [ ] A toast raised while the client is hidden shows but unhides the whole app (RT-1040: the window is ordered front at open, before the panel's `canHide` is turned off).
+- [ ] A toast raised while the client is hidden showed but unhid the whole app, because the window was ordered front at open, before the panel's `canHide` was turned off. RT-1040 opens it unshown and orders it in after the setters (a Swift rig keeps the app hidden that way); the live rerun is RT-1030's.
 - [ ] The frontmost application is unchanged by a toast, and a click on a toast's button leaves the keyboard with the app the user is typing in: not measurable with the console locked (`loginwindow` stays frontmost and no app becomes active); needs the console unlocked, in person or over RustDesk.
 
 A Swift script run from SSH can read the window list and hide or unhide an app (`NSRunningApplication.hide()` returns false but works); Python there has no Quartz bindings.

@@ -1519,11 +1519,12 @@ impl ToastPlacer for PlaceRecorder {
         Some((area, 96))
     }
 
-    fn show(&self, _hwnd_address: Option<usize>, rect: PhysicalRect) {
+    fn show(&self, _hwnd_address: Option<usize>, rect: PhysicalRect) -> bool {
         self.shown
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(rect);
+        true
     }
 
     fn restack(&self, _hwnd_address: Option<usize>, rect: PhysicalRect) {

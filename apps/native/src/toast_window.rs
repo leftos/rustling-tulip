@@ -19,8 +19,10 @@ pub trait ToastPlacer: Send + Sync {
     fn work_area(&self, near: Option<usize>) -> Option<(WorkArea, u32)>;
 
     /// Shows a newly opened toast window on `rect`, above every other window
-    /// and never activated.
-    fn show(&self, hwnd_address: Option<usize>, rect: PhysicalRect);
+    /// and never activated. `true` when the window was shown or its show
+    /// queued, `false` when it could not be, so the caller dismisses a toast
+    /// that would otherwise hold a slot invisibly.
+    fn show(&self, hwnd_address: Option<usize>, rect: PhysicalRect) -> bool;
 
     /// Moves a shown toast window to `rect`.
     fn restack(&self, hwnd_address: Option<usize>, rect: PhysicalRect);
@@ -38,11 +40,12 @@ impl ToastPlacer for SystemToastPlacer {
         work_area_logical(near.map(hwnd_at))
     }
 
-    fn show(&self, hwnd_address: Option<usize>, rect: PhysicalRect) {
+    fn show(&self, hwnd_address: Option<usize>, rect: PhysicalRect) -> bool {
         if let Some(address) = hwnd_address {
-            show_topmost(address, rect);
+            show_topmost(address, rect)
         } else {
             tracing::warn!("a toast window with no handle cannot be shown");
+            false
         }
     }
 
@@ -65,7 +68,9 @@ impl ToastPlacer for SystemToastPlacer {
         None
     }
 
-    fn show(&self, _hwnd_address: Option<usize>, _rect: PhysicalRect) {}
+    fn show(&self, _hwnd_address: Option<usize>, _rect: PhysicalRect) -> bool {
+        false
+    }
 
     fn restack(&self, _hwnd_address: Option<usize>, _rect: PhysicalRect) {}
 
@@ -84,14 +89,16 @@ impl ToastPlacer for SystemToastPlacer {
         mac::work_area(near).map(|area| (area, 96))
     }
 
-    /// gpui orders a pop-up panel front when it opens it; this keeps the
-    /// panel up while the app is inactive or hidden, and lets a click on it
-    /// leave the keyboard where it was.
-    fn show(&self, hwnd_address: Option<usize>, _rect: PhysicalRect) {
+    /// Keeps the panel up while the app is inactive or hidden, makes it
+    /// non-key-only-if-needed so a click on it leaves the keyboard where it
+    /// was, and then orders it in on the main queue; the window was opened
+    /// unshown, for the reason `keep_panel_up`'s doc gives.
+    fn show(&self, hwnd_address: Option<usize>, _rect: PhysicalRect) -> bool {
         if let Some(address) = hwnd_address {
-            mac::keep_panel_up(address);
+            mac::keep_panel_up(address)
         } else {
             tracing::warn!("a toast window with no view cannot be kept up");
+            false
         }
     }
 
@@ -162,26 +169,49 @@ mod mac {
     }
 
     /// Keeps the panel whose view is at `address` on screen while the app is
-    /// inactive (a panel hides then by default) or hidden (Cmd+H), and makes
-    /// it key only for a control that asks for the keyboard, which a toast
-    /// has none of, so a click on it leaves the keyboard where it was. None
-    /// of these setters calls back into gpui.
-    pub(super) fn keep_panel_up(address: usize) {
-        if MainThreadMarker::new().is_none() {
+    /// inactive (a panel hides then by default) or hidden (Cmd+H), makes it
+    /// key only for a control that asks for the keyboard, which a toast has
+    /// none of, so a click on it leaves the keyboard where it was, and then
+    /// orders it in. The window opened unshown because gpui orders a shown
+    /// window front at open, before these setters run, and ordering a
+    /// hideable window of a hidden app in unhides the app; none of the
+    /// setters calls back into gpui. `false` when the panel could not be kept
+    /// up, so the caller dismisses the toast instead of leaving it invisible.
+    pub(super) fn keep_panel_up(address: usize) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
             tracing::warn!("a toast window was shown off the main thread");
-            return;
-        }
+            return false;
+        };
         let Some(window) = window_at(address) else {
             tracing::warn!("the toast view has no window to keep up");
-            return;
+            return false;
         };
         window.setHidesOnDeactivate(false);
         window.setCanHide(false);
-        if let Ok(panel) = window.downcast::<NSPanel>() {
+        if let Ok(panel) = window.clone().downcast::<NSPanel>() {
             panel.setBecomesKeyOnlyIfNeeded(true);
         } else {
             tracing::warn!("the toast window is not a panel; it may take the keyboard");
         }
+        let window = MainThreadBound::new(window, mtm);
+        DispatchQueue::main().exec_async(move || {
+            let Some(mtm) = MainThreadMarker::new() else {
+                tracing::warn!("a toast window was shown off the main thread");
+                return;
+            };
+            let window = window.into_inner(mtm);
+            // A window gpui has closed since stays closed: gpui 0.2.2's `Drop
+            // for MacWindow` clears the delegate, and `isVisible` cannot tell
+            // an unshown toast from a closed one. Re-check that when gpui is
+            // upgraded. No visible toast is skipped either, since the main
+            // queue runs blocks in order and this one is queued before any
+            // later restack's `isVisible` check.
+            if window.delegate().is_none() {
+                return;
+            }
+            window.orderFrontRegardless();
+        });
+        true
     }
 
     /// Moves the panel whose view is at `address` to `rect`, in points from
@@ -219,7 +249,7 @@ mod mac {
             };
             let window = window.into_inner(mtm);
             // A toast closed since the move was asked for stays closed.
-            if window.isVisible() {
+            if window.isVisible() && window.delegate().is_some() {
                 window.setFrame_display(frame, true);
             }
         });
@@ -450,7 +480,7 @@ fn serve(calls: &std::sync::mpsc::Receiver<PlaceCall>, mut apply: impl FnMut(Pla
 /// thread those messages are lost (as in `offscreen.rs`). One queue also
 /// keeps a later move from being overwritten by an earlier show.
 #[cfg(windows)]
-fn send_to_worker(call: PlaceCall) {
+fn send_to_worker(call: PlaceCall) -> bool {
     use std::sync::OnceLock;
     use std::sync::mpsc::{Sender, channel};
 
@@ -470,11 +500,13 @@ fn send_to_worker(call: PlaceCall) {
     });
     let Some(worker) = worker else {
         tracing::warn!("no thread places toast windows: {call:?} is dropped");
-        return;
+        return false;
     };
     if let Err(err) = worker.send(call) {
         tracing::warn!("the thread that places toast windows has gone: {err}");
+        return false;
     }
+    true
 }
 
 /// Runs `call` on the worker's thread.
@@ -487,10 +519,11 @@ fn apply_call(call: PlaceCall) {
 }
 
 /// Shows the window whose handle is `hwnd_address` on `rect` in physical px,
-/// above every other window and never activated.
+/// above every other window and never activated; `false` when the worker that
+/// would show it could not be reached.
 #[cfg(windows)]
-pub(crate) fn show_topmost(hwnd_address: usize, rect: PhysicalRect) {
-    send_to_worker(PlaceCall::Show(hwnd_address, rect));
+pub(crate) fn show_topmost(hwnd_address: usize, rect: PhysicalRect) -> bool {
+    send_to_worker(PlaceCall::Show(hwnd_address, rect))
 }
 
 /// How far a window's outer rectangle reaches past its client area on each

@@ -1338,10 +1338,11 @@ impl RootView {
     }
 
     /// Opens `toast`'s window at `bounds` on `display` and hands it to the
-    /// placer to show on `rect`: on Windows hidden until then, so gpui never
-    /// activates it; on macOS shown at open as a panel that is not made key,
-    /// which the placer then keeps up and off the keyboard. A window that
-    /// fails to open dismisses its toast.
+    /// placer to show on `rect`: the window opens unshown, and the placer
+    /// orders it in once it has made the panel stay up (macOS) or shown it
+    /// without activation (Windows). A window that fails to open, or that the
+    /// placer cannot show, dismisses its toast rather than holding a slot
+    /// invisibly.
     fn open_toast_window(
         &mut self,
         toast: &AppToast,
@@ -1354,28 +1355,12 @@ impl RootView {
         let root = cx.weak_entity();
         let shown = toast.clone();
         let mut address = None;
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: None,
-                kind: WindowKind::PopUp,
-                focus: false,
-                // macOS orders a pop-up panel front at open without making
-                // it key; Windows shows it from the placer instead.
-                show: cfg!(target_os = "macos"),
-                is_movable: false,
-                is_resizable: false,
-                is_minimizable: false,
-                display_id: display,
-                window_background: WindowBackgroundAppearance::Transparent,
-                ..Default::default()
-            },
-            |window, cx| {
-                address = placer.address_of(window);
-                placer.show(address, rect);
-                cx.new(|_| ToastView::new(root, shown))
-            },
-        );
+        let mut placed = false;
+        let opened = cx.open_window(toast_window_options(bounds, display), |window, cx| {
+            address = placer.address_of(window);
+            placed = placer.show(address, rect);
+            cx.new(|_| ToastView::new(root, shown))
+        });
         match opened {
             Ok(handle) => {
                 let open = ToastWindow { handle, address };
@@ -1383,6 +1368,14 @@ impl RootView {
                     .toasts
                     .windows
                     .insert(toast.key.clone(), open);
+                if !placed {
+                    tracing::warn!(
+                        "the placer could not show a toast window; dismissing its toast"
+                    );
+                    let now = cx.background_executor().now();
+                    self.notifications.toasts.stack.dismiss(&toast.key, now);
+                    self.close_toast_window(&toast.key, cx);
+                }
             }
             Err(err) => {
                 tracing::warn!("opening a toast window: {err:#}");
@@ -1656,6 +1649,25 @@ impl RootView {
     }
 }
 
+/// The options a toast's window opens with at `bounds` on `display`: a
+/// borderless panel that never takes the keyboard and opens unshown, for the
+/// placer to order in once the panel stays up (`keep_panel_up` has the why).
+fn toast_window_options(bounds: Bounds<gpui::Pixels>, display: Option<DisplayId>) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: None,
+        kind: WindowKind::PopUp,
+        focus: false,
+        show: false,
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        display_id: display,
+        window_background: WindowBackgroundAppearance::Transparent,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -1663,6 +1675,18 @@ impl RootView {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_toast_window_opens_unshown_so_the_placer_orders_it_in() {
+        let bounds = Bounds::new(point(px(1544.0), px(795.0)), size(px(360.0), px(182.0)));
+        let options = toast_window_options(bounds, None);
+        assert!(matches!(options.kind, WindowKind::PopUp));
+        assert!(!options.focus, "a toast never takes the keyboard");
+        assert!(
+            !options.show,
+            "the placer orders the toast in once the panel stays up"
+        );
+    }
 
     fn snapshot(fields: &serde_json::Value) -> SessionSnapshot {
         let mut session = serde_json::json!({
