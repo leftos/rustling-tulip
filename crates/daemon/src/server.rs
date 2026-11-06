@@ -24,6 +24,7 @@ mod chat;
 mod connection;
 mod dashboard;
 mod folder;
+mod gate;
 mod handshake;
 pub(crate) use self::handshake::TAILNET_HANDSHAKE_TIMEOUT;
 
@@ -566,7 +567,9 @@ pub async fn run(
         integrity,
         peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
         accounts: accounts::start_service(&login_hub),
-        gate_state: crate::gate_state::LIVE_READER.map(|_| crate::gate_state::GateHub::new()),
+        gate_state: crate::gate_state::LIVE_READER.map(|_| {
+            crate::gate_state::GateHub::new(Arc::new(crate::gate_state::live_counts_path))
+        }),
     };
     start_hub_tasks(&hub, client_count_rx);
     let resume_ids = start_logins(&hub, &login_hub, resume_ids).await;
@@ -1122,8 +1125,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::SetSummarizerSettings { .. }
         | ClientMessage::SetSummarizerKey { .. }
         | ClientMessage::TestSummary { .. }) => summarizer::handle(hub, m, ctx).await?,
-        ClientMessage::SetGateSlotCount { request_id, .. }
-        | ClientMessage::GateHistory { request_id } => {
+        m @ ClientMessage::SetGateSlotCount { .. } => gate::handle(hub, m, ctx),
+        ClientMessage::GateHistory { request_id } => {
             let _ = ctx.out_tx.send(DaemonMessage::Error {
                 message: "the gate view is not served by this daemon".to_owned(),
                 request_id,

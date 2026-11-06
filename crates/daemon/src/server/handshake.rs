@@ -1048,7 +1048,7 @@ mod tests {
             "a daemon that reads no gate state sends none"
         );
 
-        crate::server::test_support::enable_gate_state(&mut hub, None);
+        crate::server::test_support::enable_gate_state(&mut hub, None, None);
         push_initial_state(&hub, &out_tx, "c1", false);
         assert_eq!(
             gate_states(&mut out_rx),
@@ -1067,7 +1067,7 @@ mod tests {
             builders: Vec::new(),
             covered: Vec::new(),
         };
-        crate::server::test_support::enable_gate_state(&mut hub, Some(state.clone()));
+        crate::server::test_support::enable_gate_state(&mut hub, Some(state.clone()), None);
         push_initial_state(&hub, &out_tx, "c1", false);
         assert_eq!(gate_states(&mut out_rx), [Some(state)]);
     }

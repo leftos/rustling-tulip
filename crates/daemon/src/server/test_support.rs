@@ -192,9 +192,14 @@ pub(super) fn build_test_hub(
 }
 
 /// Give `hub` a gate state holding `state`, as a 64-bit Windows daemon's hub
-/// holds one once its poll has read.
-pub(crate) fn enable_gate_state(hub: &mut Hub, state: Option<protocol::GateState>) {
-    let gate = crate::gate_state::GateHub::new();
+/// holds one once its poll has read, writing slot counts to `counts_path`
+/// (`None`: the counts file cannot be found).
+pub(crate) fn enable_gate_state(
+    hub: &mut Hub,
+    state: Option<protocol::GateState>,
+    counts_path: Option<PathBuf>,
+) {
+    let gate = crate::gate_state::GateHub::new(Arc::new(move || counts_path.clone()));
     gate.publish(state, &hub.state_events);
     hub.gate_state = Some(gate);
 }

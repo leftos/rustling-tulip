@@ -8,12 +8,13 @@
     )
 )]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{Notify, broadcast, watch};
 use tracing::warn;
 
 use crate::server::StateEvent;
@@ -252,19 +253,58 @@ pub(crate) const LIVE_READER: Option<fn() -> Option<protocol::GateState>> = Some
 #[cfg(not(all(windows, target_pointer_width = "64")))]
 pub(crate) const LIVE_READER: Option<fn() -> Option<protocol::GateState>> = None;
 
+/// Where the gate's counts file is, looked up at each slot-count write: the live inputs' path in the daemon, a temp
+/// file in tests; `None` when it cannot be found. It may block, so a write calls it on a blocking thread.
+pub(crate) type CountsPath = Arc<dyn Fn() -> Option<PathBuf> + Send + Sync>;
+
+/// This host's gate counts file, read from the gate's live inputs, or `None` when they cannot be read.
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub(crate) fn live_counts_path() -> Option<PathBuf> {
+    match ::gate_state::live_inputs() {
+        Ok(inputs) => Some(::gate_state::slot_count_path(&inputs)),
+        Err(error) => {
+            warn!(%error, "gate state: the gate's inputs could not be read for its counts file");
+            None
+        }
+    }
+}
+
+/// This host's gate counts file: none off 64-bit Windows, where the hub holds no gate state.
+#[cfg(not(all(windows, target_pointer_width = "64")))]
+pub(crate) fn live_counts_path() -> Option<PathBuf> {
+    None
+}
+
 /// The hub's current gate state, `None` until a read finds a gate. The poll is its only writer; a connection reads it
-/// at its initial state and when its state stream lags, and otherwise takes the poll's broadcasts.
+/// at its initial state and when its state stream lags, and otherwise takes the poll's broadcasts. A slot-count write
+/// never publishes: it asks the poll to read again ([`GateHub::repoll`]), so a write and a tick never publish out of
+/// order.
 #[derive(Clone)]
 pub(crate) struct GateHub {
     current: Arc<watch::Sender<Option<protocol::GateState>>>,
+    counts_path: CountsPath,
+    repoll: Arc<Notify>,
 }
 
 impl GateHub {
-    /// A hub gate state that holds no state yet.
-    pub(crate) fn new() -> Self {
+    /// A hub gate state that holds no state yet, writing slot counts to the file `counts_path` names.
+    pub(crate) fn new(counts_path: CountsPath) -> Self {
         Self {
             current: Arc::new(watch::Sender::new(None)),
+            counts_path,
+            repoll: Arc::new(Notify::new()),
         }
+    }
+
+    /// The lookup of the gate's counts file.
+    pub(crate) fn counts_path(&self) -> CountsPath {
+        Arc::clone(&self.counts_path)
+    }
+
+    /// Ask the poll to read at once rather than at its next tick; a request made while it is parked is kept for the
+    /// next connect, whose read it joins.
+    pub(crate) fn repoll(&self) {
+        self.repoll.notify_one();
     }
 
     /// The current state. Every change is broadcast under the watch's write lock, so a connection that holds this
@@ -297,8 +337,8 @@ impl GateHub {
 }
 
 /// Start the gate poll for the daemon's life. While no client is connected it parks and reads nothing; when the count
-/// rises from zero it reads at once, then every [`POLL_INTERVAL`], each read on a blocking thread, publishing each
-/// result to `gate` (broadcast on `events` when it changed).
+/// rises from zero it reads at once, then every [`POLL_INTERVAL`] and at once on each [`GateHub::repoll`], each read on
+/// a blocking thread, publishing each result to `gate` (broadcast on `events` when it changed).
 pub(crate) fn spawn_poll(
     reader: GateReader,
     gate: GateHub,
@@ -324,6 +364,7 @@ pub(crate) fn spawn_poll(
                             break;
                         }
                     }
+                    () = gate.repoll.notified() => read_and_publish(&reader, &gate, &events).await,
                     _ = interval.tick() => read_and_publish(&reader, &gate, &events).await,
                 }
             }
@@ -927,7 +968,7 @@ mod tests {
         });
         let (events_tx, events) = broadcast::channel(16);
         let (clients, clients_rx) = watch::channel(clients);
-        let gate = GateHub::new();
+        let gate = GateHub::new(Arc::new(|| None));
         let task = spawn_poll(reader, gate.clone(), events_tx.clone(), clients_rx);
         PollRig {
             reads,

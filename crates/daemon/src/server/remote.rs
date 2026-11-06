@@ -471,6 +471,7 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
         | ClientMessage::SetAccountOrder { .. }
         | ClientMessage::StartAccountLogin { .. }
         | ClientMessage::CancelAccountLogin { .. } => Some("account administration is local-only"),
+        ClientMessage::SetGateSlotCount { .. } => Some("gate slot counts are local-only"),
         _ => None,
     }
 }
