@@ -152,8 +152,7 @@
 - [ ] RT-39 Built-in Claude account switching: several logins, usage polling and switching · release vNext
   - [ ] RT-915 Accounts: daemon-driven login and the docs (CA.11, CA.12) · release vNext
     - [ ] RT-988 Login: document the daemon-driven login and promote the accounts plan (RT-915 part F) · release vNext
-    - [ ] RT-993 Login: live specs for a login, a failure and a cancel (RT-915 part E) · release vNext
-  - [ ] RT-924 Merge feat/claude-accounts to main (#205)
+  - [ ] RT-924 Merge feat/claude-accounts to main (#205) · release vNext
   - [ ] RT-958 Accounts: answer Draining at once for switch and capture, Unsupported for an unsupported lock, and fix the remove-timeout text
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-113 Open Claude artifact links in the account that published them
@@ -163,6 +162,7 @@
   - [ ] RT-970 Keep the footer's version text whole beside the accounts chip
   - [ ] RT-971 Draw the accounts popover's sign-in refused tag in the danger colour
 - [ ] RT-975 Auto-switch: pin the mid-tick off check, the engine wake and the tick tests' environment
+- [ ] RT-1038 Accounts: show a login in progress again after the client reconnects
 
 ## Wave 13 — ops-tower views: gates, board and dock
 
@@ -275,16 +275,13 @@
 
 ## macOS
 
+- [ ] RT-1031 macOS: run an update end to end on the Mac mini from a local feed · release vNext
+- [!] RT-1030 macOS: check a real in-app toast on the Mac mini · release vNext
 - [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option
 - [ ] RT-665 Ship rustling-tulip on macOS: verified build, signed .app and .dmg, auto-update · release vNext
   - [!] RT-46 Verify macOS support M0–M3 on real Mac hardware · release vNext
   - [ ] RT-666 Auto-update the macOS client: platform asset in the feed and an .app swap · release vNext
-    - [ ] RT-1015 Updates: start a macOS update from the client and clean up the old bundle · release vNext
-  - [ ] RT-667 Build and publish the macOS release assets from docs/release.md, with macOS install steps in the README · release vNext
   - [ ] RT-906 Port the native client to macOS: build, launch and run sessions on the Mac mini · release vNext
-    - [ ] RT-1008 macOS: show in-app toasts on macOS and hide the OS toast style there · release vNext
-    - [ ] RT-1018 macOS: check the real Claude CLI runs a hook program whose path has a space · release vNext
-    - [ ] RT-1022 macOS: give the daemon the login shell's PATH when it starts with launchd's minimal one · release vNext
 - [ ] RT-925 macOS: check that a case-differing cached folder name doesn't make folder fetch refuse an inside file
 - [ ] RT-926 Unix daemon stop: wait once on a refused owner check, and name a failed owner lookup
 - [ ] RT-1017 macOS: read the machine identifier from IOPlatformUUID
@@ -292,6 +289,11 @@
 - [ ] RT-1026 Unix: kill a headless child's descendants, not only its pid
 - [ ] RT-1027 Unix: guard the tracer's shutdown killpg against a reused shell pid
 - [ ] RT-1028 macOS signing: keep a cleanup failure from hiding the real error, and make the temp folder inside the try
+- [ ] RT-1032 macOS: show the device-pairing prompt, which goes to the stub OS notifier
+- [ ] RT-1033 macOS updates: unpack the update in the background download step, not on Restart
+- [ ] RT-1034 macOS updates: serialize update starts with a lock the client and apply-update both take
+- [ ] RT-1035 macOS updates: tell a standard user in /Applications what can work, not to move the app
+- [ ] RT-1036 macOS toasts: hold app toasts back during Focus and over a full-screen app
 
 ## Agent CLIs
 
@@ -407,7 +409,6 @@
 - [ ] RT-615 Keep a weight difference between chosen and unchosen at UI weight SemiBold
 - [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
 - [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
-- [ ] RT-640 Polish found by the v0.6.0-alpha smoke test · release vNext
 - [ ] RT-701 Replace the Fetching toast with the error when a page fetch fails
 - [ ] RT-702 Close a chat's Tail boxes when its load is refused or its host lacks file_tail
 - [ ] RT-712 Polish the Spawn submenu and New session dialog from the v0.7.0-alpha smoke
@@ -488,6 +489,8 @@
 - [ ] RT-1019 Login: honour a typed-verbatim launch command and share the program lookup with interactive spawns
 - [ ] RT-1020 Login: bound the start-up sweep as a whole and discard a login record whose child will not end
 - [ ] RT-1021 Login: skip files the start-up sweep finds under the login root
+- [ ] RT-1037 Keep an isolated daemon's summarizer folder under its config override
+- [ ] RT-1039 Tracer: end a stopped session's whole process tree, not only its direct child
 
 ## Design files
 
@@ -506,7 +509,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [macos-compat.md](macos-compat.md) — RT-46, RT-665, RT-906, RT-1022
+- [macos-compat.md](macos-compat.md) — RT-46, RT-665, RT-906, RT-1030, RT-1031
 - [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-364, RT-365, RT-366, RT-367, RT-368, RT-369, RT-370, RT-881, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
