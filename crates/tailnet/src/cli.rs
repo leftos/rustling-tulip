@@ -28,6 +28,15 @@ const OUTPUT_CAP: usize = 4 * 1024 * 1024;
 /// The environment variable that names the `tailscale` binary.
 const BINARY_ENV: &str = "RUSTLING_TULIP_TAILSCALE";
 
+/// The macOS install locations, tried in this order: the Tailscale app's CLI
+/// inside its bundle, then Homebrew's on Apple silicon, then Homebrew's on
+/// Intel. A Finder-launched app reaches none of them through its `PATH`.
+const MACOS_CANDIDATES: [&str; 3] = [
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/opt/homebrew/bin/tailscale",
+    "/usr/local/bin/tailscale",
+];
+
 /// Why a `tailscale` call failed. A caller treats every one as "deny".
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TailnetError {
@@ -57,14 +66,21 @@ pub struct Cli {
 }
 
 impl Cli {
-    /// Locate the binary: `RUSTLING_TULIP_TAILSCALE` if set, else
-    /// `%ProgramFiles%\Tailscale\tailscale.exe` if it exists, else `tailscale`
-    /// on `PATH`. A binary that is not there surfaces as
+    /// Locate the binary, in this order: `RUSTLING_TULIP_TAILSCALE` if set and
+    /// non-empty; else `%ProgramFiles%\Tailscale\tailscale.exe` if it exists;
+    /// else, on macOS, the first existing one of the Tailscale app's bundled
+    /// CLI, `/opt/homebrew/bin/tailscale` and `/usr/local/bin/tailscale`; else
+    /// `tailscale` on `PATH`. A binary that is not there surfaces as
     /// [`TailnetError::NotInstalled`] on the first call.
     #[must_use]
     pub fn locate() -> Self {
+        let fixed: &[&str] = if cfg!(target_os = "macos") {
+            &MACOS_CANDIDATES
+        } else {
+            &[]
+        };
         Self {
-            binary: locate_with(|name| std::env::var_os(name), Path::is_file),
+            binary: locate_with(|name| std::env::var_os(name), Path::is_file, fixed),
             timeout: DEFAULT_TIMEOUT,
         }
     }
@@ -166,8 +182,13 @@ impl Cli {
     }
 }
 
-/// The binary lookup, with the environment and the file check injected.
-fn locate_with(env: impl Fn(&str) -> Option<OsString>, is_file: impl Fn(&Path) -> bool) -> PathBuf {
+/// The binary lookup, with the environment, the file check and the fixed
+/// candidates injected.
+fn locate_with(
+    env: impl Fn(&str) -> Option<OsString>,
+    is_file: impl Fn(&Path) -> bool,
+    fixed: &[&str],
+) -> PathBuf {
     let set = |name: &str| env(name).filter(|value| !value.is_empty());
     if let Some(binary) = set(BINARY_ENV) {
         return PathBuf::from(binary);
@@ -178,6 +199,12 @@ fn locate_with(env: impl Fn(&str) -> Option<OsString>, is_file: impl Fn(&Path) -
             .join("tailscale.exe");
         if is_file(&installed) {
             return installed;
+        }
+    }
+    for &candidate in fixed {
+        let candidate = Path::new(candidate);
+        if is_file(candidate) {
+            return candidate.to_path_buf();
         }
     }
     PathBuf::from("tailscale")
@@ -303,8 +330,8 @@ fn classify_failure(stderr: &str) -> TailnetError {
 #[cfg(test)]
 mod tests {
     use crate::cli::{
-        Cli, OUTPUT_CAP, TailnetError, args, cap_output, cert_args, classify_failure, locate_with,
-        parse_whoami, parse_whois,
+        Cli, MACOS_CANDIDATES, OUTPUT_CAP, TailnetError, args, cap_output, cert_args,
+        classify_failure, locate_with, parse_whoami, parse_whois,
     };
     use std::collections::HashMap;
     use std::ffi::OsString;
@@ -492,30 +519,70 @@ mod tests {
         let installed = PathBuf::from("C:\\Program Files")
             .join("Tailscale")
             .join("tailscale.exe");
-        let locate = |vars: &[(&str, &str)], files: &[&Path]| {
+        let locate = |vars: &[(&str, &str)], files: &[&Path], fixed: &[&str]| {
             let vars: HashMap<String, OsString> = vars
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), OsString::from(v)))
                 .collect();
-            locate_with(|name| vars.get(name).cloned(), |path| files.contains(&path))
+            locate_with(
+                |name| vars.get(name).cloned(),
+                |path| files.contains(&path),
+                fixed,
+            )
         };
         let both = [
             ("RUSTLING_TULIP_TAILSCALE", "D:\\tools\\tailscale.exe"),
             ("ProgramFiles", "C:\\Program Files"),
         ];
         assert_eq!(
-            locate(&both, &[installed.as_path()]),
+            locate(&both, &[installed.as_path()], &[]),
             PathBuf::from("D:\\tools\\tailscale.exe")
         );
         let empty_env = [
             ("RUSTLING_TULIP_TAILSCALE", ""),
             ("ProgramFiles", "C:\\Program Files"),
         ];
-        assert_eq!(locate(&empty_env, &[installed.as_path()]), installed);
+        assert_eq!(locate(&empty_env, &[installed.as_path()], &[]), installed);
         assert_eq!(
-            locate(&[("ProgramFiles", "C:\\Program Files")], &[]),
+            locate(&[("ProgramFiles", "C:\\Program Files")], &[], &[]),
             PathBuf::from("tailscale")
         );
+        assert_eq!(locate(&[], &[], &[]), PathBuf::from("tailscale"));
+    }
+
+    #[test]
+    fn locate_prefers_macos_bundle_then_homebrew_then_path() {
+        let bundle = Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        let apple_silicon = Path::new("/opt/homebrew/bin/tailscale");
+        let intel = Path::new("/usr/local/bin/tailscale");
+        let locate = |vars: &[(&str, &str)], files: &[&Path]| {
+            let vars: HashMap<String, OsString> = vars
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), OsString::from(v)))
+                .collect();
+            locate_with(
+                |name| vars.get(name).cloned(),
+                |path| files.contains(&path),
+                &MACOS_CANDIDATES,
+            )
+        };
+        assert_eq!(locate(&[], &[apple_silicon]), apple_silicon.to_path_buf());
+        assert_eq!(locate(&[], &[intel]), intel.to_path_buf());
+        assert_eq!(
+            locate(&[], &[intel, apple_silicon]),
+            apple_silicon.to_path_buf()
+        );
+        assert_eq!(
+            locate(&[], &[intel, apple_silicon, bundle]),
+            bundle.to_path_buf()
+        );
         assert_eq!(locate(&[], &[]), PathBuf::from("tailscale"));
+        assert_eq!(
+            locate(
+                &[("RUSTLING_TULIP_TAILSCALE", "/custom/tailscale")],
+                &[intel, apple_silicon, bundle]
+            ),
+            PathBuf::from("/custom/tailscale")
+        );
     }
 }

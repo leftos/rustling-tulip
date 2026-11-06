@@ -25,6 +25,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - On macOS, Cmd+C and Cmd+V copy and paste in terminals and text fields, and Ctrl+C always interrupts the program.
+- On macOS, remote access finds the Tailscale app's command-line tool, or Homebrew's, when the app is opened from Finder or the Dock.
 - Settings › Remote access's "Start the daemon when I log in" waits for OK or Apply like every other setting, and Cancel leaves it as it was.
 - On macOS, an app opened from Finder or the Dock finds Claude, node, git and gh on your login shell's PATH.
 - Opening a subagent's view in Claude no longer raises a false Finished notification or drops the session's background-work ring.
