@@ -80,6 +80,12 @@ pub const FEATURE_ACCOUNTS: &str = "accounts";
 /// accounts that a client may tell the user of, such as a switch.
 pub const FEATURE_ACCOUNT_EVENTS: &str = "account_events";
 
+/// `Welcome.features` entry: the daemon pushes [`DaemonMessage::GateState`]
+/// and answers [`ClientMessage::SetGateSlotCount`] and
+/// [`ClientMessage::GateHistory`]. A client shows the Gates view only when
+/// the connected daemon lists it.
+pub const FEATURE_GATE_STATE: &str = "gate_state";
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -3297,6 +3303,451 @@ pub enum AccountLoginState {
     Unknown,
 }
 
+/// The host's gate slots as the Gates view shows them
+/// ([`DaemonMessage::GateState`]): the daemon's own types, converted from
+/// the gate's dashboard state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateState {
+    /// The moment the state describes.
+    #[serde(default)]
+    pub now: Option<DateTime<Utc>>,
+    /// The machine's name.
+    #[serde(default)]
+    pub machine: String,
+    /// The machine's logical processor count.
+    #[serde(default)]
+    pub processors: u32,
+    /// The critical request: the gate holding the critical mutex, and the
+    /// critical gates waiting for it.
+    #[serde(default)]
+    pub critical: Option<GateCriticalState>,
+    /// The arrival tickets of the live gates waiting for a slot or for the
+    /// machine, oldest first.
+    #[serde(default)]
+    pub queue: Vec<GateQueueTicket>,
+    /// The heavy pool, then the light one.
+    #[serde(default)]
+    pub pools: Vec<GatePool>,
+    /// The remote pool, whose slots the gate runs on a build box; `None`
+    /// while the gate has no remote configuration and no remote claim.
+    #[serde(default)]
+    pub remote: Option<GateRemotePool>,
+    /// Each builder's own remote pool.
+    #[serde(default)]
+    pub builders: Vec<GateBuilderPool>,
+    /// The live gates running under a parent gate's slot, oldest first.
+    #[serde(default)]
+    pub covered: Vec<GateCoveredRun>,
+}
+
+/// A gate slot pool's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateSlotKind {
+    Heavy,
+    Light,
+    /// Forward-compat fallback: a kind the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What holds a gate slot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateSlotState {
+    /// No process has the slot's mutex open.
+    Free,
+    /// A live gate holds the slot and its claim names it.
+    Busy,
+    /// The slot's mutex is open but no live claim names its holder.
+    Held,
+    /// Forward-compat fallback: a state the current build doesn't know, or
+    /// none sent.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// One local pool of gate slots.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatePool {
+    pub kind: GateSlotKind,
+    /// The slots gates may take: the counts file's value, or `default`.
+    #[serde(default)]
+    pub count: u32,
+    /// The count the processor count gives.
+    #[serde(default)]
+    pub default: u32,
+    /// The counts file's valid value for the kind, or `None`.
+    #[serde(default)]
+    pub set: Option<u32>,
+    /// Why the gate ignores the counts file or its value for the kind.
+    #[serde(default)]
+    pub problem: Option<String>,
+    /// The slots `0..count`, plus any slot past the count that has a claim.
+    #[serde(default)]
+    pub slots: Vec<GateSlot>,
+    /// The gates waiting for a slot of the kind, listed only when no slot
+    /// within the count is free or a critical request bars the pool.
+    #[serde(default)]
+    pub waiting: Vec<GateWaiting>,
+}
+
+/// The remote pool: heavy gates the gate routes to a build box.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateRemotePool {
+    /// The slots gates may take; 0 when the remote configuration is absent
+    /// or ignored.
+    #[serde(default)]
+    pub count: u32,
+    /// Why the remote configuration was ignored, or that it is absent while
+    /// a remote claim exists.
+    #[serde(default)]
+    pub problem: Option<String>,
+    #[serde(default)]
+    pub slots: Vec<GateSlot>,
+}
+
+/// One builder's own remote pool.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateBuilderPool {
+    /// The pool id the pool's slot mutex names carry.
+    pub id: String,
+    /// The builder's alias; `None` for a pooled claim no builder names.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The builder's ssh destination; `None` as for `name`.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// The builder's operating system, `windows` or `macos`.
+    #[serde(default)]
+    pub os: Option<String>,
+    #[serde(default)]
+    pub count: u32,
+    /// Why the gate refuses the remote configuration, or the pool id no
+    /// builder names.
+    #[serde(default)]
+    pub problem: Option<String>,
+    /// Whether a pick may send a run to the builder; `false` for one only a
+    /// pinned run reaches.
+    #[serde(default)]
+    pub routed: bool,
+    #[serde(default)]
+    pub slots: Vec<GateSlot>,
+}
+
+/// One gate slot's row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateSlot {
+    /// The slot's index in its pool.
+    pub index: u32,
+    /// The slot's mutex name.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub state: GateSlotState,
+    /// The claim of the live gate holding the slot, when it is busy.
+    #[serde(default)]
+    pub claim: Option<GateClaim>,
+    /// A claim that is not live.
+    #[serde(default)]
+    pub stale: Option<GateClaim>,
+    /// The number of processes under the holding gate, the gate excluded.
+    #[serde(default)]
+    pub processes: u32,
+    /// The last non-blank line of the holding gate's log.
+    #[serde(default)]
+    pub last_line: Option<String>,
+    /// True for a held pool slot while a gate holds or is taking the
+    /// critical mutex: the critical gate holds it.
+    #[serde(default)]
+    pub critical: bool,
+    /// For a pool's slot, true when it is past the pool's count and shown
+    /// only because it has a claim; `None` for the critical row.
+    #[serde(default)]
+    pub extra: Option<bool>,
+}
+
+/// A slot's claim, as the gate holding it wrote it. Every field is optional,
+/// since the claim is another program's file.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GateClaim {
+    /// The holding gate's process id.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// When the gate took the slot.
+    #[serde(default)]
+    pub started: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// The gated command.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// The gate's log file.
+    #[serde(default)]
+    pub log: Option<String>,
+    /// The gate's ceiling for the command, in seconds.
+    #[serde(default)]
+    pub timeout_seconds: Option<f64>,
+}
+
+/// A live gate's arrival ticket, kept while it waits for its slot; a
+/// critical gate keeps its own to its end.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateQueueTicket {
+    /// The slot the gate asked for: `heavy`, `light` or `critical`; a string
+    /// because `critical` is not a [`GateSlotKind`].
+    pub kind: String,
+    /// True for a critical gate that holds the machine.
+    #[serde(default)]
+    pub holds: bool,
+    /// True for a heavy gate routed to the remote pool and waiting for a
+    /// remote slot.
+    #[serde(default)]
+    pub remote: bool,
+    /// The id of the builder's pool the gate queues for.
+    #[serde(default)]
+    pub pool: Option<String>,
+    /// True for a run pinned to one builder.
+    #[serde(default)]
+    pub pinned: bool,
+    /// The gate's process id.
+    pub pid: u32,
+    /// When the gate arrived.
+    #[serde(default)]
+    pub arrived: Option<DateTime<Utc>>,
+    /// Whole seconds from the arrival to the state's `now`.
+    #[serde(default)]
+    pub age_seconds: f64,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub command_line: Option<String>,
+    /// The free text the gate was given as its reason when it queued.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// What the gate's durations store expected of the run as it queued.
+    #[serde(default)]
+    pub expected: Option<GateExpected>,
+}
+
+/// What a gate's durations store expected of a run as it queued.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GateExpected {
+    /// The median run time, in seconds.
+    #[serde(default)]
+    pub p50: Option<f64>,
+    /// The 90th percentile run time, in seconds.
+    #[serde(default)]
+    pub p90: Option<f64>,
+    /// The number of runs the figures come from.
+    #[serde(default)]
+    pub n: Option<u32>,
+    /// The durations store's key for the command.
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// A gate waiting for a slot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateWaiting {
+    /// The waiting gate's process id.
+    pub pid: u32,
+    /// When it started; `None` when unknown.
+    #[serde(default)]
+    pub since: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub command_line: String,
+}
+
+/// A live gate a parent gate's slot covers: it takes no slot of its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateCoveredRun {
+    /// The covered gate's process id.
+    pub pid: u32,
+    /// The covered gate's process start.
+    #[serde(default)]
+    pub start: Option<DateTime<Utc>>,
+    /// The process id of the parent gate whose slot covers it.
+    #[serde(default)]
+    pub parent_pid: u32,
+    /// The gated command.
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub cwd: String,
+    /// When the covered gate wrote its marker.
+    #[serde(default)]
+    pub since: Option<DateTime<Utc>>,
+}
+
+/// The critical request: who holds the machine and who waits to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateCriticalState {
+    /// The critical mutex's row: busy once its gate holds every slot, held
+    /// while that gate waits for the slots' holders, free when there is none.
+    #[serde(default)]
+    pub holder: Option<GateSlot>,
+    /// The critical gates that hold no live claim yet.
+    #[serde(default)]
+    pub waiting: Vec<GateWaiting>,
+}
+
+/// How a gate run stands ([`GateHistoryRun::state`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateRunState {
+    /// Released with status 0.
+    Ok,
+    /// Released with a non-zero status, or failed before its command ran.
+    Failed,
+    /// Queued, then ended without a slot.
+    Abandoned,
+    /// Not ended, and its gate is still running.
+    Running,
+    /// Not ended, and its gate is gone.
+    Unrecorded,
+    /// Ran on its parent gate's slot, under the parent's run, which owns its
+    /// time.
+    Parent,
+    /// Ran under a parent gate whose held slot covers its kind, taking no
+    /// slot; the parent's run owns its time.
+    Covered,
+    /// Forward-compat fallback: a state the current build doesn't know, or
+    /// none sent.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// One gate run from the gate's journal ([`DaemonMessage::GateHistory`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateHistoryRun {
+    /// The gated command, normalised.
+    #[serde(default)]
+    pub command: String,
+    /// The folder the gate ran in.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// The repository the run's folder belongs to.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// The gate's slot request: `heavy`, `light`, `critical` or `none`; a
+    /// string because `critical` and `none` are not a [`GateSlotKind`].
+    pub kind: String,
+    /// The index of the first slot the run took; `None` when it took none.
+    #[serde(default)]
+    pub slot: Option<u32>,
+    /// True for a run routed to the remote pool.
+    #[serde(default)]
+    pub remote: bool,
+    /// The build box a remote run waits for or runs on.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Why a remote run was sent back to the local queue, such as `full` or
+    /// `unreachable`; `None` when it was not.
+    #[serde(default)]
+    pub fallback: Option<String>,
+    /// The free text the run was given as its reason.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// The run's own gate's process id; with `process_start` the run's key.
+    pub pid: u32,
+    /// The run's own gate's process start.
+    #[serde(default)]
+    pub process_start: Option<DateTime<Utc>>,
+    /// The gate whose slot a `parent` or `covered` run ran on.
+    #[serde(default)]
+    pub parent_pid: Option<u32>,
+    #[serde(default)]
+    pub state: GateRunState,
+    /// True while the run's own gate is live, whatever its state.
+    #[serde(default)]
+    pub running: bool,
+    /// When the gate queued.
+    #[serde(default)]
+    pub queued: Option<DateTime<Utc>>,
+    /// When the gate took its slot.
+    #[serde(default)]
+    pub started: Option<DateTime<Utc>>,
+    /// How long the gate waited for its slot.
+    #[serde(default)]
+    pub waited_seconds: Option<f64>,
+    /// How long the gate held its slot; for a `parent` or `covered` run, how
+    /// long its parent's run held its slot. The status, verdict, wall and
+    /// adjusted seconds follow the same rule.
+    #[serde(default)]
+    pub held_seconds: Option<f64>,
+    /// The gate's exit status.
+    #[serde(default)]
+    pub status: Option<i64>,
+    /// How the command ended, as the gate's release wrote it.
+    #[serde(default)]
+    pub verdict: Option<String>,
+    /// The command's wall time.
+    #[serde(default)]
+    pub wall_seconds: Option<f64>,
+    /// The command's load-adjusted seconds.
+    #[serde(default)]
+    pub adjusted_seconds: Option<f64>,
+    /// The slots and journal mutex the run took from a gate that died
+    /// holding them.
+    #[serde(default)]
+    pub abandoned: Vec<String>,
+    /// The remote slot the run held before a fallback sent it back.
+    #[serde(default)]
+    pub remote_take: Option<GateRemoteTake>,
+    /// Whether the run was routed to a builder with a cold work folder.
+    #[serde(default)]
+    pub cold: Option<bool>,
+    /// The critical request's gate whose barrier sent this light run to a
+    /// builder.
+    #[serde(default)]
+    pub critical_pid: Option<u32>,
+}
+
+/// The remote slot a routed run held before it fell back to run locally.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateRemoteTake {
+    /// When the run took the remote slot.
+    #[serde(default)]
+    pub started: Option<DateTime<Utc>>,
+    /// How long the run waited for the remote slot.
+    #[serde(default)]
+    pub waited_seconds: Option<f64>,
+    /// When the run fell back.
+    #[serde(default)]
+    pub fell_back_at: Option<DateTime<Utc>>,
+}
+
+/// How long the passed runs of one command in one repository held their
+/// slot over the last seven days, the remote runs apart from the local ones.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateCommandSummary {
+    /// The command, normalised.
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// True for the runs that held a remote slot.
+    #[serde(default)]
+    pub remote: bool,
+    /// The runs counted.
+    #[serde(default)]
+    pub count: u32,
+    /// The median held time, by nearest rank.
+    #[serde(default)]
+    pub p50_seconds: f64,
+    /// The 90th percentile held time, by nearest rank.
+    #[serde(default)]
+    pub p90_seconds: f64,
+    /// The longest held time.
+    #[serde(default)]
+    pub max_seconds: f64,
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
@@ -4660,6 +5111,28 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Set the slot count of the host's `kind` gate pool, 1 to 64; `None`
+    /// clears it back to the gate's formula. Answered to the requester with
+    /// [`DaemonMessage::GateSlotCountSet`], or with `Error`:
+    /// `invalid_request` for a count outside 1 to 64, `gate_write_failed`
+    /// when the write fails; each echoes `request_id`. Local-only: a tailnet
+    /// connection is answered `Error { code: local_only }`, which does not
+    /// echo `request_id`. Sent only to a daemon that lists
+    /// [`FEATURE_GATE_STATE`].
+    SetGateSlotCount {
+        kind: GateSlotKind,
+        #[serde(default)]
+        count: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Ask for the host's recent gate runs. Answered to the requester with
+    /// [`DaemonMessage::GateHistory`] echoing `request_id`. Sent only to a
+    /// daemon that lists [`FEATURE_GATE_STATE`].
+    GateHistory {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 }
 
 /// One history entry to recover, and how.
@@ -5012,6 +5485,34 @@ pub enum DaemonMessage {
     /// [`FEATURE_ACCOUNT_EVENTS`].
     AccountEvent {
         event: AccountEventKind,
+    },
+    /// The host's gate slots, sent at the initial state and on change by a
+    /// daemon that lists [`FEATURE_GATE_STATE`]. `None` means no gate state.
+    GateState {
+        #[serde(default)]
+        state: Option<Box<GateState>>,
+    },
+    /// The answer to a [`ClientMessage::SetGateSlotCount`] that was written,
+    /// echoing its `kind`, `count` and `request_id`.
+    GateSlotCountSet {
+        kind: GateSlotKind,
+        #[serde(default)]
+        count: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// The answer to [`ClientMessage::GateHistory`]: the recent runs, every
+    /// open run (a run may be in both lists), and one summary row per
+    /// repository, command and remote flag over the last seven days.
+    GateHistory {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(default)]
+        runs: Vec<GateHistoryRun>,
+        #[serde(default)]
+        open: Vec<GateHistoryRun>,
+        #[serde(default)]
+        summary: Vec<GateCommandSummary>,
     },
     /// A daemon-driven account login's progress
     /// ([`ClientMessage::StartAccountLogin`]): `started` once its terminal
@@ -9846,6 +10347,445 @@ mod tests {
             panic!("expected Unknown");
         };
         assert_eq!(type_tag, "future_only_broadcast");
+    }
+
+    fn gate_time(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s)
+            .expect("an RFC 3339 time")
+            .with_timezone(&Utc)
+    }
+
+    fn gate_claim(pid: u32) -> GateClaim {
+        GateClaim {
+            pid: Some(pid),
+            started: Some(gate_time("2026-11-05T09:58:00Z")),
+            cwd: Some(r"X:\dev\repo".to_owned()),
+            command: Some("cargo nextest run".to_owned()),
+            log: Some(r"X:\dev\repo\.tmp\test.log".to_owned()),
+            timeout_seconds: Some(600.0),
+        }
+    }
+
+    fn gate_slot(index: u32, state: GateSlotState) -> GateSlot {
+        GateSlot {
+            index,
+            name: format!("gate-slot-{index}"),
+            state,
+            claim: None,
+            stale: None,
+            processes: 0,
+            last_line: None,
+            critical: false,
+            extra: Some(false),
+        }
+    }
+
+    fn gate_waiting(pid: u32) -> GateWaiting {
+        GateWaiting {
+            pid,
+            since: Some(gate_time("2026-11-05T09:59:30Z")),
+            cwd: Some(r"X:\dev\other".to_owned()),
+            command_line: "gate.exe run -- cargo build".to_owned(),
+        }
+    }
+
+    /// A state with every part filled: both pools, a busy slot with a claim,
+    /// a held slot, a free slot with a stale claim, an extra slot, a queue
+    /// ticket, a waiting gate, a critical holder, a remote pool, a builder
+    /// pool and a covered run.
+    fn gate_full_state() -> GateState {
+        let busy = GateSlot {
+            claim: Some(gate_claim(4100)),
+            processes: 3,
+            last_line: Some("Compiling protocol".to_owned()),
+            ..gate_slot(0, GateSlotState::Busy)
+        };
+        let held = GateSlot {
+            critical: true,
+            ..gate_slot(1, GateSlotState::Held)
+        };
+        let free_with_stale = GateSlot {
+            stale: Some(gate_claim(4000)),
+            ..gate_slot(2, GateSlotState::Free)
+        };
+        let extra = GateSlot {
+            claim: Some(gate_claim(4200)),
+            extra: Some(true),
+            ..gate_slot(3, GateSlotState::Busy)
+        };
+        GateState {
+            now: Some(gate_time("2026-11-05T10:00:00Z")),
+            machine: "BOX".to_owned(),
+            processors: 16,
+            critical: Some(GateCriticalState {
+                holder: Some(GateSlot {
+                    claim: Some(gate_claim(4500)),
+                    extra: None,
+                    ..gate_slot(0, GateSlotState::Busy)
+                }),
+                waiting: vec![gate_waiting(4600)],
+            }),
+            queue: vec![GateQueueTicket {
+                kind: "heavy".to_owned(),
+                holds: false,
+                remote: true,
+                pool: Some("1a2b3c4d".to_owned()),
+                pinned: true,
+                pid: 4300,
+                arrived: Some(gate_time("2026-11-05T09:59:30Z")),
+                age_seconds: 30.0,
+                cwd: Some(r"X:\dev\other".to_owned()),
+                command_line: Some("gate.exe run -- cargo build".to_owned()),
+                reason: Some("release build".to_owned()),
+                expected: Some(GateExpected {
+                    p50: Some(42.0),
+                    p90: Some(90.5),
+                    n: Some(12),
+                    key: Some("cargo build".to_owned()),
+                }),
+            }],
+            pools: vec![
+                GatePool {
+                    kind: GateSlotKind::Heavy,
+                    count: 3,
+                    default: 4,
+                    set: Some(3),
+                    problem: None,
+                    slots: vec![busy, held, free_with_stale, extra],
+                    waiting: vec![gate_waiting(4300)],
+                },
+                GatePool {
+                    kind: GateSlotKind::Light,
+                    count: 1,
+                    default: 8,
+                    set: None,
+                    problem: Some("slot-counts.json: light is not a number".to_owned()),
+                    slots: vec![gate_slot(0, GateSlotState::Free)],
+                    waiting: Vec::new(),
+                },
+            ],
+            remote: Some(GateRemotePool {
+                count: 1,
+                problem: None,
+                slots: vec![gate_slot(0, GateSlotState::Free)],
+            }),
+            builders: vec![GateBuilderPool {
+                id: "1a2b3c4d".to_owned(),
+                name: Some("builder@mac-mini".to_owned()),
+                host: Some("builder@mac-mini".to_owned()),
+                os: Some("macos".to_owned()),
+                count: 2,
+                problem: None,
+                routed: true,
+                slots: vec![gate_slot(0, GateSlotState::Free)],
+            }],
+            covered: vec![GateCoveredRun {
+                pid: 4700,
+                start: Some(gate_time("2026-11-05T09:59:50Z")),
+                parent_pid: 4100,
+                command: "cargo fmt --all --check".to_owned(),
+                cwd: r"X:\dev\repo".to_owned(),
+                since: Some(gate_time("2026-11-05T09:59:51Z")),
+            }],
+        }
+    }
+
+    #[test]
+    fn gate_state_round_trips() {
+        let msg = DaemonMessage::GateState {
+            state: Some(Box::new(gate_full_state())),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.starts_with(r#"{"type":"gate_state""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("decodes");
+        assert!(
+            matches!(&back, DaemonMessage::GateState { state: Some(s) } if **s == gate_full_state()),
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn gate_state_none_round_trips() {
+        let msg = DaemonMessage::GateState { state: None };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        for json in [json.as_str(), r#"{"type":"gate_state"}"#] {
+            let back: DaemonMessage = serde_json::from_str(json).expect("decodes");
+            assert!(
+                matches!(&back, DaemonMessage::GateState { state: None }),
+                "{json}: {back:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_unknown_enum_values_decode_in_place() {
+        let json = r#"{"type":"gate_state","state":{"machine":"BOX","processors":8,
+            "pools":[{"kind":"medium","count":2,"slots":[{"index":0,"state":"parked","name":"gate-slot-0"}]}]}}"#;
+        let back: DaemonMessage = serde_json::from_str(json).expect("decodes");
+        let DaemonMessage::GateState { state: Some(state) } = back else {
+            panic!("expected a gate state: {back:?}");
+        };
+        assert_eq!(state.machine, "BOX");
+        assert_eq!(state.processors, 8);
+        let pool = state.pools.first().expect("a pool");
+        assert_eq!(pool.kind, GateSlotKind::Unknown);
+        assert_eq!(pool.count, 2);
+        let slot = pool.slots.first().expect("a slot");
+        assert_eq!(slot.state, GateSlotState::Unknown);
+        assert_eq!(slot.name, "gate-slot-0");
+
+        let run: GateHistoryRun =
+            serde_json::from_str(r#"{"kind":"heavy","pid":7,"state":"paused"}"#).expect("decodes");
+        assert_eq!(run.state, GateRunState::Unknown);
+        assert_eq!(run.pid, 7);
+    }
+
+    #[test]
+    fn gate_missing_optional_fields_default() {
+        let slot: GateSlot =
+            serde_json::from_str(r#"{"index":2,"state":"free"}"#).expect("decodes");
+        assert_eq!(
+            slot,
+            GateSlot {
+                index: 2,
+                name: String::new(),
+                state: GateSlotState::Free,
+                claim: None,
+                stale: None,
+                processes: 0,
+                last_line: None,
+                critical: false,
+                extra: None,
+            }
+        );
+        let claim: GateClaim = serde_json::from_str("{}").expect("decodes");
+        assert_eq!(
+            claim,
+            GateClaim {
+                pid: None,
+                started: None,
+                cwd: None,
+                command: None,
+                log: None,
+                timeout_seconds: None,
+            }
+        );
+        let claim: GateClaim = serde_json::from_str(r#"{"pid":5,"surprise":true}"#)
+            .expect("an unknown field is ignored");
+        assert_eq!(claim.pid, Some(5));
+        let state: GateState = serde_json::from_str("{}").expect("decodes");
+        assert_eq!(state.now, None);
+        assert_eq!(state.critical, None);
+        assert!(
+            state.pools.is_empty() && state.queue.is_empty(),
+            "{state:?}"
+        );
+    }
+
+    #[test]
+    fn gate_unknown_top_level_type_is_absorbed() {
+        let parsed =
+            InboundDaemonMessage::from_json_str(r#"{"type":"gate_something_new"}"#).expect("parse");
+        let InboundDaemonMessage::Unknown { type_tag, .. } = parsed else {
+            panic!("expected Unknown");
+        };
+        assert_eq!(type_tag, "gate_something_new");
+    }
+
+    #[test]
+    fn gate_set_slot_count_round_trips() {
+        let cases = [
+            (
+                GateSlotKind::Heavy,
+                Some(4),
+                Some("r1"),
+                r#"{"type":"set_gate_slot_count","kind":"heavy","count":4,"request_id":"r1"}"#,
+            ),
+            (
+                GateSlotKind::Light,
+                None,
+                None,
+                r#"{"type":"set_gate_slot_count","kind":"light","count":null}"#,
+            ),
+        ];
+        for (kind, count, request_id, json) in cases {
+            let msg = ClientMessage::SetGateSlotCount {
+                kind,
+                count,
+                request_id: request_id.map(str::to_owned),
+            };
+            let sent = serde_json::to_string(&msg).expect("serializes");
+            assert_eq!(sent, json, "an absent request_id is omitted");
+            let back: ClientMessage = serde_json::from_str(json).expect("decodes");
+            assert!(
+                matches!(
+                    &back,
+                    ClientMessage::SetGateSlotCount { kind: k, count: c, request_id: id }
+                        if *k == kind && *c == count && id.as_deref() == request_id
+                ),
+                "{back:?}"
+            );
+        }
+        let back: ClientMessage =
+            serde_json::from_str(r#"{"type":"set_gate_slot_count","kind":"light"}"#)
+                .expect("decodes");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::SetGateSlotCount {
+                    kind: GateSlotKind::Light,
+                    count: None,
+                    request_id: None
+                }
+            ),
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn gate_slot_count_set_round_trips() {
+        let cases = [
+            (
+                GateSlotKind::Light,
+                Some(64),
+                Some("r1"),
+                r#"{"type":"gate_slot_count_set","kind":"light","count":64,"request_id":"r1"}"#,
+            ),
+            (
+                GateSlotKind::Heavy,
+                None,
+                None,
+                r#"{"type":"gate_slot_count_set","kind":"heavy","count":null}"#,
+            ),
+        ];
+        for (kind, count, request_id, json) in cases {
+            let msg = DaemonMessage::GateSlotCountSet {
+                kind,
+                count,
+                request_id: request_id.map(str::to_owned),
+            };
+            let sent = serde_json::to_string(&msg).expect("serializes");
+            assert_eq!(sent, json, "an absent request_id is omitted");
+            let back: DaemonMessage = serde_json::from_str(json).expect("decodes");
+            assert!(
+                matches!(
+                    &back,
+                    DaemonMessage::GateSlotCountSet { kind: k, count: c, request_id: id }
+                        if *k == kind && *c == count && id.as_deref() == request_id
+                ),
+                "{back:?}"
+            );
+        }
+    }
+
+    fn gate_history_run(state: GateRunState, pid: u32) -> GateHistoryRun {
+        GateHistoryRun {
+            command: "cargo nextest run".to_owned(),
+            cwd: Some(r"X:\dev\repo.wt\rt-1".to_owned()),
+            repo: Some("repo".to_owned()),
+            kind: "heavy".to_owned(),
+            slot: Some(0),
+            remote: false,
+            host: None,
+            fallback: Some("full".to_owned()),
+            reason: Some("proving".to_owned()),
+            pid,
+            process_start: Some(gate_time("2026-11-05T09:00:00Z")),
+            parent_pid: Some(4000),
+            state,
+            running: false,
+            queued: Some(gate_time("2026-11-05T09:00:01Z")),
+            started: Some(gate_time("2026-11-05T09:00:05Z")),
+            waited_seconds: Some(4.0),
+            held_seconds: Some(120.5),
+            status: Some(0),
+            verdict: Some("passed".to_owned()),
+            wall_seconds: Some(119.0),
+            adjusted_seconds: Some(100.25),
+            abandoned: vec![r"Local\gate-slot-1".to_owned()],
+            remote_take: Some(GateRemoteTake {
+                started: Some(gate_time("2026-11-05T08:59:00Z")),
+                waited_seconds: Some(1.5),
+                fell_back_at: Some(gate_time("2026-11-05T08:59:59Z")),
+            }),
+            cold: Some(true),
+            critical_pid: Some(4900),
+        }
+    }
+
+    #[test]
+    fn gate_history_round_trips() {
+        for (request_id, json) in [
+            (Some("h1"), r#"{"type":"gate_history","request_id":"h1"}"#),
+            (None, r#"{"type":"gate_history"}"#),
+        ] {
+            let msg = ClientMessage::GateHistory {
+                request_id: request_id.map(str::to_owned),
+            };
+            let sent = serde_json::to_string(&msg).expect("serializes");
+            assert_eq!(sent, json, "an absent request_id is omitted");
+            let back: ClientMessage = serde_json::from_str(json).expect("decodes");
+            assert!(
+                matches!(&back, ClientMessage::GateHistory { request_id: id } if id.as_deref() == request_id),
+                "{back:?}"
+            );
+        }
+
+        let states = [
+            (GateRunState::Ok, "ok"),
+            (GateRunState::Failed, "failed"),
+            (GateRunState::Abandoned, "abandoned"),
+            (GateRunState::Running, "running"),
+            (GateRunState::Unrecorded, "unrecorded"),
+            (GateRunState::Parent, "parent"),
+            (GateRunState::Covered, "covered"),
+        ];
+        let runs: Vec<GateHistoryRun> = (1..)
+            .zip(states)
+            .map(|(pid, (state, _))| gate_history_run(state, pid))
+            .collect();
+        let open = vec![gate_history_run(GateRunState::Running, 4)];
+        let summary = vec![GateCommandSummary {
+            command: "cargo nextest run".to_owned(),
+            repo: Some("repo".to_owned()),
+            remote: true,
+            count: 9,
+            p50_seconds: 60.0,
+            p90_seconds: 120.0,
+            max_seconds: 180.5,
+        }];
+        let msg = DaemonMessage::GateHistory {
+            request_id: Some("h1".to_owned()),
+            runs: runs.clone(),
+            open: open.clone(),
+            summary: summary.clone(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        for (_, wire) in states {
+            assert!(
+                json.contains(&format!(r#""state":"{wire}""#)),
+                "{wire}: {json}"
+            );
+        }
+        let back: DaemonMessage = serde_json::from_str(&json).expect("decodes");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::GateHistory { request_id: Some(id), runs: r, open: o, summary: s }
+                    if id == "h1" && *r == runs && *o == open && *s == summary
+            ),
+            "{back:?}"
+        );
+        let back: DaemonMessage =
+            serde_json::from_str(r#"{"type":"gate_history"}"#).expect("decodes");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::GateHistory { request_id: None, runs, open, summary }
+                    if runs.is_empty() && open.is_empty() && summary.is_empty()
+            ),
+            "{back:?}"
+        );
     }
 
     /// Every [`RemoteState`] arm the daemon sends.

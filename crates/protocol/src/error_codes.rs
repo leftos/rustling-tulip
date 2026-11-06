@@ -68,6 +68,8 @@ pub const ACCOUNT_REFUSED: &str = "account_refused";
 pub const ACCOUNT_UNSUPPORTED: &str = "account_unsupported";
 /// An account write failed.
 pub const ACCOUNT_FAILED: &str = "account_failed";
+/// A gate slot count write failed.
+pub const GATE_WRITE_FAILED: &str = "gate_write_failed";
 
 /// Every code in the catalogue.
 pub const ALL: &[&str] = &[
@@ -100,6 +102,7 @@ pub const ALL: &[&str] = &[
     ACCOUNT_REFUSED,
     ACCOUNT_UNSUPPORTED,
     ACCOUNT_FAILED,
+    GATE_WRITE_FAILED,
 ];
 
 #[cfg(test)]

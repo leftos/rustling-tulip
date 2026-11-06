@@ -1107,6 +1107,14 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::SetSummarizerSettings { .. }
         | ClientMessage::SetSummarizerKey { .. }
         | ClientMessage::TestSummary { .. }) => summarizer::handle(hub, m, ctx).await?,
+        ClientMessage::SetGateSlotCount { request_id, .. }
+        | ClientMessage::GateHistory { request_id } => {
+            let _ = ctx.out_tx.send(DaemonMessage::Error {
+                message: "the gate view is not served by this daemon".to_owned(),
+                request_id,
+                code: Some(protocol::error_codes::UNSUPPORTED_MESSAGE.to_owned()),
+            });
+        }
     }
     Ok(())
 }
