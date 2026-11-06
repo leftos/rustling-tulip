@@ -176,7 +176,7 @@ The app's own toasts on the Mac mini (macOS 27.0, one 1920×1080 display at scal
 - [x] The logs hold no `already borrowed`, panic or toast-placer warning.
 - [x] A toast raised while the client is hidden stays on screen and leaves the app hidden: one layer-101 window 360×182 points, 16 points inside the right edge and the visible bottom, the main window off screen and the app hidden and inactive throughout. RT-1040 opens the panel unshown and orders it in after `canHide` is turned off; before that the toast unhid the whole app.
 - [x] The frontmost application is unchanged by a toast, with the console unlocked and another app (System Settings) frontmost: across two Needs you toasts raised through the fake CLI's `rt-perm` prompt and answered with `send --keys 1`, the frontmost app stayed System Settings and the client never became active (the `frontwatch` probe, every 100 ms).
-- [ ] A click on a toast's button leaves the keyboard with the app the user is typing in: not run; it needs a person at the console (RT-1030).
+- A click on a toast's button leaving the keyboard with the app the user is typing in was not checked on a real Mac; the owner dropped that check.
 
 An update end to end on the Mac mini (RT-1031): two ad-hoc signed builds packed with `tools/installer/pack-macos.ps1`, the new one with a throwaway version bump to `0.9.1-alpha` that was never committed; the old `0.9.0-alpha` bundle unpacked with `ditto -x -k` into a writable scratch Applications folder; a static feed (the releases JSON and the `dl/` assets) served on 127.0.0.1 with `RUSTLING_TULIP_UPDATE_FEED` pointing at it; every data folder isolated under the scratch folder. A plain shell session and a fake Claude session were started before the update.
 
