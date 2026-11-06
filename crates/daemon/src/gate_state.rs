@@ -275,6 +275,177 @@ pub(crate) fn live_counts_path() -> Option<PathBuf> {
     None
 }
 
+/// A run's state as the wire carries it.
+fn run_state_of(state: ::gate_state::RunState) -> protocol::GateRunState {
+    match state {
+        ::gate_state::RunState::Ok => protocol::GateRunState::Ok,
+        ::gate_state::RunState::Failed => protocol::GateRunState::Failed,
+        ::gate_state::RunState::Abandoned => protocol::GateRunState::Abandoned,
+        ::gate_state::RunState::Running => protocol::GateRunState::Running,
+        ::gate_state::RunState::Unrecorded => protocol::GateRunState::Unrecorded,
+        ::gate_state::RunState::Parent => protocol::GateRunState::Parent,
+        ::gate_state::RunState::Covered => protocol::GateRunState::Covered,
+    }
+}
+
+/// One run of the gate's journal as the wire carries it, without its machine snapshot and slot names.
+fn history_run_of(run: &::gate_state::HistoryRun) -> protocol::GateHistoryRun {
+    protocol::GateHistoryRun {
+        command: run.command.clone(),
+        cwd: run.cwd.clone(),
+        repo: run.repo.clone(),
+        kind: run.kind.clone(),
+        slot: run.slot,
+        remote: run.remote,
+        host: run.host.clone(),
+        fallback: run.fallback.clone(),
+        reason: run.reason.clone(),
+        pid: run.pid,
+        process_start: iso(&run.process_start),
+        parent_pid: run.parent_pid,
+        state: run_state_of(run.state),
+        running: run.running,
+        queued: run.queued.as_deref().and_then(iso),
+        started: run.started.as_deref().and_then(iso),
+        waited_seconds: run.waited_seconds,
+        held_seconds: run.held_seconds,
+        status: run.status,
+        verdict: run.verdict.clone(),
+        wall_seconds: run.wall_seconds,
+        adjusted_seconds: run.adjusted_seconds,
+        abandoned: run.abandoned.clone(),
+        remote_take: run
+            .remote_take
+            .as_ref()
+            .map(|take| protocol::GateRemoteTake {
+                started: iso(&take.started),
+                waited_seconds: take.waited_seconds,
+                fell_back_at: iso(&take.fell_back_at),
+            }),
+        cold: run.cold,
+        critical_pid: run.critical_pid,
+    }
+}
+
+/// One summary row as the wire carries it.
+fn summary_of(row: &::gate_state::CommandSummary) -> protocol::GateCommandSummary {
+    protocol::GateCommandSummary {
+        command: row.command.clone(),
+        repo: row.repo.clone(),
+        remote: row.remote,
+        count: count(row.count),
+        p50_seconds: row.p50_seconds,
+        p90_seconds: row.p90_seconds,
+        max_seconds: row.max_seconds,
+    }
+}
+
+/// The gate's run history as a `GateHistory` reply carries it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct HistoryLists {
+    pub(crate) runs: Vec<protocol::GateHistoryRun>,
+    pub(crate) open: Vec<protocol::GateHistoryRun>,
+    pub(crate) summary: Vec<protocol::GateCommandSummary>,
+}
+
+/// Converts the gate's journal history to the lists the wire carries.
+pub(crate) fn history_to_wire(history: &::gate_state::History) -> HistoryLists {
+    HistoryLists {
+        runs: history.runs.iter().map(history_run_of).collect(),
+        open: history.open.iter().map(history_run_of).collect(),
+        summary: history.summary.iter().map(summary_of).collect(),
+    }
+}
+
+/// The registered repos' folders, snapshotted for a history read, which names the repo of each run's folder.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RepoFolders {
+    /// Each repo's folder as `paths::normalize_path_key` gives it, with the repo's name.
+    folders: Vec<(String, String)>,
+}
+
+impl RepoFolders {
+    /// The folders of the given `(folder, name)` pairs.
+    pub(crate) fn new<F: AsRef<str>, N: AsRef<str>>(
+        repos: impl IntoIterator<Item = (F, N)>,
+    ) -> Self {
+        Self {
+            folders: repos
+                .into_iter()
+                .map(|(folder, name)| {
+                    (
+                        crate::paths::normalize_path_key(folder.as_ref()),
+                        name.as_ref().to_owned(),
+                    )
+                })
+                .filter(|(folder, _)| !folder.is_empty())
+                .collect(),
+        }
+    }
+
+    /// The repo `folder` belongs to: the registered repo whose folder is the longest one holding it; else, for a
+    /// folder under `<repo>.wt\<name>`, `<repo>`; else none.
+    pub(crate) fn repo_of(&self, folder: &str) -> Option<String> {
+        let key = crate::paths::normalize_path_key(folder);
+        self.folders
+            .iter()
+            .filter(|(repo, _)| {
+                key.strip_prefix(repo.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '\\']))
+            })
+            .max_by_key(|(repo, _)| repo.len())
+            .map(|(_, name)| name.clone())
+            .or_else(|| worktree_repo(folder))
+    }
+}
+
+/// The `<repo>` of a folder at or under `<repo>.wt\<name>` (`.wt` in any case), the last such component winning.
+fn worktree_repo(folder: &str) -> Option<String> {
+    let parts: Vec<&str> = folder
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.windows(2).rev().find_map(|pair| {
+        let [name, _] = pair else {
+            return None;
+        };
+        let cut = name.len().checked_sub(3)?;
+        let repo = name.get(..cut)?;
+        let suffix = name.get(cut..)?;
+        (!repo.is_empty() && suffix.eq_ignore_ascii_case(".wt")).then(|| repo.to_owned())
+    })
+}
+
+/// How a `GateHistory` request reads the gate's run history, given the registered repos' folders: the journal through
+/// one [`::gate_state::JournalCache`] in the daemon, a scripted closure in tests; `None` when the journal cannot be read.
+/// It blocks, so the request calls it on a blocking thread.
+pub(crate) type HistorySource = Arc<dyn Fn(RepoFolders) -> Option<HistoryLists> + Send + Sync>;
+
+/// The daemon's history source: a closure owning the one journal cache, which it locks only while it reads, after a
+/// process snapshot for the journal's liveness check. A failed read is logged and shows no history.
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub(crate) fn live_history_source() -> HistorySource {
+    use ::proc_table::ProcessTable as _;
+    let cache = Arc::new(std::sync::Mutex::new(::gate_state::JournalCache::default()));
+    Arc::new(move |repos: RepoFolders| {
+        let processes = ::proc_table::Win32ProcessTable.snapshot();
+        let mut cache = crate::sync::lock(&cache);
+        match ::gate_state::live_history(&mut cache, &processes, |folder| repos.repo_of(folder)) {
+            Ok(history) => Some(history_to_wire(&history)),
+            Err(error) => {
+                warn!(%error, "gate state: the gate's journal could not be read; no history shown");
+                None
+            }
+        }
+    })
+}
+
+/// The daemon's history source: none off 64-bit Windows, where the hub holds no gate state.
+#[cfg(not(all(windows, target_pointer_width = "64")))]
+pub(crate) fn live_history_source() -> HistorySource {
+    Arc::new(|_: RepoFolders| None)
+}
+
 /// The hub's current gate state, `None` until a read finds a gate. The poll is its only writer; a connection reads it
 /// at its initial state and when its state stream lags, and otherwise takes the poll's broadcasts. A slot-count write
 /// never publishes: it asks the poll to read again ([`GateHub::repoll`]), so a write and a tick never publish out of
@@ -283,15 +454,18 @@ pub(crate) fn live_counts_path() -> Option<PathBuf> {
 pub(crate) struct GateHub {
     current: Arc<watch::Sender<Option<protocol::GateState>>>,
     counts_path: CountsPath,
+    history: HistorySource,
     repoll: Arc<Notify>,
 }
 
 impl GateHub {
-    /// A hub gate state that holds no state yet, writing slot counts to the file `counts_path` names.
-    pub(crate) fn new(counts_path: CountsPath) -> Self {
+    /// A hub gate state that holds no state yet, writing slot counts to the file `counts_path` names and reading the
+    /// run history from `history`.
+    pub(crate) fn new(counts_path: CountsPath, history: HistorySource) -> Self {
         Self {
             current: Arc::new(watch::Sender::new(None)),
             counts_path,
+            history,
             repoll: Arc::new(Notify::new()),
         }
     }
@@ -299,6 +473,11 @@ impl GateHub {
     /// The lookup of the gate's counts file.
     pub(crate) fn counts_path(&self) -> CountsPath {
         Arc::clone(&self.counts_path)
+    }
+
+    /// The read of the gate's run history.
+    pub(crate) fn history(&self) -> HistorySource {
+        Arc::clone(&self.history)
     }
 
     /// Ask the poll to read at once rather than at its next tick; a request made while it is parked is kept for the
@@ -401,21 +580,27 @@ mod tests {
     use std::time::Duration;
 
     use ::gate_state::{
-        BuilderPool, CoveredRun, CriticalState, CwdReader, DashboardState, Generation, MutexProbe,
-        PoolState, QueueTicket, RemotePool, SlotCount, SlotKind, SlotRow, SlotState, StateInputs,
-        Waiting,
+        BuilderPool, CommandSummary, CoveredRun, CriticalState, CwdReader, DashboardState,
+        Generation, History, HistoryRun, MutexProbe, PoolState, QueueTicket, RemotePool,
+        RemoteTake, RunState, SlotCount, SlotKind, SlotRow, SlotState, StateInputs, Waiting,
     };
     use ::proc_table::EmptyTable;
     use chrono::{DateTime, Utc};
     use serde_json::{Value, json};
 
-    use protocol::{GateClaim, GateExpected, GateSlotKind, GateSlotState, GateWaiting};
+    use protocol::{
+        GateClaim, GateCommandSummary, GateExpected, GateHistoryRun, GateRemoteTake, GateRunState,
+        GateSlotKind, GateSlotState, GateWaiting,
+    };
 
     use tokio::sync::{broadcast, mpsc, watch};
 
     use crate::server::StateEvent;
 
-    use super::{GateHub, GateReader, POLL_INTERVAL, read_once, same_state, spawn_poll, to_wire};
+    use super::{
+        GateHub, GateReader, POLL_INTERVAL, RepoFolders, history_to_wire, read_once, same_state,
+        spawn_poll, to_wire,
+    };
 
     /// The moment a test describes.
     const NOW: &str = "2026-10-01T12:00:00.1234567Z";
@@ -924,6 +1109,208 @@ mod tests {
         assert!(!same_state(&to_wire(&first), &to_wire(&changed)));
     }
 
+    /// A journal run in `state` with every field set, its moments at `START` and `NOW`.
+    fn journal_run(state: RunState, pid: u32) -> HistoryRun {
+        HistoryRun {
+            command: "cargo test".to_owned(),
+            cwd: Some("X:\\dev\\repo".to_owned()),
+            repo: Some("repo".to_owned()),
+            kind: "heavy".to_owned(),
+            slot: Some(1),
+            slots: vec!["Local\\gate-slot-1".to_owned()],
+            machine: None,
+            remote: false,
+            host: None,
+            fallback: None,
+            reason: Some("release".to_owned()),
+            pid,
+            process_start: START.to_owned(),
+            parent_pid: None,
+            state,
+            running: false,
+            queued: Some(START.to_owned()),
+            started: Some(NOW.to_owned()),
+            waited_seconds: Some(1.5),
+            held_seconds: Some(42.25),
+            status: Some(0),
+            verdict: Some("ok".to_owned()),
+            wall_seconds: Some(40.0),
+            adjusted_seconds: Some(38.5),
+            abandoned: vec!["Local\\gate-slot-0".to_owned()],
+            remote_take: None,
+            cold: Some(false),
+            critical_pid: Some(9),
+        }
+    }
+
+    /// The wire run `journal_run(state, pid)` converts to.
+    fn wire_run(state: GateRunState, pid: u32) -> GateHistoryRun {
+        GateHistoryRun {
+            command: "cargo test".to_owned(),
+            cwd: Some("X:\\dev\\repo".to_owned()),
+            repo: Some("repo".to_owned()),
+            kind: "heavy".to_owned(),
+            slot: Some(1),
+            remote: false,
+            host: None,
+            fallback: None,
+            reason: Some("release".to_owned()),
+            pid,
+            process_start: Some(start()),
+            parent_pid: None,
+            state,
+            running: false,
+            queued: Some(start()),
+            started: Some(now()),
+            waited_seconds: Some(1.5),
+            held_seconds: Some(42.25),
+            status: Some(0),
+            verdict: Some("ok".to_owned()),
+            wall_seconds: Some(40.0),
+            adjusted_seconds: Some(38.5),
+            abandoned: vec!["Local\\gate-slot-0".to_owned()],
+            remote_take: None,
+            cold: Some(false),
+            critical_pid: Some(9),
+        }
+    }
+
+    /// Every run state, the parent pid, the remote take, an unparsable moment, the open list and the summary's counts
+    /// reach the wire; the machine snapshot and the slot names do not.
+    #[test]
+    fn gate_history_converts_runs_open_and_summary() {
+        let states = [
+            (RunState::Ok, GateRunState::Ok),
+            (RunState::Failed, GateRunState::Failed),
+            (RunState::Abandoned, GateRunState::Abandoned),
+            (RunState::Running, GateRunState::Running),
+            (RunState::Unrecorded, GateRunState::Unrecorded),
+            (RunState::Parent, GateRunState::Parent),
+            (RunState::Covered, GateRunState::Covered),
+        ];
+        let mut runs: Vec<HistoryRun> = (1..)
+            .zip(states)
+            .map(|(pid, (state, _))| journal_run(state, pid))
+            .collect();
+        let mut expected: Vec<GateHistoryRun> = (1..)
+            .zip(states)
+            .map(|(pid, (_, state))| wire_run(state, pid))
+            .collect();
+        runs[5].parent_pid = Some(100);
+        expected[5].parent_pid = Some(100);
+
+        let mut fell_back = journal_run(RunState::Ok, 20);
+        fell_back.remote = true;
+        fell_back.host = Some("mac-1".to_owned());
+        fell_back.fallback = Some("unreachable".to_owned());
+        fell_back.remote_take = Some(RemoteTake {
+            started: START.to_owned(),
+            waited_seconds: Some(3.0),
+            fell_back_at: NOW.to_owned(),
+        });
+        runs.push(fell_back);
+        let mut wire_fell_back = wire_run(GateRunState::Ok, 20);
+        wire_fell_back.remote = true;
+        wire_fell_back.host = Some("mac-1".to_owned());
+        wire_fell_back.fallback = Some("unreachable".to_owned());
+        wire_fell_back.remote_take = Some(GateRemoteTake {
+            started: Some(start()),
+            waited_seconds: Some(3.0),
+            fell_back_at: Some(now()),
+        });
+        expected.push(wire_fell_back);
+
+        let mut garbled = journal_run(RunState::Ok, 21);
+        garbled.process_start = "not a time".to_owned();
+        garbled.queued = Some("not a time".to_owned());
+        garbled.started = None;
+        garbled.remote_take = Some(RemoteTake {
+            started: "not a time".to_owned(),
+            waited_seconds: None,
+            fell_back_at: "not a time".to_owned(),
+        });
+        runs.push(garbled);
+        let mut wire_garbled = wire_run(GateRunState::Ok, 21);
+        wire_garbled.process_start = None;
+        wire_garbled.queued = None;
+        wire_garbled.started = None;
+        wire_garbled.remote_take = Some(GateRemoteTake {
+            started: None,
+            waited_seconds: None,
+            fell_back_at: None,
+        });
+        expected.push(wire_garbled);
+
+        let mut open = journal_run(RunState::Running, 30);
+        open.running = true;
+        let mut wire_open = wire_run(GateRunState::Running, 30);
+        wire_open.running = true;
+
+        let summary_row = |count| CommandSummary {
+            command: "cargo test".to_owned(),
+            repo: Some("repo".to_owned()),
+            remote: true,
+            count,
+            p50_seconds: 10.0,
+            p90_seconds: 20.0,
+            max_seconds: 30.0,
+        };
+        let wire_summary_row = |count| GateCommandSummary {
+            command: "cargo test".to_owned(),
+            repo: Some("repo".to_owned()),
+            remote: true,
+            count,
+            p50_seconds: 10.0,
+            p90_seconds: 20.0,
+            max_seconds: 30.0,
+        };
+
+        let wire = history_to_wire(&History {
+            runs,
+            open: vec![open],
+            summary: vec![summary_row(7), summary_row(usize::MAX)],
+        });
+
+        assert_eq!(wire.runs.len(), expected.len());
+        for (got, want) in wire.runs.iter().zip(&expected) {
+            assert_eq!(got, want, "run {}", want.pid);
+        }
+        assert_eq!(wire.open, vec![wire_open]);
+        assert_eq!(
+            wire.summary,
+            vec![wire_summary_row(7), wire_summary_row(u32::MAX)]
+        );
+    }
+
+    /// A folder under a registered repo is that repo's, the deepest registered folder winning; a `<repo>.wt\<name>`
+    /// folder is `<repo>`'s; any other folder is no repo's.
+    #[test]
+    fn gate_repo_of_maps_registered_folders_and_wt_folders() {
+        let repos = RepoFolders::new([
+            ("X:\\dev\\monorepo", "monorepo"),
+            ("X:\\dev\\monorepo\\vendor\\lib\\", "lib"),
+            ("X:\\dev\\rustling-tulip", "rustling-tulip"),
+        ]);
+
+        let cases = [
+            ("X:\\dev\\monorepo", Some("monorepo")),
+            ("X:\\dev\\monorepo\\crates\\a", Some("monorepo")),
+            ("X:\\dev\\monorepo\\vendor\\lib", Some("lib")),
+            ("X:\\dev\\monorepo\\vendor\\lib\\src", Some("lib")),
+            ("X:\\dev\\monorepository", None),
+            ("X:\\dev\\yaat.wt\\fix-12", Some("yaat")),
+            ("X:\\dev\\yaat.WT\\fix-12\\crates\\core", Some("yaat")),
+            ("X:/dev/yaat.wt/fix-12", Some("yaat")),
+            ("X:\\dev\\yaat.wt", None),
+            ("X:\\dev\\.wt\\fix-12", None),
+            ("X:\\dev\\unknown", None),
+            ("", None),
+        ];
+        for (folder, repo) in cases {
+            assert_eq!(repos.repo_of(folder).as_deref(), repo, "{folder}");
+        }
+    }
+
     /// A step-count guard on a paused clock, far past any passing wait.
     const GUARD: Duration = Duration::from_hours(7 * 24);
 
@@ -968,7 +1355,7 @@ mod tests {
         });
         let (events_tx, events) = broadcast::channel(16);
         let (clients, clients_rx) = watch::channel(clients);
-        let gate = GateHub::new(Arc::new(|| None));
+        let gate = GateHub::new(Arc::new(|| None), Arc::new(|_: RepoFolders| None));
         let task = spawn_poll(reader, gate.clone(), events_tx.clone(), clients_rx);
         PollRig {
             reads,

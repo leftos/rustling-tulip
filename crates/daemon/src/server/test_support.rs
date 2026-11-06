@@ -199,7 +199,22 @@ pub(crate) fn enable_gate_state(
     state: Option<protocol::GateState>,
     counts_path: Option<PathBuf>,
 ) {
-    let gate = crate::gate_state::GateHub::new(Arc::new(move || counts_path.clone()));
+    enable_gate_state_with_history(
+        hub,
+        state,
+        counts_path,
+        Arc::new(|_: crate::gate_state::RepoFolders| None),
+    );
+}
+
+/// [`enable_gate_state`], with the gate's history read from `history`.
+pub(crate) fn enable_gate_state_with_history(
+    hub: &mut Hub,
+    state: Option<protocol::GateState>,
+    counts_path: Option<PathBuf>,
+    history: crate::gate_state::HistorySource,
+) {
+    let gate = crate::gate_state::GateHub::new(Arc::new(move || counts_path.clone()), history);
     gate.publish(state, &hub.state_events);
     hub.gate_state = Some(gate);
 }
