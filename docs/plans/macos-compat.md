@@ -128,9 +128,7 @@ Note: the Tauri app is no longer on `main`; it lives on the `tauri` branch (tag 
       `daemon_client::locate_daemon_binary` then `--detach` (the same hand-over to the cached copy as the Windows `Run` value), `AbandonProcessGroup` true so launchd spares the cached daemon, `RunAtLoad`, and no `KeepAlive`. **File-only** (no
       `launchctl load` on toggle: that would start a second daemon while the
       app's supervisor runs one; the file gives next-login parity with the
-      Windows `Run` key). The plist it writes passes `plutil -lint` on the Mac mini (see "macOS verification"). Left open: *verify on a real Mac that launchd loads it at login, which needs the owner at the MacBook Air;
-      consider an `EnvironmentVariables`/PATH key if the daemon can't find
-      `claude` in launchd's minimal env.*
+      Windows `Run` key). The plist it writes passes `plutil -lint` on the Mac mini, and launchd loads it at login on the MacBook Air (see "macOS verification"). A launchd-started daemon takes the login shell's PATH itself (RT-1022), so the plist needs no `EnvironmentVariables` key.
 
 ## 4. Build, bundle, packaging
 
@@ -209,7 +207,10 @@ Checks:
 - [x] M2, session tree kill: in a new `/bin/zsh` session `send` of `sleep 600 & sh -c 'sleep 601 &' ; echo started` left `sleep 600` in a process group of its own and `sleep 601` reparented to pid 1 in the exited `sh`'s group. `kill <id>` returned 0 and `wait <id> --status stopped` printed `stopped`; the tracer log shows `stop request received, killing child`, `tree kill: 1 processes, 1 groups` and `exiting`, and `pgrep -f '^sleep 60[01]$'` then printed nothing.
 - An earlier run, with only the shell's process group killed, failed. In a new shell session `send` of `sleep 600 & sh -c 'sleep 601 &' ; echo started` printed `[1] <pid>` and `started`. `ps` showed the shell `/bin/zsh` as its own group leader (its pgid equals its pid), `sleep 600` in a process group of its own (zsh's job control gives each job one), and `sleep 601` reparented to pid 1 in the exited `sh`'s job group. `kill <id>` returned 0, `wait <id> --status stopped` printed `stopped`, the tracer log shows `stop request received, killing child` and `exiting`, and the tracer was gone. `sleep 600` was gone too, but `sleep 601` was still running 28 seconds later, with parent 1. So `killpg` on the shell's group does not reach a job's own group; a job the shell still knows died (the run does not show how, though zsh hangs up its own jobs when it gets SIGHUP), but a process that left the shell's job table (a grandchild of a backgrounded subshell) survives. The run killed that `sleep 601` by its pid.
 - [x] M3, the LaunchAgent file: `.\rt.ps1 mac test --package daemon-client` passed 132 of 132 on the Mac mini, among them `autostart::tests::the_launch_agent_detaches_and_abandons_its_process_group`, which writes the plist through the macOS `set_at` to a temp path, reads it back and removes it. That test leaves no file, so the plist text it builds (the template in `autostart.rs` with the test's program path) was copied into a file in the scratch folder: `plutil -lint` printed `OK`, and `plutil -p` showed `Label`, `ProgramArguments` (the daemon path, then `--detach`), `AbandonProcessGroup` true and `RunAtLoad` true. The builder account's own `~/Library/LaunchAgents` was not touched.
-- [ ] M3, launchd starts the daemon at login (log out, log in, a daemon is running): needs the owner at the MacBook Air.
+- [x] M3, launchd starts the daemon at login, on the owner's MacBook Air with the signed, notarized 0.9.0-alpha dmg installed in /Applications (it opened without a Gatekeeper prompt).
+  - The Settings toggle wrote `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist`; the owner logged out and in without opening the app.
+  - `launchctl print gui/<uid>/dev.leftos.rustling-tulip.daemon` shows `runs = 1`, `last exit code = 0`. `autostart.log` shows the `--detach` hand-over to the cached copy, and `daemon.log` shows the daemon starting.
+  - With no client, no session and remote access off, idle exit stopped the daemon 30 s later, as designed: the login launch exists so remote access works before the app is opened, and idle exit is held while remote access is on.
 - [x] Clean stop: `kill` of the remaining session and `rustling-tulipd shutdown` left no `rt-tracer` or `rustling-tulipd` process and no tracer socket in the temp folder.
 
 ## 5. Minor cleanups (work as-is, optionally tidy)
@@ -264,9 +265,9 @@ Confirmed dual-arm or platform-neutral during the sweep:
       daemon shutdown and the next daemon reattaches to it (see "macOS
       verification"). The Windows runtime reattach smoke is not part of that run.
 - [x] **Phase M2 — process-tree cleanup.** `#[cfg(unix)]` on tracer shutdown, mirroring the Windows job object: `killpg` (SIGTERM → SIGKILL) on the shell's group, then a kill of every process in the shell's session, background jobs and reparented grandchildren included, read before the shell dies. Relies on `portable-pty` making the child a session leader. Verified on macOS (see "macOS verification").
-- [ ] **Phase M3 — autostart (LaunchAgent).** On `main` (`crates/daemon-client/src/autostart.rs`, RT-246). Writes/removes
+- [x] **Phase M3 — autostart (LaunchAgent).** On `main` (`crates/daemon-client/src/autostart.rs`, RT-246). Writes/removes
       `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist` with `--detach`, `RunAtLoad`, `AbandonProcessGroup` and no `KeepAlive` (file-only;
-      no `launchctl load` on toggle, to avoid a double daemon). The plist passes `plutil -lint` on macOS (see "macOS verification"). Left unticked: *verify on a real Mac that launchd loads it at login*, which needs the owner at the MacBook Air.
+      no `launchctl load` on toggle, to avoid a double daemon). The plist passes `plutil -lint` on macOS, and launchd starts the daemon from it at login on the MacBook Air (see "macOS verification").
 - [ ] **Phase M4 — packaging + signing/notarization** for distribution.
       Deferred (local dev only this round).
 
