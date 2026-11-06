@@ -150,8 +150,6 @@
 ## Wave 12 — Claude accounts and artifacts by account
 
 - [ ] RT-39 Built-in Claude account switching: several logins, usage polling and switching · release vNext
-  - [ ] RT-915 Accounts: daemon-driven login and the docs (CA.11, CA.12) · release vNext
-    - [ ] RT-988 Login: document the daemon-driven login and promote the accounts plan (RT-915 part F) · release vNext
   - [ ] RT-924 Merge feat/claude-accounts to main (#205) · release vNext
   - [ ] RT-958 Accounts: answer Draining at once for switch and capture, Unsupported for an unsupported lock, and fix the remove-timeout text
 - [ ] RT-112 PW.13: Accounts screen on the phone
@@ -275,7 +273,7 @@
 
 ## macOS
 
-- [ ] RT-1031 macOS: run an update end to end on the Mac mini from a local feed · release vNext
+- [/] RT-1031 macOS: run an update end to end on the Mac mini from a local feed · release vNext
 - [!] RT-1030 macOS: check a real in-app toast on the Mac mini · release vNext
 - [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option
 - [ ] RT-665 Ship rustling-tulip on macOS: verified build, signed .app and .dmg, auto-update · release vNext
@@ -494,7 +492,7 @@
 
 ## Design files
 
-- [accounts.md](accounts.md) — RT-39, RT-277, RT-915, RT-988
+- [accounts.md](accounts.md) — RT-39, RT-277
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
