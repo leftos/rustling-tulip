@@ -4,7 +4,9 @@
 //! [`spawn`] starts one task that owns all reading, a `notify` watcher on the
 //! file's parent folder (the file itself may not exist yet) and a [`POLL`]
 //! interval for the file systems where a watcher misses an append. Both only
-//! wake the task, so two wakeups never read at once.
+//! wake the task, so two wakeups never read at once. A folder that does not
+//! exist yet when the tail starts is watched on the first poll tick after it
+//! appears.
 //!
 //! The task parks while no client is connected (`client_count` 0, the pattern
 //! `git_watch` uses for its refreshers) and reads once as soon as one arrives,
@@ -53,6 +55,8 @@ struct Shared {
     missing: AtomicU64,
     #[cfg(test)]
     parked: AtomicBool,
+    #[cfg(test)]
+    watching: AtomicBool,
 }
 
 impl Shared {
@@ -98,6 +102,13 @@ impl TailHandle {
         self.shared.parked.load(Ordering::SeqCst)
     }
 
+    /// Whether a folder watch is active, which a spec waits on to know the
+    /// watch was made after its folder appeared.
+    #[cfg(test)]
+    fn watching(&self) -> bool {
+        self.shared.watching.load(Ordering::SeqCst)
+    }
+
     /// Stop the tail, ending its task and dropping its watcher.
     pub fn stop(mut self) {
         self.stop = None;
@@ -124,7 +135,7 @@ pub fn spawn(
     let shared = Arc::new(Shared::new(start_offset));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (wake_tx, wake_rx) = mpsc::unbounded_channel();
-    let watcher = start_watcher(&path, wake_tx);
+    let watcher = FolderWatch::start(&path, wake_tx);
     debug!(path = %path.display(), start_offset, "transcript_tail: started");
     let task = tokio::spawn(tail_task(
         path,
@@ -176,59 +187,157 @@ impl Cursor {
     }
 }
 
-/// Watch the file's folder (non-recursively, since the file may not exist yet)
-/// and wake the tailing task for any event naming the file. A watcher that
-/// cannot start leaves the tail running on the poll alone.
-fn start_watcher(path: &Path, wake: mpsc::UnboundedSender<()>) -> Option<RecommendedWatcher> {
-    let Some(folder) = path.parent() else {
-        warn!(
-            path = %path.display(),
-            "transcript_tail: the transcript has no folder to watch; polling only"
-        );
-        return None;
-    };
-    let watched = path.to_path_buf();
-    let handler_path = watched.clone();
-    let mut watcher =
-        match notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result
-        {
-            Ok(event) => {
-                if event
-                    .paths
-                    .iter()
-                    .any(|event_path| event_path == &handler_path)
-                {
-                    let _ = wake.send(());
-                }
-            }
-            Err(err) => {
-                debug!(
-                    path = %handler_path.display(),
-                    error = %err,
-                    "transcript_tail: watcher error"
-                );
-            }
-        }) {
+/// The words notify's Windows backend uses for a path that is neither a file
+/// nor a directory, which is what a folder that does not exist yet looks like.
+const NEITHER_FILE_NOR_DIRECTORY: &str = "Input watch path is neither a file nor a directory";
+
+/// Whether `err` says the watched path does not exist yet: a platform's
+/// not-found error, or Windows' refusal of a path that is neither a file nor a
+/// directory.
+fn is_missing_path(err: &notify::Error) -> bool {
+    match &err.kind {
+        notify::ErrorKind::PathNotFound => true,
+        notify::ErrorKind::Io(io) => io.kind() == std::io::ErrorKind::NotFound,
+        notify::ErrorKind::Generic(message) => message.starts_with(NEITHER_FILE_NOR_DIRECTORY),
+        _ => false,
+    }
+}
+
+/// The watcher on the transcript's folder (non-recursively, since the file may
+/// not exist yet): made as soon as the folder exists, and made again on a poll
+/// tick when the folder was missing at the start.
+struct FolderWatch {
+    /// The file whose events wake the tail.
+    path: PathBuf,
+    /// The folder to watch.
+    folder: PathBuf,
+    /// A wake sender held while a retry is still owed, so the channel stays
+    /// open: `wake.recv()` returning `None` means no watch can ever wake the
+    /// task again. `None` once the watcher holds the sender itself, or once
+    /// nothing more is retried.
+    wake: Option<mpsc::UnboundedSender<()>>,
+    /// The active watch, once one is made.
+    watcher: Option<RecommendedWatcher>,
+}
+
+impl FolderWatch {
+    /// The watch on `path`'s folder: made now when the folder exists, else owed
+    /// to a poll tick.
+    fn start(path: &Path, wake: mpsc::UnboundedSender<()>) -> Self {
+        let Some(folder) = path.parent() else {
+            warn!(
+                path = %path.display(),
+                "transcript_tail: the transcript has no folder to watch; polling only"
+            );
+            return Self {
+                path: path.to_path_buf(),
+                folder: PathBuf::new(),
+                wake: None,
+                watcher: None,
+            };
+        };
+        let mut watch = Self {
+            path: path.to_path_buf(),
+            folder: folder.to_path_buf(),
+            wake: Some(wake),
+            watcher: None,
+        };
+        watch.make();
+        watch
+    }
+
+    /// Makes the watch now. The error itself says whether the folder does not
+    /// exist yet, which is tried again on the next poll tick; a watcher that
+    /// cannot start, or a folder that cannot be watched for another reason, is
+    /// reported once and given up on.
+    fn make(&mut self) {
+        let Some(wake) = self.wake.clone() else {
+            return;
+        };
+        let mut watcher = match watcher_for(&self.path, wake) {
             Ok(watcher) => watcher,
             Err(err) => {
                 warn!(
-                    path = %watched.display(),
+                    path = %self.path.display(),
                     error = %err,
                     "transcript_tail: failed to start the transcript's watcher; polling only"
                 );
-                return None;
+                self.wake = None;
+                return;
             }
         };
-    if let Err(err) = watcher.watch(folder, RecursiveMode::NonRecursive) {
-        warn!(
-            path = %watched.display(),
-            error = %err,
-            "transcript_tail: failed to watch the transcript's folder; polling only"
-        );
-        return None;
+        if let Err(err) = watcher.watch(&self.folder, RecursiveMode::NonRecursive) {
+            if is_missing_path(&err) {
+                debug!(
+                    path = %self.path.display(),
+                    error = %err,
+                    "transcript_tail: the transcript's folder does not exist yet; watching for it on the poll"
+                );
+            } else {
+                warn!(
+                    path = %self.path.display(),
+                    error = %err,
+                    "transcript_tail: failed to watch the transcript's folder; polling only"
+                );
+                self.wake = None;
+            }
+            return;
+        }
+        self.watcher = Some(watcher);
+        // The watcher's handler holds a sender now, so the channel closes when
+        // the watch does.
+        self.wake = None;
+        debug!(path = %self.path.display(), "transcript_tail: watching the transcript's folder");
     }
-    Some(watcher)
+
+    /// Whether a watch is active.
+    #[cfg(test)]
+    fn is_watching(&self) -> bool {
+        self.watcher.is_some()
+    }
+
+    /// Makes the owed watch once the folder appears, and nothing else: a watch
+    /// that failed for another reason was already given up on.
+    fn retry(&mut self) {
+        if self.watcher.is_some() || self.wake.is_none() || !self.folder.exists() {
+            return;
+        }
+        self.make();
+    }
 }
+
+/// A watcher that wakes `wake` for any event naming `path`.
+fn watcher_for(path: &Path, wake: mpsc::UnboundedSender<()>) -> notify::Result<RecommendedWatcher> {
+    let handler_path = path.to_path_buf();
+    notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result {
+        Ok(event) => {
+            if event
+                .paths
+                .iter()
+                .any(|event_path| event_path == &handler_path)
+            {
+                let _ = wake.send(());
+            }
+        }
+        Err(err) => {
+            debug!(
+                path = %handler_path.display(),
+                error = %err,
+                "transcript_tail: watcher error"
+            );
+        }
+    })
+}
+
+/// Records whether a watch is active, for the specs that wait on one.
+#[cfg(test)]
+fn note_watch(shared: &Shared, watch: &FolderWatch) {
+    shared.watching.store(watch.is_watching(), Ordering::SeqCst);
+}
+
+/// Nothing to record in a build without the specs' observation.
+#[cfg(not(test))]
+fn note_watch(_shared: &Shared, _watch: &FolderWatch) {}
 
 /// Drop every wakeup already queued, so one burst of events costs one read.
 fn drain(wake: &mut mpsc::UnboundedReceiver<()>) {
@@ -244,9 +353,10 @@ async fn tail_task(
     mut on_event: impl FnMut(TailEvent) + Send + 'static,
     mut wake: mpsc::UnboundedReceiver<()>,
     mut stop: oneshot::Receiver<()>,
-    _watcher: Option<RecommendedWatcher>,
+    mut folder_watch: FolderWatch,
 ) {
     let start_offset = shared.offset.load(Ordering::SeqCst);
+    note_watch(&shared, &folder_watch);
     let mut cursor = Cursor {
         offset: start_offset,
         partial: Vec::new(),
@@ -280,6 +390,8 @@ async fn tail_task(
                     read_wake(&path, &mut cursor, &shared, &mut on_event);
                 }
                 _ = poll.tick() => {
+                    folder_watch.retry();
+                    note_watch(&shared, &folder_watch);
                     drain(&mut wake);
                     read_wake(&path, &mut cursor, &shared, &mut on_event);
                 }
@@ -303,6 +415,8 @@ async fn tail_task(
                     drain(&mut wake);
                 }
                 _ = poll.tick() => {
+                    folder_watch.retry();
+                    note_watch(&shared, &folder_watch);
                     drain(&mut wake);
                 }
             }
@@ -432,7 +546,7 @@ mod tests {
         reason = "tests assert their fixture preconditions; the messages name the step that failed"
     )]
 
-    use super::{TailEvent, TailHandle, spawn};
+    use super::{TailEvent, TailHandle, is_missing_path, spawn};
     use crate::server::test_support::ScratchDir;
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
@@ -505,6 +619,17 @@ mod tests {
         })
         .await
         .expect("hung: the tailer never saw the transcript missing");
+    }
+
+    /// Wait until the tail's folder watch is active.
+    async fn wait_until_watching(tail: &TailHandle) {
+        tokio::time::timeout(HANG, async {
+            while !tail.watching() {
+                tokio::time::sleep(CHECK).await;
+            }
+        })
+        .await
+        .expect("hung waiting for the folder watch");
     }
 
     /// Wait until the task has parked with no client connected.
@@ -596,6 +721,40 @@ mod tests {
 
         std::fs::create_dir_all(&folder).expect("create the transcript's folder");
         write_file(&path, "first\n");
+        assert_eq!(next_event(&mut events).await, line("first"));
+    }
+
+    #[test]
+    fn a_missing_path_error_is_retried_and_others_are_not() {
+        assert!(is_missing_path(&notify::Error::new(
+            notify::ErrorKind::PathNotFound
+        )));
+        let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(is_missing_path(&notify::Error::io(not_found)));
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!is_missing_path(&notify::Error::io(denied)));
+        assert!(!is_missing_path(&notify::Error::generic("other")));
+        // notify's Windows backend refuses a path that is neither a file nor a
+        // directory, which is what a folder that does not exist yet looks like.
+        assert!(is_missing_path(&notify::Error::generic(
+            "Input watch path is neither a file nor a directory."
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_missing_folder_is_watched_once_it_appears() {
+        let scratch = ScratchDir::new("tail-late-watch");
+        let folder = scratch.path().join("projects").join("not-yet");
+        let path = folder.join("session.jsonl");
+        let (_clients, clients_rx) = watch::channel(1usize);
+        let (tail, mut events) = tail(path.clone(), 0, clients_rx);
+
+        assert!(!tail.watching(), "no folder exists to watch yet");
+        std::fs::create_dir_all(&folder).expect("create the transcript's folder");
+        write_file(&path, "");
+        wait_until_watching(&tail).await;
+
+        append_file(&path, "first\n");
         assert_eq!(next_event(&mut events).await, line("first"));
     }
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use dev_daemon::{DaemonSpec, IsolatedDaemon};
+use dev_daemon::{DaemonSpec, IsolatedDaemon, TestShell};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -41,6 +41,7 @@ pub struct LaunchSpec {
     pub repo_root: PathBuf,
     pub build_dir: PathBuf,
     pub scratch: PathBuf,
+    pub shell: TestShell,
 }
 
 /// A driven client's discovery file, as the endpoint writes it.
@@ -58,14 +59,17 @@ pub fn launch(spec: &LaunchSpec) -> Result<Session, String> {
     check_build(&spec.build_dir)?;
     let bin = spec.scratch.join("bin");
     shadow_copy(&spec.build_dir, &bin).map_err(|err| format!("shadow-copying the build: {err}"))?;
-    let daemon = IsolatedDaemon::start(DaemonSpec {
+    let daemon_spec = DaemonSpec {
         name: spec.session.clone(),
         scratch_root: spec.scratch.clone(),
         repo_root: spec.repo_root.clone(),
         bin_dir: bin.clone(),
         extra_env: Vec::new(),
-    })
-    .map_err(|err| format!("starting the isolated daemon: {err}"))?;
+        shell: spec.shell,
+    };
+    let removed = dev_daemon::removed_envs(&daemon_spec);
+    let daemon = IsolatedDaemon::start(daemon_spec)
+        .map_err(|err| format!("starting the isolated daemon: {err}"))?;
     let log = native_log(&daemon.config_dir());
     let fail = |step: &str, err: &str| {
         format!(
@@ -74,7 +78,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<Session, String> {
             log_tail(&log)
         )
     };
-    let mut client = spawn_client(&daemon, &bin, &spec.scratch)
+    let mut client = spawn_client(&daemon, &bin, &spec.scratch, removed)
         .map_err(|err| fail("starting the client", &err))?;
     let pipe = match wait_discovery(&mut client, &spec.scratch) {
         Ok(discovery) => format!(r"\\.\pipe\{}", discovery.pipe),
@@ -132,11 +136,20 @@ fn shadow_copy(build_dir: &Path, bin: &Path) -> std::io::Result<()> {
 
 /// Starts the copied client with the daemon's isolation and the driver
 /// switched on, its stderr in `<scratch>/client-stderr.log`.
-fn spawn_client(daemon: &IsolatedDaemon, bin: &Path, scratch: &Path) -> Result<Child, String> {
+fn spawn_client(
+    daemon: &IsolatedDaemon,
+    bin: &Path,
+    scratch: &Path,
+    removed: &[&'static str],
+) -> Result<Child, String> {
     let stderr_path = scratch.join("client-stderr.log");
     let stderr = File::create(&stderr_path)
         .map_err(|err| format!("creating {}: {err}", stderr_path.display()))?;
     let mut command = Command::new(bin.join(exe("rustling-tulip-native")));
+    // The client hands its environment on to any daemon it starts itself.
+    for name in removed {
+        command.env_remove(*name);
+    }
     command
         .envs(daemon.envs().iter().map(|(key, value)| (*key, value)))
         .env(DRIVER_ENV, "1")
@@ -230,7 +243,7 @@ fn creation_time(_child: &Child) -> Result<u64, String> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{BUILD_HINT, Discovery, LaunchSpec, find_discovery, launch};
+    use super::{BUILD_HINT, Discovery, LaunchSpec, TestShell, find_discovery, launch};
 
     /// A folder of the test's own under the temp dir, made empty.
     fn fixture(name: &str) -> PathBuf {
@@ -275,6 +288,7 @@ mod tests {
             repo_root: root.clone(),
             build_dir: root.join("empty-build"),
             scratch: scratch.clone(),
+            shell: TestShell::Cmd,
         };
         std::fs::create_dir_all(&spec.build_dir).expect("makes the empty build folder");
 

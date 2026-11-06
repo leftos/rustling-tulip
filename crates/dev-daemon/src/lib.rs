@@ -26,18 +26,42 @@ pub const HANG_GUARD: Duration = Duration::from_secs(300);
 /// How many of `daemon.log`'s last lines a hung start reports.
 const LOG_TAIL_LINES: usize = 20;
 
+/// The shell an isolated daemon gives its shell sessions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TestShell {
+    /// A shell whose prompt and echo are the same on every run:
+    /// `RUSTLING_TULIP_SHELL` names `ComSpec`, and shell integration is off.
+    #[default]
+    Cmd,
+    /// The daemon's Default shell setting, which a fresh config dir
+    /// auto-detects, with shell integration on: neither `RUSTLING_TULIP_SHELL`
+    /// nor `RUSTLING_TULIP_SHELL_INTEGRATION` is set.
+    Default,
+}
+
 /// What to start: `name` goes into the tracer pipe prefix; `scratch_root`
 /// is the folder every directory goes under, which must sit under a `.tmp`
 /// folder; `repo_root` holds the `tools/e2e` fakes the daemon runs;
 /// `bin_dir` holds `rustling-tulipd` and the tracer it copies; `extra_env`
 /// is set on the daemon after the isolation variables, so a row can
-/// override one.
+/// override one; `shell` is the shell its sessions get, as [`TestShell`] says.
 pub struct DaemonSpec {
     pub name: String,
     pub scratch_root: PathBuf,
     pub repo_root: PathBuf,
     pub bin_dir: PathBuf,
     pub extra_env: Vec<(&'static str, OsString)>,
+    pub shell: TestShell,
+}
+
+/// The variables an isolated daemon must not inherit from its parent, so a
+/// `Default` spec's shell really comes from the daemon's own setting.
+#[must_use]
+pub fn removed_envs(spec: &DaemonSpec) -> &'static [&'static str] {
+    match spec.shell {
+        TestShell::Cmd => &[],
+        TestShell::Default => &["RUSTLING_TULIP_SHELL", "RUSTLING_TULIP_SHELL_INTEGRATION"],
+    }
 }
 
 /// Why an isolated daemon did not start.
@@ -106,6 +130,7 @@ pub struct IsolatedDaemon {
     daemon: PathBuf,
     child: Child,
     envs: Vec<(&'static str, OsString)>,
+    removed_envs: &'static [&'static str],
     handshake: DaemonHandshake,
     keep_root: bool,
 }
@@ -126,12 +151,14 @@ impl IsolatedDaemon {
             return Err(LaunchError::MissingDaemon { looked_for: daemon });
         }
         env::make_scratch_dirs(&spec.scratch_root)?;
-        let child = process::spawn_daemon(&daemon, &envs).map_err(LaunchError::Spawn)?;
+        let removed = removed_envs(&spec);
+        let child = process::spawn_daemon(&daemon, &envs, removed).map_err(LaunchError::Spawn)?;
         let mut isolated = Self {
             root: spec.scratch_root,
             daemon,
             child,
             envs,
+            removed_envs: removed,
             handshake: DaemonHandshake {
                 protocol_version: 0,
                 port: 0,
@@ -149,10 +176,11 @@ impl IsolatedDaemon {
     /// Starts a new daemon on the same directories and environment, after
     /// [`Self::kill`], and waits for its handshake and `/health`.
     pub fn respawn(&mut self) -> Result<(), LaunchError> {
-        self.child = process::spawn_daemon(&self.daemon, &self.envs).map_err(|err| {
-            self.keep_root = true;
-            LaunchError::Spawn(err)
-        })?;
+        self.child =
+            process::spawn_daemon(&self.daemon, &self.envs, self.removed_envs).map_err(|err| {
+                self.keep_root = true;
+                LaunchError::Spawn(err)
+            })?;
         self.wait_healthy()
     }
 
@@ -347,6 +375,7 @@ mod tests {
             repo_root: repo_root(),
             bin_dir: repo_root().join("target").join("no-such-profile"),
             extra_env: Vec::new(),
+            shell: TestShell::Cmd,
         }
     }
 
@@ -421,5 +450,68 @@ mod tests {
                 "agent {id:?}: fake CLI is not the launch checkout's"
             );
         }
+    }
+
+    /// A spec that leaves the shell to the daemon's Default shell setting sets
+    /// neither override, so a fresh config dir auto-detects with integration on.
+    #[test]
+    fn a_default_shell_spec_sets_no_shell_variables() {
+        let scratch = repo_root()
+            .join(".tmp")
+            .join("dev-daemon-unit")
+            .join(format!("shell-default-{}", std::process::id()));
+        let mut spec = spec(scratch);
+        spec.shell = TestShell::Default;
+        let envs = env::isolated_envs(&spec).expect("every registered agent has a fake CLI");
+        assert_eq!(env::env_value(&envs, "RUSTLING_TULIP_SHELL"), None);
+        assert_eq!(
+            env::env_value(&envs, "RUSTLING_TULIP_SHELL_INTEGRATION"),
+            None
+        );
+    }
+
+    /// Both names leave a `Default` spec's daemon, so an inherited
+    /// `RUSTLING_TULIP_SHELL=cmd.exe` cannot decide its shell.
+    #[test]
+    fn a_default_shell_spec_removes_inherited_shell_variables() {
+        let scratch = |name: &str| {
+            repo_root()
+                .join(".tmp")
+                .join("dev-daemon-unit")
+                .join(format!("{name}-{}", std::process::id()))
+        };
+        let mut default = spec(scratch("removed-default"));
+        default.shell = TestShell::Default;
+        assert_eq!(
+            removed_envs(&default).to_vec(),
+            vec!["RUSTLING_TULIP_SHELL", "RUSTLING_TULIP_SHELL_INTEGRATION"]
+        );
+        let cmd = spec(scratch("removed-cmd"));
+        assert!(
+            removed_envs(&cmd).is_empty(),
+            "a Cmd spec keeps the inherited variables"
+        );
+    }
+
+    /// A `Cmd` spec keeps the fixed prompt and echo the live specs match.
+    #[test]
+    fn a_cmd_shell_spec_keeps_cmd_and_no_integration() {
+        let scratch = repo_root()
+            .join(".tmp")
+            .join("dev-daemon-unit")
+            .join(format!("shell-cmd-{}", std::process::id()));
+        let mut spec = spec(scratch);
+        spec.shell = TestShell::Cmd;
+        let envs = env::isolated_envs(&spec).expect("every registered agent has a fake CLI");
+        let shell =
+            env::env_value(&envs, "RUSTLING_TULIP_SHELL").expect("a cmd spec sets the shell");
+        assert_eq!(
+            shell,
+            std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe"))
+        );
+        assert_eq!(
+            env::env_value(&envs, "RUSTLING_TULIP_SHELL_INTEGRATION"),
+            Some(OsString::from("0"))
+        );
     }
 }

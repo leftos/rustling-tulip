@@ -63,7 +63,10 @@ const SHELL_EXPANDED: &[char] = &[
 ];
 
 /// The options a Claude spawn takes, one per field of Claude's descriptor.
+/// Every field has a default, so an empty object (a hand-started agent's shell
+/// has no spawn options) decodes as the defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ClaudeOptions {
     /// Claude's `--permission-mode <value>`; `None` passes none, leaving the
     /// CLI's default. Ignored (and the flag omitted) on a trusted spawn.
@@ -1030,6 +1033,15 @@ mod tests {
     fn recovery_without_a_record_is_the_default_options() {
         assert_eq!(recovered(None, false), ClaudeOptions::default());
         assert_eq!(recovered(None, true), ClaudeOptions::default());
+    }
+
+    /// A hand-started agent's shell has no spawn options, so the daemon maps
+    /// its hook events with an empty object.
+    #[test]
+    fn options_from_an_empty_object_are_the_defaults() {
+        let decoded: ClaudeOptions =
+            serde_json::from_value(serde_json::json!({})).expect("an empty object is the defaults");
+        assert_eq!(decoded, ClaudeOptions::default());
     }
 
     #[test]

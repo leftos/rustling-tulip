@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
+use dev_daemon::TestShell;
 use serde_json::{Map, Value, json};
 
 use crate::launch::{LaunchSpec, launch};
@@ -57,6 +58,7 @@ pub fn list() -> Value {
                 "session": {"type": "string", "description": "A new session name: letters, digits, '-' and '_'."},
                 "build_dir": {"type": "string", "description": "The folder holding the driver build; default <repo_root>/target/test-release."},
                 "repo_root": {"type": "string", "description": "The checkout to run from; default the server's --repo-root."},
+                "shell": {"type": "string", "enum": ["cmd", "default"], "description": "The isolated daemon's shell: cmd (default) for a fixed prompt and echo, or default to leave it to the Default shell setting with shell integration on."},
             }),
             &["session"],
             [false, false, false],
@@ -164,7 +166,20 @@ impl Tools {
     }
 
     fn launch(&mut self, args: &Map<String, Value>) -> Result<ToolResult, String> {
-        check_args(args, &["session", "build_dir", "repo_root"], &["session"])?;
+        check_args(
+            args,
+            &["session", "build_dir", "repo_root", "shell"],
+            &["session"],
+        )?;
+        let shell = match optional_string(args, "shell")? {
+            None | Some("cmd") => TestShell::Cmd,
+            Some("default") => TestShell::Default,
+            Some(other) => {
+                return Err(format!(
+                    "shell must be \"cmd\" or \"default\", not \"{other}\""
+                ));
+            }
+        };
         let session = string_arg(args, "session")?.to_owned();
         check_session_name(&session)?;
         if self.sessions.contains(&session) {
@@ -190,6 +205,7 @@ impl Tools {
             repo_root,
             build_dir,
             scratch,
+            shell,
         })?;
         let summary = launched.summary();
         tracing::info!(%summary, "launched");
@@ -385,9 +401,16 @@ fn image_content(shot: &Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "a spec fails with the message of the step it lost"
+    )]
+
+    use std::path::PathBuf;
+
     use serde_json::{Value, json};
 
-    use super::{Step, run_batch};
+    use super::{Step, Tools, list, run_batch};
     use crate::pipe::{CallError, Transport};
 
     /// Answers each method from a script and records the calls.
@@ -442,6 +465,40 @@ mod tests {
             outcome["steps"].as_array().map(Vec::len),
             Some(2),
             "{outcome}"
+        );
+    }
+
+    /// The `launch` tool's entry in `tools/list`.
+    fn launch_tool() -> Value {
+        list()
+            .as_array()
+            .expect("the listing is an array")
+            .iter()
+            .find(|tool| tool["name"] == json!("launch"))
+            .cloned()
+            .expect("the launch tool is listed")
+    }
+
+    #[test]
+    fn launch_lists_the_shell_property() {
+        let launch = launch_tool();
+        let shell = &launch["inputSchema"]["properties"]["shell"];
+        assert_eq!(shell["enum"], json!(["cmd", "default"]), "{launch}");
+    }
+
+    #[test]
+    fn launch_refuses_an_unknown_shell() {
+        let mut tools = Tools::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let args = json!({"session": "a", "shell": "bash"});
+        let refused = tools
+            .call("launch", args.as_object().expect("an object of arguments"))
+            .expect("the launch tool exists")
+            .into_value();
+        assert_eq!(refused["isError"], json!(true), "{refused}");
+        let text = refused["content"][0]["text"].as_str().expect("a text item");
+        assert!(
+            text.contains("shell must be \"cmd\" or \"default\", not \"bash\""),
+            "{text}"
         );
     }
 }

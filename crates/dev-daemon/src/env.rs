@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use agent_api::{AgentPlugin, FakeCli};
 use protocol::AgentId;
 
-use crate::{DaemonSpec, LaunchError};
+use crate::{DaemonSpec, LaunchError, TestShell};
 
 /// What a `PATH` stub prints before its arguments.
 pub const STUB_MARKER: &str = "[rt-e2e agent stub]";
@@ -61,8 +61,6 @@ pub(crate) fn isolated_envs(
                 spec.name
             )),
         ),
-        ("RUSTLING_TULIP_SHELL", test_shell()),
-        ("RUSTLING_TULIP_SHELL_INTEGRATION", OsString::from("0")),
         // The tailnet listener's CLI and certificate dir: never the user's
         // Tailscale or their real certificate, even with remote access off.
         ("RUSTLING_TULIP_TAILSCALE", fake_tailscale.into_os_string()),
@@ -86,6 +84,13 @@ pub(crate) fn isolated_envs(
             spec.bin_dir.clone().into_os_string(),
         ),
     ];
+    // A `Cmd` spec's prompt and echo are the same on every run. A `Default`
+    // spec names neither, so the daemon uses its Default shell setting, which
+    // a fresh config dir auto-detects, and keeps shell integration on.
+    if spec.shell == TestShell::Cmd {
+        envs.push(("RUSTLING_TULIP_SHELL", test_shell()));
+        envs.push(("RUSTLING_TULIP_SHELL_INTEGRATION", OsString::from("0")));
+    }
     // Every registered agent runs its fake, with its home under the scratch
     // root: never the user's real CLI or its files. The fake is the one in
     // the checkout the launch names, not the one the harness was built in.

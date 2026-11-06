@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use daemon_client::device_tokens::MemoryTokens;
-use dev_daemon::{DaemonSpec, IsolatedDaemon, no_console};
+use dev_daemon::{DaemonSpec, IsolatedDaemon, TestShell, no_console};
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{Modifiers, TestAppContext, px};
@@ -141,6 +141,7 @@ impl LiveDaemon {
             repo_root: repo_root(),
             bin_dir: target_bin_dir(),
             extra_env: extra.to_vec(),
+            shell: TestShell::Cmd,
         };
         let inner = IsolatedDaemon::start(spec).unwrap_or_else(|err| panic!("{err}"));
         Self { inner, tailnet_ca }

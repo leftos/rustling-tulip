@@ -11,12 +11,19 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-/// Starts `daemon` with `envs` set and no console or standard streams.
+/// Starts `daemon` with `envs` set, `removed` taken out of the environment it
+/// would inherit, and no console or standard streams.
 pub(crate) fn spawn_daemon(
     daemon: &Path,
     envs: &[(&'static str, OsString)],
+    removed: &[&'static str],
 ) -> std::io::Result<Child> {
     let mut command = Command::new(daemon);
+    // A variable the spec leaves out of `envs` would otherwise arrive from
+    // the parent shell and decide the daemon's shell.
+    for name in removed {
+        command.env_remove(*name);
+    }
     command
         .envs(envs.iter().map(|(key, value)| (*key, value)))
         .stdin(Stdio::null())

@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- A Claude started by hand in a shell, or a session whose transcript folder is still new, no longer fills the daemon log with errors and warnings.
+
 ## v0.10.2-alpha
 
 ### Fixed
