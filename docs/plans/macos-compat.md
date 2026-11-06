@@ -167,7 +167,8 @@ Checks:
 - [x] The same Claude check with a second daemon whose `RUSTLING_TULIP_BINARIES_DIR` has a space (`.tmp/bin dir`): `hook-settings.json` names the hook program as `.../bin dir/rt-tracer-<hash>` with its arguments in a separate list, and the status goes `idle`, `working`, `idle` with the same hook log lines. fake-claude runs the hook as a program with an argument list.
 - [x] The real Claude CLI (Claude Code 2.1.318, darwin-arm64) runs a hook's `command` as a program with `args` as its argument list, with no shell between: a probe at `~/rt-1018 scratch/bin dir/hook probe` in the daemon's exact entry shape fired for `SessionStart` and `UserPromptSubmit`, with and without `async`, and received `$0` and every argument whole (`/tmp/x y` as one argument; `$HOME`, `a;b`, `*` and `it's` literal). The CLI's `--debug hooks` log prints the command flattened into one line, which does not show how it was split. Hooks can be checked on a machine with no Claude login: `SessionStart` and `UserPromptSubmit` fire before the "Not logged in" exit of `claude -p … --settings <file>` run with a scratch `CLAUDE_CONFIG_DIR`.
 - [x] Clean stop: `kill` of each session, `rustling-tulipd shutdown` of each daemon and a TERM to the client leave no `rt-tracer`, `rustling-tulipd` or fake-claude process, and the tracer sockets are gone from the temp folder.
-- [ ] A shell tab takes keys in the window, Cmd+C and Cmd+V copy and paste (or only Ctrl does), and a Claude session's status shows in the sidebar and pane: not run. Driving the window needs `osascript` and System Events, which hung without an Automation or Accessibility grant, so these need a person at the console or over RustDesk.
+- [x] A shell tab takes keys in the window: the owner typed `echo hi` at the console, and the daemon's `read` showed `echo hi` then `hi`. Driving the window from SSH needs `osascript` and System Events, which hung without an Automation or Accessibility grant, so key checks need a person at the console.
+- [ ] Cmd+C and Cmd+V copy and paste: they do nothing; only Ctrl+C and Ctrl+V work, in the terminal and in text fields (RT-1050).
 
 The app's own toasts on the Mac mini (macOS 27.0, one 1920×1080 display at scale 1, a debug build, the client isolated under a scratch folder and launched through a `.command` file, toasts raised by the fake CLI's `rt-perm` prompt and closed with `send <id> --keys 1`, windows read with a Swift probe over `CGWindowListCopyWindowInfo`, `NSScreen` and `NSWorkspace`):
 
@@ -175,8 +176,19 @@ The app's own toasts on the Mac mini (macOS 27.0, one 1920×1080 display at scal
 - [x] Toasts stack and close: a new toast takes the corner and pushes the older ones up by its height plus 8 points; closing one moves the rest back; a Finished toast expires after 6 s and the stack settles.
 - [x] With another app's window opened, a toast stays on screen at layer 101 and the client stays inactive.
 - [x] The logs hold no `already borrowed`, panic or toast-placer warning.
-- [ ] A toast raised while the client is hidden showed but unhid the whole app, because the window was ordered front at open, before the panel's `canHide` was turned off. RT-1040 opens it unshown and orders it in after the setters (a Swift rig keeps the app hidden that way); the live rerun is RT-1030's.
-- [ ] The frontmost application is unchanged by a toast, and a click on a toast's button leaves the keyboard with the app the user is typing in: not measurable with the console locked (`loginwindow` stays frontmost and no app becomes active); needs the console unlocked, in person or over RustDesk.
+- [x] A toast raised while the client is hidden stays on screen and leaves the app hidden: one layer-101 window 360×182 points, 16 points inside the right edge and the visible bottom, the main window off screen and the app hidden and inactive throughout. RT-1040 opens the panel unshown and orders it in after `canHide` is turned off; before that the toast unhid the whole app.
+- [x] The frontmost application is unchanged by a toast, with the console unlocked and another app (System Settings) frontmost: across two Needs you toasts raised through the fake CLI's `rt-perm` prompt and answered with `send --keys 1`, the frontmost app stayed System Settings and the client never became active (the `frontwatch` probe, every 100 ms).
+- [ ] A click on a toast's button leaves the keyboard with the app the user is typing in: not run; it needs a person at the console (RT-1030).
+
+An update end to end on the Mac mini (RT-1031): two ad-hoc signed builds packed with `tools/installer/pack-macos.ps1`, the new one with a throwaway version bump to `0.9.1-alpha` that was never committed; the old `0.9.0-alpha` bundle unpacked with `ditto -x -k` into a writable scratch Applications folder; a static feed (the releases JSON and the `dl/` assets) served on 127.0.0.1 with `RUSTLING_TULIP_UPDATE_FEED` pointing at it; every data folder isolated under the scratch folder. A plain shell session and a fake Claude session were started before the update.
+
+- [x] The client downloads and verifies the release and offers Restart to update; the owner pressed it at the console.
+- [x] The installed bundle's `CFBundleShortVersionString` reads `0.9.1` and its `rustling-tulipd --version` prints `0.9.1-alpha`.
+- [x] The new client relaunched with `--updated-from 0.9.0-alpha`, and `native.log` has `started by an update from this version` with `version=0.9.0-alpha`.
+- [x] Both sessions started before the update survive it (their tracers), and the shell takes keys afterwards.
+- [x] Nothing is left beside the bundle after the relaunch: no `rustling-tulip.app.old` and no `.rustling-tulip-update-*` folder.
+- [x] `codesign --verify --deep --strict` passes on the new bundle.
+- [x] Negative: an old client run from a read-only Applications folder refuses Restart to update with "rustling-tulip.app runs from a place the update cannot replace; move it to Applications and update again; nothing was changed", stays open, and its bundle still reads `0.9.0`.
 
 A Swift script run from SSH can read the window list and hide or unhide an app (`NSRunningApplication.hide()` returns false but works); Python there has no Quartz bindings.
 
