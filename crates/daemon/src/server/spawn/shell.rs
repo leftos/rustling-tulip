@@ -3113,3 +3113,90 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod bash_init_tests {
+    use super::BASH_INIT_SCRIPT;
+    use std::io::Write as _;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+
+    /// The bash the daemon runs a plain bash shell with: Git Bash on
+    /// Windows, `bash` on the PATH elsewhere.
+    fn bash() -> PathBuf {
+        if cfg!(windows) {
+            let root = std::env::var_os("ProgramFiles").expect("ProgramFiles is set");
+            PathBuf::from(root).join(r"Git\bin\bash.exe")
+        } else {
+            PathBuf::from("bash")
+        }
+    }
+
+    /// The OSC 133 marks (`A`, `B`, `C`, `D`) and the `hi` the command prints,
+    /// in the order an interactive bash wrote them to stdout running the init
+    /// script over a `.bashrc` holding `bashrc`, with `input` typed.
+    fn marks(bashrc: &str, input: &str) -> Vec<String> {
+        let dir =
+            std::env::temp_dir().join(format!("rt-bash-init-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).expect("create the scratch home");
+        std::fs::write(dir.join(".bashrc"), bashrc).expect("write .bashrc");
+        let init = dir.join("bash-init.sh");
+        std::fs::write(&init, BASH_INIT_SCRIPT).expect("write the init script");
+        let mut child = Command::new(bash())
+            .arg("--rcfile")
+            .arg(&init)
+            .arg("-i")
+            .env("HOME", &dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("bash starts");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(input.as_bytes())
+            .expect("type the input");
+        let out = child.wait_with_output().expect("bash exits");
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8_lossy(&out.stdout);
+        let pattern = regex::Regex::new(r"\x1b\]133;([ABCD])|(hi)\n").expect("pattern compiles");
+        pattern
+            .captures_iter(&text)
+            .map(|caps| {
+                caps.get(1)
+                    .or_else(|| caps.get(2))
+                    .map_or_else(String::new, |m| m.as_str().to_owned())
+            })
+            .collect()
+    }
+
+    /// The DEBUG trap fires for every `PROMPT_COMMAND` statement too: a user's
+    /// own prompt command (starship's, for one) must not read as a command
+    /// starting after the prompt mark, and the user's command must.
+    #[test]
+    fn bash_init_marks_the_users_command_and_not_their_prompt_command() {
+        let bashrc = "HISTFILE=/dev/null\n__user_precmd() { :; }\nPROMPT_COMMAND='__user_precmd'\n";
+        assert_eq!(
+            marks(bashrc, "echo hi\nexit\n"),
+            ["A", "C", "hi", "D", "A", "C"],
+            "prompt, `echo hi` starting, its output, its end, prompt, `exit` starting"
+        );
+    }
+
+    /// With no prompt command of the user's, the shell's start marks no
+    /// command, and an empty line starts none.
+    #[test]
+    fn bash_init_marks_no_command_at_start_or_for_an_empty_line() {
+        assert_eq!(
+            marks("HISTFILE=/dev/null\n", "\necho hi\nexit\n"),
+            ["A", "A", "C", "hi", "D", "A", "C"],
+            "prompt, prompt again after Enter, `echo hi` starting, its output, its end, prompt, `exit` starting"
+        );
+    }
+}

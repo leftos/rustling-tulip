@@ -288,10 +288,11 @@ fn compile_or_reject(agent: &AgentId, rules: &ScreenRules) -> CompiledRules {
 
 /// A shell's prompt row, each pattern with whether it is the POSIX form,
 /// which a row holding one of an agent's box glyphs never matches: PowerShell's
-/// `PS <path>>`, cmd's `<drive>:\<path>>`, and a POSIX shell's row ending in
-/// `$`, `#` or `%`, which may be the sigil alone.
+/// `PS <path>>`, its bare fallback `PS>`, and a nested prompt's repeated `>`
+/// (`PS <path>>>`), cmd's `<drive>:\<path>>`, and a POSIX shell's row ending
+/// in `$`, `#` or `%`, which may be the sigil alone.
 const SHELL_PROMPTS: [(&str, bool); 3] = [
-    (r"^PS [^>]*>$", false),
+    (r"^PS(?: [^>]*)?>+$", false),
     (r"^[A-Za-z]:\\[^>]*>$", false),
     (r"^(?:\S.*)?[$#%]$", true),
 ];
@@ -315,14 +316,16 @@ static COMPILED_PROMPTS: LazyLock<Vec<(Regex, bool)>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Whether the last line of the grid, soft-wrapped rows joined, is a shell's
-/// prompt: the shell is back at its own prompt, whatever an ended program left
-/// painted above.
+/// Whether the shell is back at its own prompt, whatever an ended program left
+/// painted above: the last line of the grid, soft-wrapped rows joined, is a
+/// shell's prompt, or the shell, which marks its commands with OSC 133, last
+/// marked a prompt start after any command's start or end.
 #[must_use]
 pub fn last_row_is_shell_prompt(screen: &Screen) -> bool {
     screen
         .bottom_logical_line()
         .is_some_and(|line| is_shell_prompt(line.trim_end()))
+        || screen.at_marked_prompt()
 }
 
 fn is_shell_prompt(row: &str) -> bool {
@@ -1421,6 +1424,113 @@ mod tests {
                 !last_row_is_shell_prompt(&screen),
                 "the agent's footer under {above:?} read as a prompt"
             );
+        }
+    }
+
+    /// An agent's run in a shell that marks its prompt and its commands with
+    /// OSC 133, ended, with `prompt` (bytes, marks included) after it.
+    fn marked_run_then(prompt: &str) -> Vec<u8> {
+        format!(
+            "\x1b]133;A\x07me@box ~> \x1b]133;B\x07claude\r\n\x1b]133;C\x07[fake-claude] ready (pid: 1)\r\n[fake-claude] bye\r\n\x1b]133;D;0\x07{prompt}"
+        )
+        .into_bytes()
+    }
+
+    /// Prompts no pattern reads, each marked the way its shell marks it:
+    /// Nushell's as measured through `ConPTY` (ST-terminated, a right prompt
+    /// after `133;P;k=r`), the others with the daemon's own BEL form.
+    #[test]
+    fn a_prompt_the_shell_marked_with_osc_133_is_the_shells_prompt() {
+        let prompts = [
+            (
+                "nushell",
+                "\x1b]133;A;k=i;click_events=1\x1b\\X:\\work> \x1b]133;P;k=r\x1b\\\x1b[41C 11/06/2026 11:01:02 AM\x1b]133;B\x1b\\",
+            ),
+            ("fish", "\x1b]133;A\x07me@box ~> \x1b]133;B\x07"),
+            (
+                "starship",
+                "\x1b]133;A\x07\r\n~/rt on main\r\n❯ \x1b]133;B\x07",
+            ),
+            (
+                "zsh rprompt",
+                "\x1b]133;A\x07box%                       10:32:01\x1b[34G\x1b]133;B\x07",
+            ),
+            ("pwsh fallback", "\x1b]133;A\x07PS> \x1b]133;B\x07"),
+        ];
+        for (shell, prompt) in prompts {
+            let mut screen = Screen::new(80, 12);
+            screen.feed(&marked_run_then(prompt));
+            assert!(
+                last_row_is_shell_prompt(&screen),
+                "{shell}'s marked prompt read as no prompt: {:?}",
+                screen.bottom_logical_line()
+            );
+        }
+    }
+
+    /// A command started after the prompt mark: the program runs, whatever
+    /// mark came before it.
+    #[test]
+    fn a_command_started_after_the_prompt_mark_is_not_the_shells_prompt() {
+        let mut screen = Screen::new(60, 12);
+        let rule = "─".repeat(58);
+        screen.feed(
+            format!(
+                "\x1b]133;A\x07me@box ~> \x1b]133;B\x07claude\r\n\x1b]133;C\x07{rule}\r\n❯ \r\n{rule}\r\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+            )
+            .as_bytes(),
+        );
+        assert!(
+            !last_row_is_shell_prompt(&screen),
+            "the agent's footer after a command start read as a prompt"
+        );
+    }
+
+    /// A shell that marks its prompt but never a command's start or end (a
+    /// pwsh prompt with no `PSReadLine`) cannot tell a running program from
+    /// its prompt: its prompt mark alone is not the prompt back.
+    #[test]
+    fn a_prompt_mark_from_a_shell_that_marks_no_command_is_not_the_shells_prompt() {
+        let mut screen = Screen::new(60, 12);
+        let rule = "─".repeat(58);
+        screen.feed(
+            format!(
+                "\x1b]133;A\x07me@box ~> \x1b]133;B\x07claude\r\n{rule}\r\n❯ \r\n{rule}\r\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+            )
+            .as_bytes(),
+        );
+        assert!(
+            !last_row_is_shell_prompt(&screen),
+            "a prompt mark with no command mark read as the prompt back"
+        );
+    }
+
+    /// A lagged stream may have lost a command's start: the marks read before
+    /// the lag no longer say where the shell is.
+    #[test]
+    fn a_lag_forgets_the_prompt_mark() {
+        let mut screen = Screen::new(80, 12);
+        screen.feed(&marked_run_then("\x1b]133;A\x07me@box ~> \x1b]133;B\x07"));
+        screen.reset_parser();
+        assert!(
+            !last_row_is_shell_prompt(&screen),
+            "a prompt mark read before a lag still counted"
+        );
+    }
+
+    /// pwsh's own fallback prompt and a nested prompt's repeated `>`.
+    #[test]
+    fn a_bare_or_nested_powershell_prompt_is_the_shells_prompt() {
+        let last_row_is_prompt = |row: &str| {
+            let mut screen = Screen::new(80, 5);
+            screen.feed(format!("some output\r\n{row}").as_bytes());
+            last_row_is_shell_prompt(&screen)
+        };
+        for row in ["PS>", r"PS C:\>>", r"PS C:\work>>>"] {
+            assert!(last_row_is_prompt(row), "read as no prompt: {row:?}");
+        }
+        for row in [">", ">>", "PS", "-->", "PS> done", "  PS>"] {
+            assert!(!last_row_is_prompt(row), "read as a prompt: {row:?}");
         }
     }
 }

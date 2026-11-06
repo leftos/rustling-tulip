@@ -16,6 +16,8 @@ use alacritty_terminal::term::Config;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
 
+use crate::osc_title::PromptMarks;
+
 pub mod dialogs;
 #[cfg(test)]
 pub(crate) mod fixture_screen;
@@ -82,6 +84,8 @@ pub struct Screen {
     title: Arc<Mutex<Option<String>>>,
     /// How many bytes of output [`Self::feed`] has applied.
     fed: u64,
+    /// The shell's OSC 133 marks, which the grid itself drops.
+    marks: PromptMarks,
 }
 
 impl Screen {
@@ -105,12 +109,14 @@ impl Screen {
             rows,
             title,
             fed: 0,
+            marks: PromptMarks::default(),
         }
     }
 
     /// Applies PTY output to the grid.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+        self.marks.feed(bytes);
         let count = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         self.fed = self.fed.wrapping_add(count);
     }
@@ -123,9 +129,19 @@ impl Screen {
     }
 
     /// Drops any escape sequence the parser had half read, so the rest of the
-    /// stream starts from the ground state instead of being swallowed.
+    /// stream starts from the ground state instead of being swallowed, and
+    /// forgets the shell's last OSC 133 mark, since the lost bytes may have
+    /// held a command's start.
     pub fn reset_parser(&mut self) {
         self.parser = Processor::new();
+        self.marks.forget();
+    }
+
+    /// Whether the shell, which marks its commands with OSC 133, last marked
+    /// a prompt start after any command's start or end.
+    #[must_use]
+    pub fn at_marked_prompt(&self) -> bool {
+        self.marks.at_prompt()
     }
 
     /// Resizes the grid with the PTY. A zero dimension is ignored: with no

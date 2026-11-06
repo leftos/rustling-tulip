@@ -4123,6 +4123,163 @@ mod hysteresis_tests {
         );
     }
 
+    /// Nushell's prompt on Windows as measured through `ConPTY` (0.116.1,
+    /// default config): marks ST-terminated, a right prompt after
+    /// `133;P;k=r`. No pattern reads it.
+    const NU_PROMPT: &str = "\x1b]133;A;k=i;click_events=1\x1b\\X:\\work> \x1b]133;P;k=r\x1b\\\x1b[41C 11/06/2026 11:01:02 AM\x1b]133;B\x1b\\";
+
+    /// fish 4's prompt with its own marks.
+    const FISH_PROMPT: &str = "\x1b]133;A\x07me@box ~> \x1b]133;B\x07";
+
+    /// The shell at `prompt`, the user's `claude` typed, the command's start
+    /// marked, and the agent's idle frame painted.
+    fn marked_agent_start(prompt: &str) -> Vec<u8> {
+        let mut bytes = format!("{prompt}claude\r\n\x1b]133;C\x07").into_bytes();
+        bytes.extend(idle_frame(&[]));
+        bytes
+    }
+
+    /// The agent's exit lines, the command's end marked, and `prompt`.
+    fn marked_agent_end(prompt: &str) -> Vec<u8> {
+        let mut bytes = frame(&["[fake-claude] ready (pid: 1)", "[fake-claude] bye", ""]);
+        bytes.extend(format!("\x1b]133;D;0\x07{prompt}").into_bytes());
+        bytes
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn promoted_shell_sees_its_agent_end_at_a_nushell_prompt_by_its_prompt_mark() {
+        let mut record = pwsh_plain_shell();
+        record.program_name = Some("nu".to_owned());
+        let h = start_record("shell-promote-nu-mark", true, record);
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(marked_agent_start(NU_PROMPT));
+        advance(Duration::from_secs(1)).await;
+        assert!(promotion(&h).0, "the shell is promoted");
+        h.chunk(marked_agent_end(NU_PROMPT));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            agent_exits(&mut events),
+            1,
+            "the agent's end at Nushell's marked prompt is announced"
+        );
+        assert_eq!(
+            promotion(&h).3,
+            Some("nu".to_owned()),
+            "the leaf names the shell again"
+        );
+    }
+
+    /// The typed-agent case runs the same watcher and predicate.
+    #[tokio::test(start_paused = true)]
+    async fn typed_agent_sees_its_end_at_a_fish_prompt_by_its_prompt_mark() {
+        let mut record = test_record(SESSION);
+        record.agent_in_shell = true;
+        record.shell_label = Some("fish".to_owned());
+        record.program_name = Some(agent_tag());
+        let h = start_record_launching("shell-typed-fish-mark", record, ShellLaunch::AgentTyped);
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(marked_agent_start(FISH_PROMPT));
+        advance(Duration::from_secs(1)).await;
+        h.chunk(marked_agent_end(FISH_PROMPT));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            agent_exits(&mut events),
+            1,
+            "the typed agent's end at fish's marked prompt is announced"
+        );
+    }
+
+    /// The agent's last frame stays painted above the marked prompt: the end
+    /// is seen, and the leftover frame does not promote the shell again.
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_frame_left_above_a_marked_prompt_ends_the_run_and_is_not_promoted_again() {
+        let mut record = pwsh_plain_shell();
+        record.program_name = Some("fish".to_owned());
+        let h = start_record("shell-promote-fish-leftover", true, record);
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(marked_agent_start(FISH_PROMPT));
+        advance(Duration::from_secs(1)).await;
+        assert!(promotion(&h).0, "the shell is promoted");
+        let mut leftover = idle_frame(&[]);
+        leftover.extend(format!("\r\n\x1b]133;D;0\x07{FISH_PROMPT}").into_bytes());
+        h.chunk(leftover);
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            agent_exits(&mut events),
+            1,
+            "the agent's end under its leftover frame is announced"
+        );
+        advance(Duration::from_secs(3)).await;
+        assert_eq!(
+            promotion(&h).3,
+            Some("fish".to_owned()),
+            "the leftover frame restarted the agent"
+        );
+    }
+
+    /// The prompt mark the shell painted before the agent started is not the
+    /// agent's end.
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_mark_before_the_agents_command_start_does_not_end_it() {
+        let mut record = pwsh_plain_shell();
+        record.program_name = Some("nu".to_owned());
+        let h = start_record("shell-nu-mark-before", true, record);
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(marked_agent_start(NU_PROMPT));
+        advance(Duration::from_secs(1)).await;
+        assert!(promotion(&h).0, "the shell is promoted");
+        h.chunk(idle_frame(&["working on it"]));
+        advance(Duration::from_secs(3)).await;
+        assert_eq!(agent_exits(&mut events), 0, "the running agent was ended");
+        assert_eq!(promotion(&h).3, Some(agent_tag()));
+    }
+
+    /// A shell that marks its prompt but no command (pwsh with no
+    /// `PSReadLine`) keeps today's reading: its prompt mark alone ends nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_shell_marking_only_its_prompt_keeps_its_agent_running() {
+        let h = start_record("shell-prompt-mark-only", true, pwsh_plain_shell());
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        let mut start = b"\x1b]133;A\x07PS C:\\work> \x1b]133;B\x07claude\r\n".to_vec();
+        start.extend(idle_frame(&[]));
+        h.chunk(start);
+        advance(Duration::from_secs(1)).await;
+        assert!(promotion(&h).0, "the shell is promoted");
+        h.chunk(idle_frame(&["working on it"]));
+        advance(Duration::from_secs(3)).await;
+        assert_eq!(agent_exits(&mut events), 0, "the running agent was ended");
+    }
+
+    #[test]
+    fn agent_up_reads_the_prompt_mark() {
+        let registry = SessionRegistry::new(scratch_dirs("agent-up-mark"));
+        let screen: SharedScreen = Arc::new(Mutex::new(Screen::new(COLS, ROWS)));
+        let mut record = test_record(SESSION);
+        record.screen = Some(Arc::clone(&screen));
+        registry.insert(record);
+        screen
+            .lock()
+            .expect("screen lock")
+            .feed(&marked_agent_start(FISH_PROMPT));
+        assert!(
+            agent_up(&registry, SESSION),
+            "Claude's idle prompt box after a marked command start did not count as the agent up"
+        );
+        screen
+            .lock()
+            .expect("screen lock")
+            .feed(format!("\r\n\x1b]133;D;0\x07{FISH_PROMPT}").as_bytes());
+        assert!(
+            !agent_up(&registry, SESSION),
+            "fish's marked prompt under the agent's leftover frame counted as the agent up"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn promoted_shell_without_a_program_name_still_sees_its_agent_end() {
         let mut record = pwsh_plain_shell();

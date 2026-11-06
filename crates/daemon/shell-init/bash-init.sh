@@ -7,8 +7,11 @@
 # payload) hooks on top. The frontend parses these to render per-command
 # chips with copy + re-run actions.
 #
-# Re-entry is guarded by __rt_busy so the DEBUG trap fires only for
-# top-level user commands, not for our own prompt-command statements.
+# The DEBUG trap fires for every simple command, PROMPT_COMMAND's statements
+# included. __rt_precmd's own statement is skipped by name, and __rt_busy,
+# set by __rt_precmd and cleared only by __rt_prompt_done (PROMPT_COMMAND's
+# last statement), keeps the user's prompt commands (starship's, for one)
+# from reading as a command start: only top-level user commands send 133;C.
 
 if [[ -r "$HOME/.bashrc" ]]; then
     # shellcheck disable=SC1091
@@ -25,6 +28,7 @@ __rt_emit_cwd() {
 __rt_preexec() {
     [[ -n "$__rt_busy" || -n "$__rt_in_command" ]] && return
     [[ -n "$COMP_LINE" ]] && return
+    [[ "$BASH_COMMAND" == __rt_precmd ]] && return
     __rt_busy="1"
     __rt_in_command="1"
     local cmd="$BASH_COMMAND"
@@ -45,13 +49,15 @@ __rt_precmd() {
     fi
     __rt_emit_cwd
     builtin printf '\e]133;A\a'
-    __rt_busy=""
 }
 
+__rt_prompt_done() { __rt_busy=""; }
+
 if [[ -z "$PROMPT_COMMAND" ]]; then
-    PROMPT_COMMAND='__rt_precmd'
+    PROMPT_COMMAND='__rt_precmd; __rt_prompt_done'
 else
-    PROMPT_COMMAND='__rt_precmd; '"$PROMPT_COMMAND"
+    PROMPT_COMMAND='__rt_precmd; '"$PROMPT_COMMAND"'
+__rt_prompt_done'
 fi
 
 trap '__rt_preexec' DEBUG

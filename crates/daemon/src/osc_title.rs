@@ -8,6 +8,8 @@
 //! - `ESC ] 1 ; <title> BEL`  (icon only — most terminals also surface this as the title)
 //! - `ESC ] 2 ; <title> BEL`  (window title only)
 //! - `ESC ] 7 ; file://<host>/<cwd> BEL`  (current working directory)
+//! - `ESC ] 133 ; <A|B|C|D>[;…] BEL`  (shell integration's prompt and command
+//!   marks, read by [`PromptMarks`]; only the payload's first byte is kept)
 //! - for plain shells only, visible `PS <cwd>` prompt text as a fallback for
 //!   sessions that were spawned before the prompt hook emitted OSC 7.
 //!
@@ -56,12 +58,43 @@ enum State {
     OscString { param: u8 },
     /// Inside `OscString` and we just saw `ESC`; if next byte is `\` (ST), commit.
     OscStringAfterEsc { param: u8 },
+    /// In `ESC ] 133 ;`, keeping the payload's first byte and skipping the
+    /// rest until BEL or `ESC \`, so a long payload is never abandoned.
+    PromptMark { kind: Option<u8> },
+    /// Inside `PromptMark` and we just saw `ESC`; if next byte is `\` (ST), commit.
+    PromptMarkAfterEsc { kind: Option<u8> },
+}
+
+/// One OSC 133 mark, by its payload's first byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// `A`: the prompt starts.
+    PromptStart,
+    /// `B`: the prompt ends and the command line starts.
+    CommandLine,
+    /// `C`: the command starts.
+    CommandStart,
+    /// `D`: the command ended.
+    CommandEnd,
+}
+
+impl Mark {
+    const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            b'A' => Some(Self::PromptStart),
+            b'B' => Some(Self::CommandLine),
+            b'C' => Some(Self::CommandStart),
+            b'D' => Some(Self::CommandEnd),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OscEvent {
     Title(String),
     CurrentCwd(String),
+    PromptMark(Mark),
 }
 
 struct Parser {
@@ -114,7 +147,9 @@ impl Parser {
                             self.state = State::Normal;
                         }
                     } else if b == b';' && had_digit {
-                        if is_supported_param(param) {
+                        if param == PROMPT_MARK_PARAM {
+                            self.state = State::PromptMark { kind: None };
+                        } else if is_supported_param(param) {
                             self.buf.clear();
                             self.state = State::OscString { param };
                         } else {
@@ -159,6 +194,12 @@ impl Parser {
                             State::Normal
                         };
                     }
+                }
+                State::PromptMark { kind } | State::PromptMarkAfterEsc { kind } => {
+                    let after_esc = matches!(self.state, State::PromptMarkAfterEsc { .. });
+                    let (next, mark) = prompt_mark_step(b, kind, after_esc);
+                    self.state = next;
+                    events.extend(mark.map(OscEvent::PromptMark));
                 }
             }
         }
@@ -258,12 +299,101 @@ impl TitleActivity {
     }
 }
 
+/// The last OSC 133 marks a shell's integration wrote, so a reader can tell
+/// whether the shell is back at its prompt: its last mark is a prompt start
+/// (`A`) after any command start or end (`C`/`D`). A shell that has never
+/// marked a command (a prompt-only marker) never counts as at its prompt, and
+/// `B` and other marks are ignored.
+pub struct PromptMarks {
+    parser: Parser,
+    last: Option<LastMark>,
+    marks_commands: bool,
+}
+
+/// Whether the last mark that counts started a prompt or a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastMark {
+    Prompt,
+    Command,
+}
+
+impl Default for PromptMarks {
+    fn default() -> Self {
+        Self {
+            parser: Parser::new(false),
+            last: None,
+            marks_commands: false,
+        }
+    }
+}
+
+impl PromptMarks {
+    /// Feed one chunk of PTY output.
+    pub fn feed(&mut self, bytes: &[u8]) {
+        for event in self.parser.feed(bytes) {
+            let OscEvent::PromptMark(mark) = event else {
+                continue;
+            };
+            match mark {
+                Mark::PromptStart => self.last = Some(LastMark::Prompt),
+                Mark::CommandStart | Mark::CommandEnd => {
+                    self.last = Some(LastMark::Command);
+                    self.marks_commands = true;
+                }
+                Mark::CommandLine => {}
+            }
+        }
+    }
+
+    /// Whether the shell marks its commands and its last mark is a prompt
+    /// start.
+    #[must_use]
+    pub fn at_prompt(&self) -> bool {
+        self.marks_commands && self.last == Some(LastMark::Prompt)
+    }
+
+    /// Forgets the last mark and any half-read sequence, for a stream that
+    /// lost bytes: a command's start may be among them.
+    pub fn forget(&mut self) {
+        self.parser = Parser::new(false);
+        self.last = None;
+    }
+}
+
+/// The OSC parameter of shell integration's prompt and command marks.
+const PROMPT_MARK_PARAM: u8 = 133;
+
+/// The parser's state after byte `b` inside an OSC 133 payload whose first
+/// byte so far is `kind` (`after_esc`: the byte before was `ESC`), and the
+/// mark `b` completes. Bytes after the first are skipped, so a long payload
+/// is never abandoned; an `ESC` not followed by `\` abandons the mark, as in
+/// [`State::OscStringAfterEsc`].
+fn prompt_mark_step(b: u8, kind: Option<u8>, after_esc: bool) -> (State, Option<Mark>) {
+    if after_esc {
+        return match b {
+            b'\\' => (State::Normal, kind.and_then(Mark::from_byte)),
+            ESC => (State::AfterEsc, None),
+            _ => (State::Normal, None),
+        };
+    }
+    match b {
+        BEL => (State::Normal, kind.and_then(Mark::from_byte)),
+        ESC => (State::PromptMarkAfterEsc { kind }, None),
+        _ => (
+            State::PromptMark {
+                kind: kind.or(Some(b)),
+            },
+            None,
+        ),
+    }
+}
+
 fn is_supported_param_prefix(param: u8) -> bool {
-    matches!(param, 0 | 1 | 2 | 7)
+    matches!(param, 0 | 1 | 2 | 7 | 13 | 133)
 }
 
 fn is_supported_param(param: u8) -> bool {
-    matches!(param, 0 | 1 | 2 | 7)
+    matches!(param, 0 | 1 | 2 | 7 | 133)
 }
 
 const fn max_bytes_for_param(param: u8) -> usize {
@@ -441,7 +571,9 @@ pub fn watch(
                                 });
                                 last_cwd = Some(cwd);
                             }
-                            OscEvent::Title(_) | OscEvent::CurrentCwd(_) => {}
+                            OscEvent::Title(_)
+                            | OscEvent::CurrentCwd(_)
+                            | OscEvent::PromptMark(_) => {}
                         }
                     }
                 }
