@@ -2,8 +2,9 @@
 //! beside it. General holds keep-awake and copy on select, Notifications
 //! the Needs you toggle and sound and Windows' toast state, Appearance
 //! the appearance editor at the app level, App title the window title's
-//! settings; every change applies at once. The main window's title, which
-//! the App title tab controls, is kept here too.
+//! settings; every change except Appearance is pending until OK or Apply.
+//! The main window's title, which the App title tab controls, is kept here
+//! too.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -2823,12 +2824,13 @@ impl RootView {
     /// per pending row (a host's remote access, and its Dashboard rows, as
     /// one message each), and This PC's pending settings are saved, while
     /// [`apply_enabled`] says so; nothing otherwise. Returns the echoes the
-    /// sends owe, `None` when nothing was applied.
+    /// sends owe and whether a This PC setting could not be applied, `None`
+    /// when nothing was applied.
     fn apply_pending_settings(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<Vec<OwedEcho>> {
+    ) -> Option<Applied> {
         let pending = self.pending_edits();
         if !apply_enabled(&pending) {
             return None;
@@ -2837,12 +2839,16 @@ impl RootView {
         for (host, edits) in pending {
             self.apply_host_edits(&host, &edits, cx);
         }
+        let mut failed = false;
         for value in std::mem::take(&mut self.settings_pending.local) {
-            self.commit_local(value, window, cx);
+            failed |= self.commit_local(value, window, cx);
         }
         self.commit_chat_width();
         cx.notify();
-        self.settings_pending.log.take()
+        Some(Applied {
+            owed: self.settings_pending.log.take().unwrap_or_default(),
+            failed,
+        })
     }
 
     /// Apply reaching `host`, whose pending rows are `edits`: its agent
@@ -2900,25 +2906,31 @@ impl RootView {
     }
 
     /// OK: Apply, then close at once when it sent nothing to a daemon, or
-    /// once every daemon echoed what it sent.
+    /// once every daemon echoed what it sent; a This PC setting Apply could
+    /// not write keeps Settings open.
     fn press_settings_ok(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // An alias typed on the Accounts page is sent as Enter would; it
         // owes no echo, so it never holds Settings open.
         let alias_sent = self.commit_alias_on_close(cx);
-        let Some(sent) = self.apply_pending_settings(window, cx) else {
+        let Some(applied) = self.apply_pending_settings(window, cx) else {
             if alias_sent {
                 self.close_appearance_editor(window, cx);
             }
             return;
         };
-        if sent.is_empty() {
-            self.close_appearance_editor(window, cx);
+        if applied.failed {
+            tracing::info!("settings: a This PC setting could not be applied; OK stays open");
+        }
+        if applied.owed.is_empty() {
+            if !applied.failed {
+                self.close_appearance_editor(window, cx);
+            }
         } else {
             tracing::info!(
-                sends = sent.len(),
+                sends = applied.owed.len(),
                 "settings: OK waits for the daemons' echoes"
             );
-            self.settings_pending.ok_wait = Some(sent);
+            self.settings_pending.ok_wait = Some(applied.owed);
         }
     }
 
@@ -4044,6 +4056,14 @@ impl RootView {
             .and_then(|tab| tab.autostart.as_ref().ok().copied())
     }
 
+    /// Whether the daemon starts on login as the page draws it: the launch
+    /// the page read, with a pending switch over it; `None` before the page
+    /// was shown or when the read failed.
+    #[must_use]
+    pub fn remote_autostart_shown(&self) -> Option<bool> {
+        self.shown_local().autostart
+    }
+
     /// The line under the login-launch toggle: why its last switch, or its
     /// read, failed.
     #[must_use]
@@ -4185,33 +4205,13 @@ impl RootView {
         );
     }
 
-    /// Switches the login launch and reads it back; a failed switch leaves
-    /// it as it was and says why under the toggle.
+    /// The switch's press: the opposite of the login launch as shown,
+    /// pending until Apply; nothing while the launch could not be read.
     fn toggle_autostart(&mut self) {
-        let Some(Ok(on)) = self
-            .remote_access_tab
-            .as_ref()
-            .map(|tab| tab.autostart.clone())
-        else {
+        let Some(on) = self.remote_autostart_shown() else {
             return;
         };
-        let switched = self.autostart.set(!on);
-        let read = switched.is_ok().then(|| self.read_autostart());
-        let Some(tab) = &mut self.remote_access_tab else {
-            return;
-        };
-        match switched {
-            Ok(()) => {
-                tab.autostart_error = None;
-                if let Some(read) = read {
-                    tab.autostart = read;
-                }
-            }
-            Err(error) => {
-                tracing::warn!("settings: switching the login launch failed: {error}");
-                tab.autostart_error = Some(autostart_failure_line(&error));
-            }
-        }
+        self.pend_local(LocalPending::Autostart(!on));
     }
 
     /// The title last set on the window; empty until the first is.
@@ -4921,18 +4921,35 @@ impl RootView {
     }
 
     /// Apply reaching a pending This PC setting: it is recorded and saved,
-    /// and what it changes follows now.
-    fn commit_local(&mut self, value: LocalPending, window: &mut Window, cx: &mut Context<Self>) {
-        let saves = match value {
+    /// and what it changes follows now. Returns whether it could not be
+    /// applied, in which case it stays pending.
+    fn commit_local(
+        &mut self,
+        value: LocalPending,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (saves, applied) = match value {
+            LocalPending::Autostart(on) => {
+                let applied = self.commit_autostart(on);
+                if !applied {
+                    let saved = self
+                        .local_with(&[])
+                        .value_like(&LocalPending::Autostart(on));
+                    self.settings_pending
+                        .set_local(LocalPending::Autostart(on), &saved);
+                }
+                (false, applied)
+            }
             LocalPending::SidebarView(view) => {
                 self.set_sidebar_view(view, cx);
-                false
+                (false, true)
             }
             LocalPending::CountMode(_)
             | LocalPending::TitleCount(_)
             | LocalPending::TitleSuffix(_) => {
                 self.commit_title(&value, window, cx);
-                false
+                (false, true)
             }
             LocalPending::NotifyNeedsYou(_)
             | LocalPending::NeedsYouSound(_)
@@ -4941,13 +4958,37 @@ impl RootView {
             | LocalPending::FinishedSound(_)
             | LocalPending::NotifySkip(_)
             | LocalPending::FinishedGrace(_)
-            | LocalPending::ToastStyle(_) => self.commit_notification(value),
-            other => self.commit_general(&other, cx),
+            | LocalPending::ToastStyle(_) => (self.commit_notification(value), true),
+            other => (self.commit_general(&other, cx), true),
         };
         if saves {
             self.save_ui();
         }
         cx.notify();
+        !applied
+    }
+
+    /// Apply reaching the login-launch switch: the launch is written and
+    /// read back; a failed write leaves it as it was and says why under the
+    /// toggle. Returns whether it was written.
+    fn commit_autostart(&mut self, on: bool) -> bool {
+        match self.autostart.set(on) {
+            Ok(()) => {
+                let read = self.read_autostart();
+                if let Some(tab) = &mut self.remote_access_tab {
+                    tab.autostart_error = None;
+                    tab.autostart = read;
+                }
+                true
+            }
+            Err(error) => {
+                tracing::warn!("settings: switching the login launch failed: {error}");
+                if let Some(tab) = &mut self.remote_access_tab {
+                    tab.autostart_error = Some(autostart_failure_line(&error));
+                }
+                false
+            }
+        }
     }
 
     /// Apply reaching a pending App title setting: recorded, saved, and the
@@ -5578,8 +5619,9 @@ impl RootView {
             .child(field)
     }
 
-    /// The login-launch toggle, its hint, and why its last switch or read
-    /// failed; the toggle is inert while the launch could not be read.
+    /// The login-launch toggle as the page draws it (the launch it read,
+    /// with a pending switch over it), its hint, and why its last apply or
+    /// read failed; the toggle is inert while the launch could not be read.
     fn autostart_rows(
         &self,
         tab: &RemoteAccessTab,
@@ -5588,7 +5630,7 @@ impl RootView {
     ) -> Vec<Div> {
         let t = theme(cx);
         let state = ToggleState {
-            checked: tab.autostart.as_ref().is_ok_and(|on| *on),
+            checked: self.remote_autostart_shown() == Some(true),
             enabled: tab.autostart.is_ok(),
         };
         let launch = toggle(
@@ -8420,6 +8462,14 @@ pub(crate) enum LocalPending {
     FinishedGrace(u32),
     ToastStyle(ToastStyle),
     SpawnTrusted(bool),
+    Autostart(bool),
+}
+
+/// What an Apply did: the echoes its sends owe, and whether a This PC
+/// setting it could not write stayed pending, which keeps OK open.
+struct Applied {
+    owed: Vec<OwedEcho>,
+    failed: bool,
 }
 
 /// A host daemon's setting a Settings control changed, waiting for Apply.
@@ -8797,6 +8847,9 @@ pub(crate) struct ShownLocal {
     pub(crate) trusted: bool,
     pub(crate) sidebar_view: SidebarView,
     pub(crate) chat_mode: ChatMode,
+    /// Whether this PC starts the daemon on login, as the Remote access
+    /// page read it; `None` when it could not be read.
+    pub(crate) autostart: Option<bool>,
 }
 
 impl ShownLocal {
@@ -8823,6 +8876,7 @@ impl ShownLocal {
             LocalPending::FinishedGrace(secs) => self.notifications.finished_grace_secs = secs,
             LocalPending::ToastStyle(style) => self.notifications.toast_style = style,
             LocalPending::SpawnTrusted(on) => self.trusted = on,
+            LocalPending::Autostart(on) => self.autostart = Some(on),
         }
     }
 
@@ -8862,6 +8916,9 @@ impl ShownLocal {
             }
             LocalPending::ToastStyle(_) => LocalPending::ToastStyle(notes.toast_style),
             LocalPending::SpawnTrusted(_) => LocalPending::SpawnTrusted(self.trusted),
+            // Only a launch that could be read can be drafted, so the
+            // unknown saved value is never compared against.
+            LocalPending::Autostart(_) => LocalPending::Autostart(self.autostart == Some(true)),
         }
     }
 }
@@ -8877,6 +8934,7 @@ impl RootView {
             trusted: ui.spawn.trusted,
             sidebar_view: ui.sidebar_view,
             chat_mode: ui.chat_mode,
+            autostart: self.remote_autostart(),
         };
         for value in pending {
             shown.take(value);

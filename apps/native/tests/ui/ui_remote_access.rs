@@ -565,29 +565,107 @@ fn apply_that_the_echo_removes_keeps_the_keyboard(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn autostart_toggle_calls_the_seam_and_shows_a_failure(cx: &mut TestAppContext) {
+fn autostart_toggle_is_pending_until_apply(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     open_page(&mut h);
     assert_eq!(h.root(|root, _| root.remote_autostart()), Some(false));
     h.click_on(AUTOSTART);
+    assert_eq!(
+        h.root(|root, _| root.remote_autostart_shown()),
+        Some(true),
+        "the click drafts the switch"
+    );
+    assert!(h.autostart().sets().is_empty(), "the click writes nothing");
+    assert_eq!(
+        h.root(|root, _| root.remote_autostart()),
+        Some(false),
+        "the launch is as it was"
+    );
+    assert!(
+        h.root(|root, _| root.settings_apply_enabled()),
+        "the footer's OK and Apply are lit"
+    );
+
+    h.click_on(APPLY);
     assert_eq!(h.autostart().sets(), [true]);
     assert_eq!(h.root(|root, _| root.remote_autostart()), Some(true));
+    assert_eq!(h.root(|root, _| root.remote_autostart_shown()), Some(true));
     assert_eq!(h.root(|root, _| root.remote_autostart_line()), None);
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "the footer dims once applied"
+    );
+}
 
-    h.autostart().fail_next_set("unsupported");
+#[gpui::test]
+fn a_failed_autostart_apply_keeps_settings_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
     h.click_on(AUTOSTART);
-    assert_eq!(h.autostart().sets(), [true, false]);
+    h.autostart().fail_next_set("unsupported");
+    h.click_on(APPLY);
+    assert_eq!(h.autostart().sets(), [true]);
     assert_eq!(
         h.root(|root, _| root.remote_autostart_line()),
         Some("Could not change start on login: unsupported.".to_owned())
     );
+    assert!(painted(&mut h, "settings-remote-autostart-error"));
     assert_eq!(
         h.root(|root, _| root.remote_autostart()),
-        Some(true),
-        "a failed switch leaves the launch as it was"
+        Some(false),
+        "a failed write leaves the launch as it was"
     );
-    assert!(painted(&mut h, "settings-remote-autostart-error"));
+    assert_eq!(
+        h.root(|root, _| root.remote_autostart_shown()),
+        Some(true),
+        "the draft stays pending"
+    );
+    assert!(h.root(|root, _| root.settings_apply_enabled()));
+    h.autostart().fail_next_set("unsupported");
+    h.click_on("settings-ok");
+    assert_eq!(h.autostart().sets(), [true, true], "OK writes the draft");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "OK keeps Settings open"
+    );
+}
+
+#[gpui::test]
+fn a_cancelled_autostart_draft_is_gone_on_reopen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
+    h.click_on(AUTOSTART);
+    h.click_on("settings-cancel");
+    assert!(!h.root(|root, _| root.settings_open()), "Cancel closes");
+    assert!(h.autostart().sets().is_empty(), "Cancel never writes");
+    h.keys("ctrl-,");
+    h.click_on(TAB);
+    assert_eq!(shown_tab(&mut h), "Remote access");
+    assert_eq!(
+        h.root(|root, _| root.remote_autostart_shown()),
+        Some(false),
+        "reopening shows the saved launch"
+    );
+    assert!(!h.root(|root, _| root.settings_apply_enabled()));
+}
+
+#[gpui::test]
+fn autostart_pressed_back_to_its_saved_value_is_not_pending(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
+    h.click_on(AUTOSTART);
+    h.click_on(AUTOSTART);
+    assert_eq!(h.root(|root, _| root.remote_autostart_shown()), Some(false));
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "the footer dims again"
+    );
+    h.click_on(APPLY);
+    assert!(h.autostart().sets().is_empty(), "nothing is written");
 }
 
 const DEVICES: &str = "settings-devices";
