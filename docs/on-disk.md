@@ -136,7 +136,19 @@ The Dashboard summarizer runs the agent's CLI in a fifth machine-local root besi
 
 The account store, the saved Claude logins the daemon switches between, lives in a machine-local root beside those, `ProjectDirs::data_local_dir().join("accounts")` (overridable with `RUSTLING_TULIP_ACCOUNTS_DIR`), `%LOCALAPPDATA%\leftos\rustling-tulip\data\accounts\` on Windows. While `RUSTLING_TULIP_CONFIG_DIR` overrides the config dir and `RUSTLING_TULIP_ACCOUNTS_DIR` is unset, it is `<config>/accounts`, so an isolated daemon never reaches the real store. The daemon does not create it when it resolves it; the store creates it owner-only when it first opens it. An elevated daemon never opens it (`crates/daemon-client/src/profile.rs`, `crates/daemon/src/paths.rs` `resolve_accounts_dir`).
 
-The daemon-driven account login keeps its scratch folder, one `<session id>` folder per login, under `account-login` (`ProfileRoots::account_login`): `<data dir>/account-login/` normally, `<config dir>/account-login/<session id>` while `RUSTLING_TULIP_CONFIG_DIR` overrides the config dir, so an elevated daemon uses its own root. The login removes its folder when it ends or is cancelled, retrying for up to 5 s while a process the login session left still holds it as its working directory (the cancel's reply waits for this); past that the folder is left for the start-up sweep, with a warning.
+The store is a folder of files (`crates/agents/claude/accounts/src/paths.rs`): `accounts.json` (the accounts, their order, the active one and the next number), `credentials/<n>.cred` (each account's credential, sealed to the user: DPAPI on Windows, an owner-only file on macOS).
+
+It also holds `configs/<n>.json` (each account's `oauthAccount` block), `settings.json` (auto-switch's settings), `autoswitch_state.json` (the last switch and the quarantined accounts), `cache/usage.json` (the shared per-account usage table) and `engine_lease.json` (which auto-switch engine is live on the store).
+
+It has a `.lock` file and one lock file beside each shared file. It sits outside the config dir, and account settings never go in `state.json`.
+
+The daemon-driven account login keeps its scratch folder, one `<session id>` folder per login, under `account-login` (`ProfileRoots::account_login`): `<data dir>/account-login/` normally, `<config dir>/account-login/<session id>` while `RUSTLING_TULIP_CONFIG_DIR` overrides the config dir, so an elevated daemon uses its own root.
+
+The folder is owner-only off Windows (on Windows it inherits the data dir's access list) and holds the login's `CLAUDE_CONFIG_DIR` (on macOS the login's Keychain item is deleted with it). It is never under the user's Claude home.
+
+The login removes its folder on success, failure, cancel, timeout and the daemon's shutdown, retrying for up to 5 s while a process the login session left still holds it as its working directory (the cancel's reply waits for this); past that the folder is left for the start-up sweep, with a warning.
+
+At every daemon start, before any client connects, the sweep stops, discards and removes each entry a crashed run left under `account-login`.
 
 A fetch writes a hidden `.fetch-<launch stamp>-<n>.part` beside the target and renames it over the target when the file is done; a failed or cancelled fetch deletes its part. Nothing under it is ever pruned (`apps/native/src/file_fetch.rs`).
 

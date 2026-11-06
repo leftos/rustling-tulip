@@ -27,7 +27,23 @@ The rules of the daemon/client protocol that the types in `crates/protocol/src/l
 
   A daemon lists `accounts` in `Welcome.features` only when it holds an accounts service: on 64-bit Windows and macOS, where the Claude plugin's account locks work, and not on Linux, 32-bit Windows or in an elevated daemon. A client hides its accounts surfaces when the feature is absent. `AccountsUpdated { accounts, auto }` (`accounts_updated`) is broadcast to every connected client when a poll finishes, or a write's refresh finishes, and the mapped snapshot differs from the cached one (the first successful poll always broadcasts); `ListAccounts` answers from that cache. A connection whose state stream lagged also gets `AccountsUpdated` from the cached snapshot, and nothing before the first poll.
 
-  The account writes are `SwitchAccount { number, request_id? }` (any origin) and, local origin only, `AddCurrentLogin { request_id? }`, `RemoveAccount { number, request_id? }`, `SetAccountAlias { number, alias?, request_id? }` and `SetAccountOrder { order, request_id? }`. A write that succeeds is answered to the requester with `Accounts { accounts, auto, request_id }` after the driver re-reads the store (it waits up to 10 s, then answers from the cache), and other connections get `AccountsUpdated` only when the snapshot changed. A write that fails is answered with `Error { code, message, request_id }`, the code one of `account_busy`, `account_draining`, `account_unknown`, `account_refused`, `account_unsupported` or `account_failed`; a host with no account service answers every write `account_unsupported`. A tailnet connection that sends one of the four admin messages gets `Error { code: "local_only" }` with no `request_id`. Remove refuses the active account and the live login.
+  The account writes are `SwitchAccount { number, request_id? }` (any origin) and, local origin only, `AddCurrentLogin { request_id? }`, `RemoveAccount { number, request_id? }`, `SetAccountAlias { number, alias?, request_id? }` and `SetAccountOrder { order, request_id? }`.
+
+  A write that succeeds is answered to the requester with `Accounts { accounts, auto, request_id }` after the driver re-reads the store (it waits up to 10 s, then answers from the cache), and other connections get `AccountsUpdated` only when the snapshot changed.
+
+  A write that fails is answered with `Error { code, message, request_id }`, the code one of `account_busy`, `account_draining`, `account_unknown`, `account_refused`, `account_unsupported` or `account_failed`; a host with no account service answers every write `account_unsupported`.
+
+  A tailnet connection that sends one of the four admin messages, or one of the two login messages below, gets `Error { code: "local_only" }` with no `request_id`. Remove refuses the active account and the live login.
+
+  The daemon-driven login is `StartAccountLogin { request_id? }` and `CancelAccountLogin { request_id? }`, both local origin only, and it answers with `AccountLogin { state, session_id?, message?, request_id? }` (`account_login`). `state` is `started`, `succeeded`, `failed` or `cancelled`, and a value the client does not know decodes as `Unknown`.
+
+  A start is answered at once to the requester with `AccountLogin` `started` (its `session_id` is the login's terminal session, which the user finishes the login in) echoing `request_id`, never with `Accounts`, since a login runs for minutes.
+
+  At most one login runs at a time: a second start gets `Error { code: "account_busy" }`, and a start while the daemon shuts down gets `account_draining`. A host with no accounts service answers both messages `account_unsupported`.
+
+  Every connection then hears the run end as one broadcast `AccountLogin` (`succeeded`, `failed` or `cancelled`, `request_id` absent, `message` saying why when there is more to say), and the requester of a start or a cancel also gets its terminal state directly echoing its `request_id`.
+
+  A cancel with no login running is answered `account_refused`, and one while the login is starting or finishing `account_busy`. A login that succeeds changes the store, so the other connections also get `AccountsUpdated` as for any write.
 
   `auto` is `null` on a host that holds no accounts service (it does not list `accounts`) and otherwise carries the settings file's state: `enabled` is `false` until the user turns auto-switch on (a missing settings file or key reads as off), and `paused_reason` names a settings file that could not be read, its defaults then standing in.
 

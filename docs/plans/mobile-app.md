@@ -111,7 +111,7 @@ Item ids are PW.1, PW.2, â€¦ (phone web app), distinct from the macOS plan's M0â
 - [ ] **PW.10 Chat** (Wave 8, RT-109). The chat mirror's entries (RT-51) above the status line, in the chat look ruled above.
 - [ ] **PW.11 Linear cards** (Wave 8, RT-142). A tapped identifier shows the desktop's card from the daemon's `LinearIssues` cache.
 - [ ] **PW.12 Files** (RT-106). A tapped path opens a viewer with Share (`navigator.share`) and Save; a worktree file tree; sending a photo or file into a session from the page's file picker and camera, since iOS has no Web Share Target.
-- [ ] **PW.13 Accounts screen** (Wave 12, RT-112). Every Claude account with its 5h and 7d usage and reset times, Switch, and the auto-switch on/off and threshold, over the messages in [accounts.md](./accounts.md); adding, removing and logging in stay on the desktop.
+- [ ] **PW.13 Accounts screen** (Wave 12, RT-112). Every Claude account with its 5h and 7d usage and reset times, Switch, and the auto-switch on/off and threshold, over the messages in [wire-protocol.md](../wire-protocol.md); adding, removing and logging in stay on the desktop.
 - [ ] **PW.14 Dictation** (Wave 14, RT-83). The keyboard's own dictation key into the composer (decision below); design in [dictation.md](./dictation.md).
 
 ## Prior art for the phases

@@ -287,10 +287,13 @@ The Accounts tab (`accounts_settings.rs` draws it, `accounts.rs` holds its texts
 
 - **Account table**: one row per account with its tags, usage bars and reset times, then Switch (the row in use has none), an alias field, Up and Down (they move the row in the rotation order) and Remove. Remove on the row in use reads "Switch first" instead of a button.
 - **Add current login**: saves the login the agent is using now, with a note beside it not to `/logout` first, since logging out can revoke the account being left.
+- **Log in a new account…**: sends `StartAccountLogin`; the daemon runs the login as a visible terminal session in the sidebar ("Log in a new account"), and the page shows "Finish the login in its terminal session…" with a "Cancel login" button (`CancelAccountLogin`) while it runs, and the last result ("The new account was added.", or the daemon's failure or cancel message) until the next press. The button is disabled while a login runs.
+
+  The login's progress is folded from `AccountLogin` messages into the host's login slot in `accounts.rs`, apart from the one pending-write slot, so a long login never holds the write controls.
 - **Auto-switch block**: the on/off toggle, "Switch at" (the threshold) and Hysteresis steppers, and Cooldown, Strategy and Forecast window choice rows. A host whose `Accounts` answer carries no engine shows "Auto-switch is not available on this host" instead. A paused engine adds "Auto-switch paused: {reason}".
 - **Forecast line**: the fleet verdict ("Rotation lasts the next 7 days", "Runs dry at {when}", "All accounts used up", then "back {when}" and the account count), drawn only while the daemon sends a verdict.
-- **Writes**: every control sends its account write at once (`SwitchAccount`, `AddCurrentLogin`, `RemoveAccount`, `SetAccountAlias`, `SetAccountOrder`, `SetAutoSwitch`, `SetAutoSwitchRules`), never through Apply or OK. One write is in flight at a time, and every write control is disabled until its answer; the page shows what the next `Accounts` or `AccountsUpdated` carries.
-- **Remote origin**: when the daemon's `Welcome` calls this connection `Remote`, the admin controls (alias, Up, Down, Remove, Add current login) are disabled with the tooltip "Only on the machine running the daemon".
+- **Writes**: every control sends its account write at once (`SwitchAccount`, `AddCurrentLogin`, `RemoveAccount`, `SetAccountAlias`, `SetAccountOrder`, `SetAutoSwitch`, `SetAutoSwitchRules`, and `StartAccountLogin` and `CancelAccountLogin` for the login), never through Apply or OK. One write is in flight at a time, and every write control is disabled until its answer; the page shows what the next `Accounts` or `AccountsUpdated` carries.
+- **Remote origin**: when the daemon's `Welcome` calls this connection `Remote`, the admin controls (alias, Up, Down, Remove, Add current login, Log in a new account…, Cancel login) are disabled with the tooltip "Only on the machine running the daemon".
 
 The popover's auto-switch toggle and threshold stepper (see "Accounts chip and popover") send the same `SetAutoSwitch`. The account toasts are under "Notifications".
 

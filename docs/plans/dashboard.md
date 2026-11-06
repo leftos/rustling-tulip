@@ -36,7 +36,7 @@ Out of this design's scope, each with its own design; the Dashboard consumes wha
 
 - **Plan tab** (board and daily briefing): a Plan tab from a new rail icon (owner); RT-56, mock [canvases/ops-tower-absorb/ot-plan-board/index.html](./canvases/ops-tower-absorb/ot-plan-board/index.html). The lanes' Questions and Next up and the "No live agent" table read its board.
 - **Gates**: a rail view plus a footer strip (owner); RT-55, [gate-dashboard.md](./gate-dashboard.md). Gate ticks and gate rows read its reader.
-- **Accounts**: a footer chip and popover plus Settings → Accounts (owner); RT-39 and RT-66, [accounts.md](./accounts.md). The accounts card reads its fleet verdict.
+- **Accounts**: a footer chip and popover plus Settings → Accounts (owner); RT-39 and RT-66, [architecture.md](../architecture.md) "Claude accounts". The accounts card reads its fleet verdict.
 - **Costs**: ops-tower's subscription-share model plus a Costs tab (owner); no issue yet, mock [canvases/ops-tower-absorb/ot-costs/index.html](./canvases/ops-tower-absorb/ot-costs/index.html). The header's Today figure is the API-equivalent sum below until the Costs tab ships (RT-479); then it shows the subscription share with API prices muted beside it, and a click opens the Costs tab, as the costs mock's lane A draws it.
 
 ## Layout
@@ -218,7 +218,7 @@ What each field needs, and whether the tree has it today (paths at `main` b4b55b
 | Two-hour activity track | a status-change log per session and per dispatch run that survives a daemon restart; `status_since` is stamped in `SessionRegistry::update_from` (`crates/daemon/src/session.rs:744`, `:781`) and kept only as the latest change | the latest change only | DB.19, DB.20, DB.22 |
 | Gate ticks | gate holds from the gate's journal, matched to a session by working folder (ops-tower's activity route) | none | RT-55 (as RT-64 re-cuts it), then DB.20 |
 | Dispatch rows | the dispatch run folder's live-run files and `stream.jsonl`, designed in [dispatch-follow.md](./dispatch-follow.md) (RT-31) | none | RT-31 (DF.1 to DF.5), then DB.21 |
-| Accounts card | the accounts feature's fleet verdict (when every account runs dry at the current pace, or that all are blocked now) | none | RT-39 and RT-66 ([accounts.md](./accounts.md)), then DB.23 |
+| Accounts card | the accounts feature's fleet verdict (when every account runs dry at the current pace, or that all are blocked now) | none | RT-39 and RT-66 ([architecture.md](../architecture.md) "Claude accounts"), then DB.23 |
 | Questions, Next up, No live agent | the Plan tab's board: blocked issues waiting on the owner, To-do issues in board order, per repo | none | RT-56, then DB.23, DB.24 |
 
 ### The transcript activity reader
@@ -513,7 +513,7 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
   Built for sessions; a dispatch run's track is RT-733 and gate holds are RT-732.
 - [ ] DB.23 Draw the need-you band. `apps/native/src/dashboard_band_view.rs` (new: Need you with ask blocks, the accounts card, Questions by repo, the calm state), `apps/native/src/dashboard.rs` (the band model and the needs-you count rule), `apps/native/src/activity_bar.rs` and `apps/native/src/tab_bar.rs` (the badge follows the rule), `apps/native/src/dashboard_view.rs` (the queue strip's accounts and questions chips), `apps/native/tests/ui/ui_dashboard.rs`.
 
-  Proof: specs that waits run longest first with working answer buttons, Questions never raise the badge, a dry fleet adds one and a later run-dry does not, and the calm state shows with nothing due. Waits on DB.11, DB.13, the accounts fleet verdict (RT-39 and RT-66, [accounts.md](./accounts.md) CA.4 and CA.5) and the board's Questions (RT-56).
+  Proof: specs that waits run longest first with working answer buttons, Questions never raise the badge, a dry fleet adds one and a later run-dry does not, and the calm state shows with nothing due. Waits on DB.11, DB.13, the accounts fleet verdict (RT-39 and RT-66, [architecture.md](../architecture.md) "Claude accounts") and the board's Questions (RT-56).
 
   Need you column and calm state built, unmounted until DB.24; Accounts and Questions are RT-737.
 - [ ] DB.24 Draw the repo lanes, the default view.
