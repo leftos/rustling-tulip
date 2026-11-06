@@ -12,6 +12,8 @@ use gpui::{AssetSource, SharedString};
 pub(crate) const SESSIONS_ICON: &str = "icons/sessions.svg";
 /// The rail's Source control icon.
 pub(crate) const SOURCE_CONTROL_ICON: &str = "icons/source-control.svg";
+/// The rail's Gates icon: two posts and two bars, a gate.
+pub(crate) const GATES_ICON: &str = "icons/gates.svg";
 /// The source-control panel's refresh icon.
 pub(crate) const REFRESH_ICON: &str = "icons/refresh.svg";
 /// The rail's Recover sessions icon.
@@ -139,7 +141,7 @@ fn agent_icon_bytes(path: &str) -> Option<Cow<'static, [u8]>> {
 }
 
 /// Every bundled asset, by the path the views ask for it under.
-const ASSETS: [(&str, &[u8]); 42] = [
+const ASSETS: [(&str, &[u8]); 43] = [
     (
         SESSIONS_ICON,
         include_bytes!("../assets/icons/sessions.svg"),
@@ -148,6 +150,7 @@ const ASSETS: [(&str, &[u8]); 42] = [
         SOURCE_CONTROL_ICON,
         include_bytes!("../assets/icons/source-control.svg"),
     ),
+    (GATES_ICON, include_bytes!("../assets/icons/gates.svg")),
     (REFRESH_ICON, include_bytes!("../assets/icons/refresh.svg")),
     (RECOVER_ICON, include_bytes!("../assets/icons/recover.svg")),
     (

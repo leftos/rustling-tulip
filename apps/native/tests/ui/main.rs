@@ -37,6 +37,7 @@ mod ui_fetch_dialog;
 mod ui_file_fetch;
 mod ui_folder_fetch;
 mod ui_font_size;
+mod ui_gates;
 mod ui_history;
 mod ui_host_chips;
 mod ui_host_groups;

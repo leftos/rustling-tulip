@@ -107,9 +107,12 @@ fn connected(features: Vec<String>) -> Connection {
 fn side_part_shown(root: &RootView, selector: &str) -> bool {
     let open = !root.sidebar_collapsed();
     match selector {
-        "sidebar-panel" => open && root.activity() == Activity::Sessions,
+        "sidebar-panel" => open && root.shown_activity() == Activity::Sessions,
         "sidebar-divider" => open,
         "activity-badge" => root.activity_badge().is_some(),
+        "activity-gates" => root.gates_header().is_some(),
+        "gates-badge" => root.gates_badge().is_some(),
+        "gates-panel" | "gates-header" => open && root.shown_activity() == Activity::Gates,
         "recover-badge" => root.recover_badge().is_some(),
         "needs-you-badge" => root.needs_you_badge().is_some(),
         "needs-you-panel" | "needs-you-header" => open && root.activity() == Activity::NeedsYou,
@@ -843,6 +846,81 @@ pub fn accounts_updated(accounts: Vec<protocol::AccountSnapshot>) -> DaemonMessa
     DaemonMessage::AccountsUpdated {
         accounts,
         auto: None,
+    }
+}
+
+/// A gate slot `index` in `state`, with no claim.
+fn gate_slot(index: u32, state: protocol::GateSlotState) -> protocol::GateSlot {
+    protocol::GateSlot {
+        index,
+        name: format!("gate-slot-{index}"),
+        state,
+        claim: None,
+        stale: None,
+        processes: 0,
+        last_line: None,
+        critical: false,
+        extra: Some(false),
+    }
+}
+
+/// A `GateState` fixture for `machine`: a heavy pool of 3 with a busy, a
+/// held and a free slot, and a light pool of 2 with a busy and a free slot,
+/// so 3 slots are busy or held.
+pub fn gate_state(machine: &str) -> protocol::GateState {
+    use protocol::{GateClaim, GatePool, GateSlotKind, GateSlotState};
+    let busy = |index| protocol::GateSlot {
+        claim: Some(GateClaim {
+            pid: Some(4100 + index),
+            started: Some(Utc::now()),
+            cwd: Some(r"X:\dev\repo".to_owned()),
+            command: Some("cargo nextest run".to_owned()),
+            log: None,
+            timeout_seconds: None,
+        }),
+        ..gate_slot(index, GateSlotState::Busy)
+    };
+    let pool = |kind, count, slots| GatePool {
+        kind,
+        count,
+        default: count,
+        set: None,
+        problem: None,
+        slots,
+        waiting: Vec::new(),
+    };
+    protocol::GateState {
+        now: Some(Utc::now()),
+        machine: machine.to_owned(),
+        processors: 16,
+        critical: None,
+        queue: Vec::new(),
+        pools: vec![
+            pool(
+                GateSlotKind::Heavy,
+                3,
+                vec![
+                    busy(0),
+                    gate_slot(1, GateSlotState::Held),
+                    gate_slot(2, GateSlotState::Free),
+                ],
+            ),
+            pool(
+                GateSlotKind::Light,
+                2,
+                vec![busy(0), gate_slot(1, GateSlotState::Free)],
+            ),
+        ],
+        remote: None,
+        builders: Vec::new(),
+        covered: Vec::new(),
+    }
+}
+
+/// The `GateState` push of `state`; `None` says the host has no gate state.
+pub fn gate_state_msg(state: Option<protocol::GateState>) -> DaemonMessage {
+    DaemonMessage::GateState {
+        state: state.map(Box::new),
     }
 }
 
@@ -3042,7 +3120,8 @@ impl<'a> Harness<'a> {
         };
         self.root(move |root, cx| {
             let pane = |id: &str| root.active_pane_ids().iter().any(|p| p == id);
-            let sessions_shown = !root.sidebar_collapsed() && root.activity() == Activity::Sessions;
+            let sessions_shown =
+                !root.sidebar_collapsed() && root.shown_activity() == Activity::Sessions;
             if selector == "undo-shelf" {
                 shelf_drawn && !root.undo_entries().is_empty()
             } else if let Some(shown) = modal_part_shown(root, &selector) {

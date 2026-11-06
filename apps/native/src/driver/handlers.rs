@@ -509,9 +509,10 @@ fn activity(name: &str) -> Result<Activity, ParamError> {
         "sessions" => Ok(Activity::Sessions),
         "needs_you" => Ok(Activity::NeedsYou),
         "source_control" => Ok(Activity::SourceControl),
+        "gates" => Ok(Activity::Gates),
         other => Err(ParamError {
             message: format!("unknown activity: {other}"),
-            hint: Some("activities: sessions, needs_you, source_control".to_owned()),
+            hint: Some("activities: sessions, needs_you, source_control, gates".to_owned()),
         }),
     }
 }

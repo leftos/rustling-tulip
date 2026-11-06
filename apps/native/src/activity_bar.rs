@@ -1,6 +1,7 @@
-//! The activity rail at the window's left edge: Sessions, Needs You and
-//! Source control, which pick the panel beside it and fold it, the badges
-//! counting the sessions waiting on the user and the uncommitted changes,
+//! The activity rail at the window's left edge: Sessions, Needs You, Source
+//! control and, while This PC's daemon pushes a gate state, Gates, which
+//! pick the panel beside it and fold it, the badges counting the sessions
+//! waiting on the user, the uncommitted changes and the busy gate slots,
 //! the Dashboard button, which opens or shows the Dashboard tab, and at the
 //! bottom the Recover sessions button with its badge and the Settings
 //! button.
@@ -13,8 +14,10 @@ use gpui::{
 };
 
 use crate::assets::{
-    DASHBOARD_ICON, NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SETTINGS_ICON, SOURCE_CONTROL_ICON,
+    DASHBOARD_ICON, GATES_ICON, NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SETTINGS_ICON,
+    SOURCE_CONTROL_ICON,
 };
+use crate::gates;
 use crate::sidebar::{Activity, SidebarModel};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, tooltip};
@@ -157,10 +160,24 @@ impl RootView {
         badge_text(self.sc_badge())
     }
 
+    /// The Gates item's badge count, the busy and held slots of This PC's
+    /// local pools; `None` while the item is left out.
+    fn gates_count(&self) -> Option<usize> {
+        self.gate_state
+            .as_ref()
+            .map(|state| usize::try_from(gates::busy_count(state)).unwrap_or(usize::MAX))
+    }
+
+    /// The Gates item's badge as drawn, when the item and its badge show.
+    #[must_use]
+    pub fn gates_badge(&self) -> Option<String> {
+        self.gates_count().and_then(badge_text)
+    }
+
     /// The rail, always shown, left of the panel.
     pub(crate) fn activity_rail(&self, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
-        let items = [
+        let mut items = vec![
             Item {
                 activity: Activity::Sessions,
                 selector: "activity-sessions",
@@ -189,6 +206,17 @@ impl RootView {
                 noun: "uncommitted",
             },
         ];
+        if let Some(count) = self.gates_count() {
+            items.push(Item {
+                activity: Activity::Gates,
+                selector: "activity-gates",
+                label: "Gates",
+                icon: GATES_ICON,
+                badge: count,
+                badge_selector: "gates-badge",
+                noun: "busy",
+            });
+        }
         div()
             .flex()
             .flex_col()
@@ -209,7 +237,7 @@ impl RootView {
 
     fn rail_item(&self, item: Item, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme(cx);
-        let active = self.sidebar.activity() == item.activity;
+        let active = self.shown_activity() == item.activity;
         let collapsed = self.sidebar.is_collapsed();
         let activity = item.activity;
         let button = rail_button(item.selector, item.icon, active, &t)
@@ -390,7 +418,7 @@ impl RootView {
         // The Stop all chip and the container rows live only in the sessions
         // panel, so a switch away from it, or a fold, takes any arm and the
         // row focus and hover with it.
-        if self.sidebar.is_collapsed() || self.sidebar.activity() != Activity::Sessions {
+        if self.sidebar.is_collapsed() || self.shown_activity() != Activity::Sessions {
             self.detached_stop_all.disarm();
             self.row_focus = None;
             self.hovered_container = None;

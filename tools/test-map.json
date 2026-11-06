@@ -514,6 +514,13 @@
     },
     {
       "paths": [
+        "apps/native/src/accounts_settings.rs",
+        "apps/native/tests/ui/ui_accounts_settings.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^accounts_settings::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_accounts_settings|ui_settings)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/footer.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^footer::/))"
@@ -523,6 +530,13 @@
         "apps/native/src/fuzzy.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^(fuzzy|spawn_form)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_spawn_combobox|ui_spawn_dialog|ui_spawn_hosts)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/gates.rs",
+        "apps/native/tests/ui/ui_gates.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^gates::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_gates)::/))"
     },
     {
       "paths": [

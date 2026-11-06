@@ -388,6 +388,9 @@ pub enum Activity {
     SourceControl,
     /// The sessions waiting on the user.
     NeedsYou,
+    /// This PC's gate slots; shown only while its daemon pushes a gate
+    /// state, else the sessions panel shows in its place.
+    Gates,
     /// The sessions panel; also what a value this build does not know loads
     /// as, so a newer build's panel keeps the rest of the file (`serde(other)`
     /// must be the last variant).
@@ -8189,6 +8192,14 @@ pub(crate) mod tests {
         let source_control: Activity =
             serde_json::from_str(r#""source_control""#).expect("deserialise");
         assert_eq!(source_control, Activity::SourceControl);
+    }
+
+    #[test]
+    fn activity_round_trips_gates() {
+        let text = serde_json::to_string(&Activity::Gates).expect("serialise");
+        assert_eq!(text, r#""gates""#);
+        let back: Activity = serde_json::from_str(&text).expect("deserialise");
+        assert_eq!(back, Activity::Gates);
     }
 
     #[test]

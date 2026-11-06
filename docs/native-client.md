@@ -1139,7 +1139,7 @@ The pointer methods (`click`, `drag`, `move`, `wheel`; `apps/native/src/driver/p
 
 Posted input cannot carry modifiers, since gpui reads them from `GetKeyState`: any pointer request with `modifiers` is `refused` ("posted pointer input cannot carry modifiers; press a chord with key, or use action"). A posted move is followed by `WM_MOUSELEAVE`, so hover-only UI needs `action` `set_hover`. Posted pointer input reaches only a real window, so the in-process UI specs cover the refusals only, and the driven smoke specs prove the rest on the real exe.
 
-`action` names are `open_settings`, `new_shell`, `open_spawn`, `toggle_sidebar`, `select_tab` (`{"id"}`), `focus_pane` (`{"id"}`), `show_activity` (`{"name"}`: `sessions`, `needs_you` or `source_control`) and `set_hover` (`{"value"}`: `true`, `false` or `null`).
+`action` names are `open_settings`, `new_shell`, `open_spawn`, `toggle_sidebar`, `select_tab` (`{"id"}`), `focus_pane` (`{"id"}`), `show_activity` (`{"name"}`: `sessions`, `needs_you`, `source_control` or `gates`, which shows the sessions panel while This PC has no gate state) and `set_hover` (`{"value"}`: `true`, `false` or `null`).
 
 A `wait_for` predicate (`until`) is one of `{"state": "<dotted path>", "equals": <json>}`, `{"state": path, "exists": bool}`, `{"pane_text": {"pane", "contains"}}` and `{"element": "<registry name>", "visible": bool}`. A numeric path segment indexes an array, and `exists` means non-null. `pane_text.contains` matches against the same joined `text` that `pane_text` replies, so a match survives a soft wrap. The loop runs in the endpoint between frames (`apps/native/src/driver/wait.rs`), so it never blocks the UI thread, and it is answered only over the pipe.
 

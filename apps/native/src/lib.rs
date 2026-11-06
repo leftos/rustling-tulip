@@ -66,6 +66,7 @@ mod folder_unpack;
 pub mod fonts;
 mod footer;
 mod fuzzy;
+mod gates;
 mod grid_view;
 mod header_tip;
 mod history;
@@ -950,6 +951,11 @@ pub struct RootView {
     /// Each host's saved accounts and the asks in flight, as the accounts
     /// chip and popover read them.
     accounts: accounts::AccountsState,
+    /// This PC's gate state, as its daemon last pushed it; `None` before the
+    /// first push, after a push of none, and from This PC's `Welcome` or
+    /// disconnect until the next push. Only This PC's daemon runs a gate, so
+    /// another host's push is ignored.
+    gate_state: Option<protocol::GateState>,
     /// The last copy, while its "copied" chip is up.
     copy_chip: Copied,
     /// Wakes the view when the chip's time is up.
@@ -1551,6 +1557,7 @@ impl RootView {
             stop: StopConfirm::default(),
             accounts_open: false,
             accounts: accounts::AccountsState::default(),
+            gate_state: None,
             copy_chip: Copied::default(),
             chip_timer: None,
             paths,
@@ -4237,6 +4244,7 @@ impl RootView {
         if !conn.is_open() && *host == HostKey::Local {
             self.agent_tabs.forget_applies(&HostKey::Local);
             self.launch_last.clear();
+            self.gate_state = None;
         }
         // The handshake, the fetches streaming over the connection and the
         // remote access status are the old target's daemon's.
@@ -4347,6 +4355,37 @@ impl RootView {
         }
     }
 
+    /// Folds This PC's gate state from `msg`: a `GateState` push sets it,
+    /// a `Welcome` clears it until the next push. Another host's messages
+    /// leave it alone.
+    fn on_gates_message(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
+        if *host != HostKey::Local {
+            return;
+        }
+        match msg {
+            DaemonMessage::GateState { state } => {
+                self.gate_state = state.as_deref().cloned();
+                cx.notify();
+            }
+            DaemonMessage::Welcome { .. } if self.gate_state.is_some() => {
+                self.gate_state = None;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// The panel the rail shows and lights: the stored activity, except a
+    /// stored Gates while This PC has no gate state, which shows Sessions.
+    /// The stored value is kept, for the state's return.
+    #[must_use]
+    pub fn shown_activity(&self) -> Activity {
+        match self.sidebar.activity() {
+            Activity::Gates if self.gate_state.is_none() => Activity::Sessions,
+            activity => activity,
+        }
+    }
+
     fn on_message(
         &mut self,
         host: &HostKey,
@@ -4382,6 +4421,7 @@ impl RootView {
         self.notify_on(host, &msg, finished, window.is_window_active(), cx);
         self.on_summarizer_message(host, &msg, cx);
         self.on_accounts_message(host, &msg, cx);
+        self.on_gates_message(host, &msg, cx);
         self.on_shell_message(host, &msg, window, cx);
         if self.on_panel_message(host, &msg, window, cx) {
             return;
