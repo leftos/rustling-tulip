@@ -4,6 +4,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.10.1-alpha
+
 ### Fixed
 
 - On macOS, an app opened from Finder or the Dock lists your tailnet's devices in Connections, instead of an error that Tailscale's output does not parse.
