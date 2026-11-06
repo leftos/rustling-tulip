@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result};
-use daemon_client::device_tokens::{CredentialManagerTokens, DeviceTokenStore, MemoryTokens};
+use daemon_client::device_tokens::{DeviceTokenStore, KeyringTokens, MemoryTokens};
 use daemon_client::{ClientIdentity, Proof, ProvenConnectError};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::{Sink, SinkExt as _, Stream, StreamExt as _};
@@ -145,10 +145,12 @@ impl NetDeps {
     }
 }
 
-/// Windows Credential Manager's device tokens; an empty in-memory store when
-/// it cannot be opened, so every tailnet host is dialled without a token.
+/// The device tokens in the platform's credential store: Windows Credential
+/// Manager on Windows, the login Keychain on macOS, under the same service
+/// and user names on both. An empty in-memory store when it cannot be opened,
+/// so every tailnet host is dialled without a token.
 pub(crate) fn device_token_store() -> Arc<dyn DeviceTokenStore> {
-    match CredentialManagerTokens::open() {
+    match KeyringTokens::open() {
         Ok(store) => Arc::new(store),
         Err(err) => {
             warn!("opening the device token store, holding no device tokens: {err:#}");
