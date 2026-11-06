@@ -31,8 +31,8 @@
 - [ ] RT-699 Keep the terminal link tip off dialogs and the link, and name Cmd on macOS
 - [ ] RT-918 Split the agent launch command by Windows rules on Windows, so backslash paths survive
 - [ ] RT-921 Default shell: move the save check off the runtime, and detect WSL that is really installed
-- [ ] RT-930 Jump to a pane, tab or sidebar repo or workspace with a Ctrl+Shift+P palette · release vNext+1
-- [ ] RT-932 Add non-git folders to the sidebar, with no worktree or branch choice when spawning into one · release vNext+1
+- [ ] RT-930 Jump to a pane, tab or sidebar repo or workspace with a Ctrl+Shift+P palette · release vNext
+- [ ] RT-932 Add non-git folders to the sidebar, with no worktree or branch choice when spawning into one · release vNext
 - [ ] RT-959 Default shell: verify Nushell raw-string programs, give the resume the launch's .cmd checks, and skip a familyless Automatic shell
 
 ## Wave 2b — Hook status
@@ -49,15 +49,15 @@
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
-- [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge · release vNext+1
-  - [ ] RT-364 PW.1: Serve the PWA shell from the tailnet listener · release vNext+1
-  - [ ] RT-365 PW.3: Pair the PWA with a device token · release vNext+1
-  - [ ] RT-366 PW.5: Phone session screen: live rows, composer, Quick and Keys, prompt sheet · release vNext+1
-  - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext+1
-  - [ ] RT-368 PW.7: Home Screen badge with the Needs you count · release vNext+1
-  - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext+1
-  - [ ] RT-370 PW.2: Protocol types for the PWA and its connection · release vNext+1
-  - [ ] RT-104 PW.4: Phone Home: grouped list and Needs you tray; answer prompts, stop and resume · release vNext+1
+- [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge · release vNext
+  - [ ] RT-364 PW.1: Serve the PWA shell from the tailnet listener · release vNext
+  - [ ] RT-365 PW.3: Pair the PWA with a device token · release vNext
+  - [ ] RT-366 PW.5: Phone session screen: live rows, composer, Quick and Keys, prompt sheet · release vNext
+  - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext
+  - [ ] RT-368 PW.7: Home Screen badge with the Needs you count · release vNext
+  - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
+  - [ ] RT-370 PW.2: Protocol types for the PWA and its connection · release vNext
+  - [ ] RT-104 PW.4: Phone Home: grouped list and Needs you tray; answer prompts, stop and resume · release vNext
 
 ## Wave 5 — Attention feed on the desktop
 
@@ -256,6 +256,7 @@
   - [ ] RT-812 Check that a window minimised in front of the driven client never hands it the foreground
 - [ ] RT-840 Sign the installer's uninstaller too
 - [ ] RT-861 Forget a driver id's bounds in UI specs once it stops being drawn
+- [ ] RT-1061 Let a driven run's isolated daemon use the Default shell setting instead of forcing cmd.exe · release vNext
 
 ## macOS
 
@@ -475,6 +476,18 @@
 - [ ] RT-1045 Give two unknown-kind gate pools distinct selectors in the Gates view
 - [ ] RT-1046 Stop four agent-api icon conformance tests leaking past nextest's leak timeout
 - [ ] RT-1052 Show seconds in a Gates row's time and usual under ten minutes
+- [ ] RT-1055 Show a Ctrl+clicked file fetch's size, progress and Cancel in its toast · release vNext
+- [ ] RT-1056 Get colour query replies (OSC 10/11) through ConPTY to programs on Windows hosts
+- [ ] RT-1057 Name the account login session "Log in a new account" in the sidebar, not its run id · release vNext
+- [ ] RT-1058 Map a hand-started agent's hook events without logging a missing-options ERROR · release vNext
+- [ ] RT-1059 Keep a long folder path clear of Browse in the Open a shell dialog · release vNext
+- [ ] RT-1060 Close the new-session dialog on Escape after Escape closed its Target list · release vNext
+- [ ] RT-1063 Keep a statusline ending in %, \$ or # under Claude's box from reading as the shell's prompt · release vNext
+- [ ] RT-1064 Keep a spawned agent session's label after its agent exits into the shell · release vNext
+- [ ] RT-1065 Report a promoted shell's agent as gone in the sessions verb after it exits · release vNext
+- [ ] RT-1066 Match the waiting ring and footer count to the session's idle status after a hand-started agent exits · release vNext
+- [ ] RT-1067 Remove the stray dot at the bottom-left of a plain Nushell pane · release vNext
+- [ ] RT-1068 Watch a session's transcript folder once it exists instead of falling back to polling · release vNext
 
 ## Design files
 
