@@ -443,6 +443,61 @@ fn a_narrow_pane_keeps_the_full_width(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_long_paste_leaves_the_rows_after_it_in_reach(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    let height = h.window_height();
+    h.cx.simulate_resize(gpui::size(px(1600.0), px(height)));
+    h.cx.run_until_parked();
+    let paste: String = (0..150)
+        .map(|n| {
+            format!(
+                "Error (active)    CS0246    The type or namespace name 'Windows' could not be found \
+                 (are you missing a using directive or an assembly reference?)    \
+                 WorktreeSweep.Core    X:\\dev\\worktree-sweep\\src\\Core\\File{n}.cs    7"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    h.send(reply(
+        Some(&id),
+        vec![
+            ChatEntry::User {
+                id: "u1".to_owned(),
+                text: paste,
+                pending: false,
+            },
+            answer("a1", "Looking.", false),
+            user("u2"),
+            answer("a2", "Done.", false),
+        ],
+    ));
+    let pane = h.bounds("pane-chat-p1");
+    assert!(
+        pane.size.width / px(1.0) > CHAT_CAP + 100.0,
+        "the pane is wider than the column's cap: {pane:?}"
+    );
+    // The chat follows its bottom; a long wheel down makes sure of it.
+    h.cx.simulate_event(ScrollWheelEvent {
+        position: point(pane.center().x, pane.origin.y + px(120.0)),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-1_000_000.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    h.cx.run_until_parked();
+    let column = h.bounds("chat-column-p1");
+    let last = h.bounds("chat-row-p1-a2");
+    assert!(
+        last.bottom() <= column.bottom(),
+        "the column's box holds its last row: column {column:?}, last row {last:?}"
+    );
+    assert!(
+        last.bottom() <= pane.bottom(),
+        "at the bottom of the chat the last row is in view: pane {pane:?}, last row {last:?}"
+    );
+}
+
+#[gpui::test]
 fn the_final_reply_draws_in_a_box(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, id) = opened(cx, &dir);

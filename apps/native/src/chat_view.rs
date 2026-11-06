@@ -2113,6 +2113,7 @@ fn chat_column(
         .driver_id(|| name)
         .w_full()
         .when_some(look.max_width, |rows, cap| rows.max_w(px(cap)))
+        .mx_auto()
         .px(px(BODY_PAD_X))
         .py(px(BODY_PAD_Y))
         .flex()
@@ -2126,9 +2127,6 @@ fn chat_column(
         ))))
         .size_full()
         .overflow_y_scroll()
-        .flex()
-        .flex_col()
-        .items_center()
         .text_size(ui_px_at(look.text_offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(look.theme.text))
         .child(rows);

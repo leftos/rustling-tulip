@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- In a wide Chat pane, every message after a very long one, such as a pasted build log, can be scrolled to.
+
 ## v0.10.1-alpha
 
 ### Fixed
