@@ -4046,6 +4046,83 @@ mod hysteresis_tests {
         assert_eq!(snap.mode, SessionMode::PlainShell);
     }
 
+    fn after_exit_frame(prompt: &str) -> Vec<u8> {
+        frame(&["[fake-claude] ready (pid: 1)", "[fake-claude] bye", prompt])
+    }
+
+    /// Wider than the harness's 140-column grid, so it soft-wraps.
+    fn wrapped_pwsh_prompt() -> String {
+        format!(r"PS X:\{}delve> ", r"a-long-folder-name\".repeat(8))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn promoted_shell_sees_its_agent_end_under_a_soft_wrapped_pwsh_prompt() {
+        let h = start_record("shell-promote-wrapped", true, pwsh_plain_shell());
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert!(promotion(&h).0, "the shell is promoted");
+        h.chunk(after_exit_frame(&wrapped_pwsh_prompt()));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            agent_exits(&mut events),
+            1,
+            "the agent's end under a soft-wrapped prompt is announced"
+        );
+        assert_eq!(
+            promotion(&h).3,
+            Some("pwsh".to_owned()),
+            "the leaf names the shell again"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn promoted_shell_sees_its_agent_end_under_git_bashs_two_row_prompt() {
+        let mut record = pwsh_plain_shell();
+        record.program_name = Some("bash".to_owned());
+        let h = start_record("shell-promote-git-bash", true, record);
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert!(promotion(&h).0, "the shell is promoted");
+        h.chunk(frame(&[
+            "[fake-claude] ready (pid: 1)",
+            "[fake-claude] bye",
+            "",
+            "lefto@LEFTOS-PC UCRT64 /c",
+            "$ ",
+        ]));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            agent_exits(&mut events),
+            1,
+            "the agent's end under Git Bash's `$` row is announced"
+        );
+    }
+
+    /// The typed-agent case runs the same watcher and predicate.
+    #[tokio::test(start_paused = true)]
+    async fn typed_agent_sees_its_end_under_a_soft_wrapped_pwsh_prompt() {
+        let mut record = test_record(SESSION);
+        record.agent_in_shell = true;
+        record.shell_label = Some("pwsh".to_owned());
+        record.program_name = Some(agent_tag());
+        let h = start_record_launching("shell-typed-wrapped", record, ShellLaunch::AgentTyped);
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        h.chunk(after_exit_frame(&wrapped_pwsh_prompt()));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            agent_exits(&mut events),
+            1,
+            "the typed agent's end under a soft-wrapped prompt is announced"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn promoted_shell_without_a_program_name_still_sees_its_agent_end() {
         let mut record = pwsh_plain_shell();

@@ -289,11 +289,11 @@ fn compile_or_reject(agent: &AgentId, rules: &ScreenRules) -> CompiledRules {
 /// A shell's prompt row, each pattern with whether it is the POSIX form,
 /// which a row holding one of an agent's box glyphs never matches: PowerShell's
 /// `PS <path>>`, cmd's `<drive>:\<path>>`, and a POSIX shell's row ending in
-/// `$`, `#` or `%`.
+/// `$`, `#` or `%`, which may be the sigil alone.
 const SHELL_PROMPTS: [(&str, bool); 3] = [
     (r"^PS [^>]*>$", false),
     (r"^[A-Za-z]:\\[^>]*>$", false),
-    (r"^\S.*[$#%]$", true),
+    (r"^(?:\S.*)?[$#%]$", true),
 ];
 
 /// [`SHELL_PROMPTS`] compiled once; a pattern that does not compile is left
@@ -315,14 +315,14 @@ static COMPILED_PROMPTS: LazyLock<Vec<(Regex, bool)>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Whether the last non-empty row of the grid is a shell's prompt: the shell
-/// is back at its own prompt, whatever an ended program left painted above.
+/// Whether the last line of the grid, soft-wrapped rows joined, is a shell's
+/// prompt: the shell is back at its own prompt, whatever an ended program left
+/// painted above.
 #[must_use]
 pub fn last_row_is_shell_prompt(screen: &Screen) -> bool {
     screen
-        .bottom_non_empty_lines(1)
-        .first()
-        .is_some_and(|row| is_shell_prompt(row.trim_end()))
+        .bottom_logical_line()
+        .is_some_and(|line| is_shell_prompt(line.trim_end()))
 }
 
 fn is_shell_prompt(row: &str) -> bool {
@@ -1323,6 +1323,8 @@ mod tests {
             r"C:\work>",
             "me@box:~/rt$",
             "root@box:/#",
+            "$",
+            "#",
         ];
         for row in prompts {
             assert!(last_row_is_prompt(row), "read as no prompt: {row:?}");
@@ -1365,5 +1367,60 @@ mod tests {
                 from_title: false
             }
         );
+    }
+
+    /// pwsh writes its prompt as one unbroken string, so a prompt wider than
+    /// the pane soft-wraps and the grid's last row holds only its tail.
+    #[test]
+    fn a_soft_wrapped_powershell_prompt_is_the_shells_prompt() {
+        let mut screen = Screen::new(38, 6);
+        screen.feed(
+            b"[fake-claude] bye\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS X:\\dev\\rustling-tulip.wt\\smoke-0100-b\\.tmp\\drive\\repos\\delve> \x1b]133;B\x07",
+        );
+        assert_eq!(
+            screen.bottom_non_empty_lines(2),
+            [
+                r"PS X:\dev\rustling-tulip.wt\smoke-0100",
+                r"-b\.tmp\drive\repos\delve>"
+            ],
+            "the prompt wraps onto two rows"
+        );
+        assert!(
+            last_row_is_shell_prompt(&screen),
+            "a soft-wrapped pwsh prompt read as no prompt"
+        );
+    }
+
+    /// Git Bash's default prompt puts `$ ` on a row of its own.
+    #[test]
+    fn a_git_bash_prompt_with_its_sigil_on_its_own_row_is_the_shells_prompt() {
+        let mut screen = Screen::new(80, 8);
+        screen.feed(
+            b"[fake-claude] bye\r\n\x1b]133;D;0\x07\x1b]7;file://LEFTOS-PC/c\x07\x1b]133;A\x07\x1b[?2004h\x1b[32m\r\nlefto@LEFTOS-PC \x1b[35mUCRT64 \x1b[33m/c\x1b[m\r\n$ \x1b]0;UCRT64:/c\x07",
+        );
+        assert_eq!(screen.bottom_non_empty_lines(1), ["$"]);
+        assert!(
+            last_row_is_shell_prompt(&screen),
+            "Git Bash's `$` row read as no prompt"
+        );
+    }
+
+    /// A prompt-looking line above the agent's TUI is not the shell's prompt.
+    #[test]
+    fn an_agent_tui_under_a_prompt_looking_line_is_not_the_shells_prompt() {
+        for above in [r"PS C:\work>", "$", "me@box:~/rt$"] {
+            let mut screen = Screen::new(60, 12);
+            let rule = "─".repeat(58);
+            screen.feed(
+                format!(
+                    "{above}\r\n{rule}\r\n❯ \r\n{rule}\r\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+                )
+                .as_bytes(),
+            );
+            assert!(
+                !last_row_is_shell_prompt(&screen),
+                "the agent's footer under {above:?} read as a prompt"
+            );
+        }
     }
 }

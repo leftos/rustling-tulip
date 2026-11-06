@@ -183,6 +183,44 @@ impl Screen {
         last_non_empty(&self.rows(), n)
     }
 
+    /// The bottom logical line: the last non-empty row, soft-wrapped rows joined.
+    #[must_use]
+    pub fn bottom_logical_line(&self) -> Option<String> {
+        let grid = self.term.grid();
+        let row_text = |index: usize| {
+            let row = &grid[Line::from(index)];
+            let mut text = String::with_capacity(self.cols);
+            for column in 0..self.cols {
+                let cell = &row[Column(column)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                text.push(cell.c);
+                if let Some(extra) = cell.zerowidth() {
+                    text.extend(extra);
+                }
+            }
+            text
+        };
+        let wraps = |index: usize| {
+            grid[Line::from(index)][Column(self.cols - 1)]
+                .flags
+                .contains(Flags::WRAPLINE)
+        };
+        let last = (0..self.rows)
+            .rev()
+            .find(|&index| !row_text(index).trim_end().is_empty())?;
+        let mut first = last;
+        while first > 0 && wraps(first - 1) {
+            first -= 1;
+        }
+        let joined: String = (first..=last).map(row_text).collect();
+        Some(joined.trim_end().to_owned())
+    }
+
     /// The rows below the last rule row, trailing empty rows dropped.
     #[must_use]
     pub fn after_last_horizontal_rule(&self) -> Vec<String> {
