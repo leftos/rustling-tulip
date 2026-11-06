@@ -15,7 +15,7 @@ It is alpha software.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
 - Tab pills and, on Windows, a badge on the taskbar button count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead.
 - The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A notification fires when a session needs you or finishes (skipped when you are already looking at it), after a wait you choose for Finished.
-- On Windows, notifications can be the app's own toasts, which answer a prompt or go to its pane without taking focus. Each kind plays its own sound, silent during Do Not Disturb: a chime from the bundled list, your own .wav or .ogg, or none.
+- Notifications can be the app's own toasts, which answer a prompt or go to its pane without taking focus; on macOS they always are. Each kind plays its own sound, silent during Do Not Disturb: a chime from the bundled list, your own .wav or .ogg, or none.
 - Turn on session summaries in Settings › Dashboard and each finished turn of a Claude session gets a one-line summary, kept across restarts, with a daily cap on what they spend.
 - The Dashboard tab, opened from the activity rail, opens on a Compact view of every running agent by repo, with its state, work and subagents and no scrolling. Its By status view adds context, recent work, cost, a two-hour activity bar and the Linear issue named in each session's branch, with a drawer per session.
 - Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane; the header counts today's cost, tokens and commits across every session.
@@ -24,11 +24,14 @@ It is alpha software.
 - Tabs and split panes: drag a pane or a sidebar session onto a pane to split, swap or move it, rearrange a tab into a grid, and undo a closed tab or a moved pane.
 - The sidebar groups sessions by repo or by tab, in Comfortable or Compact rows, and can show every session under a repo, only the busy ones, or just a count.
 - Repos sort with the ones that need you on top, by latest activity, or in your own order, and an All / Active switch hides the repos and workspaces with nothing running.
-- Right-click a repo or workspace for a Spawn submenu: Last, each agent, Shell and your presets. The New session dialog picks its target from a dropdown and remembers your Trusted choice.
+- Right-click a repo or workspace for a Spawn submenu: Last, each agent, Shell and your presets. The New session dialog picks its target from a list that narrows as you type, and remembers your Trusted choice.
+- Pick each host's default shell for new sessions and shells, from the shells installed there (PowerShell, cmd, Git Bash, WSL, Nushell, fish, zsh or bash) or your own command. Claude sessions start inside it.
 - Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges, and on a remote host the wizard takes typed paths on that host.
 - In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, a file path opens in its default app with Ctrl+click and in the viewer with Ctrl+Shift+click, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
 - Terminal programs that ask for urxvt or pixel-precise mouse reporting get clicks, drags and the wheel in the format they asked for.
 - When Claude exits, its pane stays a working shell, and its Chat and Summary views turn off until Claude starts again.
+- Start Claude yourself in a plain shell, by name, an alias or a wrapper, and the pane gets Chat and Summary while it runs. Settings › Claude can install the app's hooks in Claude Code's own settings, so such a Claude reports its conversation and status too.
+- On macOS hosts, programs that ask the terminal for its colours, such as bat and delta, get your theme's.
 - Secret environment values you give a session are stored in Windows Credential Manager, never in a settings file.
 
 ![The Dashboard tab's Compact view: a queue of the sessions waiting on you, then every session by repo with its state, what it is doing now and its running subagents and background work](docs/images/dashboard.png)
@@ -44,6 +47,21 @@ It is alpha software.
 - Compact mode, on by default, folds a run of reads, searches and commands into one line you can open. The chat column keeps a readable width on wide panes, and each turn's final answer sits in its own box.
 
 ![A Claude session's pane in the chat view, with its conversation, a permission card and the message box](docs/images/chat.png)
+
+### Claude accounts
+
+- Save several Claude logins and switch between them. The footer shows the account in use with its five-hour and weekly usage; click it to switch, turn auto-switch on and see when your accounts run dry.
+- Settings › Accounts lists your saved accounts to switch, rename, reorder, remove or add, logs in a new account in a terminal session, and sets auto-switch's threshold, cooldown, strategy and forecast window.
+- A toast tells you when auto-switch changes accounts, finds every account used up, or stops.
+
+![The footer's account popover: each saved account's five-hour and weekly usage with its resets, a Switch button, the account in use, and auto-switch at 85%](docs/images/accounts.png)
+
+### Gates
+
+- On Windows, a Gates view on the activity rail shows this PC's gate slots, the runs holding them, waiting gates and the queue, and sets each pool's slot count. Each row shows its command's usual time beside its own.
+- It lists the last two hours' gated runs with how each ended, and the last seven days' most frequent passed commands. A footer pill counts busy slots and names a run that failed in the last ten minutes.
+
+![The Gates view: the heavy, light and remote pools with their running commands and usual times, a held slot, the queue and recent runs, and the footer's Gates pill naming a failed run](docs/images/gates.png)
 
 ### Several hosts in one window
 
@@ -130,6 +148,15 @@ On a Mac with Apple silicon (there is no build for Intel Macs):
 4. Secret environment rows need Windows Credential Manager, so on a Mac a session with a secret row will not start; give it the secret through an `${env:NAME}` row instead.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.10.0-alpha
+
+- rustling-tulip now runs on Apple silicon Macs, as a signed and notarized .dmg that updates itself.
+- Save several Claude logins, see each one's usage in the footer, and switch accounts by hand or let auto-switch do it.
+- On Windows, a Gates view shows this PC's gate slots, queue and recent runs, and sets each pool's slot count.
+- Pick each host's default shell, and a Claude you start by hand in a shell gets Chat and Summary too.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.10.0-alpha).
 
 ## What's new in v0.9.0-alpha
 
