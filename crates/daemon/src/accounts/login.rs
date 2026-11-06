@@ -16,9 +16,11 @@
 //! session (unless its exit is already in), waits up to [`STOP_WAIT`] for the
 //! exit, and has the runner discard the session's record. The scratch folder
 //! is removed only once the child is confirmed gone and no capture runs;
-//! otherwise it is left for the start-up sweep. The slot is Idle again
-//! before the terminal state is sent, so a client that starts again on it is
-//! not refused busy.
+//! otherwise it is left for the start-up sweep. On Windows, a folder a
+//! process the session left still holds (a wrapped CLI's grandchild whose
+//! cwd it is) is retried for up to `SCRATCH_RELEASE_WAIT` before it too is
+//! left for the sweep. The slot is Idle again before the terminal state is
+//! sent, so a client that starts again on it is not refused busy.
 //!
 //! The slot's lock is never held across an `.await`, a spawn of the login,
 //! the capture, or a send.
@@ -1276,19 +1278,75 @@ async fn discard_login(service: super::SharedAccounts, scratch: PathBuf) {
     }
 }
 
+/// How long [`remove_scratch`] keeps retrying a folder a process the session
+/// left still holds (a wrapped CLI's grandchild, whose cwd is the folder
+/// until the tracer's job ends it). Longer than the tracer's slowest normal
+/// exit after its child's: a 200 ms grace plus up to a 3 s reader join.
+#[cfg(windows)]
+const SCRATCH_RELEASE_WAIT: Duration = Duration::from_secs(5);
+
+/// The pause between two tries at removing a held folder.
+#[cfg(windows)]
+const SCRATCH_RETRY: Duration = Duration::from_millis(50);
+
+/// Windows' `ERROR_SHARING_VIOLATION`: another process holds the folder or a
+/// file in it. No other target reports it.
+#[cfg(windows)]
+const SHARING_VIOLATION: i32 = 32;
+
+/// Remove the run's folder off the async threads; one already gone is fine.
+/// A folder still held by a process the session left is retried every
+/// [`SCRATCH_RETRY`] for up to [`SCRATCH_RELEASE_WAIT`]; past that, and on
+/// any other failure, it is left for the start-up sweep.
+#[cfg(windows)]
+async fn remove_scratch(scratch: PathBuf) {
+    let shown = scratch.display().to_string();
+    let deadline = tokio::time::Instant::now() + SCRATCH_RELEASE_WAIT;
+    loop {
+        let path = scratch.clone();
+        match tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&path)).await {
+            Ok(Ok(())) => return,
+            Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Ok(Err(err))
+                if err.raw_os_error() == Some(SHARING_VIOLATION)
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(SCRATCH_RETRY).await;
+            }
+            Ok(Err(err)) => {
+                warn!(
+                    %err,
+                    scratch = %shown,
+                    "could not remove the login's folder; the start-up sweep removes it"
+                );
+                return;
+            }
+            Err(err) => {
+                warn!(%err, scratch = %shown, "the login folder's removal stopped");
+                return;
+            }
+        }
+    }
+}
+
 /// Remove the run's folder off the async threads; one already gone is fine,
-/// any other failure leaves it for the start-up sweep.
+/// and any other failure is left for the start-up sweep.
+#[cfg(not(windows))]
 async fn remove_scratch(scratch: PathBuf) {
     let shown = scratch.display().to_string();
     match tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&scratch)).await {
         Ok(Ok(())) => {}
         Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(Err(err)) => warn!(
-            %err,
-            scratch = %shown,
-            "could not remove the login's folder; the start-up sweep removes it"
-        ),
-        Err(err) => warn!(%err, scratch = %shown, "the login folder's removal stopped"),
+        Ok(Err(err)) => {
+            warn!(
+                %err,
+                scratch = %shown,
+                "could not remove the login's folder; the start-up sweep removes it"
+            );
+        }
+        Err(err) => {
+            warn!(%err, scratch = %shown, "the login folder's removal stopped");
+        }
     }
 }
 
@@ -1892,6 +1950,63 @@ mod tests {
             [format!("spawn {session} dir=true")],
             "a self-exit is neither stopped nor discarded"
         );
+    }
+
+    /// A cancel whose stop's exit comes in while a process the session left
+    /// (a wrapped CLI's grandchild, whose cwd is the scratch folder until the
+    /// tracer's job takes it) still holds the folder: the run removes the folder
+    /// once that process lets go, before it answers the cancel.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn login_cancel_removes_a_folder_a_lingering_grandchild_held() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        /// How long the grandchild outlives the forwarded exit; the tracer's
+        /// grace alone is 200 ms.
+        const LINGER: Duration = Duration::from_secs(1);
+        let mut rig = rig("login-cancel-held-folder");
+        let session = rig.start_running("l1").await;
+        let _ = rig.login_event().await;
+        // A process's cwd handle: shares read and write, never delete.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2) // FILE_SHARE_READ | FILE_SHARE_WRITE
+            .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS: a directory
+            .open(rig.root.join(&session))
+            .expect("the scratch folder opens as a cwd holds it");
+        let mut held = Some(held);
+
+        let mut canceller = rig.cancel("c1").await;
+        let reply = {
+            let reply = next_reply(&mut canceller);
+            tokio::pin!(reply);
+            tokio::select! {
+                reply = &mut reply => reply,
+                () = tokio::time::sleep(LINGER) => {
+                    held = None;
+                    reply.await
+                }
+            }
+        };
+        drop(held);
+
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::AccountLogin {
+                    state: AccountLoginState::Cancelled,
+                    session_id: Some(id),
+                    request_id: Some(echoed),
+                    ..
+                } if *id == session && echoed == "c1"
+            ),
+            "{reply:?}"
+        );
+        assert!(
+            rig.dirs().is_empty(),
+            "the folder is left: {:?}",
+            rig.dirs()
+        );
+        assert_eq!(rig.slot(), "idle");
     }
 
     #[tokio::test]

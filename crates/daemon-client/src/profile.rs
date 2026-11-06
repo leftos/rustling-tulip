@@ -195,6 +195,8 @@ pub struct ProfileRoots {
     /// The account store's root: the saved agent logins the daemon switches
     /// between. An elevated daemon never opens it.
     pub accounts: PathBuf,
+    /// The root of the daemon-driven account logins' scratch folders.
+    pub account_login: PathBuf,
 }
 
 /// The folder overrides the environment sets; each beats the profile for the
@@ -305,6 +307,13 @@ pub fn roots_for(
             base.join("accounts")
         }
     });
+    // The account logins' scratch root too: a login writes credentials there,
+    // so an isolated daemon keeps it in its own tree.
+    let account_login = if overrides.config.is_some() {
+        config.join("account-login")
+    } else {
+        base.join("account-login")
+    };
     ProfileRoots {
         binaries: overrides
             .binaries
@@ -320,6 +329,7 @@ pub fn roots_for(
             .unwrap_or_else(|| base.join("tailnet")),
         summarizer: base.join("summarizer"),
         accounts,
+        account_login,
         daemon_id,
         config,
         root,
@@ -519,7 +529,7 @@ mod tests {
     }
 
     /// Every path field of `roots`, named.
-    fn fields(roots: &ProfileRoots) -> [(&'static str, &PathBuf); 7] {
+    fn fields(roots: &ProfileRoots) -> [(&'static str, &PathBuf); 8] {
         [
             ("config", &roots.config),
             ("binaries", &roots.binaries),
@@ -528,6 +538,7 @@ mod tests {
             ("tailnet", &roots.tailnet),
             ("summarizer", &roots.summarizer),
             ("accounts", &roots.accounts),
+            ("account_login", &roots.account_login),
         ]
     }
 
@@ -555,6 +566,7 @@ mod tests {
                 tailnet: data_local.join("tailnet"),
                 summarizer: data_local.join("summarizer"),
                 accounts: data_local.join("accounts"),
+                account_login: data_local.join("account-login"),
             },
             "an ordinary daemon's saved data stays where it is"
         );
@@ -648,6 +660,7 @@ mod tests {
                 tailnet: config.join("tailnet"),
                 summarizer: config.join("summarizer"),
                 accounts: config.join("accounts"),
+                account_login: config.join("account-login"),
             },
             "an isolated elevated run keeps everything under its config override"
         );
@@ -817,6 +830,24 @@ mod tests {
                 "{profile:?}: an isolated daemon's store reaches the real data dir"
             );
         }
+    }
+
+    #[test]
+    fn account_login_root_sits_in_an_overridden_config_dir() {
+        let config = std::env::temp_dir()
+            .join("rt-account-login-config")
+            .join("config");
+        let overrides = Overrides {
+            config: Some(config.clone()),
+            ..Overrides::default()
+        };
+        let account_login = roots_of(Profile::Ordinary, &overrides).account_login;
+        assert_eq!(account_login, config.join("account-login"));
+        assert!(
+            !account_login.starts_with(data_local()),
+            "{}",
+            account_login.display()
+        );
     }
 
     #[test]

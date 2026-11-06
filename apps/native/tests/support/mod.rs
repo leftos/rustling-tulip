@@ -38,6 +38,7 @@ use rustling_tulip_native::{
 use serde_json::{Value, json};
 
 pub mod live;
+pub mod profile_server;
 
 pub const PROTOCOL: u32 = 1;
 

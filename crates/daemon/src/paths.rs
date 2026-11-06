@@ -176,15 +176,6 @@ mod dir_tests {
     }
 
     #[test]
-    fn account_login_dir_is_beside_the_summarizer_dir() {
-        let data = PathBuf::from(r"C:\scratch\data");
-        assert_eq!(
-            account_login_dir_of(&data.join("summarizer")),
-            data.join("account-login")
-        );
-    }
-
-    #[test]
     fn elevated_profile_has_no_accounts_dir() {
         let accounts = PathBuf::from(r"C:\scratch\accounts");
         assert_eq!(accounts_dir_of(Profile::Elevated, accounts.clone()), None);
@@ -402,22 +393,15 @@ pub(crate) fn resolve_summarizer_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// The root of the daemon-driven account logins' scratch folders by the
-/// profile: `<data dir>/account-login`, beside the summarizer's folder (an
-/// ordinary daemon's is `%LOCALAPPDATA%\leftos\rustling-tulip\data\account-login\`
-/// on Windows; an elevated daemon's is under its protected root). Never under
-/// an agent's own config home. Nothing is created here; a login run creates
+/// profile ([`profile::ProfileRoots::account_login`]): an ordinary daemon's
+/// is `%LOCALAPPDATA%\leftos\rustling-tulip\data\account-login\` on Windows,
+/// an elevated daemon's is under its protected root, and under a
+/// `RUSTLING_TULIP_CONFIG_DIR` override it is `<config dir>/account-login`,
+/// so an isolated daemon keeps its logins in its own tree. Never under an
+/// agent's own config home. Nothing is created here; a login run creates
 /// the root, and its own folder in it, when it starts.
 pub(crate) fn resolve_account_login_dir() -> anyhow::Result<PathBuf> {
-    Ok(account_login_dir_of(&profile::roots()?.1.summarizer))
-}
-
-/// The login root beside the summarizer folder `summarizer`: both sit in the
-/// profile's data dir.
-fn account_login_dir_of(summarizer: &Path) -> PathBuf {
-    summarizer
-        .parent()
-        .unwrap_or(summarizer)
-        .join("account-login")
+    Ok(profile::roots()?.1.account_login)
 }
 
 /// The account store's root by the profile ([`profile::ProfileRoots::accounts`]),

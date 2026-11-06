@@ -114,7 +114,76 @@ pub(crate) fn service_for(
     ask: impl FnOnce(&AccountsConfig) -> Option<SharedAccounts>,
 ) -> Option<SharedAccounts> {
     let cfg = AccountsConfig::new(dir?);
+    #[cfg(feature = "e2e-loopback-peers")]
+    let cfg = match accounts_base_url_override(|name| std::env::var(name).ok()) {
+        Some(url) => {
+            warn!(
+                origin = %url,
+                "built with e2e-loopback-peers: the account service's profile, usage and refresh requests go to RUSTLING_TULIP_ACCOUNTS_BASE_URL; never ship this build"
+            );
+            AccountsConfig {
+                base_url: Some(url),
+                ..cfg
+            }
+        }
+        None => cfg,
+    };
     ask(&cfg)
+}
+
+/// The origin `RUSTLING_TULIP_ACCOUNTS_BASE_URL` names, read through `read`:
+/// the value when it is an `http://` or `https://` origin on a loopback host
+/// ([`is_loopback_origin`]), else `None` (any other value is warned of and
+/// ignored). Only an `e2e-loopback-peers` build asks, so the live specs can
+/// point the account service's requests at a local server.
+#[cfg_attr(
+    all(not(feature = "e2e-loopback-peers"), not(test)),
+    expect(
+        dead_code,
+        reason = "only an e2e-loopback-peers build reads the override"
+    )
+)]
+fn accounts_base_url_override(read: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let value = read("RUSTLING_TULIP_ACCOUNTS_BASE_URL")?;
+    if is_loopback_origin(&value) {
+        return Some(value);
+    }
+    if !value.is_empty() {
+        warn!(
+            value = %value,
+            "RUSTLING_TULIP_ACCOUNTS_BASE_URL is not a loopback http(s) origin; ignored"
+        );
+    }
+    None
+}
+
+/// Whether `value` is `http://` or `https://`, then `127.0.0.1`, `[::1]` or
+/// `localhost`, then an optional `:<port>`, with nothing after it.
+#[cfg_attr(
+    all(not(feature = "e2e-loopback-peers"), not(test)),
+    expect(
+        dead_code,
+        reason = "only an e2e-loopback-peers build reads the override"
+    )
+)]
+fn is_loopback_origin(value: &str) -> bool {
+    let Some(authority) = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let (host, port) = if authority.ends_with(']') {
+        (authority, None)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    let port_ok =
+        port.is_none_or(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+    port_ok && (host == "127.0.0.1" || host == "[::1]" || host.eq_ignore_ascii_case("localhost"))
 }
 
 /// Handle the accounts messages `dispatch` routes here.
@@ -1086,6 +1155,67 @@ mod tests {
             asked.load(Ordering::SeqCst),
             "an ordinary daemon did not ask"
         );
+    }
+
+    /// A reader of the process environment holding `value` for the base-URL
+    /// variable alone.
+    fn holding(value: Option<&str>) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            (name == "RUSTLING_TULIP_ACCOUNTS_BASE_URL")
+                .then(|| value.map(str::to_owned))
+                .flatten()
+        }
+    }
+
+    #[test]
+    fn accounts_base_url_override_takes_an_http_url() {
+        assert_eq!(
+            accounts_base_url_override(holding(Some("http://127.0.0.1:5000"))),
+            Some("http://127.0.0.1:5000".to_owned())
+        );
+    }
+
+    #[test]
+    fn accounts_base_url_override_takes_an_https_loopback_url() {
+        assert_eq!(
+            accounts_base_url_override(holding(Some("https://[::1]:8443"))),
+            Some("https://[::1]:8443".to_owned())
+        );
+    }
+
+    #[test]
+    fn accounts_base_url_override_takes_localhost() {
+        assert_eq!(
+            accounts_base_url_override(holding(Some("http://localhost:9"))),
+            Some("http://localhost:9".to_owned())
+        );
+    }
+
+    #[test]
+    fn accounts_base_url_override_ignores_a_host_off_loopback() {
+        assert_eq!(
+            accounts_base_url_override(holding(Some("https://example.test"))),
+            None
+        );
+        assert_eq!(
+            accounts_base_url_override(holding(Some("http://10.0.0.1:9"))),
+            None
+        );
+    }
+
+    #[test]
+    fn accounts_base_url_override_ignores_an_empty_value() {
+        assert_eq!(accounts_base_url_override(holding(Some(""))), None);
+    }
+
+    #[test]
+    fn accounts_base_url_override_ignores_a_value_that_is_not_an_http_url() {
+        assert_eq!(accounts_base_url_override(holding(Some("ftp://x"))), None);
+    }
+
+    #[test]
+    fn accounts_base_url_override_is_none_when_the_variable_is_unset() {
+        assert_eq!(accounts_base_url_override(holding(None)), None);
     }
 
     use super::fake::{ADDED, HANG, Writable, ask_as, dispatch_with, next_reply};

@@ -12,6 +12,9 @@
 #[expect(dead_code, reason = "each spec file uses its own share of the helper")]
 mod support;
 
+use std::ffi::OsString;
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -19,8 +22,9 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use gpui::{TestAppContext, px, size};
 use protocol::{
-    ChatEntry, ClientMessage, DaemonMessage, InitLayoutKind, PendingInput, PendingQuestion,
-    SessionMode, SessionSnapshot, SessionStatus, SplitDirection, SplitPlace, UserHooksWire,
+    AccountLoginState, AccountSnapshot, ChatEntry, ClientMessage, DaemonMessage, FEATURE_ACCOUNTS,
+    InitLayoutKind, PendingInput, PendingQuestion, SessionMode, SessionSnapshot, SessionStatus,
+    SplitDirection, SplitPlace, UserHooksWire,
 };
 use serde_json::{Value, json};
 use support::Harness;
@@ -28,6 +32,7 @@ use support::live::{
     HANG_GUARD, LiveClient, LiveDaemon, kill_tree, processes_under, spawn_default_agent_in_place,
     spawn_shell, target_bin_dir,
 };
+use support::profile_server::{ProfileServer, fake_login_token, fake_login_uuids};
 
 /// Waits until the view's latest state is open on `daemon`'s port with no
 /// connecting overlay.
@@ -133,6 +138,371 @@ fn live_connects_and_reports_connected(cx: &mut TestAppContext) {
     let labels = client.footer_labels();
     let last = labels.last().expect("the view was sent a state");
     assert_eq!(last, "0 sessions", "footer labels: {labels:?}");
+}
+
+/// Waits until `pick` answers a message the daemon sent this client, newest
+/// first, and returns the answer.
+fn wait_message<R>(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    what: &str,
+    mut pick: impl FnMut(&DaemonMessage) -> Option<R>,
+) -> R {
+    let mut found = None;
+    h.wait_until(what, |_| {
+        found = client.find_message(&mut pick);
+        found.is_some()
+    });
+    found.expect("the wait just found it")
+}
+
+/// Whether the live login specs run on this host: they need the Windows
+/// credential file the fake CLI's login writes (a macOS daemon captures a
+/// login from the Keychain), so elsewhere a spec says it skipped and returns
+/// before it starts a daemon.
+#[expect(
+    clippy::print_stderr,
+    reason = "a skipped spec says so in the run's output"
+)]
+fn login_specs_run_here() -> bool {
+    if cfg!(windows) {
+        return true;
+    }
+    eprintln!("skipped: the live login specs need Windows");
+    false
+}
+
+/// Waits until an `AccountsUpdated` or `Accounts` message lists `email` as
+/// account 1, and returns that message's accounts.
+fn wait_captured(h: &mut Harness<'_>, client: &LiveClient, email: &str) -> Vec<AccountSnapshot> {
+    wait_message(
+        h,
+        client,
+        &format!("an accounts list holding {email} as account 1"),
+        |msg| match msg {
+            DaemonMessage::AccountsUpdated { accounts, .. }
+            | DaemonMessage::Accounts { accounts, .. }
+                if accounts
+                    .iter()
+                    .any(|account| account.email == email && account.number == 1) =>
+            {
+                Some(accounts.clone())
+            }
+            _ => None,
+        },
+    )
+}
+
+/// Waits for the daemon's `Welcome` and fails at once when it offers no
+/// accounts feature, which an account login needs.
+fn require_accounts_feature(h: &mut Harness<'_>, client: &LiveClient) {
+    let features = wait_message(h, client, "the daemon's welcome", |msg| match msg {
+        DaemonMessage::Welcome { features, .. } => Some(features.clone()),
+        _ => None,
+    });
+    assert!(
+        features.iter().any(|feature| feature == FEATURE_ACCOUNTS),
+        "the isolated daemon offers no accounts feature; the live login specs need 64-bit Windows"
+    );
+}
+
+/// The answer to request `id`: the `AccountLogin` or `Error` echoing it.
+fn login_answer(h: &mut Harness<'_>, client: &LiveClient, id: &str) -> DaemonMessage {
+    wait_message(h, client, &format!("the answer to {id}"), |msg| match msg {
+        DaemonMessage::AccountLogin {
+            request_id: Some(echoed),
+            ..
+        }
+        | DaemonMessage::Error {
+            request_id: Some(echoed),
+            ..
+        } if echoed == id => Some(msg.clone()),
+        _ => None,
+    })
+}
+
+/// Starts an account login as request `l1` and returns its session id once
+/// the daemon says it started.
+fn start_login(h: &mut Harness<'_>, client: &LiveClient) -> String {
+    client.send(ClientMessage::StartAccountLogin {
+        request_id: Some("l1".to_owned()),
+    });
+    let answer = login_answer(h, client, "l1");
+    let session = match &answer {
+        DaemonMessage::AccountLogin {
+            state: AccountLoginState::Started,
+            session_id: Some(session),
+            ..
+        } => Some(session.clone()),
+        _ => None,
+    };
+    assert!(session.is_some(), "the login did not start: {answer:?}");
+    session.expect("checked just above")
+}
+
+/// The first `AccountLogin` that ends the login (any state but `Started`):
+/// its state and message.
+fn wait_login_end(h: &mut Harness<'_>, client: &LiveClient) -> (AccountLoginState, Option<String>) {
+    wait_message(h, client, "the login to end", |msg| match msg {
+        DaemonMessage::AccountLogin { state, message, .. }
+            if *state != AccountLoginState::Started =>
+        {
+            Some((*state, message.clone()))
+        }
+        _ => None,
+    })
+}
+
+/// The accounts the daemon lists, asked as request `id`.
+fn list_accounts(h: &mut Harness<'_>, client: &LiveClient, id: &str) -> Vec<AccountSnapshot> {
+    client.send(ClientMessage::ListAccounts {
+        request_id: Some(id.to_owned()),
+    });
+    wait_message(
+        h,
+        client,
+        &format!("the accounts answer to {id}"),
+        |msg| match msg {
+            DaemonMessage::Accounts {
+                accounts,
+                request_id: Some(echoed),
+                ..
+            } if echoed == id => Some(accounts.clone()),
+            _ => None,
+        },
+    )
+}
+
+/// Every folder named `name` under `root`, and under
+/// `<local_app_data>/leftos/rustling-tulip` (the ordinary profile's data),
+/// for a failure that says where a login's folder went.
+fn folders_named(name: &str, root: &Path, local_app_data: Option<OsString>) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    if let Some(local) = local_app_data {
+        pending.push(PathBuf::from(local).join("leftos").join("rustling-tulip"));
+    }
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.filter_map(|entry| Some(entry.ok()?.path())) {
+            if path.is_dir() {
+                if path.file_name().is_some_and(|file| file == name) {
+                    found.push(path.clone());
+                }
+                pending.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// The values the fake CLI's `loginFiles` and `uuidOf` give for its default
+/// email, worked from the SHA-256 of `login@example.com`
+/// (`9f514e36d9d6164173b6156375a68021` `41c49447e2142b1c4b8ca7409a1a9cf9`).
+/// Here, not in `support`, so it runs once rather than in every binary.
+#[test]
+fn the_fake_login_identity_matches_the_fake_cli() {
+    let (account, organization) = fake_login_uuids("login@example.com");
+    assert_eq!(account, "9f514e36-d9d6-1641-73b6-156375a68021");
+    assert_eq!(organization, "41c49447-e214-2b1c-4b8c-a7409a1a9cf9");
+    assert_eq!(
+        fake_login_token("login@example.com"),
+        "fake-access-9f514e36d9d6"
+    );
+}
+
+/// A client that connects and sends nothing holds the profile server only
+/// until its read timeout: a later request is still answered, and dropping
+/// the server returns.
+#[test]
+fn the_profile_server_answers_after_a_stalled_connection() {
+    let server = ProfileServer::start(&["login@example.com"]);
+    let origin = server.origin();
+    let addr = origin.trim_start_matches("http://");
+    let stalled = TcpStream::connect(addr).expect("the stalling client connects");
+    let mut asking = TcpStream::connect(addr).expect("the asking client connects");
+    asking
+        .set_read_timeout(Some(HANG_GUARD))
+        .expect("a read timeout can be set");
+    write!(
+        asking,
+        "GET /api/oauth/profile HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\n\r\n",
+        fake_login_token("login@example.com")
+    )
+    .expect("the request is sent");
+    let mut answer = String::new();
+    asking
+        .read_to_string(&mut answer)
+        .expect("the answer arrives before the hang guard");
+
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    let (account, _) = fake_login_uuids("login@example.com");
+    assert!(answer.contains(&account), "{answer}");
+    drop(stalled);
+    drop(server);
+}
+
+/// The folder the daemon logs in from, for every login of `daemon`.
+fn login_root(daemon: &LiveDaemon) -> PathBuf {
+    daemon.config_dir().join("account-login")
+}
+
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn an_account_login_adds_the_account_it_captured(cx: &mut TestAppContext) {
+    if !login_specs_run_here() {
+        return;
+    }
+    let server = ProfileServer::start(&["login@example.com"]);
+    let daemon = LiveDaemon::start_with_env(
+        "login-ok",
+        &[
+            (
+                "RUSTLING_TULIP_ACCOUNTS_BASE_URL",
+                OsString::from(server.origin()),
+            ),
+            ("FAKE_CLAUDE_LOGIN", OsString::from("ok")),
+        ],
+    );
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+    require_accounts_feature(&mut h, &client);
+
+    let session = start_login(&mut h, &client);
+    let (state, message) = wait_login_end(&mut h, &client);
+
+    assert_eq!(
+        state,
+        AccountLoginState::Succeeded,
+        "the login ended: {message:?}"
+    );
+    let accounts = wait_captured(&mut h, &client, "login@example.com");
+    assert_eq!(accounts.len(), 1, "{accounts:?}");
+    assert_eq!(accounts[0].email, "login@example.com");
+    assert_eq!(accounts[0].number, 1);
+    let scratch = login_root(&daemon).join(&session);
+    assert!(
+        !scratch.exists(),
+        "the login's scratch folder {} is left",
+        scratch.display()
+    );
+    let requests = server.requests();
+    assert!(
+        requests.iter().any(|request| {
+            let mut lines = request.lines();
+            lines
+                .next()
+                .is_some_and(|line| line.starts_with("GET /api/oauth/profile "))
+                && lines.next().is_some_and(|auth| auth.starts_with("Bearer "))
+        }),
+        "the profile server saw no bearer GET of the profile: {requests:?}"
+    );
+}
+
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn a_failed_account_login_says_why(cx: &mut TestAppContext) {
+    if !login_specs_run_here() {
+        return;
+    }
+    let daemon = LiveDaemon::start_with_env(
+        "login-fail",
+        &[("FAKE_CLAUDE_LOGIN", OsString::from("fail"))],
+    );
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+    require_accounts_feature(&mut h, &client);
+
+    let session = start_login(&mut h, &client);
+    let (state, message) = wait_login_end(&mut h, &client);
+
+    assert_eq!(state, AccountLoginState::Failed, "{message:?}");
+    let message = message.expect("a failed login says why");
+    assert!(
+        message.starts_with("the login exited with code 1"),
+        "{message:?}"
+    );
+    assert!(message.contains("Login failed. (fake)"), "{message:?}");
+    let accounts = list_accounts(&mut h, &client, "a1");
+    assert!(accounts.is_empty(), "{accounts:?}");
+    let scratch = login_root(&daemon).join(&session);
+    assert!(
+        !scratch.exists(),
+        "the login's scratch folder {} is left",
+        scratch.display()
+    );
+}
+
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn a_cancelled_account_login_leaves_no_scratch_folder(cx: &mut TestAppContext) {
+    if !login_specs_run_here() {
+        return;
+    }
+    let daemon = LiveDaemon::start_with_env(
+        "login-cancel",
+        &[("FAKE_CLAUDE_LOGIN", OsString::from("hang"))],
+    );
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+    require_accounts_feature(&mut h, &client);
+
+    let session = start_login(&mut h, &client);
+    let root = login_root(&daemon);
+    let scratch = root.join(&session);
+    // The daemon makes the folder before it says the login started; a folder
+    // elsewhere fails with where it went and what the daemon logged.
+    assert!(
+        scratch.is_dir(),
+        "no login scratch folder at {}; folders named for the login: {:?}; the daemon logged:\n{}",
+        scratch.display(),
+        folders_named(&session, daemon.dir(), std::env::var_os("LOCALAPPDATA")),
+        daemon
+            .daemon_log()
+            .lines()
+            .filter(|line| line.contains("login"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // Cancel with the fake's own process up, which holds the folder as its
+    // cwd until the session's tracer ends it.
+    wait_scrollback(&mut h, &client, &session, "Opening the browser to sign in");
+    client.send(ClientMessage::CancelAccountLogin {
+        request_id: Some("c1".to_owned()),
+    });
+    let answer = login_answer(&mut h, &client, "c1");
+
+    assert!(
+        matches!(
+            answer,
+            DaemonMessage::AccountLogin {
+                state: AccountLoginState::Cancelled,
+                ..
+            }
+        ),
+        "{answer:?}"
+    );
+    assert!(
+        !scratch.exists(),
+        "the login's scratch folder {} is left",
+        scratch.display()
+    );
+    let listed = std::fs::read_dir(&root).and_then(|entries| {
+        entries
+            .map(|entry| Ok(entry?.path()))
+            .collect::<std::io::Result<Vec<PathBuf>>>()
+    });
+    let left = match listed {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        listed => listed
+            .map_err(|err| format!("{}: {err}", root.display()))
+            .expect("the login folder can be listed"),
+    };
+    assert!(left.is_empty(), "the login folder holds {left:?}");
+    let accounts = list_accounts(&mut h, &client, "a1");
+    assert!(accounts.is_empty(), "{accounts:?}");
 }
 
 /// Runs one `rustling-tulipd` verb against `daemon`, under its isolation
