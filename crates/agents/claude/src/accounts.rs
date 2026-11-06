@@ -375,7 +375,11 @@ impl Drop for ClaudeAccounts {
 impl AccountsService for ClaudeAccounts {
     fn snapshot(&self) -> Result<AccountsSnapshot, AccountsError> {
         let store = self.open_store()?;
-        let mut snapshot = read_store(&store)?.snapshot;
+        let live = self
+            .claude_paths()
+            .ok()
+            .and_then(|paths| live_identity(&paths));
+        let mut snapshot = read_store(&store, live.as_ref())?.snapshot;
         let auto = self.auto_snapshot(store.root(), &snapshot.accounts);
         snapshot.auto = auto;
         Ok(snapshot)
@@ -411,7 +415,8 @@ impl AccountsService for ClaudeAccounts {
             poll_with_refresh(usage, &settings, context, fetch)
         })?
         .map_err(|error| AccountsError::new(error.to_string()))?;
-        let mut read = read_store(&store)?;
+        let live = live_identity(&claude);
+        let mut read = read_store(&store, live.as_ref())?;
         let auto = self.auto_snapshot(store.root(), &read.snapshot.accounts);
         read.snapshot.auto = auto;
         let next_poll_in = if read.snapshot.accounts.is_empty() {
@@ -1445,9 +1450,11 @@ struct StoreRead {
     next_poll_at: Option<jiff::Timestamp>,
 }
 
-/// Every account in `store`, in its order, with the usage saved for each.
-/// Sends no request: an empty store is an empty snapshot.
-fn read_store(store: &Store) -> Result<StoreRead, AccountsError> {
+/// Every account in `store`, in its order, with the usage saved for each. The
+/// row `live` names is the active one, and none is when it names no stored
+/// account; without a live identity the store's own `active` stands. Sends no
+/// request: an empty store is an empty snapshot.
+fn read_store(store: &Store, live: Option<&Identity>) -> Result<StoreRead, AccountsError> {
     let Some(sequence) = store.read_sequence().map_err(|error| store_error(&error))? else {
         return Ok(StoreRead {
             snapshot: AccountsSnapshot::default(),
@@ -1478,7 +1485,13 @@ fn read_store(store: &Store) -> Result<StoreRead, AccountsError> {
         .filter(|record| !record.disabled)
         .filter_map(|record| usage.get(&record.number)?.next_poll_at)
         .min();
-    let active = sequence.active();
+    let active = match live {
+        Some(live) => identities
+            .iter()
+            .find(|(_, identity)| *identity == live)
+            .map(|(&number, _)| number),
+        None => sequence.active(),
+    };
     let accounts = records
         .into_iter()
         .map(|record| {

@@ -746,6 +746,49 @@ fn snapshot_lists_records_missing_from_the_order() {
     assert_eq!(active, [4]);
 }
 
+/// The row marked active is the account Claude Code's global config is logged
+/// in as, not the store's own `active`.
+#[cfg(accounts_locks)]
+#[test]
+fn snapshot_marks_the_live_login_active() {
+    let dir = scratch("snapshot_marks_the_live_login_active");
+    let root = write_roster_of_two(&dir);
+    log_in(&dir.join("claude"), 2, false);
+
+    let snapshot = service_at(root, dir.join("claude"), None)
+        .snapshot()
+        .expect("the store reads");
+
+    let active: Vec<u32> = snapshot
+        .accounts
+        .iter()
+        .filter(|row| row.active)
+        .map(|row| row.number)
+        .collect();
+    assert_eq!(active, [2]);
+}
+
+/// A live login the store does not save leaves every row inactive.
+#[cfg(accounts_locks)]
+#[test]
+fn snapshot_marks_no_account_active_for_an_unsaved_login() {
+    let dir = scratch("snapshot_marks_no_account_active_for_an_unsaved_login");
+    let root = write_roster_of_two(&dir);
+    log_in(&dir.join("claude"), 9, false);
+
+    let snapshot = service_at(root, dir.join("claude"), None)
+        .snapshot()
+        .expect("the store reads");
+
+    let active: Vec<u32> = snapshot
+        .accounts
+        .iter()
+        .filter(|row| row.active)
+        .map(|row| row.number)
+        .collect();
+    assert!(active.is_empty(), "no account is active, got {active:?}");
+}
+
 #[cfg(accounts_locks)]
 #[test]
 fn snapshot_status_follows_the_latest_failed_poll() {
