@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet dry spells mocks</title>
+<style>
+  :root {
+    --page: #15171c; --pop: #2b3039; --row: #313641; --line: #3a404b;
+    --fg: #e5e6e8; --muted: #8d929c; --dim: #656872; --blue: #7eb4ff; --amber: #e8a531; --red: #ef5c5c; --green: #3fb96a; --violet: #b787f0;
+    --ui: "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--fg); font: 13px/1.4 var(--ui); padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .lede { color: var(--muted); margin: 0 0 22px; max-width: 1000px; }
+  .lane { margin: 0 0 34px; }
+  .lane h2 { font-size: 15px; margin: 0 0 4px; }
+  .tag { display: inline-block; background: var(--blue); color: #0d1320; border-radius: 4px; padding: 0 7px; margin-right: 8px; font-weight: 700; }
+  .note { color: var(--muted); margin: 0 0 12px; max-width: 1000px; }
+  .pop { width: 560px; background: var(--pop); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.45); }
+  .pop .top { display: flex; align-items: center; padding: 12px 14px 4px; }
+  .pop .top b { font-size: 15px; flex: 1; }
+  .btn { border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; margin-left: 6px; }
+  .fleet { padding: 4px 14px 10px; border-bottom: 1px solid var(--line); }
+  .fleet .line { color: var(--fg); }
+  .fleet .line .k { color: var(--muted); }
+  .fleet .line .warn { color: var(--amber); font-weight: 600; }
+  .fleet .line .dry { color: var(--red); font-weight: 600; }
+  .fleet .sub { color: var(--muted); font-size: 12px; }
+  /* timeline */
+  .tl { position: relative; margin-top: 8px; }
+  .tl .track { position: relative; height: 12px; border-radius: 3px; background: #1d2027; overflow: hidden; }
+  .tl .ok { position: absolute; top: 0; bottom: 0; background: rgba(63,185,106,.35); }
+  .tl .gap { position: absolute; top: 0; bottom: 0; background: var(--red); }
+  .tl .gap.soft { background: repeating-linear-gradient(45deg, rgba(239,92,92,.85) 0 4px, rgba(239,92,92,.45) 4px 8px); }
+  .tl .now { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); }
+  .tl .ticks { position: relative; height: 15px; font-size: 10.5px; color: var(--dim); }
+  .tl .ticks span { position: absolute; transform: translateX(-50%); top: 1px; }
+  .tl .tip { position: absolute; top: 30px; z-index: 3; background: #1d2027; border: 1px solid var(--line); border-radius: 5px; padding: 3px 8px; font-size: 11.5px; white-space: nowrap; transform: translateX(-50%); }
+  .acct { padding: 8px 14px; border-bottom: 1px solid var(--line); }
+  .acct.on { background: var(--row); }
+  .acct .h { display: flex; gap: 8px; align-items: baseline; }
+  .acct .h .e { color: var(--muted); }
+  .pill { font-size: 11px; border-radius: 4px; padding: 0 6px; background: rgba(183,135,240,.25); color: #d4abff; }
+  .w { display: grid; grid-template-columns: 26px 150px 42px 1fr; gap: 8px; align-items: center; font-size: 12px; margin-top: 3px; }
+  .w .lbl { color: var(--muted); }
+  .bar { height: 6px; border-radius: 3px; background: #1d2027; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--blue); }
+  .bar i.hi { background: var(--amber); } .bar i.full { background: var(--red); }
+  .w .pct { text-align: right; }
+  .w .r { color: var(--muted); }
+  .w .r b { color: var(--fg); font-weight: 600; }
+  .mini { display: grid; grid-template-columns: 26px 1fr; gap: 8px; align-items: center; margin-top: 5px; }
+  .mini .lbl { color: var(--dim); font-size: 11px; }
+  .mini .tl .track { height: 6px; }
+  .foot { padding: 8px 14px; color: var(--muted); font-size: 12px; }
+  .row { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-start; }
+  .formats { width: 420px; background: var(--pop); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+  .formats div { padding: 5px 0; border-top: 1px solid var(--line); }
+  .formats div:first-child { border-top: 0; }
+  .formats .k { color: var(--muted); font-size: 11.5px; display: block; }
+</style>
+</head>
+<body>
+<h1>Fleet status: return times, dry duration and dry spells</h1>
+<p class="lede">The Claude accounts popover (also shown on Settings › Accounts). Today its fleet line reads "Runs dry at Sun 12:38 · back Mon 12:38 · 5 accounts": weekday and time only, no date, no duration, and only the first dry spell. The daemon's forecast already finds every fleet-wide dry spell over its window; the bar below needs them sent to the client. Sample data: now is Fri 6 Nov 14:00, with the forecast running 7 days ahead.</p>
+
+<section class="lane">
+  <h2><span class="tag">A</span>Fleet line with dates and durations, plus a 7-day fleet bar</h2>
+  <p class="note">The line gives each time as a date and time plus how far off it is, and how long the fleet stays dry. The bar shows the next 7 days: green while some account has usage left, red for each projected spell when every account is used up, with a white line at now. Hovering a spell shows its start, end and length. Each used-up window's "back" also gets a date and a countdown.</p>
+  <div class="pop">
+    <div class="top"><b>Claude accounts</b><span class="btn">Auto-switch: On</span><span class="btn">−</span><span class="btn" style="border:0">at 85%</span><span class="btn">+</span></div>
+    <div class="fleet">
+      <div class="line"><span class="warn">Runs dry Sun 8 Nov 12:38</span> <span class="k">(in 1d22h)</span> · <span class="dry">dry for 24h00m</span> · back <b>Mon 9 Nov 12:38</b> · 7 accounts</div>
+      <div class="sub">Then dry again Wed 11 Nov 03:10 for 6h20m.</div>
+      <div class="tl" style="margin-bottom:26px">
+        <div class="tip" style="left:39.6%">Sun 8 Nov 12:38 → Mon 9 Nov 12:38 · 24h00m</div>
+        <div class="track">
+          <div class="ok" style="left:0;width:100%"></div>
+          <div class="gap" style="left:27.7%;width:14.3%"></div>
+          <div class="gap" style="left:65.1%;width:3.8%"></div>
+          <div class="now" style="left:0"></div>
+        </div>
+        <div class="ticks"><span style="left:0;transform:none">now</span><span style="left:14.3%">Sat</span><span style="left:28.6%">Sun</span><span style="left:42.9%">Mon</span><span style="left:57.1%">Tue</span><span style="left:71.4%">Wed</span><span style="left:85.7%">Thu</span><span style="left:100%;transform:translateX(-100%)">Fri</span></div>
+      </div>
+    </div>
+    <div class="acct on"><div class="h"><b>main</b><span class="e">leftos.dev.5@proton.me</span><span class="pill">In use</span></div>
+      <div class="w"><span class="lbl">5h</span><div class="bar"><i style="width:34%"></i></div><span class="pct">34%</span><span class="r">resets 17:58 <span class="k">(in 3h58m)</span></span></div>
+      <div class="w"><span class="lbl">7d</span><div class="bar"><i style="width:41%"></i></div><span class="pct">41%</span><span class="r">resets Sun 8 Nov 09:38</span></div>
+    </div>
+    <div class="acct"><div class="h"><b>lab</b><span class="e">leftos.dev@gmail.com</span></div>
+      <div class="w"><span class="lbl">5h</span><div class="bar"><i class="full" style="width:100%"></i></div><span class="pct" style="color:var(--red)">100%</span><span class="r">used up · back <b>16:33</b> (in 2h33m)</span></div>
+      <div class="w"><span class="lbl">7d</span><div class="bar"><i class="hi" style="width:83%"></i></div><span class="pct" style="color:var(--amber)">83%</span><span class="r">resets Sat 7 Nov 21:10</span></div>
+    </div>
+    <div class="foot">+5 more accounts · checked 19s ago</div>
+  </div>
+</section>
+
+<section class="lane">
+  <h2><span class="tag">B</span>A plus a small per-account bar</h2>
+  <p class="note">Each account also gets its own thin 7-day bar under its usage bars, showing when that account is projected to be used up. The fleet goes dry only where every account's bar is red at once. This needs new forecast output per account; today the daemon computes only fleet-wide spells.</p>
+  <div class="pop">
+    <div class="top"><b>Claude accounts</b><span class="btn">Auto-switch: On</span></div>
+    <div class="fleet">
+      <div class="line"><span class="warn">Runs dry Sun 8 Nov 12:38</span> <span class="k">(in 1d22h)</span> · <span class="dry">dry for 24h00m</span> · back <b>Mon 9 Nov 12:38</b></div>
+      <div class="tl">
+        <div class="track"><div class="ok" style="left:0;width:100%"></div><div class="gap" style="left:27.7%;width:14.3%"></div><div class="gap" style="left:65.1%;width:3.8%"></div><div class="now" style="left:0"></div></div>
+        <div class="ticks"><span style="left:0;transform:none">now</span><span style="left:14.3%">Sat</span><span style="left:28.6%">Sun</span><span style="left:42.9%">Mon</span><span style="left:57.1%">Tue</span><span style="left:71.4%">Wed</span><span style="left:85.7%">Thu</span><span style="left:100%;transform:translateX(-100%)">Fri</span></div>
+      </div>
+    </div>
+    <div class="acct on"><div class="h"><b>main</b><span class="e">leftos.dev.5@proton.me</span><span class="pill">In use</span></div>
+      <div class="w"><span class="lbl">5h</span><div class="bar"><i style="width:34%"></i></div><span class="pct">34%</span><span class="r">resets 17:58 (in 3h58m)</span></div>
+      <div class="mini"><span class="lbl">dry</span><div class="tl"><div class="track"><div class="ok" style="left:0;width:100%"></div><div class="gap soft" style="left:20%;width:22%"></div><div class="gap soft" style="left:60%;width:12%"></div></div></div></div>
+    </div>
+    <div class="acct"><div class="h"><b>lab</b><span class="e">leftos.dev@gmail.com</span></div>
+      <div class="w"><span class="lbl">5h</span><div class="bar"><i class="full" style="width:100%"></i></div><span class="pct" style="color:var(--red)">100%</span><span class="r">used up · back <b>16:33</b> (in 2h33m)</span></div>
+      <div class="mini"><span class="lbl">dry</span><div class="tl"><div class="track"><div class="ok" style="left:0;width:100%"></div><div class="gap soft" style="left:0;width:1.5%"></div><div class="gap soft" style="left:26%;width:18%"></div><div class="gap soft" style="left:63%;width:8%"></div></div></div></div>
+    </div>
+    <div class="foot">+5 more accounts · checked 19s ago</div>
+  </div>
+</section>
+
+<section class="lane">
+  <h2><span class="tag">C</span>How a time reads, at different distances</h2>
+  <p class="note">The owner chose this rule for every time the accounts UI shows, with ops-tower's "tomorrow" (its <code>clockText</code> in ui/accounts.js) and its compact durations. Later today shows the clock only. The next calendar day reads "tomorrow" and the clock. The rest of the coming week shows weekday, date and clock, and further out shows date and clock. Each time is followed by its countdown, and each dry spell by its length.</p>
+  <div class="row">
+    <div class="formats">
+      <div><span class="k">Later today</span>back 16:33 (in 2h33m)</div>
+      <div><span class="k">Next calendar day</span>back tomorrow 00:30 (in 10h30m)</div>
+      <div><span class="k">Within a week</span>back Mon 9 Nov 12:38 (in 2d22h)</div>
+      <div><span class="k">Further</span>back 16 Nov 09:00 (in 9d19h)</div>
+      <div><span class="k">Dry length</span>dry for 24h00m · dry for 3d4h · dry for 45m</div>
+    </div>
+  </div>
+</section>
+</body>
+</html>
