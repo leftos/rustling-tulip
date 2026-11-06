@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Performance monitor mocks</title>
+<style>
+  :root {
+    --page: #15171c;
+    --app: #262a32;
+    --rail: #22262d;
+    --panel: #2b3039;
+    --panel-2: #313641;
+    --line: #3a404b;
+    --fg: #e5e6e8;
+    --muted: #8d929c;
+    --dim: #656872;
+    --blue: #5b9bff;
+    --green: #3fb96a;
+    --amber: #e8a531;
+    --red: #ef5c5c;
+    --violet: #b787f0;
+    --cyan: #5dd5e3;
+    --mono: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+    --ui: "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--fg); font: 13px/1.4 var(--ui); padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .lede { color: var(--muted); margin: 0 0 24px; max-width: 980px; }
+  .lane { margin: 0 0 36px; }
+  .lane h2 { font-size: 15px; margin: 0 0 4px; }
+  .lane h2 .tag { display: inline-block; background: var(--blue); color: #0d1320; border-radius: 4px; padding: 0 7px; margin-right: 8px; font-weight: 700; }
+  .lane p.note { color: var(--muted); margin: 0 0 10px; max-width: 980px; }
+  .frame { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--app); }
+
+  /* App chrome */
+  .app { display: grid; grid-template-columns: 44px 1fr; height: 100%; }
+  .rail { background: var(--rail); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 12px 0; }
+  .rail i { width: 22px; height: 22px; border-radius: 5px; border: 1.5px solid var(--muted); display: block; opacity: .7; }
+  .rail i.on { border-color: var(--blue); background: rgba(91,155,255,.18); opacity: 1; }
+  .work { display: flex; flex-direction: column; min-width: 0; }
+  .tabs { display: flex; align-items: center; height: 36px; border-bottom: 1px solid var(--line); background: var(--rail); }
+  .tabs .t { padding: 0 16px; height: 100%; display: flex; align-items: center; gap: 8px; color: var(--muted); border-right: 1px solid var(--line); }
+  .tabs .t.on { color: var(--fg); background: var(--app); }
+  .footer { height: 28px; border-top: 1px solid var(--line); background: var(--rail); display: flex; align-items: center; gap: 8px; padding: 0 8px; font-size: 12px; }
+  .pill { border: 1px solid var(--line); border-radius: 12px; padding: 1px 9px; color: var(--muted); white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+  .pill b { color: var(--fg); font-weight: 600; }
+  .pill.hot { border-color: var(--blue); color: var(--fg); background: rgba(91,155,255,.12); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+
+  /* Tree table */
+  .tree { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .tree th { text-align: right; color: var(--muted); font-weight: 600; font-size: 11.5px; padding: 6px 10px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+  .tree th:first-child { text-align: left; }
+  .tree th.sorted { color: var(--fg); }
+  .tree td { padding: 3px 10px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; border-bottom: 1px solid rgba(58,64,75,.45); }
+  .tree td:first-child { text-align: left; }
+  .tree tr.group td { background: var(--panel-2); font-weight: 600; }
+  .tree tr.sel td { background: rgba(91,155,255,.16); }
+  .tree tr.total td { font-weight: 700; border-top: 1px solid var(--line); }
+  .tree tr.other td { color: var(--muted); font-style: italic; }
+  .name { display: inline-flex; align-items: center; gap: 6px; }
+  .tw { color: var(--muted); width: 10px; display: inline-block; text-align: center; font-size: 10px; }
+  .pid { color: var(--dim); font-family: var(--mono); font-size: 11.5px; }
+  .proc { font-family: var(--mono); font-size: 12px; }
+  .sub { color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .chip { font-size: 10.5px; border-radius: 3px; padding: 0 5px; border: 1px solid var(--line); color: var(--muted); font-weight: 500; }
+  .heat { position: relative; display: inline-block; min-width: 54px; }
+  .heat::before { content: ""; position: absolute; right: -6px; top: -2px; bottom: -2px; left: -6px; border-radius: 3px; background: var(--h, transparent); z-index: 0; }
+  .heat span { position: relative; z-index: 1; }
+  .warm { --h: rgba(232,165,49,.22); }
+  .hotc { --h: rgba(239,92,92,.30); }
+  .spark { vertical-align: middle; }
+
+  /* Lane A: rail panel */
+  .laneA .frame { height: 600px; }
+  .laneA .body { display: grid; grid-template-columns: 360px 1fr; flex: 1; min-height: 0; }
+  .side { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .side .head { padding: 10px 12px 6px; display: flex; justify-content: space-between; align-items: baseline; }
+  .side .head .title { font-weight: 700; letter-spacing: .04em; font-size: 12px; color: var(--muted); }
+  .meters { padding: 4px 12px 10px; display: grid; gap: 8px; border-bottom: 1px solid var(--line); }
+  .meter .lbl { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; }
+  .meter .lbl .v { font-variant-numeric: tabular-nums; }
+  .bar { height: 7px; border-radius: 4px; background: #1d2027; overflow: hidden; display: flex; }
+  .bar .rt { background: var(--blue); }
+  .bar .os { background: #59606c; }
+  .legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); }
+  .legend .dot { margin-right: 4px; }
+  .side .scroll { overflow: hidden; flex: 1; }
+  .side .tree th, .side .tree td { padding-left: 6px; padding-right: 8px; }
+  .ghost { background: #20242b; display: flex; align-items: center; justify-content: center; color: var(--dim); font-family: var(--mono); }
+
+  /* Lane B: full tab */
+  .laneB .frame { height: 720px; }
+  .page { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 14px 16px; gap: 12px; }
+  .cards { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .card .k { color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: .03em; }
+  .card .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .card .v small { font-size: 13px; color: var(--muted); font-weight: 500; }
+  .toolbar { display: flex; gap: 8px; align-items: center; }
+  .input { background: #1d2027; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; color: var(--dim); width: 260px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg span { padding: 3px 10px; color: var(--muted); border-right: 1px solid var(--line); }
+  .seg span:last-child { border-right: 0; }
+  .seg span.on { background: var(--panel-2); color: var(--fg); }
+  .btn { border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; color: var(--fg); background: var(--panel-2); }
+  .btn.danger { color: #ffb3b3; border-color: #6b3a3a; }
+  .grow { flex: 1; }
+  .tablewrap { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; flex: 1; min-height: 0; }
+
+  /* Lane C: footer popover */
+  .laneC .frame { height: 300px; position: relative; }
+  .laneC .stage { flex: 1; background: #20242b; position: relative; }
+  .pop { position: absolute; left: 330px; bottom: 34px; width: 420px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.45); padding: 10px 12px; }
+  .pop .row { display: flex; justify-content: space-between; padding: 3px 0; font-variant-numeric: tabular-nums; }
+  .pop .row .n { color: var(--muted); }
+  .pop .foot { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--blue); font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Performance monitor</h1>
+<p class="lede">The same sample data in three placements. Every pane is a group whose row adds up its whole process tree, from the tracer and shell down to the agent and anything it spawned, such as cargo, rustc and MCP servers. "rustling-tulip" holds the app's own processes (client, daemon). "Other processes" is the rest of the machine, so the column totals match the OS-wide meters. CPU % is of the whole machine, as in Task Manager. Memory is each process's private working set.</p>
+
+<!-- ============ Lane A ============ -->
+<section class="lane laneA">
+  <h2><span class="tag">A</span>A rail view beside the panes, like Gates</h2>
+  <p class="note">Opened from the rail. It stays open while you work, so a busy build is easy to watch. The tree is narrow, with Name, CPU and Memory only; PID and the full command line show on hover.</p>
+  <div class="frame">
+    <div class="app">
+      <div class="rail"><i></i><i></i><i></i><i></i><i class="on"></i></div>
+      <div class="work">
+        <div class="body">
+          <div class="side">
+            <div class="head"><span class="title">PERFORMANCE · LEFTOS-DESK</span><span class="sub">16 cores · 64 GB</span></div>
+            <div class="meters">
+              <div class="meter">
+                <div class="lbl"><span>CPU</span><span class="v"><b>31%</b> <span class="sub">· rustling-tulip 12.4%</span></span></div>
+                <div class="bar"><div class="rt" style="width:12.4%"></div><div class="os" style="width:18.6%"></div></div>
+              </div>
+              <div class="meter">
+                <div class="lbl"><span>Memory</span><span class="v"><b>27.4</b> / 63.7 GB <span class="sub">· rustling-tulip 3.6 GB</span></span></div>
+                <div class="bar"><div class="rt" style="width:5.7%"></div><div class="os" style="width:37.3%"></div></div>
+              </div>
+              <div class="legend"><span><span class="dot" style="background:var(--blue)"></span>rustling-tulip and its panes</span><span><span class="dot" style="background:#59606c"></span>everything else</span></div>
+            </div>
+            <div class="scroll">
+              <table class="tree">
+                <thead><tr><th>Name</th><th class="sorted">CPU ▾</th><th>Memory</th></tr></thead>
+                <tbody>
+                  <tr class="group"><td><span class="name"><span class="tw">▾</span>Petal fixes <span class="chip">tulip</span></span></td><td><span class="heat hotc"><span>8.9%</span></span></td><td>2.41 GB</td></tr>
+                  <tr><td><span class="name" style="padding-left:14px"><span class="tw">▾</span><span class="proc">claude</span></span></td><td>2.3%</td><td>612 MB</td></tr>
+                  <tr class="sel"><td><span class="name" style="padding-left:28px"><span class="tw">▾</span><span class="proc">cargo nextest</span></span></td><td><span class="heat hotc"><span>6.3%</span></span></td><td>1.66 GB</td></tr>
+                  <tr><td><span class="name" style="padding-left:42px"><span class="tw"></span><span class="proc">rustc ×6</span></span></td><td><span class="heat warm"><span>6.1%</span></span></td><td>1.62 GB</td></tr>
+                  <tr><td><span class="name" style="padding-left:28px"><span class="tw">▸</span><span class="proc">MCP servers ×3</span></span></td><td>0.2%</td><td>141 MB</td></tr>
+                  <tr><td><span class="name" style="padding-left:14px"><span class="tw"></span><span class="proc">pwsh · rt-tracer</span></span></td><td>0.1%</td><td>94 MB</td></tr>
+                  <tr class="group"><td><span class="name"><span class="tw">▸</span>yaat <span class="chip">yaat</span></span></td><td>1.4%</td><td>690 MB</td></tr>
+                  <tr class="group"><td><span class="name"><span class="tw">▸</span>rustling-tulip shell <span class="chip">tulip</span></span></td><td>0.1%</td><td>120 MB</td></tr>
+                  <tr class="group"><td><span class="name"><span class="tw">▸</span>rustling-tulip <span class="sub">app</span></span></td><td>2.0%</td><td>412 MB</td></tr>
+                  <tr class="other"><td><span class="name"><span class="tw"></span>Other processes</span></td><td>18.6%</td><td>23.8 GB</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="ghost">panes stay visible here</div>
+        </div>
+        <div class="footer"><span class="pill">Connections</span><span class="pill"><span class="dot" style="background:var(--green)"></span>daemon · 3 sessions</span><span class="pill hot">CPU <b>31%</b> · RAM <b>27.4 GB</b></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Lane B ============ -->
+<section class="lane laneB">
+  <h2><span class="tag">B</span>A full tab, like Dashboard</h2>
+  <p class="note">Opened as a tab. Room for every column: PID, CPU over the last minute, threads, and the command line. Select a row to end its process or its whole tree. Pane rows jump to their pane.</p>
+  <div class="frame">
+    <div class="app">
+      <div class="rail"><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="work">
+        <div class="tabs"><div class="t">tulip</div><div class="t">yaat</div><div class="t on">▤ Performance</div></div>
+        <div class="page">
+          <div class="cards">
+            <div class="card"><div class="k">CPU · 16 CORES</div><div class="v">31% <small>rustling-tulip 12.4%</small></div>
+              <svg class="spark" width="100%" height="34" viewBox="0 0 300 34" preserveAspectRatio="none"><polyline fill="none" stroke="#59606c" stroke-width="1.5" points="0,22 20,20 40,24 60,19 80,21 100,17 120,15 140,18 160,12 180,10 200,13 220,9 240,11 260,8 280,12 300,10"/><polyline fill="none" stroke="#5b9bff" stroke-width="1.8" points="0,30 20,30 40,29 60,29 80,28 100,27 120,25 140,26 160,22 180,20 200,23 220,19 240,21 260,18 280,22 300,21"/></svg></div>
+            <div class="card"><div class="k">MEMORY · 63.7 GB</div><div class="v">27.4 GB <small>rustling-tulip 3.6 GB</small></div>
+              <svg class="spark" width="100%" height="34" viewBox="0 0 300 34" preserveAspectRatio="none"><polyline fill="none" stroke="#59606c" stroke-width="1.5" points="0,14 50,14 100,13 150,13 200,12 250,12 300,12"/><polyline fill="none" stroke="#5b9bff" stroke-width="1.8" points="0,31 50,31 100,30 150,29 200,28 250,28 300,28"/></svg></div>
+            <div class="card"><div class="k">BUSIEST PANE</div><div class="v" style="font-size:17px;padding-top:4px">Petal fixes <small>8.9% · rustc ×6</small></div><div class="sub" style="margin:4px 0 0">tulip tab · rustling-tulip:main</div></div>
+          </div>
+          <div class="toolbar">
+            <span class="input">Filter by name, PID or command…</span>
+            <span class="seg"><span class="on">By pane</span><span>By tab</span><span>Flat</span></span>
+            <span class="grow"></span>
+            <span class="btn">Go to pane</span><span class="btn danger">End process tree</span>
+          </div>
+          <div class="tablewrap">
+            <table class="tree">
+              <thead><tr><th>Name</th><th>PID</th><th class="sorted">CPU ▾</th><th>Last minute</th><th>Memory</th><th>Threads</th><th style="text-align:left">Command</th></tr></thead>
+              <tbody>
+                <tr class="group"><td><span class="name"><span class="tw">▾</span>Petal fixes <span class="chip">tulip</span> <span class="sub">Claude · rustling-tulip:main</span></span></td><td></td><td><span class="heat hotc"><span>8.9%</span></span></td><td><svg width="90" height="16"><polyline fill="none" stroke="#ef5c5c" stroke-width="1.5" points="0,14 10,14 20,13 30,12 40,9 50,6 60,4 70,5 80,3 90,4"/></svg></td><td>2.41 GB</td><td>187</td><td></td></tr>
+                <tr><td><span class="name" style="padding-left:16px"><span class="tw">▾</span><span class="proc">rt-tracer.exe</span></span></td><td class="pid">37264</td><td>0.0%</td><td></td><td>6 MB</td><td>4</td><td style="text-align:left" class="pid">rt-tracer --session c47350ab…</td></tr>
+                <tr><td><span class="name" style="padding-left:32px"><span class="tw">▾</span><span class="proc">pwsh.exe</span></span></td><td class="pid">37301</td><td>0.1%</td><td></td><td>88 MB</td><td>22</td><td style="text-align:left" class="pid">pwsh -NoLogo</td></tr>
+                <tr><td><span class="name" style="padding-left:48px"><span class="tw">▾</span><span class="proc">claude.exe</span></span></td><td class="pid">38012</td><td>2.3%</td><td><svg width="90" height="16"><polyline fill="none" stroke="#8d929c" stroke-width="1.3" points="0,12 15,13 30,11 45,12 60,10 75,12 90,11"/></svg></td><td>612 MB</td><td>31</td><td style="text-align:left" class="pid">claude --dangerously-skip-permissions</td></tr>
+                <tr class="sel"><td><span class="name" style="padding-left:64px"><span class="tw">▾</span><span class="proc">cargo.exe</span></span></td><td class="pid">40220</td><td>0.2%</td><td></td><td>41 MB</td><td>9</td><td style="text-align:left" class="pid">cargo nextest run --workspace --cargo-profile test-release</td></tr>
+                <tr><td><span class="name" style="padding-left:80px"><span class="tw">▸</span><span class="proc">rustc.exe</span> <span class="sub">×6</span></span></td><td class="pid">…</td><td><span class="heat warm"><span>6.1%</span></span></td><td><svg width="90" height="16"><polyline fill="none" stroke="#e8a531" stroke-width="1.5" points="0,15 15,15 30,13 45,9 60,5 75,4 90,3"/></svg></td><td>1.62 GB</td><td>96</td><td style="text-align:left" class="pid">rustc --crate-name daemon …</td></tr>
+                <tr><td><span class="name" style="padding-left:64px"><span class="tw">▸</span><span class="proc">node.exe</span> <span class="sub">MCP ×3</span></span></td><td class="pid">…</td><td>0.2%</td><td></td><td>141 MB</td><td>25</td><td style="text-align:left" class="pid">context7, exa, rt-driver</td></tr>
+                <tr class="group"><td><span class="name"><span class="tw">▸</span>yaat <span class="chip">yaat</span> <span class="sub">Claude · yaat:main</span></span></td><td></td><td>1.4%</td><td><svg width="90" height="16"><polyline fill="none" stroke="#8d929c" stroke-width="1.3" points="0,13 15,12 30,13 45,12 60,13 75,12 90,12"/></svg></td><td>690 MB</td><td>58</td><td></td></tr>
+                <tr class="group"><td><span class="name"><span class="tw">▸</span>rustling-tulip <span class="chip">tulip</span> <span class="sub">Shell · pwsh</span></span></td><td></td><td>0.1%</td><td></td><td>120 MB</td><td>24</td><td></td></tr>
+                <tr class="group"><td><span class="name"><span class="tw">▾</span>rustling-tulip <span class="sub">this app</span></span></td><td></td><td>2.0%</td><td></td><td>412 MB</td><td>71</td><td></td></tr>
+                <tr><td><span class="name" style="padding-left:16px"><span class="tw"></span><span class="proc">rustling-tulip-native.exe</span></span></td><td class="pid">27520</td><td>1.4%</td><td></td><td>316 MB</td><td>48</td><td style="text-align:left" class="pid">client</td></tr>
+                <tr><td><span class="name" style="padding-left:16px"><span class="tw"></span><span class="proc">rustling-tulipd.exe</span></span></td><td class="pid">25108</td><td>0.6%</td><td></td><td>96 MB</td><td>23</td><td style="text-align:left" class="pid">daemon</td></tr>
+                <tr class="other"><td><span class="name"><span class="tw"></span>Other processes</span></td><td></td><td>18.6%</td><td></td><td>23.8 GB</td><td></td><td></td></tr>
+                <tr class="total"><td>Total</td><td></td><td>31.0%</td><td></td><td>27.4 GB</td><td></td><td></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="footer"><span class="pill">Connections</span><span class="pill"><span class="dot" style="background:var(--green)"></span>daemon · 3 sessions</span><span class="pill hot">CPU <b>31%</b> · RAM <b>27.4 GB</b></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Lane C ============ -->
+<section class="lane laneC">
+  <h2><span class="tag">C</span>The footer pill, the entry point either way</h2>
+  <p class="note">Always on screen: the machine's CPU and memory now. Hovering shows the busiest panes, and clicking opens A or B. It turns amber above 80% CPU or 90% memory.</p>
+  <div class="frame">
+    <div class="app">
+      <div class="rail"><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="work">
+        <div class="stage"></div>
+        <div class="pop">
+          <div style="font-weight:700;margin-bottom:6px">This PC · CPU 31% · RAM 27.4 / 63.7 GB</div>
+          <div class="row"><span>Petal fixes <span class="chip">tulip</span></span><span><span class="n">8.9% ·</span> 2.41 GB</span></div>
+          <div class="row"><span>rustling-tulip app</span><span><span class="n">2.0% ·</span> 412 MB</span></div>
+          <div class="row"><span>yaat <span class="chip">yaat</span></span><span><span class="n">1.4% ·</span> 690 MB</span></div>
+          <div class="row"><span class="n">Other processes</span><span><span class="n">18.6% ·</span> 23.8 GB</span></div>
+          <div class="foot">Open Performance ›</div>
+        </div>
+        <div class="footer"><span class="pill">Connections</span><span class="pill"><span class="dot" style="background:var(--green)"></span>daemon · 3 sessions</span><span class="pill">Gates 4/6</span><span class="pill hot">CPU <b>31%</b> · RAM <b>27.4 GB</b></span><span class="grow"></span><span class="pill">main</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+</body>
+</html>
