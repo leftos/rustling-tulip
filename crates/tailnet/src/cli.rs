@@ -117,8 +117,7 @@ impl Cli {
     /// Any [`TailnetError`].
     pub async fn status(&self) -> Result<Status, TailnetError> {
         let stdout = self.run(&args(&["status", "--json"]), self.timeout).await?;
-        serde_json::from_slice(&stdout)
-            .map_err(|e| TailnetError::BadOutput(format!("status --json: {e}")))
+        parse_json(&stdout, "status --json")
     }
 
     /// Write the TLS certificate and key for `name` (the host's `MagicDNS` name,
@@ -140,11 +139,20 @@ impl Cli {
         self.run(&argv, CERT_TIMEOUT).await.map(|_| ())
     }
 
-    /// Run the binary with `argv`, returning its stdout when it exits 0.
-    async fn run(&self, argv: &[OsString], timeout: Duration) -> Result<Vec<u8>, TailnetError> {
+    /// The binary's command line, with no console window and piped output.
+    ///
+    /// The Tailscale macOS app's bundled binary decides from its environment
+    /// whether to run as the CLI or start the app: an app launched from Finder
+    /// has no `TERM`, and the binary then prints "The Tailscale GUI failed to
+    /// start" and exits 0. `TAILSCALE_BE_CLI=1` is Tailscale's documented switch
+    /// for CLI mode, and a set `TERM` is what the binary checks first; any
+    /// other `tailscale` ignores both.
+    fn command(&self, argv: &[OsString]) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.binary);
         command
             .args(argv)
+            .env("TAILSCALE_BE_CLI", "1")
+            .env("TERM", "dumb")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -154,7 +162,12 @@ impl Cli {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
-        let mut child = command.spawn().map_err(|e| spawn_error(&e))?;
+        command
+    }
+
+    /// Run the binary with `argv`, returning its stdout when it exits 0.
+    async fn run(&self, argv: &[OsString], timeout: Duration) -> Result<Vec<u8>, TailnetError> {
+        let mut child = self.command(argv).spawn().map_err(|e| spawn_error(&e))?;
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         // An over-cap stream ends the join at once; any early return drops the
         // child, and kill_on_drop kills it.
@@ -270,10 +283,32 @@ async fn read_capped(
     cap_output(bytes, what)
 }
 
+/// The most characters of an unparseable reply that its error quotes.
+const QUOTE_CAP: usize = 200;
+
+/// Parse a `--json` reply; one that does not parse is [`TailnetError::BadOutput`]
+/// naming `call` and quoting the start of what the CLI printed.
+fn parse_json<T: serde::de::DeserializeOwned>(
+    stdout: &[u8],
+    call: &str,
+) -> Result<T, TailnetError> {
+    serde_json::from_slice(stdout).map_err(|e| {
+        let text = String::from_utf8_lossy(stdout);
+        let text = text.trim();
+        let printed = if text.is_empty() {
+            "nothing".to_owned()
+        } else {
+            let quote: String = text.chars().take(QUOTE_CAP).collect();
+            let more = if quote.len() < text.len() { "…" } else { "" };
+            format!("\"{quote}{more}\"")
+        };
+        TailnetError::BadOutput(format!("{call}: {e}; it printed {printed}"))
+    })
+}
+
 /// Parse `whois --json` / `whoami --json` stdout.
 fn parse_whois(stdout: &[u8]) -> Result<WhoIs, TailnetError> {
-    serde_json::from_slice(stdout)
-        .map_err(|e| TailnetError::BadOutput(format!("whois --json: {e}")))
+    parse_json(stdout, "whois --json")
 }
 
 /// Parse `whoami --json` stdout: a node with no addresses is logged out or stopped.
@@ -439,6 +474,53 @@ mod tests {
             parse_whois(b"not json"),
             Err(TailnetError::BadOutput(_))
         ));
+    }
+
+    #[test]
+    fn unparsable_stdout_quotes_what_the_cli_printed() {
+        let detail = |stdout: &[u8]| match parse_whois(stdout) {
+            Err(TailnetError::BadOutput(detail)) => detail,
+            other => format!("not BadOutput: {other:?}"),
+        };
+        let gui_line = "The Tailscale GUI failed to start: The operation couldn’t be completed. \
+                        (Tailscale.CLIError error 3.)\n";
+        let quoted = detail(gui_line.as_bytes());
+        assert!(
+            quoted.contains("printed \"The Tailscale GUI failed to start"),
+            "{quoted}"
+        );
+        let empty = detail(b"  \n");
+        assert!(empty.ends_with("printed nothing"), "{empty}");
+        let long = detail("x".repeat(1_000).as_bytes());
+        assert!(
+            long.starts_with("whois --json") && long.len() < 400,
+            "the quote is cut short: {long}"
+        );
+    }
+
+    #[test]
+    fn command_forces_the_macos_app_binary_into_cli_mode() {
+        // The Tailscale app's bundled binary picks GUI or CLI mode from the
+        // environment; a Finder-launched process has no TERM, so without these the
+        // binary prints "The Tailscale GUI failed to start" and exits 0.
+        let cli = Cli {
+            binary: PathBuf::from("tailscale"),
+            timeout: Duration::from_secs(1),
+        };
+        let command = cli.command(&args(&["status", "--json"]));
+        let envs: HashMap<OsString, Option<OsString>> = command
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| (k.to_owned(), v.map(ToOwned::to_owned)))
+            .collect();
+        assert_eq!(
+            envs.get(&OsString::from("TAILSCALE_BE_CLI")),
+            Some(&Some(OsString::from("1")))
+        );
+        assert_eq!(
+            envs.get(&OsString::from("TERM")),
+            Some(&Some(OsString::from("dumb")))
+        );
     }
 
     #[test]
