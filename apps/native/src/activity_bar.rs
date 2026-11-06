@@ -240,6 +240,13 @@ impl RootView {
         let active = self.shown_activity() == item.activity;
         let collapsed = self.sidebar.is_collapsed();
         let activity = item.activity;
+        // The Gates badge counts taken slots in the accent; the others keep
+        // the neutral pill.
+        let badge_colors = if activity == Activity::Gates {
+            (t.accent, t.on_accent)
+        } else {
+            (t.hover, t.text)
+        };
         let button = rail_button(item.selector, item.icon, active, &t)
             .when_some(badge_text(item.badge), |row, text| {
                 row.child(badge(
@@ -247,6 +254,7 @@ impl RootView {
                     crate::fonts::ui_weight_shift(cx),
                     item.badge_selector,
                     text,
+                    badge_colors,
                     &t,
                 ))
             })
@@ -271,6 +279,7 @@ impl RootView {
                     crate::fonts::ui_weight_shift(cx),
                     "dashboard-badge",
                     text,
+                    (t.hover, t.text),
                     &t,
                 ))
             })
@@ -294,6 +303,7 @@ impl RootView {
                         crate::fonts::ui_weight_shift(cx),
                         "recover-badge",
                         text,
+                        (t.hover, t.text),
                         &t,
                     ))
                 },
@@ -431,6 +441,7 @@ impl RootView {
             self.seed_history();
         }
         self.arm_needs_you_repaint(cx);
+        self.arm_gates_repaint(cx);
         cx.notify();
     }
 }
@@ -489,7 +500,16 @@ fn rail_button(
         .child(tile)
 }
 
-fn badge(offset: i8, shift: i8, selector: &'static str, text: String, t: &UiTheme) -> Div {
+/// A rail item's count badge tagged `selector`: `text` in `ink` on a
+/// `fill` pill, ringed in the rail's colour.
+fn badge(
+    offset: i8,
+    shift: i8,
+    selector: &'static str,
+    text: String,
+    (fill, ink): (u32, u32),
+    t: &UiTheme,
+) -> Div {
     div()
         .absolute()
         .right(px(BADGE_INSET))
@@ -501,10 +521,10 @@ fn badge(offset: i8, shift: i8, selector: &'static str, text: String, t: &UiThem
         .h(ui_px_at(offset, BADGE_HEIGHT))
         .px(px(4.0))
         .rounded_full()
-        .bg(gpui::rgb(t.hover))
+        .bg(gpui::rgb(fill))
         .border(px(BADGE_RING))
         .border_color(gpui::rgb(t.sunken))
-        .text_color(gpui::rgb(t.text))
+        .text_color(gpui::rgb(ink))
         .text_size(ui_px_at(offset, BADGE_TEXT_SIZE))
         .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::BOLD))
         .driver_id(move || selector.to_owned())

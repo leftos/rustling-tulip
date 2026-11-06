@@ -32,8 +32,21 @@ pub(crate) enum GateRow {
         stale_pid: Option<u32>,
         /// Past the pool's count, shown only because it has a claim.
         extra: bool,
+        /// The live claim's log file.
+        log: Option<String>,
+        /// The live claim's ceiling, in seconds.
+        timeout_seconds: Option<f64>,
+        /// How many processes the slot's gate runs.
+        processes: u32,
     },
 }
+
+/// The fewest slots a pool's count stepper sets.
+pub(crate) const MIN_COUNT: u32 = 1;
+/// The most slots a pool's count stepper sets.
+pub(crate) const MAX_COUNT: u32 = 64;
+/// A time younger than this, in seconds, reads in seconds.
+const SECONDS_SHOWN_BELOW: i64 = 60;
 
 /// Whether `slot` counts as taken: busy, or held with no live claim.
 fn taken(slot: &GateSlot) -> bool {
@@ -41,7 +54,8 @@ fn taken(slot: &GateSlot) -> bool {
 }
 
 /// How many of `slots` are busy or held.
-fn taken_count<'a>(slots: impl IntoIterator<Item = &'a GateSlot>) -> u32 {
+#[must_use]
+pub(crate) fn taken_count<'a>(slots: impl IntoIterator<Item = &'a GateSlot>) -> u32 {
     let count = slots.into_iter().filter(|slot| taken(slot)).count();
     u32::try_from(count).unwrap_or(u32::MAX)
 }
@@ -63,8 +77,19 @@ fn kind_rank(kind: GateSlotKind) -> u8 {
     }
 }
 
+/// A pool kind's name in a slot's name and a selector, lower-case.
+#[must_use]
+pub(crate) fn kind_name(kind: GateSlotKind) -> &'static str {
+    match kind {
+        GateSlotKind::Heavy => "heavy",
+        GateSlotKind::Light => "light",
+        GateSlotKind::Unknown => "unknown",
+    }
+}
+
 /// A pool kind's name in a header, upper-case.
-fn kind_title(kind: GateSlotKind) -> &'static str {
+#[must_use]
+pub(crate) fn kind_title(kind: GateSlotKind) -> &'static str {
     match kind {
         GateSlotKind::Heavy => "HEAVY",
         GateSlotKind::Light => "LIGHT",
@@ -88,20 +113,39 @@ fn header_text(pool: &GatePool) -> String {
 /// extra slots past the count last.
 #[must_use]
 pub(crate) fn rows(state: &GateState) -> Vec<GateRow> {
-    let mut pools: Vec<&GatePool> = state.pools.iter().collect();
-    pools.sort_by_key(|pool| kind_rank(pool.kind));
     let mut rows = Vec::new();
-    for pool in pools {
+    for pool in local_pools(state) {
         rows.push(GateRow::PoolHeader {
             kind: pool.kind,
             text: header_text(pool),
         });
-        let mut slots: Vec<&GateSlot> = pool.slots.iter().collect();
-        slots.sort_by_key(|slot| (slot.extra.unwrap_or(false), slot.index));
-        rows.extend(slots.into_iter().map(|slot| {
+        rows.extend(slot_rows(pool.kind, &pool.slots));
+    }
+    rows
+}
+
+/// The local pools, heavy first, then light, then any kind this build does
+/// not know.
+#[must_use]
+pub(crate) fn local_pools(state: &GateState) -> Vec<&GatePool> {
+    let mut pools: Vec<&GatePool> = state.pools.iter().collect();
+    pools.sort_by_key(|pool| kind_rank(pool.kind));
+    pools
+}
+
+/// `slots` as rows of a pool of `kind`, by index with the extra slots past
+/// the count last. A remote or builder pool's rows take
+/// [`GateSlotKind::Unknown`], since they have no local kind.
+#[must_use]
+pub(crate) fn slot_rows(kind: GateSlotKind, slots: &[GateSlot]) -> Vec<GateRow> {
+    let mut slots: Vec<&GateSlot> = slots.iter().collect();
+    slots.sort_by_key(|slot| (slot.extra.unwrap_or(false), slot.index));
+    slots
+        .into_iter()
+        .map(|slot| {
             let claim = slot.claim.as_ref();
             GateRow::Slot {
-                kind: pool.kind,
+                kind,
                 index: slot.index,
                 state: slot.state,
                 command: claim.and_then(|claim| claim.command.clone()),
@@ -111,10 +155,108 @@ pub(crate) fn rows(state: &GateState) -> Vec<GateRow> {
                 last_line: slot.last_line.clone(),
                 stale_pid: slot.stale.as_ref().and_then(|stale| stale.pid),
                 extra: slot.extra.unwrap_or(false),
+                log: claim.and_then(|claim| claim.log.clone()),
+                timeout_seconds: claim.and_then(|claim| claim.timeout_seconds),
+                processes: slot.processes,
             }
-        }));
+        })
+        .collect()
+}
+
+/// The next count a stepper press sets from `count`, one up or down;
+/// `None` past [`MIN_COUNT`] to [`MAX_COUNT`].
+#[must_use]
+pub(crate) fn stepped(count: u32, up: bool) -> Option<u32> {
+    let next = if up {
+        count.checked_add(1)?
+    } else {
+        count.checked_sub(1)?
+    };
+    (MIN_COUNT..=MAX_COUNT).contains(&next).then_some(next)
+}
+
+/// The critical block's note: who holds the critical gate and how many
+/// wait for it; `None` when nothing holds or waits.
+#[must_use]
+pub(crate) fn critical_note(state: &GateState) -> Option<String> {
+    let critical = state.critical.as_ref()?;
+    let holder = critical.holder.as_ref().map(|slot| {
+        slot.claim
+            .as_ref()
+            .and_then(|claim| claim.command.as_deref())
+            .map_or_else(|| "a gate with no claim".to_owned(), short_command)
+    });
+    let waiting = critical.waiting.len();
+    match (holder, waiting) {
+        (None, 0) => None,
+        (None, n) => Some(format!("{n} waiting")),
+        (Some(holder), 0) => Some(format!("held by {holder}")),
+        (Some(holder), n) => Some(format!("held by {holder} · {n} waiting")),
     }
-    rows
+}
+
+/// The footer strip's text: `Gates <taken>/<total>` over the local pools.
+#[must_use]
+pub(crate) fn strip_text(state: &GateState) -> String {
+    let total: u32 = state.pools.iter().map(|pool| pool.count).sum();
+    format!("Gates {}/{total}", busy_count(state))
+}
+
+/// A busy row's tooltip: the full command and folder, then the log, the
+/// ceiling and the process count, each line only when known.
+#[must_use]
+pub(crate) fn slot_tooltip(
+    command: Option<&str>,
+    cwd: Option<&str>,
+    log: Option<&str>,
+    timeout_seconds: Option<f64>,
+    processes: u32,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.extend(command.map(str::to_owned));
+    lines.extend(cwd.map(str::to_owned));
+    lines.extend(log.map(|log| format!("Log: {log}")));
+    lines.extend(timeout_seconds.map(|secs| format!("Ceiling: {secs:.0} s")));
+    lines.push(format!("Processes: {processes}"));
+    lines.join("\n")
+}
+
+/// Whether some time the panel shows, a claim's hold or a gate's wait,
+/// still reads in seconds at `now`.
+#[must_use]
+pub(crate) fn fresh(state: &GateState, now: DateTime<Utc>) -> bool {
+    let young = |time: Option<DateTime<Utc>>| {
+        time.is_some_and(|time| (now - time).num_seconds() < SECONDS_SHOWN_BELOW)
+    };
+    let slots = state
+        .pools
+        .iter()
+        .flat_map(|pool| &pool.slots)
+        .chain(state.remote.iter().flat_map(|remote| &remote.slots))
+        .chain(state.builders.iter().flat_map(|builder| &builder.slots));
+    let waits = state
+        .pools
+        .iter()
+        .flat_map(|pool| &pool.waiting)
+        .chain(state.critical.iter().flat_map(|critical| &critical.waiting));
+    slots
+        .filter_map(|slot| slot.claim.as_ref())
+        .any(|claim| young(claim.started))
+        || waits.into_iter().any(|gate| young(gate.since))
+        || state.queue.iter().any(|ticket| young(ticket.arrived))
+}
+
+/// `n` as an English ordinal: `1st`, `2nd`, `3rd`, `4th`, `11th`, `21st`.
+#[must_use]
+pub(crate) fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }
 
 /// The key that sorts `time` oldest first, an unknown time last.
@@ -124,10 +266,6 @@ fn oldest_first(time: Option<DateTime<Utc>>) -> (bool, Option<DateTime<Utc>>) {
 
 /// The queue tickets, oldest arrival first; a ticket with no arrival time
 /// sorts last.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the Gates view lists the queue")
-)]
 #[must_use]
 pub(crate) fn queue(state: &GateState) -> Vec<&GateQueueTicket> {
     let mut tickets: Vec<&GateQueueTicket> = state.queue.iter().collect();
@@ -135,16 +273,11 @@ pub(crate) fn queue(state: &GateState) -> Vec<&GateQueueTicket> {
     tickets
 }
 
-/// The gates waiting for a slot of any local pool, oldest first; one with
-/// no start time sorts last.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the Gates view lists the waiting gates")
-)]
+/// The gates waiting for a slot of `pool`, oldest first; one with no start
+/// time sorts last.
 #[must_use]
-pub(crate) fn waiting(state: &GateState) -> Vec<&GateWaiting> {
-    let mut waiting: Vec<&GateWaiting> =
-        state.pools.iter().flat_map(|pool| &pool.waiting).collect();
+pub(crate) fn pool_waiting(pool: &GatePool) -> Vec<&GateWaiting> {
+    let mut waiting: Vec<&GateWaiting> = pool.waiting.iter().collect();
     waiting.sort_by_key(|gate| oldest_first(gate.since));
     waiting
 }
@@ -205,10 +338,6 @@ fn split_program(command: &str) -> (&str, &str) {
 /// no program extension (`.exe`, `.cmd`, `.bat`, `.com`; any other dot
 /// stays), then a space and the rest unchanged; a quoted program loses
 /// its quotes, and an empty command stays empty.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the Gates view's slot rows show it")
-)]
 #[must_use]
 pub(crate) fn short_command(command: &str) -> String {
     let (program, rest) = split_program(command.trim_start());
@@ -224,10 +353,6 @@ pub(crate) fn short_command(command: &str) -> String {
 
 /// A folder as a row shows it: its last two components joined by `/`; a
 /// one-component path is itself.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the Gates view's slot rows show it")
-)]
 #[must_use]
 pub(crate) fn folder_label(path: &str) -> String {
     let parts: Vec<&str> = path
@@ -245,7 +370,7 @@ pub(crate) fn folder_label(path: &str) -> String {
 )]
 mod tests {
     use super::*;
-    use protocol::GateClaim;
+    use protocol::{GateClaim, GateCriticalState};
 
     fn time(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s)
@@ -345,8 +470,11 @@ mod tests {
                 last_line,
                 stale_pid,
                 extra,
+                log,
+                timeout_seconds,
+                processes,
             } => format!(
-                "slot {kind:?} {index} {state:?} {command:?} {cwd:?} {} {pid:?} {last_line:?} {stale_pid:?} {extra}",
+                "slot {kind:?} {index} {state:?} {command:?} {cwd:?} {} {pid:?} {last_line:?} {stale_pid:?} {extra} {log:?} {timeout_seconds:?} {processes}",
                 started.is_some()
             ),
         }
@@ -422,13 +550,13 @@ mod tests {
             lines,
             [
                 "header Heavy HEAVY · 2 of 2 busy",
-                "slot Heavy 0 Free None None false None None Some(40) false",
-                r#"slot Heavy 1 Busy Some("cargo nextest run") Some("X:\\dev\\repo") true Some(41) Some("Compiling") None false"#,
-                r#"slot Heavy 2 Busy Some("cargo nextest run") Some("X:\\dev\\repo") true Some(42) None None true"#,
+                "slot Heavy 0 Free None None false None None Some(40) false None None 0",
+                r#"slot Heavy 1 Busy Some("cargo nextest run") Some("X:\\dev\\repo") true Some(41) Some("Compiling") None false None None 0"#,
+                r#"slot Heavy 2 Busy Some("cargo nextest run") Some("X:\\dev\\repo") true Some(42) None None true None None 0"#,
                 "header Light LIGHT · 1 of 1 busy",
-                "slot Light 0 Held None None false None None None false",
+                "slot Light 0 Held None None false None None None false None None 0",
                 "header Unknown UNKNOWN · 0 of 1 busy",
-                "slot Unknown 0 Free None None false None None None false",
+                "slot Unknown 0 Free None None false None None None false None None 0",
             ]
         );
     }
@@ -446,14 +574,156 @@ mod tests {
     }
 
     #[test]
-    fn waiting_is_oldest_first_across_pools_with_no_time_last() {
+    fn pool_waiting_is_oldest_first_with_no_time_last() {
         let mut heavy = pool(GateSlotKind::Heavy, 1, Vec::new());
-        heavy.waiting = vec![waiter(1, None), waiter(2, Some("2026-11-05T10:00:00Z"))];
-        let mut light = pool(GateSlotKind::Light, 1, Vec::new());
-        light.waiting = vec![waiter(3, Some("2026-11-05T09:00:00Z"))];
-        let gates = state(vec![heavy, light]);
-        let pids: Vec<u32> = waiting(&gates).iter().map(|w| w.pid).collect();
+        heavy.waiting = vec![
+            waiter(1, None),
+            waiter(2, Some("2026-11-05T10:00:00Z")),
+            waiter(3, Some("2026-11-05T09:00:00Z")),
+        ];
+        let pids: Vec<u32> = pool_waiting(&heavy).iter().map(|w| w.pid).collect();
         assert_eq!(pids, [3, 2, 1]);
+        let none: Vec<u32> = pool_waiting(&pool(GateSlotKind::Light, 1, Vec::new()))
+            .iter()
+            .map(|w| w.pid)
+            .collect();
+        assert_eq!(none, Vec::<u32>::new());
+    }
+
+    #[test]
+    fn stepped_stays_within_one_to_sixty_four() {
+        assert_eq!(stepped(3, true), Some(4));
+        assert_eq!(stepped(3, false), Some(2));
+        assert_eq!(stepped(64, true), None, "64 is the most");
+        assert_eq!(stepped(1, false), None, "1 is the least");
+        assert_eq!(
+            stepped(0, true),
+            Some(1),
+            "an out-of-range count steps back in"
+        );
+        assert_eq!(stepped(65, false), Some(64));
+    }
+
+    #[test]
+    fn critical_note_names_the_holder_and_the_waiting_count() {
+        let mut gates = state(Vec::new());
+        assert_eq!(critical_note(&gates), None, "no critical state");
+        gates.critical = Some(GateCriticalState {
+            holder: None,
+            waiting: Vec::new(),
+        });
+        assert_eq!(critical_note(&gates), None, "no holder and no waiter");
+        gates.critical = Some(GateCriticalState {
+            holder: None,
+            waiting: vec![waiter(1, None)],
+        });
+        assert_eq!(critical_note(&gates).as_deref(), Some("1 waiting"));
+        gates.critical = Some(GateCriticalState {
+            holder: Some(GateSlot {
+                claim: Some(claim(7)),
+                ..slot(0, GateSlotState::Busy)
+            }),
+            waiting: vec![waiter(1, None), waiter(2, None)],
+        });
+        assert_eq!(
+            critical_note(&gates).as_deref(),
+            Some("held by cargo nextest run · 2 waiting")
+        );
+        gates.critical = Some(GateCriticalState {
+            holder: Some(slot(0, GateSlotState::Held)),
+            waiting: Vec::new(),
+        });
+        assert_eq!(
+            critical_note(&gates).as_deref(),
+            Some("held by a gate with no claim")
+        );
+    }
+
+    #[test]
+    fn strip_text_counts_the_taken_local_slots_of_their_total() {
+        let mut gates = state(vec![
+            pool(
+                GateSlotKind::Heavy,
+                3,
+                vec![
+                    slot(0, GateSlotState::Busy),
+                    slot(1, GateSlotState::Held),
+                    slot(2, GateSlotState::Free),
+                ],
+            ),
+            pool(
+                GateSlotKind::Light,
+                2,
+                vec![slot(0, GateSlotState::Busy), slot(1, GateSlotState::Free)],
+            ),
+        ]);
+        gates.remote = Some(protocol::GateRemotePool {
+            count: 1,
+            problem: None,
+            slots: vec![slot(0, GateSlotState::Busy)],
+        });
+        assert_eq!(
+            strip_text(&gates),
+            "Gates 3/5",
+            "the remote pool is left out"
+        );
+    }
+
+    #[test]
+    fn slot_tooltip_lists_command_folder_log_ceiling_and_processes() {
+        assert_eq!(
+            slot_tooltip(
+                Some("cargo nextest run"),
+                Some(r"X:\dev\repo"),
+                Some(r"C:\logs\g.log"),
+                Some(600.0),
+                3
+            ),
+            "cargo nextest run\nX:\\dev\\repo\nLog: C:\\logs\\g.log\nCeiling: 600 s\nProcesses: 3"
+        );
+        assert_eq!(slot_tooltip(None, None, None, None, 0), "Processes: 0");
+    }
+
+    #[test]
+    fn fresh_holds_while_a_claim_or_a_wait_is_under_a_minute() {
+        let now = time("2026-11-05T10:00:00Z");
+        let young = GateSlot {
+            claim: Some(GateClaim {
+                started: Some(time("2026-11-05T09:59:30Z")),
+                ..claim(1)
+            }),
+            ..slot(0, GateSlotState::Busy)
+        };
+        assert!(fresh(
+            &state(vec![pool(GateSlotKind::Heavy, 1, vec![young])]),
+            now
+        ));
+        let old = GateSlot {
+            claim: Some(claim(1)),
+            ..slot(0, GateSlotState::Busy)
+        };
+        assert!(
+            !fresh(&state(vec![pool(GateSlotKind::Heavy, 1, vec![old])]), now),
+            "two minutes held"
+        );
+        let mut light = pool(GateSlotKind::Light, 1, Vec::new());
+        light.waiting = vec![waiter(2, Some("2026-11-05T09:59:50Z"))];
+        assert!(fresh(&state(vec![light]), now), "a young wait");
+        assert!(!fresh(&state(Vec::new()), now));
+    }
+
+    #[test]
+    fn ordinal_reads_1st_2nd_3rd_then_th() {
+        let read: Vec<String> = [1, 2, 3, 4, 11, 12, 13, 21, 22]
+            .into_iter()
+            .map(ordinal)
+            .collect();
+        assert_eq!(
+            read,
+            [
+                "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd"
+            ]
+        );
     }
 
     #[test]

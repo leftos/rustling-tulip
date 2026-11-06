@@ -217,10 +217,11 @@ enum View {
     Toast,
     SettingsSounds,
     Accounts,
+    Gates,
 }
 
 impl View {
-    const ALL: [Self; 29] = [
+    const ALL: [Self; 30] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -249,6 +250,7 @@ impl View {
         Self::SettingsAccounts,
         Self::SettingsSounds,
         Self::Accounts,
+        Self::Gates,
         Self::Toast,
     ];
 
@@ -282,6 +284,7 @@ impl View {
             Self::SettingsAccounts => "settings-accounts",
             Self::SettingsSounds => "settings-sounds",
             Self::Accounts => "accounts",
+            Self::Gates => "gates",
             Self::Toast => "toast",
         }
     }
@@ -354,6 +357,8 @@ impl View {
             Self::Toast => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
+            // The Gates panel over the fake daemon's gate state.
+            Self::Gates => root.shown_activity() == Activity::Gates,
             Self::Main | Self::MainCompact => {
                 !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
             }
@@ -522,6 +527,7 @@ impl Shot {
             | View::SettingsAccounts
             | View::SettingsSounds
             | View::Accounts
+            | View::Gates
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -1118,6 +1124,7 @@ fn drive(
     match view {
         View::Main | View::MainCompact | View::MultiHost | View::Toast => Ok(()),
         View::Accounts => open_accounts(window, cx),
+        View::Gates => show_gates(window, cx),
         View::SourceControl => {
             let y = (SOURCE_CONTROL_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
             #[expect(
@@ -1934,13 +1941,18 @@ impl FakeDaemon {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(FAKE_PORT);
-        let features = vec![
+        let mut features = vec![
             protocol::FEATURE_AGENT_COMMANDS.to_owned(),
             protocol::FEATURE_FILE_TAIL.to_owned(),
             protocol::FEATURE_DEFAULT_SHELL.to_owned(),
             protocol::FEATURE_AGENT_USER_HOOKS.to_owned(),
             protocol::FEATURE_ACCOUNTS.to_owned(),
         ];
+        // Only the gates shot lists the gate feature, so the other views keep
+        // no Gates item or footer pill.
+        if self.view == View::Gates {
+            features.push(protocol::FEATURE_GATE_STATE.to_owned());
+        }
         conn.on_welcome(version, features.clone(), None);
         self.event(NetEvent::State(conn))?;
         self.event(NetEvent::Handshake(HandshakeInfo {
@@ -1975,6 +1987,11 @@ impl FakeDaemon {
         })?;
         if self.view == View::SettingsDashboard {
             self.send(shot_summarizer_status())?;
+        }
+        if self.view == View::Gates {
+            self.send(DaemonMessage::GateState {
+                state: Some(Box::new(shot_gate_state(self.now))),
+            })?;
         }
         self.send(DaemonMessage::AgentCommands {
             commands: vec![AgentCommandEntry {
@@ -2215,6 +2232,151 @@ fn shot_auto(now: DateTime<Utc>) -> protocol::AutoSwitchState {
             first_reset: Some(now + chrono::Duration::days(1)),
         }),
     }
+}
+
+/// The fake daemon's gate state at `now`, after lane A's busy state: heavy
+/// 4 with two busy slots, a held one and a free one with a stale claim, and
+/// a gate waiting for it; light 2 with one busy; one queue ticket; a remote
+/// pool of 2 with one busy.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one literal fixture, read top to bottom like the mock's state"
+)]
+fn shot_gate_state(now: DateTime<Utc>) -> protocol::GateState {
+    use protocol::{
+        GateClaim, GatePool, GateQueueTicket, GateRemotePool, GateSlot, GateSlotKind,
+        GateSlotState, GateWaiting,
+    };
+    let slot = |index: u32, state: GateSlotState| GateSlot {
+        index,
+        name: format!("gate-slot-{index}"),
+        state,
+        claim: None,
+        stale: None,
+        processes: 0,
+        last_line: None,
+        critical: false,
+        extra: Some(false),
+    };
+    let claim = |pid: u32, minutes: i64, cwd: &str, command: &str| GateClaim {
+        pid: Some(pid),
+        started: Some(now - chrono::Duration::minutes(minutes)),
+        cwd: Some(cwd.to_owned()),
+        command: Some(command.to_owned()),
+        log: Some(format!(r"C:\Users\me\AppData\Local\gate\logs\{pid}.log")),
+        timeout_seconds: Some(1800.0),
+    };
+    let busy =
+        |index: u32, pid: u32, minutes: i64, cwd: &str, command: &str, line: &str| GateSlot {
+            claim: Some(claim(pid, minutes, cwd, command)),
+            processes: 4,
+            last_line: Some(line.to_owned()),
+            ..slot(index, GateSlotState::Busy)
+        };
+    let waiting_since = now - chrono::Duration::minutes(1);
+    let heavy = GatePool {
+        kind: GateSlotKind::Heavy,
+        count: 4,
+        default: 4,
+        set: Some(4),
+        problem: None,
+        slots: vec![
+            busy(
+                0,
+                4100,
+                6,
+                r"X:\dev\rustling-tulip.wt\rt-1001",
+                r"C:\Users\me\.cargo\bin\cargo.exe nextest run -p rustling-tulip-native",
+                "PASS [ 0.071s] ui_gates::the_badge_counts_busy_and_held_slots",
+            ),
+            busy(
+                1,
+                4102,
+                2,
+                r"X:\dev\gate.wt\g-41",
+                "cargo clippy --workspace -- -D warnings",
+                "Checking gate-state v0.4.0",
+            ),
+            slot(2, GateSlotState::Held),
+            GateSlot {
+                stale: Some(claim(3920, 40, r"X:\dev\repo", "cargo build")),
+                ..slot(3, GateSlotState::Free)
+            },
+        ],
+        waiting: vec![GateWaiting {
+            pid: 4210,
+            since: Some(waiting_since),
+            cwd: Some(r"X:\dev\ops-tower".to_owned()),
+            command_line: "cargo nextest run --workspace".to_owned(),
+        }],
+    };
+    let light = GatePool {
+        kind: GateSlotKind::Light,
+        count: 2,
+        default: 2,
+        set: None,
+        problem: None,
+        slots: vec![
+            busy(
+                0,
+                4120,
+                1,
+                r"X:\dev\rustling-tulip",
+                "cargo fmt --all --check",
+                "Diff in apps/native/src/gates_view.rs",
+            ),
+            slot(1, GateSlotState::Free),
+        ],
+        waiting: Vec::new(),
+    };
+    protocol::GateState {
+        now: Some(now),
+        machine: "LEFTOS-DESK".to_owned(),
+        processors: 16,
+        critical: None,
+        queue: vec![GateQueueTicket {
+            kind: "heavy".to_owned(),
+            holds: false,
+            remote: false,
+            pool: None,
+            pinned: false,
+            pid: 4210,
+            arrived: Some(waiting_since),
+            age_seconds: 60.0,
+            cwd: Some(r"X:\dev\ops-tower".to_owned()),
+            command_line: Some("cargo nextest run --workspace".to_owned()),
+            reason: None,
+            expected: None,
+        }],
+        pools: vec![heavy, light],
+        remote: Some(GateRemotePool {
+            count: 2,
+            problem: None,
+            slots: vec![
+                busy(
+                    0,
+                    5100,
+                    3,
+                    r"X:\dev\yaat",
+                    "dotnet test yaat.slnx",
+                    "Passed!  - Failed: 0, Passed: 412",
+                ),
+                slot(1, GateSlotState::Free),
+            ],
+        }),
+        builders: Vec::new(),
+        covered: Vec::new(),
+    }
+}
+
+/// Shows the Gates panel.
+fn show_gates(window: &mut Window, cx: &mut App) -> Result<()> {
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    root.update(cx, |root, cx| root.show_gates(window, cx));
+    Ok(())
 }
 
 /// Opens the accounts popover from the footer's chip.

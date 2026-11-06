@@ -110,9 +110,12 @@ fn side_part_shown(root: &RootView, selector: &str) -> bool {
         "sidebar-panel" => open && root.shown_activity() == Activity::Sessions,
         "sidebar-divider" => open,
         "activity-badge" => root.activity_badge().is_some(),
-        "activity-gates" => root.gates_header().is_some(),
+        "activity-gates" | "footer-gates" => root.gates_header().is_some(),
         "gates-badge" => root.gates_badge().is_some(),
         "gates-panel" | "gates-header" => open && root.shown_activity() == Activity::Gates,
+        _ if selector == "gates-menu" || selector.starts_with("gates-menu-") => {
+            root.gates_menu_open()
+        }
         "recover-badge" => root.recover_badge().is_some(),
         "needs-you-badge" => root.needs_you_badge().is_some(),
         "needs-you-panel" | "needs-you-header" => open && root.activity() == Activity::NeedsYou,
@@ -915,6 +918,92 @@ pub fn gate_state(machine: &str) -> protocol::GateState {
         builders: Vec::new(),
         covered: Vec::new(),
     }
+}
+
+/// A fuller `GateState` for `machine`: a heavy pool of 4 with a busy slot
+/// (`C:\tools\cargo.exe nextest run` in `X:\dev\repo.wt\rt-7`, held five
+/// minutes, logging to `log`), a held slot, a free slot with pid 4040's
+/// stale claim and a free slot, and one gate (`cargo clippy` in
+/// `X:\dev\other`) waiting two minutes; a light pool of 2 with a busy slot
+/// that has no log and a free slot; a critical gate waiting; one queue
+/// ticket; and a remote pool with a busy slot. 3 local slots are busy or
+/// held, of 6.
+pub fn gate_state_full(machine: &str, log: &Path) -> protocol::GateState {
+    use protocol::{
+        GateClaim, GateCriticalState, GateQueueTicket, GateRemotePool, GateSlotKind, GateSlotState,
+        GateWaiting,
+    };
+    let mut state = gate_state(machine);
+    let now = Utc::now();
+    let claim = |pid, command: &str, cwd: &str, log: Option<String>| GateClaim {
+        pid: Some(pid),
+        started: Some(now - chrono::Duration::minutes(5)),
+        cwd: Some(cwd.to_owned()),
+        command: Some(command.to_owned()),
+        log,
+        timeout_seconds: Some(600.0),
+    };
+    let heavy = &mut state.pools[0];
+    heavy.count = 4;
+    heavy.slots = vec![
+        protocol::GateSlot {
+            claim: Some(claim(
+                4100,
+                r"C:\tools\cargo.exe nextest run",
+                r"X:\dev\repo.wt\rt-7",
+                Some(log.display().to_string()),
+            )),
+            processes: 3,
+            last_line: Some("Compiling foo".to_owned()),
+            ..gate_slot(0, GateSlotState::Busy)
+        },
+        gate_slot(1, GateSlotState::Held),
+        protocol::GateSlot {
+            stale: Some(claim(4040, "cargo build", r"X:\dev\repo", None)),
+            ..gate_slot(2, GateSlotState::Free)
+        },
+        gate_slot(3, GateSlotState::Free),
+    ];
+    heavy.waiting = vec![GateWaiting {
+        pid: 4200,
+        since: Some(now - chrono::Duration::minutes(2)),
+        cwd: Some(r"X:\dev\other".to_owned()),
+        command_line: "cargo clippy".to_owned(),
+    }];
+    state.pools[1].slots[0].claim = Some(claim(4101, "cargo fmt", r"X:\dev\repo", None));
+    state.critical = Some(GateCriticalState {
+        holder: None,
+        waiting: vec![GateWaiting {
+            pid: 4300,
+            since: Some(now - chrono::Duration::minutes(1)),
+            cwd: Some(r"X:\dev\repo".to_owned()),
+            command_line: "pwsh tools/release.ps1".to_owned(),
+        }],
+    });
+    state.queue = vec![GateQueueTicket {
+        kind: "heavy".to_owned(),
+        holds: false,
+        remote: false,
+        pool: None,
+        pinned: false,
+        pid: 4200,
+        arrived: Some(now - chrono::Duration::minutes(2)),
+        age_seconds: 120.0,
+        cwd: Some(r"X:\dev\other".to_owned()),
+        command_line: Some("cargo clippy".to_owned()),
+        reason: None,
+        expected: None,
+    }];
+    state.remote = Some(GateRemotePool {
+        count: 1,
+        problem: None,
+        slots: vec![protocol::GateSlot {
+            claim: Some(claim(4400, "cargo test", r"X:\dev\repo", None)),
+            ..gate_slot(0, GateSlotState::Busy)
+        }],
+    });
+    debug_assert_eq!(state.pools[1].kind, GateSlotKind::Light);
+    state
 }
 
 /// The `GateState` push of `state`; `None` says the host has no gate state.

@@ -67,6 +67,7 @@ pub mod fonts;
 mod footer;
 mod fuzzy;
 mod gates;
+mod gates_view;
 mod grid_view;
 mod header_tip;
 mod history;
@@ -1280,6 +1281,9 @@ pub struct RootView {
     needs_you_timer: Option<Task<()>>,
     /// How many times that timer has repainted the panel.
     needs_you_repaints: usize,
+    /// The Gates panel's pending stepper writes, refusals, row menu and
+    /// repaint timer.
+    gates_ui: gates_view::GatesUi,
     /// The files being fetched from a remote host.
     fetches: file_fetch::FetchRegistry,
     /// Where the open the run confirm asks about came from.
@@ -1702,6 +1706,7 @@ impl RootView {
             recover_batches: Vec::new(),
             needs_you_timer: None,
             needs_you_repaints: 0,
+            gates_ui: gates_view::GatesUi::default(),
             fetches: file_fetch::FetchRegistry::new(&format!(
                 "{:x}",
                 uuid::Uuid::new_v4().as_u64_pair().0
@@ -4244,7 +4249,7 @@ impl RootView {
         if !conn.is_open() && *host == HostKey::Local {
             self.agent_tabs.forget_applies(&HostKey::Local);
             self.launch_last.clear();
-            self.gate_state = None;
+            self.forget_gate_state();
         }
         // The handshake, the fetches streaming over the connection and the
         // remote access status are the old target's daemon's.
@@ -4356,19 +4361,32 @@ impl RootView {
     }
 
     /// Folds This PC's gate state from `msg`: a `GateState` push sets it,
-    /// a `Welcome` clears it until the next push. Another host's messages
-    /// leave it alone.
+    /// a `Welcome` clears it until the next push, and a `GateSlotCountSet`
+    /// ends the stepper write it answers. Another host's messages leave it
+    /// alone.
     fn on_gates_message(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
         if *host != HostKey::Local {
             return;
         }
         match msg {
             DaemonMessage::GateState { state } => {
-                self.gate_state = state.as_deref().cloned();
+                match state.as_deref() {
+                    Some(state) => self.gate_state = Some(state.clone()),
+                    None => self.forget_gate_state(),
+                }
+                self.arm_gates_repaint(cx);
                 cx.notify();
             }
+            DaemonMessage::GateSlotCountSet {
+                request_id: Some(id),
+                ..
+            } => {
+                if self.gates_ui.answered(id) {
+                    cx.notify();
+                }
+            }
             DaemonMessage::Welcome { .. } if self.gate_state.is_some() => {
-                self.gate_state = None;
+                self.forget_gate_state();
                 cx.notify();
             }
             _ => {}
@@ -4689,6 +4707,7 @@ impl RootView {
                 self.on_default_shell_refused(host, id, &message, cx)
                     || self.on_summarizer_refused(host, id, &message, cx)
                     || self.on_accounts_refused(host, id, &message, cx)
+                    || self.on_gates_refused(host, id, &message, cx)
                     || self.on_agent_command_error(host, id, code, &message, cx)
                     || self.on_preset_list_failed(id, &message, cx)
             }
@@ -5604,6 +5623,7 @@ impl Render for RootView {
             .children(self.empty_pane_menu_layer(here, cx).into_iter().flatten())
             .children(self.container_menu_layer(cx).into_iter().flatten())
             .children(self.more_menu_layer())
+            .children(self.gates_menu_layer(cx).into_iter().flatten())
             .children(self.sc_picker_layer())
             .children(self.sc_file_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
@@ -5742,6 +5762,7 @@ impl RootView {
             .child(connections)
             .child(pill)
             .children(self.hosts_online().map(|text| hosts_online_item(text, cx)))
+            .children(self.gates_strip(cx))
             .children(
                 counts
                     .spans()

@@ -18,7 +18,6 @@ use crate::driver_id::DriverId as _;
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{self, DEFAULT_FAMILY};
 use crate::fonts::{ui_px, ui_px_at};
-use crate::gates;
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
 use crate::palette::ROW_GAP;
@@ -77,10 +76,6 @@ const SUBLINE_GAP: f32 = 8.0;
 const NO_ACTIVE_REPOS: &str = "No active repos or workspaces";
 /// The widest a `T:<name>` chip grows before its name truncates.
 const PILL_MAX_WIDTH: f32 = 96.0;
-/// The Gates panel's header title, before the machine's name.
-const GATES_TITLE: &str = "GATES";
-/// The Gates panel's header height, as the Needs You panel's.
-const GATES_HEADER_HEIGHT: f32 = 26.0;
 
 impl RootView {
     /// The rail, the panel it picks with its divider, and the terminal pane
@@ -102,7 +97,7 @@ impl RootView {
                 Activity::Sessions => self.sidebar_panel(width, window, cx),
                 Activity::SourceControl => self.source_control_view(width, window, cx),
                 Activity::NeedsYou => self.needs_you_view(width, cx),
-                Activity::Gates => self.gates_panel(width, cx),
+                Activity::Gates => self.gates_view(width, cx),
             };
             row.child(panel).child(divider(active, cx))
         };
@@ -3056,77 +3051,6 @@ impl RootView {
         } else {
             DETACHED_STOP_ALL
         })
-    }
-
-    /// The Gates panel's header text, `GATES · <machine>`, while This PC
-    /// has a gate state.
-    #[must_use]
-    pub fn gates_header(&self) -> Option<String> {
-        self.gate_state
-            .as_ref()
-            .map(|state| format!("{GATES_TITLE} · {}", state.machine))
-    }
-
-    /// The Gates panel's pool lines, one header per pool in
-    /// [`gates::rows`]'s order; empty with no gate state.
-    #[must_use]
-    pub fn gates_pool_lines(&self) -> Vec<String> {
-        self.gate_state
-            .as_ref()
-            .map(gates::rows)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|row| match row {
-                gates::GateRow::PoolHeader { text, .. } => Some(text),
-                gates::GateRow::Slot { .. } => None,
-            })
-            .collect()
-    }
-
-    /// The Gates panel, `width` wide: the machine's header, then one line
-    /// per pool. The slot rows are the Gates view's.
-    fn gates_panel(&self, width: f32, cx: &mut Context<Self>) -> Div {
-        let t = theme(cx);
-        let offset = fonts::ui_text_size(cx);
-        let shift = fonts::ui_weight_shift(cx);
-        let header = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .h(ui_px_at(offset, GATES_HEADER_HEIGHT))
-            .px(px(ROW_PADDING))
-            .border_b_1()
-            .border_color(gpui::rgb(t.border))
-            .text_color(gpui::rgb(t.muted))
-            .driver_id(|| "gates-header".to_owned())
-            .child(
-                div()
-                    .font_weight(fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
-                    .child(self.gates_header().unwrap_or_default()),
-            );
-        let pools = self.gates_pool_lines().into_iter().map(|line| {
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .h(ui_px_at(offset, ROW_HEIGHT))
-                .px(px(ROW_PADDING))
-                .text_color(gpui::rgb(t.text_2))
-                .child(line)
-        });
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(px(width))
-            .h_full()
-            .driver_id(|| "gates-panel".to_owned())
-            .track_focus(&self.sidebar_focus)
-            .bg(gpui::rgb(t.panel_bg))
-            .text_size(ui_px(cx, UI_TEXT_SIZE))
-            .text_color(gpui::rgb(t.text))
-            .child(header)
-            .children(pools)
     }
 }
 

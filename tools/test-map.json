@@ -540,6 +540,12 @@
     },
     {
       "paths": [
+        "apps/native/src/gates_view.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_gates)::/)"
+    },
+    {
+      "paths": [
         "apps/native/src/grid_view.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^grid_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_chat|ui_file_fetch|ui_links|ui_pane_drag|ui_pane_spawn|ui_panes|ui_remote|ui_session_actions|ui_sidebar_drag|ui_tabs|ui_terminal|ui_viewer_tabs)::/))"
