@@ -29,7 +29,7 @@ directories = { workspace = true }
 # The clock the account poll reads, and the HTTP-date `Retry-After` parse.
 jiff = "0.2.37"
 # The process table the account engine checks a lease holder against.
-proc-table = { git = "https://github.com/leftos/gate", rev = "15659c9e38a82270688c3371af2c5b6d7c19a0b6" }
+proc-table = { workspace = true }
 protocol = { workspace = true }
 regex = "1.11"
 # The account transports' HTTP client: blocking, rustls on the `ring` backend

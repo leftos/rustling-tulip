@@ -112,6 +112,11 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-native-roots",
     "json",
 ] }
+# The gate's live state (slots, queue, pools) for the Gates view, read with
+# `gate_state::dashboard_state`, and the process table it reads it against.
+gate-state = { workspace = true }
+proc-table = { workspace = true }
+jiff = "0.2.37"
 
 [dev-dependencies]
 agent-claude = { workspace = true }

@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 jiff = "0.2.37"
-proc-table = { git = "https://github.com/leftos/gate", rev = "15659c9e38a82270688c3371af2c5b6d7c19a0b6" }
+proc-table = { workspace = true }
 serde = { workspace = true }
 serde_json = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
 sha2 = { version = "0.11.0", features = ["zeroize"] }
