@@ -1282,14 +1282,15 @@ fn record_prepaid(row: &mut Map<String, Value>, read: &PrepaidRead) {
             {
                 return;
             }
-            let prepaid = prepaid_object(row);
-            prepaid.insert("amountMinor".to_owned(), Value::from(*amount_minor));
-            prepaid.insert("exponent".to_owned(), Value::from(*exponent));
-            prepaid.insert("currency".to_owned(), Value::from(currency.clone()));
-            prepaid.insert("autoReload".to_owned(), Value::from(*auto_reload));
-            prepaid.insert("fetchedAt".to_owned(), Value::from(*at));
-            prepaid.insert("error".to_owned(), Value::Null);
-            prepaid.insert("attemptedAt".to_owned(), Value::from(*at));
+            with_prepaid(row, |prepaid| {
+                prepaid.insert("amountMinor".to_owned(), Value::from(*amount_minor));
+                prepaid.insert("exponent".to_owned(), Value::from(*exponent));
+                prepaid.insert("currency".to_owned(), Value::from(currency.clone()));
+                prepaid.insert("autoReload".to_owned(), Value::from(*auto_reload));
+                prepaid.insert("fetchedAt".to_owned(), Value::from(*at));
+                prepaid.insert("error".to_owned(), Value::Null);
+                prepaid.insert("attemptedAt".to_owned(), Value::from(*at));
+            });
         }
         PrepaidRead::Failed { error, at } => {
             if stored_time("attemptedAt")
@@ -1297,29 +1298,26 @@ fn record_prepaid(row: &mut Map<String, Value>, read: &PrepaidRead) {
             {
                 return;
             }
-            let prepaid = prepaid_object(row);
-            prepaid.insert("error".to_owned(), Value::String(error.kind()));
-            prepaid.insert("attemptedAt".to_owned(), Value::from(*at));
+            with_prepaid(row, |prepaid| {
+                prepaid.insert("error".to_owned(), Value::String(error.kind()));
+                prepaid.insert("attemptedAt".to_owned(), Value::from(*at));
+            });
         }
     }
 }
 
-/// The row's `prepaid` object, made fresh when the row has none there or holds something that is not an object: a
-/// balance read and a failed one both write into it, so keys neither models survive.
-#[expect(
-    clippy::expect_used,
-    reason = "the entry is replaced by an object just above"
-)]
-fn prepaid_object(row: &mut Map<String, Value>) -> &mut Map<String, Value> {
+/// Fills the row's `prepaid` object with `fill`, making it fresh first when the row has none there or holds something
+/// that is not an object: a balance read and a failed one both write into it, so keys neither models survive.
+fn with_prepaid(row: &mut Map<String, Value>, fill: impl FnOnce(&mut Map<String, Value>)) {
     let entry = row
         .entry("prepaid")
         .or_insert_with(|| Value::Object(Map::new()));
     if !entry.is_object() {
         *entry = Value::Object(Map::new());
     }
-    entry
-        .as_object_mut()
-        .expect("prepaid is an object after the replacement")
+    if let Value::Object(prepaid) = entry {
+        fill(prepaid);
+    }
 }
 
 fn classify(answer: &RawUsage) -> FetchResult {
