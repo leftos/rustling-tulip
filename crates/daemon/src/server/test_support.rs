@@ -186,8 +186,17 @@ pub(super) fn build_test_hub(
         integrity: crate::integrity::IntegrityLevel::MEDIUM,
         peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
         accounts: None,
+        gate_state: None,
     };
     (hub, scratch, attention_rx)
+}
+
+/// Give `hub` a gate state holding `state`, as a 64-bit Windows daemon's hub
+/// holds one once its poll has read.
+pub(crate) fn enable_gate_state(hub: &mut Hub, state: Option<protocol::GateState>) {
+    let gate = crate::gate_state::GateHub::new();
+    gate.publish(state, &hub.state_events);
+    hub.gate_state = Some(gate);
 }
 
 /// A hub whose provider is a fake billing `cost_usd` per call, with one

@@ -164,6 +164,7 @@ async fn read_hello<R: Inbound>(
         &hub.daemon_id,
         origin_of(auth),
         hub.accounts.is_some(),
+        hub.gate_state.is_some(),
     ));
     Ok(Handshake {
         negotiated_version: negotiated,
@@ -239,9 +240,10 @@ fn authorize_device(
 /// with a session's grid and the trace of its screen rules over it.
 const FEATURE_SCREEN_DUMP: &str = "screen_dump";
 
-/// The features every daemon lists, whatever its state. The account features
-/// are not here: they join in [`welcome_message`] only when the hub holds an
-/// accounts service, since a daemon without one cannot honour them.
+/// The features every daemon lists, whatever its state. The account and gate
+/// state features are not here: they join in [`welcome_message`] only when
+/// the hub holds an accounts service or a gate state, since a daemon without
+/// one cannot honour them.
 const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_AGENT_COMMANDS,
     protocol::FEATURE_DEVICE_PAIRING,
@@ -261,12 +263,15 @@ const DAEMON_FEATURES: &[&str] = &[
 /// `accounts` appends `protocol::FEATURE_ACCOUNTS` and
 /// `protocol::FEATURE_ACCOUNT_EVENTS`, in that order, after those entries:
 /// the hub holds an accounts service only where the agent's account store
-/// works, and a daemon without one lists neither.
+/// works, and a daemon without one lists neither. `gate_state` then appends
+/// `protocol::FEATURE_GATE_STATE`: the hub holds a gate state only where the
+/// gate's live inputs are read (64-bit Windows).
 fn welcome_message(
     negotiated: u32,
     daemon_id: &str,
     origin: ConnectionOrigin,
     accounts: bool,
+    gate_state: bool,
 ) -> DaemonMessage {
     let mut features: Vec<String> = DAEMON_FEATURES
         .iter()
@@ -275,6 +280,9 @@ fn welcome_message(
     if accounts {
         features.push(protocol::FEATURE_ACCOUNTS.to_owned());
         features.push(protocol::FEATURE_ACCOUNT_EVENTS.to_owned());
+    }
+    if gate_state {
+        features.push(protocol::FEATURE_GATE_STATE.to_owned());
     }
     DaemonMessage::Welcome {
         protocol_version: negotiated,
@@ -386,6 +394,18 @@ pub(super) fn push_initial_state(
         state: remote.snapshot.state.clone(),
     });
     drop(remote);
+    // Held across the send for the same reason: every gate state broadcast
+    // is published under the watch's write lock. A daemon that reads no gate
+    // state, or has found none yet, sends nothing.
+    if let Some(gate) = &hub.gate_state {
+        let current = gate.current();
+        if let Some(state) = &*current {
+            let _ = out_tx.send(DaemonMessage::GateState {
+                state: Some(Box::new(state.clone())),
+            });
+        }
+        drop(current);
+    }
     send_resume_report(hub, out_tx, client_id);
 }
 
@@ -532,7 +552,7 @@ mod tests {
     #[test]
     fn welcome_lists_detailed_logging_and_the_initial_state_carries_the_switch() {
         let (hub, _scratch) = test_hub("detailed-logging-initial");
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
         assert!(
             matches!(
                 &welcome,
@@ -568,7 +588,7 @@ mod tests {
     }
     #[test]
     fn welcome_carries_the_daemon_features_and_the_negotiated_version() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
         let mut expected: Vec<String> = DAEMON_FEATURES
             .iter()
             .map(|feature| (*feature).to_owned())
@@ -642,7 +662,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_default_shell() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
         assert!(
             matches!(
                 &welcome,
@@ -655,7 +675,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_agent_commands() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
         assert!(
             matches!(
                 &welcome,
@@ -884,7 +904,7 @@ mod tests {
 
     #[test]
     fn welcome_advertises_device_pairing() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
         assert!(
             matches!(
                 &welcome,
@@ -897,7 +917,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_device_block() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
         assert!(
             matches!(
                 &welcome,
@@ -912,7 +932,7 @@ mod tests {
 
     #[test]
     fn welcome_carries_the_daemon_id() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
         assert!(
             matches!(
                 &welcome,
@@ -924,7 +944,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_daemon_id_feature() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
         assert!(
             matches!(
                 &welcome,
@@ -937,7 +957,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_accounts_feature() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
         assert!(
             matches!(
                 &welcome,
@@ -951,7 +971,7 @@ mod tests {
 
     #[test]
     fn welcome_without_an_accounts_service_lists_no_account_features() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
         assert!(
             matches!(
                 &welcome,
@@ -962,6 +982,94 @@ mod tests {
             ),
             "{welcome:?}"
         );
+    }
+
+    /// The features a `Welcome` lists.
+    fn features_of(welcome: &DaemonMessage) -> Vec<String> {
+        match welcome {
+            DaemonMessage::Welcome { features, .. } => features.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn gate_welcome_lists_the_feature_only_when_enabled() {
+        let enabled = features_of(&welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            true,
+        ));
+        assert_eq!(
+            enabled.last().map(String::as_str),
+            Some(protocol::FEATURE_GATE_STATE),
+            "the gate feature follows the account features: {enabled:?}"
+        );
+
+        let disabled = features_of(&welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            false,
+        ));
+        assert!(
+            !disabled.iter().any(|f| f == protocol::FEATURE_GATE_STATE),
+            "{disabled:?}"
+        );
+        assert!(
+            !DAEMON_FEATURES.contains(&protocol::FEATURE_GATE_STATE),
+            "the gate feature joins only where the gate state is read"
+        );
+    }
+
+    /// Every `GateState` an initial-state push put on the wire, draining `out_rx`.
+    fn gate_states(
+        out_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
+    ) -> Vec<Option<protocol::GateState>> {
+        let mut sent = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            if let DaemonMessage::GateState { state } = message {
+                sent.push(state.map(|state| *state));
+            }
+        }
+        sent
+    }
+
+    #[test]
+    fn gate_initial_state_carries_the_current_value() {
+        let (mut hub, _scratch) = test_hub("gate-initial-state");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        push_initial_state(&hub, &out_tx, "c1", false);
+        assert_eq!(
+            gate_states(&mut out_rx),
+            [],
+            "a daemon that reads no gate state sends none"
+        );
+
+        crate::server::test_support::enable_gate_state(&mut hub, None);
+        push_initial_state(&hub, &out_tx, "c1", false);
+        assert_eq!(
+            gate_states(&mut out_rx),
+            [],
+            "nothing is sent before a read finds a gate"
+        );
+
+        let state = protocol::GateState {
+            now: None,
+            machine: "TESTBOX".to_owned(),
+            processors: 16,
+            critical: None,
+            queue: Vec::new(),
+            pools: Vec::new(),
+            remote: None,
+            builders: Vec::new(),
+            covered: Vec::new(),
+        };
+        crate::server::test_support::enable_gate_state(&mut hub, Some(state.clone()));
+        push_initial_state(&hub, &out_tx, "c1", false);
+        assert_eq!(gate_states(&mut out_rx), [Some(state)]);
     }
 
     /// The first message the daemon sends a connection of `auth` that

@@ -797,6 +797,9 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::Accounts { accounts, auto }) => {
                     let _ = out_tx.send(DaemonMessage::AccountsUpdated { accounts, auto });
                 }
+                Ok(StateEvent::GateState(state)) => {
+                    let _ = out_tx.send(DaemonMessage::GateState { state });
+                }
                 Ok(StateEvent::AccountEvent { event }) => {
                     let _ = out_tx.send(DaemonMessage::AccountEvent { event });
                 }
@@ -893,6 +896,15 @@ fn spawn_state_forwarder(
                             accounts: wire.accounts,
                             auto: wire.auto,
                         });
+                    }
+                    // Nor is a lost gate state, so the current one goes
+                    // again, held across the send as at the initial state.
+                    if let Some(gate) = &hub.gate_state {
+                        let current = gate.current();
+                        let _ = out_tx.send(DaemonMessage::GateState {
+                            state: current.clone().map(Box::new),
+                        });
+                        drop(current);
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,

@@ -218,6 +218,12 @@ pub struct Hub {
     /// off the async threads, with the snapshot its driver last polled;
     /// `None` when no plugin keeps accounts or the daemon runs elevated.
     pub accounts: Option<Arc<crate::accounts::Accounts>>,
+    /// The gate state the gate poll last read; `Some` exactly on 64-bit
+    /// Windows, the one platform with live gate inputs. An elevated daemon
+    /// reads too, but its `LOCALAPPDATA` and `Local\` namespace may differ
+    /// from the user's gates, so it may report no gate state or another
+    /// account's.
+    pub(crate) gate_state: Option<crate::gate_state::GateHub>,
 }
 
 impl Hub {
@@ -292,6 +298,10 @@ pub enum StateEvent {
         accounts: Vec<protocol::AccountSnapshot>,
         auto: Option<protocol::AutoSwitchState>,
     },
+    /// Broadcast by the gate poll when a read changed the gate state, under
+    /// the hub's gate-state watch's write lock. Mirrors
+    /// [`protocol::DaemonMessage::GateState`].
+    GateState(Option<Box<protocol::GateState>>),
     /// Broadcast when something happens to the host's accounts, such as a
     /// manual switch. Mirrors [`protocol::DaemonMessage::AccountEvent`].
     AccountEvent {
@@ -442,6 +452,10 @@ fn load_devices(dirs: &Dirs) -> Arc<std::sync::Mutex<crate::devices::DeviceStore
     )))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one line per hub field in the hub's literal; the start-up steps are already helpers"
+)]
 pub async fn run(
     state: Arc<AppState>,
     dirs: Dirs,
@@ -552,6 +566,7 @@ pub async fn run(
         integrity,
         peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
         accounts: accounts::start_service(&login_hub),
+        gate_state: crate::gate_state::LIVE_READER.map(|_| crate::gate_state::GateHub::new()),
     };
     start_hub_tasks(&hub, client_count_rx);
     let resume_ids = start_logins(&hub, &login_hub, resume_ids).await;
@@ -1242,6 +1257,16 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
             },
         );
         accounts.start_engine(hub.state_events.clone(), hub.shutdown_tx.subscribe());
+    }
+    // The 2 s gate poll; it parks while no client is connected and
+    // broadcasts only a changed state.
+    if let (Some(gate), Some(read)) = (&hub.gate_state, crate::gate_state::LIVE_READER) {
+        crate::gate_state::spawn_poll(
+            Arc::new(read),
+            gate.clone(),
+            hub.state_events.clone(),
+            client_count_rx.clone(),
+        );
     }
     // Idle self-exit: once the last client disconnects and no session has a
     // live child for a full grace period, flip the shutdown watch so a

@@ -1,16 +1,22 @@
-//! The gate's live state, read through leftos/gate's `gate-state` crate.
+//! The gate's live state, read through leftos/gate's `gate-state` crate, and the hub's poll that publishes it.
 
 #![cfg_attr(
-    not(test),
+    not(any(test, all(windows, target_pointer_width = "64"))),
     expect(
         dead_code,
-        reason = "the hub's gate poll calls these, and is wired separately"
+        reason = "only 64-bit Windows reads live gate inputs, so elsewhere the reader and its conversion are reached only by tests"
     )
 )]
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
+use tokio::sync::{broadcast, watch};
 use tracing::warn;
+
+use crate::server::StateEvent;
 
 /// A count as the wire carries it, saturating at `u32::MAX`.
 fn count(value: usize) -> u32 {
@@ -199,13 +205,6 @@ pub(crate) fn read_once(
 
 /// Reads this host's live gate state, or `None` when the gate's inputs cannot be read or no gate has run here.
 #[cfg(all(windows, target_pointer_width = "64"))]
-#[cfg_attr(
-    test,
-    expect(
-        dead_code,
-        reason = "the hub's gate poll calls it, and is wired separately"
-    )
-)]
 pub(crate) fn read_live() -> Option<protocol::GateState> {
     let inputs = match ::gate_state::live_inputs() {
         Ok(inputs) => inputs,
@@ -238,14 +237,127 @@ fn without_ages(state: &protocol::GateState) -> protocol::GateState {
     state
 }
 
+/// The wait between two reads while a client is connected.
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How the poll reads the gate's state: [`read_live`] in the daemon, a scripted closure in tests. It blocks, so the
+/// poll calls it on a blocking thread.
+pub(crate) type GateReader = Arc<dyn Fn() -> Option<protocol::GateState> + Send + Sync>;
+
+/// The reader the daemon's poll runs: [`read_live`] on 64-bit Windows, the one platform with live gate inputs, and
+/// `None` elsewhere, where the hub holds no gate state and starts no poll.
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub(crate) const LIVE_READER: Option<fn() -> Option<protocol::GateState>> = Some(read_live);
+/// The reader the daemon's poll runs: none off 64-bit Windows, where the hub holds no gate state and starts no poll.
+#[cfg(not(all(windows, target_pointer_width = "64")))]
+pub(crate) const LIVE_READER: Option<fn() -> Option<protocol::GateState>> = None;
+
+/// The hub's current gate state, `None` until a read finds a gate. The poll is its only writer; a connection reads it
+/// at its initial state and when its state stream lags, and otherwise takes the poll's broadcasts.
+#[derive(Clone)]
+pub(crate) struct GateHub {
+    current: Arc<watch::Sender<Option<protocol::GateState>>>,
+}
+
+impl GateHub {
+    /// A hub gate state that holds no state yet.
+    pub(crate) fn new() -> Self {
+        Self {
+            current: Arc::new(watch::Sender::new(None)),
+        }
+    }
+
+    /// The current state. Every change is broadcast under the watch's write lock, so a connection that holds this
+    /// borrow across its send cannot see a later broadcast before it.
+    pub(crate) fn current(&self) -> watch::Ref<'_, Option<protocol::GateState>> {
+        self.current.borrow()
+    }
+
+    /// Store `state` and, when it differs from the current one by more than its moment and ages, broadcast it on
+    /// `events` as a [`StateEvent::GateState`]; returns whether it was broadcast. An equal state still replaces the
+    /// stored one silently, so a connection's initial state carries the latest moment.
+    pub(crate) fn publish(
+        &self,
+        state: Option<protocol::GateState>,
+        events: &broadcast::Sender<StateEvent>,
+    ) -> bool {
+        self.current.send_if_modified(|current| {
+            let same = match (&*current, &state) {
+                (None, None) => true,
+                (Some(old), Some(new)) => same_state(old, new),
+                _ => false,
+            };
+            *current = state;
+            if !same {
+                let _ = events.send(StateEvent::GateState(current.clone().map(Box::new)));
+            }
+            !same
+        })
+    }
+}
+
+/// Start the gate poll for the daemon's life. While no client is connected it parks and reads nothing; when the count
+/// rises from zero it reads at once, then every [`POLL_INTERVAL`], each read on a blocking thread, publishing each
+/// result to `gate` (broadcast on `events` when it changed).
+pub(crate) fn spawn_poll(
+    reader: GateReader,
+    gate: GateHub,
+    events: broadcast::Sender<StateEvent>,
+    mut clients: watch::Receiver<usize>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if clients.wait_for(|count| *count > 0).await.is_err() {
+                return;
+            }
+            let mut interval = tokio::time::interval(POLL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick completes at once: the connect's read.
+            loop {
+                tokio::select! {
+                    biased;
+                    changed = clients.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        if *clients.borrow_and_update() == 0 {
+                            break;
+                        }
+                    }
+                    _ = interval.tick() => read_and_publish(&reader, &gate, &events).await,
+                }
+            }
+        }
+    })
+}
+
+/// Read once on a blocking thread and publish the result; a read that stopped is logged and skips the tick.
+async fn read_and_publish(
+    reader: &GateReader,
+    gate: &GateHub,
+    events: &broadcast::Sender<StateEvent>,
+) {
+    let reader = Arc::clone(reader);
+    match tokio::task::spawn_blocking(move || reader()).await {
+        Ok(state) => {
+            gate.publish(state, events);
+        }
+        Err(error) => warn!(%error, "gate state: the read stopped; skipping this tick"),
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
     reason = "tests assert setup and fixtures with expect"
 )]
 mod tests {
+    use std::collections::VecDeque;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::time::Duration;
 
     use ::gate_state::{
         BuilderPool, CoveredRun, CriticalState, CwdReader, DashboardState, Generation, MutexProbe,
@@ -258,7 +370,11 @@ mod tests {
 
     use protocol::{GateClaim, GateExpected, GateSlotKind, GateSlotState, GateWaiting};
 
-    use super::{read_once, same_state, to_wire};
+    use tokio::sync::{broadcast, mpsc, watch};
+
+    use crate::server::StateEvent;
+
+    use super::{GateHub, GateReader, POLL_INTERVAL, read_once, same_state, spawn_poll, to_wire};
 
     /// The moment a test describes.
     const NOW: &str = "2026-10-01T12:00:00.1234567Z";
@@ -765,5 +881,169 @@ mod tests {
         let mut changed = first.clone();
         changed.pools[0].slots[0].state = SlotState::Held;
         assert!(!same_state(&to_wire(&first), &to_wire(&changed)));
+    }
+
+    /// A step-count guard on a paused clock, far past any passing wait.
+    const GUARD: Duration = Duration::from_hours(7 * 24);
+
+    /// A wait far past any tick the tests schedule.
+    const A_DAY: Duration = Duration::from_hours(24);
+
+    /// An idle gate's wire state, on the machine `machine`.
+    fn idle_on(machine: &str) -> protocol::GateState {
+        let mut state = dashboard(vec![heavy_pool(Vec::new())]);
+        machine.clone_into(&mut state.machine);
+        to_wire(&state)
+    }
+
+    /// A poll over a scripted reader, with the channels a test drives it by.
+    struct PollRig {
+        reads: Arc<AtomicUsize>,
+        calls: mpsc::UnboundedReceiver<()>,
+        events: broadcast::Receiver<StateEvent>,
+        _events_tx: broadcast::Sender<StateEvent>,
+        clients: watch::Sender<usize>,
+        gate: GateHub,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    /// A poll whose reads answer `script` in order, then its last entry again, with `clients` connected; each
+    /// read is counted and signalled.
+    fn poll_rig(script: Vec<Option<protocol::GateState>>, clients: usize) -> PollRig {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (signal, calls) = mpsc::unbounded_channel();
+        let last = script.last().cloned().flatten();
+        let queue = Mutex::new(VecDeque::from(script));
+        let counted = Arc::clone(&reads);
+        let reader: GateReader = Arc::new(move || {
+            let next = queue
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or_else(|| last.clone());
+            counted.fetch_add(1, Ordering::SeqCst);
+            let _ = signal.send(());
+            next
+        });
+        let (events_tx, events) = broadcast::channel(16);
+        let (clients, clients_rx) = watch::channel(clients);
+        let gate = GateHub::new();
+        let task = spawn_poll(reader, gate.clone(), events_tx.clone(), clients_rx);
+        PollRig {
+            reads,
+            calls,
+            events,
+            _events_tx: events_tx,
+            clients,
+            gate,
+            task,
+        }
+    }
+
+    impl PollRig {
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+
+        /// Wait for the next read's signal.
+        async fn next_read(&mut self) {
+            tokio::time::timeout(GUARD, self.calls.recv())
+                .await
+                .expect("a read came")
+                .expect("the reader is alive");
+        }
+
+        /// Wait for the next broadcast: the gate state it carries, or `None` for another event.
+        async fn next_event(&mut self) -> Option<Option<protocol::GateState>> {
+            let event = tokio::time::timeout(GUARD, self.events.recv())
+                .await
+                .expect("a broadcast came")
+                .expect("the channel is open");
+            let StateEvent::GateState(state) = event else {
+                return None;
+            };
+            Some(state.map(|state| *state))
+        }
+
+        fn no_event(&mut self) -> bool {
+            matches!(
+                self.events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            )
+        }
+    }
+
+    /// Let the tasks run; yields only, so a passing run takes no wall time.
+    async fn settle() {
+        for _ in 0..1_000 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gate_poll_sends_once_for_equal_reads() {
+        let first = idle_on("TESTBOX");
+        let mut later = first.clone();
+        later.now = None;
+        let mut rig = poll_rig(vec![Some(first.clone()), Some(later)], 1);
+
+        rig.next_read().await;
+        assert_eq!(rig.next_event().await, Some(Some(first)));
+        rig.next_read().await;
+        // The third read starts only once the second one's result was compared.
+        rig.next_read().await;
+
+        assert!(rig.no_event(), "an equal read sends nothing");
+        rig.task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gate_poll_sends_a_change() {
+        let first = idle_on("TESTBOX");
+        let second = idle_on("OTHERBOX");
+        let mut rig = poll_rig(vec![Some(first.clone()), Some(second.clone())], 1);
+
+        assert_eq!(rig.next_event().await, Some(Some(first)));
+        assert_eq!(rig.next_event().await, Some(Some(second.clone())));
+        assert_eq!(
+            *rig.gate.current(),
+            Some(second),
+            "the watch holds what was sent"
+        );
+        rig.task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gate_poll_parks_with_no_client() {
+        let mut rig = poll_rig(vec![Some(idle_on("TESTBOX"))], 0);
+
+        tokio::time::sleep(A_DAY).await;
+        settle().await;
+        assert_eq!(rig.reads(), 0, "no client, no read");
+
+        rig.clients.send_replace(1);
+        rig.next_read().await;
+        rig.clients.send_replace(0);
+        tokio::time::sleep(A_DAY).await;
+        settle().await;
+        assert_eq!(rig.reads(), 1, "the last client leaving parks the poll");
+        rig.task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gate_poll_reads_at_once_on_connect() {
+        let mut rig = poll_rig(vec![Some(idle_on("TESTBOX"))], 0);
+        settle().await;
+        let connected = tokio::time::Instant::now();
+
+        rig.clients.send_replace(1);
+        rig.next_read().await;
+
+        assert_eq!(rig.reads(), 1);
+        assert!(
+            connected.elapsed() < POLL_INTERVAL,
+            "the connect's read waits for no tick"
+        );
+        rig.task.abort();
     }
 }
