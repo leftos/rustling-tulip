@@ -4,8 +4,18 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.10.0-alpha
+
+### Highlights
+
+- rustling-tulip now runs on Apple silicon Macs, as a signed and notarized .dmg that updates itself.
+- Save several Claude logins, see each one's usage in the footer, and switch accounts by hand or let auto-switch do it.
+- On Windows, a Gates view shows this PC's gate slots, queue and recent runs, and sets each pool's slot count.
+- Pick each host's default shell, and a Claude you start by hand in a shell gets Chat and Summary too.
+
 ### Added
 
+- rustling-tulip now runs on Apple silicon Macs, as a signed and notarized .dmg that updates itself.
 - On Windows and macOS hosts, the footer shows the Claude account in use and its usage; click it to switch accounts, set auto-switch and see when they run dry.
 - Settings › Accounts lists your saved accounts to switch, rename, reorder, remove or add, and sets auto-switch's threshold, cooldown, strategy and forecast window.
 - Settings › Accounts can log in a new account: the sign-in runs in a terminal session in the sidebar, and the account joins the list once it ends.
