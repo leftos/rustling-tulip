@@ -101,6 +101,22 @@ fn connected(features: Vec<String>) -> Connection {
     connected_to(Target::Local, 4242, features)
 }
 
+/// Whether the Gates panel is the one showing.
+fn gates_open(root: &RootView) -> bool {
+    !root.sidebar_collapsed() && root.shown_activity() == Activity::Gates
+}
+
+/// The row index after `prefix` in a Gates row selector such as
+/// `gates-recent-2-command=...`.
+fn gates_index(selector: &str, prefix: &str) -> Option<usize> {
+    selector
+        .strip_prefix(prefix)?
+        .split(['-', '='])
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// Whether the rail's side of the window shows what `selector` tags: the
 /// panels, the divider, the badge and the source-control panel's parts.
 /// Selectors it does not know count as present.
@@ -115,6 +131,25 @@ fn side_part_shown(root: &RootView, selector: &str) -> bool {
         "gates-panel" | "gates-header" => open && root.shown_activity() == Activity::Gates,
         _ if selector == "gates-menu" || selector.starts_with("gates-menu-") => {
             root.gates_menu_open()
+        }
+        "gates-recent" => gates_open(root) && root.gates_recent_count().is_some(),
+        _ if selector.starts_with("gates-recent-empty") => {
+            gates_open(root) && root.gates_recent_count() == Some(0)
+        }
+        _ if selector.starts_with("gates-recent-") => {
+            gates_open(root)
+                && gates_index(selector, "gates-recent-")
+                    .is_some_and(|n| root.gates_recent_count().is_some_and(|count| n < count))
+        }
+        "gates-week" | "gates-week-toggle" => gates_open(root) && root.gates_week_count().is_some(),
+        _ if selector.starts_with("gates-week-empty") => {
+            gates_open(root) && root.gates_week_open() && root.gates_week_count() == Some(0)
+        }
+        _ if selector.starts_with("gates-week-") => {
+            gates_open(root)
+                && root.gates_week_open()
+                && gates_index(selector, "gates-week-")
+                    .is_some_and(|n| root.gates_week_count().is_some_and(|count| n < count))
         }
         "recover-badge" => root.recover_badge().is_some(),
         "needs-you-badge" => root.needs_you_badge().is_some(),
@@ -1010,6 +1045,122 @@ pub fn gate_state_full(machine: &str, log: &Path) -> protocol::GateState {
 pub fn gate_state_msg(state: Option<protocol::GateState>) -> DaemonMessage {
     DaemonMessage::GateState {
         state: state.map(Box::new),
+    }
+}
+
+/// A finished gate run of `pid`: `command` in `repo` on heavy slot
+/// `slot`, in `state`, which held its slot 108 s and ended `ago` minutes
+/// before now.
+pub fn gate_history_run(
+    pid: u32,
+    command: &str,
+    repo: &str,
+    slot: u32,
+    state: protocol::GateRunState,
+    ago: i64,
+) -> protocol::GateHistoryRun {
+    let end = Utc::now() - chrono::Duration::minutes(ago);
+    let started = end - chrono::Duration::seconds(108);
+    protocol::GateHistoryRun {
+        command: command.to_owned(),
+        cwd: Some(format!(r"X:\dev\{repo}")),
+        repo: Some(repo.to_owned()),
+        kind: "heavy".to_owned(),
+        slot: Some(slot),
+        remote: false,
+        host: None,
+        fallback: None,
+        reason: None,
+        pid,
+        process_start: Some(started - chrono::Duration::seconds(5)),
+        parent_pid: None,
+        state,
+        running: false,
+        queued: Some(started - chrono::Duration::seconds(5)),
+        started: Some(started),
+        waited_seconds: Some(5.0),
+        held_seconds: Some(108.0),
+        status: match state {
+            protocol::GateRunState::Ok => Some(0),
+            protocol::GateRunState::Failed => Some(1),
+            _ => None,
+        },
+        verdict: None,
+        wall_seconds: None,
+        adjusted_seconds: None,
+        abandoned: Vec::new(),
+        remote_take: None,
+        cold: None,
+        critical_pid: None,
+    }
+}
+
+/// A gate history's recent runs, newest first in the window: an ok
+/// `cargo nextest run --workspace` in rustling-tulip 10 minutes ago, a
+/// failed `dotnet test` (exit 1) in yaat on heavy slot 1 20 minutes ago, a
+/// remote `cargo build` in claude-config that fell back (`full`) 30
+/// minutes ago, and an ok run 3 hours ago, outside the window.
+pub fn gate_history_runs() -> Vec<protocol::GateHistoryRun> {
+    use protocol::GateRunState;
+    let mut fell_back = gate_history_run(
+        5003,
+        "cargo build",
+        "claude-config",
+        0,
+        GateRunState::Ok,
+        30,
+    );
+    fell_back.fallback = Some("full".to_owned());
+    vec![
+        gate_history_run(
+            5001,
+            "cargo nextest run --workspace",
+            "rustling-tulip",
+            0,
+            GateRunState::Ok,
+            10,
+        ),
+        gate_history_run(5002, "dotnet test", "yaat", 1, GateRunState::Failed, 20),
+        fell_back,
+        gate_history_run(
+            5004,
+            "cargo fmt",
+            "rustling-tulip",
+            0,
+            GateRunState::Ok,
+            180,
+        ),
+    ]
+}
+
+/// Five seven-day summary rows, `cmd-0` to `cmd-4`, `cmd-n` counting
+/// `10 + n` runs with a p90 of 108 s.
+pub fn gate_history_summary() -> Vec<protocol::GateCommandSummary> {
+    (0..5)
+        .map(|n| protocol::GateCommandSummary {
+            command: format!("cmd-{n}"),
+            repo: Some("rustling-tulip".to_owned()),
+            remote: false,
+            count: 10 + n,
+            p50_seconds: 60.0,
+            p90_seconds: 108.0,
+            max_seconds: 200.0,
+        })
+        .collect()
+}
+
+/// The `GateHistory` reply to `request_id`.
+pub fn gate_history_msg(
+    request_id: Option<String>,
+    runs: Vec<protocol::GateHistoryRun>,
+    open: Vec<protocol::GateHistoryRun>,
+    summary: Vec<protocol::GateCommandSummary>,
+) -> DaemonMessage {
+    DaemonMessage::GateHistory {
+        request_id,
+        runs,
+        open,
+        summary,
     }
 }
 

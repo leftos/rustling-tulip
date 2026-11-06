@@ -5,7 +5,8 @@
 
 use chrono::{DateTime, Utc};
 use protocol::{
-    GatePool, GateQueueTicket, GateSlot, GateSlotKind, GateSlotState, GateState, GateWaiting,
+    GateCommandSummary, GateHistoryRun, GatePool, GateQueueTicket, GateRunState, GateSlot,
+    GateSlotKind, GateSlotState, GateState, GateWaiting,
 };
 
 /// One row of the Gates panel's pool list, in [`rows`]'s order.
@@ -363,6 +364,187 @@ pub(crate) fn folder_label(path: &str) -> String {
     parts[from..].join("/")
 }
 
+/// How far back the Recent runs block reaches for a finished run.
+const RECENT_WINDOW: chrono::TimeDelta = chrono::TimeDelta::hours(2);
+/// The most rows the Recent runs block shows.
+const RECENT_MAX: usize = 5;
+/// The most rows the Last 7 days block shows.
+const WEEK_MAX: usize = 4;
+
+/// How a recent run ended, as its row's glyph and word show it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunResult {
+    Ok,
+    Running,
+    Failed,
+    /// Failed with status 124, the gate's timeout.
+    TimedOut,
+    Abandoned,
+    /// A parent, covered, unrecorded or unknown run.
+    Other,
+}
+
+impl RunResult {
+    /// The row's leading glyph.
+    #[must_use]
+    pub(crate) fn glyph(self) -> &'static str {
+        match self {
+            Self::Ok => "✓",
+            Self::Running => "◉",
+            Self::Failed => "✕",
+            Self::TimedOut => "⏱",
+            Self::Abandoned => "⏸",
+            Self::Other => "·",
+        }
+    }
+
+    /// The word a bad row's second line carries.
+    #[must_use]
+    pub(crate) fn word(self) -> Option<&'static str> {
+        match self {
+            Self::Failed => Some("failed"),
+            Self::TimedOut => Some("timed out"),
+            Self::Abandoned => Some("abandoned"),
+            Self::Ok | Self::Running | Self::Other => None,
+        }
+    }
+
+    /// Whether the row is washed and barred in the danger colour.
+    #[must_use]
+    pub(crate) fn bad(self) -> bool {
+        self.word().is_some()
+    }
+}
+
+/// `run`'s result: its state, with a failure at status 124 timed out.
+#[must_use]
+pub(crate) fn run_result(run: &GateHistoryRun) -> RunResult {
+    match run.state {
+        GateRunState::Ok => RunResult::Ok,
+        GateRunState::Running => RunResult::Running,
+        GateRunState::Failed if run.status == Some(124) => RunResult::TimedOut,
+        GateRunState::Failed => RunResult::Failed,
+        GateRunState::Abandoned => RunResult::Abandoned,
+        GateRunState::Unrecorded
+        | GateRunState::Parent
+        | GateRunState::Covered
+        | GateRunState::Unknown => RunResult::Other,
+    }
+}
+
+/// Whether `run` is still going: its gate is live or its state says so.
+fn run_running(run: &GateHistoryRun) -> bool {
+    run.running || run.state == GateRunState::Running
+}
+
+/// When `run` ended: its start plus its held time, else its start, else
+/// when it queued.
+#[must_use]
+pub(crate) fn run_end(run: &GateHistoryRun) -> Option<DateTime<Utc>> {
+    match (run.started, run.held_seconds) {
+        (Some(started), Some(held)) => {
+            Some(started + chrono::TimeDelta::milliseconds(rounded(held.max(0.0) * 1000.0)))
+        }
+        (Some(started), None) => Some(started),
+        (None, _) => run.queued,
+    }
+}
+
+/// `value` rounded to a whole number, saturating at the bounds of `i64`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a time in seconds or milliseconds is far inside i64; `as` saturates past it"
+)]
+fn rounded(value: f64) -> i64 {
+    value.round() as i64
+}
+
+/// The runs the Recent runs block shows: `open` and `runs` merged by pid
+/// and process start, the open entry winning; covered runs left out, as
+/// their parent's row shows the work; a run kept while running or when it
+/// ended within two hours of `now`; running runs first, then newest end
+/// first; at most five.
+#[must_use]
+pub(crate) fn recent_runs<'a>(
+    runs: &'a [GateHistoryRun],
+    open: &'a [GateHistoryRun],
+    now: DateTime<Utc>,
+) -> Vec<&'a GateHistoryRun> {
+    let key = |run: &GateHistoryRun| (run.pid, run.process_start);
+    let mut merged: Vec<&GateHistoryRun> = open.iter().collect();
+    merged.extend(
+        runs.iter()
+            .filter(|run| !open.iter().any(|live| key(live) == key(run))),
+    );
+    merged.retain(|run| {
+        run.state != GateRunState::Covered
+            && (run_running(run) || run_end(run).is_some_and(|end| now - end <= RECENT_WINDOW))
+    });
+    merged.sort_by_key(|run| std::cmp::Reverse((run_running(run), run_end(run))));
+    merged.truncate(RECENT_MAX);
+    merged
+}
+
+/// A held time as a row shows it: `42s`, `1m 48s`, `1h 03m`; empty when
+/// unknown.
+#[must_use]
+pub(crate) fn held_text(seconds: Option<f64>) -> String {
+    let Some(seconds) = seconds else {
+        return String::new();
+    };
+    let seconds = rounded(seconds.max(0.0));
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m {:02}s", seconds % 60);
+    }
+    format!("{}h {:02}m", minutes / 60, minutes % 60)
+}
+
+/// A recent run's second line before its tag and age: the repo (the
+/// folder's label with none), `· {kind} #{slot + 1}` (the kind alone with
+/// no slot), and on a bad row `· {word}` and ` · exit {status}`.
+#[must_use]
+pub(crate) fn run_detail(run: &GateHistoryRun) -> String {
+    let repo = run
+        .repo
+        .clone()
+        .or_else(|| run.cwd.as_deref().map(folder_label))
+        .unwrap_or_default();
+    let slot = match run.slot {
+        Some(slot) => format!("{} #{}", run.kind, u64::from(slot) + 1),
+        None => run.kind.clone(),
+    };
+    let mut detail = format!("{repo} · {slot}");
+    if let Some(word) = run_result(run).word() {
+        detail.push_str(" · ");
+        detail.push_str(word);
+        if let Some(status) = run.status {
+            detail.push_str(" · exit ");
+            detail.push_str(&status.to_string());
+        }
+    }
+    detail
+}
+
+/// A Last 7 days row's run count: `1 run`, else `{count} runs`.
+#[must_use]
+pub(crate) fn runs_text(count: u32) -> String {
+    if count == 1 {
+        "1 run".to_owned()
+    } else {
+        format!("{count} runs")
+    }
+}
+
+/// The rows the Last 7 days block shows: the first four, in wire order.
+#[must_use]
+pub(crate) fn week_rows(summary: &[GateCommandSummary]) -> &[GateCommandSummary] {
+    &summary[..summary.len().min(WEEK_MAX)]
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -370,7 +552,9 @@ pub(crate) fn folder_label(path: &str) -> String {
 )]
 mod tests {
     use super::*;
-    use protocol::{GateClaim, GateCriticalState};
+    use protocol::{
+        GateClaim, GateCommandSummary, GateCriticalState, GateHistoryRun, GateRunState,
+    };
 
     fn time(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s)
@@ -777,5 +961,201 @@ mod tests {
         assert_eq!(folder_label("/home/me/src/repo/"), "src/repo");
         assert_eq!(folder_label("repo"), "repo", "one component is itself");
         assert_eq!(folder_label(""), "");
+    }
+
+    /// The fixed now the history tests measure from.
+    fn history_now() -> DateTime<Utc> {
+        time("2026-11-05T12:00:00Z")
+    }
+
+    /// A finished run of `pid` in `state` that held its slot one minute and
+    /// ended `ago` minutes before [`history_now`].
+    fn history_run(pid: u32, state: GateRunState, ago: i64) -> GateHistoryRun {
+        let end = history_now() - chrono::Duration::minutes(ago);
+        GateHistoryRun {
+            command: format!("cargo test {pid}"),
+            cwd: Some(r"X:\dev\repo".to_owned()),
+            repo: Some("repo".to_owned()),
+            kind: "heavy".to_owned(),
+            slot: Some(0),
+            remote: false,
+            host: None,
+            fallback: None,
+            reason: None,
+            pid,
+            process_start: Some(end - chrono::Duration::minutes(2)),
+            parent_pid: None,
+            state,
+            running: false,
+            queued: Some(end - chrono::Duration::minutes(2)),
+            started: Some(end - chrono::Duration::minutes(1)),
+            waited_seconds: Some(60.0),
+            held_seconds: Some(60.0),
+            status: (state == GateRunState::Ok).then_some(0),
+            verdict: None,
+            wall_seconds: None,
+            adjusted_seconds: None,
+            abandoned: Vec::new(),
+            remote_take: None,
+            cold: None,
+            critical_pid: None,
+        }
+    }
+
+    fn pids(runs: &[&GateHistoryRun]) -> Vec<u32> {
+        runs.iter().map(|run| run.pid).collect()
+    }
+
+    #[test]
+    fn recent_runs_dedupe_runs_and_open_with_the_open_entry_winning() {
+        let ended = history_run(10, GateRunState::Ok, 5);
+        let mut live = history_run(10, GateRunState::Running, 5);
+        live.running = true;
+        let other = history_run(11, GateRunState::Ok, 7);
+        let runs = [ended, other];
+        let open = [live];
+        let recent = recent_runs(&runs, &open, history_now());
+        assert_eq!(pids(&recent), [10, 11]);
+        assert_eq!(
+            recent[0].state,
+            GateRunState::Running,
+            "the open entry wins"
+        );
+
+        let mut restarted = history_run(10, GateRunState::Failed, 3);
+        restarted.process_start = Some(history_now() - chrono::Duration::minutes(4));
+        let runs = [restarted];
+        let recent = recent_runs(&runs, &open, history_now());
+        assert_eq!(
+            recent.len(),
+            2,
+            "the same pid with another process start is another run"
+        );
+    }
+
+    #[test]
+    fn recent_runs_skip_covered_runs() {
+        let runs = [
+            history_run(1, GateRunState::Covered, 1),
+            history_run(2, GateRunState::Parent, 2),
+        ];
+        assert_eq!(pids(&recent_runs(&runs, &[], history_now())), [2]);
+    }
+
+    #[test]
+    fn recent_runs_drop_a_run_that_ended_more_than_two_hours_ago() {
+        let runs = [
+            history_run(1, GateRunState::Ok, 121),
+            history_run(2, GateRunState::Ok, 119),
+        ];
+        assert_eq!(pids(&recent_runs(&runs, &[], history_now())), [2]);
+
+        let mut queued_only = history_run(3, GateRunState::Abandoned, 0);
+        queued_only.started = None;
+        queued_only.held_seconds = None;
+        queued_only.queued = Some(history_now() - chrono::Duration::minutes(121));
+        assert_eq!(
+            pids(&recent_runs(&[queued_only], &[], history_now())),
+            [0u32; 0],
+            "with no start, the queue time is the end"
+        );
+    }
+
+    #[test]
+    fn recent_runs_keep_a_running_run_whatever_its_age() {
+        let mut old = history_run(1, GateRunState::Running, 600);
+        old.running = true;
+        old.held_seconds = None;
+        assert_eq!(pids(&recent_runs(&[], &[old], history_now())), [1]);
+    }
+
+    #[test]
+    fn recent_runs_are_newest_first_and_at_most_five() {
+        let mut running = history_run(9, GateRunState::Running, 90);
+        running.running = true;
+        let runs = [
+            history_run(1, GateRunState::Ok, 50),
+            history_run(2, GateRunState::Ok, 10),
+            history_run(3, GateRunState::Failed, 30),
+            history_run(4, GateRunState::Ok, 20),
+            history_run(5, GateRunState::Ok, 40),
+            history_run(6, GateRunState::Ok, 60),
+        ];
+        assert_eq!(
+            pids(&recent_runs(&runs, &[running], history_now())),
+            [9, 2, 4, 3, 5],
+            "a running run first, then by end, newest first; five kept"
+        );
+    }
+
+    #[test]
+    fn run_result_maps_each_state_and_124_to_timed_out() {
+        let result = |state, status| {
+            let mut run = history_run(1, state, 1);
+            run.status = status;
+            run_result(&run)
+        };
+        assert_eq!(result(GateRunState::Ok, Some(0)), RunResult::Ok);
+        assert_eq!(result(GateRunState::Running, None), RunResult::Running);
+        assert_eq!(result(GateRunState::Failed, Some(1)), RunResult::Failed);
+        assert_eq!(result(GateRunState::Failed, None), RunResult::Failed);
+        assert_eq!(result(GateRunState::Failed, Some(124)), RunResult::TimedOut);
+        assert_eq!(result(GateRunState::Abandoned, None), RunResult::Abandoned);
+        for state in [
+            GateRunState::Parent,
+            GateRunState::Unrecorded,
+            GateRunState::Unknown,
+            GateRunState::Covered,
+        ] {
+            assert_eq!(result(state, None), RunResult::Other, "{state:?}");
+        }
+
+        let shown = |result: RunResult| (result.glyph(), result.word(), result.bad());
+        assert_eq!(shown(RunResult::Ok), ("✓", None, false));
+        assert_eq!(shown(RunResult::Running), ("◉", None, false));
+        assert_eq!(shown(RunResult::Failed), ("✕", Some("failed"), true));
+        assert_eq!(shown(RunResult::TimedOut), ("⏱", Some("timed out"), true));
+        assert_eq!(shown(RunResult::Abandoned), ("⏸", Some("abandoned"), true));
+        assert_eq!(shown(RunResult::Other), ("·", None, false));
+    }
+
+    #[test]
+    fn held_text_reads_seconds_minutes_and_hours() {
+        assert_eq!(held_text(None), "");
+        assert_eq!(held_text(Some(42.0)), "42s");
+        assert_eq!(held_text(Some(108.0)), "1m 48s");
+        assert_eq!(held_text(Some(3780.0)), "1h 03m");
+    }
+
+    #[test]
+    fn runs_text_is_singular_for_one_run() {
+        assert_eq!(runs_text(1), "1 run");
+        assert_eq!(runs_text(2), "2 runs");
+    }
+
+    #[test]
+    fn week_rows_are_the_first_four_in_wire_order() {
+        let row = |command: &str, count| GateCommandSummary {
+            command: command.to_owned(),
+            repo: Some("repo".to_owned()),
+            remote: false,
+            count,
+            p50_seconds: 60.0,
+            p90_seconds: 90.0,
+            max_seconds: 120.0,
+        };
+        let summary = [
+            row("a", 1),
+            row("b", 9),
+            row("c", 3),
+            row("d", 7),
+            row("e", 20),
+        ];
+        let commands: Vec<&str> = week_rows(&summary)
+            .iter()
+            .map(|row| row.command.as_str())
+            .collect();
+        assert_eq!(commands, ["a", "b", "c", "d"]);
+        assert!(week_rows(&summary[..2]).len() == 2, "fewer than four stay");
     }
 }

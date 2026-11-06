@@ -12,6 +12,7 @@
 )]
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::support;
 
@@ -20,8 +21,8 @@ use protocol::{ClientMessage, DaemonMessage, GateSlotKind};
 use rustling_tulip_native::Activity;
 use serde_json::json;
 use support::{
-    Fixture, Harness, Opened, TestDir, gate_state, gate_state_full, gate_state_msg, saved_remote,
-    saved_remote_over, saved_ui,
+    Fixture, Harness, Opened, TestDir, gate_history_msg, gate_history_runs, gate_history_summary,
+    gate_state, gate_state_full, gate_state_msg, saved_remote, saved_remote_over, saved_ui,
 };
 
 fn activity(h: &mut Harness<'_>) -> Activity {
@@ -472,4 +473,252 @@ fn the_footer_strip_counts_slots_and_shows_the_gates_view(cx: &mut TestAppContex
 
     h.send(gate_state_msg(None));
     assert!(!h.in_model("footer-gates"));
+}
+
+/// The request ids of the `GateHistory` messages the client sent since the
+/// last read.
+fn history_sent(h: &mut Harness<'_>) -> Vec<Option<String>> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::GateHistory { request_id } => Some(request_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The id of the one `GateHistory` the client sent since the last read.
+fn one_history(h: &mut Harness<'_>) -> String {
+    let sent = history_sent(h);
+    assert!(
+        matches!(sent.as_slice(), [Some(_)]),
+        "one GateHistory with an id: {sent:?}"
+    );
+    sent.into_iter()
+        .flatten()
+        .next()
+        .expect("the request carries an id")
+}
+
+/// This PC pushed [`gate_state`] and the Gates view opened; what the client
+/// sent before the open is drained.
+fn opened(h: &mut Harness<'_>) {
+    pushed(h);
+    h.sent();
+    h.click_on("activity-gates");
+}
+
+/// The reply to `id` with [`gate_history_runs`] and
+/// [`gate_history_summary`].
+fn answer(h: &mut Harness<'_>, id: String) {
+    h.send(gate_history_msg(
+        Some(id),
+        gate_history_runs(),
+        Vec::new(),
+        gate_history_summary(),
+    ));
+}
+
+fn recent_count(h: &mut Harness<'_>) -> Option<usize> {
+    h.root(|root, _| root.gates_recent_count())
+}
+
+#[gpui::test]
+fn opening_the_view_asks_for_the_history_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    pushed(&mut h);
+    assert_eq!(history_sent(&mut h), [], "not while the view is hidden");
+    h.click_on("activity-gates");
+    one_history(&mut h);
+}
+
+#[gpui::test]
+fn the_history_is_asked_again_every_15_s_while_the_view_shows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    opened(&mut h);
+    let id = one_history(&mut h);
+    answer(&mut h, id);
+    h.advance(Duration::from_secs(14));
+    assert_eq!(history_sent(&mut h), [], "not before 15 s");
+    h.advance(Duration::from_secs(1));
+    let id = one_history(&mut h);
+    answer(&mut h, id);
+
+    h.click_on("activity-gates");
+    assert!(!h.in_model("gates-panel"), "the panel folded");
+    h.advance(Duration::from_secs(30));
+    assert_eq!(history_sent(&mut h), [], "folded, no request");
+
+    h.click_on("activity-gates");
+    let id = one_history(&mut h);
+    answer(&mut h, id);
+    h.click_on("activity-sessions");
+    h.advance(Duration::from_secs(30));
+    assert_eq!(history_sent(&mut h), [], "another panel, no request");
+}
+
+#[gpui::test]
+fn no_second_request_goes_while_one_is_unanswered(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    opened(&mut h);
+    one_history(&mut h);
+    h.advance(Duration::from_secs(30));
+    assert_eq!(history_sent(&mut h), []);
+}
+
+#[gpui::test]
+fn a_reply_draws_the_recent_runs_and_the_week_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    opened(&mut h);
+    let id = one_history(&mut h);
+    assert!(!h.in_model("gates-recent"), "no block before an answer");
+    answer(&mut h, id);
+    assert!(h.in_model("gates-recent"));
+    assert_eq!(recent_count(&mut h), Some(3), "the 3 h old run is out");
+    assert!(drawn(
+        &mut h,
+        "gates-recent-0-command=cargo nextest run --workspace"
+    ));
+    assert!(drawn(&mut h, "gates-recent-0-result=✓"));
+    assert!(drawn(&mut h, "gates-recent-0-held=1m 48s"));
+    assert!(drawn(&mut h, "gates-recent-1-command=dotnet test"));
+    assert!(drawn(&mut h, "gates-recent-1-result=✕"));
+    assert!(drawn(
+        &mut h,
+        "gates-recent-1-detail=yaat · heavy #2 · failed · exit 1"
+    ));
+    assert!(drawn(
+        &mut h,
+        "gates-recent-2-detail=claude-config · heavy #1"
+    ));
+    assert!(drawn(&mut h, "gates-recent-2-fallback=fell back"));
+    assert!(drawn(&mut h, "gates-recent-2-ago=30m ago"));
+    assert!(
+        !drawn(&mut h, "gates-recent-0-fallback=fell back"),
+        "no tag on a run that did not fall back"
+    );
+    for n in 0..4 {
+        assert!(h.in_model(&format!("gates-week-{n}")), "week row {n}");
+        assert!(drawn(&mut h, &format!("gates-week-{n}-command=cmd-{n}")));
+    }
+    assert!(!h.in_model("gates-week-4"), "four rows at most");
+    assert!(drawn(&mut h, "gates-week-0-runs=10 runs"));
+    assert!(drawn(&mut h, "gates-week-0-p90=p90 1m 48s"));
+
+    h.advance(Duration::from_secs(15));
+    let id = one_history(&mut h);
+    h.send(gate_history_msg(
+        Some(id),
+        gate_history_runs().split_off(3),
+        Vec::new(),
+        Vec::new(),
+    ));
+    assert_eq!(recent_count(&mut h), Some(0));
+    assert!(h.in_model("gates-recent-empty"));
+    assert!(drawn(&mut h, "gates-recent-empty=No runs in the last 2 h"));
+    assert!(drawn(&mut h, "gates-week-empty=No passed runs in 7 days"));
+}
+
+#[gpui::test]
+fn a_click_on_the_week_header_folds_and_unfolds_its_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    opened(&mut h);
+    let id = one_history(&mut h);
+    answer(&mut h, id);
+    assert!(h.in_model("gates-week-0"), "open by default");
+    h.click_on("gates-week-toggle");
+    assert!(!h.root(|root, _| root.gates_week_open()));
+    assert!(!h.in_model("gates-week-0"), "folded");
+    h.click_on("gates-week-toggle");
+    assert!(h.in_model("gates-week-0"), "unfolded");
+}
+
+#[gpui::test]
+fn a_gone_gate_state_drops_the_history(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    opened(&mut h);
+    let id = one_history(&mut h);
+    answer(&mut h, id);
+    assert_eq!(recent_count(&mut h), Some(3));
+
+    h.send(gate_state_msg(None));
+    assert_eq!(
+        recent_count(&mut h),
+        None,
+        "the history went with the state"
+    );
+    h.send(gate_state_msg(Some(gate_state("BOX"))));
+    assert!(h.in_model("gates-panel"), "the view is back");
+    assert!(!h.in_model("gates-recent"), "no block until a new reply");
+    let id = one_history(&mut h);
+    answer(&mut h, id);
+    assert!(h.in_model("gates-recent"));
+}
+
+#[gpui::test]
+fn an_error_echoing_the_history_id_ends_the_request_quietly(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    opened(&mut h);
+    let id = one_history(&mut h);
+    answer(&mut h, id);
+    h.advance(Duration::from_secs(15));
+    let id = one_history(&mut h);
+    h.send(DaemonMessage::Error {
+        code: None,
+        message: "the gate journal is unreadable".to_owned(),
+        request_id: Some(id),
+    });
+    assert!(!h.root(|root, _| root.gates_history_pending()));
+    assert!(
+        h.root(|root, _| root.toasts().is_empty()),
+        "no toast for a history refusal"
+    );
+    for kind in ["heavy", "light"] {
+        assert!(
+            !drawn(
+                &mut h,
+                &format!("gates-error-{kind}=the gate journal is unreadable")
+            ),
+            "no pool error under {kind}"
+        );
+    }
+    assert_eq!(recent_count(&mut h), Some(3), "the earlier history stays");
+    h.advance(Duration::from_secs(15));
+    one_history(&mut h);
+}
+
+#[gpui::test]
+fn another_hosts_gate_history_is_ignored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &Fixture::default(), &[]);
+    opened(&mut h);
+    let id = one_history(&mut h);
+    h.host(&saved_remote()).send(gate_history_msg(
+        Some(id),
+        gate_history_runs(),
+        Vec::new(),
+        gate_history_summary(),
+    ));
+    assert_eq!(recent_count(&mut h), None);
+    assert!(h.root(|root, _| root.gates_history_pending()));
+}
+
+#[gpui::test]
+fn a_reply_to_another_id_is_ignored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    opened(&mut h);
+    let id = one_history(&mut h);
+    answer(&mut h, format!("{id}-other"));
+    assert_eq!(recent_count(&mut h), None);
+    assert!(h.root(|root, _| root.gates_history_pending()));
+    answer(&mut h, id);
+    assert_eq!(recent_count(&mut h), Some(3));
 }

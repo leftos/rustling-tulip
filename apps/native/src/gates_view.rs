@@ -14,7 +14,8 @@ use gpui::{
     SharedString, Stateful, StyledText, Task, Window, anchored, deferred, div, prelude::*, px,
 };
 use protocol::{
-    ClientMessage, GateQueueTicket, GateSlotKind, GateSlotState, GateState, GateWaiting,
+    ClientMessage, GateCommandSummary, GateHistoryRun, GateQueueTicket, GateSlotKind,
+    GateSlotState, GateState, GateWaiting,
 };
 
 use crate::driver_id::DriverId as _;
@@ -42,6 +43,8 @@ const HEADER_HEIGHT: f32 = 26.0;
 const FAST_REPAINT: Duration = Duration::from_secs(1);
 /// The repaint interval once every time reads in minutes or more.
 const SLOW_REPAINT: Duration = Duration::from_secs(30);
+/// How often the panel asks for the gate's history while it shows.
+const HISTORY_INTERVAL: Duration = Duration::from_secs(15);
 /// The rows' and headers' small text, in px.
 const SMALL_TEXT: f32 = 11.5;
 /// A caps heading's text, in px.
@@ -76,6 +79,21 @@ pub(crate) struct GatesUi {
     timer: Option<Task<()>>,
     /// How many times that timer has repainted the panel.
     repaints: usize,
+    /// The request id of the pending `GateHistory`.
+    history_pending: Option<String>,
+    /// The last `GateHistory` reply.
+    history: Option<History>,
+    /// Asks for the history again while the panel shows.
+    history_timer: Option<Task<()>>,
+    /// Whether the Last 7 days block is folded; in memory only.
+    week_folded: bool,
+}
+
+/// A `GateHistory` reply as the panel keeps it.
+struct History {
+    runs: Vec<GateHistoryRun>,
+    open: Vec<GateHistoryRun>,
+    summary: Vec<GateCommandSummary>,
 }
 
 /// The open row menu: where it opened and the values it copies.
@@ -104,6 +122,41 @@ impl GatesUi {
         self.pending.clear();
         self.errors.clear();
         self.menu = None;
+        self.history_pending = None;
+        self.history = None;
+        self.history_timer = None;
+    }
+
+    /// Keeps the `GateHistory` reply to `request_id` when it answers the
+    /// pending request; returns whether it did.
+    pub(crate) fn history_answered(
+        &mut self,
+        request_id: &str,
+        runs: &[GateHistoryRun],
+        open: &[GateHistoryRun],
+        summary: &[GateCommandSummary],
+    ) -> bool {
+        if self.history_pending.as_deref() != Some(request_id) {
+            return false;
+        }
+        self.history_pending = None;
+        self.history = Some(History {
+            runs: runs.to_vec(),
+            open: open.to_vec(),
+            summary: summary.to_vec(),
+        });
+        true
+    }
+
+    /// Ends the pending `GateHistory` request a refusal echoing
+    /// `request_id` answers, keeping any earlier history; returns whether
+    /// it did.
+    fn history_refused(&mut self, request_id: &str) -> bool {
+        if self.history_pending.as_deref() != Some(request_id) {
+            return false;
+        }
+        self.history_pending = None;
+        true
     }
 
     /// Ends the pending write `request_id` answers; returns whether one was.
@@ -210,6 +263,10 @@ impl RootView {
         message: &str,
         cx: &mut Context<Self>,
     ) -> bool {
+        if *host == HostKey::Local && self.gates_ui.history_refused(request_id) {
+            tracing::info!("gates: the daemon refused a history request: {message}");
+            return true;
+        }
         let answered = *host == HostKey::Local && self.gates_ui.refused(request_id, message);
         if answered {
             tracing::info!("gates: the daemon refused a slot count");
@@ -256,6 +313,142 @@ impl RootView {
         self.gates_ui.repaints += 1;
         cx.notify();
         self.arm_gates_repaint(cx);
+    }
+
+    /// Whether a `GateHistory` request waits for its answer.
+    #[must_use]
+    pub fn gates_history_pending(&self) -> bool {
+        self.gates_ui.history_pending.is_some()
+    }
+
+    /// How many rows the Recent runs block shows; `None` before the first
+    /// answer.
+    #[must_use]
+    pub fn gates_recent_count(&self) -> Option<usize> {
+        self.gates_ui
+            .history
+            .as_ref()
+            .map(|history| gates::recent_runs(&history.runs, &history.open, Utc::now()).len())
+    }
+
+    /// How many rows the Last 7 days block holds, folded or not; `None`
+    /// before the first answer.
+    #[must_use]
+    pub fn gates_week_count(&self) -> Option<usize> {
+        self.gates_ui
+            .history
+            .as_ref()
+            .map(|history| gates::week_rows(&history.summary).len())
+    }
+
+    /// Whether the Last 7 days block is unfolded.
+    #[must_use]
+    pub fn gates_week_open(&self) -> bool {
+        !self.gates_ui.week_folded
+    }
+
+    /// Asks This PC for the gate's history when the panel opens and starts
+    /// asking every 15 s; drops the timer while the panel is hidden. A
+    /// running timer is left alone.
+    pub(crate) fn arm_gates_history(&mut self, cx: &mut Context<Self>) {
+        if !self.gates_shown() {
+            self.gates_ui.history_timer = None;
+            return;
+        }
+        if self.gates_ui.history_timer.is_some() {
+            return;
+        }
+        self.request_gate_history();
+        self.schedule_gate_history(cx);
+    }
+
+    fn schedule_gate_history(&mut self, cx: &mut Context<Self>) {
+        self.gates_ui.history_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HISTORY_INTERVAL).await;
+            // Fails only when the view is gone, and the panel with it.
+            this.update(cx, Self::tick_gate_history).ok();
+        }));
+    }
+
+    /// The history timer fired: ask again and go on while the panel still
+    /// shows.
+    fn tick_gate_history(&mut self, cx: &mut Context<Self>) {
+        if !self.gates_shown() {
+            self.gates_ui.history_timer = None;
+            return;
+        }
+        self.request_gate_history();
+        self.schedule_gate_history(cx);
+    }
+
+    /// Sends a `GateHistory` to This PC, unless one is unanswered.
+    fn request_gate_history(&mut self) {
+        if self.gates_ui.history_pending.is_some() {
+            return;
+        }
+        let request_id = new_request_id();
+        self.gates_ui.history_pending = Some(request_id.clone());
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::GateHistory {
+                request_id: Some(request_id),
+            },
+        );
+    }
+
+    /// A click on the Last 7 days header: fold or unfold its rows.
+    fn toggle_gates_week(&mut self, cx: &mut Context<Self>) {
+        self.gates_ui.week_folded = !self.gates_ui.week_folded;
+        cx.notify();
+    }
+
+    /// The Last 7 days block: its header, which folds it, then the first
+    /// four summary rows or a line saying there are none.
+    fn week_block(
+        &self,
+        history: &History,
+        offset: i8,
+        shift: i8,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let open = !self.gates_ui.week_folded;
+        let rows = gates::week_rows(&history.summary);
+        let header = section_header(
+            "Last 7 days",
+            if open { "passed runs" } else { "▸ folded" },
+            offset,
+            shift,
+            &t,
+        )
+        .id("gates-week-toggle")
+        .driver_id(|| "gates-week-toggle".to_owned())
+        .cursor_pointer()
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.toggle_gates_week(cx);
+        }));
+        let body: Vec<AnyElement> = if !open {
+            Vec::new()
+        } else if rows.is_empty() {
+            vec![
+                note_line(offset, t.faint)
+                    .child(tagged_text("gates-week-empty", "No passed runs in 7 days"))
+                    .into_any_element(),
+            ]
+        } else {
+            rows.iter()
+                .enumerate()
+                .map(|(n, row)| week_row(n, row, offset, &t))
+                .collect()
+        };
+        div()
+            .driver_id(|| "gates-week".to_owned())
+            .flex()
+            .flex_col()
+            .pb(px(6.0))
+            .child(header)
+            .children(body)
+            .into_any_element()
     }
 
     /// A stepper press: sends `kind`'s count one up or down, unless a write
@@ -434,6 +627,10 @@ impl RootView {
                 blocks.push(self.pool_block(&block, now, cx));
             }
             blocks.extend(queue_block(state, now, offset, shift, &t));
+            if let Some(history) = self.gates_ui.history.as_ref() {
+                blocks.push(recent_block(history, now, offset, shift, &t));
+                blocks.push(self.week_block(history, offset, shift, cx));
+            }
         }
         let header = div()
             .flex()
@@ -1005,6 +1202,221 @@ fn queue_block(
             .children(rows)
             .into_any_element(),
     )
+}
+
+/// A history block's header: `title` on the left, `note` faint on the
+/// right.
+fn section_header(title: &str, note: &str, offset: i8, shift: i8, t: &UiTheme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(HEADER_GAP))
+        .px(px(12.0))
+        .pt(px(8.0))
+        .pb(px(4.0))
+        .child(caps(title, offset, shift, t))
+        .child(
+            div()
+                .ml_auto()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_size(ui_px_at(offset, 11.0))
+                .text_color(gpui::rgb(t.faint))
+                .child(SharedString::from(note.to_owned())),
+        )
+}
+
+/// The Recent runs block: its header, then a row per recent run or a line
+/// saying there are none.
+fn recent_block(
+    history: &History,
+    now: DateTime<Utc>,
+    offset: i8,
+    shift: i8,
+    t: &UiTheme,
+) -> AnyElement {
+    let runs = gates::recent_runs(&history.runs, &history.open, now);
+    let body: Vec<AnyElement> = if runs.is_empty() {
+        vec![
+            note_line(offset, t.faint)
+                .child(tagged_text("gates-recent-empty", "No runs in the last 2 h"))
+                .into_any_element(),
+        ]
+    } else {
+        runs.into_iter()
+            .enumerate()
+            .map(|(n, run)| recent_row(n, run, now, offset, t))
+            .collect()
+    };
+    div()
+        .driver_id(|| "gates-recent".to_owned())
+        .flex()
+        .flex_col()
+        .pb(px(6.0))
+        .border_b_1()
+        .border_color(gpui::rgb(t.line))
+        .child(section_header("Recent runs", "last 2 h", offset, shift, t))
+        .children(body)
+        .into_any_element()
+}
+
+/// One recent run: its result glyph, short command and held time, then
+/// its repo, slot, failure, fallback tag and age; a bad run is washed and
+/// barred in the danger colour.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the row's two lines and its danger bar build one element in order"
+)]
+fn recent_row(
+    n: usize,
+    run: &GateHistoryRun,
+    now: DateTime<Utc>,
+    offset: i8,
+    t: &UiTheme,
+) -> AnyElement {
+    let selector = format!("gates-recent-{n}");
+    let result = gates::run_result(run);
+    let glyph_color = match result {
+        gates::RunResult::Ok => t.waiting,
+        gates::RunResult::Running => t.working,
+        gates::RunResult::Failed | gates::RunResult::TimedOut | gates::RunResult::Abandoned => {
+            t.danger
+        }
+        gates::RunResult::Other => t.subtle,
+    };
+    let short = gates::short_command(&run.command);
+    let held = gates::held_text(run.held_seconds);
+    let ago = gates::run_end(run)
+        .map(|end| format!("{} ago", needs_you::waited(now, end)))
+        .unwrap_or_default();
+    let line_one = div()
+        .flex()
+        .items_center()
+        .gap(px(COLUMN_GAP))
+        .min_w(px(0.0))
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .justify_center()
+                .w(px(GLYPH_COLUMN))
+                .font_weight(FontWeight::BOLD)
+                .text_color(gpui::rgb(glyph_color))
+                .child(tagged_text(format!("{selector}-result"), result.glyph())),
+        )
+        .child(mono(
+            tagged_box(&format!("{selector}-command"), &short)
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_color(gpui::rgb(t.text))
+                .child(truncating(
+                    &format!("{selector}-command"),
+                    StyledText::new(short.clone()),
+                )),
+            offset,
+        ))
+        .child(
+            div()
+                .flex_none()
+                .text_size(ui_px_at(offset, SMALL_TEXT))
+                .text_color(gpui::rgb(t.subtle))
+                .child(tagged_text(format!("{selector}-held"), held)),
+        );
+    let fallback = run.fallback.as_ref().map(|_| {
+        div()
+            .flex_none()
+            .px(px(5.0))
+            .rounded(px(3.0))
+            .border_1()
+            .border_color(gpui::rgb(t.ochre))
+            .text_color(gpui::rgb(t.ochre))
+            .child(tagged_text(format!("{selector}-fallback"), "fell back"))
+    });
+    let line_two = div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .min_w(px(0.0))
+        .pl(px(GLYPH_COLUMN + COLUMN_GAP))
+        .whitespace_nowrap()
+        .text_size(ui_px_at(offset, SMALL_TEXT))
+        .text_color(gpui::rgb(t.subtle))
+        .child(div().min_w(px(0.0)).overflow_hidden().child(tagged_text(
+            format!("{selector}-detail"),
+            gates::run_detail(run),
+        )))
+        .children(fallback)
+        .child(
+            div()
+                .ml_auto()
+                .flex_none()
+                .text_color(gpui::rgb(t.faint))
+                .child(tagged_text(format!("{selector}-ago"), ago)),
+        );
+    let bad = result.bad();
+    div()
+        .driver_id({
+            let selector = selector.clone();
+            move || selector
+        })
+        .relative()
+        .flex()
+        .flex_col()
+        .px(px(12.0))
+        .py(px(4.0))
+        .when(bad, |row| {
+            row.bg(gpui::rgba(t.danger_wash)).child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(2.0))
+                    .bg(gpui::rgb(t.danger)),
+            )
+        })
+        .child(line_one)
+        .child(line_two)
+        .into_any_element()
+}
+
+/// One Last 7 days row: its short command, run count and p90 held time.
+fn week_row(n: usize, row: &GateCommandSummary, offset: i8, t: &UiTheme) -> AnyElement {
+    let selector = format!("gates-week-{n}");
+    let short = gates::short_command(&row.command);
+    div()
+        .driver_id({
+            let selector = selector.clone();
+            move || selector
+        })
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(12.0))
+        .py(px(2.0))
+        .text_size(ui_px_at(offset, SMALL_TEXT))
+        .text_color(gpui::rgb(t.text_2))
+        .child(mono(
+            tagged_box(&format!("{selector}-command"), &short)
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .child(truncating(
+                    &format!("{selector}-command"),
+                    StyledText::new(short.clone()),
+                )),
+            offset,
+        ))
+        .child(div().flex_none().child(tagged_text(
+            format!("{selector}-runs"),
+            gates::runs_text(row.count),
+        )))
+        .child(div().flex_none().child(tagged_text(
+            format!("{selector}-p90"),
+            format!("p90 {}", gates::held_text(Some(row.p90_seconds))),
+        )))
+        .into_any_element()
 }
 
 /// One queue ticket: its kind, short command, folder and time waited.

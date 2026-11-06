@@ -2144,6 +2144,9 @@ impl FakeDaemon {
             ClientMessage::ListAccounts { request_id } => {
                 shot_accounts(self.now, request_id.clone())
             }
+            ClientMessage::GateHistory { request_id } => {
+                shot_gate_history(self.now, request_id.clone())
+            }
             ClientMessage::SuggestBranchName { target, request_id } => {
                 DaemonMessage::BranchNameSuggestion {
                     target: target.clone(),
@@ -2231,6 +2234,140 @@ fn shot_auto(now: DateTime<Utc>) -> protocol::AutoSwitchState {
             resumes_at: Some(now + chrono::Duration::days(3)),
             first_reset: Some(now + chrono::Duration::days(1)),
         }),
+    }
+}
+
+/// The fake daemon's `GateHistory` reply to `request_id` at `now`: four
+/// finished runs (an ok `cargo nextest run --workspace` in rustling-tulip,
+/// a failed `dotnet test` in yaat, a timed-out run in claude-config and an
+/// ok run that fell back from the remote pool), one running run, and five
+/// seven-day summary rows.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one literal fixture, read top to bottom like the mock's state"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a fixture's held seconds are far inside i64"
+)]
+fn shot_gate_history(now: DateTime<Utc>, request_id: Option<String>) -> DaemonMessage {
+    use protocol::{GateCommandSummary, GateHistoryRun, GateRunState};
+    let run = |pid: u32,
+               command: &str,
+               repo: &str,
+               slot: Option<u32>,
+               state: GateRunState,
+               status: Option<i64>,
+               ended: i64,
+               held: f64| {
+        let started = now
+            - chrono::Duration::minutes(ended)
+            - chrono::Duration::milliseconds((held * 1000.0) as i64);
+        GateHistoryRun {
+            command: command.to_owned(),
+            cwd: Some(format!(r"X:\dev\{repo}")),
+            repo: Some(repo.to_owned()),
+            kind: "heavy".to_owned(),
+            slot,
+            remote: false,
+            host: None,
+            fallback: None,
+            reason: None,
+            pid,
+            process_start: Some(started - chrono::Duration::seconds(3)),
+            parent_pid: None,
+            state,
+            running: false,
+            queued: Some(started - chrono::Duration::seconds(3)),
+            started: Some(started),
+            waited_seconds: Some(3.0),
+            held_seconds: Some(held),
+            status,
+            verdict: None,
+            wall_seconds: None,
+            adjusted_seconds: None,
+            abandoned: Vec::new(),
+            remote_take: None,
+            cold: None,
+            critical_pid: None,
+        }
+    };
+    let mut running = run(
+        4100,
+        r"C:\Users\me\.cargo\bin\cargo.exe nextest run -p rustling-tulip-native",
+        "rustling-tulip",
+        Some(0),
+        GateRunState::Running,
+        None,
+        0,
+        360.0,
+    );
+    running.running = true;
+    running.held_seconds = None;
+    let mut fell_back = run(
+        3980,
+        "cargo build --release",
+        "rustling-tulip",
+        Some(2),
+        GateRunState::Ok,
+        Some(0),
+        41,
+        203.0,
+    );
+    fell_back.fallback = Some("full".to_owned());
+    let runs = vec![
+        run(
+            3990,
+            "cargo nextest run --workspace",
+            "rustling-tulip",
+            Some(1),
+            GateRunState::Ok,
+            Some(0),
+            4,
+            108.0,
+        ),
+        run(
+            3985,
+            "dotnet test",
+            "yaat",
+            Some(0),
+            GateRunState::Failed,
+            Some(1),
+            12,
+            42.0,
+        ),
+        run(
+            3982,
+            "pwsh -NoProfile -File tools/check.ps1",
+            "claude-config",
+            None,
+            GateRunState::Failed,
+            Some(124),
+            26,
+            600.0,
+        ),
+        fell_back,
+    ];
+    let summary = |command: &str, repo: &str, count: u32, p90: f64| GateCommandSummary {
+        command: command.to_owned(),
+        repo: Some(repo.to_owned()),
+        remote: false,
+        count,
+        p50_seconds: p90 * 0.7,
+        p90_seconds: p90,
+        max_seconds: p90 * 1.4,
+    };
+    DaemonMessage::GateHistory {
+        request_id,
+        runs,
+        open: vec![running],
+        summary: vec![
+            summary("cargo nextest run --workspace", "rustling-tulip", 42, 118.0),
+            summary("cargo clippy --workspace", "rustling-tulip", 31, 64.0),
+            summary("dotnet test", "yaat", 18, 252.0),
+            summary("cargo build --release", "rustling-tulip", 9, 3780.0),
+            summary("pwsh tools/check.ps1", "claude-config", 6, 37.0),
+        ],
     }
 }
 

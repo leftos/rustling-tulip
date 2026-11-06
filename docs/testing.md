@@ -82,7 +82,7 @@ The views:
 - `settings-accounts`: Settings on the Accounts tab, scrolled to the auto-switch block and its forecast.
 - `settings-sounds`: Settings on the Notifications tab with the Needs you sound list open.
 - `accounts`: the footer's accounts popover open over scripted accounts. The shots' fake daemon lists `accounts`, so every view shows the accounts chip.
-- `gates`: the Gates panel over a scripted gate state: busy, held, free and stale heavy slots with a gate waiting, a busy light slot, the remote pool and the queue, with the footer's `Gates` pill. Only this view's fake daemon lists `gate_state`.
+- `gates`: the Gates panel over a scripted gate state: busy, held, free and stale heavy slots with a gate waiting, a busy light slot, the remote pool and the queue, then the Recent runs block (good and bad rows) and the Last 7 days block, with the footer's `Gates` pill. Only this view's fake daemon lists `gate_state`, and it answers `GateHistory` with a scripted journal.
 
 The `support` builders for account specs (`apps/native/tests/support/mod.rs`) are `account`, `auto_switch`, `accounts_reply` and `accounts_updated`; `Harness::reconnect_with_features` redoes the handshake with extra `Welcome.features` (`tests/ui/ui_accounts.rs` uses it to list `accounts`).
 

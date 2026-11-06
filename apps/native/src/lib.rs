@@ -4361,9 +4361,10 @@ impl RootView {
     }
 
     /// Folds This PC's gate state from `msg`: a `GateState` push sets it,
-    /// a `Welcome` clears it until the next push, and a `GateSlotCountSet`
-    /// ends the stepper write it answers. Another host's messages leave it
-    /// alone.
+    /// a `Welcome` clears it until the next push, a `GateSlotCountSet`
+    /// ends the stepper write it answers, and a `GateHistory` answering the
+    /// pending request is kept for the panel. Another host's messages leave
+    /// it alone.
     fn on_gates_message(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
         if *host != HostKey::Local {
             return;
@@ -4375,7 +4376,18 @@ impl RootView {
                     None => self.forget_gate_state(),
                 }
                 self.arm_gates_repaint(cx);
+                self.arm_gates_history(cx);
                 cx.notify();
+            }
+            DaemonMessage::GateHistory {
+                request_id: Some(id),
+                runs,
+                open,
+                summary,
+            } => {
+                if self.gates_ui.history_answered(id, runs, open, summary) {
+                    cx.notify();
+                }
             }
             DaemonMessage::GateSlotCountSet {
                 request_id: Some(id),

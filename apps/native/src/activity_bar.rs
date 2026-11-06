@@ -442,6 +442,7 @@ impl RootView {
         }
         self.arm_needs_you_repaint(cx);
         self.arm_gates_repaint(cx);
+        self.arm_gates_history(cx);
         cx.notify();
     }
 }
