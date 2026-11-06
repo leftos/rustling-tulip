@@ -149,9 +149,7 @@
 
 ## Wave 12 — Claude accounts and artifacts by account
 
-- [ ] RT-39 Built-in Claude account switching: several logins, usage polling and switching · release vNext
-  - [ ] RT-924 Merge feat/claude-accounts to main (#205) · release vNext
-  - [ ] RT-958 Accounts: answer Draining at once for switch and capture, Unsupported for an unsupported lock, and fix the remove-timeout text
+- [ ] RT-958 Accounts: answer Draining at once for switch and capture, Unsupported for an unsupported lock, and fix the remove-timeout text
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-113 Open Claude artifact links in the account that published them
 - [ ] RT-115 Host-approved extra roots for file fetch
@@ -165,14 +163,9 @@
 ## Wave 13 — ops-tower views: gates, board and dock
 
 - [ ] RT-55 Gate dashboard in the client · release vNext
-  - [ ] RT-995 Gates: pin leftos/gate's gate-state and proc-table crates (GD.1) · release vNext
-  - [ ] RT-996 Gates: GateState, SetGateSlotCount and the history request on the wire (GD.2) · release vNext
-  - [ ] RT-997 Gates: read the gate state in the daemon and convert it to the wire types (GD.3) · release vNext
-  - [ ] RT-998 Gates: push the gate state from the hub on connect and on change (GD.4) · release vNext
-  - [ ] RT-999 Gates: change a slot count from the client (GD.5) · release vNext
-  - [ ] RT-1000 Gates: the client's gate model and the Gates rail item (GD.6) · release vNext
-  - [ ] RT-1001 Gates: the Gates view and the footer strip (GD.7) · release vNext
   - [ ] RT-1002 Gates: the gate run history (GD.8) · release vNext
+    - [ ] RT-1048 Gates history B: the view's recent runs and last seven days · release vNext
+    - [ ] RT-1049 Gates history C: the usual time on slot rows and the footer's failure tail · release vNext
   - [ ] RT-1003 Gates: document the gate view and retire the gate-dashboard plan (GD.9) · release vNext
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-159 Corner status window: Needs you, Just finished and a Working ticker
@@ -345,7 +338,7 @@
 - [ ] RT-279 Stop sending loopback bearer tokens in cleartext
 - [ ] RT-586 Re-hash a binary-cache hit before running it
 - [ ] RT-788 Build the Dashboard model once per render
-- [ ] RT-289 Classify a plain shell by its prompt at the cursor, not by output volume
+- [ ] RT-289 Classify a plain shell by its command marks, child processes and prompt, not by output volume
 - [ ] RT-790 Resolve an elevated daemon's peer integrity once per connection
 - [ ] RT-306 Polish from v0.1.0-alpha dogfooding
   - [ ] RT-308 Show the focused session's name without its UUID in the status bar
@@ -489,10 +482,15 @@
 - [ ] RT-1021 Login: skip files the start-up sweep finds under the login root
 - [ ] RT-1037 Keep an isolated daemon's summarizer folder under its config override
 - [ ] RT-1039 Tracer: end a stopped session's whole process tree, not only its direct child
+- [ ] RT-1041 Accounts: show the poll's NoCredentials, ForeignCredential and StoreUnwritable outcomes in each account's status
+- [ ] RT-1042 Accounts: send each account's per-model limits and extra-usage state from the usage cache
+- [ ] RT-1043 Fold the panel when the Sessions item shown in place of a stored Gates is clicked
+- [ ] RT-1044 Line up a waiting gate's command with its folder line in the Gates view
+- [ ] RT-1045 Give two unknown-kind gate pools distinct selectors in the Gates view
+- [ ] RT-1046 Stop four agent-api icon conformance tests leaking past nextest's leak timeout
 
 ## Design files
 
-- [accounts.md](accounts.md) — RT-39, RT-277
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
@@ -503,7 +501,7 @@
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-786, RT-787, RT-867, RT-868, RT-869
 - [finished-toast.md](finished-toast.md) — RT-754, RT-755, RT-757, RT-769, RT-770
-- [gate-dashboard.md](gate-dashboard.md) — RT-995, RT-996, RT-997, RT-998, RT-999, RT-1000, RT-1001, RT-1002, RT-1003
+- [gate-dashboard.md](gate-dashboard.md) — RT-1002, RT-1003
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
