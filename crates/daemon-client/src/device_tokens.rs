@@ -1,40 +1,42 @@
 //! The device tokens this client holds for remote hosts.
 //!
 //! A tailnet host's daemon serves this device only when its `Hello` carries
-//! the token that host issued it at pairing. [`CredentialManagerTokens`] keeps
-//! them in Windows Credential Manager, one credential per host, under the
-//! service the daemon files its env secrets under: `rustling-tulip`, or
+//! the token that host issued it at pairing. [`KeyringTokens`] keeps them in
+//! the platform's credential store, Windows Credential Manager on Windows and
+//! the login Keychain on macOS (a generic password), one item per host, under
+//! the service the daemon files its env secrets under: `rustling-tulip`, or
 //! `rustling-tulip:<first 8 hex of the SHA-256 of the config dir>` while
 //! `RUSTLING_TULIP_CONFIG_DIR` is set, so an isolated client never shares
-//! entries with the user's own. The credential's user is
+//! entries with the user's own. The item's user (the Keychain's account) is
 //! `device/<lower-cased host name>`, with no port: one device identity per
-//! host name. [`MemoryTokens`] holds them in memory, for tests.
+//! host name. Both platforms use the same service and user names.
+//! [`MemoryTokens`] holds them in memory, for tests.
 //!
 //! A token never appears in a log line, an error or a `Debug` string.
 
 use anyhow::{Context as _, Result};
 use keyring_core::{Entry, Error as KeyringError};
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::fmt;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-/// The Credential Manager service tokens are filed under, unless the config
+/// The credential store service tokens are filed under, unless the config
 /// dir is overridden.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 const SERVICE: &str = "rustling-tulip";
 
 /// Setting this to a non-empty value switches the service to its
 /// per-config-dir variant.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const CONFIG_DIR_VAR: &str = "RUSTLING_TULIP_CONFIG_DIR";
 
 /// How many hex characters of the config dir's hash the isolated service name
 /// carries.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 const SERVICE_HASH_LEN: usize = 8;
 
 /// What every device token's credential user starts with.
@@ -79,7 +81,7 @@ pub fn user_for(host: &str) -> String {
 /// its per-config-dir variant when `overridden` (the config dir comes from
 /// `RUSTLING_TULIP_CONFIG_DIR`). The daemon's env secrets use the same rule
 /// (`crates/daemon/src/env_secrets.rs`).
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 fn service_for(config_dir: &Path, overridden: bool) -> String {
     if !overridden {
         return SERVICE.to_owned();
@@ -94,31 +96,58 @@ fn service_for(config_dir: &Path, overridden: bool) -> String {
 }
 
 /// The service for this process's config dir.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn service() -> Result<String> {
     let overridden = std::env::var(CONFIG_DIR_VAR).is_ok_and(|value| !value.is_empty());
     Ok(service_for(&crate::config_dir()?, overridden))
 }
 
-/// Device tokens in Windows Credential Manager.
+/// Install Windows Credential Manager as the process's credential store.
+#[cfg(windows)]
+fn install_store() -> Result<()> {
+    let store = windows_native_keyring_store::Store::new()
+        .context("creating the Windows credential store")?;
+    keyring_core::set_default_store(store);
+    Ok(())
+}
+
+/// Install the user's login Keychain as the process's credential store: one
+/// generic password per (service, user) pair.
+#[cfg(target_os = "macos")]
+fn install_store() -> Result<()> {
+    let store = apple_native_keyring_store::keychain::Store::new()
+        .context("creating the macOS Keychain credential store")?;
+    keyring_core::set_default_store(store);
+    Ok(())
+}
+
+/// Device tokens in the platform's credential store: Windows Credential
+/// Manager on Windows, the login Keychain on macOS.
 #[derive(Debug)]
-pub struct CredentialManagerTokens {
+pub struct KeyringTokens {
     service: String,
 }
 
-impl CredentialManagerTokens {
-    /// Install Windows Credential Manager as the process's credential store
-    /// and file tokens under this config dir's service.
+impl KeyringTokens {
+    /// A store filing tokens under `service`, for a test that must not touch
+    /// the user's own items.
+    #[cfg(all(test, target_os = "macos"))]
+    fn with_service(service: String) -> Result<Self> {
+        install_store()?;
+        Ok(Self { service })
+    }
+
+    /// Install the platform's credential store (Windows Credential Manager,
+    /// or the macOS login Keychain) as the process's credential store and
+    /// file tokens under this config dir's service.
     ///
     /// # Errors
     ///
     /// Fails when the platform store cannot be created or the config dir
     /// cannot be resolved.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn open() -> Result<Self> {
-        let store = windows_native_keyring_store::Store::new()
-            .context("creating the Windows credential store")?;
-        keyring_core::set_default_store(store);
+        install_store()?;
         Ok(Self {
             service: service()?,
         })
@@ -126,11 +155,11 @@ impl CredentialManagerTokens {
 
     /// # Errors
     ///
-    /// Always: the store is Windows Credential Manager.
-    #[cfg(not(windows))]
+    /// Always: the store is Windows Credential Manager or the macOS Keychain.
+    #[cfg(not(any(windows, target_os = "macos")))]
     pub fn open() -> Result<Self> {
         anyhow::bail!(
-            "device tokens live in Windows Credential Manager; there is no store off Windows"
+            "device tokens live in Windows Credential Manager or the macOS Keychain; there is no store on this system"
         )
     }
 
@@ -140,7 +169,7 @@ impl CredentialManagerTokens {
     }
 }
 
-impl DeviceTokenStore for CredentialManagerTokens {
+impl DeviceTokenStore for KeyringTokens {
     fn get(&self, host: &str) -> Result<Option<String>> {
         match self.entry(host)?.get_password() {
             Ok(token) => Ok(Some(token)),
@@ -150,9 +179,9 @@ impl DeviceTokenStore for CredentialManagerTokens {
     }
 
     fn set(&self, host: &str, token: &str) -> Result<()> {
-        self.entry(host)?.set_password(token).with_context(|| {
-            format!("saving the device token for {host} to Windows Credential Manager")
-        })
+        self.entry(host)?
+            .set_password(token)
+            .with_context(|| format!("saving the device token for {host} to the credential store"))
     }
 
     fn delete(&self, host: &str) -> Result<()> {
@@ -325,5 +354,49 @@ mod tests {
         let shown = format!("{store:?}");
         assert!(!shown.contains(TOKEN), "{shown}");
         assert!(shown.contains("box.tail1234.ts.net"), "{shown}");
+    }
+
+    /// A token saved to the login Keychain is read back by a fresh store on
+    /// the same service, as a relaunched client builds, and is gone once
+    /// deleted. The service is unique to the run, so the user's own items are
+    /// never read or written.
+    #[test]
+    #[cfg(target_os = "macos")]
+    #[ignore = "touches the login Keychain; run on the Mac builder"]
+    fn keychain_store_round_trips_a_token() {
+        use super::KeyringTokens;
+        use std::fmt::Write as _;
+
+        /// Deletes the test's item however the test ends.
+        struct Cleanup<'a>(&'a KeyringTokens);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.delete(HOST);
+            }
+        }
+
+        const HOST: &str = "box.tail1234.ts.net:8787";
+        const TOKEN: &str = "keychain-test-token";
+
+        let mut bytes = [0_u8; 8];
+        getrandom::fill(&mut bytes).expect("reads random bytes");
+        let mut service = String::from("rustling-tulip-test:");
+        for byte in bytes {
+            let _ = write!(service, "{byte:02x}");
+        }
+
+        let store = KeyringTokens::with_service(service.clone()).expect("opens the Keychain");
+        let _cleanup = Cleanup(&store);
+        store.set(HOST, TOKEN).expect("saves the token");
+
+        let relaunched = KeyringTokens::with_service(service).expect("opens the Keychain again");
+        assert_eq!(
+            relaunched.get(HOST).expect("reads").as_deref(),
+            Some(TOKEN),
+            "a fresh store reads the saved token back"
+        );
+
+        relaunched.delete(HOST).expect("deletes the token");
+        assert_eq!(store.get(HOST).expect("reads"), None, "the token is gone");
     }
 }

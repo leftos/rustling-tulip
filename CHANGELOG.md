@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - In a wide Chat pane, every message after a very long one, such as a pasted build log, can be scrolled to.
+- On macOS, a Mac you approved for remote access stays approved after the app quits or updates, instead of asking to pair again.
 
 ## v0.10.1-alpha
 
