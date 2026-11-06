@@ -889,6 +889,41 @@ An Ended row reads "Error", "Exited with code N" or "Stopped".
 
 A click is a leaf click: it focuses or places the session's pane and clears the flag, so an Ended row leaves while an Asking row stays until the question is answered; right-click opens the session menu.
 
+## Gates
+
+A rail item after Source control (`Activity::Gates`, selector `activity-gates`) opens a panel of the gate slots on This PC's daemon host. It is a rail view plus a footer pill, not a Dashboard tab. The item shows only while This PC's daemon lists `gate_state` and has pushed a gate state, and only a 64-bit Windows daemon does; another host's state is ignored, and the state is cleared on This PC's `Welcome` and when its connection closes.
+
+A daemon reports gate state, idle included, once the host's gate has run at least once, and none before that. The item's badge (`gates-badge`) counts busy plus held slots across the local pools in the accent colour, and is hidden at 0.
+
+The model is plain Rust (`gates.rs`) and the panel is `gates_view.rs`. `Activity::Gates` sits before `Sessions`, which stays the last `#[serde(other)]` variant, so an older build reading a saved `"activity": "gates"` shows Sessions. `RootView::shown_activity` reads a stored Gates as Sessions while there is no state, and keeps the stored value for the state's return.
+
+The panel shows only the daemon host's gates, headed `GATES · <machine>` with its core count, at the other panels' 26 px header height; a tailnet host's slots and an aggregate across machines are never shown.
+
+Each local pool, heavy first, has a header (`HEAVY · 2 of 3 busy`, busy counting busy and held), a slot-count stepper and its slots by index, with any slot past the count last, shown only because it has a claim. The stepper (`gates-step-up-<kind>`, `gates-step-down-<kind>`) sets the count from 1 to 64 and sends `SetGateSlotCount`, one write per pool at a time; a refusal shows under the pool. Its tooltip names the default for this machine. A slot is one of four states:
+
+- Busy: two lines. Line one is the slot name in muted text (`heavy 0`), the short command (the program's file name without folder or extension, then the rest) and, right-aligned, the time held from the claim's start. Line two, muted and ellipsized, is the folder label (the last two path components) and the holding gate's last log line. The tooltip carries the full command, the full folder, the log path, the ceiling and the process count.
+- Held: a slot taken by a gate with no live claim, drawn as one line with `held` in ochre.
+- Free: one muted line, `free`.
+- Stale: a free slot whose claim file names a process that is gone, `free · stale pid <n>`.
+
+A click on a busy row opens its log in the OS default app on This PC, and its right-click menu copies the command, the folder or the log path (a part the gate did not report is a disabled row). There is no Stop gate item: gate-state has no stop API, and a stop would bring job-object code into the daemon.
+
+Gates waiting for a pool are listed under it with their folder, command and time waited, oldest first. Below the pools sit the critical block (who holds the critical gate and how many wait), the remote and builder pools, and the queue of tickets, oldest first.
+
+The history comes from `GateHistory`, a separate pull of This PC's daemon. Recent runs lists up to five runs that are running or ended in the last 2 h, running ones first and then newest end first, open runs and journal runs merged by pid and process start, covered runs left out because their parent's row shows the work.
+
+A row leads with a result glyph: `✓` ok, `◉` running, `✕` failed, `⏱` timed out (a failure at status 124), `⏸` abandoned and `·` for any other state. A failed, timed-out or abandoned row is a bad row, washed and barred in the danger colour with its word on line two.
+
+Last 7 days lists the first four summary rows of passed runs by repo and command; its header folds it, and the fold state lives in memory only. Neither block is saved.
+
+A busy row, a waiting gate and a queue ticket append the usual time after the time held or waited (` / 4m`), the `p50_seconds` of the summary row whose command key, repo and remote flag match the gate's own; the whole time turns the danger colour while it runs over the usual, and a gate with no matching row shows no usual.
+
+The footer pill `Gates <taken>/<total>` (`footer-gates`), shown while This PC has a gate state, counts taken slots over the local pools' counts, and a click shows the panel. While the history holds a run that failed or timed out in the last 10 minutes the pill carries a danger-coloured tail, ` · ✕ failed · <repo> · <ago> ago`, the repo left out when unknown.
+
+History is requested when the view opens, every 15 s while it shows and every 60 s while it is hidden and a gate state is known, one request at a time (a new one waits for the unanswered one). A refusal is logged at info with no toast.
+
+The panel repaints every second while a time on it still reads in seconds, else every 30 s. Driver selectors: `gates-panel`, `gates-header`, `gates-pool-<kind>-title`, `gates-slot-<kind>-<index>`, `gates-recent`, `gates-week`, `gates-week-toggle`, `gates-menu`, `footer-gates`, `footer-gates-tail`.
+
 ## Text viewer
 
 A text file a terminal path link's Ctrl+Shift+click, a plain click on a Markdown viewer link or the Fetch file… dialog opens goes to a viewer tab (`viewer_tab.rs` the model, `viewer_tab_view.rs` the view, `viewer_text.rs` the plain-Rust core) unless the file is not viewable.

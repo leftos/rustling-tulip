@@ -35,7 +35,7 @@ Settled (owner ruling, 2026-10-28), from the ops-tower absorption mocks (RT-464,
 Out of this design's scope, each with its own design; the Dashboard consumes what they publish, and each DB step names the dependency:
 
 - **Plan tab** (board and daily briefing): a Plan tab from a new rail icon (owner); RT-56, mock [canvases/ops-tower-absorb/ot-plan-board/index.html](./canvases/ops-tower-absorb/ot-plan-board/index.html). The lanes' Questions and Next up and the "No live agent" table read its board.
-- **Gates**: a rail view plus a footer strip (owner); RT-55, [gate-dashboard.md](./gate-dashboard.md). Gate ticks and gate rows read its reader.
+- **Gates**: a rail view plus a footer strip (owner); RT-55, [native-client.md](../native-client.md) "Gates". Gate ticks and gate rows read its reader.
 - **Accounts**: a footer chip and popover plus Settings → Accounts (owner); RT-39 and RT-66, [architecture.md](../architecture.md) "Claude accounts". The accounts card reads its fleet verdict.
 - **Costs**: ops-tower's subscription-share model plus a Costs tab (owner); no issue yet, mock [canvases/ops-tower-absorb/ot-costs/index.html](./canvases/ops-tower-absorb/ot-costs/index.html). The header's Today figure is the API-equivalent sum below until the Costs tab ships (RT-479); then it shows the subscription share with API prices muted beside it, and a click opens the Costs tab, as the costs mock's lane A draws it.
 
@@ -198,7 +198,7 @@ What each field needs, and whether the tree has it today (paths at `main` b4b55b
 | Glyph, state word, age | `status` (`:596`), `status_since` (`:599`), `pending_input` (`:708`), `background` (`:713`), the client's `Leaf.unseen` (`apps/native/src/sidebar.rs:196`) | have | |
 | Linear key, state, priority, title | issue detection plus the daemon's Linear client and cache, designed in [linear-links.md](./linear-links.md) (RT-133, LL.1 to LL.3) | none: no Linear client in the tree (`rg -il linear crates apps` finds only test strings, a `Linear` split layout and the word "linear" in comments) | RT-133, then DB.7 |
 | Now line, rule 1 | `pending_input`, worded by `needs_you.rs:101` | have | |
-| Now line, rules 2 to 6 | open tool calls, running subagents and background tasks from the transcript; gate claims from the daemon's gate reader, designed in [gate-dashboard.md](./gate-dashboard.md) (RT-55, re-cut by RT-64 around the `gate-state` crate) | transcript side have: the activity reader's `open_calls`, `subagents` and `background` (`ActivitySnapshot`, `crates/agents/api/src/activity.rs`); no gate reader yet, and the `Stop` hook's `background_tasks` is read only as one flag (`crates/agents/api/src/hook_vocabulary.rs`) | DB.3, DB.4, DB.8 |
+| Now line, rules 2 to 6 | open tool calls, running subagents and background tasks from the transcript; gate claims from the daemon's gate reader, the gate reader in [architecture.md](../architecture.md) "Gates view" (RT-55, around the `gate-state` crate) | transcript side have: the activity reader's `open_calls`, `subagents` and `background` (`ActivitySnapshot`, `crates/agents/api/src/activity.rs`); the gate reader exists (`crates/daemon/src/gate_state.rs`), and the `Stop` hook's `background_tasks` is read only as one flag (`crates/agents/api/src/hook_vocabulary.rs`) | DB.3, DB.4, DB.8 |
 | Summary lines | the summarizer over each turn's last message: `SessionRecord.last_assistant_message` (`crates/daemon/src/session.rs:228`, set at `crates/daemon/src/hook_status.rs:505`, 8 KiB cap); `SessionSnapshot.summary` (`lib.rs:602`), filled from the summary ring | have: finished turns (SA.6) and, while a Dashboard is watched, working refreshes as provisional lines (DB.17, `crates/daemon/src/summarizer/refresh.rs`) | DB.17 |
 | Agents count, nested rows | subagent folders and background-task records in the transcript | have: the activity reader's `subagents` tree (`crates/agents/claude/src/subagents.rs`), `background` and `ended_background`; DB.5 maps them to `AgentNode` | DB.3, DB.4, DB.8 |
 | Context | the newest assistant record's `message.usage` over the model's context window | have: the activity reader's `context` and `model` | DB.3 |
@@ -277,7 +277,7 @@ Each read runs with `--no-optional-locks` and `-c core.quotepath=false`, with `-
 
 ### Gates
 
-**Orchestrator decision (not an owner ruling):** gate rows come from the daemon's one gate reader, the one [gate-dashboard.md](./gate-dashboard.md) designs for RT-55 and RT-64 re-cuts around the `gate-state` crate (`github.com/leftos/gate`, which ops-tower pins by rev in its `Cargo.toml`). The Dashboard adds only the placement.
+**Orchestrator decision (not an owner ruling):** gate rows come from the daemon's one gate reader, the one [architecture.md](../architecture.md) "Gates view" describes, built around the `gate-state` crate (`github.com/leftos/gate`, which the workspace `Cargo.toml` pins). The Dashboard adds only the placement.
 
 A claim or queue ticket is placed under the nearest listed session whose process is its ancestor (`sysinfo`, already a daemon dependency in `crates/daemon/Cargo.toml`), and under the subagent whose open `Bash` call's command matches the claim's (ops-tower's `command_matches`).
 
