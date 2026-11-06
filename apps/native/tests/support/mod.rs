@@ -127,6 +127,7 @@ fn side_part_shown(root: &RootView, selector: &str) -> bool {
         "sidebar-divider" => open,
         "activity-badge" => root.activity_badge().is_some(),
         "activity-gates" | "footer-gates" => root.gates_header().is_some(),
+        _ if selector.starts_with("footer-gates-tail") => root.gates_failure_tail().is_some(),
         "gates-badge" => root.gates_badge().is_some(),
         "gates-panel" | "gates-header" => open && root.shown_activity() == Activity::Gates,
         _ if selector == "gates-menu" || selector.starts_with("gates-menu-") => {
@@ -915,6 +916,8 @@ pub fn gate_state(machine: &str) -> protocol::GateState {
             command: Some("cargo nextest run".to_owned()),
             log: None,
             timeout_seconds: None,
+            command_key: None,
+            repo: None,
         }),
         ..gate_slot(index, GateSlotState::Busy)
     };
@@ -977,6 +980,8 @@ pub fn gate_state_full(machine: &str, log: &Path) -> protocol::GateState {
         command: Some(command.to_owned()),
         log,
         timeout_seconds: Some(600.0),
+        command_key: None,
+        repo: None,
     };
     let heavy = &mut state.pools[0];
     heavy.count = 4;
@@ -1004,6 +1009,8 @@ pub fn gate_state_full(machine: &str, log: &Path) -> protocol::GateState {
         since: Some(now - chrono::Duration::minutes(2)),
         cwd: Some(r"X:\dev\other".to_owned()),
         command_line: "cargo clippy".to_owned(),
+        command_key: None,
+        repo: None,
     }];
     state.pools[1].slots[0].claim = Some(claim(4101, "cargo fmt", r"X:\dev\repo", None));
     state.critical = Some(GateCriticalState {
@@ -1013,6 +1020,8 @@ pub fn gate_state_full(machine: &str, log: &Path) -> protocol::GateState {
             since: Some(now - chrono::Duration::minutes(1)),
             cwd: Some(r"X:\dev\repo".to_owned()),
             command_line: "pwsh tools/release.ps1".to_owned(),
+            command_key: None,
+            repo: None,
         }],
     });
     state.queue = vec![GateQueueTicket {
@@ -1028,6 +1037,8 @@ pub fn gate_state_full(machine: &str, log: &Path) -> protocol::GateState {
         command_line: Some("cargo clippy".to_owned()),
         reason: None,
         expected: None,
+        command_key: None,
+        repo: None,
     }];
     state.remote = Some(GateRemotePool {
         count: 1,

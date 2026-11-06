@@ -411,13 +411,19 @@ mod tests {
         let reads = Arc::new(AtomicUsize::new(0));
         let (signal, mut calls) = mpsc::unbounded_channel();
         let counted = Arc::clone(&reads);
-        let reader: GateReader = Arc::new(move || {
+        let reader: GateReader = Arc::new(move |_: &RepoFolders| {
             counted.fetch_add(1, Ordering::SeqCst);
             let _ = signal.send(());
             None
         });
         let (_clients, clients_rx) = watch::channel(1_usize);
-        let poll = spawn_poll(reader, gate, hub.state_events.clone(), clients_rx);
+        let poll = spawn_poll(
+            reader,
+            gate,
+            Arc::clone(&hub.state),
+            hub.state_events.clone(),
+            clients_rx,
+        );
         next_call(&mut calls).await;
         let connected = tokio::time::Instant::now();
 

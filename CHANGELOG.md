@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A toast tells you when auto-switch changes accounts, finds every account used up, or stops; Settings › Notifications › Account switches turns them off.
 - On Windows, a Gates view on the rail and a footer pill show this PC's gate slots, waiting gates and queue, and set each pool's slot count.
 - The Gates view lists the last two hours' gated runs with how each ended, and the last seven days' most frequent passed commands.
+- Each gate row in the Gates view shows its command's usual time beside its own, and the footer's Gates pill names a run that failed in the last ten minutes.
 - Settings › General picks each host's default shell for new sessions, from its installed shells or a custom command.
 - The new-session dialog's Target list narrows as you type, matching repo and workspace names in part, so "ya" finds yaat.
 - With Nushell or fish as the default shell, new Claude sessions start inside it, like PowerShell, cmd and POSIX shells.

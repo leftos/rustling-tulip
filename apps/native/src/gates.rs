@@ -39,6 +39,10 @@ pub(crate) enum GateRow {
         timeout_seconds: Option<f64>,
         /// How many processes the slot's gate runs.
         processes: u32,
+        /// The live claim's command as the history's summary keys it.
+        command_key: Option<String>,
+        /// The repo the live claim's folder belongs to.
+        repo: Option<String>,
     },
 }
 
@@ -159,6 +163,8 @@ pub(crate) fn slot_rows(kind: GateSlotKind, slots: &[GateSlot]) -> Vec<GateRow> 
                 log: claim.and_then(|claim| claim.log.clone()),
                 timeout_seconds: claim.and_then(|claim| claim.timeout_seconds),
                 processes: slot.processes,
+                command_key: claim.and_then(|claim| claim.command_key.clone()),
+                repo: claim.and_then(|claim| claim.repo.clone()),
             }
         })
         .collect()
@@ -545,6 +551,117 @@ pub(crate) fn week_rows(summary: &[GateCommandSummary]) -> &[GateCommandSummary]
     &summary[..summary.len().min(WEEK_MAX)]
 }
 
+/// The usual time of a live gate, in seconds: the `p50_seconds` of the
+/// summary row whose command, repo and remote flag are the gate's
+/// `command_key`, `repo` and `remote`; `None` with no key or no such row.
+#[must_use]
+pub(crate) fn usual(
+    summary: &[GateCommandSummary],
+    command_key: Option<&str>,
+    repo: Option<&str>,
+    remote: bool,
+) -> Option<f64> {
+    let key = command_key?;
+    summary
+        .iter()
+        .find(|row| row.command == key && row.repo.as_deref() == repo && row.remote == remote)
+        .map(|row| row.p50_seconds)
+}
+
+/// A usual time as a row shows it after its held time or age: ` / 4m`,
+/// read as [`crate::needs_you::waited`] reads a wait.
+#[must_use]
+pub(crate) fn usual_text(seconds: f64) -> String {
+    let since = DateTime::<Utc>::UNIX_EPOCH;
+    let now = since + chrono::TimeDelta::milliseconds(rounded(seconds.max(0.0) * 1000.0));
+    format!(" / {}", crate::needs_you::waited(now, since))
+}
+
+/// Whether a held time or age of `seconds` is over the `usual`.
+#[must_use]
+pub(crate) fn over_usual(seconds: i64, usual: Option<f64>) -> bool {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a held time in seconds is far inside f64's exact range"
+    )]
+    let seconds = seconds as f64;
+    usual.is_some_and(|usual| seconds > usual)
+}
+
+/// How long the footer keeps a failed run's tail after it ended.
+const TAIL_WINDOW: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
+
+/// The footer pill's tail for a run that failed lately.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FailureTail {
+    /// `✕`, or `⏱` for a timeout.
+    pub(crate) glyph: &'static str,
+    /// `failed`, or `timed out` for a timeout.
+    pub(crate) word: &'static str,
+    /// The run's repo, else its folder's label; `None` with neither.
+    pub(crate) repo: Option<String>,
+    /// When the run ended, by [`run_end`].
+    pub(crate) end: DateTime<Utc>,
+}
+
+impl FailureTail {
+    /// The tail's text after the pill's count:
+    /// ` · ✕ failed · {repo} · {ago} ago`, the repo part left out when
+    /// unknown.
+    #[must_use]
+    pub(crate) fn text(&self, now: DateTime<Utc>) -> String {
+        let mut text = format!(" · {} {}", self.glyph, self.word);
+        if let Some(repo) = &self.repo {
+            text.push_str(" · ");
+            text.push_str(repo);
+        }
+        text.push_str(" · ");
+        text.push_str(&crate::needs_you::waited(now, self.end));
+        text.push_str(" ago");
+        text
+    }
+}
+
+/// The footer's failure tail: the newest failed run of `runs` by its end,
+/// when it ended within ten minutes of `now`; a failure at status 124 is a
+/// timeout. `None` when the newest failure is older or there is none.
+#[must_use]
+pub(crate) fn failure_tail(runs: &[GateHistoryRun], now: DateTime<Utc>) -> Option<FailureTail> {
+    let (run, end) = runs
+        .iter()
+        .filter(|run| run.state == GateRunState::Failed)
+        .filter_map(|run| run_end(run).map(|end| (run, end)))
+        .max_by_key(|(_, end)| *end)?;
+    if now - end > TAIL_WINDOW {
+        return None;
+    }
+    let result = run_result(run);
+    Some(FailureTail {
+        glyph: result.glyph(),
+        word: result.word().unwrap_or("failed"),
+        repo: run
+            .repo
+            .clone()
+            .or_else(|| run.cwd.as_deref().map(folder_label)),
+        end,
+    })
+}
+
+/// Whether some time the history shows, a recent run's age or the failure
+/// tail's, still reads in seconds at `now`: a run of `runs` or `open` that
+/// ended (or, running, started) under a minute ago.
+#[must_use]
+pub(crate) fn history_fresh(
+    runs: &[GateHistoryRun],
+    open: &[GateHistoryRun],
+    now: DateTime<Utc>,
+) -> bool {
+    runs.iter()
+        .chain(open)
+        .filter_map(run_end)
+        .any(|end| (now - end).num_seconds() < SECONDS_SHOWN_BELOW)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -584,6 +701,8 @@ mod tests {
             command: Some("cargo nextest run".to_owned()),
             log: None,
             timeout_seconds: None,
+            command_key: None,
+            repo: None,
         }
     }
 
@@ -627,6 +746,8 @@ mod tests {
             command_line: None,
             reason: None,
             expected: None,
+            command_key: None,
+            repo: None,
         }
     }
 
@@ -636,6 +757,8 @@ mod tests {
             since: since.map(time),
             cwd: None,
             command_line: String::new(),
+            command_key: None,
+            repo: None,
         }
     }
 
@@ -657,6 +780,8 @@ mod tests {
                 log,
                 timeout_seconds,
                 processes,
+                command_key: _,
+                repo: _,
             } => format!(
                 "slot {kind:?} {index} {state:?} {command:?} {cwd:?} {} {pid:?} {last_line:?} {stale_pid:?} {extra} {log:?} {timeout_seconds:?} {processes}",
                 started.is_some()
@@ -1157,5 +1282,110 @@ mod tests {
             .collect();
         assert_eq!(commands, ["a", "b", "c", "d"]);
         assert!(week_rows(&summary[..2]).len() == 2, "fewer than four stay");
+    }
+
+    /// A summary row of `command` in `repo`, local or `remote`, whose
+    /// median is `p50` seconds.
+    fn summary_row(command: &str, repo: &str, remote: bool, p50: f64) -> GateCommandSummary {
+        GateCommandSummary {
+            command: command.to_owned(),
+            repo: Some(repo.to_owned()),
+            remote,
+            count: 5,
+            p50_seconds: p50,
+            p90_seconds: p50 * 2.0,
+            max_seconds: p50 * 3.0,
+        }
+    }
+
+    #[test]
+    fn usual_is_the_p50_of_the_row_matching_key_repo_and_remote() {
+        let summary = [
+            summary_row("cargo test", "other", false, 10.0),
+            summary_row("cargo build", "repo", false, 20.0),
+            summary_row("cargo test", "repo", false, 30.0),
+            summary_row("cargo test", "repo", true, 40.0),
+        ];
+        assert_eq!(
+            usual(&summary, Some("cargo test"), Some("repo"), false),
+            Some(30.0)
+        );
+        assert_eq!(
+            usual(&summary, Some("cargo test"), Some("repo"), true),
+            Some(40.0)
+        );
+        assert_eq!(
+            usual(&summary, Some("cargo test"), Some("other"), false),
+            Some(10.0)
+        );
+    }
+
+    #[test]
+    fn usual_ignores_a_local_row_for_a_remote_gate() {
+        let summary = [summary_row("cargo test", "repo", false, 30.0)];
+        assert_eq!(
+            usual(&summary, Some("cargo test"), Some("repo"), true),
+            None
+        );
+    }
+
+    #[test]
+    fn usual_is_none_with_no_matching_row() {
+        let summary = [summary_row("cargo test", "repo", false, 30.0)];
+        assert_eq!(
+            usual(&summary, Some("cargo build"), Some("repo"), false),
+            None
+        );
+        assert_eq!(usual(&summary, Some("cargo test"), None, false), None);
+        assert_eq!(usual(&[], Some("cargo test"), Some("repo"), false), None);
+    }
+
+    #[test]
+    fn usual_is_none_with_no_command_key() {
+        let summary = [summary_row("cargo test", "repo", false, 30.0)];
+        assert_eq!(usual(&summary, None, Some("repo"), false), None);
+    }
+
+    #[test]
+    fn failure_tail_shows_a_run_failed_nine_minutes_ago() {
+        let mut run = history_run(7, GateRunState::Failed, 9);
+        run.status = Some(1);
+        let tail = failure_tail(&[run], history_now()).expect("a tail");
+        assert_eq!(tail.glyph, "✕");
+        assert_eq!(tail.word, "failed");
+        assert_eq!(tail.repo.as_deref(), Some("repo"));
+        assert_eq!(tail.end, history_now() - chrono::Duration::minutes(9));
+        assert_eq!(tail.text(history_now()), " · ✕ failed · repo · 9m ago");
+    }
+
+    #[test]
+    fn failure_tail_drops_a_run_failed_eleven_minutes_ago() {
+        let run = history_run(7, GateRunState::Failed, 11);
+        assert_eq!(failure_tail(&[run], history_now()), None);
+    }
+
+    #[test]
+    fn failure_tail_reads_status_124_as_timed_out() {
+        let mut run = history_run(7, GateRunState::Failed, 3);
+        run.status = Some(124);
+        let tail = failure_tail(&[run], history_now()).expect("a tail");
+        assert_eq!(tail.glyph, "⏱");
+        assert_eq!(tail.word, "timed out");
+    }
+
+    #[test]
+    fn failure_tail_takes_the_newest_of_two_failed_runs() {
+        let mut older = history_run(1, GateRunState::Failed, 8);
+        older.repo = Some("older".to_owned());
+        let mut newer = history_run(2, GateRunState::Failed, 2);
+        newer.repo = Some("newer".to_owned());
+        let tail = failure_tail(&[older, newer], history_now()).expect("a tail");
+        assert_eq!(tail.repo.as_deref(), Some("newer"));
+    }
+
+    #[test]
+    fn failure_tail_is_none_for_an_ok_run() {
+        let run = history_run(7, GateRunState::Ok, 1);
+        assert_eq!(failure_tail(&[run], history_now()), None);
     }
 }

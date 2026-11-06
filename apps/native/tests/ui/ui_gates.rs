@@ -21,8 +21,9 @@ use protocol::{ClientMessage, DaemonMessage, GateSlotKind};
 use rustling_tulip_native::Activity;
 use serde_json::json;
 use support::{
-    Fixture, Harness, Opened, TestDir, gate_history_msg, gate_history_runs, gate_history_summary,
-    gate_state, gate_state_full, gate_state_msg, saved_remote, saved_remote_over, saved_ui,
+    Fixture, Harness, Opened, TestDir, gate_history_msg, gate_history_run, gate_history_runs,
+    gate_history_summary, gate_state, gate_state_full, gate_state_msg, saved_remote,
+    saved_remote_over, saved_ui,
 };
 
 fn activity(h: &mut Harness<'_>) -> Activity {
@@ -721,4 +722,176 @@ fn a_reply_to_another_id_is_ignored(cx: &mut TestAppContext) {
     assert!(h.root(|root, _| root.gates_history_pending()));
     answer(&mut h, id);
     assert_eq!(recent_count(&mut h), Some(3));
+}
+
+/// A local summary row of `command` in `repo` whose median is `p50`
+/// seconds.
+fn summary_row(command: &str, repo: &str, p50: f64) -> protocol::GateCommandSummary {
+    protocol::GateCommandSummary {
+        command: command.to_owned(),
+        repo: Some(repo.to_owned()),
+        remote: false,
+        count: 5,
+        p50_seconds: p50,
+        p90_seconds: p50 * 2.0,
+        max_seconds: p50 * 3.0,
+    }
+}
+
+/// This PC pushed [`gate_state_full`] with its busy heavy slot keyed
+/// `cargo nextest run` in `repo` (held five minutes), and its queue ticket
+/// and waiting gate keyed `cargo clippy` in `other` (two minutes old); the
+/// Gates view opened and its history request was answered with `summary`.
+fn keyed(h: &mut Harness<'_>, dir: &TestDir, summary: Vec<protocol::GateCommandSummary>) {
+    let log = dir.path().join("gate.log");
+    std::fs::write(&log, "done\n").expect("write the gate's log");
+    let mut state = gate_state_full("BOX", &log);
+    let claim = state.pools[0].slots[0]
+        .claim
+        .as_mut()
+        .expect("the busy heavy slot's claim");
+    claim.command_key = Some("cargo nextest run".to_owned());
+    claim.repo = Some("repo".to_owned());
+    for gate in &mut state.pools[0].waiting {
+        gate.command_key = Some("cargo clippy".to_owned());
+        gate.repo = Some("other".to_owned());
+    }
+    for ticket in &mut state.queue {
+        ticket.command_key = Some("cargo clippy".to_owned());
+        ticket.repo = Some("other".to_owned());
+    }
+    h.reconnect_with_features(&[protocol::FEATURE_GATE_STATE]);
+    h.send(gate_state_msg(Some(state)));
+    h.sent();
+    h.click_on("activity-gates");
+    let id = one_history(h);
+    h.send(gate_history_msg(Some(id), Vec::new(), Vec::new(), summary));
+}
+
+#[gpui::test]
+fn a_busy_row_shows_its_usual_time_after_its_held_time(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    keyed(
+        &mut h,
+        &dir,
+        vec![summary_row("cargo nextest run", "repo", 600.0)],
+    );
+    assert!(drawn(&mut h, "gates-slot-heavy-0-usual= / 10m"));
+    assert!(drawn(&mut h, "gates-slot-heavy-0-time=5m"));
+}
+
+#[gpui::test]
+fn a_row_held_past_its_usual_still_shows_the_usual(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    keyed(
+        &mut h,
+        &dir,
+        vec![summary_row("cargo nextest run", "repo", 240.0)],
+    );
+    assert!(drawn(&mut h, "gates-slot-heavy-0-time=5m"));
+    assert!(drawn(&mut h, "gates-slot-heavy-0-usual= / 4m"));
+}
+
+#[gpui::test]
+fn queue_and_waiting_rows_show_their_usual_time(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    keyed(
+        &mut h,
+        &dir,
+        vec![summary_row("cargo clippy", "other", 180.0)],
+    );
+    assert!(drawn(&mut h, "gates-queue-0-time=2m"));
+    assert!(drawn(&mut h, "gates-queue-0-usual= / 3m"));
+    assert!(drawn(&mut h, "gates-wait-heavy-0-time=2m"));
+    assert!(drawn(&mut h, "gates-wait-heavy-0-usual= / 3m"));
+}
+
+#[gpui::test]
+fn a_row_with_no_matching_summary_row_shows_no_usual(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    keyed(&mut h, &dir, gate_history_summary());
+    assert!(drawn(&mut h, "gates-slot-heavy-0-time=5m"));
+    for selector in [
+        "gates-slot-heavy-0-usual",
+        "gates-queue-0-usual",
+        "gates-wait-heavy-0-usual",
+    ] {
+        assert!(!drawn(&mut h, selector), "{selector}");
+    }
+}
+
+#[gpui::test]
+fn the_hidden_view_asks_for_the_history_every_60_s(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    pushed(&mut h);
+    h.sent();
+    h.advance(Duration::from_secs(59));
+    assert_eq!(history_sent(&mut h), [], "not before 60 s");
+    h.advance(Duration::from_secs(1));
+    one_history(&mut h);
+    h.advance(Duration::from_secs(60));
+    assert_eq!(
+        history_sent(&mut h),
+        [],
+        "none while the last one is unanswered"
+    );
+}
+
+/// The footer's failure tail after the history answered with `run`.
+fn tail_after(h: &mut Harness<'_>, run: protocol::GateHistoryRun) -> Option<String> {
+    opened(h);
+    let id = one_history(h);
+    h.send(gate_history_msg(
+        Some(id),
+        vec![run],
+        Vec::new(),
+        Vec::new(),
+    ));
+    h.root(|root, _| root.gates_failure_tail())
+}
+
+#[gpui::test]
+fn a_run_failed_lately_tails_the_footer_for_10_minutes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let failed = gate_history_run(
+        5101,
+        "dotnet test",
+        "yaat",
+        1,
+        protocol::GateRunState::Failed,
+        2,
+    );
+    let tail = tail_after(&mut h, failed).expect("a failure tail");
+    assert!(tail.contains("✕ failed") && tail.contains("yaat"), "{tail}");
+    assert!(h.in_model("footer-gates-tail"));
+    assert!(drawn(&mut h, &format!("footer-gates-tail={tail}")));
+    assert!(drawn(&mut h, "footer-gates-text=Gates 3/5"));
+
+    h.advance(Duration::from_mins(9));
+    assert_eq!(h.root(|root, _| root.gates_failure_tail()), None);
+    assert!(!h.in_model("footer-gates-tail"));
+}
+
+#[gpui::test]
+fn a_run_failed_with_status_124_tails_the_footer_as_timed_out(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let mut timed_out = gate_history_run(
+        5102,
+        "cargo nextest run",
+        "rustling-tulip",
+        0,
+        protocol::GateRunState::Failed,
+        2,
+    );
+    timed_out.status = Some(124);
+    let tail = tail_after(&mut h, timed_out).expect("a failure tail");
+    assert!(tail.contains("⏱ timed out"), "{tail}");
+    assert!(drawn(&mut h, &format!("footer-gates-tail={tail}")));
 }

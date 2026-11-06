@@ -29,23 +29,38 @@ fn iso(text: &str) -> Option<DateTime<Utc>> {
     text.parse::<DateTime<Utc>>().ok()
 }
 
+/// The key of a live gate's command in the history's summary: the journal's normalization of `command`.
+fn command_key(command: &str) -> String {
+    ::gate_state::normalize_command(command)
+}
+
+/// The repo a live gate's folder belongs to, as the history names it.
+fn repo_of(repos: &RepoFolders, cwd: Option<&str>) -> Option<String> {
+    cwd.and_then(|cwd| repos.repo_of(cwd))
+}
+
 /// A slot's claim or stale claim as the wire carries it: each field from its own camel case key, each `None` when
-/// missing or of another type, and every field `None` for a value that is not an object.
-fn claim_of(value: &Value) -> protocol::GateClaim {
+/// missing or of another type, and every field `None` for a value that is not an object. The command's key and the
+/// folder's repo come from the command and the folder.
+fn claim_of(value: &Value, repos: &RepoFolders) -> protocol::GateClaim {
     let Value::Object(fields) = value else {
         return protocol::GateClaim::default();
     };
+    let cwd = fields.get("cwd").and_then(Value::as_str).map(str::to_owned);
+    let command = fields
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     protocol::GateClaim {
         pid: fields
             .get("pid")
             .and_then(Value::as_u64)
             .and_then(|pid| u32::try_from(pid).ok()),
         started: fields.get("started").and_then(Value::as_str).and_then(iso),
-        cwd: fields.get("cwd").and_then(Value::as_str).map(str::to_owned),
-        command: fields
-            .get("command")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        command_key: command.as_deref().map(command_key),
+        repo: repo_of(repos, cwd.as_deref()),
+        cwd,
+        command,
         log: fields.get("log").and_then(Value::as_str).map(str::to_owned),
         timeout_seconds: fields.get("timeoutSeconds").and_then(Value::as_f64),
     }
@@ -65,7 +80,7 @@ fn expected_of(fields: &Map<String, Value>) -> protocol::GateExpected {
 }
 
 /// One slot's row.
-fn slot_of(row: &::gate_state::SlotRow) -> protocol::GateSlot {
+fn slot_of(row: &::gate_state::SlotRow, repos: &RepoFolders) -> protocol::GateSlot {
     protocol::GateSlot {
         index: row.index,
         name: row.name.clone(),
@@ -74,8 +89,8 @@ fn slot_of(row: &::gate_state::SlotRow) -> protocol::GateSlot {
             ::gate_state::SlotState::Busy => protocol::GateSlotState::Busy,
             ::gate_state::SlotState::Held => protocol::GateSlotState::Held,
         },
-        claim: row.claim.as_ref().map(claim_of),
-        stale: row.stale.as_ref().map(claim_of),
+        claim: row.claim.as_ref().map(|claim| claim_of(claim, repos)),
+        stale: row.stale.as_ref().map(|claim| claim_of(claim, repos)),
         processes: count(row.processes),
         last_line: row.last_line.clone(),
         critical: row.critical,
@@ -84,17 +99,19 @@ fn slot_of(row: &::gate_state::SlotRow) -> protocol::GateSlot {
 }
 
 /// A gate waiting for a slot.
-fn waiting_of(gate: &::gate_state::Waiting) -> protocol::GateWaiting {
+fn waiting_of(gate: &::gate_state::Waiting, repos: &RepoFolders) -> protocol::GateWaiting {
     protocol::GateWaiting {
         pid: gate.pid,
         since: gate.since.as_deref().and_then(iso),
         cwd: gate.cwd.clone(),
         command_line: gate.command_line.clone(),
+        command_key: Some(command_key(&gate.command_line)),
+        repo: repo_of(repos, gate.cwd.as_deref()),
     }
 }
 
 /// One local pool of slots.
-fn pool_of(pool: &::gate_state::PoolState) -> protocol::GatePool {
+fn pool_of(pool: &::gate_state::PoolState, repos: &RepoFolders) -> protocol::GatePool {
     protocol::GatePool {
         kind: match pool.kind {
             ::gate_state::SlotKind::Heavy => protocol::GateSlotKind::Heavy,
@@ -104,22 +121,26 @@ fn pool_of(pool: &::gate_state::PoolState) -> protocol::GatePool {
         default: pool.default_count,
         set: pool.set.map(::gate_state::SlotCount::get),
         problem: pool.problem.clone(),
-        slots: pool.slots.iter().map(slot_of).collect(),
-        waiting: pool.waiting.iter().map(waiting_of).collect(),
+        slots: pool.slots.iter().map(|row| slot_of(row, repos)).collect(),
+        waiting: pool
+            .waiting
+            .iter()
+            .map(|gate| waiting_of(gate, repos))
+            .collect(),
     }
 }
 
 /// The remote pool.
-fn remote_of(pool: &::gate_state::RemotePool) -> protocol::GateRemotePool {
+fn remote_of(pool: &::gate_state::RemotePool, repos: &RepoFolders) -> protocol::GateRemotePool {
     protocol::GateRemotePool {
         count: pool.count,
         problem: pool.problem.clone(),
-        slots: pool.slots.iter().map(slot_of).collect(),
+        slots: pool.slots.iter().map(|row| slot_of(row, repos)).collect(),
     }
 }
 
 /// One builder's own remote pool.
-fn builder_of(pool: &::gate_state::BuilderPool) -> protocol::GateBuilderPool {
+fn builder_of(pool: &::gate_state::BuilderPool, repos: &RepoFolders) -> protocol::GateBuilderPool {
     protocol::GateBuilderPool {
         id: pool.id.clone(),
         name: pool.name.clone(),
@@ -128,7 +149,7 @@ fn builder_of(pool: &::gate_state::BuilderPool) -> protocol::GateBuilderPool {
         count: pool.count,
         problem: pool.problem.clone(),
         routed: pool.routed,
-        slots: pool.slots.iter().map(slot_of).collect(),
+        slots: pool.slots.iter().map(|row| slot_of(row, repos)).collect(),
     }
 }
 
@@ -145,7 +166,7 @@ fn covered_of(run: &::gate_state::CoveredRun) -> protocol::GateCoveredRun {
 }
 
 /// One queued gate's ticket.
-fn ticket_of(ticket: &::gate_state::QueueTicket) -> protocol::GateQueueTicket {
+fn ticket_of(ticket: &::gate_state::QueueTicket, repos: &RepoFolders) -> protocol::GateQueueTicket {
     protocol::GateQueueTicket {
         kind: ticket.kind.clone(),
         holds: ticket.holds,
@@ -159,23 +180,45 @@ fn ticket_of(ticket: &::gate_state::QueueTicket) -> protocol::GateQueueTicket {
         command_line: ticket.command_line.clone(),
         reason: ticket.reason.clone(),
         expected: ticket.expected.as_ref().map(expected_of),
+        command_key: ticket.command_line.as_deref().map(command_key),
+        repo: repo_of(repos, ticket.cwd.as_deref()),
     }
 }
 
-/// Converts the gate's dashboard state to the wire state the client reads.
-pub(crate) fn to_wire(state: &::gate_state::DashboardState) -> protocol::GateState {
+/// Converts the gate's dashboard state to the wire state the client reads, naming each live gate's repo from `repos`.
+pub(crate) fn to_wire(
+    state: &::gate_state::DashboardState,
+    repos: &RepoFolders,
+) -> protocol::GateState {
     protocol::GateState {
         now: iso(&state.now),
         machine: state.machine.clone(),
         processors: count(state.processors),
         critical: Some(protocol::GateCriticalState {
-            holder: Some(slot_of(&state.critical.holder)),
-            waiting: state.critical.waiting.iter().map(waiting_of).collect(),
+            holder: Some(slot_of(&state.critical.holder, repos)),
+            waiting: state
+                .critical
+                .waiting
+                .iter()
+                .map(|gate| waiting_of(gate, repos))
+                .collect(),
         }),
-        queue: state.queue.iter().map(ticket_of).collect(),
-        pools: state.pools.iter().map(pool_of).collect(),
-        remote: state.remote.as_ref().map(remote_of),
-        builders: state.builders.iter().map(builder_of).collect(),
+        queue: state
+            .queue
+            .iter()
+            .map(|ticket| ticket_of(ticket, repos))
+            .collect(),
+        pools: state
+            .pools
+            .iter()
+            .map(|pool| pool_of(pool, repos))
+            .collect(),
+        remote: state.remote.as_ref().map(|pool| remote_of(pool, repos)),
+        builders: state
+            .builders
+            .iter()
+            .map(|pool| builder_of(pool, repos))
+            .collect(),
         covered: state.covered.iter().map(covered_of).collect(),
     }
 }
@@ -189,6 +232,7 @@ pub(crate) fn read_once(
     processes: &dyn ::proc_table::ProcessTable,
     mutexes: &dyn ::gate_state::MutexProbe,
     cwds: &dyn ::gate_state::CwdReader,
+    repos: &RepoFolders,
 ) -> Option<protocol::GateState> {
     let dir = inputs.local_app_data.join("gate");
     match dir.try_exists() {
@@ -199,14 +243,16 @@ pub(crate) fn read_once(
             return None;
         }
     }
-    Some(to_wire(&::gate_state::dashboard_state(
-        inputs, processes, mutexes, cwds,
-    )))
+    Some(to_wire(
+        &::gate_state::dashboard_state(inputs, processes, mutexes, cwds),
+        repos,
+    ))
 }
 
-/// Reads this host's live gate state, or `None` when the gate's inputs cannot be read or no gate has run here.
+/// Reads this host's live gate state, naming each live gate's repo from `repos`, or `None` when the gate's inputs
+/// cannot be read or no gate has run here.
 #[cfg(all(windows, target_pointer_width = "64"))]
-pub(crate) fn read_live() -> Option<protocol::GateState> {
+pub(crate) fn read_live(repos: &RepoFolders) -> Option<protocol::GateState> {
     let inputs = match ::gate_state::live_inputs() {
         Ok(inputs) => inputs,
         Err(error) => {
@@ -219,6 +265,7 @@ pub(crate) fn read_live() -> Option<protocol::GateState> {
         &::proc_table::Win32ProcessTable,
         &::gate_state::Win32MutexProbe,
         &::gate_state::Win32CwdReader,
+        repos,
     )
 }
 
@@ -241,17 +288,18 @@ fn without_ages(state: &protocol::GateState) -> protocol::GateState {
 /// The wait between two reads while a client is connected.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// How the poll reads the gate's state: [`read_live`] in the daemon, a scripted closure in tests. It blocks, so the
-/// poll calls it on a blocking thread.
-pub(crate) type GateReader = Arc<dyn Fn() -> Option<protocol::GateState> + Send + Sync>;
+/// How the poll reads the gate's state, given the registered repos' folders: [`read_live`] in the daemon, a scripted
+/// closure in tests. It blocks, so the poll calls it on a blocking thread.
+pub(crate) type GateReader = Arc<dyn Fn(&RepoFolders) -> Option<protocol::GateState> + Send + Sync>;
 
 /// The reader the daemon's poll runs: [`read_live`] on 64-bit Windows, the one platform with live gate inputs, and
 /// `None` elsewhere, where the hub holds no gate state and starts no poll.
 #[cfg(all(windows, target_pointer_width = "64"))]
-pub(crate) const LIVE_READER: Option<fn() -> Option<protocol::GateState>> = Some(read_live);
+pub(crate) const LIVE_READER: Option<fn(&RepoFolders) -> Option<protocol::GateState>> =
+    Some(read_live);
 /// The reader the daemon's poll runs: none off 64-bit Windows, where the hub holds no gate state and starts no poll.
 #[cfg(not(all(windows, target_pointer_width = "64")))]
-pub(crate) const LIVE_READER: Option<fn() -> Option<protocol::GateState>> = None;
+pub(crate) const LIVE_READER: Option<fn(&RepoFolders) -> Option<protocol::GateState>> = None;
 
 /// Where the gate's counts file is, looked up at each slot-count write: the live inputs' path in the daemon, a temp
 /// file in tests; `None` when it cannot be found. It may block, so a write calls it on a blocking thread.
@@ -381,6 +429,18 @@ impl RepoFolders {
                 .filter(|(folder, _)| !folder.is_empty())
                 .collect(),
         }
+    }
+
+    /// The folders of the repos `state`'s registry holds now.
+    pub(crate) fn registered(state: &crate::state::AppState) -> Self {
+        state.with_persisted(|persisted| {
+            Self::new(
+                persisted
+                    .repos
+                    .iter()
+                    .map(|repo| (repo.path.as_str(), repo.name.as_str())),
+            )
+        })
     }
 
     /// The repo `folder` belongs to: the registered repo whose folder is the longest one holding it; else, for a
@@ -517,10 +577,12 @@ impl GateHub {
 
 /// Start the gate poll for the daemon's life. While no client is connected it parks and reads nothing; when the count
 /// rises from zero it reads at once, then every [`POLL_INTERVAL`] and at once on each [`GateHub::repoll`], each read on
-/// a blocking thread, publishing each result to `gate` (broadcast on `events` when it changed).
+/// a blocking thread with the repos `state` registers at that moment, publishing each result to `gate` (broadcast on
+/// `events` when it changed).
 pub(crate) fn spawn_poll(
     reader: GateReader,
     gate: GateHub,
+    state: Arc<crate::state::AppState>,
     events: broadcast::Sender<StateEvent>,
     mut clients: watch::Receiver<usize>,
 ) -> tokio::task::JoinHandle<()> {
@@ -543,22 +605,25 @@ pub(crate) fn spawn_poll(
                             break;
                         }
                     }
-                    () = gate.repoll.notified() => read_and_publish(&reader, &gate, &events).await,
-                    _ = interval.tick() => read_and_publish(&reader, &gate, &events).await,
+                    () = gate.repoll.notified() => read_and_publish(&reader, &gate, &state, &events).await,
+                    _ = interval.tick() => read_and_publish(&reader, &gate, &state, &events).await,
                 }
             }
         }
     })
 }
 
-/// Read once on a blocking thread and publish the result; a read that stopped is logged and skips the tick.
+/// Snapshot the registered repos, read once on a blocking thread and publish the result; a read that stopped is
+/// logged and skips the tick.
 async fn read_and_publish(
     reader: &GateReader,
     gate: &GateHub,
+    state: &crate::state::AppState,
     events: &broadcast::Sender<StateEvent>,
 ) {
     let reader = Arc::clone(reader);
-    match tokio::task::spawn_blocking(move || reader()).await {
+    let repos = RepoFolders::registered(state);
+    match tokio::task::spawn_blocking(move || reader(&repos)).await {
         Ok(state) => {
             gate.publish(state, events);
         }
@@ -595,7 +660,11 @@ mod tests {
 
     use tokio::sync::{broadcast, mpsc, watch};
 
+    use protocol::{AppearanceOverrides, RepoEntry};
+
+    use crate::paths::Dirs;
     use crate::server::StateEvent;
+    use crate::state::AppState;
 
     use super::{
         GateHub, GateReader, POLL_INTERVAL, RepoFolders, history_to_wire, read_once, same_state,
@@ -728,7 +797,14 @@ mod tests {
             command: Some("cargo test".to_owned()),
             log: Some("X:\\dev\\repo\\.tmp\\gate.log".to_owned()),
             timeout_seconds: Some(600.0),
+            command_key: Some("cargo test".to_owned()),
+            repo: None,
         }
+    }
+
+    /// No registered repo, and so no repo for any folder outside a `<repo>.wt` folder.
+    fn no_repos() -> RepoFolders {
+        RepoFolders::default()
     }
 
     /// A queued heavy gate's ticket, arrived at `START`, `age_seconds` old.
@@ -803,9 +879,10 @@ mod tests {
         past_count.claim = Some(json!({"pid": 77}));
         past_count.extra = Some(true);
 
-        let wire = to_wire(&dashboard(vec![heavy_pool(vec![
-            busy, held, free, past_count,
-        ])]));
+        let wire = to_wire(
+            &dashboard(vec![heavy_pool(vec![busy, held, free, past_count])]),
+            &no_repos(),
+        );
 
         assert_eq!(wire.now, Some(now()));
         assert_eq!(wire.machine, "TESTBOX");
@@ -921,7 +998,7 @@ mod tests {
     /// The queue, the critical request, the remote and builder pools and the covered runs reach the wire.
     #[test]
     fn gate_state_converts_the_queue_critical_remote_and_builders() {
-        let wire = to_wire(&busy_dashboard());
+        let wire = to_wire(&busy_dashboard(), &no_repos());
 
         let critical = wire.critical.as_ref().expect("a critical request");
         let holder = critical.holder.as_ref().expect("the critical row");
@@ -935,6 +1012,7 @@ mod tests {
                 pid: Some(500),
                 started: Some(start()),
                 command: Some("cargo build".to_owned()),
+                command_key: Some("cargo build".to_owned()),
                 ..GateClaim::default()
             })
         );
@@ -945,6 +1023,8 @@ mod tests {
                 since: Some(start()),
                 cwd: Some("X:\\dev\\repo".to_owned()),
                 command_line: "cargo build --release".to_owned(),
+                command_key: Some("cargo build --release".to_owned()),
+                repo: None,
             }]
         );
         assert_eq!(
@@ -954,6 +1034,8 @@ mod tests {
                 since: Some(start()),
                 cwd: Some("X:\\dev\\repo".to_owned()),
                 command_line: "cargo build --release".to_owned(),
+                command_key: Some("cargo build --release".to_owned()),
+                repo: None,
             }]
         );
 
@@ -1019,7 +1101,7 @@ mod tests {
             "futureKey": {"nested": true}
         }));
 
-        let wire = to_wire(&dashboard(vec![heavy_pool(vec![busy])]));
+        let wire = to_wire(&dashboard(vec![heavy_pool(vec![busy])]), &no_repos());
 
         assert_eq!(
             wire.pools[0].slots[0].claim,
@@ -1030,6 +1112,8 @@ mod tests {
                 command: Some("cargo test".to_owned()),
                 log: None,
                 timeout_seconds: None,
+                command_key: Some("cargo test".to_owned()),
+                repo: None,
             })
         );
     }
@@ -1042,10 +1126,10 @@ mod tests {
         let mut not_an_object = empty_slot(1, "gate-slot-1", SlotState::Free);
         not_an_object.stale = Some(json!([1, 2, 3]));
 
-        let wire = to_wire(&dashboard(vec![heavy_pool(vec![
-            unreadable,
-            not_an_object,
-        ])]));
+        let wire = to_wire(
+            &dashboard(vec![heavy_pool(vec![unreadable, not_an_object])]),
+            &no_repos(),
+        );
 
         assert_eq!(wire.pools[0].slots[0].stale, Some(GateClaim::default()));
         assert_eq!(wire.pools[0].slots[1].stale, Some(GateClaim::default()));
@@ -1057,7 +1141,7 @@ mod tests {
         let mut state = dashboard(vec![heavy_pool(Vec::new())]);
         state.now = "not a time".to_owned();
 
-        let wire = to_wire(&state);
+        let wire = to_wire(&state, &no_repos());
 
         assert_eq!(wire.now, None);
         assert_eq!(wire.machine, "TESTBOX");
@@ -1068,7 +1152,13 @@ mod tests {
     fn gate_state_reports_none_where_no_gate_ever_ran() {
         let dir = fresh_dir("gate_state_reports_none_where_no_gate_ever_ran");
 
-        let state = read_once(&inputs(&dir), &EmptyTable, &QuietProbe, &QuietProbe);
+        let state = read_once(
+            &inputs(&dir),
+            &EmptyTable,
+            &QuietProbe,
+            &QuietProbe,
+            &no_repos(),
+        );
 
         assert_eq!(state, None);
     }
@@ -1080,8 +1170,14 @@ mod tests {
         fs::create_dir_all(dir.join("gate").join("slots"))
             .expect("the gate's slots folder is created");
 
-        let state = read_once(&inputs(&dir), &EmptyTable, &QuietProbe, &QuietProbe)
-            .expect("an idle gate reports a state");
+        let state = read_once(
+            &inputs(&dir),
+            &EmptyTable,
+            &QuietProbe,
+            &QuietProbe,
+            &no_repos(),
+        )
+        .expect("an idle gate reports a state");
 
         assert_eq!(state.machine, "TESTBOX");
         assert_eq!(state.now, Some(now()));
@@ -1102,11 +1198,81 @@ mod tests {
         let mut later = first.clone();
         later.now = "2026-10-01T12:00:02.1234567Z".to_owned();
         later.queue[0].age_seconds = 9.0;
-        assert!(same_state(&to_wire(&first), &to_wire(&later)));
+        let repos = no_repos();
+        assert!(same_state(
+            &to_wire(&first, &repos),
+            &to_wire(&later, &repos)
+        ));
 
         let mut changed = first.clone();
         changed.pools[0].slots[0].state = SlotState::Held;
-        assert!(!same_state(&to_wire(&first), &to_wire(&changed)));
+        assert!(!same_state(
+            &to_wire(&first, &repos),
+            &to_wire(&changed, &repos)
+        ));
+    }
+
+    /// The registered repos the key tests name their folders by.
+    fn dev_repos() -> RepoFolders {
+        RepoFolders::new([("X:\\dev\\repo", "repo")])
+    }
+
+    /// A dashboard whose heavy pool has a busy slot, a waiting gate and a queued ticket, all in `X:\dev\repo`, their
+    /// raw commands normalizing to `cargo test` (the claim), `cargo build --release` (the waiting gate) and
+    /// `cargo build …` (the ticket).
+    fn keyed_dashboard() -> DashboardState {
+        let mut busy = empty_slot(0, "gate-slot-0", SlotState::Busy);
+        busy.claim = Some(json!({
+            "pid": 4321,
+            "started": START,
+            "cwd": "X:\\dev\\repo\\crates\\a",
+            "command": "cargo  test --manifest-path X:\\dev\\repo\\Cargo.toml"
+        }));
+        let mut pool = heavy_pool(vec![busy]);
+        pool.waiting = vec![Waiting {
+            pid: 700,
+            since: Some(START.to_owned()),
+            cwd: Some("X:\\dev\\repo".to_owned()),
+            command_line: "cargo build\t--release".to_owned(),
+        }];
+        let mut state = dashboard(vec![pool]);
+        let mut ticket = queued(3.0);
+        ticket.command_line = Some("cargo build .tmp/out.txt".to_owned());
+        state.queue = vec![ticket];
+        state
+    }
+
+    /// A claim, a waiting gate and a queue ticket carry their raw command's normalized key, whether or not a repo
+    /// holds their folder.
+    #[test]
+    fn gate_state_keys_live_gates_by_their_normalized_command() {
+        for repos in [dev_repos(), no_repos()] {
+            let wire = to_wire(&keyed_dashboard(), &repos);
+            let claim = wire.pools[0].slots[0].claim.as_ref().expect("a claim");
+            assert_eq!(claim.command_key.as_deref(), Some("cargo test"));
+            assert_eq!(
+                wire.pools[0].waiting[0].command_key.as_deref(),
+                Some("cargo build --release")
+            );
+            assert_eq!(wire.queue[0].command_key.as_deref(), Some("cargo build …"));
+        }
+    }
+
+    /// A claim, a waiting gate and a queue ticket in a registered repo's folder carry its name; with no repo holding
+    /// the folder they carry none.
+    #[test]
+    fn gate_state_names_the_repo_of_live_gates_folders() {
+        let wire = to_wire(&keyed_dashboard(), &dev_repos());
+        let claim = wire.pools[0].slots[0].claim.as_ref().expect("a claim");
+        assert_eq!(claim.repo.as_deref(), Some("repo"));
+        assert_eq!(wire.pools[0].waiting[0].repo.as_deref(), Some("repo"));
+        assert_eq!(wire.queue[0].repo.as_deref(), Some("repo"));
+
+        let wire = to_wire(&keyed_dashboard(), &no_repos());
+        let claim = wire.pools[0].slots[0].claim.as_ref().expect("a claim");
+        assert_eq!(claim.repo, None);
+        assert_eq!(wire.pools[0].waiting[0].repo, None);
+        assert_eq!(wire.queue[0].repo, None);
     }
 
     /// A journal run in `state` with every field set, its moments at `START` and `NOW`.
@@ -1321,7 +1487,80 @@ mod tests {
     fn idle_on(machine: &str) -> protocol::GateState {
         let mut state = dashboard(vec![heavy_pool(Vec::new())]);
         machine.clone_into(&mut state.machine);
-        to_wire(&state)
+        to_wire(&state, &no_repos())
+    }
+
+    /// A distinct number for each poll rig's registry folder within this process; with the process id it keeps
+    /// tests run in parallel processes from sharing one.
+    fn next_rig() -> usize {
+        static RIGS: AtomicUsize = AtomicUsize::new(0);
+        RIGS.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// A daemon registry in a fresh folder named `test`, holding a repo per `(name, folder)` pair.
+    fn registry(test: &str, repos: &[(&str, &str)]) -> Arc<AppState> {
+        let dir = fresh_dir(test);
+        let state = AppState::load_or_default(&Dirs {
+            config: dir.clone(),
+            state_file: dir.join("state.json"),
+            handshake_file: dir.join("daemon.json"),
+            remote_config_file: dir.join("remote.json"),
+            sessions_dir: dir.join("sessions"),
+            worktrees_dir: dir.join("worktrees"),
+            binaries_dir: dir.join("binaries"),
+            bin_templates: None,
+        })
+        .expect("the registry loads");
+        if repos.is_empty() {
+            return Arc::new(state);
+        }
+        state
+            .mutate(|persisted| {
+                persisted
+                    .repos
+                    .extend(repos.iter().map(|(name, folder)| RepoEntry {
+                        id: (*name).to_owned(),
+                        name: (*name).to_owned(),
+                        path: (*folder).to_owned(),
+                        default_branch: None,
+                        default_use_worktree: true,
+                        appearance: AppearanceOverrides::default(),
+                        last_agent: None,
+                        last_spawn_config: None,
+                    }));
+            })
+            .expect("the registry saves");
+        Arc::new(state)
+    }
+
+    /// The poll names each live gate's repo from the repos the registry holds at the read.
+    #[tokio::test(start_paused = true)]
+    async fn gate_poll_names_repos_from_the_registry() {
+        let state = registry(
+            "gate_poll_names_repos_from_the_registry",
+            &[("repo", "X:\\dev\\repo")],
+        );
+        let reader: GateReader =
+            Arc::new(|repos: &RepoFolders| Some(to_wire(&keyed_dashboard(), repos)));
+        let (events_tx, mut events) = broadcast::channel(16);
+        let (_clients, clients_rx) = watch::channel(1_usize);
+        let gate = GateHub::new(Arc::new(|| None), Arc::new(|_: RepoFolders| None));
+        let task = spawn_poll(reader, gate, state, events_tx.clone(), clients_rx);
+
+        let event = tokio::time::timeout(GUARD, events.recv())
+            .await
+            .expect("a broadcast came")
+            .expect("the channel is open");
+        let published = match event {
+            StateEvent::GateState(Some(published)) => Some(published),
+            _ => None,
+        }
+        .expect("a gate state was published");
+        let claim = published.pools[0].slots[0].claim.as_ref().expect("a claim");
+        assert_eq!(claim.repo.as_deref(), Some("repo"));
+        assert_eq!(published.pools[0].waiting[0].repo.as_deref(), Some("repo"));
+        assert_eq!(published.queue[0].repo.as_deref(), Some("repo"));
+        task.abort();
     }
 
     /// A poll over a scripted reader, with the channels a test drives it by.
@@ -1343,7 +1582,7 @@ mod tests {
         let last = script.last().cloned().flatten();
         let queue = Mutex::new(VecDeque::from(script));
         let counted = Arc::clone(&reads);
-        let reader: GateReader = Arc::new(move || {
+        let reader: GateReader = Arc::new(move |_: &RepoFolders| {
             let next = queue
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -1356,7 +1595,11 @@ mod tests {
         let (events_tx, events) = broadcast::channel(16);
         let (clients, clients_rx) = watch::channel(clients);
         let gate = GateHub::new(Arc::new(|| None), Arc::new(|_: RepoFolders| None));
-        let task = spawn_poll(reader, gate.clone(), events_tx.clone(), clients_rx);
+        let state = registry(
+            &format!("poll-rig-{}-{}", std::process::id(), next_rig()),
+            &[],
+        );
+        let task = spawn_poll(reader, gate.clone(), state, events_tx.clone(), clients_rx);
         PollRig {
             reads,
             calls,

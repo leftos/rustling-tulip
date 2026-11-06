@@ -3489,6 +3489,13 @@ pub struct GateClaim {
     /// The gate's ceiling for the command, in seconds.
     #[serde(default)]
     pub timeout_seconds: Option<f64>,
+    /// `command` as the gate's journal normalizes it, the key of its
+    /// [`GateCommandSummary`] row.
+    #[serde(default)]
+    pub command_key: Option<String>,
+    /// The repo `cwd` belongs to, named as [`GateHistoryRun::repo`] names it.
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 /// A live gate's arrival ticket, kept while it waits for its slot; a
@@ -3529,6 +3536,13 @@ pub struct GateQueueTicket {
     /// What the gate's durations store expected of the run as it queued.
     #[serde(default)]
     pub expected: Option<GateExpected>,
+    /// `command_line` as the gate's journal normalizes it, the key of its
+    /// [`GateCommandSummary`] row.
+    #[serde(default)]
+    pub command_key: Option<String>,
+    /// The repo `cwd` belongs to, named as [`GateHistoryRun::repo`] names it.
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 /// What a gate's durations store expected of a run as it queued.
@@ -3560,6 +3574,13 @@ pub struct GateWaiting {
     pub cwd: Option<String>,
     #[serde(default)]
     pub command_line: String,
+    /// `command_line` as the gate's journal normalizes it, the key of its
+    /// [`GateCommandSummary`] row.
+    #[serde(default)]
+    pub command_key: Option<String>,
+    /// The repo `cwd` belongs to, named as [`GateHistoryRun::repo`] names it.
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 /// A live gate a parent gate's slot covers: it takes no slot of its own.
@@ -10363,6 +10384,8 @@ mod tests {
             command: Some("cargo nextest run".to_owned()),
             log: Some(r"X:\dev\repo\.tmp\test.log".to_owned()),
             timeout_seconds: Some(600.0),
+            command_key: Some("cargo nextest run".to_owned()),
+            repo: Some("repo".to_owned()),
         }
     }
 
@@ -10386,6 +10409,8 @@ mod tests {
             since: Some(gate_time("2026-11-05T09:59:30Z")),
             cwd: Some(r"X:\dev\other".to_owned()),
             command_line: "gate.exe run -- cargo build".to_owned(),
+            command_key: Some("cargo build".to_owned()),
+            repo: Some("other".to_owned()),
         }
     }
 
@@ -10443,6 +10468,8 @@ mod tests {
                     n: Some(12),
                     key: Some("cargo build".to_owned()),
                 }),
+                command_key: Some("cargo build".to_owned()),
+                repo: Some("other".to_owned()),
             }],
             pools: vec![
                 GatePool {
@@ -10568,6 +10595,8 @@ mod tests {
                 command: None,
                 log: None,
                 timeout_seconds: None,
+                command_key: None,
+                repo: None,
             }
         );
         let claim: GateClaim = serde_json::from_str(r#"{"pid":5,"surprise":true}"#)
@@ -10580,6 +10609,40 @@ mod tests {
             state.pools.is_empty() && state.queue.is_empty(),
             "{state:?}"
         );
+    }
+
+    /// A live entry's command key and repo survive a round trip, and an
+    /// entry an older daemon wrote without them decodes with both `None`.
+    #[test]
+    fn gate_live_entries_carry_a_command_key_and_repo_or_none() {
+        let claim = gate_claim(4100);
+        let back: GateClaim =
+            serde_json::from_str(&serde_json::to_string(&claim).expect("serializes"))
+                .expect("decodes");
+        assert_eq!(back.command_key.as_deref(), Some("cargo nextest run"));
+        assert_eq!(back.repo.as_deref(), Some("repo"));
+        let waiting = gate_waiting(4300);
+        let back: GateWaiting =
+            serde_json::from_str(&serde_json::to_string(&waiting).expect("serializes"))
+                .expect("decodes");
+        assert_eq!(back, waiting);
+        let ticket = gate_full_state().queue.remove(0);
+        let back: GateQueueTicket =
+            serde_json::from_str(&serde_json::to_string(&ticket).expect("serializes"))
+                .expect("decodes");
+        assert_eq!(back.command_key.as_deref(), Some("cargo build"));
+        assert_eq!(back.repo.as_deref(), Some("other"));
+
+        let claim: GateClaim =
+            serde_json::from_str(r#"{"pid":5,"command":"cargo test"}"#).expect("decodes");
+        assert_eq!((claim.command_key, claim.repo), (None, None));
+        let waiting: GateWaiting =
+            serde_json::from_str(r#"{"pid":6,"command_line":"cargo test"}"#).expect("decodes");
+        assert_eq!((waiting.command_key, waiting.repo), (None, None));
+        let ticket: GateQueueTicket =
+            serde_json::from_str(r#"{"kind":"heavy","pid":7,"command_line":"cargo test"}"#)
+                .expect("decodes");
+        assert_eq!((ticket.command_key, ticket.repo), (None, None));
     }
 
     #[test]

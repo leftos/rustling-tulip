@@ -1265,6 +1265,7 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
         crate::gate_state::spawn_poll(
             Arc::new(read),
             gate.clone(),
+            Arc::clone(&hub.state),
             hub.state_events.clone(),
             client_count_rx.clone(),
         );

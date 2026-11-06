@@ -2333,7 +2333,7 @@ fn shot_gate_history(now: DateTime<Utc>, request_id: Option<String>) -> DaemonMe
             Some(0),
             GateRunState::Failed,
             Some(1),
-            12,
+            3,
             42.0,
         ),
         run(
@@ -2367,6 +2367,20 @@ fn shot_gate_history(now: DateTime<Utc>, request_id: Option<String>) -> DaemonMe
             summary("dotnet test", "yaat", 18, 252.0),
             summary("cargo build --release", "rustling-tulip", 9, 3780.0),
             summary("pwsh tools/check.ps1", "claude-config", 6, 37.0),
+            // The live gates' rows, past the four the week block shows.
+            summary(
+                r"C:\Users\me\.cargo\bin\cargo.exe nextest run -p rustling-tulip-native",
+                "rustling-tulip",
+                5,
+                343.0,
+            ),
+            summary("cargo clippy --workspace -- -D warnings", "gate", 5, 257.0),
+            summary("cargo fmt --all --check", "rustling-tulip", 5, 129.0),
+            summary("cargo nextest run --workspace", "ops-tower", 5, 343.0),
+            GateCommandSummary {
+                remote: true,
+                ..summary("dotnet test yaat.slnx", "yaat", 5, 429.0)
+            },
         ],
     }
 }
@@ -2402,14 +2416,27 @@ fn shot_gate_state(now: DateTime<Utc>) -> protocol::GateState {
         command: Some(command.to_owned()),
         log: Some(format!(r"C:\Users\me\AppData\Local\gate\logs\{pid}.log")),
         timeout_seconds: Some(1800.0),
+        command_key: None,
+        repo: None,
     };
-    let busy =
-        |index: u32, pid: u32, minutes: i64, cwd: &str, command: &str, line: &str| GateSlot {
-            claim: Some(claim(pid, minutes, cwd, command)),
-            processes: 4,
-            last_line: Some(line.to_owned()),
-            ..slot(index, GateSlotState::Busy)
-        };
+    // A busy slot's claim carries the key and repo of its summary row in
+    // `shot_gate_history`, so its row shows the usual time.
+    let busy = |index: u32,
+                pid: u32,
+                minutes: i64,
+                cwd: &str,
+                command: &str,
+                line: &str,
+                (repo, key): (&str, &str)| GateSlot {
+        claim: Some(GateClaim {
+            command_key: Some(key.to_owned()),
+            repo: Some(repo.to_owned()),
+            ..claim(pid, minutes, cwd, command)
+        }),
+        processes: 4,
+        last_line: Some(line.to_owned()),
+        ..slot(index, GateSlotState::Busy)
+    };
     let waiting_since = now - chrono::Duration::minutes(1);
     let heavy = GatePool {
         kind: GateSlotKind::Heavy,
@@ -2425,6 +2452,10 @@ fn shot_gate_state(now: DateTime<Utc>) -> protocol::GateState {
                 r"X:\dev\rustling-tulip.wt\rt-1001",
                 r"C:\Users\me\.cargo\bin\cargo.exe nextest run -p rustling-tulip-native",
                 "PASS [ 0.071s] ui_gates::the_badge_counts_busy_and_held_slots",
+                (
+                    "rustling-tulip",
+                    r"C:\Users\me\.cargo\bin\cargo.exe nextest run -p rustling-tulip-native",
+                ),
             ),
             busy(
                 1,
@@ -2433,6 +2464,7 @@ fn shot_gate_state(now: DateTime<Utc>) -> protocol::GateState {
                 r"X:\dev\gate.wt\g-41",
                 "cargo clippy --workspace -- -D warnings",
                 "Checking gate-state v0.4.0",
+                ("gate", "cargo clippy --workspace -- -D warnings"),
             ),
             slot(2, GateSlotState::Held),
             GateSlot {
@@ -2445,6 +2477,8 @@ fn shot_gate_state(now: DateTime<Utc>) -> protocol::GateState {
             since: Some(waiting_since),
             cwd: Some(r"X:\dev\ops-tower".to_owned()),
             command_line: "cargo nextest run --workspace".to_owned(),
+            command_key: Some("cargo nextest run --workspace".to_owned()),
+            repo: Some("ops-tower".to_owned()),
         }],
     };
     let light = GatePool {
@@ -2461,6 +2495,7 @@ fn shot_gate_state(now: DateTime<Utc>) -> protocol::GateState {
                 r"X:\dev\rustling-tulip",
                 "cargo fmt --all --check",
                 "Diff in apps/native/src/gates_view.rs",
+                ("rustling-tulip", "cargo fmt --all --check"),
             ),
             slot(1, GateSlotState::Free),
         ],
@@ -2484,6 +2519,8 @@ fn shot_gate_state(now: DateTime<Utc>) -> protocol::GateState {
             command_line: Some("cargo nextest run --workspace".to_owned()),
             reason: None,
             expected: None,
+            command_key: Some("cargo nextest run --workspace".to_owned()),
+            repo: Some("ops-tower".to_owned()),
         }],
         pools: vec![heavy, light],
         remote: Some(GateRemotePool {
@@ -2497,6 +2534,7 @@ fn shot_gate_state(now: DateTime<Utc>) -> protocol::GateState {
                     r"X:\dev\yaat",
                     "dotnet test yaat.slnx",
                     "Passed!  - Failed: 0, Passed: 412",
+                    ("yaat", "dotnet test yaat.slnx"),
                 ),
                 slot(1, GateSlotState::Free),
             ],

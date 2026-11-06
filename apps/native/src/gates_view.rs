@@ -45,6 +45,9 @@ const FAST_REPAINT: Duration = Duration::from_secs(1);
 const SLOW_REPAINT: Duration = Duration::from_secs(30);
 /// How often the panel asks for the gate's history while it shows.
 const HISTORY_INTERVAL: Duration = Duration::from_secs(15);
+/// How often the client asks for the gate's history while the panel is
+/// hidden, for the footer's failure tail.
+const HIDDEN_HISTORY_INTERVAL: Duration = Duration::from_secs(60);
 /// The rows' and headers' small text, in px.
 const SMALL_TEXT: f32 = 11.5;
 /// A caps heading's text, in px.
@@ -85,6 +88,8 @@ pub(crate) struct GatesUi {
     history: Option<History>,
     /// Asks for the history again while the panel shows.
     history_timer: Option<Task<()>>,
+    /// Asks for the history every minute while the panel is hidden.
+    hidden_history_timer: Option<Task<()>>,
     /// Whether the Last 7 days block is folded; in memory only.
     week_folded: bool,
 }
@@ -125,6 +130,7 @@ impl GatesUi {
         self.history_pending = None;
         self.history = None;
         self.history_timer = None;
+        self.hidden_history_timer = None;
     }
 
     /// Keeps the `GateHistory` reply to `request_id` when it answers the
@@ -285,7 +291,12 @@ impl RootView {
     pub(crate) fn arm_gates_repaint(&mut self, cx: &mut Context<Self>) {
         let delay = match self.gate_state.as_ref() {
             Some(state) if self.gates_shown() => {
-                if gates::fresh(state, Utc::now()) {
+                let now = Utc::now();
+                let history_fresh =
+                    self.gates_ui.history.as_ref().is_some_and(|history| {
+                        gates::history_fresh(&history.runs, &history.open, now)
+                    });
+                if gates::fresh(state, now) || history_fresh {
                     FAST_REPAINT
                 } else {
                     SLOW_REPAINT
@@ -348,18 +359,69 @@ impl RootView {
     }
 
     /// Asks This PC for the gate's history when the panel opens and starts
-    /// asking every 15 s; drops the timer while the panel is hidden. A
-    /// running timer is left alone.
+    /// asking every 15 s; while the panel is hidden and a gate state is
+    /// known, asks every 60 s instead, for the footer's failure tail. A
+    /// running timer of the right cadence is left alone; with no gate state
+    /// both stop.
     pub(crate) fn arm_gates_history(&mut self, cx: &mut Context<Self>) {
-        if !self.gates_shown() {
+        if self.gate_state.is_none() {
             self.gates_ui.history_timer = None;
+            self.gates_ui.hidden_history_timer = None;
             return;
         }
+        if !self.gates_shown() {
+            self.gates_ui.history_timer = None;
+            if self.gates_ui.hidden_history_timer.is_none() {
+                self.schedule_hidden_gate_history(cx);
+            }
+            return;
+        }
+        self.gates_ui.hidden_history_timer = None;
         if self.gates_ui.history_timer.is_some() {
             return;
         }
         self.request_gate_history();
         self.schedule_gate_history(cx);
+    }
+
+    fn schedule_hidden_gate_history(&mut self, cx: &mut Context<Self>) {
+        self.gates_ui.hidden_history_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(HIDDEN_HISTORY_INTERVAL)
+                .await;
+            // Fails only when the view is gone, and the footer with it.
+            this.update(cx, Self::tick_hidden_gate_history).ok();
+        }));
+    }
+
+    /// The hidden-panel history timer fired: ask again and go on while the
+    /// panel is still hidden and the gate state still known.
+    fn tick_hidden_gate_history(&mut self, cx: &mut Context<Self>) {
+        self.gates_ui.hidden_history_timer = None;
+        if self.gate_state.is_none() || self.gates_shown() {
+            return;
+        }
+        self.request_gate_history();
+        self.schedule_hidden_gate_history(cx);
+    }
+
+    /// The footer pill's failure tail, ` · ✕ failed · {repo} · {ago} ago`,
+    /// while This PC has a gate state and its history holds a run that
+    /// failed in the last 10 minutes.
+    #[must_use]
+    pub fn gates_failure_tail(&self) -> Option<String> {
+        self.gate_state.as_ref()?;
+        let history = self.gates_ui.history.as_ref()?;
+        let now = self.wall_now();
+        gates::failure_tail(&history.runs, now).map(|tail| tail.text(now))
+    }
+
+    /// The summary rows of the last history reply; none before one.
+    fn gates_summary(&self) -> &[GateCommandSummary] {
+        self.gates_ui
+            .history
+            .as_ref()
+            .map_or(&[], |history| history.summary.as_slice())
     }
 
     fn schedule_gate_history(&mut self, cx: &mut Context<Self>) {
@@ -571,6 +633,13 @@ impl RootView {
         let state = self.gate_state.as_ref()?;
         let t = theme(cx);
         let on = self.gates_shown();
+        let tail = self.gates_failure_tail().map(|tail| {
+            div()
+                .driver_id(|| "footer-gates-tail".to_owned())
+                .flex_none()
+                .text_color(gpui::rgb(t.danger))
+                .child(tagged_text("footer-gates-tail", tail))
+        });
         Some(
             div()
                 .id("footer-gates")
@@ -590,6 +659,7 @@ impl RootView {
                 .cursor_pointer()
                 .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
                 .child(tagged_text("footer-gates-text", gates::strip_text(state)))
+                .children(tail)
                 .tooltip(tooltip(format!("Gates on {}", state.machine)))
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.show_gates(window, cx);
@@ -626,7 +696,14 @@ impl RootView {
             for block in remote_blocks(state) {
                 blocks.push(self.pool_block(&block, now, cx));
             }
-            blocks.extend(queue_block(state, now, offset, shift, &t));
+            blocks.extend(queue_block(
+                state,
+                self.gates_summary(),
+                now,
+                offset,
+                shift,
+                &t,
+            ));
             if let Some(history) = self.gates_ui.history.as_ref() {
                 blocks.push(recent_block(history, now, offset, shift, &t));
                 blocks.push(self.week_block(history, offset, shift, cx));
@@ -783,16 +860,38 @@ impl RootView {
                 problem.to_owned(),
             ))
         });
+        let summary = self.gates_summary();
         let rows: Vec<AnyElement> = block
             .rows
             .iter()
-            .filter_map(|row| Self::slot_row(&key, block.name, row, block.remote, now, cx))
+            .filter_map(|row| {
+                let usual = match row {
+                    GateRow::Slot {
+                        command_key, repo, ..
+                    } => gates::usual(
+                        summary,
+                        command_key.as_deref(),
+                        repo.as_deref(),
+                        block.remote,
+                    ),
+                    GateRow::PoolHeader { .. } => None,
+                };
+                Self::slot_row(&key, block.name, row, block.remote, usual, now, cx)
+            })
             .collect();
         let waits: Vec<AnyElement> = block
             .waiting
             .iter()
             .enumerate()
-            .map(|(n, gate)| wait_row(&key, n, gate, now, offset, shift, &t))
+            .map(|(n, gate)| {
+                let usual = gates::usual(
+                    summary,
+                    gate.command_key.as_deref(),
+                    gate.repo.as_deref(),
+                    false,
+                );
+                wait_row(&key, n, gate, usual, now, offset, shift, &t)
+            })
             .collect();
         div()
             .driver_id(move || format!("gates-pool-{key}"))
@@ -900,6 +999,7 @@ impl RootView {
         name: &str,
         row: &GateRow,
         remote: bool,
+        usual: Option<f64>,
         now: DateTime<Utc>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -960,6 +1060,8 @@ impl RootView {
                 let held = started
                     .map(|since| needs_you::waited(now, since))
                     .unwrap_or_default();
+                let over = started
+                    .is_some_and(|since| gates::over_usual((now - since).num_seconds(), usual));
                 let detail = [cwd.as_deref().map(gates::folder_label), last_line.clone()]
                     .into_iter()
                     .flatten()
@@ -984,13 +1086,14 @@ impl RootView {
                             )),
                         offset,
                     ))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(ui_px_at(offset, SMALL_TEXT))
-                            .text_color(gpui::rgb(t.text_2))
-                            .child(tagged_text(format!("{selector}-time"), held)),
-                    );
+                    .child(timed(
+                        &selector,
+                        held,
+                        if over { t.danger } else { t.text_2 },
+                        usual,
+                        offset,
+                        &t,
+                    ));
                 // The ellipsized copy is drawn absolutely over its box, which
                 // ignores the box's padding, so the indent sits on a wrapper.
                 let line_two = div()
@@ -1168,9 +1271,11 @@ fn critical_block(state: &GateState, offset: i8, shift: i8, t: &UiTheme) -> Opti
     )
 }
 
-/// The queue block, oldest ticket first, one line each; only with tickets.
+/// The queue block, oldest ticket first, one line each, each with its
+/// usual time from `summary`; only with tickets.
 fn queue_block(
     state: &GateState,
+    summary: &[GateCommandSummary],
     now: DateTime<Utc>,
     offset: i8,
     shift: i8,
@@ -1180,10 +1285,15 @@ fn queue_block(
     if tickets.is_empty() {
         return None;
     }
-    let rows = tickets
-        .into_iter()
-        .enumerate()
-        .map(|(n, ticket)| queue_row(n, ticket, now, offset, t));
+    let rows = tickets.into_iter().enumerate().map(|(n, ticket)| {
+        let usual = gates::usual(
+            summary,
+            ticket.command_key.as_deref(),
+            ticket.repo.as_deref(),
+            ticket.remote || ticket.pool.is_some(),
+        );
+        queue_row(n, ticket, usual, now, offset, t)
+    });
     Some(
         div()
             .driver_id(|| "gates-queue".to_owned())
@@ -1419,10 +1529,12 @@ fn week_row(n: usize, row: &GateCommandSummary, offset: i8, t: &UiTheme) -> AnyE
         .into_any_element()
 }
 
-/// One queue ticket: its kind, short command, folder and time waited.
+/// One queue ticket: its kind, short command, folder and time waited, then
+/// its `usual` time when known, the wait in the danger colour past it.
 fn queue_row(
     n: usize,
     ticket: &GateQueueTicket,
+    usual: Option<f64>,
     now: DateTime<Utc>,
     offset: i8,
     t: &UiTheme,
@@ -1442,6 +1554,9 @@ fn queue_row(
         .arrived
         .map(|since| needs_you::waited(now, since))
         .unwrap_or_default();
+    let over = ticket
+        .arrived
+        .is_some_and(|since| gates::over_usual((now - since).num_seconds(), usual));
     div()
         .driver_id({
             let selector = selector.clone();
@@ -1477,21 +1592,29 @@ fn queue_row(
                 .text_color(gpui::rgb(t.subtle))
                 .child(tagged_text(format!("{selector}-folder"), folder)),
         )
-        .child(
-            div()
-                .flex_none()
-                .text_color(gpui::rgb(t.ochre))
-                .child(tagged_text(format!("{selector}-time"), waited)),
-        )
+        .child(timed(
+            &selector,
+            waited,
+            if over { t.danger } else { t.ochre },
+            usual,
+            offset,
+            t,
+        ))
         .into_any_element()
 }
 
 /// The `n`th gate waiting for pool `key`: its ordinal, command and time
-/// waited, then its folder.
+/// waited, then its `usual` time when known, the wait in the danger colour
+/// past it; then its folder.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the row's data, its usual time and the text sizes and theme every row takes"
+)]
 fn wait_row(
     key: &str,
     n: usize,
     gate: &GateWaiting,
+    usual: Option<f64>,
     now: DateTime<Utc>,
     offset: i8,
     shift: i8,
@@ -1508,6 +1631,9 @@ fn wait_row(
         .since
         .map(|since| needs_you::waited(now, since))
         .unwrap_or_default();
+    let over = gate
+        .since
+        .is_some_and(|since| gates::over_usual((now - since).num_seconds(), usual));
     let tip = [Some(gate.command_line.as_str()), gate.cwd.as_deref()]
         .into_iter()
         .flatten()
@@ -1550,13 +1676,14 @@ fn wait_row(
                 )),
             offset,
         ))
-        .child(
-            div()
-                .flex_none()
-                .text_size(ui_px_at(offset, SMALL_TEXT))
-                .text_color(gpui::rgb(t.ochre))
-                .child(tagged_text(format!("{selector}-time"), waited)),
-        );
+        .child(timed(
+            &selector,
+            waited,
+            if over { t.danger } else { t.ochre },
+            usual,
+            offset,
+            t,
+        ));
     let line_two = div()
         .pl(px(LINE_TWO_INDENT))
         .pb(px(4.0))
@@ -1576,6 +1703,40 @@ fn wait_row(
         .child(line_one)
         .child(line_two)
         .into_any_element()
+}
+
+/// A row's time: `text` tagged `{selector}-time` in `color`, then, with a
+/// `usual` time, a faint ` / {usual}` in its own element tagged
+/// `{selector}-usual`.
+fn timed(
+    selector: &str,
+    text: String,
+    color: u32,
+    usual: Option<f64>,
+    offset: i8,
+    t: &UiTheme,
+) -> Div {
+    let usual = usual.map(|usual| {
+        let tag = format!("{selector}-usual");
+        div()
+            .driver_id({
+                let tag = tag.clone();
+                move || tag
+            })
+            .text_color(gpui::rgb(t.faint))
+            .child(tagged_text(tag, gates::usual_text(usual)))
+    });
+    div()
+        .flex()
+        .flex_none()
+        .whitespace_nowrap()
+        .text_size(ui_px_at(offset, SMALL_TEXT))
+        .child(
+            div()
+                .text_color(gpui::rgb(color))
+                .child(tagged_text(format!("{selector}-time"), text)),
+        )
+        .children(usual)
 }
 
 /// A caps heading: `text` in the small semibold heading style.
