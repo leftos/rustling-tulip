@@ -753,6 +753,40 @@ fn a_long_tailscale_error_wraps_inside_the_panel(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_failed_scan_shows_its_error_under_the_title(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 9443 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let message = "Tailscale could not report this PC's tailnet: the local tailscaled \
+                   service did not answer. Start Tailscale and sign in, then open Connections again.";
+
+    open_picker(
+        &mut h,
+        FakePeers(Err(TailnetError::Failed(message.to_owned()))),
+    );
+
+    let panel = h.bounds("connections-panel");
+    let title = h.bounds("connections-section-tailnet-title");
+    let scan = h.bounds("connections-scan");
+    assert!(
+        scan.top() >= title.bottom(),
+        "the error {scan:?} starts under the title {title:?}"
+    );
+    assert_eq!(
+        scan.left(),
+        title.left(),
+        "the error {scan:?} starts at the section's left, as the title {title:?} does"
+    );
+    assert!(
+        scan.left() >= panel.left() && scan.right() <= panel.right(),
+        "the error {scan:?} stays inside the panel {panel:?}"
+    );
+}
+
+#[gpui::test]
 fn typed_known_host_on_a_new_port_updates_the_saved_port(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     seed_ui(
@@ -1294,6 +1328,94 @@ fn a_saved_rows_detail_line_ends_before_its_on_switch(cx: &mut TestAppContext) {
         line.size.height > one_line,
         "the detail line {line:?} wraps past one {one_line:?} line rather than being cut"
     );
+}
+
+#[gpui::test]
+fn a_squeezed_detail_wraps_between_whole_pieces(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [{ "name": HOST, "port": 8787, "enabled": false }],
+            "host_session_counts": { HOST: 4 },
+        }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[]));
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(4, cx));
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        detail(&mut h, HOST).map(|detail| detail.line),
+        Some("Tailnet · port 8787 · 4 sessions last time".to_owned())
+    );
+    let line = h.bounds(&format!("connections-detail-{HOST}"));
+    let on = h.bounds(&switch(HOST));
+    let one_line = h.bounds("connections-detail-This PC").size.height;
+    let first = h.bounds(&format!("connections-piece-0-{HOST}"));
+    let last = h.bounds(&format!("connections-piece-2-{HOST}"));
+    assert!(
+        line.size.height > one_line && last.top() >= first.bottom(),
+        "the detail line {line:?} wraps past one {one_line:?} line, its last piece \
+         {last:?} under its first {first:?}"
+    );
+    for n in 0..3 {
+        let piece = h.bounds(&format!("connections-piece-{n}-{HOST}"));
+        assert!(piece.size.width > px(0.0), "piece {n} is drawn");
+        assert!(
+            // Half a line of room for subpixel rounding: a second line
+            // would double the height.
+            piece.size.height < one_line * 1.5,
+            "piece {n} {piece:?} keeps its text on one {one_line:?} line"
+        );
+        assert!(
+            piece.right() <= on.left(),
+            "piece {n} {piece:?} ends before the switch {on:?}"
+        );
+    }
+    assert!(
+        line.right() <= on.left(),
+        "the detail line {line:?} ends before the switch {on:?}"
+    );
+}
+
+#[gpui::test]
+fn a_detail_piece_wider_than_the_column_wraps_inside_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let command = "wsl -d Ubuntu -- /home/me/.cargo/bin/rustling-tulipd bridge";
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{
+            "kind": "ssh",
+            "name": SSH_HOST,
+            "remote_command": command,
+            "enabled": false,
+        }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+
+    open_picker(&mut h, tailnet_with(&[]));
+
+    let key = format!("ssh:{SSH_HOST}");
+    assert!(
+        detail(&mut h, &key).is_some_and(|detail| detail.line.contains(command)),
+        "the row's line names its remote command"
+    );
+    let on = h.bounds(&switch(&key));
+    let mut pieces = 0;
+    loop {
+        let piece = h.bounds(&format!("connections-piece-{pieces}-{key}"));
+        if piece.size.width <= px(0.0) {
+            break;
+        }
+        assert!(
+            piece.right() <= on.left(),
+            "piece {pieces} {piece:?} ends before the switch {on:?}"
+        );
+        pieces += 1;
+    }
+    assert!(pieces >= 2, "the line draws its pieces, {pieces} found");
 }
 
 #[gpui::test]

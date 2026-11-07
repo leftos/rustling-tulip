@@ -1198,7 +1198,8 @@ const fn section_slug(section: Section) -> &'static str {
 }
 
 /// A section's header: its title and, at the right, its note; the tailnet
-/// note is the scan's wait, its count, or its error in the danger colour.
+/// note is the scan's wait or its count. A failed scan's error, in the danger
+/// colour, goes on its own lines under the title, as wide as the section.
 fn section_header(
     offset: i8,
     shift: i8,
@@ -1207,21 +1208,19 @@ fn section_header(
     scan_failed: bool,
     t: &UiTheme,
 ) -> Div {
-    let selector = format!("connections-section-{}", section_slug(section.section));
+    let slug = section_slug(section.section);
+    let selector = format!("connections-section-{slug}");
+    let title_selector = format!("connections-section-{slug}-title");
     let tailnet = section.section == Section::Tailnet;
+    let failed = tailnet && scan_failed;
     let note = section.note.clone().map(|note| {
-        let color = if tailnet && scan_failed {
-            t.danger
-        } else {
-            t.subtle
-        };
+        let color = if failed { t.danger } else { t.subtle };
         div()
             .when(tailnet, |note| {
                 note.driver_id(|| "connections-scan".to_owned())
             })
-            .min_w_0()
-            .flex_shrink()
-            .text_right()
+            .when(failed, |note| note.w_full().text_left())
+            .when(!failed, |note| note.min_w_0().flex_shrink().text_right())
             .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::NORMAL))
             .text_size(crate::fonts::ui_px_at(offset, 11.0))
             .text_color(gpui::rgb(color))
@@ -1230,16 +1229,22 @@ fn section_header(
     div()
         .driver_id(move || selector)
         .flex()
-        .items_baseline()
-        .justify_between()
-        .gap(px(8.0))
+        .when(failed, |header| header.flex_col().gap(px(4.0)))
+        .when(!failed, |header| {
+            header.items_baseline().justify_between().gap(px(8.0))
+        })
         .pt(px(if first { 2.0 } else { 10.0 }))
         .px(px(10.0))
         .pb(px(4.0))
         .text_size(crate::fonts::ui_px_at(offset, 11.5))
         .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
         .text_color(gpui::rgb(t.text_2))
-        .child(div().flex_none().child(section.section.title()))
+        .child(
+            div()
+                .driver_id(move || title_selector)
+                .flex_none()
+                .child(section.section.title()),
+        )
         .children(note)
 }
 
@@ -1309,7 +1314,6 @@ fn host_row(
             &row.key(),
             facts.host,
             &detail.line,
-            saved,
             group.clone(),
             &t,
         ))
@@ -1537,15 +1541,16 @@ fn detail_pieces(host: RowHost, line: &str) -> Vec<DetailPiece> {
 }
 
 /// A row's second line, its pieces split by faint dots, lifted from quiet to
-/// secondary text while its row, the hover `group`, is hovered. A `saved`
-/// row's line ends before its On switch, its last piece wrapping; any other
-/// row's is cut.
+/// secondary text while its row, the hover `group`, is hovered. The line
+/// stays inside the row's text column, wrapping between whole pieces: each
+/// piece keeps its text on one line, its dot glued before it, so a wrapped
+/// line never ends in a dot. A piece wider than the whole line wraps inside
+/// itself at its spaces.
 fn detail_line(
     offset: i8,
     key: &str,
     host: RowHost,
     line: &str,
-    saved: bool,
     group: SharedString,
     t: &UiTheme,
 ) -> Div {
@@ -1553,30 +1558,27 @@ fn detail_line(
     let mut drawn = div()
         .driver_id(move || selector)
         .flex()
+        .flex_wrap()
+        .min_w_0()
         .items_center()
-        .gap(px(6.0))
+        .gap_x(px(6.0))
         .mt(px(2.0))
-        .when(saved, |line| line.min_w_0().flex_shrink())
-        .when(!saved, |line| line.overflow_hidden().whitespace_nowrap())
         .text_size(crate::fonts::ui_px_at(offset, 11.0))
         .text_color(gpui::rgb(t.subtle))
         .group_hover(group, |style| style.text_color(gpui::rgb(t.text_2)));
-    let pieces = detail_pieces(host, line);
-    let last = pieces.len().saturating_sub(1);
-    for (index, piece) in pieces.into_iter().enumerate() {
-        if index > 0 {
-            drawn = drawn.child(div().text_color(gpui::rgb(t.faint)).child("·"));
-        }
-        // On a saved row the last piece gives way and wraps; the rest keep
-        // their width.
-        let drawn_piece = detail_piece(offset, piece, t).when(saved, |piece| {
-            if index == last {
-                piece.min_w_0().flex_shrink()
-            } else {
-                piece.flex_none()
-            }
-        });
-        drawn = drawn.child(drawn_piece);
+    for (index, piece) in detail_pieces(host, line).into_iter().enumerate() {
+        let unit = div()
+            .driver_id(|| format!("connections-piece-{index}-{key}"))
+            .flex_none()
+            .max_w(relative(1.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .when(index > 0, |unit| {
+                unit.child(div().text_color(gpui::rgb(t.faint)).child("·"))
+            })
+            .child(detail_piece(offset, piece, t));
+        drawn = drawn.child(unit);
     }
     drawn
 }

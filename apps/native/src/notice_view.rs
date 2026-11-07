@@ -24,6 +24,7 @@ use crate::ui_theme::{UiTheme, theme};
 use crate::{FOOTER_HEIGHT, RootView, UI_TEXT_SIZE};
 
 const TOAST_WIDTH: f32 = 320.0;
+/// Every modal dialog shares one width so they line up; long text wraps inside it.
 const MODAL_WIDTH: f32 = 440.0;
 /// The corner radius of a modal's card.
 pub(crate) const MODAL_RADIUS: f32 = 14.0;

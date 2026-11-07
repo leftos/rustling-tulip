@@ -73,8 +73,9 @@ The views:
 - `settings-dashboard`: Settings on its Dashboard tab with a keyed provider, a stored key, some spend and a Test result.
 - `spawn`: the spawn dialog with its Target list open.
 - `jump`: the jump palette open over the main window with an empty query.
-- `connections`: the host manager with This PC connected, the saved tailnet host "box" showing "Not paired" with its `Pair` and `Reconnect now` buttons and "3 sessions last time", and a saved SSH host switched Off.
+- `connections`: the host manager with This PC connected, the saved tailnet host "box" showing "Needs pairing" with its `Pair` and `Reconnect now` buttons, and a saved SSH host switched Off.
 - `connections-ssh`: its `+ Add host` form switched to SSH after a passing Test connection.
+- `connections-scan-error`: the same host manager over a tailnet scan that failed with a long Tailscale error, drawn on its own lines under "On your tailnet".
 - `menu`: the sessions panel's ⋯ menu open over the repo rows with a toast over the panes.
 - `update`: the footer's `Update {version} ready` notice.
 - `update-notes`: the What's new window over a ready 0.99.0.

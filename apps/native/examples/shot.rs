@@ -12,11 +12,13 @@
 //! Target dropdown open), `viewer` (a viewer tab
 //! over a small Rust file, scrolled to a line) and `viewer-md` (a viewer tab
 //! over a Markdown file, rendered), `dashboard`, `connections` (the host
-//! picker with a saved tailnet host and a saved SSH host) and
+//! picker with a saved tailnet host and a saved SSH host),
 //! `connections-ssh` (its add form switched to SSH, filled in, after a
-//! passing Test connection), `multi-host` (the main window with the
-//! tailnet host "box" online, one of its sessions in a pane of the first
-//! tab, and the tailnet host "lab" offline), `spawn-hosts` (the spawn
+//! passing Test connection) and `connections-scan-error` (the host picker
+//! over a tailnet scan that failed with a long error), `multi-host` (the
+//! main window with the tailnet host "box" online, one of its sessions in a
+//! pane of the first tab, and the tailnet host "lab" offline), `spawn-hosts`
+//! (the spawn
 //! dialog over those hosts, its Target dropdown closed), `settings-hosts`
 //! (Settings on the Claude page over those hosts, the host selector showing
 //! This PC), `settings-dashboard` (Settings on the Dashboard tab with a keyed
@@ -204,6 +206,7 @@ enum View {
     DashboardCompact,
     Connections,
     ConnectionsSsh,
+    ConnectionsScanError,
     Menu,
     Update,
     UpdateNotes,
@@ -225,7 +228,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 32] = [
+    const ALL: [Self; 33] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -240,6 +243,7 @@ impl View {
         Self::DashboardCompact,
         Self::Connections,
         Self::ConnectionsSsh,
+        Self::ConnectionsScanError,
         Self::Menu,
         Self::Update,
         Self::UpdateNotes,
@@ -276,6 +280,7 @@ impl View {
             Self::DashboardCompact => "dashboard-compact",
             Self::Connections => "connections",
             Self::ConnectionsSsh => "connections-ssh",
+            Self::ConnectionsScanError => "connections-scan-error",
             Self::Menu => "menu",
             Self::Update => "update",
             Self::UpdateNotes => "update-notes",
@@ -430,6 +435,9 @@ impl View {
                 root.connection_picker_ssh_result().as_deref()
                     == Some(&*format!("Connected: {SHOT_SSH_SHORT}"))
             }
+            Self::ConnectionsScanError => {
+                root.connection_picker_scan_text() == Some(shot_scan_error_text())
+            }
             Self::Menu => root.sidebar_more_open() && !root.toasts().is_empty(),
             Self::Update => root.settings_open() && root.update_footer_text().is_some(),
             Self::UpdateNotes => {
@@ -527,6 +535,7 @@ impl Shot {
             | View::DashboardCompact
             | View::Connections
             | View::ConnectionsSsh
+            | View::ConnectionsScanError
             | View::Menu
             | View::Update
             | View::UpdateNotes
@@ -562,7 +571,9 @@ impl Shot {
         let state = match self.view {
             View::MainCompact => compact_ui_state(),
             View::Dashboard => json!({ "dashboard": { "view": "by_status" } }),
-            View::Connections | View::ConnectionsSsh => connections_ui_state(),
+            View::Connections | View::ConnectionsSsh | View::ConnectionsScanError => {
+                connections_ui_state()
+            }
             View::MultiHost | View::SpawnHosts | View::SettingsHosts => multi_host_ui_state(),
             _ => return Ok(()),
         };
@@ -617,14 +628,14 @@ const SHOT_SSH_TYPED: &str = "me@devbox";
 const SHOT_SSH_SHORT: &str = "devbox";
 
 /// The layout the `connections` shots start from: a saved tailnet host,
-/// which had 3 sessions last time, and a saved SSH host switched off.
+/// which had 4 sessions last time, and a saved SSH host switched off.
 fn connections_ui_state() -> Value {
     json!({
         "saved_hosts": [
             { "name": SHOT_TAILNET_HOST, "port": 8787 },
             { "kind": "ssh", "name": SHOT_SSH_SAVED, "enabled": false },
         ],
-        "host_session_counts": { SHOT_TAILNET_HOST: 3 },
+        "host_session_counts": { SHOT_TAILNET_HOST: 4 },
     })
 }
 
@@ -664,6 +675,25 @@ impl PeerSource for ShotPeers {
                 .into_iter()
                 .collect(),
         })
+    }
+}
+
+/// The error the `connections-scan-error` shot's Tailscale fails with.
+const SHOT_SCAN_ERROR: &str = "Tailscale could not report this PC's tailnet: the local \
+                               tailscaled service did not answer. Start Tailscale and sign \
+                               in, then open Connections again.";
+
+/// The text the picker shows for [`SHOT_SCAN_ERROR`]: the error's `Display`.
+fn shot_scan_error_text() -> String {
+    TailnetError::Failed(SHOT_SCAN_ERROR.to_owned()).to_string()
+}
+
+/// A Tailscale whose every scan fails with [`SHOT_SCAN_ERROR`].
+struct ShotPeersFailed;
+
+impl PeerSource for ShotPeersFailed {
+    fn status(&self) -> Result<Status, TailnetError> {
+        Err(TailnetError::Failed(SHOT_SCAN_ERROR.to_owned()))
     }
 }
 
@@ -723,12 +753,21 @@ fn drive_themes_edit(step: usize, window: &mut Window, cx: &mut App) -> Result<(
 
 /// Opens the Connections picker over the shot's Tailscale and `ssh`.
 fn open_picker(window: &mut Window, cx: &mut App) -> Result<()> {
+    open_picker_over(Arc::new(ShotPeers), window, cx)
+}
+
+/// Opens the Connections picker over `peers` and the shot's `ssh`.
+fn open_picker_over(
+    peers: Arc<dyn PeerSource + Send + Sync>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<()> {
     let root = window
         .root::<RootView>()
         .flatten()
         .context("the window has no root view")?;
     root.update(cx, |root, cx| {
-        root.set_peer_source(Arc::new(ShotPeers));
+        root.set_peer_source(peers);
         root.set_ssh_tester(Arc::new(ShotSsh));
         root.open_connection_picker(window, cx);
     });
@@ -1195,6 +1234,7 @@ fn drive(
             Ok(())
         }
         View::Connections => open_picker(window, cx),
+        View::ConnectionsScanError => open_picker_over(Arc::new(ShotPeersFailed), window, cx),
         View::Themes => drive_themes(step, window, cx),
         View::ThemesEdit => drive_themes_edit(step, window, cx),
         View::ConnectionsSsh => drive_connections_ssh(step, window, cx),
