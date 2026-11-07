@@ -87,7 +87,7 @@ Toolchain: Vite builds `apps/pwa/` into `apps/pwa/dist`, with pnpm, oxlint and o
 - **Errors:** 404 and 410 delete the subscription. 400 `BadDeviceToken` and other permanent failures count against a subscription only when the same push service accepted another subscription in that round, and five in a row delete it (collie's rule, `bridge/push.ts`); with one device that never fires, so it is logged instead.
 
   403 is the sender's fault (the VAPID JWT) and never prunes; 413 is a payload bug and is logged with its size; 429 and 5xx back off. Every failure logs the status and the push service's `reason`.
-- **Sender:** RFC 8291 payload encryption (`aes128gcm`) and RFC 8292 VAPID signing on the `ring` backend the daemon's TLS already uses (`crates/daemon/Cargo.toml`), sent with `reqwest` (already in the workspace, `crates/daemon-client/Cargo.toml`); proved by RFC 8291's Appendix A test vector. The Windows host needs outbound HTTPS to `*.push.apple.com`; the phone needs no tailnet connection to receive.
+- **Sender:** RFC 8291 payload encryption (`aes128gcm`) and RFC 8292 VAPID signing with the RustCrypto `p256`, `hkdf` and `aes-gcm` crates (`ring` cannot take the fixed ephemeral key the test vector needs), sent with the daemon's `reqwest` (no redirects, no proxy, endpoints held to the push services' hosts); proved by RFC 8291's Appendix A test vector (`crates/daemon/src/push/`). The Windows host needs outbound HTTPS to `*.push.apple.com`; the phone needs no tailnet connection to receive.
 
 ## Badge
 

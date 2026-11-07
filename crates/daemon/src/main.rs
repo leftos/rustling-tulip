@@ -56,6 +56,11 @@ mod paths;
 mod presets;
 mod pty;
 mod pty_state;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the push trigger is what calls it")
+)]
+mod push;
 mod registry;
 mod remote_config;
 mod screen;

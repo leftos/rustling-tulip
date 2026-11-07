@@ -80,6 +80,20 @@ notify = "8"
 notify-debouncer-full = "0.7"
 regex = "1.11"
 sha2 = "0.10"
+# Web Push (`push/`): RFC 8291 payload encryption (P-256 ECDH, HKDF-SHA256,
+# AES-128-GCM) and the RFC 8292 VAPID JWT (ES256). `p256` rather than `ring`
+# because the RFC 8291 test vector fixes the sender's ephemeral key, which
+# `ring` cannot import. Pure Rust, so no `aws-lc-sys`.
+aes-gcm = "0.11.1"
+hkdf = "0.13.0"
+p256 = { version = "0.14.0", default-features = false, features = [
+    "ecdh",
+    "ecdsa",
+    "std",
+] }
+# The digest 0.11 generation `hkdf` 0.13 is built on, for `push/` only (the
+# HKDF and the topic hash); the rest of the daemon stays on `sha2` 0.10.
+sha2_011 = { package = "sha2", version = "0.11" }
 # Cross-platform credential-store API. `crates/daemon/src/env_secrets.rs` files
 # sealed environment-row values under Windows Credential Manager; the platform
 # store itself is `windows-native-keyring-store` below.
