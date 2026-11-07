@@ -29,6 +29,7 @@
 //!   unboundedly.
 
 use crate::session::SessionRegistry;
+use protocol::{AgentId, TitleRules};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
@@ -532,6 +533,37 @@ fn is_filesystem_path(path: &str) -> bool {
         && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
+/// Whether `title` is one the agent painted itself: its placeholder, or a
+/// glyph from its title rules leading the title, the glyph followed by
+/// whitespace or standing alone. Any other title is the shell's own.
+pub(crate) fn is_agent_title(title: &str, rules: &TitleRules) -> bool {
+    if rules.placeholder.as_deref() == Some(title) {
+        return true;
+    }
+    let mut chars = title.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let rest = chars.as_str();
+    rules.glyphs.iter().any(|range| range.contains(first))
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+/// Clear `title`, a record's `terminal_title`, when the agent whose session
+/// it is painted it. A title the shell set for itself is kept, so a shell
+/// that painted its title before its agent's end keeps it.
+pub(crate) fn clear_agent_title(title: &mut Option<String>, agent: &AgentId) {
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        return;
+    };
+    if title
+        .as_deref()
+        .is_some_and(|title| is_agent_title(title, &plugin.descriptor().title))
+    {
+        *title = None;
+    }
+}
+
 /// Spawn the watcher task. The task ends when the PTY broadcast closes.
 pub fn watch(
     registry: &Arc<SessionRegistry>,
@@ -542,24 +574,31 @@ pub fn watch(
     let registry = Arc::clone(registry);
     tokio::spawn(async move {
         let mut parser = Parser::new(infer_prompt_cwd);
-        let mut last_title: Option<String> = None;
         let mut last_cwd: Option<String> = None;
         loop {
             match output.recv().await {
                 Ok(bytes) => {
                     for event in parser.feed(&bytes) {
                         match event {
-                            OscEvent::Title(title)
-                                if last_title.as_deref() != Some(title.as_str()) =>
-                            {
-                                debug!(session_id = %session_id, %title, "applying OSC title");
+                            OscEvent::Title(title) => {
                                 let title_for_update = title.clone();
                                 // The registry update mirrors the title into
-                                // the sidecar.
-                                registry.update(&session_id, |rec| {
+                                // the sidecar, and compares against the record
+                                // under its lock: a title the daemon cleared
+                                // (the agent's end) comes back when the shell
+                                // paints the same one again.
+                                let applied = registry.update_if_changed(&session_id, |rec| {
+                                    if rec.terminal_title.as_deref()
+                                        == Some(title_for_update.as_str())
+                                    {
+                                        return false;
+                                    }
                                     rec.terminal_title = Some(title_for_update.clone());
+                                    true
                                 });
-                                last_title = Some(title);
+                                if applied {
+                                    debug!(session_id = %session_id, %title, "applying OSC title");
+                                }
                             }
                             OscEvent::CurrentCwd(cwd)
                                 if last_cwd.as_deref() != Some(cwd.as_str()) =>
@@ -571,9 +610,7 @@ pub fn watch(
                                 });
                                 last_cwd = Some(cwd);
                             }
-                            OscEvent::Title(_)
-                            | OscEvent::CurrentCwd(_)
-                            | OscEvent::PromptMark(_) => {}
+                            OscEvent::CurrentCwd(_) | OscEvent::PromptMark(_) => {}
                         }
                     }
                 }
@@ -604,6 +641,50 @@ mod tests {
 
     fn cwd(value: &str) -> OscEvent {
         OscEvent::CurrentCwd(value.to_string())
+    }
+
+    /// An agent's title rules: the idle asterisk, and its placeholder.
+    fn asterisk_rules() -> TitleRules {
+        TitleRules {
+            glyphs: vec![protocol::CharRange {
+                first: '\u{2733}',
+                last: '\u{2733}',
+            }],
+            placeholder: Some("Claude Code".to_owned()),
+        }
+    }
+
+    #[test]
+    fn the_agents_placeholder_is_an_agent_title() {
+        assert!(is_agent_title("Claude Code", &asterisk_rules()));
+    }
+
+    #[test]
+    fn a_glyph_and_a_name_is_an_agent_title() {
+        assert!(is_agent_title("✳ Fix the parser", &asterisk_rules()));
+    }
+
+    #[test]
+    fn a_glyph_alone_is_an_agent_title() {
+        assert!(is_agent_title("✳", &asterisk_rules()));
+    }
+
+    #[test]
+    fn a_glyph_with_no_space_after_it_is_not_an_agent_title() {
+        assert!(!is_agent_title("✳Fix the parser", &asterisk_rules()));
+    }
+
+    #[test]
+    fn a_shells_title_is_not_an_agent_title() {
+        assert!(!is_agent_title("MINGW64:/c", &asterisk_rules()));
+    }
+
+    #[test]
+    fn rules_with_no_glyph_or_placeholder_make_nothing_an_agent_title() {
+        let rules = TitleRules::default();
+        for title in ["Claude Code", "✳ Fix the parser", "✳", "MINGW64:/c", ""] {
+            assert!(!is_agent_title(title, &rules), "{title:?}");
+        }
     }
 
     #[test]

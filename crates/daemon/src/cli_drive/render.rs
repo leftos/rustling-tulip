@@ -27,18 +27,44 @@ pub fn status_name(status: SessionStatus) -> &'static str {
     }
 }
 
+/// Whether the session's agent is still running in its shell. A shell where
+/// an agent was started keeps its `agent` after the agent ends: `program_name`
+/// is that agent's tag while it runs and the shell's own name once the shell
+/// is handed back. A session whose `program_name` was never recorded (a
+/// sidecar from a daemon that pre-dates the field), or whose agent has no
+/// registered plugin to name its tag, counts as up.
+fn agent_up(session: &SessionSnapshot) -> bool {
+    let Some(agent) = &session.agent else {
+        return false;
+    };
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        return true;
+    };
+    let program = session
+        .program_name
+        .as_deref()
+        .filter(|name| !name.is_empty());
+    program.is_none_or(|program| program == plugin.descriptor().tag.as_str())
+}
+
 /// One tab-separated line per session: id, status, `bg` or `-`, agent id or
-/// `shell`, title, repo, branch. A tab or a line break inside a title, which a
-/// program sets freely, turns into a space so a line stays one row.
+/// `shell` (also for a session whose agent has ended in its shell), title,
+/// repo, branch. A tab or a line break inside a title, which a program sets
+/// freely, turns into a space so a line stays one row.
 pub fn sessions_text(sessions: &[SessionSnapshot]) -> String {
     let mut text = String::new();
     for session in sessions {
         let member = session.members.first();
+        let agent = if agent_up(session) {
+            session.agent.as_ref().map(|agent| agent.0.as_str())
+        } else {
+            None
+        };
         let fields = [
             session.id.as_str(),
             status_name(session.status),
             if session.background { "bg" } else { "-" },
-            session.agent.as_ref().map_or("shell", |agent| &agent.0),
+            agent.unwrap_or("shell"),
             &title(session).replace(['\t', '\r', '\n'], " "),
             member.map_or("-", |member| &member.repo_name),
             member.map_or("-", |member| &member.branch),
@@ -55,13 +81,18 @@ pub fn sessions_json(sessions: &[SessionSnapshot]) -> String {
         .iter()
         .map(|session| {
             let member = session.members.first();
+            let agent = if agent_up(session) {
+                session.agent.as_ref().map(|agent| agent.0.as_str())
+            } else {
+                None
+            };
             json!({
                 "id": session.id,
                 "label": title(session),
                 "status": status_name(session.status),
                 "status_since": session.status_since,
                 "background": session.background,
-                "agent": session.agent.as_ref().map(|agent| &agent.0),
+                "agent": agent,
                 "repo": member.map(|member| &member.repo_name),
                 "branch": member.map(|member| &member.branch),
             })
@@ -227,6 +258,61 @@ mod tests {
                 "branch": "main",
             }])
         );
+    }
+
+    /// The tag the default agent's leaf shows.
+    fn agent_tag() -> String {
+        agent_registry::plugin(&agent_registry::default_agent())
+            .expect("the default agent is registered")
+            .descriptor()
+            .tag
+            .clone()
+    }
+
+    /// A session bound to the default agent, whose `program_name` is
+    /// `program`.
+    fn with_agent(program: Option<&str>) -> SessionSnapshot {
+        let mut session = with_member(session());
+        session.agent = Some(agent_registry::default_agent());
+        session.program_name = program.map(str::to_owned);
+        session
+    }
+
+    #[test]
+    fn sessions_text_names_a_shell_once_its_agent_ended() {
+        let ended = with_agent(Some("pwsh"));
+        assert_eq!(
+            sessions_text(&[ended]),
+            "s1\tidle\t-\tshell\tcanonical\ttulip\tmain\n"
+        );
+    }
+
+    #[test]
+    fn sessions_json_has_no_agent_once_it_ended() {
+        let ended = with_agent(Some("pwsh"));
+        let value: serde_json::Value =
+            serde_json::from_str(&sessions_json(&[ended])).expect("valid JSON");
+        assert_eq!(value[0]["agent"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn sessions_still_name_a_running_agent_in_a_shell() {
+        let tag = agent_tag();
+        let id = agent_registry::default_agent().0;
+        assert_eq!(
+            sessions_text(&[with_agent(Some(&tag))]),
+            format!("s1\tidle\t-\t{id}\tcanonical\ttulip\tmain\n")
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&sessions_json(&[with_agent(Some(&tag))])).expect("valid JSON");
+        assert_eq!(value[0]["agent"], json!(id));
+    }
+
+    #[test]
+    fn a_missing_program_name_counts_as_up() {
+        let value: serde_json::Value =
+            serde_json::from_str(&sessions_json(&[with_agent(None)])).expect("valid JSON");
+        assert_eq!(value[0]["agent"], json!(agent_registry::default_agent().0));
     }
 
     #[test]

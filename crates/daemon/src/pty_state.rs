@@ -1313,6 +1313,11 @@ fn hand_shell_back(
             SessionStatus::Working | SessionStatus::AwaitingInput
         );
         agent_exited = rec.end_agent_in_shell();
+        if agent_exited {
+            // The title the agent painted named it, not the shell it ran in;
+            // one the shell set for itself is kept.
+            crate::osc_title::clear_agent_title(&mut rec.terminal_title, &rec.agent);
+        }
         promoted = rec.promoted_shell();
         let changed = rec.hook_driven || rec.background || in_turn || agent_exited;
         rec.hook_driven = false;
@@ -3845,6 +3850,22 @@ mod hysteresis_tests {
         assert_eq!(agent_exits(&mut events), 0, "one run announces once");
     }
 
+    #[test]
+    fn hand_shell_back_clears_an_agent_in_shell_records_title() {
+        let registry = SessionRegistry::new(scratch_dirs("hand-back-title"));
+        let mut record = hook_record(SessionStatus::Working);
+        record.agent_in_shell = true;
+        record.shell_label = Some("pwsh".to_owned());
+        record.program_name = Some("claude".to_owned());
+        record.terminal_title = Some("✳ Claude Code".to_owned());
+        registry.insert(record);
+        let read = record_status(&registry, SESSION).expect("the session is registered");
+        assert!(hand_shell_back(&registry, SESSION, read).is_some());
+        let record = registry.get(SESSION).expect("session registered");
+        let guard = record.lock().expect("record lock");
+        assert_eq!(guard.terminal_title, None, "the agent's title left with it");
+    }
+
     /// A plain shell record running `pwsh`, the way its spawn left it.
     fn pwsh_plain_shell() -> SessionRecord {
         let mut record = test_record(SESSION);
@@ -4099,6 +4120,111 @@ mod hysteresis_tests {
             agent_exits(&mut events),
             1,
             "the agent's end under Git Bash's `$` row is announced"
+        );
+    }
+
+    /// An exit frame whose prompt is Git Bash's `$` row.
+    fn git_bash_exit_frame() -> Vec<u8> {
+        frame(&[
+            "[fake-claude] ready (pid: 1)",
+            "[fake-claude] bye",
+            "",
+            "lefto@LEFTOS-PC UCRT64 /c",
+            "$ ",
+        ])
+    }
+
+    /// The record's terminal title.
+    fn terminal_title(h: &Harness) -> Option<String> {
+        let rec = h.registry.get(SESSION).expect("session registered");
+        let guard = rec.lock().expect("record lock");
+        guard.terminal_title.clone()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn promoted_shell_hand_back_clears_the_agents_terminal_title() {
+        let mut record = pwsh_plain_shell();
+        record.program_name = Some("bash".to_owned());
+        let h = start_record("shell-title-hand-back", true, record);
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert!(promotion(&h).0, "the shell is promoted");
+        h.set_record(|rec| rec.terminal_title = Some("✳ Claude Code".to_owned()));
+        h.chunk(git_bash_exit_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(terminal_title(&h), None, "the agent's title left with it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn promoted_shell_keeps_the_shells_title_set_after_the_agent_ends() {
+        let mut record = pwsh_plain_shell();
+        record.program_name = Some("bash".to_owned());
+        let h = start_record("shell-title-after-end", true, record);
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert!(promotion(&h).0, "the shell is promoted");
+        h.set_record(|rec| rec.terminal_title = Some("✳ Claude Code".to_owned()));
+        h.chunk(git_bash_exit_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(terminal_title(&h), None, "the agent's title left with it");
+        crate::osc_title::watch(
+            &h.registry,
+            SESSION.to_string(),
+            h.output.subscribe(),
+            false,
+        );
+        h.chunk(b"\x1b]0;MINGW64:/c\x07".to_vec());
+        advance(Duration::from_millis(100)).await;
+        assert_eq!(
+            terminal_title(&h),
+            Some("MINGW64:/c".to_owned()),
+            "the shell's own title is kept"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn promoted_shell_keeps_a_title_the_shell_set_before_the_hand_back() {
+        let mut record = pwsh_plain_shell();
+        record.program_name = Some("bash".to_owned());
+        let h = start_record("shell-title-before-hand-back", true, record);
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert!(promotion(&h).0, "the shell is promoted");
+        h.set_record(|rec| rec.terminal_title = Some("✳ Claude Code".to_owned()));
+        h.chunk(git_bash_exit_frame());
+        // The shell's prompt title lands before the hand-back's timer fires.
+        h.set_record(|rec| rec.terminal_title = Some("MINGW64:/c".to_owned()));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            terminal_title(&h),
+            Some("MINGW64:/c".to_owned()),
+            "the shell's own title is kept"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cleared_title_lets_the_same_title_through_again() {
+        let h = start_record("shell-title-again", true, pwsh_plain_shell());
+        pass_hold().await;
+        crate::osc_title::watch(
+            &h.registry,
+            SESSION.to_string(),
+            h.output.subscribe(),
+            false,
+        );
+        h.chunk(b"\x1b]0;MINGW64:/c\x07".to_vec());
+        advance(Duration::from_millis(100)).await;
+        assert_eq!(terminal_title(&h), Some("MINGW64:/c".to_owned()));
+        h.set_record(|rec| rec.terminal_title = None);
+        h.chunk(b"\x1b]0;MINGW64:/c\x07".to_vec());
+        advance(Duration::from_millis(100)).await;
+        assert_eq!(
+            terminal_title(&h),
+            Some("MINGW64:/c".to_owned()),
+            "a title cleared from the record comes back"
         );
     }
 

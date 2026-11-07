@@ -280,6 +280,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Preset wizard**: the native client's modal that walks a preset's prompt source and variables before launching it; see `docs/native-client.md`.
 - **Probe group**: the readings of one terminal path link, sent as fetches one at a time; a reading the host rejects before the transfer starts moves on to the next. See `docs/native-client.md` ("Fetched files").
 - **Progress update**: an attention-feed item for a stop while work continues, or a summary of work in progress; shown in the feed, never pushed to the phone.
+- **Promoted shell**: a plain shell session whose screen showed an agent running in it, so it became an agent session (Chat and Summary on) until the agent ends and the shell is handed back (`docs/session-runtime.md`).
 - **Prompt id**: the chat's id for a terminal dialog (`p<n>`), kept while the same dialog is up; an answer must name the current one.
 - **Prompt source**: where a preset launch takes its prompts from: a prompts file, a folder of `.md` files, inline text or GitHub issue ranges, limited to the sources the preset allows.
 - **Prompt stash**: the TUI's one-slot draft store (ctrl+s), shared by every view.

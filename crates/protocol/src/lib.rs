@@ -798,7 +798,11 @@ pub struct SessionSnapshot {
     /// under their workspace node in the sidebar tree.
     #[serde(default)]
     pub workspace_id: Option<String>,
-    /// The agent driving this session; `None` for a plain shell.
+    /// The agent this session is bound to; `None` for a plain shell. A shell
+    /// where an agent was started by hand keeps its agent after the agent
+    /// ends, so `agent` alone does not say whether it is up: `program_name`
+    /// is the agent's tag while it runs and the shell's own name once the
+    /// shell is handed back.
     pub agent: Option<AgentId>,
     /// The chips the session's agent options show, evaluated by the daemon.
     /// Empty for a plain shell and for options that show none.

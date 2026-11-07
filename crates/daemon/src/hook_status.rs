@@ -388,6 +388,11 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
         }
         turn_alert = land_turn_end(record, false, "agent_end");
         agent_exited = record.end_agent_in_shell();
+        if agent_exited {
+            // The title the agent painted named it, not the shell it ran in;
+            // one the shell set for itself is kept.
+            crate::osc_title::clear_agent_title(&mut record.terminal_title, &record.agent);
+        }
     }
     if leaves_pending_alone(record, report) {
         return Applied {
@@ -1062,6 +1067,35 @@ mod tests {
             record.work,
             crate::background_work::BackgroundWork::default(),
             "the agent's work ended with it"
+        );
+    }
+
+    #[test]
+    fn session_end_clears_an_agent_in_shell_records_title() {
+        let mut record = agent_in_shell_record();
+        record.terminal_title = Some("✳ Claude Code".to_owned());
+        assert!(
+            apply_body(&mut record, 2, &session_end()).agent_exited,
+            "the agent's end is announced"
+        );
+        assert_eq!(
+            record.terminal_title, None,
+            "the agent's title left with it"
+        );
+    }
+
+    #[test]
+    fn session_end_keeps_a_title_the_shell_set() {
+        let mut record = agent_in_shell_record();
+        record.terminal_title = Some("MINGW64:/c".to_owned());
+        assert!(
+            apply_body(&mut record, 2, &session_end()).agent_exited,
+            "the agent's end is announced"
+        );
+        assert_eq!(
+            record.terminal_title.as_deref(),
+            Some("MINGW64:/c"),
+            "the shell's own title is kept"
         );
     }
 

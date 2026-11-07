@@ -64,6 +64,10 @@ An interactive Claude session whose agent is typed into the user's shell (`agent
 
 The record's `program_name` becomes the shell's label then and `claude` again on the next `SessionStart`; the session itself ends only when the shell exits.
 
+After the hand-back the snapshot's `agent` stays set (the native client and the `send` verb rely on it), so `program_name` is what says whether the agent is up: the agent's registry tag while it runs, the shell's own name after. The native client greys Chat and Summary from `program_name` in the `SessionUpdated` the hand-back broadcasts, and does not fold `AgentExited`. The `rustling-tulipd sessions` verb reports such a session as a plain shell once `program_name` is no longer the agent's tag (`agent_up` in `cli_drive/render.rs`); a missing or empty `program_name`, or an agent with no registered plugin, counts as up.
+
+The hand-back also clears the record's terminal title, on the screen path and on the `SessionEnd` hook path, but only a title the agent painted: the agent descriptor's title rules decide (`is_agent_title` in `osc_title.rs`: its placeholder, or a leading title glyph followed by whitespace). A title the shell set for itself is kept. The OSC title watcher judges "unchanged" against the record's current title inside the registry update, so after a clear the next title goes through even when it is identical.
+
 A subagent's hook event (an `agent_id` in its input) never ends or replaces the main agent's pending prompt, never promotes the session to `Working` and never ends a turn at `Idle`, and a subagent `PermissionRequest` raises one only when none is pending.
 
 A main-agent `Stop` does not land `Idle` itself: it parks its report in the runtime-only `SessionRecord.turn_end` (`TurnEnd`), the status stays `Working`, and the `background` flag and any `WaitingAlert` wait in it, so a stop that a Stop hook blocks never reads as finished. A subagent's `Stop` never holds, and `StopFailure` lands `Idle` at once, keeping what a hold already carries.
