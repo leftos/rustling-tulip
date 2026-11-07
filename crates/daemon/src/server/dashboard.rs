@@ -6,6 +6,7 @@ use super::Hub;
 use super::chat::{refuse, send_target};
 use super::connection::ConnCtx;
 use crate::chat_answer::{self, NOT_THIS_DIALOG, PROMPT_GONE};
+use crate::file_tail::session_folders;
 use crate::inject::{TypeRefusal, TypeTarget, screen_reader};
 use crate::screen::dialogs::prompt_identity;
 use crate::sync::lock;
@@ -92,10 +93,10 @@ async fn answer_waiting(
     since: DateTime<Utc>,
     choice: PromptChoice,
 ) -> Result<(), TypeRefusal> {
-    let pending = pending_since(target, since)?;
+    let (pending, folder) = pending_since(target, since)?;
     within_options(choice, &pending)?;
     let reading = screen_reader(target).current().await;
-    let prompt = dialog_for(&reading, &pending)?;
+    let prompt = dialog_for(&reading, &pending, folder.as_deref())?;
     let kind = chat_answer_for(choice, prompt)?;
     let identity = prompt_identity(prompt);
     chat_answer::answer_identified(target, identity, since, &pending, &kind).await
@@ -118,8 +119,12 @@ fn within_options(choice: PromptChoice, pending: &PendingInput) -> Result<(), Ty
 }
 
 /// The prompt `target`'s record waits on, when its status has not changed
-/// since `since` and the Dashboard offers answers for it.
-fn pending_since(target: &TypeTarget, since: DateTime<Utc>) -> Result<PendingInput, TypeRefusal> {
+/// since `since` and the Dashboard offers answers for it, with the
+/// session's working folder (the first of its folders) when it has one.
+fn pending_since(
+    target: &TypeTarget,
+    since: DateTime<Utc>,
+) -> Result<(PendingInput, Option<String>), TypeRefusal> {
     let record = target
         .sessions
         .get(&target.session_id)
@@ -135,7 +140,11 @@ fn pending_since(target: &TypeTarget, since: DateTime<Utc>) -> Result<PendingInp
     if !offered(&pending) {
         return Err(not_this_prompt());
     }
-    Ok(pending)
+    let folder = session_folders(&record)
+        .into_iter()
+        .next()
+        .map(|folder| folder.to_string_lossy().into_owned());
+    Ok((pending, folder))
 }
 
 /// Whether the Dashboard answers `pending`: one single-choice question, or
@@ -155,10 +164,12 @@ fn offered(pending: &PendingInput) -> bool {
 /// The dialog `reading` shows for `pending`: for a question, a single-choice
 /// question with at most one question tab, asking the pending question with
 /// its options first in order; for a permission, a permission dialog whose
-/// subject or body shows the pending call's summary.
+/// subject or body shows the pending call's summary, or whose subject is
+/// the file it names under the session's working `folder`.
 fn dialog_for<'r>(
     reading: &'r Reading,
     pending: &PendingInput,
+    folder: Option<&str>,
 ) -> Result<&'r ChatPrompt, TypeRefusal> {
     let shown = reading.chat.as_ref().and_then(|chat| chat.prompt.as_ref());
     shown
@@ -172,7 +183,7 @@ fn dialog_for<'r>(
                         .is_some_and(|question| asks(prompt, question))
             }
             PendingInput::Permission { summary, .. } => {
-                prompt.kind == ChatPromptKind::Permission && shows_summary(prompt, summary)
+                prompt.kind == ChatPromptKind::Permission && shows_summary(prompt, summary, folder)
             }
             _ => false,
         })
@@ -197,12 +208,60 @@ fn asks(prompt: &ChatPrompt, question: &PendingQuestion) -> bool {
     words(&prompt.subject) == words(&question.question) && labels.starts_with(&wanted)
 }
 
-/// Whether `prompt`'s subject or body shows `summary`; never for an empty
-/// summary, which matches any dialog.
-fn shows_summary(prompt: &ChatPrompt, summary: &str) -> bool {
-    let summary = words(summary);
-    !summary.is_empty()
-        && (words(&prompt.subject).contains(&summary) || words(&prompt.body).contains(&summary))
+/// Whether `prompt`'s subject or body shows `summary`, or its subject is
+/// the file the absolute path `summary` names, shown relative to the
+/// session's working `folder` (the hook names an edited file by its
+/// absolute path); never for an empty summary, which matches any dialog.
+fn shows_summary(prompt: &ChatPrompt, summary: &str, folder: Option<&str>) -> bool {
+    let words_of = words(summary);
+    !words_of.is_empty()
+        && (words(&prompt.subject).contains(&words_of)
+            || words(&prompt.body).contains(&words_of)
+            || names_path(summary, folder, &prompt.subject))
+}
+
+/// Whether the absolute path `summary` names the file `subject` names:
+/// with `\` made `/`, `subject` joined to `folder` (or `subject` itself
+/// when it is absolute) equals `summary`, without case when the folder (or
+/// the absolute subject) has a drive letter. Never for a relative
+/// `summary`, nor for a relative `subject` with no folder.
+fn names_path(summary: &str, folder: Option<&str>, subject: &str) -> bool {
+    let summary = summary.trim();
+    let subject = subject.trim().replace('\\', "/");
+    if !is_absolute_path(summary) || subject.is_empty() {
+        return false;
+    }
+    let (wanted, drive) = if is_absolute_path(&subject) {
+        let drive = has_drive(&subject);
+        (subject, drive)
+    } else {
+        let Some(folder) = folder.map(|folder| folder.replace('\\', "/")) else {
+            return false;
+        };
+        let joined = format!("{}/{subject}", folder.trim_end_matches('/'));
+        (joined, has_drive(&folder))
+    };
+    let summary = summary.replace('\\', "/");
+    if drive {
+        summary.to_lowercase() == wanted.to_lowercase()
+    } else {
+        summary == wanted
+    }
+}
+
+/// Whether `path` is absolute: a drive letter and its separator (`X:\`,
+/// `X:/`), a UNC path (`\\`), or a root `/`.
+fn is_absolute_path(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with(r"\\") || has_drive(path)
+}
+
+/// Whether `path` starts with a drive letter and its separator.
+fn has_drive(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
 /// `text` with each run of whitespace made one space and its ends trimmed,
@@ -228,7 +287,7 @@ fn chat_answer_for(
         (PromptChoice::Option { index }, ChatPromptKind::Question) => Some(u32::from(index) + 1),
         (PromptChoice::Allow, ChatPromptKind::Permission) => allow_once_option(prompt),
         (PromptChoice::AllowAlways, ChatPromptKind::Permission) => always_allow_option(prompt),
-        (PromptChoice::Deny, ChatPromptKind::Permission) => labelled(prompt, DENY_LABEL),
+        (PromptChoice::Deny, ChatPromptKind::Permission) => deny_option(prompt),
         _ => return Err(not_this_prompt()),
     };
     number
@@ -249,6 +308,24 @@ fn labelled(prompt: &ChatPrompt, label: &str) -> Option<u32> {
         .rev()
         .find(|option| option.label.trim() == label)
         .map(|option| option.number)
+}
+
+/// The number of `prompt`'s deny option: the last labelled exactly `No`,
+/// else the last whose label starts with `No` and has no `,` as its third
+/// character, which a stale redraw leaves (`Nohift+tab)`) and `No, and
+/// tell …` is not.
+fn deny_option(prompt: &ChatPrompt) -> Option<u32> {
+    labelled(prompt, DENY_LABEL).or_else(|| {
+        prompt
+            .options
+            .iter()
+            .rev()
+            .find(|option| {
+                let label = option.label.trim();
+                label.starts_with(DENY_LABEL) && !label.starts_with("No,")
+            })
+            .map(|option| option.number)
+    })
 }
 
 fn allow_once_option(prompt: &ChatPrompt) -> Option<u32> {
@@ -1032,7 +1109,7 @@ mod tests {
         use crate::screen::fixture_screen::screen_from;
         use crate::screen::{Screen, SharedScreen};
         use crate::server::Hub;
-        use crate::server::dashboard::chat_answer_for;
+        use crate::server::dashboard::{chat_answer_for, names_path};
         use crate::server::test_support::{
             HANG_GUARD, ScratchDir, drain, idle_record, next_message, test_hub,
         };
@@ -1050,6 +1127,9 @@ mod tests {
         const MULTI_SELECT: &str = include_str!("../screen/fixtures/v33-ask-q2-toggled.txt");
         /// Main while a turn runs, no dialog up.
         const NO_DIALOG: &str = include_str!("../screen/fixtures/c32-ask-chat.txt");
+        /// An Edit's permission dialog for `calc.py`: 1 Yes, 2 accept edits,
+        /// 3 No.
+        const EDIT_PERMISSION: &str = include_str!("../screen/fixtures/c52-edit-perm.txt");
 
         const GONE: &str = "the prompt is no longer up";
         const NOT_THIS: &str = "that answer does not fit the prompt on screen";
@@ -1123,6 +1203,16 @@ mod tests {
         }
 
         fn waiting(tag: &str, capture: &str, pending: PendingInput) -> Waiting {
+            waiting_in(tag, capture, pending, None)
+        }
+
+        /// [`waiting`], the session working in `folder` when one is given.
+        fn waiting_in(
+            tag: &str,
+            capture: &str,
+            pending: PendingInput,
+            folder: Option<&str>,
+        ) -> Waiting {
             let (hub, scratch) = test_hub(tag);
             let (pty, input, exit) = recording_pty();
             let term = Terminal {
@@ -1138,6 +1228,7 @@ mod tests {
             record.status = SessionStatus::AwaitingInput;
             record.status_since = Some(since);
             record.pending_input = Some(pending);
+            record.worktree_paths = folder.map(str::to_owned).into_iter().collect();
             record.pty = Some(Arc::clone(&term.pty));
             record.screen = Some(Arc::clone(&term.screen));
             hub.sessions.insert(record);
@@ -1490,6 +1581,123 @@ mod tests {
             let mut w = waiting("dash-answer-no-summary", PERMISSION, empty);
             w.answer(PromptChoice::Allow).await;
             w.refused(CHAT_REFUSED, GONE, "a permission with no summary to match")
+                .await;
+        }
+
+        /// An Edit of `calc.py` awaiting its permission, the hook naming
+        /// the file by `summary`.
+        fn edit_permission(summary: &str) -> PendingInput {
+            PendingInput::Permission {
+                tool_name: "Edit".to_owned(),
+                summary: summary.to_owned(),
+            }
+        }
+
+        /// The Edit dialog with its third option, No, drawn as `label`.
+        fn edit_permission_denied_as(label: &str) -> String {
+            let drawn = EDIT_PERMISSION.replace("   3. No\n", &format!("   3. {label}\n"));
+            assert_ne!(drawn, EDIT_PERMISSION, "the capture's No option is redrawn");
+            drawn
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_allows_an_edit_whose_hook_names_the_absolute_path() {
+            // Claude's PermissionRequest gives an Edit's `file_path` absolute;
+            // the dialog shows it relative to the session's folder.
+            let pending = edit_permission(r"C:\Users\someone\proj\calc.py");
+            let mut w = waiting_in(
+                "dash-answer-edit-abs",
+                EDIT_PERMISSION,
+                pending,
+                Some(r"C:\Users\someone\proj"),
+            );
+            w.answer(PromptChoice::Allow).await;
+            w.types_and_ends(b"1", "the Yes option's digit").await;
+        }
+
+        #[test]
+        fn a_hook_path_names_the_subject_only_under_the_sessions_folder() {
+            let abs = r"C:\Users\someone\proj\calc.py";
+            let table: [(&str, &str, Option<&str>, &str, bool); 8] = [
+                (
+                    "under the folder",
+                    abs,
+                    Some(r"C:\Users\someone\proj"),
+                    "calc.py",
+                    true,
+                ),
+                (
+                    "a drive's case",
+                    abs,
+                    Some(r"c:\users\SOMEONE\proj\"),
+                    "calc.py",
+                    true,
+                ),
+                (
+                    "another folder",
+                    abs,
+                    Some(r"C:\proj\tests"),
+                    "src/calc.py",
+                    false,
+                ),
+                (
+                    "a suffix only",
+                    abs,
+                    Some(r"C:\elsewhere"),
+                    "calc.py",
+                    false,
+                ),
+                ("no folder", abs, None, "calc.py", false),
+                (
+                    "an absolute subject",
+                    abs,
+                    None,
+                    "C:/Users/someone/proj/calc.py",
+                    true,
+                ),
+                ("a command", "cat build/out", Some(r"C:\proj"), "out", false),
+                (
+                    "a root path's case",
+                    "/home/u/Proj/calc.py",
+                    Some("/home/u/proj"),
+                    "calc.py",
+                    false,
+                ),
+            ];
+            for (what, summary, folder, subject, wanted) in table {
+                assert_eq!(names_path(summary, folder, subject), wanted, "{what}");
+            }
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_refuses_an_edit_of_another_absolute_path() {
+            let pending = edit_permission(r"C:\elsewhere\other.py");
+            let mut w = waiting_in(
+                "dash-answer-edit-other",
+                EDIT_PERMISSION,
+                pending,
+                Some(r"C:\Users\someone\proj"),
+            );
+            w.answer(PromptChoice::Allow).await;
+            w.refused(CHAT_REFUSED, GONE, "the dialog edits another file")
+                .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_denies_on_a_stale_no_label() {
+            let drawn = edit_permission_denied_as("Nohift+tab)");
+            let mut w = waiting("dash-answer-deny-stale", &drawn, edit_permission("calc.py"));
+            w.answer(PromptChoice::Deny).await;
+            w.types_and_ends(b"3", "the No option's digit under its stale label")
+                .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_never_takes_no_and_tell_claude_as_deny() {
+            let drawn = edit_permission_denied_as("No, and tell Claude what to do differently");
+            let mut w = waiting("dash-answer-deny-tell", &drawn, edit_permission("calc.py"));
+            w.answer(PromptChoice::Deny).await;
+            w.refused(CHAT_REFUSED, NOT_THIS, "no plain No on screen")
                 .await;
         }
 

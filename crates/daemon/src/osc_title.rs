@@ -537,16 +537,30 @@ fn is_filesystem_path(path: &str) -> bool {
 /// glyph from its title rules leading the title, the glyph followed by
 /// whitespace or standing alone. Any other title is the shell's own.
 pub(crate) fn is_agent_title(title: &str, rules: &TitleRules) -> bool {
-    if rules.placeholder.as_deref() == Some(title) {
-        return true;
-    }
+    rules.placeholder.as_deref() == Some(title) || after_glyph(title, rules).is_some()
+}
+
+/// The rest of `title` after a leading glyph from `rules`, its whitespace
+/// trimmed; `None` when no glyph leads it or the glyph runs into text.
+fn after_glyph<'t>(title: &'t str, rules: &TitleRules) -> Option<&'t str> {
     let mut chars = title.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
+    let first = chars.next()?;
     let rest = chars.as_str();
-    rules.glyphs.iter().any(|range| range.contains(first))
-        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    (rules.glyphs.iter().any(|range| range.contains(first))
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace)))
+    .then(|| rest.trim())
+}
+
+/// The text of `title` after its leading glyph and the whitespace after it,
+/// trimmed: the session's name in a title the agent painted. `None` for the
+/// placeholder, bare or after a glyph (the title of a session with no
+/// name), a glyph with nothing after it, or a title that is not the agent's.
+pub(crate) fn agent_title_text<'t>(title: &'t str, rules: &TitleRules) -> Option<&'t str> {
+    let placeholder = rules.placeholder.as_deref();
+    if placeholder == Some(title) {
+        return None;
+    }
+    after_glyph(title, rules).filter(|rest| !rest.is_empty() && placeholder != Some(*rest))
 }
 
 /// Clear `title`, a record's `terminal_title`, when the agent whose session
@@ -677,6 +691,53 @@ mod tests {
     #[test]
     fn a_shells_title_is_not_an_agent_title() {
         assert!(!is_agent_title("MINGW64:/c", &asterisk_rules()));
+    }
+
+    /// An agent's title rules with a braille spinner and the idle asterisk.
+    fn spinner_rules() -> TitleRules {
+        let mut rules = asterisk_rules();
+        rules.glyphs.push(protocol::CharRange {
+            first: '\u{2800}',
+            last: '\u{28FF}',
+        });
+        rules
+    }
+
+    #[test]
+    fn agent_title_text_is_the_name_after_a_spinner_glyph() {
+        assert_eq!(
+            agent_title_text("\u{280B} append-bye-hello-txt", &spinner_rules()),
+            Some("append-bye-hello-txt")
+        );
+    }
+
+    #[test]
+    fn agent_title_text_is_the_name_after_the_idle_glyph() {
+        assert_eq!(
+            agent_title_text("✳  append-bye-hello-txt ", &spinner_rules()),
+            Some("append-bye-hello-txt")
+        );
+    }
+
+    #[test]
+    fn agent_title_text_of_the_placeholder_is_none() {
+        for title in ["Claude Code", "✳ Claude Code", "\u{280B}  Claude Code "] {
+            assert_eq!(agent_title_text(title, &spinner_rules()), None, "{title:?}");
+        }
+    }
+
+    #[test]
+    fn agent_title_text_of_a_glyph_alone_is_none() {
+        for title in ["✳", "✳  "] {
+            assert_eq!(agent_title_text(title, &spinner_rules()), None, "{title:?}");
+        }
+    }
+
+    #[test]
+    fn agent_title_text_of_a_shells_title_is_none() {
+        for title in ["MINGW64:/c", "✳Fix the parser", ""] {
+            assert_eq!(agent_title_text(title, &spinner_rules()), None, "{title:?}");
+        }
     }
 
     #[test]

@@ -27,6 +27,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Chat answers keep their single line breaks, so a list of lines no longer runs together into one paragraph.
 - A tool with nothing to summarise is named once in Chat, not twice, and a PowerShell call shows its command.
 - Settings › Remote access stops showing a phone as Connected as soon as its connection ends, including when you switch Remote access off.
+- Chat reads Claude's permission prompt in a named session again, so it shows the prompt's card instead of "Can't read the prompt box right now."
+- Allow from the phone works on an Edit or Write prompt, and Deny still works when Claude leaves stray characters on the No option.
 - Pasting an image into a Claude pane on Windows works: with an image on the clipboard, Ctrl+V sends Claude its own image-paste key.
 - A window connected to another computer shows that computer's Claude accounts in Settings › Accounts and the footer, and can switch them; adding, removing and renaming stay on the computer that runs them.
 - A right-click in a terminal pastes this computer's clipboard, even in a session on another host; Shift+right-click still reaches programs that use the mouse.

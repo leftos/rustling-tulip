@@ -18,6 +18,7 @@ use agent_api::{
 use protocol::{AgentId, ChatAnswerKind, ChatPrompt, ChatScreen, ComposerState};
 
 use super::Screen;
+use crate::osc_title::agent_title_text;
 
 /// What `screen` shows the chat, as `agent`'s plugin reads it; `None` for an
 /// agent with no registered plugin or one whose screen the chat does not
@@ -57,7 +58,9 @@ pub fn recipe_for(
 
 /// Which conversation `screen` shows and where its keys go, as `agent`'s
 /// plugin reads it; `None` for an agent with no registered plugin or one
-/// whose views the daemon does not switch.
+/// whose views the daemon does not switch. Under a dialog with no agents
+/// panel, an agent in view whose label is the session's own name, the one
+/// the agent's terminal title shows, is no agent: the main view is.
 #[must_use]
 pub fn read_view(agent: &AgentId, screen: &Screen) -> Option<ViewReading> {
     let Some(plugin) = agent_registry::plugin(agent) else {
@@ -67,7 +70,21 @@ pub fn read_view(agent: &AgentId, screen: &Screen) -> Option<ViewReading> {
         );
         return None;
     };
-    plugin.read_view(&screen.rows())
+    let mut reading = plugin.read_view(&screen.rows())?;
+    let title = screen.title();
+    let session_name = title
+        .as_deref()
+        .and_then(|title| agent_title_text(title, &plugin.descriptor().title));
+    // Only a main-view dialog's rule is read as an agent with no agents
+    // panel to say so, the plugin's own test for the session's name there.
+    let main_dialog = reading.dialog && reading.panel.is_empty();
+    if main_dialog
+        && session_name
+            .is_some_and(|name| reading.agent_in_view.as_deref().map(str::trim) == Some(name))
+    {
+        reading.agent_in_view = None;
+    }
+    Some(reading)
 }
 
 /// The running work `screen` counts, as `agent`'s plugin reads it; `None`
@@ -447,6 +464,11 @@ mod tests {
                 "c52-edit-perm",
                 include_str!("fixtures/c52-edit-perm.txt"),
                 permission("calc.py", &FILE_OPTIONS, None),
+            ),
+            (
+                "v2319-edit-perm-session-rule",
+                include_str!("fixtures/v2319-edit-perm-session-rule.txt"),
+                permission("hello.txt", &FILE_OPTIONS, None),
             ),
             (
                 "claude--permission-bash",
@@ -866,6 +888,102 @@ mod tests {
             .expect("Claude's plugin reads views")
     }
 
+    /// A named session's permission dialog on Claude Code 2.1.319, which
+    /// draws the session's name in a rule under it.
+    const V2319: &str = include_str!("fixtures/v2319-edit-perm-session-rule.txt");
+
+    /// The title the session V2319 is of shows: its name after the idle
+    /// glyph.
+    const V2319_TITLE: &str = "✳ append-bye-hello-txt";
+
+    /// The view reading of a capture whose terminal shows `title`.
+    fn titled_view_of(text: &str, title: &str) -> ViewReading {
+        let mut screen = screen_from(text);
+        screen.feed(format!("\x1b]0;{title}\x07").as_bytes());
+        read_view(&agent_registry::default_agent(), &screen).expect("Claude's plugin reads views")
+    }
+
+    #[test]
+    fn the_sessions_own_name_is_no_agent_in_view() {
+        assert_eq!(
+            titled_view_of(V2319, V2319_TITLE).agent_in_view,
+            None,
+            "the rule under the dialog names the session the title names"
+        );
+    }
+
+    #[test]
+    fn with_no_title_the_rules_name_stays() {
+        assert_eq!(
+            view_of(V2319).agent_in_view.as_deref(),
+            Some("append-bye-hello-txt"),
+            "no title, no filter"
+        );
+    }
+
+    #[test]
+    fn a_title_naming_another_session_keeps_the_agent_in_view() {
+        let cases = [
+            (
+                "v167",
+                include_str!("fixtures/v167-agent-view-ask.txt"),
+                "Agent C timed Python wait",
+            ),
+            (
+                "v192",
+                include_str!("fixtures/v192-agent-view-ask-with-chat-about-this.txt"),
+                "Sleeper B",
+            ),
+        ];
+        for (name, text, agent) in cases {
+            assert_eq!(
+                titled_view_of(text, "✳ some-other-session")
+                    .agent_in_view
+                    .as_deref(),
+                Some(agent),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_placeholder_title_names_no_session() {
+        let labelled = V2319.replace(" append-bye-hello-txt ", " Claude Code ");
+        assert_ne!(labelled, V2319, "the capture's rule carries the label");
+        for title in ["Claude Code", "✳ Claude Code"] {
+            assert_eq!(
+                titled_view_of(&labelled, title).agent_in_view.as_deref(),
+                Some("Claude Code"),
+                "{title:?}: the placeholder is never compared as a name"
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_view_with_its_panel_keeps_an_agent_named_as_the_title() {
+        let cases = [
+            (
+                "v162",
+                include_str!("fixtures/v162-agent-view-idle.txt"),
+                "Agent A python wait",
+            ),
+            (
+                "v191",
+                include_str!("fixtures/v191-agent-view-box-keys-shell-pill.txt"),
+                "Sleeper B",
+            ),
+        ];
+        for (name, text, agent) in cases {
+            assert_eq!(
+                titled_view_of(text, &format!("✳ {agent}"))
+                    .agent_in_view
+                    .as_deref(),
+                Some(agent),
+                "{name}: only a main-view dialog's rule is the session's name"
+            );
+        }
+    }
+
     /// The main conversation in view, the box holding the keys, nothing
     /// stashed or typed, and `panel` under the box with `main` in view.
     fn main_view(panel: &[&str]) -> ViewReading {
@@ -1253,13 +1371,27 @@ mod tests {
                 },
             ),
         ];
-        let wrong: Vec<String> = cases
-            .iter()
-            .filter_map(|(name, text, expected)| {
-                let got = view_of(text);
-                (got != *expected).then(|| format!("{name}: wanted {expected:?}, got {got:?}"))
-            })
-            .collect();
+        // Captures read with the terminal title the session had.
+        let titled: Vec<(&str, &str, &str, ViewReading)> = vec![(
+            "v2319",
+            V2319,
+            V2319_TITLE,
+            ViewReading {
+                dialog: true,
+                ..main_view(&[])
+            },
+        )];
+        let wrong: Vec<String> =
+            cases
+                .iter()
+                .map(|(name, text, expected)| (name, view_of(text), expected))
+                .chain(titled.iter().map(|(name, text, title, expected)| {
+                    (name, titled_view_of(text, title), expected)
+                }))
+                .filter_map(|(name, got, expected)| {
+                    (got != *expected).then(|| format!("{name}: wanted {expected:?}, got {got:?}"))
+                })
+                .collect();
         assert!(
             wrong.is_empty(),
             "captures read the wrong view:\n{}",

@@ -60,6 +60,14 @@ A daemon a client, `bridge` or verb starts inherits none of the caller's handles
 
 Measuring an elevated daemon against an ordinary one on a builder needs the real ordinary profile: under a `RUSTLING_TULIP_CONFIG_DIR` override both profiles resolve to one folder. With no daemon running, rename the real ordinary config folder aside, set `RUSTLING_TULIP_BINARIES_DIR` and `RUSTLING_TULIP_WORKTREES_DIR` to scratch folders and `RUSTLING_TULIP_CLAUDE` to a path that does not exist, and rename the folder back afterwards. An SSH logon of an administrator is High; a Medium process comes from a scheduled task with `-LogonType Interactive -RunLevel Limited` while the console session is logged on, and a daemon such a task starts comes through the WMI launch, since the task's job refuses breakaway.
 
+## Reproducing a terminal fault
+
+The CLI verbs send no `Resize`, so reproducing a fault at a given width needs a small client that sends `hello`, then `resize` with `claim: true`.
+
+Keep scratch repos outside the checkout: a scratch folder under this repo makes Claude ask about the repo's `.mcp.json` server (`rt-driver`) before the first prompt.
+
+A session's `scrollback.bin` holds the raw ConPTY output and can be replayed into any emulator, which makes it the first stop for a garbled-terminal report.
+
 ## Looking at a UI change
 
 To look at a UI change, run `.\rt.ps1 native-shot <view>`: it writes a PNG of the real client window over a scripted fake daemon (`apps/native/examples/shot.rs`) to `.tmp\shots\` and prints its path (it draws Nord, the default theme; the UI specs pin Contrast in the harness). Read the PNG, and show the user before and after shots for any visual choice.

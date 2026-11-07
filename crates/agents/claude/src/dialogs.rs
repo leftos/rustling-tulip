@@ -14,7 +14,8 @@
 //!
 //! The parsers key on the text Claude Code 2.1.307 draws (the captures in
 //! the daemon's `screen/fixtures/`), never on colour, which the rows do not
-//! carry.
+//! carry. Claude Code 2.1.319 also draws a named session's name in a rule
+//! under a permission dialog, the screen's last row.
 
 use std::cmp::Ordering;
 
@@ -820,9 +821,20 @@ fn rule_indices(rows: &[String]) -> Vec<usize> {
         .collect()
 }
 
-/// The index of the first row under the last rule, or 0 with no rule.
+/// The index of the first row under the last rule, or 0 with no rule. A
+/// labelled rule with only blank rows under it (the one Claude Code 2.1.319
+/// draws the session's name in under a permission dialog) closes the screen
+/// and is passed over; a bare rule there still starts below it.
 fn after_last_rule(rows: &[String]) -> usize {
-    rule_indices(rows).last().map_or(0, |&index| index + 1)
+    rule_indices(rows)
+        .iter()
+        .rev()
+        .find(|&&index| {
+            let closes = rows[index + 1..].iter().all(|row| row.trim().is_empty());
+            let labelled = !rows[index].trim().trim_matches(RULE_CHAR).trim().is_empty();
+            !(closes && labelled)
+        })
+        .map_or(0, |&index| index + 1)
 }
 
 /// The keys that give `answer` to `prompt`.
@@ -1180,7 +1192,9 @@ pub(crate) fn read_view(rows: &[String]) -> ViewReading {
     // A named session draws its name where an agent's description goes, so
     // the rule's text is an agent only with more to say so: the panel's
     // agent row in view, or with no panel, a dialog in the box's place or
-    // the agent's placeholder in the box.
+    // the agent's placeholder in the box. Under a main-view dialog the rule
+    // still carries the session's own name; the daemon drops a label equal
+    // to the session's terminal title.
     let agent_shown = if panel.is_empty() {
         dialog || box_first_row(rows, &rules).is_some_and(is_agent_placeholder)
     } else {
@@ -1613,6 +1627,33 @@ mod tests {
             .iter()
             .map(|option| (option.number, option.label.clone()))
             .collect()
+    }
+
+    /// A two-option permission dialog with its footer, then `under`.
+    fn permission_over(under: &[String]) -> Vec<String> {
+        let mut screen = permission(
+            &[" ❯ 1. Yes", "   2. No"],
+            Some(" Esc to cancel · Tab to amend"),
+        );
+        screen.extend(under.iter().cloned());
+        screen
+    }
+
+    #[test]
+    fn a_labelled_rule_under_a_dialog_hides_nothing() {
+        let named = format!("{} my-session ─", "─".repeat(28));
+        let screen = read(&permission_over(&[named, String::new()]));
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        assert_eq!(
+            screen.prompt.map(|prompt| prompt.subject),
+            Some("calc.py".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_bare_rule_under_a_dialog_starts_below_it() {
+        let screen = read(&permission_over(&[rule(), String::new()]));
+        assert_eq!(screen.prompt, None, "nothing under the last rule");
     }
 
     #[test]
