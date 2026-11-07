@@ -61,9 +61,12 @@
 
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge · release vNext
   - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext
-  - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
+  - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
 - [ ] RT-1126 Precache the phone app's hashed assets so its first offline open is complete
 - [ ] RT-1152 Spike GPUI on iOS: the session list in the simulator, text input and Return · release vNext+1
+- [ ] RT-1208 Show the connection state on the phone's session screen · release vNext
+- [ ] RT-1209 Update the phone's device row when Remote access switches off · release vNext
+- [ ] RT-1210 Keep the phone's header and a usable composer above the keyboard · release vNext
 
 ## Wave 5 — Attention feed on the desktop
 
@@ -94,7 +97,6 @@
 - [ ] RT-686 Update a connected remote host's daemon from the client, with automatic session recovery
 - [ ] RT-99 Pick between candidates when a clicked path matches several files
 - [ ] RT-100 Open an unchanged fetched file from the local cache
-- [/] RT-101 Paste an image or drop a file into a remote session · release vNext
 - [ ] RT-102 Resume a remote connection without replaying scrollback
 - [ ] RT-590 Fail a spawn whose secret Credential Manager refuses, instead of hanging
 - [ ] RT-536 Host SSH remote sessions on Linux and macOS machines
@@ -136,7 +138,25 @@
   - [ ] RT-1083 Move to the start or end of the text with Ctrl+Home/End (Cmd+Up/Down on macOS) in multi-line text boxes
   - [ ] RT-1084 Send from the Chat message box with Cmd+Enter on macOS
   - [ ] RT-1085 Send the preset wizard's inline prompt with Ctrl+Enter
-- [ ] RT-1088 Let an agent try to break the desktop Chat view and the phone session screen against a real Claude session · release vNext
+- [ ] RT-1196 Polish found by RT-1088's smoke run of desktop Chat and the phone · release vNext
+  - [ ] RT-1201 Draw a queued prompt below the turn it waits on in desktop Chat · release vNext
+  - [ ] RT-1211 Drop the finish-setting-up line in the installed phone app · release vNext
+  - [ ] RT-1212 Say No sessions on an empty phone Home · release vNext
+  - [ ] RT-1213 Name a pasted prompt's turn in Summary and leave Interrupted out of the turns · release vNext
+  - [ ] RT-1214 Keep a pane on Chat across a Restart · release vNext
+  - [ ] RT-1219 Name a tool once in its Chat row · release vNext
+- [ ] RT-1197 Hide Claude Code's pasted_content wrapper in a pasted prompt's bubble · release vNext
+- [ ] RT-1198 Keep single line breaks in a reply in desktop Chat · release vNext
+- [ ] RT-1199 Keep desktop Chat's live row free of breaks at chunk boundaries · release vNext
+- [ ] RT-1200 Let desktop Chat interrupt a running turn · release vNext
+- [ ] RT-1202 Show the plan's text in the Chat plan card · release vNext
+- [ ] RT-1203 Read and answer the Edit permission prompt that follows plan approval · release vNext
+- [ ] RT-1204 Clear stale characters on Claude's prompt row in the terminal · release vNext
+- [ ] RT-1205 Show the first reply after /compact once · release vNext
+- [ ] RT-1206 Say how much of a tool's output Chat cut, and offer the rest · release vNext
+- [ ] RT-1207 Shape and order right-to-left text in desktop Chat · release vNext
+- [ ] RT-1218 Refresh desktop Chat without switching the view away and back · release vNext
+- [ ] RT-1221 Render Markdown on the phone's session screen · release vNext
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
@@ -299,6 +319,10 @@
   - [ ] RT-812 Check that a window minimised in front of the driven client never hands it the foreground
 - [ ] RT-840 Sign the installer's uninstaller too
 - [ ] RT-861 Forget a driver id's bounds in UI specs once it stops being drawn
+- [ ] RT-1215 Keep a driven client's Settings off the owner's login entry · release vNext
+- [ ] RT-1216 Let a driven client add a local repo without the folder picker · release vNext
+- [ ] RT-1217 Make the simulator helper reset idb and swipe slowly · release vNext
+- [ ] RT-1220 Give a driven run's real Claude its own config folder instead of the owner's ~/.claude · release vNext
 
 ## macOS
 
@@ -546,6 +570,12 @@
 - [ ] RT-1183 Send a push round's targets concurrently so one slow push service holds no other device
 - [ ] RT-1187 Don't count or push a session removed before the push trigger reads its update
 - [ ] RT-1188 Give pane_header_fit.rs a test-map row so rt.ps1 test -Validate passes
+- [ ] RT-1190 Stop a file drop's uploads and say so when its pane changes session or its host reconnects
+- [ ] RT-1191 Read dropped files off the UI thread
+- [ ] RT-1192 Claim the session's size when a file drop pastes, as a paste does
+- [ ] RT-1193 Keep alacritty_terminal's types inside term.rs and screen.rs
+- [ ] RT-1194 Try the daemon's screen on libghostty-vt behind a feature and measure it
+- [ ] RT-1223 Wake a parked accounts driver when a client connects as another leaves
 
 ## Design files
 
@@ -568,7 +598,7 @@
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
-- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-101, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, RT-1111, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
+- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, RT-1111, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
 - [remote-access.md](remote-access.md) — RT-686, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
 - [screen-status.md](screen-status.md) — RT-289, RT-754
