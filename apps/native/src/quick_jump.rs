@@ -16,6 +16,8 @@ pub enum EntryKind {
     Tab,
     Session,
     Repo,
+    /// A registered folder that is not a git repository.
+    PlainRepo,
     Workspace,
     Dir,
 }
@@ -29,15 +31,16 @@ impl EntryKind {
             Self::Tab => "[TAB]",
             Self::Session => "[SESSION]",
             Self::Repo => "[REPO]",
+            Self::PlainRepo | Self::Dir => "[DIR]",
             Self::Workspace => "[WS]",
-            Self::Dir => "[DIR]",
         }
     }
 
     /// The entry kind of a sidebar container of `kind`; `None` for the
     /// kinds the palette does not list.
-    fn of_container(kind: ContainerKind) -> Option<Self> {
+    fn of_container(kind: ContainerKind, plain: bool) -> Option<Self> {
         match kind {
+            ContainerKind::Repo if plain => Some(Self::PlainRepo),
             ContainerKind::Repo => Some(Self::Repo),
             ContainerKind::Workspace => Some(Self::Workspace),
             ContainerKind::Dir => Some(Self::Dir),
@@ -156,6 +159,8 @@ pub struct ContainerInput {
     pub key: String,
     pub id: String,
     pub kind: ContainerKind,
+    /// A registered folder that is not a git repository.
+    pub plain: bool,
     pub name: String,
     pub host_name: String,
 }
@@ -265,7 +270,7 @@ fn session_entries<'a>(
 
 fn container_entry(container: &ContainerInput) -> Option<Entry> {
     Some(Entry {
-        kind: EntryKind::of_container(container.kind)?,
+        kind: EntryKind::of_container(container.kind, container.plain)?,
         primary: container.name.clone(),
         secondary: container.host_name.clone(),
         action: JumpAction::SelectContainer {
@@ -406,6 +411,7 @@ mod tests {
             key: format!("{}:{id}", kind.tag()),
             id: id.to_owned(),
             kind,
+            plain: false,
             name: name.to_owned(),
             host_name: host_name.to_owned(),
         }
@@ -439,6 +445,22 @@ mod tests {
             ],
             containers: vec![container(ContainerKind::Repo, "r1", "yaat", "This PC")],
         }
+    }
+
+    #[test]
+    fn a_plain_folder_repo_reads_dir() {
+        let plain = ContainerInput {
+            plain: true,
+            ..container(ContainerKind::Repo, "r3", "notes", "This PC")
+        };
+        let entries = build_entries(
+            &JumpInputs {
+                containers: vec![plain],
+                ..JumpInputs::default()
+            },
+            &FocusHistory::default(),
+        );
+        assert_eq!(names(&entries), ["[DIR] notes"]);
     }
 
     #[test]

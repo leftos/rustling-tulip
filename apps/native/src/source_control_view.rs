@@ -164,7 +164,7 @@ impl RootView {
     /// The pinned repo, when it is still registered on the shown host.
     fn sc_pinned(&self) -> Option<&str> {
         self.sc_pin_on_shown()
-            .filter(|id| self.sc_repos().iter().any(|repo| repo.id == *id))
+            .filter(|id| self.sc_git_repos().any(|repo| repo.id == *id))
     }
 
     /// The shown host's registered repos.
@@ -172,12 +172,15 @@ impl RootView {
         self.sidebar.repos_of(&self.sc_shown)
     }
 
+    /// The shown host's registered git repos: a plain folder has no git
+    /// surfaces.
+    fn sc_git_repos(&self) -> impl Iterator<Item = &RepoEntry> + '_ {
+        self.sc_repos().iter().filter(|repo| repo.is_git)
+    }
+
     pub(crate) fn sc_sections(&self) -> Vec<Section> {
-        sections(
-            self.sc_repos(),
-            self.sc_focused_members(),
-            self.sc_pin_on_shown(),
-        )
+        let repos: Vec<RepoEntry> = self.sc_git_repos().cloned().collect();
+        sections(&repos, self.sc_focused_members(), self.sc_pin_on_shown())
     }
 
     /// `key` as the persisted collapse and height entries name it on the
@@ -252,10 +255,9 @@ impl RootView {
         done
     }
 
-    /// Every registered repo's main tree on the shown host.
+    /// Every registered git repo's main tree on the shown host.
     fn sc_main_keys(&self) -> Vec<ScKey> {
-        self.sc_repos()
-            .iter()
+        self.sc_git_repos()
             .map(|repo| ScKey {
                 repo_id: repo.id.clone(),
                 worktree: None,
@@ -293,12 +295,18 @@ impl RootView {
     }
 
     /// Whether the picker's button shows: the source-control panel is up,
-    /// the focused session names no repos, and two or more are registered.
+    /// the focused session names no repos, and two or more git repos are
+    /// registered.
     fn sc_picker_offered(&self) -> bool {
         self.sidebar.activity() == Activity::SourceControl
             && !self.sidebar.is_collapsed()
             && self.sc_focused_members().is_none()
-            && self.sidebar.all_repos().nth(1).is_some()
+            && self
+                .sidebar
+                .all_repos()
+                .filter(|(_, repo)| repo.is_git)
+                .nth(1)
+                .is_some()
     }
 
     /// Closes the picker once its button no longer shows, so its menu and
@@ -324,23 +332,26 @@ impl RootView {
             repo_id: None,
             checked: pinned.is_none(),
         };
-        let repos = self.sidebar.all_repos().map(|(host, repo)| {
-            let entry = pin_entry(host, &repo.id);
-            ScPickerRow {
-                selector: format!("sc-picker-{entry}"),
-                label: repo.name.clone(),
-                checked: pinned.as_deref() == Some(entry.as_str()),
-                repo_id: Some(entry),
-            }
-        });
+        let repos = self
+            .sidebar
+            .all_repos()
+            .filter(|(_, repo)| repo.is_git)
+            .map(|(host, repo)| {
+                let entry = pin_entry(host, &repo.id);
+                ScPickerRow {
+                    selector: format!("sc-picker-{entry}"),
+                    label: repo.name.clone(),
+                    checked: pinned.as_deref() == Some(entry.as_str()),
+                    repo_id: Some(entry),
+                }
+            });
         std::iter::once(auto).chain(repos).collect()
     }
 
     /// What the panel shows now.
     #[must_use]
     pub fn source_control_panel(&self) -> ScPanel {
-        let repos = self.sc_repos();
-        if repos.is_empty() {
+        if self.sc_git_repos().next().is_none() {
             return ScPanel {
                 refresh: false,
                 picker: None,
@@ -351,17 +362,28 @@ impl RootView {
         }
         let members = self.sc_focused_members();
         let sections = self.sc_sections();
+        if sections.is_empty() {
+            // A focused session whose members are plain folders has nothing
+            // git to show, and the panel says so as it does with no git repo.
+            return ScPanel {
+                refresh: false,
+                picker: None,
+                context: None,
+                sections: Vec::new(),
+                empty_hint: Some(NO_REPOS_HINT),
+            };
+        }
         let picker = self.sc_picker_offered().then(|| {
             let name = self
                 .sc_pinned()
-                .and_then(|id| repos.iter().find(|repo| repo.id == id))
+                .and_then(|id| self.sc_git_repos().find(|repo| repo.id == id))
                 .map_or(AUTO_LABEL, |repo| repo.name.as_str());
             format!("{name} ▾")
         });
         ScPanel {
             refresh: true,
             picker,
-            context: self.sc_context(members.map(<[SessionMember]>::len), &sections),
+            context: self.sc_context(members.map(|_| sections.len()), &sections),
             sections: sections
                 .iter()
                 .map(|section| self.sc_row(section))
@@ -370,10 +392,10 @@ impl RootView {
         }
     }
 
-    /// The context line: the focused session and its repo count, else the
-    /// shown repo and whether it is pinned.
-    fn sc_context(&self, member_count: Option<usize>, sections: &[Section]) -> Option<ScContext> {
-        if let Some(count) = member_count {
+    /// The context line: the focused session and the number of git sections
+    /// it shows, else the shown repo and whether it is pinned.
+    fn sc_context(&self, git_sections: Option<usize>, sections: &[Section]) -> Option<ScContext> {
+        if let Some(count) = git_sections {
             let session = self.focused_session()?;
             let label = self
                 .sidebar

@@ -342,13 +342,13 @@ fn recover_as_choices_match_folder_flags(cx: &mut TestAppContext) {
     h.click_on("recover-as-plain");
     assert_eq!(
         recover_as(&mut h, "plain").as_deref(),
-        Some("Shell running claude --resume"),
-        "the only choice stays"
+        Some("Register D:\\notes as a folder, then Claude session"),
+        "a plain folder can be registered too"
     );
 }
 
 #[gpui::test]
-fn an_entry_without_shell_resume_offers_the_agent_only(cx: &mut TestAppContext) {
+fn an_entry_without_shell_resume_offers_no_shell(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.load(&Fixture {
@@ -380,7 +380,10 @@ fn an_entry_without_shell_resume_offers_the_agent_only(cx: &mut TestAppContext) 
     for (id, only) in [
         ("git", "Register D:\\proj as a repo, then Claude session"),
         ("reg", "Claude session in r1"),
-        ("plain", "Claude session"),
+        (
+            "plain",
+            "Register D:\\notes as a folder, then Claude session",
+        ),
     ] {
         assert_eq!(
             row(&mut h, id).recover_as.as_deref(),

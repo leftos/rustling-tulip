@@ -84,7 +84,11 @@ impl StashModel {
 
     /// Drop every repo not in `repos`; `true` when a shown one went.
     fn retain_repos(&mut self, repos: &[RepoEntry]) -> bool {
-        let ids: HashSet<&str> = repos.iter().map(|repo| repo.id.as_str()).collect();
+        let ids: HashSet<&str> = repos
+            .iter()
+            .filter(|repo| repo.is_git)
+            .map(|repo| repo.id.as_str())
+            .collect();
         let before = self.lists.len() + self.failed.len() + self.pending.len();
         self.lists.retain(|repo, _| ids.contains(repo.as_str()));
         self.requested.retain(|repo| ids.contains(repo.as_str()));
@@ -354,6 +358,25 @@ mod tests {
             .map(|id| json!({ "id": id, "name": id, "path": format!("D:/{id}") }))
             .collect();
         serde_json::from_value(json!({ "type": "repos", "repos": repos })).expect("repos fixture")
+    }
+
+    fn plain_repos(ids: &[&str]) -> DaemonMessage {
+        let repos: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| json!({ "id": id, "name": id, "path": format!("D:/{id}"), "is_git": false }))
+            .collect();
+        serde_json::from_value(json!({ "type": "repos", "repos": repos })).expect("repos fixture")
+    }
+
+    #[test]
+    fn a_folder_repo_keeps_no_stash_list() {
+        let mut model = StashModel::default();
+        assert!(model.apply(&stashes("r1", None, 2)));
+        assert!(
+            model.apply(&plain_repos(&["r1"])),
+            "a plain folder is no git repo"
+        );
+        assert!(model.list("r1").is_none(), "its list goes with it");
     }
 
     #[test]

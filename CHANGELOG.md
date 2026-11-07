@@ -8,6 +8,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Ctrl+Shift+P opens a jump palette: type to find any open pane, tab, session, repo or workspace, and Enter goes straight there.
 - A Ctrl+clicked file fetched from another host shows its size, progress and a progress bar in its toast, with Cancel until the download is done.
+- Add repo accepts any folder: one that is not a git repo shows as DIR and opens sessions in place, with no worktree or branch choice.
 
 ### Fixed
 

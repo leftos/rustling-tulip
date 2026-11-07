@@ -475,8 +475,8 @@ fn recover_options(item: &SessionHistoryItem, names: &Names) -> (Vec<RecoverOpti
 }
 
 /// The `label` choice for a row known by its folder: a session in the
-/// registered repo at the folder, else registering the folder as a repo first
-/// when it is a git repo; none otherwise.
+/// registered repo at the folder, else registering the folder as a repo (or
+/// as a folder, when it holds no `.git`) first; none with no folder path.
 fn folder_agent_options(
     item: &SessionHistoryItem,
     names: &Names,
@@ -494,12 +494,17 @@ fn folder_agent_options(
             label: format!("{label} session in {repo}"),
             resumes: true,
         }]
-    } else if item.folder_is_git_repo && !path.is_empty() {
+    } else if !path.is_empty() {
+        let as_what = if item.folder_is_git_repo {
+            "repo"
+        } else {
+            "folder"
+        };
         vec![RecoverOption {
             how: RecoverAs::RegisterRepoThenAgent {
                 path: path.to_owned(),
             },
-            label: format!("Register {path} as a repo, then {label} session"),
+            label: format!("Register {path} as a {as_what}, then {label} session"),
             resumes: true,
         }]
     } else {
@@ -1937,7 +1942,12 @@ mod tests {
                     path: "D:\\proj".to_owned(),
                 },
             ),
-            (&plain, RecoverAs::Agent),
+            (
+                &plain,
+                RecoverAs::RegisterRepoThenAgent {
+                    path: "D:\\proj".to_owned(),
+                },
+            ),
         ] {
             let (options, default) = recover_options(item, &Names::default());
             let hows: Vec<RecoverAs> = options.iter().map(|o| o.how.clone()).collect();
@@ -1991,9 +2001,13 @@ mod tests {
         assert_eq!(
             options(&plain, &names),
             (
-                vec!["Shell running claude --resume".to_owned()],
+                vec![
+                    "Register D:\\proj as a folder, then Claude session".to_owned(),
+                    "Shell running claude --resume".to_owned()
+                ],
                 Some(RecoverAs::ShellResume)
-            )
+            ),
+            "an unregistered plain folder: register offered, shell chosen"
         );
 
         let claude = lost("c", "2026-09-28T09:00:00Z");
@@ -2001,6 +2015,43 @@ mod tests {
         let row = dialog.row("c").expect("row");
         assert!(!row.shows_recover_as, "a Claude session recovers as itself");
         assert_eq!(row.chosen().map(|o| o.how.clone()), Some(RecoverAs::Agent));
+    }
+
+    #[test]
+    fn a_plain_folder_offers_registering_it_as_a_folder() {
+        let mut plain = lost("f", "2026-09-28T09:00:00Z");
+        plain.entry.spawn_config = None;
+        plain.entry.current_cwd = Some("D:\\notes".to_owned());
+        plain.folder_is_git_repo = false;
+        let names = Names::default();
+        let options = folder_agent_options(&plain, &names, "Claude");
+        assert_eq!(options.len(), 1, "the register choice alone");
+        assert_eq!(
+            options[0].label,
+            "Register D:\\notes as a folder, then Claude session"
+        );
+        assert_eq!(
+            options[0].how,
+            RecoverAs::RegisterRepoThenAgent {
+                path: "D:\\notes".to_owned()
+            }
+        );
+
+        let mut git = plain.clone();
+        git.folder_is_git_repo = true;
+        assert_eq!(
+            folder_agent_options(&git, &names, "Claude")[0].label,
+            "Register D:\\notes as a repo, then Claude session",
+            "a git folder keeps its label"
+        );
+
+        let mut no_path = plain.clone();
+        no_path.entry.current_cwd = None;
+        no_path.entry.primary_cwd = None;
+        assert!(
+            folder_agent_options(&no_path, &names, "Claude").is_empty(),
+            "no path, nothing to register"
+        );
     }
 
     #[test]

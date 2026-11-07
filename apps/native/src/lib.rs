@@ -3428,6 +3428,7 @@ impl RootView {
                     key: c.key,
                     id: c.id,
                     kind: c.kind,
+                    plain: c.plain,
                     name: c.name,
                 })
                 .collect(),

@@ -2392,9 +2392,14 @@ fn chevron(container: &Container, t: &UiTheme) -> AnyElement {
 
 /// A container kind's icon, the selector suffix naming it and its colour;
 /// none for Unbound.
-fn kind_icon(kind: ContainerKind, t: &UiTheme) -> Option<(&'static str, &'static str, u32)> {
+fn kind_icon(
+    kind: ContainerKind,
+    plain: bool,
+    t: &UiTheme,
+) -> Option<(&'static str, &'static str, u32)> {
     match kind {
         ContainerKind::Workspace => Some((SIDEBAR_WORKSPACE_ICON, "ws", t.lilac)),
+        ContainerKind::Repo if plain => Some((SIDEBAR_FOLDER_ICON, "folder", t.text_2)),
         ContainerKind::Repo => Some((SIDEBAR_BRANCH_ICON, "repo", t.text_2)),
         ContainerKind::Shell => Some((SIDEBAR_SHELL_ICON, "shell", t.text_2)),
         ContainerKind::Dir | ContainerKind::Detached => {
@@ -2420,7 +2425,7 @@ fn container_parts(offset: i8, shift: i8, container: &Container, t: &UiTheme) ->
 /// The container's kind icon, when its kind has one.
 fn container_icon(container: &Container, t: &UiTheme) -> Option<AnyElement> {
     let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
-    let (path, suffix, color) = kind_icon(container.kind, t)?;
+    let (path, suffix, color) = kind_icon(container.kind, container.plain, t)?;
     let selector = part(&format!("icon-{suffix}"));
     Some(
         div()
@@ -2461,7 +2466,7 @@ fn container_info_parts(
             .font_weight(crate::fonts::mono_weight())
             .text_size(ui_px_at(offset, TAG_TEXT_SIZE))
             .text_color(gpui::rgb(t.subtle))
-            .child(container.kind.tag())
+            .child(container.tag())
             .into_any_element(),
     );
     let count = part("count");
@@ -3308,6 +3313,7 @@ mod tests {
             key: format!("repo:{id}"),
             id: id.to_owned(),
             kind: ContainerKind::Repo,
+            plain: false,
             name: id.to_owned(),
             summary: None,
             hover: None,

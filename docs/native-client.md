@@ -65,6 +65,8 @@ This doc records the decisions a change to the client needs to know; what each f
 
   The banner folds with its container, and only DIR and SH containers draw one: a repo, workspace, tab, Unbound or Detached container never does, nor an SH with no cwd.
 
+  A registered folder that is not a git repo is a repo container tagged `DIR` with the folder icon, where a git repo keeps `REPO` and the branch icon; its menu, ordering and drag are the repo container's, and the jump palette's row for it reads `[DIR]`. Source Control and Stashes leave it out of their repo lists.
+
   `Add repo` registers that folder straight away (`AddRepo { path, name: None }`), opening no picker and leaving the toolbar's Add repo… start folder (`last_repo_dir`) alone. `Add workspace` accepts the scanned `VscodeWorkspaceSuggestion` as it stands (`AcceptVscodeWorkspaceSuggestion { watch: false }`), with no creator dialog and no `needs 2 repos` gate.
 
   The client sends `ScanVscodeWorkspaces` once for each distinct DIR or SH folder on a connection, keyed by the folder's normalized path (case-folded on Windows): a folder first seen in a session list or update, or regrouped by a repo or workspace registry change, is scanned then, and the same folder is never rescanned. Answers for a folder are dropped on `Welcome` and while the connection overlay is up, so a reconnect scans again.
@@ -144,7 +146,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   **Host path prompt** (`host_path_prompt.rs` model, `host_path_prompt_view.rs` view): Add repo is the one local-file action a remote host keeps, as a typed path. Its five entries (the sidebar note button, the ⋯ menu row, the empty-pane button and the spawn dialog's no-repos button, by click or Enter/Space) open a modal "Add a repo on {host}" instead of the folder picker, which stays the local behaviour; the ⋯ row's tooltip reads "Type the path of a folder on the host to register as a repo".
 
-  The field (placeholder "Full path on {host}", hint "A folder on {host} that holds a git repo.") has Cancel and Add after it: Tab cycles field, Cancel, Add; Enter adds and Esc closes. Add sends `AddRepo { path: the trimmed text, name: its last segment }` and closes, and a daemon refusal arrives as the usual error toast.
+  The field (placeholder "Full path on {host}", hint "A git repo or any folder on {host}.") has Cancel and Add after it: Tab cycles field, Cancel, Add; Enter adds and Esc closes. Add sends `AddRepo { path: the trimmed text, name: its last segment }` and closes, and a daemon refusal arrives as the usual error toast.
 
   The host may run another OS, so the client checks the text by string rules only (`repo_add.rs`, `RepoAdd::from_host_path`, `HostPathProblem`, `host_workspace_file`): empty, not a full path (a drive letter, `\\server` or `/` start) and a `..` segment are refused inline with the field kept, and the workspace creator's file field also wants a `.code-workspace` name. A typed host path never reads or writes `last_repo_dir` or `last_vscode_dir`.
 
@@ -868,7 +870,7 @@ The dialog (`recover.rs` model, `recover_view.rs` view) lists the last 7 days ne
 
 Unrecovered losses are pre-ticked; a row already recovered, or with no conversation to resume, is disabled with its reason. Each row offers its conversation candidates (the known id, else the newest) and, for plain-shell rows and rows with no spawn config, a "Recover as" choice limited to what the folder allows.
 
-The choices read the entry's agent descriptor: `{label} session`, `{label} session in {repo}` and `Register {path} as a repo, then {label} session`, the shell choice, and "Plain shell" always.
+The choices read the entry's agent descriptor: `{label} session`, `{label} session in {repo}` and `Register {path} as a repo, then {label} session` (`Register {path} as a folder, then {label} session` when the path is not a git repo; none for an empty path), the shell choice, and "Plain shell" always.
 
 The shell choice shows as the descriptor's `texts.shell_resume_label` (Claude: "Shell running claude --resume") only when the daemon flags the entry (`SessionHistoryItem.shell_resume`: the plugin has the `shell_resume` cap and the entry has a conversation to resume). A row with nothing to resume shows `texts.no_conversation`.
 
@@ -1075,7 +1077,7 @@ Ctrl+Shift+P (Cmd+Shift+P too on macOS; Alt held, or Ctrl and Cmd together, is n
 The palette is main-window only, as the spawn dialog is, so it has no `Overlay` variant. The state (entries, ranking, highlight, Enter's `JumpAction`) is plain Rust in `quick_jump.rs`, unit-tested; `quick_jump_view.rs` draws and routes keys; `RootView::jump_to` runs the action.
 
 - **Panel**: 560 px wide, 64 px under the window's top, a query field (placeholder "Jump to a pane, tab, session or repo") over rows that scroll past twelve. Up and Down move the highlight, Enter or a click jumps.
-- **Rows**, across every connected host: `[PANE]` (each pane on screen in any tab, by its session's label), `[TAB]`, `[SESSION]` (a sidebar session in no pane), and `[REPO]`, `[WS]` and `[DIR]` (each sidebar container); a row of another host ends ` · host`.
+- **Rows**, across every connected host: `[PANE]` (each pane on screen in any tab, by its session's label), `[TAB]`, `[SESSION]` (a sidebar session in no pane), and `[REPO]`, `[WS]` and `[DIR]` (each sidebar container; `[DIR]` also tags a registered folder that is not a git repo); a row of another host ends ` · host`.
 - **Order**: with an empty query, panes and tabs by last focus (an in-memory history, lost on quit), then tabs never focused each with its panes, then sessions in no pane, then containers in sidebar order. A typed query ranks with `fuzzy.rs` (the spawn Target list's matcher), the kind tags never matched and the host name a second, lower-ranked field. With no match one dimmed row reads "No matching pane, tab, session or repo", and Enter keeps the palette open.
 - **Jumping**: a pane row focuses that exact pane (`show_session_on`), and a popped pane or tab brings its window forward; a tab row shows the tab; a session row places the session as a sidebar click does. A repo, workspace or folder row reveals its sidebar row, doing only what is needed: expanding the sidebar, showing Sessions, switching the Tabs view to Repos, setting the filter to All and unfolding its host; then it focuses the row and scrolls the sidebar to it. Rows vary in height, so the sidebar scrolls the container's group to the top (gpui `scroll_to_top_of_item`) only when its row is not fully in view.
 - **Preselected target**: a jump to a repo or workspace makes it the Target of the next New Session opened from the toolbar, `+ Session` or Ctrl+Shift+N (`spawn_form::initial_target` takes it ahead of the focused pane's session). It clears on a click on another sidebar row, a leaf or a host header, on a pane focus, on a change of the sidebar's view or filter, and when its container leaves the registry; a New Session dialog that opens with it uses it up.

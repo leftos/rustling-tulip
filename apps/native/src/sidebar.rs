@@ -327,6 +327,9 @@ pub struct Container {
     /// The id a manual session order is stored under.
     pub id: String,
     pub kind: ContainerKind,
+    /// A registered folder that is not a git repository: the row reads `DIR`
+    /// with the folder icon, though its kind stays [`ContainerKind::Repo`].
+    pub plain: bool,
     pub name: String,
     /// The last launch's one-line summary; repos and workspaces that have
     /// launched before have one.
@@ -347,6 +350,12 @@ pub struct Container {
 }
 
 impl Container {
+    /// The tag the row draws: `DIR` for a plain folder, else its kind's.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        if self.plain { "DIR" } else { self.kind.tag() }
+    }
+
     /// The row's hover text: its own, else the last launch's summary.
     #[must_use]
     pub fn tooltip(&self) -> Option<String> {
@@ -3039,6 +3048,11 @@ fn container(
         })
         .collect();
     let key = container_key(kind, id);
+    let plain = kind == ContainerKind::Repo
+        && inputs
+            .repos
+            .iter()
+            .any(|repo| repo.id == id && !repo.is_git);
     let summary = match kind {
         ContainerKind::Repo => inputs
             .repos
@@ -3063,6 +3077,7 @@ fn container(
         key,
         id: id.to_owned(),
         kind,
+        plain,
         name,
         summary,
         hover: None,
@@ -3314,6 +3329,7 @@ fn tab_view_container(
         key,
         id: id.to_owned(),
         kind,
+        plain: false,
         name,
         summary: None,
         hover: Some(hover),
@@ -4305,6 +4321,24 @@ pub(crate) mod tests {
         )
         .build();
         assert_eq!(keys(&tree), ["ws:w1", "repo:r2"]);
+    }
+
+    #[test]
+    fn a_plain_folder_repo_is_tagged_dir() {
+        let mut plain = repo("r3", "D:\\src\\r3");
+        plain.is_git = false;
+        let tree = Fixture::new(vec![repo("r1", "D:\\src\\r1"), plain], vec![], vec![]).build();
+        let tag = |key: &str| {
+            tree.iter()
+                .find(|c| c.key == key)
+                .map(|c| (c.kind, c.tag()))
+        };
+        assert_eq!(tag("repo:r1"), Some((ContainerKind::Repo, "REPO")));
+        assert_eq!(
+            tag("repo:r3"),
+            Some((ContainerKind::Repo, "DIR")),
+            "a plain folder keeps the repo kind but reads DIR"
+        );
     }
 
     #[test]

@@ -1487,6 +1487,38 @@ fn repo_container_draws_its_icon_tag_count_and_attention_badge(cx: &mut TestAppC
     );
 }
 
+#[gpui::test]
+fn a_plain_folder_repo_draws_dir_and_the_folder_icon(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut plain = repo("r3", "D:/notes");
+    plain.is_git = false;
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1"), plain],
+        sessions: vec![session("s3").in_repo("r3").build()],
+        tabs: vec![tab("t1", &pane("p1", Some("s3")))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert!(
+        drawn(&mut h, "container-repo:r3-icon-folder"),
+        "the folder icon"
+    );
+    assert!(
+        !drawn(&mut h, "container-repo:r3-icon-repo"),
+        "not the branch icon"
+    );
+    assert!(drawn(&mut h, "container-repo:r3-tag"));
+    let tag = h.root(|root, _| {
+        root.sidebar_containers()
+            .iter()
+            .find(|c| c.key == "repo:r3")
+            .map(|c| c.tag().to_owned())
+    });
+    assert_eq!(tag.as_deref(), Some("DIR"), "the row reads DIR");
+    assert!(drawn(&mut h, "container-repo:r1-icon-repo"), "a git repo");
+}
+
 /// Repos `ra`, `rb` and `rc`, manual order by name: `rb` holds a working
 /// session, `rc` one awaiting input, `ra` none.
 fn sort_fixture() -> Fixture {

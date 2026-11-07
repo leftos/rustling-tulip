@@ -94,6 +94,31 @@ fn two_repos() -> Fixture {
     }
 }
 
+fn plain_repo(id: &str, path: &str) -> protocol::RepoEntry {
+    let mut repo = repo(id, path);
+    repo.is_git = false;
+    repo
+}
+
+#[gpui::test]
+fn a_plain_folder_repo_is_no_section_and_no_picker_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1"), plain_repo("r2", "D:/notes")],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("activity-source-control");
+    let sections = panel(&mut h).sections;
+    assert_eq!(sections.len(), 1, "only the git repo gets a section");
+    assert_eq!(sections[0].id, "r1::");
+    assert_eq!(
+        h.root(|root, _| root.sc_picker_rows().len()),
+        2,
+        "Auto and the git repo alone"
+    );
+}
+
 #[gpui::test]
 fn the_rail_switches_to_source_control_and_persists(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -727,6 +752,44 @@ fn no_repos_shows_the_register_hint(cx: &mut TestAppContext) {
         ); 0]
     );
     assert_eq!(badge(&mut h), None);
+}
+
+#[gpui::test]
+fn a_session_in_a_plain_folder_shows_the_register_hint(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").in_repo("r2").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1"), plain_repo("r2", "D:/notes")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("activity-source-control");
+
+    let panel = panel(&mut h);
+    assert!(panel.sections.is_empty(), "a plain folder has no section");
+    assert_eq!(panel.context, None, "no repo counted over nothing");
+    assert_eq!(
+        panel.empty_hint,
+        Some("Register a repo from the Sessions sidebar to inspect changes here."),
+        "the panel says why it is empty"
+    );
+}
+
+#[gpui::test]
+fn a_mixed_workspace_counts_only_its_git_member(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let s1 = session("s1")
+        .members(&[("r1", "main", "D:/src/r1"), ("r2", "main", "D:/notes")])
+        .build();
+    let mut fixture = Fixture::single(s1);
+    fixture.repos = vec![repo("r1", "D:/src/r1"), plain_repo("r2", "D:/notes")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("activity-source-control");
+
+    let panel = panel(&mut h);
+    assert_eq!(panel.sections.len(), 1, "the git member alone");
+    assert_eq!(
+        panel.context.expect("the focused session's line").text,
+        "s1 · 1 repo",
+        "one repo, not two"
+    );
 }
 
 #[gpui::test]

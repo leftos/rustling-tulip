@@ -58,7 +58,7 @@ impl HostPathPrompt {
     }
 
     pub(crate) fn hint(&self) -> String {
-        format!("A folder on {} that holds a git repo.", self.host)
+        format!("A git repo or any folder on {}.", self.host)
     }
 
     pub(crate) fn focus(&self) -> PromptControl {
@@ -123,7 +123,7 @@ mod tests {
         let prompt = HostPathPrompt::new("box");
         assert_eq!(prompt.title(), "Add a repo on box");
         assert_eq!(prompt.placeholder(), "Full path on box");
-        assert_eq!(prompt.hint(), "A folder on box that holds a git repo.");
+        assert_eq!(prompt.hint(), "A git repo or any folder on box.");
     }
 
     #[test]

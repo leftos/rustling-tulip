@@ -145,6 +145,22 @@ fn typing_narrows_and_highlights_the_best_match(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_plain_folder_repo_reads_dir(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut plain = repo("notes", "C:/notes");
+    plain.is_git = false;
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.repos = vec![repo("r1", "C:/r1"), plain];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    focus_terminal(&mut h, "p1");
+    h.keys("ctrl-shift-p");
+
+    type_text(&mut h, "not");
+
+    assert_eq!(rows(&mut h), ["[DIR] notes"]);
+}
+
+#[gpui::test]
 fn enter_on_a_tab_shows_that_tab(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut fixture = Fixture::single(session("s1").build());
