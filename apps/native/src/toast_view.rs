@@ -82,8 +82,10 @@ pub fn card_height(toast: &AppToast) -> f32 {
 /// An answer button's press: the wait it answers and the choice made.
 type AnswerPress = Rc<dyn Fn(DateTime<Utc>, PromptChoice, &mut App)>;
 
-/// A click on a control of the card.
-type ClickPress = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+/// A click on a control of the card, or on several of them at once: a Needs
+/// you or Finished toast's title and body run the same press as its
+/// `Go to pane` button.
+type SharedPress = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 /// What the card's controls do.
 pub struct ToastPresses {
@@ -91,9 +93,9 @@ pub struct ToastPresses {
     pub answer: AnswerPress,
     /// `Go to pane`'s press; on an account toast, which has no pane to go
     /// to, a press on the card's body.
-    pub go: ClickPress,
+    pub go: SharedPress,
     /// ×'s press.
-    pub dismiss: ClickPress,
+    pub dismiss: SharedPress,
 }
 
 /// The answer button at `index`, primary when it is the first.
@@ -212,7 +214,7 @@ fn answer_block(ask: &AskBlock, sent: bool, answer: &AnswerPress, cx: &App) -> D
 }
 
 /// The card's `Go to pane` button, running `press`.
-fn go_to_pane_button(press: ClickPress, cx: &App) -> AnyElement {
+fn go_to_pane_button(press: SharedPress, cx: &App) -> AnyElement {
     let t = theme(cx);
     outlined_button(
         fonts::ui_text_size(cx),
@@ -225,46 +227,18 @@ fn go_to_pane_button(press: ClickPress, cx: &App) -> AnyElement {
     )
     .text_color(gpui::rgb(t.text_2))
     .child(GO_TO_PANE)
-    .on_click(press)
+    .on_click(move |event, window, cx| (*press)(event, window, cx))
     .into_any_element()
 }
 
-/// `toast`'s card, filling its parent; `sent` when an answer is out for its
-/// session.
-pub fn toast_card(toast: &AppToast, sent: bool, presses: ToastPresses, cx: &App) -> Div {
+/// The card's title and body, taking `press` when a click on them goes to the
+/// toast's pane.
+fn head_block(toast: &AppToast, press: Option<SharedPress>, cx: &App) -> AnyElement {
     let t = theme(cx);
-    let accent = match toast.kind {
-        AppToastKind::NeedsYou { .. } => t.asking,
-        AppToastKind::Finished | AppToastKind::Account => t.muted,
-    };
-    // An account toast has no pane to go to: its body takes the press.
-    let (go, body_press) = match toast.kind {
-        AppToastKind::NeedsYou { .. } | AppToastKind::Finished => {
-            (Some(go_to_pane_button(presses.go, cx)), None)
-        }
-        AppToastKind::Account => (None, Some(presses.go)),
-    };
-    let dismiss = div()
-        .id("toast-dismiss")
-        .driver_id(|| "toast-dismiss".to_owned())
-        .absolute()
-        .top(px(6.0))
-        .right(px(8.0))
-        .cursor_pointer()
-        .text_color(gpui::rgb(t.muted))
-        .child("×")
-        .on_click(presses.dismiss);
-    let answers = toast
-        .ask
-        .as_ref()
-        .map(|ask| answer_block(ask, sent, &presses.answer, cx));
-    let words = div()
+    let head = div()
         .flex()
         .flex_col()
-        .flex_1()
-        .min_w_0()
         .gap(px(4.0))
-        .p(px(10.0))
         .child(
             crate::ellipsis::truncating(
                 &format!("toast-title-{}", toast.key.1),
@@ -280,7 +254,63 @@ pub fn toast_card(toast: &AppToast, sent: bool, presses: ToastPresses, cx: &App)
                 .line_clamp(2)
                 .text_color(gpui::rgb(t.text_2))
                 .child(toast.body.clone()),
-        )
+        );
+    match press {
+        Some(press) => head
+            .id("toast-body")
+            .cursor_pointer()
+            .on_click(move |event, window, cx| (*press)(event, window, cx))
+            .into_any_element(),
+        None => head.into_any_element(),
+    }
+}
+
+/// `toast`'s card, filling its parent; `sent` when an answer is out for its
+/// session.
+pub fn toast_card(toast: &AppToast, sent: bool, presses: ToastPresses, cx: &App) -> Div {
+    let t = theme(cx);
+    let accent = match toast.kind {
+        AppToastKind::NeedsYou { .. } => t.asking,
+        AppToastKind::Finished | AppToastKind::Account => t.muted,
+    };
+    // An account toast has no pane to go to: its body takes the press. A
+    // Needs you or Finished toast goes to its pane from `Go to pane` and
+    // from its title and body, never from its answers or its ×.
+    let (go_button, head_press, body_press) = match toast.kind {
+        AppToastKind::NeedsYou { .. } | AppToastKind::Finished => (
+            Some(go_to_pane_button(Rc::clone(&presses.go), cx)),
+            Some(Rc::clone(&presses.go)),
+            None,
+        ),
+        AppToastKind::Account => (None, None, Some(Rc::clone(&presses.go))),
+    };
+    let dismiss = div()
+        .id("toast-dismiss")
+        .driver_id(|| "toast-dismiss".to_owned())
+        .absolute()
+        .top(px(6.0))
+        .right(px(8.0))
+        .cursor_pointer()
+        .text_color(gpui::rgb(t.muted))
+        .child("×")
+        // It sits over the title, whose press goes to the pane: the press
+        // ends here, never running both.
+        .on_click(move |event, window, cx| {
+            (*presses.dismiss)(event, window, cx);
+            cx.stop_propagation();
+        });
+    let answers = toast
+        .ask
+        .as_ref()
+        .map(|ask| answer_block(ask, sent, &presses.answer, cx));
+    let words = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .gap(px(4.0))
+        .p(px(10.0))
+        .child(head_block(toast, head_press, cx))
         .child(
             div()
                 .mt_auto()
@@ -288,13 +318,13 @@ pub fn toast_card(toast: &AppToast, sent: bool, presses: ToastPresses, cx: &App)
                 .flex_col()
                 .gap(px(6.0))
                 .children(answers)
-                .children(go.map(|go| div().flex().child(go))),
+                .children(go_button.map(|go| div().flex().child(go))),
         );
     let words = match body_press {
         Some(press) => words
             .id("toast-body")
             .cursor_pointer()
-            .on_click(press)
+            .on_click(move |event, window, cx| (*press)(event, window, cx))
             .into_any_element(),
         None => words.into_any_element(),
     };
@@ -397,8 +427,8 @@ impl ToastView {
 }
 
 /// A press that takes `key`'s toast down through `root`.
-fn dismiss_press(root: WeakEntity<RootView>, key: SessionKey) -> ClickPress {
-    Box::new(move |_, _, cx| {
+fn dismiss_press(root: WeakEntity<RootView>, key: SessionKey) -> SharedPress {
+    Rc::new(move |_, _, cx| {
         let dismissed = root.update(cx, |root, cx| root.dismiss_app_toast(&key, cx));
         if let Err(err) = dismissed {
             tracing::debug!("toast dismissed after the root view went: {err:#}");
@@ -424,7 +454,7 @@ impl Render for ToastView {
             }),
             go: match self.toast.kind {
                 AppToastKind::NeedsYou { .. } | AppToastKind::Finished => {
-                    Box::new(move |_, _, cx| RootView::toast_go_to_pane(&go_root, &go_key, cx))
+                    Rc::new(move |_, _, cx| RootView::toast_go_to_pane(&go_root, &go_key, cx))
                 }
                 AppToastKind::Account => dismiss_press(go_root, go_key),
             },

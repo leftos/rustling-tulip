@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Clicking a Needs you or Finished toast, the Windows notification or the app's own, now shows that pane's tab and gives the pane keyboard focus.
 - Once an agent started by hand in a shell exits, `rustling-tulipd sessions` shows a plain shell again and the pane drops the agent's title.
 - A Claude started by hand in a shell, or a session whose transcript folder is still new, no longer fills the daemon log with errors and warnings.
 

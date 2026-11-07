@@ -13,6 +13,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{ClientMessage, PendingDevice, Secret};
 use qrcodegen::{QrCode, QrCodeEcc};
 
+use crate::target::HostKey;
+
 /// How long an unapproved request stays listed after the device asked.
 const REQUEST_LIFETIME_SECS: i64 = 300;
 
@@ -92,19 +94,26 @@ pub enum PairingAction {
     Approve { request_id: String },
     /// Decline the request `request_id`.
     Deny { request_id: String },
+    /// Show `host`'s session `id` and give its pane the keyboard: a press on
+    /// a Needs you or Finished toast.
+    GoTo { host: HostKey, id: String },
     /// A press on the toast body: bring the app forward.
     Open,
 }
 
 impl PairingAction {
     /// The action a toast activation carries: `approve:<id>` or `deny:<id>`
-    /// from a button, no argument or an empty one from a press on the toast
+    /// from a button, `go:<id>` or `go:<id>:<host key>` from a Needs you or
+    /// Finished toast, no argument or an empty one from a press on the toast
     /// body, and nothing from any other argument.
     #[must_use]
     pub fn from_activation(arg: Option<&str>) -> Option<Self> {
         let Some(arg) = arg.filter(|arg| !arg.is_empty()) else {
             return Some(Self::Open);
         };
+        if let Some(session) = arg.strip_prefix("go:") {
+            return Self::parse_go_to(session);
+        }
         let (kind, request_id) = arg.split_once(':')?;
         if request_id.is_empty() || request_id.contains(':') {
             return None;
@@ -130,6 +139,39 @@ impl PairingAction {
     #[must_use]
     pub fn deny_arg(request_id: &str) -> String {
         format!("deny:{request_id}")
+    }
+
+    /// The launch argument a Needs you or Finished toast about `host`'s
+    /// session `session_id` carries: `go:<id>`, with the host's wire key
+    /// after it when another host lists the session. A session id never
+    /// holds a `:`; a wire key may (`ssh:<name>`), so the host key takes
+    /// everything after the first one.
+    #[must_use]
+    pub fn go_arg(host: &HostKey, session_id: &str) -> String {
+        match host.wire() {
+            None => format!("go:{session_id}"),
+            Some(key) => format!("go:{session_id}:{key}"),
+        }
+    }
+
+    /// What `go:`'s `session` (the argument after the prefix) names: no
+    /// host key, or an empty one, is refused.
+    fn parse_go_to(session: &str) -> Option<Self> {
+        let (id, host) = match session.split_once(':') {
+            Some((id, key)) => (id, Some(key)),
+            None => (session, None),
+        };
+        if id.is_empty() || host.is_some_and(str::is_empty) {
+            return None;
+        }
+        let host = match host {
+            None => HostKey::Local,
+            Some(key) => HostKey::Remote(key.to_owned()),
+        };
+        Some(Self::GoTo {
+            host,
+            id: id.to_owned(),
+        })
     }
 }
 
@@ -173,7 +215,9 @@ pub struct ToastActionQueue {
 impl ToastActionQueue {
     /// A press arrived: applied now, held for the list, or dropped.
     pub fn arrive(&mut self, action: PairingAction) -> Arrival {
-        if action == PairingAction::Open {
+        // A body press needs no list, and neither does a go-to-session press
+        // about a toast the owner's own client raised.
+        if matches!(action, PairingAction::Open | PairingAction::GoTo { .. }) {
             return Arrival::Apply(action);
         }
         match self.list {
@@ -517,12 +561,13 @@ impl PairingState {
             .count()
     }
 
-    /// Whether a toast's `action` still applies at `now`: a body press
-    /// always does, a button only while its request is listed.
+    /// Whether a toast's `action` still applies at `now`: a body press and a
+    /// go-to-session press always do, a button only while its request is
+    /// listed.
     #[must_use]
     pub fn applies(&self, action: &PairingAction, now: DateTime<Utc>) -> bool {
         match action {
-            PairingAction::Open => true,
+            PairingAction::Open | PairingAction::GoTo { .. } => true,
             PairingAction::Approve { request_id } | PairingAction::Deny { request_id } => self
                 .rows(now)
                 .iter()
@@ -604,6 +649,7 @@ mod tests {
         Arrival, DialogPhase, PairingAction, PairingState, PairingToast, ToastActionQueue,
         approve_message, deny_message, qr_matrix, qr_payload,
     };
+    use crate::target::HostKey;
 
     /// The instant every fixture request asked at.
     fn asked_at() -> DateTime<Utc> {
@@ -1007,6 +1053,67 @@ mod tests {
             PairingAction::from_activation(Some("")),
             Some(PairingAction::Open),
             "the COM activator hands a body click over as an empty string"
+        );
+    }
+
+    #[test]
+    fn from_activation_reads_a_go_to_session_press() {
+        let local = PairingAction::GoTo {
+            host: HostKey::Local,
+            id: "abc".to_owned(),
+        };
+        assert_eq!(PairingAction::from_activation(Some("go:abc")), Some(local));
+        assert_eq!(
+            PairingAction::from_activation(Some(&PairingAction::go_arg(&HostKey::Local, "abc"))),
+            Some(PairingAction::GoTo {
+                host: HostKey::Local,
+                id: "abc".to_owned(),
+            }),
+            "the local argument round-trips"
+        );
+        for (arg, key) in [
+            ("go:abc:box.ts.net", "box.ts.net"),
+            ("go:abc:ssh:box", "ssh:box"),
+        ] {
+            assert_eq!(
+                PairingAction::from_activation(Some(arg)),
+                Some(PairingAction::GoTo {
+                    host: HostKey::Remote(key.to_owned()),
+                    id: "abc".to_owned(),
+                }),
+                "{arg:?}"
+            );
+        }
+        assert_eq!(
+            PairingAction::from_activation(Some(&PairingAction::go_arg(
+                &HostKey::Remote("ssh:box".to_owned()),
+                "abc"
+            ))),
+            Some(PairingAction::GoTo {
+                host: HostKey::Remote("ssh:box".to_owned()),
+                id: "abc".to_owned(),
+            }),
+            "a wire key holding a colon round-trips"
+        );
+        for refused in ["go:", "go::box", "go:abc:"] {
+            assert_eq!(
+                PairingAction::from_activation(Some(refused)),
+                None,
+                "{refused:?}"
+            );
+        }
+        assert_eq!(
+            PairingAction::from_activation(Some("approve:r1")),
+            Some(PairingAction::Approve {
+                request_id: "r1".to_owned()
+            }),
+            "the pairing buttons are unchanged"
+        );
+        assert_eq!(
+            PairingAction::from_activation(Some("deny:r1")),
+            Some(PairingAction::Deny {
+                request_id: "r1".to_owned()
+            })
         );
     }
 

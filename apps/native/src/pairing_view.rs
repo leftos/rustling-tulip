@@ -178,8 +178,9 @@ impl RootView {
     /// Applies a toast press. Approve… brings the window forward and,
     /// unless a dialog is already open, opens the request's dialog as the
     /// row's Approve… does; Deny declines the request; a press on the body
-    /// only brings the window forward. A press for a request the client no
-    /// longer lists is dropped.
+    /// only brings the window forward; a Needs you or Finished press shows
+    /// its session's pane and gives it the keyboard. A press for a request
+    /// the client no longer lists is dropped.
     fn apply_pairing_action(
         &mut self,
         action: PairingAction,
@@ -208,6 +209,21 @@ impl RootView {
             PairingAction::Deny { request_id } => {
                 if self.pairing_row(&request_id).is_some() {
                     self.deny_pairing(&request_id, window, cx);
+                }
+            }
+            PairingAction::GoTo { host, id } => {
+                window.activate_window();
+                // A client already up shows the session, or nothing when no
+                // host lists it. One still starting holds the press as the
+                // command line's session is held: the daemon sends the
+                // sessions before the layout, and the pane to focus is only
+                // known once both are in.
+                if self.sessions_loaded && self.tabs.is_loaded() {
+                    self.select_session_on(&host, &id, window, cx);
+                } else {
+                    tracing::info!(?host, id, "pairing: a toast press waits for the layout");
+                    self.wanted_session = Some((host, id));
+                    self.try_wanted_session(window, cx);
                 }
             }
             PairingAction::Open => window.activate_window(),
@@ -297,7 +313,9 @@ impl RootView {
 
     /// Hands a pressed toast's action to the window, from whichever thread
     /// the OS raises it on.
-    pub(crate) fn pairing_sink(&self) -> PairingActionSink {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pairing_sink(&self) -> PairingActionSink {
         let actions = self.pairing.actions.clone();
         Arc::new(move |action: PairingAction| {
             if let Err(err) = actions.unbounded_send(action) {

@@ -1855,6 +1855,7 @@ impl Opener for OpenRecorder {
 pub struct NotifyRecorder {
     shown: Mutex<Vec<(String, String)>>,
     silent: Mutex<Vec<bool>>,
+    launches: Mutex<Vec<Option<String>>>,
     pairing: Mutex<Vec<PairingToast>>,
     action: Mutex<Option<PairingActionSink>>,
     state: Mutex<NotifyState>,
@@ -1867,6 +1868,7 @@ impl Default for NotifyRecorder {
         Self {
             shown: Mutex::new(Vec::new()),
             silent: Mutex::new(Vec::new()),
+            launches: Mutex::new(Vec::new()),
             pairing: Mutex::new(Vec::new()),
             action: Mutex::new(None),
             state: Mutex::new(NotifyState::On),
@@ -1886,6 +1888,18 @@ impl NotifyRecorder {
             .clone()
     }
 
+    /// The launch argument the notification at `index` carried, if it asked
+    /// for one.
+    #[must_use]
+    pub fn launch(&self, index: usize) -> Option<String> {
+        self.launches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(index)
+            .cloned()
+            .flatten()
+    }
+
     /// Presses the last pairing toast: with a button's argument, or with
     /// `None` for a press on the toast body.
     pub fn activate(&self, arg: Option<&str>) {
@@ -1902,7 +1916,7 @@ impl NotifyRecorder {
 }
 
 impl Notifier for NotifyRecorder {
-    fn notify(&self, title: &str, body: &str, silent: bool) {
+    fn notify(&self, title: &str, body: &str, silent: bool, launch: Option<&str>) {
         self.shown
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1911,6 +1925,10 @@ impl Notifier for NotifyRecorder {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(silent);
+        self.launches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(launch.map(str::to_owned));
     }
 
     fn notify_pairing(&self, toast: &PairingToast, on_action: PairingActionSink) {
@@ -2987,6 +3005,37 @@ impl<'a> Harness<'a> {
     pub fn activate_pairing_toast(&mut self, arg: Option<&str>) {
         self.cx.run_until_parked();
         self.notifier.activate(arg);
+        self.cx.run_until_parked();
+    }
+
+    /// The launch argument each notification carried, oldest first, in the
+    /// order of [`Harness::notified`], once the view has settled.
+    pub fn notified_launches(&mut self) -> Vec<Option<String>> {
+        self.cx.run_until_parked();
+        self.notifier
+            .launches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Presses the OS notification at `index` as the activator delivers a
+    /// press on it: its launch argument, parsed and handed to the window's
+    /// toast actions, then the view settles.
+    pub fn activate_os_toast(&mut self, index: usize) {
+        self.cx.run_until_parked();
+        let launch = self.notifier.launch(index);
+        self.activate_toast_arg(launch.as_deref());
+    }
+
+    /// Hands `arg`, the argument a toast's press carries, to the window as
+    /// its activator does, then lets the view settle.
+    pub fn activate_toast_arg(&mut self, arg: Option<&str>) {
+        let Some(action) = PairingAction::from_activation(arg) else {
+            return;
+        };
+        let sink = self.root(|root, _| root.pairing_sink());
+        sink(action);
         self.cx.run_until_parked();
     }
 

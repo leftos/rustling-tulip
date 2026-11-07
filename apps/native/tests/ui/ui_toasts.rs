@@ -229,6 +229,99 @@ fn go_to_pane_selects_the_session_and_closes_the_toast(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn a_click_on_a_needs_you_toasts_body_goes_to_its_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, &sessions(&["s2"]), json!({}));
+    h.cx.deactivate_window();
+    h.send(needs_you("s2"));
+    let mut toast = h.popout_window();
+    toast.run_until_parked();
+    let card = toast.debug_bounds("toast-card").expect("the card is drawn");
+    // On the title, clear of every button.
+    toast.simulate_click(
+        point(card.origin.x + px(40.0), card.origin.y + px(18.0)),
+        Modifiers::none(),
+    );
+    toast.run_until_parked();
+
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned))
+            .as_deref(),
+        Some("t-0"),
+        "the session's tab is on screen"
+    );
+    let root = h.root.clone();
+    assert!(
+        h.cx.update(|window, cx| root.read(cx).pane_terminal_focused("p-0", window, cx)),
+        "its terminal has the keyboard"
+    );
+    assert!(
+        h.cx.update(|window, _| window.is_window_active()),
+        "the main window is in front"
+    );
+    assert_eq!(h.window_count(), 1, "the toast closed");
+    h.sent();
+    h.keys("x");
+    assert_eq!(h.sent_input("s2"), b"x", "typing reaches the session");
+}
+
+#[gpui::test]
+fn a_press_on_an_answer_button_does_not_change_the_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = raised(cx, &dir, permission());
+    let before = h.root(|root, _| root.active_tab_id().map(str::to_owned));
+    let mut toast = h.popout_window();
+
+    press(&mut toast, "toast-answer-0");
+
+    assert_eq!(answers(h.sent()).len(), 1, "the press answered the prompt");
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        before,
+        "the tab stays as it was"
+    );
+    assert_eq!(h.window_count(), 2, "and the toast stays up");
+}
+
+#[gpui::test]
+fn a_press_on_the_close_button_only_closes_the_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, &sessions(&["s2"]), json!({}));
+    let before = h.root(|root, _| root.active_tab_id().map(str::to_owned));
+    h.cx.deactivate_window();
+    h.send(needs_you("s2"));
+    let mut toast = h.popout_window();
+
+    press(&mut toast, "toast-dismiss");
+
+    assert_eq!(h.window_count(), 1, "the toast closed");
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        before,
+        "the tab stayed as it was"
+    );
+    assert!(
+        !h.cx.update(|window, _| window.is_window_active()),
+        "and the main window stayed behind"
+    );
+}
+
+#[gpui::test]
+fn hovering_the_close_button_keeps_the_toast_held(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, &sessions(&["s2"]), json!({}));
+    finish(&mut h, "s2");
+    let mut toast = h.popout_window();
+    toast.run_until_parked();
+    let dismiss = toast.debug_bounds("toast-dismiss").expect("the × is drawn");
+
+    toast.simulate_mouse_move(dismiss.center(), None, Modifiers::none());
+    h.advance(Duration::from_secs(60));
+
+    assert_eq!(h.window_count(), 2, "held while the pointer rests on the ×");
+}
+
+#[gpui::test]
 fn a_toast_expires_after_its_time(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir, &sessions(&["s2"]), json!({}));

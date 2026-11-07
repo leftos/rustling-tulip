@@ -83,9 +83,10 @@ pub type PairingActionSink = Arc<dyn Fn(PairingAction) + Send + Sync>;
 /// Shows OS notifications.
 pub trait Notifier: Send + Sync {
     /// Shows a toast titled `title` with `body`, without Windows' own
-    /// notification sound when `silent`. Called off the UI thread; a failure
-    /// is logged, never returned.
-    fn notify(&self, title: &str, body: &str, silent: bool);
+    /// notification sound when `silent`, carrying `launch` as the argument a
+    /// press on the toast hands back to the activator when there is one.
+    /// Called off the UI thread; a failure is logged, never returned.
+    fn notify(&self, title: &str, body: &str, silent: bool, launch: Option<&str>);
 
     /// Raises the pairing toast for `toast`, its buttons handing what was
     /// pressed to `on_action`. Called off the UI thread; a failure is logged,
@@ -122,14 +123,14 @@ pub struct SystemNotifier;
 
 #[cfg(windows)]
 impl Notifier for SystemNotifier {
-    fn notify(&self, title: &str, body: &str, silent: bool) {
+    fn notify(&self, title: &str, body: &str, silent: bool, launch: Option<&str>) {
         let audio = if silent {
             toast_activation::ToastAudio::Silent
         } else {
             toast_activation::ToastAudio::Windows
         };
         let registered = toast_activation::registered();
-        let xml = toast_activation::toast_xml(title, body, &[], registered, audio);
+        let xml = toast_activation::toast_xml(title, body, launch, &[], registered, audio);
         if let Err(err) = show_toast(&xml, None) {
             tracing::warn!("notification {title:?} was not shown: {err}");
         }
@@ -335,7 +336,7 @@ fn toasts_enabled() -> windows::core::Result<bool> {
 
 #[cfg(not(windows))]
 impl Notifier for SystemNotifier {
-    fn notify(&self, title: &str, _: &str, _: bool) {
+    fn notify(&self, title: &str, _: &str, _: bool, _: Option<&str>) {
         tracing::debug!("no OS notifications on this platform: {title:?}");
     }
 
@@ -369,7 +370,7 @@ impl Notifier for SystemNotifier {
 pub struct SilentNotifier;
 
 impl Notifier for SilentNotifier {
-    fn notify(&self, title: &str, _: &str, _: bool) {
+    fn notify(&self, title: &str, _: &str, _: bool, _: Option<&str>) {
         tracing::debug!("offscreen window: notification {title:?} not shown");
     }
 
@@ -901,7 +902,7 @@ impl RootView {
         let notifier = Arc::clone(&self.notifications.notifier);
         cx.background_executor()
             .spawn(async move {
-                notifier.notify(&title, &body, true);
+                notifier.notify(&title, &body, true, None);
             })
             .detach();
     }
@@ -987,6 +988,9 @@ impl RootView {
         }
         let title = toast.title.to_owned();
         let body = toast.body.to_owned();
+        // A press on it shows its session's pane, as its own card's title
+        // and `Go to pane` do.
+        let launch = PairingAction::go_arg(toast.host, toast.session_id);
         // The toast's sound is the client's own (none when it is off), never
         // Windows' beside it, so every app toast is raised silent.
         let kind = toast.kind;
@@ -999,7 +1003,7 @@ impl RootView {
                 if let Some(choice) = chime {
                     sound_with_toast(notifier.as_ref(), sounder.as_ref(), &choice, kind);
                 }
-                notifier.notify(&title, &body, true);
+                notifier.notify(&title, &body, true, Some(&launch));
             })
             .detach();
     }

@@ -12,10 +12,10 @@ use crate::support;
 use chrono::Utc;
 use gpui::{TestAppContext, px};
 use protocol::{
-    AccountEventKind, AlertKind, AttentionReason, DaemonMessage, KeyState, SessionSnapshot,
-    SummarySource, TabEntry,
+    AccountEventKind, AlertKind, AttentionReason, ClientMessage, DaemonMessage, KeyState,
+    SessionSnapshot, SummarySource, TabEntry,
 };
-use rustling_tulip_native::{BundledSound, ClipSource, NotifyKind, NotifyState};
+use rustling_tulip_native::{BundledSound, ClipSource, NotifyKind, NotifyState, target::Target};
 use std::time::Duration;
 use support::{
     Fixture, Harness, Opened, TestDir, account, accounts_updated, pane, repo, session,
@@ -95,6 +95,135 @@ fn awaiting_input_attention_notifies_needs_you_with_label(cx: &mut TestAppContex
     assert_eq!(
         h.notified(),
         [shown("Needs you", "fix login: Waiting for input")]
+    );
+}
+
+#[gpui::test]
+fn an_os_needs_you_toast_press_shows_its_pane_and_focuses_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.tabs.push(tab("t-0", &pane("p-0", Some("s2"))));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.cx.deactivate_window();
+
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+
+    assert_eq!(
+        h.notified_launches(),
+        [Some("go:s2".to_owned())],
+        "the toast names its session"
+    );
+    h.activate_os_toast(0);
+
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned))
+            .as_deref(),
+        Some("t-0"),
+        "the session's tab is on screen"
+    );
+    let root = h.root.clone();
+    assert!(
+        h.cx.update(|window, cx| root.read(cx).pane_terminal_focused("p-0", window, cx)),
+        "its terminal has the keyboard"
+    );
+    assert!(
+        h.cx.update(|window, _| window.is_window_active()),
+        "the main window is in front"
+    );
+    h.sent();
+    h.keys("x");
+    assert_eq!(h.sent_input("s2"), b"x", "typing reaches the session");
+}
+
+/// The layout messages among `sent`: what a placement asks the daemon for.
+fn placements(sent: Vec<ClientMessage>) -> Vec<ClientMessage> {
+    sent.into_iter()
+        .filter(|msg| {
+            matches!(
+                msg,
+                ClientMessage::CreateTab { .. }
+                    | ClientMessage::ReplacePaneSession { .. }
+                    | ClientMessage::SplitPane { .. }
+            )
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn an_os_toast_press_before_the_layout_loads_focuses_the_saved_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build(), session("s2").build()],
+    });
+    h.sent();
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified_launches(),
+        [Some("go:s2".to_owned())],
+        "the toast names its session"
+    );
+
+    // The press lands once the sessions are in and before the layout is.
+    h.activate_os_toast(0);
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t-0", &pane("p-0", Some("s2"))),
+        ],
+    });
+
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned))
+            .as_deref(),
+        Some("t-0"),
+        "the session's saved tab is on screen"
+    );
+    let root = h.root.clone();
+    assert!(
+        h.cx.update(|window, cx| root.read(cx).pane_terminal_focused("p-0", window, cx)),
+        "its terminal has the keyboard"
+    );
+    assert!(
+        placements(h.sent()).is_empty(),
+        "the session was shown where it is, not placed again"
+    );
+}
+
+#[gpui::test]
+fn an_os_toast_press_for_a_session_no_host_lists_is_not_held(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let before = h.root(|root, _| root.active_tab_id().map(str::to_owned));
+    let root = h.root.clone();
+    let focused =
+        h.cx.update(|window, cx| root.read(cx).pane_terminal_focused("p1", window, cx));
+    h.sent();
+
+    h.activate_toast_arg(Some("go:missing:ssh:box"));
+    let ssh = Target::parse_ssh("box", None).expect("an ssh target");
+    h.host(&ssh).connect();
+    h.host(&ssh).send(DaemonMessage::Sessions {
+        sessions: vec![session("missing").build()],
+    });
+
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        before,
+        "the tab did not change when the press landed, nor when the list did"
+    );
+    let root = h.root.clone();
+    assert_eq!(
+        h.cx.update(|window, cx| root.read(cx).pane_terminal_focused("p1", window, cx)),
+        focused,
+        "the keyboard stayed where it was"
+    );
+    assert!(
+        placements(h.sent()).is_empty(),
+        "the press was not held to be placed once the list came"
     );
 }
 

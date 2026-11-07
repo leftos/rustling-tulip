@@ -88,6 +88,8 @@ The views:
 
 The `support` builders for account specs (`apps/native/tests/support/mod.rs`) are `account`, `auto_switch`, `accounts_reply` and `accounts_updated`; `Harness::reconnect_with_features` redoes the handshake with extra `Welcome.features` (`tests/ui/ui_accounts.rs` uses it to list `accounts`).
 
+An OS toast press is tested through the `NotifyRecorder` notifier: `Harness::notified_launches` lists the launch argument each notification carried, `Harness::activate_os_toast(index)` presses the notification at `index`, and `activate_toast_arg(arg)` presses with a raw argument, both delivering it through the window's activation sink as the toast activator does. `h.cx.deactivate_window()` simulates an inactive main window.
+
 ## Fake CLIs
 
 The `crates/agents/claude/fake/` shim (`fake-claude.cmd` or `fake-claude.sh`, plus `index.mjs`) replaces the real CLI in the e2e tier. The plugin returns it from `Agent::fake_cli` (`agent_api::FakeCli`, feature `test-support`), and the live harness (`apps/native/tests/support/live.rs`) sets each registered agent's override variable (`program_env_var()`, `RUSTLING_TULIP_CLAUDE` for Claude) to its fake through `agent-registry`, so the daemon path-resolves the CLI from that variable at spawn time.

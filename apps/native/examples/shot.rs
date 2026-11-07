@@ -933,8 +933,8 @@ fn permission_ask() -> AskBlock {
 fn idle_presses() -> ToastPresses {
     ToastPresses {
         answer: Rc::new(|_, _, _| {}),
-        go: Box::new(|_, _, _| {}),
-        dismiss: Box::new(|_, _, _| {}),
+        go: Rc::new(|_, _, _| {}),
+        dismiss: Rc::new(|_, _, _| {}),
     }
 }
 
@@ -1525,7 +1525,7 @@ impl Opener for NoOpener {
 struct NoNotifier;
 
 impl Notifier for NoNotifier {
-    fn notify(&self, _title: &str, _body: &str, _silent: bool) {}
+    fn notify(&self, _title: &str, _body: &str, _silent: bool, _launch: Option<&str>) {}
 
     fn state(&self) -> NotifyState {
         NotifyState::On

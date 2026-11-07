@@ -947,9 +947,10 @@ pub struct RootView {
     /// The launch-last replay waiting for the daemon's fresh branch name,
     /// if any.
     launch_last: launch_last::State,
-    /// The session named on the command line, focused once the tabs and
-    /// the sessions have arrived.
-    wanted_session: Option<String>,
+    /// The session named on the command line or by a press on its toast, and
+    /// the host that lists it: focused once the tabs and that host's
+    /// sessions have arrived.
+    wanted_session: Option<(HostKey, String)>,
     /// The daemon has sent its session list.
     sessions_loaded: bool,
     /// Why a request could not be carried out.
@@ -1570,7 +1571,7 @@ impl RootView {
             rail_tip: activity_bar::RailTipSuppression::default(),
             window_hover_override: None,
             launch_last: launch_last::State::default(),
-            wanted_session: wanted,
+            wanted_session: wanted.map(|id| (HostKey::Local, id)),
             sessions_loaded: false,
             status: String::new(),
             flyout_open: false,
@@ -3596,14 +3597,6 @@ impl RootView {
         self.show_session_on(host, id, window, cx);
     }
 
-    /// Shows the pane holding the session, or places the session when no
-    /// pane shows it, on the host that lists it; see
-    /// [`Self::show_session_on`].
-    fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let host = self.host_of_session(id);
-        self.show_session_on(&host, id, window, cx);
-    }
-
     /// Shows the pane holding `host`'s session `id`, or places the session
     /// when no pane shows it. A session without a terminal only has its
     /// attention and its unseen turn cleared.
@@ -3686,20 +3679,33 @@ impl RootView {
         self.send_to(&HostKey::Local, msg);
     }
 
-    /// Focuses the command line's session once, when the layout and the
-    /// session list are both in.
+    /// Focuses the wanted session once, when the layout and the session list
+    /// of its host are both in.
     fn try_wanted_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !(self.tabs.is_loaded() && self.sessions_loaded) {
+        if !self.tabs.is_loaded() {
             return;
         }
-        let Some(id) = self.wanted_session.take() else {
+        let Some((host, id)) = self.wanted_session.clone() else {
             return;
         };
-        if self.sidebar.session(&id).is_none() {
+        if !self.host_sessions_loaded(&host) {
+            return;
+        }
+        self.wanted_session = None;
+        if self.sidebar.session_on(&host, &id).is_none() {
             self.status = format!("session {id} not found");
             return;
         }
-        self.show_session(&id, window, cx);
+        self.show_session_on(&host, &id, window, cx);
+    }
+
+    /// Whether `host`'s session list has arrived: this PC's, or a remote
+    /// host's first list.
+    fn host_sessions_loaded(&self, host: &HostKey) -> bool {
+        match host {
+            HostKey::Local => self.sessions_loaded,
+            HostKey::Remote(_) => self.remote_lists_in.contains(host),
+        }
     }
 
     /// Reopens the pop-outs saved at the last quit, once per launch, the

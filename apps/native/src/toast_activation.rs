@@ -175,23 +175,32 @@ pub(crate) enum ToastAudio {
     Silent,
 }
 
-/// A toast's XML: `title` and `body` as its two lines, then `buttons`.
-/// `activation_types` writes each button's activation type; without it every
-/// button takes Windows' default, a foreground activation.
+/// A toast's XML: `title` and `body` as its two lines, then `buttons`, under
+/// the activation argument `launch` when there is one, which a press on the
+/// toast hands back to the activator. `activation_types` writes each
+/// button's activation type; without it every button takes Windows'
+/// default, a foreground activation.
 #[cfg(any(windows, test))]
 #[must_use]
 pub(crate) fn toast_xml(
     title: &str,
     body: &str,
+    launch: Option<&str>,
     buttons: &[ToastButton],
     activation_types: bool,
     audio: ToastAudio,
 ) -> String {
-    let mut xml = format!(
-        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual>",
-        escape(title),
-        escape(body)
-    );
+    let mut xml = String::from("<toast");
+    if let Some(launch) = launch {
+        xml.push_str(" launch=\"");
+        xml.push_str(&escape(launch));
+        xml.push('"');
+    }
+    xml.push_str("><visual><binding template=\"ToastGeneric\"><text>");
+    xml.push_str(&escape(title));
+    xml.push_str("</text><text>");
+    xml.push_str(&escape(body));
+    xml.push_str("</text></binding></visual>");
     if !buttons.is_empty() {
         xml.push_str("<actions>");
         for button in buttons {
@@ -236,6 +245,7 @@ pub(crate) fn pairing_toast_xml(toast: &PairingToast, activation_types: bool) ->
     toast_xml(
         &toast.title,
         &toast.body,
+        None,
         &buttons,
         activation_types,
         ToastAudio::Windows,
@@ -659,7 +669,8 @@ mod tests {
         ActivationKind, ToastAudio, ToastButton, activator_registry_entries, clsid_braced,
         installed_copy, pairing_toast_xml, parse_launch_args, shortcut_path, toast_xml,
     };
-    use crate::pairing::PairingToast;
+    use crate::pairing::{PairingAction, PairingToast};
+    use crate::target::HostKey;
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| (*arg).to_owned()).collect()
@@ -711,14 +722,21 @@ mod tests {
             arguments: "deny:a\"b".to_owned(),
             kind: ActivationKind::Background,
         };
-        let xml = toast_xml("t", "b", &[button], true, ToastAudio::Windows);
+        let xml = toast_xml("t", "b", None, &[button], true, ToastAudio::Windows);
         assert!(xml.contains("arguments=\"deny:a&quot;b\""), "{xml}");
     }
 
     #[test]
     fn toast_xml_without_buttons_has_no_actions() {
         assert_eq!(
-            toast_xml("Finished", "fix login", &[], true, ToastAudio::Windows),
+            toast_xml(
+                "Finished",
+                "fix login",
+                None,
+                &[],
+                true,
+                ToastAudio::Windows
+            ),
             "<toast><visual><binding template=\"ToastGeneric\"><text>Finished</text><text>fix login</text></binding></visual></toast>"
         );
     }
@@ -726,8 +744,59 @@ mod tests {
     #[test]
     fn a_silent_toast_asks_windows_for_no_sound() {
         assert_eq!(
-            toast_xml("Needs you", "fix login", &[], true, ToastAudio::Silent),
+            toast_xml(
+                "Needs you",
+                "fix login",
+                None,
+                &[],
+                true,
+                ToastAudio::Silent
+            ),
             "<toast><visual><binding template=\"ToastGeneric\"><text>Needs you</text><text>fix login</text></binding></visual><audio silent=\"true\"/></toast>"
+        );
+    }
+
+    #[test]
+    fn a_needs_you_toast_carries_its_session_in_launch() {
+        let here = PairingAction::go_arg(&HostKey::Local, "s2");
+        let xml = toast_xml(
+            "Needs you",
+            "fix login",
+            Some(&here),
+            &[],
+            true,
+            ToastAudio::Silent,
+        );
+        assert!(xml.starts_with("<toast launch=\"go:s2\">"), "{xml}");
+
+        let there = PairingAction::go_arg(&HostKey::Remote("ssh:box".to_owned()), "b1");
+        let xml = toast_xml(
+            "Needs you",
+            "fix login",
+            Some(&there),
+            &[],
+            true,
+            ToastAudio::Silent,
+        );
+        assert!(xml.starts_with("<toast launch=\"go:b1:ssh:box\">"), "{xml}");
+
+        let quoted = toast_xml(
+            "Needs you",
+            "fix login",
+            Some("go:a\"b"),
+            &[],
+            true,
+            ToastAudio::Windows,
+        );
+        assert!(
+            quoted.starts_with("<toast launch=\"go:a&quot;b\">"),
+            "the launch value is escaped: {quoted}"
+        );
+
+        let pairing = pairing_toast_xml(&toast("phone"), true);
+        assert!(
+            !pairing.contains("launch"),
+            "the pairing toast keeps today's XML: {pairing}"
         );
     }
 
