@@ -96,8 +96,9 @@ export function createConnection(deps: ConnectionDeps): Connection {
   let pairing: PairingState = INITIAL_PAIRING;
   // The token the daemon issued on this page visit: the next dial presents it
   // whether or not the store kept it.
-  // `null` while a forget is under way, or after one whose clear failed: the
-  // next dial presents no token without asking the store.
+  // `null` after the daemon refused the token, while a forget is under way, or
+  // after a forget whose clear failed: every dial presents no token without
+  // asking the store, until a new pairing issues one.
   let issuedToken: string | null | undefined;
   const listeners = new Set<(notice: ConnectionNotice) => void>();
 
@@ -113,6 +114,20 @@ export function createConnection(deps: ConnectionDeps): Connection {
       pairing = next;
       notify({ kind: "pairing", pairing });
     }
+  }
+
+  /**
+   * Stop presenting the token for the rest of this visit and redial without
+   * one, which lands on the pairing channel. The stored record stays, so the
+   * next page load presents it again.
+   */
+  function dropToken(): void {
+    issuedToken = null;
+    foldPairing({ type: "forgotten" });
+    // Run after the current dispatch has finished its effects.
+    void Promise.resolve().then(() => {
+      dispatch({ type: "tokenChanged" });
+    });
   }
 
   /**
@@ -268,8 +283,8 @@ export function createConnection(deps: ConnectionDeps): Connection {
       case "pairingLost":
         foldPairing({ type: "lost" });
         break;
-      case "forgetToken":
-        forgetToken();
+      case "dropToken":
+        dropToken();
         break;
     }
   }

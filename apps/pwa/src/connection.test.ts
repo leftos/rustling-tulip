@@ -249,7 +249,7 @@ test("machine_token_changed_drops_a_tap_dial_and_says_so", () => {
   }
 });
 
-test("machine_stored_token_refused_as_not_approved_is_forgotten", () => {
+test("machine_stored_token_refused_as_not_approved_is_dropped_for_the_visit", () => {
   const refused = step(READY, {
     type: "message",
     message: { type: "device_pair_failed", reason: "device not approved" },
@@ -258,7 +258,7 @@ test("machine_stored_token_refused_as_not_approved_is_forgotten", () => {
   expect(refused.state).toEqual({ name: "notApproved" });
   expect(refused.effects).toEqual([
     { type: "close" },
-    { type: "forgetToken" },
+    { type: "dropToken" },
     { type: "status", state: "notApproved" },
   ]);
   expect(setTimerEffects(refused.effects)).toEqual([]);
@@ -958,13 +958,14 @@ async function refusedStoredToken(
   return { ...h, first };
 }
 
-test("connection_refused_stored_token_is_forgotten_and_lands_in_pairing", async () => {
+test("connection_refused_stored_token_is_kept_and_the_visit_lands_in_pairing", async () => {
   const tokenStore = memoryTokenStore(DEVICE_TOKEN);
   const clear = vi.spyOn(tokenStore, "clear");
   const { first, sockets, notices } = await refusedStoredToken(DEVICE_NOT_APPROVED, tokenStore);
 
   expect(first.closed).toBe(true);
-  expect(clear).toHaveBeenCalledOnce();
+  expect(clear).not.toHaveBeenCalled();
+  expect(await tokenStore.get()).toBe(DEVICE_TOKEN);
   expect(sockets).toHaveLength(2);
   const second = socketAt(sockets, 1);
   second.open();
@@ -987,14 +988,52 @@ test("connection_refusal_for_another_reason_is_not_approved_and_keeps_the_token"
   expect(sockets).toHaveLength(1);
 });
 
-test("connection_failed_clear_still_redials_without_the_token", async () => {
+test("connection_dropped_token_is_not_presented_again_in_the_same_visit", async () => {
+  const tokenStore = memoryTokenStore(DEVICE_TOKEN);
+  const { connection, sockets } = await refusedStoredToken(DEVICE_NOT_APPROVED, tokenStore);
+
+  // Whatever dials next in this visit presents no token, though the store
+  // still holds it: no refuse-and-redial loop.
+  connection.tokenChanged();
+  await flush();
+
+  const last = socketAt(sockets, sockets.length - 1);
+  expect(sockets).toHaveLength(3);
+  last.open();
+  expect(sent(last)[0]).toMatchObject({ type: "hello", auth_token: "" });
+});
+
+test("connection_fresh_page_presents_the_kept_token_again", async () => {
+  const tokenStore = memoryTokenStore(DEVICE_TOKEN);
+  const refusedVisit = await refusedStoredToken(DEVICE_NOT_APPROVED, tokenStore);
+  refusedVisit.connection.stop();
+
+  const relaunched = harness({ tokenStore });
+  relaunched.connection.start();
+  await flush();
+  const socket = socketAt(relaunched.sockets, 0);
+  socket.open();
+
+  expect(sent(socket)[0]).toMatchObject({ type: "hello", auth_token: DEVICE_TOKEN });
+});
+
+test("connection_forget_with_a_failed_clear_still_redials_without_the_token", async () => {
   const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
   const tokenStore: TokenStore = {
     get: () => Promise.resolve(DEVICE_TOKEN),
     set: () => Promise.resolve(),
     clear: () => Promise.reject(new Error("database gone")),
   };
-  const { sockets } = await refusedStoredToken(DEVICE_NOT_APPROVED, tokenStore);
+  const { connection, sockets } = harness({ tokenStore });
+  connection.start();
+  await flush();
+  const first = socketAt(sockets, 0);
+  first.open();
+  first.receive(WELCOME);
+
+  connection.forget();
+  await flush();
+  await flush();
 
   expect(warn).toHaveBeenCalled();
   expect(sockets).toHaveLength(2);

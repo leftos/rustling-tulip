@@ -70,10 +70,12 @@ export type ConnectionEffect =
   /** The socket that carried a tap's ask or an open request is gone. */
   | { readonly type: "pairingLost" }
   /**
-   * The daemon refused the presented token as unknown: clear the stored one,
-   * then redial (as `tokenChanged`) without it.
+   * The daemon refused the presented token with `device not approved`: stop
+   * presenting it for the rest of the page visit and redial (as
+   * `tokenChanged`) without it. The stored record is kept, since the daemon
+   * says the same when it cannot read its own device store.
    */
-  | { readonly type: "forgetToken" };
+  | { readonly type: "dropToken" };
 
 export interface StepResult {
   readonly state: ConnectionState;
@@ -248,8 +250,8 @@ function onMessage(state: ConnectionState, message: unknown): StepResult {
 /**
  * `DevicePairFailed` after `Welcome`. A connection that presented a token is
  * refused: it closes, and redialling would only repeat that. With the reason
- * `device not approved` the token is forgotten and the driver redials without
- * it; with any other only a new token redials. A no-token connection keeps its
+ * `device not approved` the driver stops presenting the token for this visit
+ * and redials without it; with any other only a new token redials. A no-token connection keeps its
  * socket as the pairing channel; a reason other than `device not approved`
  * is delivered to be shown, and the daemon decides whether to close. A
  * handshake still waiting has its Welcome timer cleared.
@@ -260,12 +262,12 @@ function refused(
 ): StepResult {
   const clear: ConnectionEffect[] = state.name === "handshaking" ? [{ type: "clearTimer" }] : [];
   if (!state.unpaired) {
-    // `device not approved` for a presented token: the daemon no longer
-    // knows it, so the driver forgets it and redials without one, which
-    // lands on the pairing channel.
-    const forget: ConnectionEffect[] =
-      message.reason === DEVICE_NOT_APPROVED ? [{ type: "forgetToken" }] : [];
-    return transition(state, { name: "notApproved" }, [...clear, { type: "close" }, ...forget]);
+    // `device not approved` for a presented token: the daemon does not know
+    // it (or cannot read its device store), so this visit redials without
+    // it and lands on the pairing channel.
+    const drop: ConnectionEffect[] =
+      message.reason === DEVICE_NOT_APPROVED ? [{ type: "dropToken" }] : [];
+    return transition(state, { name: "notApproved" }, [...clear, { type: "close" }, ...drop]);
   }
   const effects: ConnectionEffect[] = [...clear];
   if (message.reason !== DEVICE_NOT_APPROVED) {
