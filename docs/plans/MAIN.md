@@ -31,9 +31,9 @@
 - [ ] RT-699 Keep the terminal link tip off dialogs and the link, and name Cmd on macOS
 - [ ] RT-918 Split the agent launch command by Windows rules on Windows, so backslash paths survive
 - [ ] RT-921 Default shell: move the save check off the runtime, and detect WSL that is really installed
-- [ ] RT-930 Jump to a pane, tab or sidebar repo or workspace with a Ctrl+Shift+P palette · release vNext
 - [ ] RT-932 Add non-git folders to the sidebar, with no worktree or branch choice when spawning into one · release vNext
 - [ ] RT-959 Default shell: verify Nushell raw-string programs, give the resume the launch's .cmd checks, and skip a familyless Automatic shell
+- [ ] RT-1086 Open a Ctrl+clicked path that ends in a ?query or #fragment, reading #L4 as a line
 
 ## Wave 2b — Hook status
 
@@ -50,7 +50,6 @@
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge · release vNext
-  - [ ] RT-364 PW.1: Serve the PWA shell from the tailnet listener · release vNext
   - [ ] RT-365 PW.3: Pair the PWA with a device token · release vNext
   - [ ] RT-366 PW.5: Phone session screen: live rows, composer, Quick and Keys, prompt sheet · release vNext
   - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext
@@ -58,6 +57,8 @@
   - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
   - [ ] RT-370 PW.2: Protocol types for the PWA and its connection · release vNext
   - [ ] RT-104 PW.4: Phone Home: grouped list and Needs you tray; answer prompts, stop and resume · release vNext
+  - [ ] RT-1127 PW.1b: Ship the phone app's folder in the macOS app bundle · release vNext
+- [ ] RT-1126 Precache the phone app's hashed assets so its first offline open is complete
 
 ## Wave 5 — Attention feed on the desktop
 
@@ -75,6 +76,7 @@
   - [ ] RT-782 Close app toasts on every way a session comes on screen, and drop holds for a closed host
 - [ ] RT-765 Preview a toast sound from the Settings list without choosing it
 - [ ] RT-769 Log every toast decision
+- [ ] RT-1105 Show toast popups at any of eight spots around the screen, chosen in Settings
 
 ## Wave 6 — Remote enhancements
 
@@ -93,6 +95,7 @@
 - [ ] RT-896 Name the skipped folders in a fetched folder's done toast
 - [ ] RT-903 Stop a root folder fetch from deleting other worktrees' fetched copies
 - [ ] RT-923 Folder fetch link toasts: dismiss the early toast on a lost connection, and say not-on-host only for Missing
+- [ ] RT-1073 Say why a tailnet host refused the connection in Connections instead of flickering back to disconnected
 
 ## Wave 7 — Pop-out windows
 
@@ -114,6 +117,19 @@
 - [ ] RT-696 Draw a disabled pane-header view segment without the hover highlight
 - [ ] RT-698 Share one file watcher per folder across the daemon's file follows
 - [ ] RT-881 Compare ghostty-web with xterm.js for the phone's full terminal
+- [ ] RT-1072 Give the Chat message box the keys, selection and scrollbar a multi-line text box is expected to have
+  - [ ] RT-1075 Undo and redo typing in text boxes with Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z
+  - [ ] RT-1076 Move and delete by word in text boxes (Ctrl+arrows and Ctrl+Backspace/Delete, Option on macOS)
+  - [ ] RT-1077 Page through multi-line text boxes with PageUp/PageDown and extend selection with Shift+Home/End
+  - [ ] RT-1078 Select a word on double-click and a line on triple-click in text boxes
+  - [ ] RT-1079 Keep selecting and scroll a text box when a drag-select passes its edge
+  - [ ] RT-1080 Open a Cut, Copy, Paste and Select all menu on right-click in text boxes
+  - [ ] RT-1081 Blink the caret in text boxes and bind Shift+Enter to a newline explicitly
+  - [ ] RT-1082 Scroll multi-line text boxes with the wheel and show a scrollbar past their row limit
+  - [ ] RT-1083 Move to the start or end of the text with Ctrl+Home/End (Cmd+Up/Down on macOS) in multi-line text boxes
+  - [ ] RT-1084 Send from the Chat message box with Cmd+Enter on macOS
+  - [ ] RT-1085 Send the preset wizard's inline prompt with Ctrl+Enter
+- [ ] RT-1088 Let an agent smoke-test the Chat view against a real Claude session it drives, screenshots and fixes
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
@@ -159,11 +175,29 @@
   - [ ] RT-971 Draw the accounts popover's sign-in refused tag in the danger colour
 - [ ] RT-975 Auto-switch: pin the mid-tick off check, the engine wake and the tick tests' environment
 - [ ] RT-1038 Accounts: show a login in progress again after the client reconnects
+- [ ] RT-1094 Share a host's Claude accounts with remote clients, and copy chosen accounts to the client's machine
+- [ ] RT-1106 Show the fleet's return dates, dry durations and projected dry spells in Accounts
+  - [ ] RT-1107 Format account times as today, tomorrow, weekday and date, each with a countdown
+  - [ ] RT-1108 Show the fleet line with dates, countdowns and the dry duration
+  - [ ] RT-1109 Send every projected fleet dry spell to the client
+  - [ ] RT-1110 Draw a 7-day bar of projected fleet dry spells under the fleet line
+- [ ] RT-1111 Warn on the footer account pill when the fleet will run dry
+- [ ] RT-1112 Show each usage window's pace: when it runs out or that it lasts to its reset
+- [ ] RT-1113 List used-up accounts by soonest return in the accounts popover
+- [ ] RT-1114 Rest an account without removing it, with an enable and disable switch
+- [ ] RT-1115 Show recent auto-switch events in Settings › Accounts
+- [ ] RT-1116 Show per-model limits and extra-usage spend for each account
+- [ ] RT-1117 Keep the accounts usage history across daemon restarts
 
 ## Wave 13 — ops-tower views: gates, board and dock
 
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-159 Corner status window: Needs you, Just finished and a Working ticker
+- [ ] RT-1119 Open a clicked gate's log in an in-app tab that follows it, not the OS default app
+  - [ ] RT-1120 Follow a gate run's log through the daemon by run id, never by path
+  - [ ] RT-1121 Show a gate's log in a tab that follows it like tail -f
+  - [ ] RT-1122 Pop out a gate log tab into its own window
+  - [ ] RT-1123 Open the log tab from every gate row, on every host
 
 ## Wave 14 — Dictation
 
@@ -211,6 +245,7 @@
 - [ ] RT-858 Fix the missing spoken-alerts design file four issues link
 - [ ] RT-907 Re-read docs/session-runtime.md and docs/on-disk.md against their named files' changes since 2026-11-03
 - [ ] RT-1024 Say how rustling-tulipd wait --text matches line anchors, or match per line
+- [ ] RT-1069 Fix RT-277 and RT-725's link to the missing docs/plans/reboot-resume.md
 
 ## Build tooling
 
@@ -256,7 +291,6 @@
   - [ ] RT-812 Check that a window minimised in front of the driven client never hands it the foreground
 - [ ] RT-840 Sign the installer's uninstaller too
 - [ ] RT-861 Forget a driver id's bounds in UI specs once it stops being drawn
-- [ ] RT-1061 Let a driven run's isolated daemon use the Default shell setting instead of forcing cmd.exe · release vNext
 
 ## macOS
 
@@ -273,6 +307,8 @@
 - [ ] RT-1034 macOS updates: serialize update starts with a lock the client and apply-update both take
 - [ ] RT-1035 macOS updates: tell a standard user in /Applications what can work, not to move the app
 - [ ] RT-1036 macOS toasts: hold app toasts back during Focus and over a full-screen app
+- [ ] RT-1071 Show a failed tailnet scan's error under the On your tailnet header, not wrapped beside it
+- [ ] RT-1118 Fix the macOS smoke test's capture_live_login call so the Mac workspace clippy passes
 
 ## Agent CLIs
 
@@ -479,18 +515,35 @@
 - [ ] RT-1055 Show a Ctrl+clicked file fetch's size, progress and Cancel in its toast · release vNext
 - [ ] RT-1056 Get colour query replies (OSC 10/11) through ConPTY to programs on Windows hosts
 - [ ] RT-1057 Name the account login session "Log in a new account" in the sidebar, not its run id · release vNext
-- [ ] RT-1058 Map a hand-started agent's hook events without logging a missing-options ERROR · release vNext
 - [ ] RT-1059 Keep a long folder path clear of Browse in the Open a shell dialog · release vNext
 - [ ] RT-1060 Close the new-session dialog on Escape after Escape closed its Target list · release vNext
 - [ ] RT-1063 Keep a statusline ending in %, \$ or # under Claude's box from reading as the shell's prompt · release vNext
 - [ ] RT-1064 Keep a spawned agent session's label after its agent exits into the shell · release vNext
-- [ ] RT-1065 Report a promoted shell's agent as gone in the sessions verb after it exits · release vNext
 - [ ] RT-1066 Match the waiting ring and footer count to the session's idle status after a hand-started agent exits · release vNext
 - [ ] RT-1067 Remove the stray dot at the bottom-left of a plain Nushell pane · release vNext
-- [ ] RT-1068 Watch a session's transcript folder once it exists instead of falling back to polling · release vNext
+- [ ] RT-1125 Type into a shell with the send verb once its hand-started agent has ended
+
+## No project
+
+- [ ] RT-1087 Make every Settings control wait for OK or Apply, starting with Claude's Install hooks
+  - [ ] RT-1095 Stage Settings › Claude's Install hooks switch until OK or Apply, and undo it on Cancel
+  - [ ] RT-1096 Keep a typed account alias from being saved by Cancel, the close button or leaving the field
+  - [ ] RT-1097 Stage the Accounts page's auto-switch settings until OK or Apply
+  - [ ] RT-1098 Stage the Accounts page's Up and Down reordering until OK or Apply
+  - [ ] RT-1099 Stage Appearance and the Themes picker's Use until OK or Apply, with a live preview Cancel reverts
+  - [ ] RT-1100 Play the chosen notification sound, not the saved one, from Settings' Play button
+  - [ ] RT-1101 Stage the Dashboard's Clear of the stored key until OK or Apply, and name it
+  - [ ] RT-1102 Test the Dashboard settings shown in Settings, not the saved ones
+  - [ ] RT-1103 Confirm before removing a saved Claude account in Settings › Accounts
+- [ ] RT-1089 Monitor CPU and memory per pane, process tree and host in a Performance view
+  - [ ] RT-1090 Sample each host's CPU, memory and every session's process tree in the daemon for subscribed clients
+  - [ ] RT-1091 Show a rail Performance view of each pane's process tree CPU and memory beside the machine's totals
+  - [ ] RT-1092 Show the focused host's CPU and memory in a footer pill that opens the Performance view
+  - [ ] RT-1093 Add a full Performance tab with PID, history, threads, command line and End process tree
 
 ## Design files
 
+- [accounts-fleet.md](accounts-fleet.md) — RT-1106, RT-1107, RT-1108, RT-1109, RT-1110, RT-1111, RT-1112, RT-1113, RT-1114, RT-1115, RT-1116, RT-1117
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
@@ -501,17 +554,19 @@
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-786, RT-787, RT-867, RT-868, RT-869
 - [finished-toast.md](finished-toast.md) — RT-754, RT-755, RT-757, RT-769, RT-770
+- [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-364, RT-365, RT-366, RT-367, RT-368, RT-369, RT-370, RT-881, Wave 4 — Mobile app (iPhone PWA over Tailscale)
+- [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-365, RT-366, RT-367, RT-368, RT-369, RT-370, RT-881, RT-1126, RT-1127, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [non-git-folders.md](non-git-folders.md) — RT-932
-- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-101, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
-- [quick-jump.md](quick-jump.md) — RT-930
+- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-101, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, RT-1111, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
+- [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
 - [remote-access.md](remote-access.md) — RT-686, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
 - [screen-status.md](screen-status.md) — RT-289, RT-754
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-686, RT-792
 - [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406
+- [toast-position.md](toast-position.md) — RT-1105
