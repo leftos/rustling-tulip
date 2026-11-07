@@ -2203,13 +2203,14 @@ fn banner_add_repo_sends_the_folder_without_a_picker(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_shell_group_the_user_named_draws_no_add_repo_banner(cx: &mut TestAppContext) {
+fn the_account_login_shell_draws_no_add_repo_banner(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = Fixture {
         sessions: vec![
             session("run-7")
                 .shell("D:/scratch/login-run-7")
                 .user_label("Log in a new account")
+                .account_login()
                 .build(),
             session("plain").shell("D:/elsewhere").build(),
         ],
@@ -2236,6 +2237,34 @@ fn a_shell_group_the_user_named_draws_no_add_repo_banner(cx: &mut TestAppContext
     assert!(
         painted(&mut h, "container-standalone:plain-add-repo"),
         "and its Add repo"
+    );
+}
+
+#[gpui::test]
+fn a_renamed_plain_shell_keeps_its_add_repo_banner(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![
+            session("renamed")
+                .shell("D:/scratch/build-box")
+                .user_label("build box")
+                .build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    for selector in [
+        "container-standalone:renamed-banner",
+        "container-standalone:renamed-add-repo",
+    ] {
+        assert!(painted(&mut h, selector), "{selector} is drawn");
+    }
+    assert_eq!(
+        home_of(&mut h, "renamed").map(|(_, name, _, _)| name),
+        Some("build box".to_owned()),
+        "the group header reads the name the user gave it"
     );
 }
 

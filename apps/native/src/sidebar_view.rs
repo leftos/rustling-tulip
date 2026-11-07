@@ -1398,16 +1398,12 @@ fn container_rows(
     let dim = ctx.dimmed.containers.contains(&container.key);
     let mut rows = vec![dimmed(row, dim).into_any_element()];
     if !container.collapsed {
-        // A standalone group the user named (an account login) is the user's
-        // own session, not a folder offering Add repo.
+        // The account service's login session sits in the daemon's scratch
+        // folder, which offers no Add repo; every other shell keeps its banner.
         let folder_banner = match container.kind {
             ContainerKind::Dir => container.path.is_some(),
             ContainerKind::Shell => {
-                container.path.is_some()
-                    && !container
-                        .leaves
-                        .iter()
-                        .any(|leaf| leaf.user_label.is_some())
+                container.path.is_some() && !container.leaves.iter().any(|leaf| leaf.account_login)
             }
             ContainerKind::Workspace
             | ContainerKind::Repo
@@ -3254,7 +3250,7 @@ mod tests {
             mode: SessionMode::Interactive,
             agent: Some(AgentId("claude".to_owned())),
             label: "s1".to_owned(),
-            user_label: None,
+            account_login: false,
             agent_up: true,
             subline: Some("main".to_owned()),
             runtime: Some("claude".to_owned()),

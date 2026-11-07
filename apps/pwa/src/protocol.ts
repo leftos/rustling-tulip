@@ -747,7 +747,28 @@ export interface SessionSnapshot {
    * that replaced none, and a Duplicate or Restart inherits none.
    */
   resumed_from?: string[];
+  /**
+   * What the session was spawned for. A daemon that predates the field, and
+   * a role this build does not know, both read as [`SessionRole::Normal`].
+   */
+  role?: SessionRole;
 }
+
+/**
+ * What a session was spawned for. A role is fixed for the life of the
+ * session: no message changes it after the spawn.
+ */
+export type SessionRole =
+  /**
+   * A session the user spawned: a shell, an agent session, a workspace or
+   * a headless run.
+   */
+  | "normal"
+  /**
+   * The account service's login session: an agent CLI login run in a
+   * scratch folder, not one of the user's own sessions.
+   */
+  | "account_login";
 
 /**
  * What a session is waiting for, as the agent CLI's own hooks last reported

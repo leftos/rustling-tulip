@@ -4,8 +4,8 @@
 
 use protocol::{
     AgentDescriptor, AgentId, AppearanceOverrides, CharRange, ContainerRef, DaemonMessage,
-    RepoEntry, SessionChip, SessionKind, SessionMode, SessionSnapshot, SessionStatus, SpawnConfig,
-    SpawnTarget, TabEntry, WorkspaceEntry,
+    RepoEntry, SessionChip, SessionKind, SessionMode, SessionRole, SessionSnapshot, SessionStatus,
+    SpawnConfig, SpawnTarget, TabEntry, WorkspaceEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
@@ -180,8 +180,9 @@ pub struct Leaf {
     /// The agent driving the session; `None` for a plain shell.
     pub agent: Option<AgentId>,
     pub label: String,
-    /// The name the user gave the session; `None` when it has none.
-    pub user_label: Option<String>,
+    /// The session is the account service's login run, whose scratch folder
+    /// offers no Add repo.
+    pub account_login: bool,
     /// The session's agent is the program up in its pane
     /// ([`agent_is_up`]), so an agent that has ended reads false.
     pub agent_up: bool,
@@ -3107,7 +3108,7 @@ fn leaf(
         mode: s.mode,
         agent: s.agent.clone(),
         label: display_label(s, label_agents),
-        user_label: non_empty(s.user_label.as_deref()).map(str::to_owned),
+        account_login: s.role == SessionRole::AccountLogin,
         agent_up: up,
         subline: subline(s, HOME.as_deref(), tabs_view),
         icon: runtime_icon(s, runtime.as_deref(), label_agents),

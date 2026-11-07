@@ -1657,7 +1657,8 @@ pub(crate) mod test_support {
     use chrono::Utc;
     use portable_pty::ChildKiller;
     use protocol::{
-        AppearanceOverrides, HistoryEntry, SessionKind, SessionMetrics, SessionMode, SessionStatus,
+        AppearanceOverrides, HistoryEntry, SessionKind, SessionMetrics, SessionMode, SessionRole,
+        SessionStatus,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -1931,6 +1932,7 @@ pub(crate) mod test_support {
             label: id.to_string(),
             default_label: id.to_string(),
             user_label: None,
+            role: SessionRole::Normal,
             kind: SessionKind::Standalone,
             members: Vec::new(),
             mode,

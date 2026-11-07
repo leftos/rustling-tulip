@@ -20,8 +20,8 @@ use axum::http::Request;
 use chrono::Utc;
 use protocol::{
     AgentSelection, AppearanceOverrides, ClientMessage, DaemonMessage, OptionValue, OptionValues,
-    SessionKind, SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent,
-    TabEntry,
+    SessionKind, SessionMetrics, SessionMode, SessionRole, SessionStatus, SpawnRequest,
+    SpawnTarget, TabContent, TabEntry,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -361,6 +361,7 @@ pub(super) fn idle_record(id: &str) -> SessionRecord {
         label: id.to_string(),
         default_label: id.to_string(),
         user_label: None,
+        role: SessionRole::Normal,
         kind: SessionKind::Standalone,
         members: Vec::new(),
         mode: SessionMode::Interactive,

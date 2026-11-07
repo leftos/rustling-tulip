@@ -631,6 +631,11 @@ impl SessionBuilder {
         self.set("user_label", json!(label))
     }
 
+    /// The daemon's account-login session, in its scratch folder.
+    pub fn account_login(self) -> Self {
+        self.set("role", json!("account_login"))
+    }
+
     /// With `label` as the daemon's label.
     pub fn label(self, label: &str) -> Self {
         self.set("label", json!(label))

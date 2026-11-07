@@ -52,7 +52,8 @@ use chrono::Utc;
 use directories::UserDirs;
 use protocol::{
     AgentId, AppearanceOverrides, ClientMessage, DaemonMessage, OptionValues, SessionKind,
-    SessionMember, SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget,
+    SessionMember, SessionMetrics, SessionMode, SessionRole, SessionStatus, SpawnRequest,
+    SpawnTarget,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -718,6 +719,7 @@ fn interactive_record(
         label: new.label.clone(),
         default_label: new.label,
         user_label: None,
+        role: SessionRole::Normal,
         kind: new.kind,
         worktree_paths: worktree_paths_for_config(&new.stored_config, &new.members),
         members: new.members,
@@ -803,6 +805,7 @@ fn plain_shell_record(
         label: new.label.clone(),
         default_label: new.label,
         user_label: None,
+        role: SessionRole::Normal,
         kind: new.kind,
         members: new.members.clone(),
         mode: SessionMode::PlainShell,
@@ -1703,6 +1706,9 @@ pub(crate) struct CommandSpec {
     /// The name the caller gave the session, which the clients show in place
     /// of a derived one; `None` for a title the spawn itself derived.
     pub(crate) user_label: Option<String>,
+    /// What the session is for: an ordinary session, or the account service's
+    /// login run.
+    pub(crate) role: SessionRole,
 }
 
 /// A published command session: its snapshot, how its exit was handled
@@ -1752,6 +1758,7 @@ pub(crate) async fn spawn_command_session(
         cwd,
         label,
         user_label,
+        role,
     } = spec;
     // The plain shell's environment (the keep-list, the passthrough
     // variables, TERM), the command's own values on top, its removals last.
@@ -1810,6 +1817,7 @@ pub(crate) async fn spawn_command_session(
         Some(Arc::clone(&pty)),
     );
     record.user_label = user_label;
+    record.role = role;
     let pending = hub.sessions.insert_pending(record);
     let (notice, exit) = tokio::sync::oneshot::channel();
     let snap_tx = crate::session::attach_lifecycle_notifying(
@@ -2033,6 +2041,7 @@ impl HeadlessRecord<'_> {
             label: self.label.clone(),
             default_label: self.label,
             user_label: None,
+            role: SessionRole::Normal,
             kind: self.kind,
             members: self.members,
             mode: SessionMode::Headless,
@@ -2672,6 +2681,7 @@ mod tests {
                 cwd: scratch.path().to_owned(),
                 label: "login".to_owned(),
                 user_label: None,
+                role: SessionRole::Normal,
             },
         )
         .await;
@@ -4968,6 +4978,11 @@ mod tests {
         assert_eq!(meta.program_name, record.program_name);
         assert_eq!(meta.program_name.as_deref(), Some("pwsh"));
         assert_eq!(meta.tracer_pid, Some(7), "liveness runs off the tracer pid");
+        assert_eq!(
+            record.snapshot().role,
+            SessionRole::Normal,
+            "a plain shell is an ordinary session"
+        );
     }
 
     #[tokio::test]

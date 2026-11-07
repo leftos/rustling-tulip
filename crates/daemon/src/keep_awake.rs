@@ -294,7 +294,9 @@ mod tests {
     use crate::paths::Dirs;
     use crate::session::SessionRecord;
     use chrono::Utc;
-    use protocol::{AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionStatus};
+    use protocol::{
+        AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionRole, SessionStatus,
+    };
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
@@ -328,6 +330,7 @@ mod tests {
             label: id.to_string(),
             default_label: id.to_string(),
             user_label: None,
+            role: SessionRole::Normal,
             kind: SessionKind::Standalone,
             members: Vec::new(),
             mode: SessionMode::Interactive,

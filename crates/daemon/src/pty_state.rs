@@ -2074,7 +2074,9 @@ mod hysteresis_tests {
     use crate::session::{SessionRecord, SessionRegistry};
     use agent_api::{LineMatcher, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
     use chrono::Utc;
-    use protocol::{AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionStatus};
+    use protocol::{
+        AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionRole, SessionStatus,
+    };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::{broadcast, mpsc};
@@ -2196,6 +2198,7 @@ mod hysteresis_tests {
             label: id.to_string(),
             default_label: id.to_string(),
             user_label: None,
+            role: SessionRole::Normal,
             kind: SessionKind::Standalone,
             members: Vec::new(),
             mode: SessionMode::Interactive,

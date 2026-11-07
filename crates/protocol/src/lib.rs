@@ -899,6 +899,28 @@ pub struct SessionSnapshot {
     /// that replaced none, and a Duplicate or Restart inherits none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resumed_from: Vec<String>,
+    /// What the session was spawned for. A daemon that predates the field, and
+    /// a role this build does not know, both read as [`SessionRole::Normal`].
+    #[serde(default)]
+    pub role: SessionRole,
+}
+
+/// What a session was spawned for. A role is fixed for the life of the
+/// session: no message changes it after the spawn.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRole {
+    /// A session the user spawned: a shell, an agent session, a workspace or
+    /// a headless run.
+    #[default]
+    Normal,
+    /// The account service's login session: an agent CLI login run in a
+    /// scratch folder, not one of the user's own sessions.
+    AccountLogin,
+    /// Forward-compat fallback: a role this build does not know, treated as
+    /// [`SessionRole::Normal`].
+    #[serde(other)]
+    Unknown,
 }
 
 /// What a session is waiting for, as the agent CLI's own hooks last reported
@@ -13076,6 +13098,45 @@ mod tests {
         );
         let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
         assert_eq!(back.resumed_from, lineage, "oldest first");
+    }
+
+    #[test]
+    fn snapshot_without_role_reads_as_normal() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        assert_eq!(
+            snapshot.role,
+            SessionRole::Normal,
+            "a snapshot from before the field is an ordinary session"
+        );
+    }
+
+    #[test]
+    fn an_account_login_role_round_trips() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        let json = serde_json::to_value(SessionSnapshot {
+            role: SessionRole::AccountLogin,
+            ..snapshot
+        })
+        .expect("encode");
+        assert_eq!(json.get("role"), Some(&serde_json::json!("account_login")));
+        let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
+        assert_eq!(back.role, SessionRole::AccountLogin, "the role round-trips");
+    }
+
+    #[test]
+    fn an_unknown_role_still_decodes_the_snapshot() {
+        let json = SNAPSHOT_WITHOUT_STATUS_SINCE.replace(
+            r#""agent":"claude""#,
+            r#""agent":"claude","role":"some_future_role""#,
+        );
+        let snapshot: SessionSnapshot = serde_json::from_str(&json).expect("decodes");
+        assert_eq!(
+            snapshot.role,
+            SessionRole::Unknown,
+            "a role from a newer daemon does not fail the snapshot"
+        );
     }
 
     #[test]

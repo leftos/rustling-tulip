@@ -16,7 +16,7 @@ use crate::termstate::{self, BracketedPasteTracker};
 use chrono::{DateTime, Utc};
 use protocol::{
     AgentId, AppearanceOverrides, PendingInput, SessionKind, SessionMember, SessionMetrics,
-    SessionMode, SessionSnapshot, SessionStatus, SpawnConfig,
+    SessionMode, SessionRole, SessionSnapshot, SessionStatus, SpawnConfig,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -211,6 +211,11 @@ pub struct SessionRecord {
     /// default". Persisted to the orphan sidecar so the override survives
     /// daemon restarts and reattaches.
     pub user_label: Option<String>,
+    /// What the session was spawned for. Fixed at spawn and never persisted
+    /// to the orphan sidecar: a reattached session reads as
+    /// [`SessionRole::Normal`], which the start-up login sweep makes safe for
+    /// the account login session.
+    pub role: SessionRole,
     pub kind: SessionKind,
     pub members: Vec<SessionMember>,
     pub mode: SessionMode,
@@ -649,6 +654,7 @@ impl SessionRecord {
             pending_input: self.pending_input.clone(),
             background: self.background,
             resumed_from: self.resumed_from.clone(),
+            role: self.role,
         }
     }
 
@@ -1907,6 +1913,7 @@ impl SessionRegistry {
             label,
             default_label,
             user_label,
+            role: SessionRole::Normal,
             kind: meta.kind.clone(),
             members: meta.members.clone(),
             mode: meta.mode,
@@ -1995,6 +2002,7 @@ impl SessionRegistry {
             label,
             default_label,
             user_label,
+            role: SessionRole::Normal,
             kind: meta.kind.clone(),
             members: meta.members.clone(),
             mode: meta.mode,
@@ -2060,6 +2068,7 @@ impl SessionRegistry {
             label,
             default_label,
             user_label,
+            role: SessionRole::Normal,
             kind: meta.kind.clone(),
             members: meta.members.clone(),
             mode: meta.mode,
@@ -2153,6 +2162,7 @@ mod tests {
             label: id.to_string(),
             default_label: id.to_string(),
             user_label: None,
+            role: SessionRole::Normal,
             kind: SessionKind::Standalone,
             members: Vec::new(),
             mode: SessionMode::Headless,

@@ -29,7 +29,7 @@ use crate::server::{CommandSession, CommandSpec, Hub, StateEvent};
 use agent_api::{AccountsFailure, LoginCapture, LoginCommand};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
-use protocol::{AccountLoginState, DaemonMessage};
+use protocol::{AccountLoginState, DaemonMessage, SessionRole};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -180,6 +180,7 @@ impl LoginRunner for SessionRunner {
                 cwd,
                 label: LOGIN_TITLE.to_owned(),
                 user_label: Some(LOGIN_TITLE.to_owned()),
+                role: SessionRole::AccountLogin,
             };
             #[cfg(test)]
             if let Some(spawner) = spawner {
@@ -2871,6 +2872,7 @@ mod tests {
             let mut rec = record(&spec.session_id, SessionMode::PlainShell);
             rec.label.clone_from(&spec.label);
             rec.user_label.clone_from(&spec.user_label);
+            rec.role = spec.role;
             let exit = insert_live_notifying(&hub.sessions, &hub.dirs, rec, &pty);
             let snapshot = crate::sync::lock(
                 &hub.sessions
@@ -3184,6 +3186,16 @@ mod tests {
             "the sidebar shows the title the login's hint names"
         );
         assert_eq!(rec.label, LOGIN_TITLE);
+        assert_eq!(
+            rec.role,
+            SessionRole::AccountLogin,
+            "the login session is the account service's own"
+        );
+        assert_eq!(
+            rec.snapshot().role,
+            SessionRole::AccountLogin,
+            "clients see the marker on the snapshot"
+        );
     }
 
     #[tokio::test]
