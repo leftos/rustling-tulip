@@ -867,7 +867,7 @@ mod tests {
 
     /// The Content-Security-Policy every static answer must carry.
     const EXPECTED_CSP: &str = concat!(
-        "default-src 'none'; script-src 'self'; style-src 'self'; ",
+        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
         "img-src 'self' data:; font-src 'self'; connect-src 'self'; ",
         "manifest-src 'self'; worker-src 'self'; base-uri 'none'; ",
         "frame-ancestors 'none'; form-action 'none'",

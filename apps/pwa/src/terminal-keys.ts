@@ -67,6 +67,35 @@ export function replyKey(state: KeyBarState, sessionId: string, text: string): K
 }
 
 /**
+ * The shapes of the terminal's own answers: device attributes (DA1, DA2), a
+ * cursor position report, a status report, a mode report, a window report,
+ * an OSC or DCS reply, and a focus report. Each matches a whole string only.
+ */
+/* oxlint-disable no-control-regex -- ESC and BEL are the bytes these replies are made of. */
+const TERMINAL_REPLIES: readonly RegExp[] = [
+  /^\x1b\[\?[\d;]*c$/,
+  /^\x1b\[>[\d;]*c$/,
+  /^\x1b\[\d+;\d+R$/,
+  /^\x1b\[\d*n$/,
+  /^\x1b\[\??[\d;]+\$y$/,
+  /^\x1b\[[\d;]*t$/,
+  /^\x1b\][\s\S]*(?:\x07|\x1b\\)$/,
+  /^\x1bP[\s\S]*\x1b\\$/,
+  /^\x1b\[[IO]$/,
+];
+/* oxlint-enable no-control-regex */
+
+/**
+ * Whether `text` from the terminal's `onData` is the terminal answering
+ * the child (a device attributes, status or cursor report, a mode report,
+ * a window report, an OSC or DCS reply, a focus report) rather than keys
+ * the user pressed.
+ */
+export function isTerminalReply(text: string): boolean {
+  return TERMINAL_REPLIES.some((pattern) => pattern.test(text));
+}
+
+/**
  * A Quick reply: its text and Enter, as the session would read a typed
  * answer. It is not a key, so an armed Ctrl stays armed for the next one.
  */

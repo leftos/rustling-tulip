@@ -19,11 +19,14 @@ pub(super) const PWA_DIR_ENV: &str = "RUSTLING_TULIP_PWA_DIR";
 /// The body of every static answer while no folder is installed.
 const NOT_INSTALLED: &str = "The phone app is not installed with this daemon.";
 
-/// Only same-origin scripts, styles, images and connections, so the page can
-/// never load code from, or talk to, another origin. `connect-src 'self'`
+/// Only same-origin scripts, styles (plus inline styles, below), images and
+/// connections, so the page can never load code from, or talk to, another
+/// origin. `connect-src 'self'`
 /// covers the same-origin `wss://` socket a backgrounded page reopens.
+/// Inline styles are allowed because the phone terminal's xterm.js writes its
+/// own `<style>` rules at runtime; scripts stay same-origin only.
 const CONTENT_SECURITY_POLICY: &str = concat!(
-    "default-src 'none'; script-src 'self'; style-src 'self'; ",
+    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
     "img-src 'self' data:; font-src 'self'; connect-src 'self'; ",
     "manifest-src 'self'; worker-src 'self'; base-uri 'none'; ",
     "frame-ancestors 'none'; form-action 'none'",

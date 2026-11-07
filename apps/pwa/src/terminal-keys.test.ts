@@ -4,6 +4,7 @@ import { KEY_TRAY, type KeyTrayEntry } from "./keys";
 import type { ClientMessage } from "./protocol";
 import {
   INITIAL_KEY_BAR,
+  isTerminalReply,
   quickKey,
   replyKey,
   toggleCtrl,
@@ -97,4 +98,49 @@ test("keys_a_replay_reply_is_sent_as_it_is_marked_automatic_and_keeps_ctrl", () 
   expect(sent.message?.type === "send_input" ? sent.message.automatic : false).toBe(true);
 
   expect(replyKey(INITIAL_KEY_BAR, "s1", "").message).toBeNull();
+});
+
+test("keys_the_terminal_answering_the_child_is_a_reply", () => {
+  const replies = [
+    "\x1b[?1;2c",
+    "\x1b[?62;22c",
+    "\x1b[>0;276;0c",
+    "\x1b[12;40R",
+    "\x1b[0n",
+    "\x1b[?1;2$y",
+    "\x1b[2004;1$y",
+    "\x1b[8;24;80t",
+    "\x1b]11;rgb:1e1e/1e1e/2e2e\x07",
+    "\x1b]10;rgb:cdcd/d6d6/f4f4\x1b\\",
+    "\x1bP1$r0m\x1b\\",
+    "\x1b[I",
+    "\x1b[O",
+  ];
+  for (const reply of replies) {
+    expect(isTerminalReply(reply), JSON.stringify(reply)).toBe(true);
+  }
+});
+
+test("keys_keys_the_user_pressed_are_not_a_reply", () => {
+  const keys = [
+    "\x1b[A",
+    "\x1b[B",
+    "\x1b[C",
+    "\x1b[D",
+    "\x1bOA",
+    "\x1b[1;5A",
+    "\x1b[3~",
+    "\x1b[15~",
+    "\x1b[Z",
+    "\x1b",
+    "\r",
+    "\t",
+    "\x7f",
+    "a",
+    "Q",
+    "pasted text\nwith two lines",
+  ];
+  for (const key of keys) {
+    expect(isTerminalReply(key), JSON.stringify(key)).toBe(false);
+  }
 });
