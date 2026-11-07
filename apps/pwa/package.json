@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
+    "fake-indexeddb": "6.2.7",
     "oxfmt": "0.76.0",
     "oxlint": "1.91.0",
     "typescript": "7.0.2",

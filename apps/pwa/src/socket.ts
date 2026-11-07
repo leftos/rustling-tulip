@@ -5,6 +5,14 @@ import {
   type ConnectionState,
   type ConnectionStateName,
 } from "./connection-machine";
+import {
+  INITIAL_PAIRING,
+  canAsk,
+  isPairingCode,
+  pairingStep,
+  type PairingEvent,
+  type PairingState,
+} from "./pairing";
 import type { DaemonMessage } from "./protocol";
 import type { TokenStore } from "./token-store";
 
@@ -38,13 +46,15 @@ export interface ConnectionDeps {
 
 /**
  * What {@link Connection.subscribe} delivers: each daemon message the page is
- * meant to see, and each state the connection entered, in order. A listener
- * treats every `ready` as a fresh start (the daemon re-sends its initial
- * state after a reconnect) and stops acting on anything but `ready`.
+ * meant to see, each state the connection entered, and each new pairing
+ * model, in order. A listener treats every `ready` as a fresh start (the
+ * daemon re-sends its initial state after a reconnect) and stops acting on
+ * anything but `ready`.
  */
 export type ConnectionNotice =
   | { readonly kind: "message"; readonly message: DaemonMessage }
-  | { readonly kind: "status"; readonly state: ConnectionStateName };
+  | { readonly kind: "status"; readonly state: ConnectionStateName }
+  | { readonly kind: "pairing"; readonly pairing: PairingState };
 
 export interface Connection {
   start(): void;
@@ -52,6 +62,21 @@ export interface Connection {
   /** The stored token changed (pairing finished, or the device was forgotten). */
   tokenChanged(): void;
   subscribe(listener: (notice: ConnectionNotice) => void): () => void;
+  /**
+   * The user tapped to ask for pairing. Sends `device_pair_request` on the
+   * pairing channel, or redials a closed one and asks once it opens; a tap
+   * while a request is open sends nothing.
+   */
+  askToPair(): void;
+  /** The user entered or scanned `code` for the open request. */
+  redeem(code: string): void;
+  /**
+   * Forget the device token: clear this host's stored record and redial
+   * without a token, landing on the pairing channel.
+   */
+  forget(): void;
+  /** The pairing model now; each change is also a `pairing` notice. */
+  pairingState(): PairingState;
 }
 
 /**
@@ -68,12 +93,70 @@ export function createConnection(deps: ConnectionDeps): Connection {
   let unsubscribeVisibility: (() => void) | undefined;
   let started = false;
   let stopped = false;
+  let pairing: PairingState = INITIAL_PAIRING;
+  // The token the daemon issued on this page visit: the next dial presents it
+  // whether or not the store kept it.
+  // `null` while a forget is under way, or after one whose clear failed: the
+  // next dial presents no token without asking the store.
+  let issuedToken: string | null | undefined;
   const listeners = new Set<(notice: ConnectionNotice) => void>();
 
   function notify(notice: ConnectionNotice): void {
     for (const listener of listeners) {
       listener(notice);
     }
+  }
+
+  function foldPairing(event: PairingEvent): void {
+    const next = pairingStep(pairing, event);
+    if (next !== pairing) {
+      pairing = next;
+      notify({ kind: "pairing", pairing });
+    }
+  }
+
+  /**
+   * Forget the device token: clear this host's record, then redial without a
+   * token, which lands on the pairing channel. A failed clear still redials
+   * without it, and keeps presenting none for the rest of the visit.
+   */
+  function forgetToken(): void {
+    issuedToken = null;
+    foldPairing({ type: "forgotten" });
+    void deps.tokenStore
+      .clear()
+      .then(
+        () => {
+          if (issuedToken === null) {
+            issuedToken = undefined;
+          }
+        },
+        (error: unknown) => {
+          console.warn("pwa: forgetting the device token failed", error);
+        },
+      )
+      .then(() => {
+        dispatch({ type: "tokenChanged" });
+      });
+  }
+
+  function onDeviceToken(token: string): void {
+    issuedToken = token;
+    void deps.tokenStore.set(token).then(
+      () => {
+        askPersistence();
+      },
+      (error: unknown) => {
+        console.warn("pwa: saving the device token failed", error);
+        if (!stopped) {
+          foldPairing({ type: "saveFailed" });
+        }
+      },
+    );
+    // Run after the current dispatch has finished its effects.
+    void Promise.resolve().then(() => {
+      dispatch({ type: "tokenChanged" });
+    });
   }
 
   function closeSocket(): void {
@@ -132,7 +215,11 @@ export function createConnection(deps: ConnectionDeps): Connection {
   function connect(): void {
     closeSocket();
     const generation = socketGeneration;
-    void deps.tokenStore.get().then(
+    const token =
+      issuedToken === undefined
+        ? deps.tokenStore.get()
+        : Promise.resolve(issuedToken === null ? undefined : issuedToken);
+    void token.then(
       (token) => {
         openSocket(token, generation);
       },
@@ -168,9 +255,21 @@ export function createConnection(deps: ConnectionDeps): Connection {
         break;
       case "deliver":
         notify({ kind: "message", message: effect.message });
+        if (state.name === "pairing") {
+          foldPairing({ type: "message", message: effect.message });
+          if (effect.message.type === "device_token") {
+            onDeviceToken(effect.message.token);
+          }
+        }
         break;
       case "status":
         notify({ kind: "status", state: effect.state });
+        break;
+      case "pairingLost":
+        foldPairing({ type: "lost" });
+        break;
+      case "forgetToken":
+        forgetToken();
         break;
     }
   }
@@ -225,5 +324,67 @@ export function createConnection(deps: ConnectionDeps): Connection {
     };
   }
 
-  return { start, stop, tokenChanged, subscribe };
+  function askToPair(): void {
+    // Only the pairing channel asks, and only when nothing is open already.
+    if (stopped || state.name !== "pairing" || !canAsk(pairing)) {
+      return;
+    }
+    foldPairing({ type: "ask" });
+    dispatch({ type: "askPair" });
+  }
+
+  function redeem(code: string): void {
+    if (stopped) {
+      return;
+    }
+    const requestId = pairing.requestId;
+    foldPairing({ type: "redeem", code });
+    if (isPairingCode(code) && requestId !== null) {
+      dispatch({ type: "redeem", requestId, code });
+    }
+  }
+
+  function forget(): void {
+    if (!stopped) {
+      forgetToken();
+    }
+  }
+
+  return {
+    start,
+    stop,
+    tokenChanged,
+    subscribe,
+    askToPair,
+    redeem,
+    forget,
+    pairingState: () => pairing,
+  };
+}
+
+let persistenceAsked = false;
+
+/**
+ * Ask the browser to keep the page's storage through eviction, once per page
+ * load. Never awaited: the redial does not wait on it, and the answer is only
+ * logged.
+ */
+function askPersistence(): void {
+  if (persistenceAsked) {
+    return;
+  }
+  persistenceAsked = true;
+  const storage = typeof navigator === "undefined" ? undefined : navigator.storage;
+  const asked = storage?.persist?.();
+  if (asked === undefined) {
+    return;
+  }
+  void asked.then(
+    (persisted) => {
+      console.info("pwa: storage persistence granted", persisted);
+    },
+    (error: unknown) => {
+      console.warn("pwa: asking for storage persistence failed", error);
+    },
+  );
 }

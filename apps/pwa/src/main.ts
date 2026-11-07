@@ -1,6 +1,6 @@
 import { SW_SCOPE, SW_URL } from "./paths";
 import { createConnection, type WebSocketLike } from "./socket";
-import { memoryTokenStore } from "./token-store";
+import { indexedDbTokenStore } from "./token-store";
 
 // Registers the hand-written service worker, which precaches the shell so an
 // installed app opens offline. A failure is logged, never thrown: the page
@@ -42,8 +42,9 @@ function openWebSocket(url: string): WebSocketLike {
 }
 
 // The daemon's tailnet listener admits only its own origin, so the page dials
-// the host it was served from. The store is in memory: the page presents no
-// token, so the daemon answers `Welcome` and then `DevicePairFailed`.
+// the host it was served from. The device token is kept in IndexedDB; a
+// phone with none lands on the pairing channel, driven through `askToPair`
+// and `redeem`.
 const connection = createConnection({
   url: `wss://${location.host}/ws`,
   openSocket: openWebSocket,
@@ -60,10 +61,15 @@ const connection = createConnection({
       };
     },
   },
-  tokenStore: memoryTokenStore(),
+  tokenStore: indexedDbTokenStore(),
 });
 
+// The connection's notices, the pairing model's included, go to the console.
 connection.subscribe((notice) => {
+  if (notice.kind === "pairing") {
+    console.info("pwa pairing", notice.pairing);
+    return;
+  }
   console.info("pwa connection", notice);
 });
 connection.start();
