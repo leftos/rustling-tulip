@@ -41,6 +41,7 @@ crates/
   agents/registry/ - the compiled-in list of agent plugins
 apps/
   native/       - native desktop client (GPUI + alacritty_terminal)
+  pwa/          - the iPhone PWA shell (Vite + TypeScript, pnpm) that the daemon's tailnet listener serves; see its README.md
 tools/
   e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
@@ -70,6 +71,8 @@ docs/
 # tests, run with cargo-nextest (`.\rt.ps1 setup` installs it)
 .\rt.ps1 test
 ```
+
+The phone app in `apps/pwa` is not a Cargo member and `rt.ps1` does not build it yet. It needs Node.js and pnpm: run `pnpm --dir apps/pwa install` once, then `pnpm --dir apps/pwa build` (output in `apps/pwa/dist/`) or `pnpm --dir apps/pwa test` (vitest), each as a `tools/gate.ps1 run` call. Its scripts are listed in `apps/pwa/README.md`.
 
 `.\rt.ps1 help` lists the other commands.
 
@@ -263,6 +266,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Pending input**: what a hook-reported `AwaitingInput` is waiting on (a question, a permission or a plan approval), on the session record and snapshot as `pending_input` and in `meta.json` beside `status`, restored by a reattach only with `AwaitingInput`; see `docs/plans/hook-status.md`.
 - **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), its settled design in `docs/native-client.md` ("Petal chrome", "Theme and fonts").
 - **PF, AT, SV, RD, AR, OT**: idea ids in `docs/plans/off-orca.md` (files across machines, attention streams, session views, remote desktop, artifacts by account, absorbing ops-tower).
+- **Phone app**: the iPhone PWA in `apps/pwa`, which the daemon's tailnet listener serves from its `pwa` folder; design in `docs/plans/mobile-app.md`.
 - **Pick mode**: the theme editor's toggle that makes a click on a part of its preview jump the token list to that part's token (`PICK_REGIONS` in `apps/native/src/themes_view.rs`).
 - **Pinned question**: the summary view's open prompt shown as a card on top, answered from the same card as in the chat.
 - **Pinned run**: a gate run sent to one named builder alone (`--builder <host>`), never another builder and never this PC; it must match one of the repo's routed patterns. `rt.ps1 mac` pins every run to the Mac mini builder.

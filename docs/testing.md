@@ -46,6 +46,8 @@ The native client has three test tiers, and the driver MCP server has a live spe
 
 The driver MCP server's other specs (`tools/rt-driver-mcp/tests/server.rs`) run in the normal nextest run. Its live spec, `driver_mcp_launch_ping_screenshot_stop`, is `#[ignore]`d: it launches a real driven client and needs the daemon, tracer and driver client built in test-release. `tools/rt-driver-mcp/live-check.ps1` builds them and runs the ignored specs, so run it as one gate job with `--slot heavy`, since it builds: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/<name>.log --timeout 3600 --slot heavy -- pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1`.
 
+The phone app's unit tests (`apps/pwa`) run with `pnpm --dir apps/pwa test` (vitest, after `pnpm --dir apps/pwa install`), outside the Rust suite and the test map: `tools/test-map.json` ignores `apps/pwa/**`, and `.\rt.ps1 test` does not run them. The prek hooks lint and format-check that folder through `tools/pwa-hook.ps1`.
+
 ## Driving the daemon's CLI from a script
 
 `rustling-tulipd` is a GUI-subsystem program: PowerShell's `&` does not wait for it and loses its output; a redirect from `cmd` keeps it (`crates/daemon/tests/cli_console.rs` runs the exe under `cmd /c` with a redirect). A script that runs its verbs starts it with `System.Diagnostics.ProcessStartInfo` and redirected standard output and error, then reads both and the exit code.

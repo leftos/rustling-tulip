@@ -14,6 +14,10 @@ Cargo.lock.bak
 Thumbs.db
 .DS_Store
 
+# Phone app build output and dependencies
+apps/pwa/node_modules/
+apps/pwa/dist/
+
 # Local state / temp
 .tmp/
 .env

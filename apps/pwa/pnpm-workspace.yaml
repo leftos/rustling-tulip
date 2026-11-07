@@ -1,0 +1,5 @@
+# pnpm settings for this workspace. pnpm 11 and later ignore these in `.npmrc`,
+# so they live here: no dependency published in the last day, and no package
+# runs an install script.
+minimumReleaseAge: 1440
+ignoreScripts: true

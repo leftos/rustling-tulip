@@ -30,10 +30,10 @@ repos:
       # These three manifests list their own stages (pre-push among them),
       # which override default_stages; pin them to pre-commit.
       - id: trailing-whitespace
-        types_or: [rust, javascript, json, yaml, toml]
+        types_or: [rust, javascript, ts, json, yaml, toml]
         stages: [pre-commit]
       - id: end-of-file-fixer
-        types_or: [rust, javascript, json, yaml, toml]
+        types_or: [rust, javascript, ts, json, yaml, toml]
         stages: [pre-commit]
       - id: mixed-line-ending
         args: [--fix=lf]
@@ -42,7 +42,9 @@ repos:
       - id: check-case-conflict
       - id: check-json
       - id: check-toml
+      # pnpm writes its lockfile as two YAML documents.
       - id: check-yaml
+        args: [--allow-multiple-documents]
       # `tailscale cert` writes a TLS private key for the daemon at runtime. It
       # lives in the machine-local data dir, not the repo, but the cost of being
       # wrong here is a leaked key in git history.
@@ -65,6 +67,23 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+
+      # The phone app's lint and format checks, scoped to its own tree.
+      - id: pwa-oxlint
+        name: pwa oxlint
+        entry: pwsh -NoProfile -File tools/pwa-hook.ps1 lint
+        language: system
+        files: '^apps/pwa/'
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: pwa-oxfmt
+        name: pwa oxfmt --check
+        entry: pwsh -NoProfile -File tools/pwa-hook.ps1 fmt
+        language: system
+        files: '^apps/pwa/'
+        pass_filenames: false
+        stages: [pre-commit]
 
       - id: check-agent-names
         name: agent names stay behind the seam

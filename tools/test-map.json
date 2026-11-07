@@ -24,7 +24,8 @@
   "ignore": [
     "**/*.md",
     "docs/**",
-    ".claude/**"
+    ".claude/**",
+    "apps/pwa/**"
   ],
   "rows": [
     {
