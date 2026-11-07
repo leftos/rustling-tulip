@@ -731,13 +731,14 @@ pub fn follows_bottom(laid_out: Option<(f32, f32)>) -> bool {
 }
 
 /// The one line a collapsed tool card shows: the summary's first line,
-/// trimmed and cut to at most 80 characters with a closing ellipsis, or the
-/// tool's name when the summary is empty.
+/// trimmed and cut to at most 80 characters with a closing ellipsis; nothing
+/// when that line is empty or only repeats the tool's name, so the card names
+/// the tool once.
 #[must_use]
 pub fn tool_one_liner(summary: &str, name: &str) -> String {
     let line = summary.lines().next().unwrap_or_default().trim();
-    if line.is_empty() {
-        return name.to_owned();
+    if line.is_empty() || line == name {
+        return String::new();
     }
     if line.chars().count() <= ONE_LINER_CAP {
         return line.to_owned();
@@ -1952,6 +1953,17 @@ mod tests {
             "src/a.rs",
             "only the first line shows"
         );
+        assert_eq!(
+            tool_one_liner("", "Read"),
+            "",
+            "an empty summary says nothing"
+        );
+        assert_eq!(
+            tool_one_liner("ExitPlanMode", "ExitPlanMode"),
+            "",
+            "a summary that is only the name is drawn once"
+        );
+        assert_eq!(tool_one_liner("  ToolSearch  ", "ToolSearch"), "");
     }
 
     #[test]
@@ -1977,9 +1989,9 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_summary_names_the_tool() {
-        assert_eq!(tool_one_liner("", "Read"), "Read");
-        assert_eq!(tool_one_liner("   ", "Bash"), "Bash");
+    fn an_empty_summary_draws_no_one_liner() {
+        assert_eq!(tool_one_liner("", "Read"), "");
+        assert_eq!(tool_one_liner("   ", "Bash"), "");
     }
 
     #[test]

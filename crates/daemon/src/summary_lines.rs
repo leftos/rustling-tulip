@@ -99,6 +99,11 @@ fn turn_lines(turn: &[TimedEntry<'_>]) -> Vec<StretchLine> {
         .collect()
 }
 
+/// A tool's summary, or its name when the call has nothing to summarise.
+fn summary_or_name<'a>(name: &'a str, summary: &'a str) -> &'a str {
+    if summary.is_empty() { name } else { summary }
+}
+
 /// One turn's stretch inputs: one per window that holds an entry.
 fn turn_inputs(turn: &[TimedEntry<'_>]) -> Vec<(String, String)> {
     let placed = place(turn);
@@ -115,7 +120,7 @@ fn turn_inputs(turn: &[TimedEntry<'_>]) -> Vec<(String, String)> {
                 parts.extend(lead);
             }
             parts.extend(window.iter().filter_map(|placed| match placed.entry {
-                ChatEntry::Tool { summary, .. } => Some(summary.as_str()),
+                ChatEntry::Tool { name, summary, .. } => Some(summary_or_name(name, summary)),
                 ChatEntry::Answer { text, .. } => Some(text.as_str()),
                 _ => None,
             }));
@@ -214,11 +219,11 @@ fn window_line(turn_id: &str, prompt: &str, window: &[Placed<'_>]) -> Option<Str
     })
 }
 
-/// What a later window's line starts with: its first tool's summary, else
-/// its first answer, else nothing.
+/// What a later window's line starts with: its first tool's summary, or its
+/// name when it has none, else its first answer, else nothing.
 fn later_lead<'a>(window: &[Placed<'a>]) -> &'a str {
     let tool = window.iter().find_map(|placed| match placed.entry {
-        ChatEntry::Tool { summary, .. } => Some(summary.as_str()),
+        ChatEntry::Tool { name, summary, .. } => Some(summary_or_name(name, summary)),
         _ => None,
     });
     let answer = || {
@@ -294,10 +299,19 @@ mod tests {
     }
 
     fn tool(id: &str, at: Option<i64>) -> Row {
+        tool_summarised(id, at, format!("ran {id}"))
+    }
+
+    /// A tool whose call has nothing to summarise.
+    fn unnamed_tool(id: &str, at: Option<i64>) -> Row {
+        tool_summarised(id, at, String::new())
+    }
+
+    fn tool_summarised(id: &str, at: Option<i64>, summary: String) -> Row {
         let entry = ChatEntry::Tool {
             id: id.to_owned(),
             name: "Bash".to_owned(),
-            summary: format!("ran {id}"),
+            summary,
             input: String::new(),
             result: None,
             parent_id: None,
@@ -419,6 +433,18 @@ mod tests {
     }
 
     #[test]
+    fn a_later_window_leads_with_an_unnamed_tools_name() {
+        let rows = [
+            prompt("p", "Port the parser", Some(0)),
+            tool("t3", Some(3)),
+            unnamed_tool("t7", Some(7)),
+        ];
+        let lines = lines_of(&rows);
+        assert_eq!(ids(&lines), ["p", "p#1"]);
+        assert_eq!(lines[1].text, "Bash (<1m, 1 tool)");
+    }
+
+    #[test]
     fn each_line_expands_to_its_entries() {
         let rows = [
             answer("before", None),
@@ -526,6 +552,18 @@ mod tests {
             [("q".to_owned(), "ran t4".to_owned())],
             "a pending user entry is left out"
         );
+    }
+
+    #[test]
+    fn a_window_input_names_an_unnamed_tool_by_its_name() {
+        let rows = [
+            prompt("p", "Go", Some(0)),
+            tool("t1", Some(1)),
+            unnamed_tool("t2", Some(7)),
+        ];
+        let inputs = inputs_of(&rows);
+        assert_eq!(inputs[0].1, "Go\nran t1");
+        assert_eq!(inputs[1], ("p#1".to_owned(), "Bash".to_owned()));
     }
 
     #[test]

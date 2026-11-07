@@ -261,16 +261,28 @@ impl Lifter {
     }
 }
 
+/// How a soft break, a single line break inside a paragraph, draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SoftBreaks {
+    /// As a space, `CommonMark`'s reading, for a file viewer, release notes and
+    /// any other Markdown source that wraps its lines.
+    Space,
+    /// As a line break, as the terminal and the phone draw it, for a Chat
+    /// answer.
+    Line,
+}
+
 /// Parses `text`, a Markdown file's contents, into its blocks.
 ///
 /// `file_dir` is the folder the file was read from: a relative link's path is
-/// resolved against it.
+/// resolved against it. `soft_breaks` says how a single line break inside a
+/// paragraph draws.
 #[must_use]
-pub(crate) fn parse(text: &str, file_dir: &Path) -> Document {
+pub(crate) fn parse(text: &str, file_dir: &Path, soft_breaks: SoftBreaks) -> Document {
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let mut builder = Builder::new(file_dir);
+    let mut builder = Builder::new(file_dir, soft_breaks);
     for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
         builder.event(event, range);
     }
@@ -477,6 +489,7 @@ struct ImageBuf {
 /// document cannot overflow the stack.
 struct Builder<'a> {
     file_dir: &'a Path,
+    soft_breaks: SoftBreaks,
     stack: Vec<Frame>,
     spans: Vec<Span>,
     strong: u32,
@@ -495,9 +508,10 @@ struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     /// A builder whose stack holds only the document root.
-    fn new(file_dir: &'a Path) -> Self {
+    fn new(file_dir: &'a Path, soft_breaks: SoftBreaks) -> Self {
         Self {
             file_dir,
+            soft_breaks,
             stack: vec![Frame::Blocks {
                 blocks: Vec::new(),
                 task: None,
@@ -537,7 +551,13 @@ impl<'a> Builder<'a> {
                 self.text(&text, range);
             }
             Event::Code(code) => self.code_span(&code, range),
-            Event::SoftBreak => self.break_span(' ', range),
+            Event::SoftBreak => {
+                let ch = match self.soft_breaks {
+                    SoftBreaks::Space => ' ',
+                    SoftBreaks::Line => '\n',
+                };
+                self.break_span(ch, range);
+            }
             Event::HardBreak => self.break_span('\n', range),
             Event::Rule => self.rule(),
             Event::TaskListMarker(checked) => self.mark_task(checked),
@@ -651,10 +671,11 @@ impl<'a> Builder<'a> {
         self.spans.push(span);
     }
 
-    /// A soft or hard break, as a space or a newline.
+    /// A soft or hard break, as a space or a newline; an image's alt text
+    /// takes a space either way.
     fn break_span(&mut self, ch: char, range: Range<usize>) {
         if let Some(image) = &mut self.image {
-            image.text.push(ch);
+            image.text.push(' ');
             return;
         }
         if let Some(html) = &mut self.html {
@@ -993,7 +1014,7 @@ mod tests {
     }
 
     fn parse_doc(text: &str) -> Document {
-        parse(text, docs_dir())
+        parse(text, docs_dir(), SoftBreaks::Space)
     }
 
     fn texts(spans: &[Span]) -> String {
@@ -1183,6 +1204,12 @@ mod tests {
         assert_eq!(spans[0].text, "a cat");
         assert!(spans[0].muted);
         assert_eq!(spans[0].link, None);
+    }
+
+    #[test]
+    fn an_image_alt_text_keeps_a_break_as_a_space() {
+        let doc = parse("![a\nb](x.png)\n", docs_dir(), SoftBreaks::Line);
+        assert_eq!(spans_at(&doc.blocks, 0)[0].text, "a b");
     }
 
     #[test]
@@ -1407,6 +1434,12 @@ mod tests {
         assert_eq!(hard_spans.len(), 3);
         assert_eq!(texts(soft_spans), "a b");
         assert_eq!(texts(hard_spans), "a\nb");
+    }
+
+    #[test]
+    fn a_soft_break_is_a_line_break_in_line_mode() {
+        let line = parse("a\nb\n", docs_dir(), SoftBreaks::Line);
+        assert_eq!(texts(spans_at(&line.blocks, 0)), "a\nb");
     }
 
     #[test]

@@ -96,7 +96,7 @@ All replace the input box and the status and mode lines; the task list (when the
 | Review | `1` submits, `2` cancels. |
 | Plan approval | `1`/`2` approve; `3` turns option 3 into a field, Enter sends it as feedback (Claude revises and asks again); shift+tab approves with the feedback. |
 | Heads up | A bare digit answers (collie measured within 0.5 s); the notice survives one prompt typed past it and clears on the second. |
-| Input box | Bracketed paste of a few lines stays inline; 30 lines collapse to `[Pasted text #1 +29 lines]` (`paste again to expand`; the transcript wraps it in `<pasted_content id=…>`). ctrl+u clears one line; Esc Esc clears a draft but **opens Rewind on an empty box**; ctrl+c on an empty box arms exit. |
+| Input box | Bracketed paste of a few lines stays inline; 30 lines collapse to `[Pasted text #1 +29 lines]` (`paste again to expand`; the transcript wraps it in `<pasted_content id="…">…</pasted_content id="…">`, the closer carrying the id too). ctrl+u clears one line; Esc Esc clears a draft but **opens Rewind on an empty box**; ctrl+c on an empty box arms exit. |
 
 ## What the transcript adds and lacks
 

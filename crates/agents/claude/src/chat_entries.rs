@@ -188,14 +188,37 @@ fn user_message(uuid: &str, text: &str) -> Option<ChatEntry> {
     if text.trim_start().starts_with(INTERRUPTED_PREFIX) {
         return Some(system_row(uuid, "Interrupted".to_owned()));
     }
-    if is_command_noise(text) || text.trim().is_empty() {
+    if is_command_noise(text) {
+        return None;
+    }
+    let unwrapped = unwrap_pasted(text);
+    let text = if unwrapped == text {
+        unwrapped
+    } else {
+        trim_blank_lines(&unwrapped)
+    };
+    if text.trim().is_empty() {
         return None;
     }
     Some(ChatEntry::User {
         id: uuid.to_owned(),
-        text: unwrap_pasted(text),
+        text,
         pending: false,
     })
+}
+
+/// `text` without the blank lines at its start and end, the ones inside it
+/// kept.
+fn trim_blank_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(first) = lines.iter().position(|line| !line.trim().is_empty()) else {
+        return String::new();
+    };
+    let last = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .unwrap_or(first);
+    lines[first..=last].join("\n")
 }
 
 /// A block-content user record: each tool result upserts its card (with any
@@ -451,10 +474,10 @@ pub(crate) fn tool_kind(name: &str) -> ToolKind {
 
 /// One line saying what a call works on: Bash's command, the path for
 /// Read/Edit/Write, the pattern for Grep/Glob, the description for Agent and
-/// Task, else the tool's name.
+/// Task; a call with nothing to summarise has none.
 fn tool_summary(name: &str, input: &Value) -> String {
     let key = match name {
-        "Bash" => "command",
+        "Bash" | "PowerShell" => "command",
         "Read" | "Edit" | "Write" => "file_path",
         "Grep" | "Glob" => "pattern",
         "Agent" | "Task" => "description",
@@ -462,7 +485,7 @@ fn tool_summary(name: &str, input: &Value) -> String {
     };
     let line = str_at(input, key)
         .and_then(|value| value.lines().map(str::trim).find(|line| !line.is_empty()))
-        .unwrap_or(name);
+        .unwrap_or("");
     cap_chars(line, SUMMARY_MAX_CHARS)
 }
 
@@ -573,28 +596,53 @@ fn without_tag(text: &str, tag: &str) -> String {
     format!("{}{}", &text[..start], &text[end..])
 }
 
-/// Each `<pasted_content …>text</pasted_content>` replaced by its text; an
+/// The tag Claude Code wraps a pasted block in.
+const PASTED_OPEN: &str = "<pasted_content";
+/// The start of the tag's closer; the real one carries an id
+/// (`</pasted_content id="23">`), so the tag alone is not enough.
+const PASTED_CLOSE: &str = "</pasted_content";
+
+/// Each `<pasted_content …>text</pasted_content …>` replaced by its text; an
 /// unclosed one is left as written.
 fn unwrap_pasted(text: &str) -> String {
-    const OPEN: &str = "<pasted_content";
-    const CLOSE: &str = "</pasted_content>";
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(start) = rest.find(OPEN) {
+    while let Some(start) = rest.find(PASTED_OPEN) {
         let after = &rest[start..];
         let Some(body_start) = after.find('>').map(|at| at + 1) else {
             break;
         };
         let body = &after[body_start..];
-        let Some(close) = body.find(CLOSE) else {
+        let Some(close) = closer_start(body) else {
+            break;
+        };
+        let closer = &body[close..];
+        let Some(closer_end) = closer.find('>') else {
             break;
         };
         out.push_str(&rest[..start]);
         out.push_str(&body[..close]);
-        rest = &body[close + CLOSE.len()..];
+        rest = &closer[closer_end + 1..];
     }
     out.push_str(rest);
     out
+}
+
+/// Where the closer of the paste at the start of `text` begins: the end tag
+/// followed by `>` or a space, then its attributes up to a `>`. Text that
+/// merely names the tag, such as a string holding `"</pasted_content"`,
+/// does not close the paste.
+fn closer_start(text: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(PASTED_CLOSE) {
+        let start = from + at;
+        let after = text[start + PASTED_CLOSE.len()..].chars().next();
+        if matches!(after, Some('>' | ' ')) {
+            return Some(start);
+        }
+        from = start + PASTED_CLOSE.len();
+    }
+    None
 }
 
 /// `text` without its SGR escapes (`ESC [ <params> m`); other escapes stay.
@@ -975,7 +1023,7 @@ mod tests {
                 tool(
                     "toolu_05",
                     "WebFetch",
-                    "WebFetch",
+                    "",
                     &json!({"url": "https://example.test/"}),
                     None
                 ),
@@ -1013,9 +1061,14 @@ mod tests {
             summary_of("Bash", &json!({"command": "  \n  ls -la\nrm x"})),
             "ls -la"
         );
-        assert_eq!(summary_of("Bash", &json!({"command": ""})), "Bash");
-        assert_eq!(summary_of("Read", &json!({})), "Read");
-        assert_eq!(summary_of("Bash", &json!({"command": 7})), "Bash");
+        assert_eq!(summary_of("Bash", &json!({"command": ""})), "");
+        assert_eq!(summary_of("Read", &json!({})), "");
+        assert_eq!(summary_of("Bash", &json!({"command": 7})), "");
+        assert_eq!(summary_of("ExitPlanMode", &json!({"plan": "x"})), "");
+        assert_eq!(
+            summary_of("PowerShell", &json!({"command": "Get-ChildItem"})),
+            "Get-ChildItem"
+        );
     }
 
     #[test]
@@ -1166,6 +1219,56 @@ mod tests {
                 pending: false,
             }]
         );
+    }
+
+    #[test]
+    fn a_paste_closed_with_its_id_is_unwrapped() {
+        let closed = json!({"type": "user", "uuid": "u",
+            "message": {"content": "\n\n<pasted_content id=\"23ae\">line a\nline b</pasted_content id=\"23ae\">\nfix it"}})
+        .to_string();
+        assert_eq!(
+            chat_entries(&closed, &|_| None),
+            [ChatEntry::User {
+                id: "u".to_owned(),
+                text: "line a\nline b\nfix it".to_owned(),
+                pending: false,
+            }]
+        );
+        let plain = json!({"type": "user", "uuid": "u",
+            "message": {"content": "\n\nhello\n\n"}})
+        .to_string();
+        assert_eq!(
+            chat_entries(&plain, &|_| None),
+            [ChatEntry::User {
+                id: "u".to_owned(),
+                text: "\n\nhello\n\n".to_owned(),
+                pending: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_closer_named_inside_a_paste_does_not_close_it() {
+        let body = "const CLOSE: &str = \"</pasted_content\";\nfn f() -> u8 {}";
+        let content = format!("<pasted_content id=\"1\">{body}</pasted_content id=\"1\">");
+        let record =
+            json!({"type": "user", "uuid": "u", "message": {"content": content}}).to_string();
+        assert_eq!(
+            chat_entries(&record, &|_| None),
+            [ChatEntry::User {
+                id: "u".to_owned(),
+                text: body.to_owned(),
+                pending: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_blank_paste_makes_no_entry() {
+        let record = json!({"type": "user", "uuid": "u",
+            "message": {"content": "<pasted_content id=\"1\">\n  \n</pasted_content id=\"1\">"}})
+        .to_string();
+        assert_eq!(chat_entries(&record, &|_| None), []);
     }
 
     #[test]

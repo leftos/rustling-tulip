@@ -248,14 +248,18 @@ struct Place {
 /// code blocks whose language has a grammar within the highlighter's time
 /// limit for the whole document; `cancel` stops the colouring.
 pub(crate) fn prepare(text: &str, file_dir: &Path, cancel: &AtomicBool) -> MdDoc {
-    flatten(md_blocks::parse(text, file_dir), cancel)
+    flatten(
+        md_blocks::parse(text, file_dir, md_blocks::SoftBreaks::Space),
+        cancel,
+    )
 }
 
 /// A chat answer as [`crate::stretchtext::compose`] wrote it, parsed into rows
 /// with its stretches lifted into stretchtext links, its code coloured as
 /// [`prepare`] colours it.
 pub(crate) fn prepare_answer(composed: &Composed, cancel: &AtomicBool) -> MdDoc {
-    let mut document = md_blocks::parse(&composed.source, Path::new(""));
+    let mut document =
+        md_blocks::parse(&composed.source, Path::new(""), md_blocks::SoftBreaks::Line);
     md_blocks::lift_stretchtext(&mut document, &composed.keys);
     flatten(document, cancel)
 }
@@ -264,7 +268,7 @@ pub(crate) fn prepare_answer(composed: &Composed, cancel: &AtomicBool) -> MdDoc 
 /// into rows, its code coloured as [`prepare`] colours it.
 pub(crate) fn prepare_text(source: &str) -> MdDoc {
     flatten(
-        md_blocks::parse(source, Path::new("")),
+        md_blocks::parse(source, Path::new(""), md_blocks::SoftBreaks::Space),
         &AtomicBool::new(false),
     )
 }
@@ -1101,7 +1105,10 @@ mod tests {
     use std::path::Path;
 
     fn spans_of(text: &str) -> Vec<Span> {
-        match md_blocks::parse(text, Path::new("notes")).blocks.first() {
+        match md_blocks::parse(text, Path::new("notes"), md_blocks::SoftBreaks::Space)
+            .blocks
+            .first()
+        {
             Some(Block::Paragraph(spans)) => spans.clone(),
             other => panic!("one paragraph, got {other:?}"),
         }
@@ -1242,5 +1249,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_chat_answer_keeps_single_line_breaks() {
+        let answer = prepare_answer(
+            &Composed {
+                source: "1\n2\n3\n".to_owned(),
+                keys: Vec::new(),
+            },
+            &AtomicBool::new(false),
+        );
+        assert_eq!(answer.drawn_text(), "1\n2\n3");
+        let viewer = prepare("1\n2\n3\n", Path::new(""), &AtomicBool::new(false));
+        assert_eq!(
+            viewer.drawn_text(),
+            "1 2 3",
+            "a file viewer keeps the space"
+        );
     }
 }

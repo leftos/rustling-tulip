@@ -411,17 +411,17 @@ fn is_blank(long: &[Segment]) -> bool {
         .all(|part| matches!(part, Segment::Text(text) if text.trim().is_empty()))
 }
 
-/// An open stretch's long form followed by its `closer`, after a space when
-/// the long form ends in a line of paragraph text, else in a paragraph of
-/// its own after a blank line, where the block the long form ends in cannot
-/// swallow it.
+/// An open stretch's long form followed by its `closer`, on the same line
+/// after a space when the long form ends in a line of paragraph text, else in
+/// a paragraph of its own after a blank line, where the block the long form
+/// ends in cannot swallow it.
 fn close_after(long: &str, closer: &str) -> String {
     let trimmed = long.trim_end();
     let last = trimmed.rfind('\n').map_or(trimmed, |at| &trimmed[at + 1..]);
     if ends_in_a_block(last) {
         format!("{trimmed}\n\n{closer}")
     } else {
-        format!("{long} {closer}")
+        format!("{trimmed} {closer}")
     }
 }
 
@@ -551,7 +551,8 @@ mod tests {
 
     /// `composed` parsed as Markdown, its markers lifted into links.
     fn lifted(composed: &Composed) -> md_blocks::Document {
-        let mut document = md_blocks::parse(&composed.source, Path::new(""));
+        let mut document =
+            md_blocks::parse(&composed.source, Path::new(""), md_blocks::SoftBreaks::Line);
         md_blocks::lift_stretchtext(&mut document, &composed.keys);
         document
     }
@@ -839,6 +840,11 @@ mod tests {
             finished("{{a|text\n\n---}}", &["a"]),
             "text\n\n---\n\n(\u{2039}a)"
         );
+    }
+
+    #[test]
+    fn a_long_form_ending_in_a_line_break_keeps_its_closer_on_that_line() {
+        assert_eq!(finished("{{a|text\n}}", &["a"]), "text (\u{2039}a)");
     }
 
     #[test]

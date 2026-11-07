@@ -2466,6 +2466,11 @@ fn tool_card(
         Some(_) => ("done", "done", t.waiting),
     };
     let mark_name = format!("chat-tool-{state}-{}-{}", look.pane_id, tool.id);
+    let one_liner = chat::tool_one_liner(tool.summary, tool.name);
+    let summary_slot = div()
+        .flex_1()
+        .min_w(px(0.0))
+        .when(!one_liner.is_empty(), |slot| slot.child(one_liner));
     let header = div()
         .flex()
         .items_center()
@@ -2476,12 +2481,7 @@ fn tool_card(
                 .text_color(gpui::rgb(t.text))
                 .child(tool.name.to_owned()),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .child(chat::tool_one_liner(tool.summary, tool.name)),
-        )
+        .child(summary_slot)
         .child(
             div()
                 .driver_id(|| mark_name)
