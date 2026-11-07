@@ -201,6 +201,10 @@ pub struct Hub {
     /// forget cuts them at once. Locked before [`Hub::devices`] when both
     /// are held.
     pub live_devices: live_devices::LiveDevices,
+    /// The push folder, the VAPID key and the devices' push subscriptions,
+    /// behind one lock taken after [`Hub::devices`] when both are held and
+    /// never before it.
+    pub(crate) push: Arc<std::sync::Mutex<crate::push::state::PushState>>,
     /// The Dashboard's facts service: its watchers, its reader cache and the
     /// facts it last sent each watcher.
     pub dashboard: crate::dashboard::Dashboard,
@@ -455,6 +459,26 @@ fn load_devices(dirs: &Dirs) -> Arc<std::sync::Mutex<crate::devices::DeviceStore
     )))
 }
 
+/// The push state over the profile's push folder, loaded on the first push
+/// request. An unresolved folder is logged and leaves a state whose every
+/// request fails, so the daemon still starts.
+fn push_state() -> Arc<std::sync::Mutex<crate::push::state::PushState>> {
+    let dir = match crate::paths::resolve_push_dir() {
+        Ok(dir) => Some(dir),
+        Err(err) => {
+            warn!(
+                err = format!("{err:#}"),
+                "could not resolve the push folder; push requests will fail"
+            );
+            None
+        }
+    };
+    Arc::new(std::sync::Mutex::new(crate::push::state::PushState::new(
+        dir,
+        crate::push::send::PushPolicy::default(),
+    )))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one line per hub field in the hub's literal; the start-up steps are already helpers"
@@ -563,6 +587,7 @@ pub async fn run(
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: pairing::PairingWaiters::default(),
         live_devices: live_devices::LiveDevices::default(),
+        push: push_state(),
         dashboard,
         summarizer,
         turns,

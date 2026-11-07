@@ -327,23 +327,6 @@ impl Dirs {
             .with_context(|| format!("creating tailnet dir {}", dir.display()))?;
         Ok(dir)
     }
-
-    /// The push folder (see [`resolve_push_dir`]), created if missing. On Unix
-    /// it is owner-only, so the VAPID private key and the device
-    /// subscriptions stay private to the user.
-    #[expect(dead_code, reason = "the push trigger is what calls it")]
-    pub fn ensure_push_dir() -> anyhow::Result<PathBuf> {
-        let dir = resolve_push_dir()?;
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating push dir {}", dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-                .with_context(|| format!("making push dir {} owner-only", dir.display()))?;
-        }
-        Ok(dir)
-    }
 }
 
 /// The device-token store: `<config>/devices.json`, beside `remote.json`. It
@@ -403,8 +386,8 @@ pub fn resolve_tailnet_dir() -> anyhow::Result<PathBuf> {
 /// when set (used by e2e isolation): an ordinary daemon's is
 /// `<data_local>/leftos/rustling-tulip/data/push/`, so the VAPID key pair and
 /// the device subscriptions stay machine-local and never roam; an elevated
-/// daemon's is under its protected root.
-#[expect(dead_code, reason = "the push trigger is what calls it")]
+/// daemon's is under its protected root. The folder is created on the first
+/// push request ([`crate::push::ensure_folder`]).
 pub fn resolve_push_dir() -> anyhow::Result<PathBuf> {
     Ok(profile::roots()?.1.push)
 }

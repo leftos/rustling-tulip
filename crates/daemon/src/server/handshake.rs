@@ -255,6 +255,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_DETAILED_LOGGING,
     protocol::FEATURE_DEFAULT_SHELL,
     protocol::FEATURE_AGENT_USER_HOOKS,
+    protocol::FEATURE_WEB_PUSH,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
@@ -641,6 +642,19 @@ mod tests {
         assert!(
             !DAEMON_FEATURES.contains(&protocol::FEATURE_ACCOUNT_EVENTS),
             "the account events feature joins only with the accounts feature"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_web_push() {
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_WEB_PUSH)
+            ),
+            "{welcome:?}"
         );
     }
 

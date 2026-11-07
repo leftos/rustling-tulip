@@ -15,6 +15,12 @@
 //! for a block while it holds [`Hub::pairing`], so `pairing` comes before
 //! `devices` too; nothing takes `pairing` or `live_devices` while holding
 //! `devices`.
+//!
+//! [`Hub::push`] is a leaf below them: live devices, then devices, then
+//! push. A push request holds `devices` from its device lookup until its
+//! push work is done; a block, a forget and a re-pair delete the device's
+//! subscription after their `devices` change. Nothing takes `devices` or
+//! `live_devices` while holding `push`.
 use super::connection::{AuthKind, ConnCtx, ConnLife, Inbound, undecoded_reply};
 use super::{Hub, StateEvent};
 use crate::devices::{
@@ -513,6 +519,9 @@ impl PairingConn<'_> {
         {
             let cut = live.cut(replaced);
             info!(device = %self.peer.name, %replaced, cut, "device paired again; the replaced record's connections were cut");
+            // The re-paired device subscribes again from its Notifications
+            // switch; the old id's subscription goes with the old record.
+            crate::sync::lock(&self.hub.push).remove_device(replaced);
         }
         drop(live);
         match issued {
@@ -631,6 +640,7 @@ pub(super) fn block_device(hub: &Hub, device_id: &str) -> std::io::Result<bool> 
     let mut live = hub.live_devices.lock();
     let revoked = crate::sync::lock(&hub.devices).revoke(device_id);
     let cut = live.cut(device_id);
+    crate::sync::lock(&hub.push).remove_device(device_id);
     drop(live);
     match &revoked {
         Ok(found) => info!(%device_id, found, cut, "pairing: device blocked"),
@@ -656,6 +666,7 @@ fn forget_device(hub: &Hub, device_id: &str) -> std::io::Result<bool> {
     let mut live = hub.live_devices.lock();
     let forgotten = crate::sync::lock(&hub.devices).forget(device_id);
     let cut = live.cut(device_id);
+    crate::sync::lock(&hub.push).remove_device(device_id);
     drop(live);
     match &forgotten {
         Ok(found) => info!(%device_id, found, cut, "pairing: device forgotten"),
@@ -1752,6 +1763,42 @@ mod tests {
         ends(&mut old).await;
         assert_eq!(hub.live_devices.lock().connected(&old_id), 0);
         assert_eq!(hub.live_devices.lock().connected(&new_id), 0);
+    }
+
+    #[tokio::test]
+    async fn pairing_again_deletes_the_replaced_records_push_subscription() {
+        let (hub, _scratch) = test_hub("re-paired-push");
+        let (old_id, _) = issue(&hub, &test_peer());
+        {
+            let devices = crate::sync::lock(&hub.devices);
+            let mut push = crate::sync::lock(&hub.push);
+            push.load(&devices)
+                .expect("load the push state")
+                .subs
+                .put(
+                    &old_id,
+                    crate::push::store::Subscription {
+                        kind: "web_push".to_owned(),
+                        endpoint: "https://web.push.apple.com/send/abc".to_owned(),
+                        p256dh: "p256dh".to_owned(),
+                        auth: "auth".to_owned(),
+                        needs_you: true,
+                        finished: false,
+                        created_at: "2026-11-07T00:00:00Z".to_owned(),
+                    },
+                )
+                .expect("store the old record's subscription");
+        }
+
+        let (new_id, _) = pair(&hub, test_peer()).await;
+        assert_ne!(new_id, old_id, "the re-pair replaced the record");
+        let devices = crate::sync::lock(&hub.devices);
+        let mut push = crate::sync::lock(&hub.push);
+        let loaded = push.load(&devices).expect("the push state is loaded");
+        assert!(
+            loaded.subs.iter().next().is_none(),
+            "the replaced record's subscription is gone"
+        );
     }
 
     #[tokio::test]

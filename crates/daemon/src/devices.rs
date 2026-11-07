@@ -166,7 +166,6 @@ impl DeviceStore {
     }
 
     /// Whether the file could not be read or decoded.
-    #[cfg(test)]
     #[must_use]
     pub fn is_corrupt(&self) -> bool {
         self.corrupt
@@ -294,6 +293,20 @@ impl DeviceStore {
         self.devices
             .iter()
             .any(|record| record.stable_id == stable_id && record.revoked)
+    }
+
+    /// The id of the unrevoked record of the device with `stable_id`; `None`
+    /// when it has none or the store is corrupt, as [`DeviceStore::verify`]
+    /// does.
+    #[must_use]
+    pub fn unrevoked_id_of(&self, stable_id: &str) -> Option<&str> {
+        if self.corrupt {
+            return None;
+        }
+        self.devices
+            .iter()
+            .find(|record| record.stable_id == stable_id && !record.revoked)
+            .map(|record| record.id.as_str())
     }
 
     /// Forget a device: its record goes, block included, so its token stops
@@ -907,6 +920,34 @@ mod tests {
             store.verify("node-a", "not-the-token").is_none(),
             "another token does not verify"
         );
+    }
+
+    #[test]
+    fn unrevoked_id_of_finds_an_unrevoked_record_and_skips_a_revoked_one() {
+        let scratch = Scratch::new("unrevoked-id");
+        let mut store = scratch.store();
+        let (id, _) = store
+            .issue(&phone(), Utc::now())
+            .expect("issue a device token");
+        assert_eq!(store.unrevoked_id_of("node-a"), Some(id.as_str()));
+        assert_eq!(store.unrevoked_id_of("node-b"), None, "another node");
+        assert!(store.revoke(&id).expect("revoke"), "the record exists");
+        assert_eq!(
+            store.unrevoked_id_of("node-a"),
+            None,
+            "a revoked record is not the device's id"
+        );
+    }
+
+    #[test]
+    fn unrevoked_id_of_finds_nothing_in_a_corrupt_store() {
+        let scratch = Scratch::new("unrevoked-id-corrupt");
+        let mut store = scratch.store();
+        store
+            .issue(&phone(), Utc::now())
+            .expect("issue a device token");
+        std::fs::write(scratch.path(), b"{ this is not json").expect("corrupt the store");
+        assert_eq!(scratch.store().unrevoked_id_of("node-a"), None);
     }
 
     #[test]

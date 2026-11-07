@@ -155,6 +155,12 @@
     },
     {
       "paths": [
+        "crates/daemon/src/server/push.rs"
+      ],
+      "filter": "package(daemon) & (test(/^server::push::/) | test(/^push::/))"
+    },
+    {
+      "paths": [
         "crates/daemon/src/cli_apply_update.rs"
       ],
       "filter": "package(daemon) & test(/^cli_apply_update::/)"

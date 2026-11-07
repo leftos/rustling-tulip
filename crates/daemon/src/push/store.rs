@@ -9,8 +9,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, anyhow};
 use serde::{Deserialize, Serialize};
 
-/// One device's subscription and the two switches the phone app sets.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The subscriptions file's name inside the push folder.
+pub(crate) const SUBSCRIPTIONS_FILE: &str = "subscriptions.json";
+
+/// One device's subscription and the two switches the phone app sets. Its
+/// `Debug` redacts the endpoint (a capability URL) and both keys, `auth`
+/// being the RFC 8291 secret, so no log carries them.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Subscription {
     /// The push service's kind; `web_push` is the only one written today.
     pub kind: String,
@@ -27,6 +32,21 @@ pub(crate) struct Subscription {
     /// When the subscription was stored, RFC 3339 UTC; the caller reads the
     /// clock, never this store.
     pub created_at: String,
+}
+
+impl std::fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const REDACTED: &str = "<redacted>";
+        f.debug_struct("Subscription")
+            .field("kind", &self.kind)
+            .field("endpoint", &REDACTED)
+            .field("p256dh", &REDACTED)
+            .field("auth", &REDACTED)
+            .field("needs_you", &self.needs_you)
+            .field("finished", &self.finished)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 /// `subscriptions.json`: the subscriptions by device id.
@@ -97,7 +117,6 @@ impl SubscriptionStore {
     }
 
     /// Whether the file could not be read or decoded.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn is_corrupt(&self) -> bool {
         self.corrupt
@@ -199,9 +218,7 @@ mod tests {
     use std::collections::HashSet;
     use std::path::PathBuf;
 
-    use super::{Subscription, SubscriptionStore};
-
-    const FILE: &str = "subscriptions.json";
+    use super::{SUBSCRIPTIONS_FILE as FILE, Subscription, SubscriptionStore};
 
     /// A scratch push folder holding one `subscriptions.json`, removed on
     /// drop.
@@ -428,6 +445,20 @@ mod tests {
             store.get("dev-2").is_none(),
             "a new device's failed put leaves nothing behind"
         );
+    }
+
+    #[test]
+    fn debug_shows_no_endpoint_and_no_key() {
+        let mut stored = subscription("https://web.push.apple.com/send/capability", true, false);
+        stored.p256dh = "BPublicKeyValue".to_owned();
+        stored.auth = "AuthSecretValue".to_owned();
+
+        let shown = format!("{stored:?}");
+
+        for secret in ["send/capability", "BPublicKeyValue", "AuthSecretValue"] {
+            assert!(!shown.contains(secret), "{shown} shows {secret}");
+        }
+        assert!(shown.contains("needs_you: true"), "{shown}");
     }
 
     #[test]

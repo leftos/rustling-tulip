@@ -88,6 +88,14 @@ pub(super) fn test_hub_with_attention(
     build_test_hub(ScratchDir::new(tag), None)
 }
 
+/// A test hub's push state over `dir`, with the daemon's endpoint policy.
+pub(crate) fn push_state_in(dir: PathBuf) -> Arc<std::sync::Mutex<crate::push::state::PushState>> {
+    Arc::new(std::sync::Mutex::new(crate::push::state::PushState::new(
+        Some(dir),
+        crate::push::send::PushPolicy::default(),
+    )))
+}
+
 pub(super) fn build_test_hub(
     scratch: ScratchDir,
     bin_templates: Option<PathBuf>,
@@ -125,6 +133,7 @@ pub(super) fn build_test_hub(
         active: false,
     });
     let devices = crate::devices::DeviceStore::load(&crate::paths::devices_file(&dirs));
+    let push = push_state_in(scratch.path().join("push"));
     let dashboard = crate::dashboard::Dashboard::new(
         Arc::clone(&sessions),
         dirs.activity_dir(),
@@ -180,6 +189,7 @@ pub(super) fn build_test_hub(
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: super::pairing::PairingWaiters::default(),
         live_devices: super::live_devices::LiveDevices::default(),
+        push,
         dashboard,
         summarizer,
         turns,
