@@ -70,6 +70,7 @@ The views:
 - `settings-claude`: Settings on Claude's page scrolled to its end, the end of Launch command and then Hooks.
 - `dashboard-compact`: the Dashboard's Compact view over scripted agents in several repos, a workspace and a folder, at 1920x1080.
 - `main-compact`: the sidebar's Compact leaves.
+- `main-narrow`: the tulip tab split three ways, its narrow pane headers collapsed to the ⋯ overflow button.
 - `settings-dashboard`: Settings on its Dashboard tab with a keyed provider, a stored key, some spend and a Test result.
 - `spawn`: the spawn dialog with its Target list open.
 - `jump`: the jump palette open over the main window with an empty query.

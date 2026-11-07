@@ -271,6 +271,7 @@ impl RootView {
             Overlay::SessionMenu => self.menu.is_some(),
             Overlay::ShellMenu => self.shell_menu.is_some(),
             Overlay::EmptyPaneMenu => self.pane_ui.menu.is_some(),
+            Overlay::PaneOverflowMenu => self.pane_ui.overflow.is_some(),
             Overlay::PaneClose => self.pane_ui.close.is_some(),
         };
         open && self.overlays.shows(overlay, self.layouts.main())
@@ -314,6 +315,11 @@ impl RootView {
         layers.extend(self.session_menu_layer(here, cx).into_iter().flatten());
         layers.extend(self.shell_menu_layer(here, cx).into_iter().flatten());
         layers.extend(self.empty_pane_menu_layer(here, cx).into_iter().flatten());
+        layers.extend(
+            self.pane_overflow_menu_layer(here, cx)
+                .into_iter()
+                .flatten(),
+        );
         layers.extend(self.pane_close_layer(here, cx));
         layers.extend(self.toast_layer(here, cx));
         layers
@@ -372,6 +378,7 @@ impl RootView {
                 }
                 Overlay::ShellMenu => self.shell_menu = None,
                 Overlay::EmptyPaneMenu => self.pane_ui.menu = None,
+                Overlay::PaneOverflowMenu => self.pane_ui.overflow = None,
                 Overlay::PaneClose => self.pane_ui.close = None,
             }
         }

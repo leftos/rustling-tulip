@@ -13,6 +13,8 @@ pub(crate) enum Overlay {
     SessionMenu,
     ShellMenu,
     EmptyPaneMenu,
+    /// A narrow pane header's ⋯ menu.
+    PaneOverflowMenu,
     PaneClose,
 }
 

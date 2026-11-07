@@ -101,6 +101,7 @@ mod pairing_view;
 pub mod palette;
 mod pane_close;
 mod pane_close_view;
+mod pane_header_fit;
 mod pane_menu;
 mod popout_view;
 mod popouts;
@@ -2700,6 +2701,7 @@ impl RootView {
             || self.open_in_main(Overlay::PaneClose)
             || self.pane_ui.move_panes.is_some()
             || self.open_in_main(Overlay::EmptyPaneMenu)
+            || self.open_in_main(Overlay::PaneOverflowMenu)
             || self.connection_picker.is_some()
             || self.themes_modal.is_some()
             || self.whats_new.is_some()
@@ -5941,7 +5943,7 @@ impl Render for RootView {
             .children(self.session_menu_layer(here, cx).into_iter().flatten())
             .children(self.shell_menu_layer(here, cx).into_iter().flatten())
             .children(self.tab_menu_layer(cx).into_iter().flatten())
-            .children(self.empty_pane_menu_layer(here, cx).into_iter().flatten())
+            .children(self.pane_menu_layers(here, cx))
             .children(self.container_menu_layer(cx).into_iter().flatten())
             .children(self.more_menu_layer())
             .children(self.gates_menu_layer(cx).into_iter().flatten())

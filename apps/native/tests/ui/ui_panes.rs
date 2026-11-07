@@ -18,7 +18,7 @@ use protocol::{
 use rustling_tulip_native::appearance::{BUILTIN_ACCENT, PaneFrame};
 use rustling_tulip_native::palette::{LINE, RAISED, SURFACE};
 use rustling_tulip_native::{
-    HeaderChip, HeaderChipKind, PANE_GUTTER, PaneHeaderParts, RuntimeIcon,
+    HeaderChip, HeaderChipKind, PANE_GUTTER, PaneHeaderParts, RootView, RuntimeIcon,
 };
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
@@ -652,7 +652,9 @@ fn assert_buttons_inside_p1(h: &mut Harness<'_>, stage: &str) {
 }
 
 #[gpui::test]
-fn a_narrow_header_gives_up_the_branch_chip_before_the_title(cx: &mut TestAppContext) {
+fn a_narrow_header_moves_its_buttons_then_gives_up_the_branch_chip_before_the_title(
+    cx: &mut TestAppContext,
+) {
     let dir = TestDir::new();
     let long = |id: &str| {
         session(id)
@@ -683,11 +685,42 @@ fn a_narrow_header_gives_up_the_branch_chip_before_the_title(cx: &mut TestAppCon
         "a half-width pane shows its header whole: title {title}, branch {branch}, room {free}"
     );
 
+    assert!(!p1_collapsed(&mut h), "the whole header keeps its buttons");
+
+    // Short of the branch chip's room, the buttons move into ⋯ first: the
+    // chips and the name keep their width.
+    h.send(DaemonMessage::TabUpdated {
+        tab: split_at((frame - free - branch / 2.0) / row),
+    });
+    assert!(
+        p1_collapsed(&mut h),
+        "half a branch short: the buttons move into ⋯"
+    );
+    assert_inside_p1(&mut h, "pane-overflow-p1");
+    assert_inside_p1(&mut h, "close-pane-p1");
+    let kept = width_of(&mut h, "pane-chip-p1-branch");
+    assert!(
+        (kept - branch).abs() < 0.5,
+        "the branch chip stays whole while the buttons give way: {kept} of {branch}"
+    );
+    let kept = width_of(&mut h, "pane-title-p1");
+    assert!(
+        (kept - title).abs() < 0.5,
+        "the title stays whole while the buttons give way: {kept} of {title}"
+    );
+
+    // Collapsed, the header gives way in the same order: the branch chip,
+    // then the title.
+    let frame = width_of(&mut h, "pane-frame-p1");
+    let free = (h.bounds("pane-overflow-p1").left() - h.bounds("pane-chip-p1-branch").right())
+        / px(1.0)
+        - 2.0 * HEADER_GAP;
     let short_of_branch = (frame - free - branch / 2.0) / row;
     h.send(DaemonMessage::TabUpdated {
         tab: split_at(short_of_branch),
     });
-    assert_buttons_inside_p1(&mut h, "half a branch short");
+    assert_inside_p1(&mut h, "pane-overflow-p1");
+    assert_inside_p1(&mut h, "close-pane-p1");
     let squeezed = width_of(&mut h, "pane-chip-p1-branch");
     assert!(
         squeezed < branch - 1.0,
@@ -703,7 +736,8 @@ fn a_narrow_header_gives_up_the_branch_chip_before_the_title(cx: &mut TestAppCon
     h.send(DaemonMessage::TabUpdated {
         tab: split_at(short_of_title),
     });
-    assert_buttons_inside_p1(&mut h, "half a title short");
+    assert_inside_p1(&mut h, "pane-overflow-p1");
+    assert_inside_p1(&mut h, "close-pane-p1");
     let cut = width_of(&mut h, "pane-title-p1");
     assert!(
         cut > 0.0 && cut < title - 1.0,
@@ -722,8 +756,9 @@ fn pane_row(h: &mut Harness<'_>) -> f32 {
     width_of(h, "pane-frame-p1") + width_of(h, "pane-frame-p2") + PANE_GUTTER
 }
 
-/// A card narrow enough that a header's chips must give way at text size +4.
-const NARROW_CARD: f32 = 1200.0;
+/// A card narrow enough that a header's chips must give way at text size
+/// +4 once its buttons have moved into ⋯.
+const NARROW_CARD: f32 = 420.0;
 
 /// What a pane title left alone by its chips still reads as, in pixels.
 const READABLE_TITLE: f32 = 24.0;
@@ -759,6 +794,12 @@ fn a_pane_header_gives_up_its_chips_before_the_title_at_text_size_plus_four(
     h.send(DaemonMessage::TabUpdated {
         tab: split_at(NARROW_CARD / row),
     });
+    assert!(
+        p1_collapsed(&mut h),
+        "a {NARROW_CARD} px header at text size +4 moves its buttons into ⋯"
+    );
+    assert_inside_p1(&mut h, "pane-overflow-p1");
+    assert_inside_p1(&mut h, "close-pane-p1");
     let chip = width_of(&mut h, "pane-chip-p1-provider");
     let title = width_of(&mut h, "pane-title-p1");
     assert!(
@@ -768,6 +809,229 @@ fn a_pane_header_gives_up_its_chips_before_the_title_at_text_size_plus_four(
     assert!(
         title >= READABLE_TITLE,
         "the title keeps its room once the chips have given way: {title}, chip {chip} of {whole}"
+    );
+}
+
+/// A card too narrow for `p1`'s header buttons beside a readable name.
+const OVERFLOW_CARD: f32 = 360.0;
+/// The least width a narrow header leaves the session name.
+const TITLE_MIN: f32 = 120.0;
+
+/// `p1` showing `s1` beside `p2` showing `s2`, both terminals attached.
+fn overflow_panes<'a>(cx: &'a mut TestAppContext, dir: &'a TestDir) -> Harness<'a> {
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1")
+                .label("Petal footer polish across every pane header")
+                .build(),
+            session("s2").build(),
+        ],
+        tabs: vec![split_at(0.5)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    for s in &fixture.sessions {
+        h.answer_scrollback(&s.id, b"");
+    }
+    h
+}
+
+/// Narrows `p1`'s card to about `card` px.
+fn narrow_p1(h: &mut Harness<'_>, card: f32) {
+    let row = pane_row(h);
+    h.send(DaemonMessage::TabUpdated {
+        tab: split_at(card / row),
+    });
+}
+
+/// Whether `p1`'s header draws its buttons in the ⋯ menu.
+fn p1_collapsed(h: &mut Harness<'_>) -> bool {
+    h.root(|root, cx| root.pane_header_collapsed("p1", cx))
+}
+
+/// The element tagged `selector` lies inside `p1`'s card.
+fn assert_inside_p1(h: &mut Harness<'_>, selector: &str) {
+    let frame = h.bounds("pane-frame-p1");
+    let bounds = h.bounds(selector);
+    assert!(
+        bounds.size.width > px(0.0)
+            && bounds.origin.x >= frame.left()
+            && bounds.right() <= frame.right() + px(0.5),
+        "{selector} at {bounds:?} lies inside the card {frame:?}"
+    );
+}
+
+#[gpui::test]
+fn a_narrow_pane_moves_its_buttons_into_the_overflow_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = overflow_panes(cx, &dir);
+    assert!(!p1_collapsed(&mut h), "a half-width pane shows its buttons");
+
+    narrow_p1(&mut h, OVERFLOW_CARD);
+
+    assert!(
+        p1_collapsed(&mut h),
+        "a {OVERFLOW_CARD} px header moves Pop out, Stop, the switch, split, move and the prompt arrows into its menu"
+    );
+    assert_inside_p1(&mut h, "pane-overflow-p1");
+    assert_inside_p1(&mut h, "close-pane-p1");
+    assert!(
+        h.bounds("close-pane-p1").left() > h.bounds("pane-overflow-p1").left(),
+        "Close stays last, right of ⋯"
+    );
+    let title = width_of(&mut h, "pane-title-p1");
+    assert!(
+        title >= TITLE_MIN,
+        "the name keeps at least {TITLE_MIN} px: {title}"
+    );
+}
+
+#[gpui::test]
+fn the_buttons_come_back_when_the_pane_widens(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = overflow_panes(cx, &dir);
+    narrow_p1(&mut h, OVERFLOW_CARD);
+    assert!(p1_collapsed(&mut h), "the narrow header collapses");
+
+    h.send(DaemonMessage::TabUpdated { tab: split_at(0.5) });
+
+    assert!(
+        !p1_collapsed(&mut h),
+        "the widened header shows its buttons"
+    );
+    assert_buttons_inside_p1(&mut h, "widened");
+}
+
+#[gpui::test]
+fn the_overflow_menu_lists_the_moved_buttons_and_runs_them(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = overflow_panes(cx, &dir);
+    narrow_p1(&mut h, OVERFLOW_CARD);
+    h.sent();
+
+    h.click_on("pane-overflow-p1");
+
+    assert_eq!(
+        h.root(|root, _| root.pane_overflow_menu().map(ToOwned::to_owned)),
+        Some("p1".to_owned()),
+        "the ⋯ press opens p1's menu"
+    );
+    let rows = h.root(RootView::pane_overflow_menu_rows);
+    assert_eq!(
+        rows,
+        [
+            "pane-overflow-p1-popout",
+            "pane-overflow-p1-stop",
+            "pane-overflow-p1-view-chat",
+            "pane-overflow-p1-view-summary",
+            "pane-overflow-p1-split-right",
+            "pane-overflow-p1-split-down",
+            "pane-overflow-p1-move-new-tab",
+            "pane-overflow-p1-prompt-prev",
+            "pane-overflow-p1-prompt-next",
+        ],
+        "the moved buttons, in header order"
+    );
+
+    h.click_on("pane-overflow-p1-split-right");
+
+    assert_eq!(
+        h.root(|root, _| root.pane_overflow_menu().map(ToOwned::to_owned)),
+        None,
+        "choosing a row closes the menu"
+    );
+    let sent = h.sent();
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::SplitPane { tab_id, pane_id, direction: SplitDirection::Horizontal, .. }
+                if tab_id == "t1" && pane_id == "p1"
+        )),
+        "Split right asks the daemon for a pane right of p1: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn escape_closes_the_overflow_menu_and_hands_the_keyboard_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = overflow_panes(cx, &dir);
+    narrow_p1(&mut h, OVERFLOW_CARD);
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+
+    h.click_on("pane-overflow-p1");
+    let root = h.root.clone();
+    assert!(
+        !h.cx
+            .update(|window, cx| root.read(cx).pane_terminal_focused("p1", window, cx)),
+        "the open menu holds the keyboard"
+    );
+
+    h.keys("escape");
+
+    assert_eq!(
+        h.root(|root, _| root.pane_overflow_menu().map(ToOwned::to_owned)),
+        None,
+        "Esc closes the menu"
+    );
+    assert!(
+        h.cx.update(|window, cx| root.read(cx).pane_terminal_focused("p1", window, cx)),
+        "the pane has the keyboard back"
+    );
+}
+
+#[gpui::test]
+fn stop_from_the_overflow_menu_shows_confirm_inline(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = overflow_panes(cx, &dir);
+    narrow_p1(&mut h, OVERFLOW_CARD);
+
+    h.click_on("pane-overflow-p1");
+    h.click_on("pane-overflow-p1-stop");
+
+    assert!(
+        h.in_model("pane-stop-confirm-p1"),
+        "the Stop row arms the stop"
+    );
+    assert!(p1_collapsed(&mut h), "the header stays collapsed");
+    assert_inside_p1(&mut h, "pane-stop-confirm-p1");
+    assert_inside_p1(&mut h, "pane-stop-cancel-p1");
+    assert!(
+        h.bounds("pane-stop-cancel-p1").right() <= h.bounds("pane-overflow-p1").left(),
+        "Confirm stop and Cancel sit left of ⋯"
+    );
+}
+
+#[gpui::test]
+fn a_collapsed_header_keeps_an_exited_sessions_exit_code(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1")
+                .label("Petal footer polish across every pane header")
+                .exited(1)
+                .build(),
+            session("s2").build(),
+        ],
+        tabs: vec![split_at(0.5)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    for s in &fixture.sessions {
+        h.answer_scrollback(&s.id, b"");
+    }
+
+    narrow_p1(&mut h, OVERFLOW_CARD);
+
+    assert!(
+        p1_collapsed(&mut h),
+        "a {OVERFLOW_CARD} px header moves its buttons into ⋯"
+    );
+    assert_inside_p1(&mut h, "pane-overflow-p1");
+    assert_inside_p1(&mut h, "exit-code-p1");
+    assert!(
+        h.bounds("exit-code-p1").right() <= h.bounds("pane-overflow-p1").left(),
+        "the exit code stays in sight, left of ⋯"
     );
 }
 

@@ -540,6 +540,7 @@ impl RootView {
         self.close_container_menu(window, cx);
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
+        self.close_pane_overflow_menu(window, cx);
         self.more_menu = MoreMenu::Open;
         self.menu_focus.focus(window);
         cx.notify();

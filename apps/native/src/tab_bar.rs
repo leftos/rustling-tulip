@@ -279,6 +279,7 @@ impl RootView {
         self.close_more_menu(window, cx);
         self.menu = None;
         self.pane_ui.menu = None;
+        self.close_pane_overflow_menu(window, cx);
         self.tab_menu = Some(TabMenu {
             tab_id: tab_id.to_owned(),
             at,
@@ -1068,6 +1069,7 @@ impl RootView {
     pub(crate) fn menu_open(&self) -> bool {
         self.tab_menu.is_some()
             || self.open_in_main(Overlay::EmptyPaneMenu)
+            || self.open_in_main(Overlay::PaneOverflowMenu)
             || self.open_in_main(Overlay::SessionMenu)
             || self.container_menu.is_some()
             || self.open_in_main(Overlay::ShellMenu)

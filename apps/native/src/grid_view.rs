@@ -18,7 +18,7 @@ use protocol::{
 };
 
 use crate::appearance::{self, PaneFrame, Resolved, Source};
-use crate::assets::SHIELD_ICON;
+use crate::assets::{SHIELD_ICON, SIDEBAR_MORE_ICON};
 use crate::chat::PaneView;
 use crate::chat_view::{AGENT_DOWN_TIP, COMPACT_TIP, compact_toggle, offers_chat, view_segment};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
@@ -27,6 +27,7 @@ use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::header_tip::SHOW_DELAY as HEADER_TIP_DELAY;
 use crate::open_view::LinkSource;
+use crate::pane_header_fit;
 use crate::popouts::{self, PopoutKey};
 use crate::runtime_icon::{RuntimeIcon, runtime_icon, runtime_icon_view};
 use crate::session_actions::StopPlace;
@@ -1160,7 +1161,13 @@ impl RootView {
             .map(str::to_owned)
     }
 
-    fn split_pane(&mut self, tab_id: &str, pane_id: &str, direction: SplitDirection, before: bool) {
+    pub(crate) fn split_pane(
+        &mut self,
+        tab_id: &str,
+        pane_id: &str,
+        direction: SplitDirection,
+        before: bool,
+    ) {
         let msg = ClientMessage::SplitPane {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
@@ -1504,7 +1511,7 @@ impl RootView {
                 pane_id,
                 session_id,
                 ..
-            } => self.render_pane(tab_id, pane_id, session_id.as_deref(), cx),
+            } => self.render_pane(tab_id, pane_id, session_id.as_deref(), here, cx),
             GridNode::Split {
                 direction,
                 ratio,
@@ -1571,6 +1578,7 @@ impl RootView {
         tab_id: &str,
         pane_id: &str,
         session_id: Option<&str>,
+        here: WindowId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
@@ -1623,8 +1631,12 @@ impl RootView {
             .filter(|(target, _)| target == pane_id)
             .map(|(_, edge)| drop_overlay(pane_id, edge, colors.accent_line, cx, &t));
         let frame = format!("pane-frame-{pane_id}");
+        let parts = session_id
+            .and_then(|_| self.pane_session_in(tab_id, pane_id))
+            .map(|(host, session)| self.session_header_parts(&host, session));
+        let target = self.header_target(tab_id, pane_id, session_id, parts.as_ref(), here);
         let header = self
-            .pane_header(tab_id, pane_id, session_id, colors.accent_line, cx)
+            .pane_header(&target, colors.accent_line, cx)
             .bg(gpui::rgb(header_fill(focused, &t)))
             .child(
                 div()
@@ -1965,46 +1977,40 @@ impl RootView {
     /// The session's status glyph, name and chips (runtime, repo:branch
     /// with a count of further members, trusted), its Pop out, its Stop or
     /// exit code, split right and down (Shift: left and up), move and
-    /// close. A right-click opens the session's menu; a left press dragged
-    /// anywhere but on a button or a chip drags the pane, its ghost edged
-    /// in `accent`.
+    /// close. When the header in `target`'s window is too narrow for those
+    /// buttons beside a readable name, everything from Pop out to the
+    /// prompt arrows gives way to one ⋯ button opening a menu of them,
+    /// Close staying last and a stopped session's exit code beside ⋯. A
+    /// right-click opens the session's menu; a left press dragged anywhere
+    /// but on a button or a chip drags the pane, its ghost edged in
+    /// `accent`.
     fn pane_header(
         &self,
-        tab_id: &str,
-        pane_id: &str,
-        session_id: Option<&str>,
+        target: &HeaderTarget<'_>,
         accent: u32,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = theme(cx);
-        let parts = session_id
-            .and_then(|_| self.pane_session_in(tab_id, pane_id))
-            .map(|(host, session)| self.session_header_parts(&host, session));
+        let HeaderTarget {
+            tab_id,
+            pane_id,
+            session_id,
+            parts,
+            at,
+            ..
+        } = *target;
         let menu_ids = (tab_id.to_owned(), pane_id.to_owned());
         let menu_session = session_id.map(str::to_owned);
         let name = format!("pane-header-{pane_id}");
-        let label: SharedString =
-            drag::ghost_label(parts.as_ref().map(|parts| parts.title.as_str())).into();
+        let label: SharedString = drag::ghost_label(parts.map(|parts| parts.title.as_str())).into();
         let payload = DragPayload::Pane {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
         };
         let root = cx.entity().downgrade();
         let drag_session = session_id.map(str::to_owned);
-        // A popped tab's grid draws in its pop-out window, which keeps gpui's
-        // tooltips; header tips are the main window's.
-        let at = if self.is_tab_popped(tab_id) {
-            TipAt::Mouse
-        } else {
-            TipAt::BelowRow
-        };
-        let mut controls: Vec<AnyElement> = self
-            .header_pop_out(tab_id, pane_id, session_id, at, cx)
-            .into_iter()
-            .collect();
-        controls.extend(self.header_stop(pane_id, session_id, StopPlace::Grid, cx));
+        let (controls, buttons) = self.header_right(target, cx);
         let controls = (!controls.is_empty()).then(|| header_controls(cx).children(controls));
-        let buttons = self.pane_buttons(tab_id, pane_id, session_id, at, cx);
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .driver_id(|| name)
@@ -2059,7 +2065,7 @@ impl RootView {
             .when(at == TipAt::BelowRow, |row| {
                 row.child(header_row_probe(pane_id))
             })
-            .children(header_title(pane_id, parts.as_ref(), at, cx))
+            .children(header_title(pane_id, parts, at, cx))
             .child(div().flex_1())
             .children(controls)
             .children(buttons)
@@ -2320,8 +2326,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let ids = (tab_id.to_owned(), pane_id.to_owned());
-        let (right, down, close) = (ids.clone(), ids.clone(), ids);
-        let close_session = session_id.map(str::to_owned);
+        let (right, down) = (ids.clone(), ids);
         let mut buttons = vec![
             header_button(
                 pane_id,
@@ -2369,15 +2374,219 @@ impl RootView {
             buttons.push(prompt_button(pane_id, Dir::Previous, previous, at, cx));
             buttons.push(prompt_button(pane_id, Dir::Next, next, at, cx));
         }
-        buttons.push(
-            header_button(pane_id, "close-pane", "×", "Close pane", at, cx)
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    let (tab_id, pane_id) = &close;
-                    this.close_pane_clicked(tab_id, pane_id, close_session.as_deref(), window, cx);
-                }))
-                .into_any_element(),
-        );
+        buttons.push(Self::close_button(tab_id, pane_id, session_id, at, cx));
         buttons
+    }
+
+    /// The right of `target`'s header, each part tipping its place: its Pop
+    /// out and Stop, then its other buttons; or, when the header is too
+    /// narrow for them beside the name, how the session stands (an armed
+    /// Stop's Confirm stop and Cancel, or a stopped session's exit code),
+    /// then ⋯ and Close.
+    fn header_right(
+        &self,
+        target: &HeaderTarget<'_>,
+        cx: &mut Context<Self>,
+    ) -> (Vec<AnyElement>, Vec<AnyElement>) {
+        let HeaderTarget {
+            tab_id,
+            pane_id,
+            session_id,
+            at,
+            ..
+        } = *target;
+        let cluster = self.header_cluster(tab_id, pane_id, session_id, cx);
+        if let Some(menu_at) = self.header_overflow_anchor(target, &cluster, cx) {
+            // How the session stands stays in sight beside ⋯: an armed
+            // Stop's Confirm stop and Cancel, a stopped session's exit code.
+            let controls = if matches!(cluster.stop, Some(StopSlot::Armed | StopSlot::ExitCode(_)))
+            {
+                self.header_stop(pane_id, session_id, StopPlace::Grid, cx)
+            } else {
+                Vec::new()
+            };
+            let buttons = vec![
+                overflow_button(tab_id, pane_id, menu_at, at, cx),
+                Self::close_button(tab_id, pane_id, session_id, at, cx),
+            ];
+            return (controls, buttons);
+        }
+        let mut controls: Vec<AnyElement> = self
+            .header_pop_out(tab_id, pane_id, session_id, at, cx)
+            .into_iter()
+            .collect();
+        controls.extend(self.header_stop(pane_id, session_id, StopPlace::Grid, cx));
+        let buttons = self.pane_buttons(tab_id, pane_id, session_id, at, cx);
+        (controls, buttons)
+    }
+
+    /// A pane header's Close, last in the row, tipping `at`.
+    fn close_button(
+        tab_id: &str,
+        pane_id: &str,
+        session_id: Option<&str>,
+        at: TipAt,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let close = (tab_id.to_owned(), pane_id.to_owned());
+        let close_session = session_id.map(str::to_owned);
+        header_button(pane_id, "close-pane", "×", "Close pane", at, cx)
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                let (tab_id, pane_id) = &close;
+                this.close_pane_clicked(tab_id, pane_id, close_session.as_deref(), window, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// What pane `pane_id`'s header holds from Pop out to the prompt
+    /// arrows, the cluster a narrow header moves into its ⋯ menu: the same
+    /// rules [`Self::header_pop_out`], [`Self::header_stop`] and
+    /// [`Self::pane_buttons`] draw by.
+    pub(crate) fn header_cluster(
+        &self,
+        tab_id: &str,
+        pane_id: &str,
+        session_id: Option<&str>,
+        cx: &App,
+    ) -> HeaderCluster {
+        let host = self.slot_host(pane_id);
+        let hosted = session_id.and_then(|id| self.sidebar.session_on(&host, id));
+        let pop_out = hosted.filter(|session| can_attach(session)).map(|_| {
+            let key = PopoutKey::Pane {
+                tab_id: tab_id.to_owned(),
+                pane_id: pane_id.to_owned(),
+            };
+            self.popouts.blocking(&key, self.tabs.tabs()).is_some()
+        });
+        let stop = hosted.map(|session| {
+            if crate::session_actions::header_shows_exit_code(session) {
+                StopSlot::ExitCode(crate::session_actions::exit_code_label(session))
+            } else if self.confirm.is_armed(StopPlace::Grid, &host, &session.id) {
+                StopSlot::Armed
+            } else {
+                StopSlot::Stop
+            }
+        });
+        let session = session_id.and_then(|id| self.sidebar.session(id));
+        let shown = self.view_shown(pane_id, session_id);
+        let views = session.is_some_and(offers_chat).then(|| {
+            let chat_up = session_id.is_some_and(|id| self.session_chat_available(id));
+            (shown, chat_up)
+        });
+        let compact = views
+            .filter(|(shown, _)| *shown == PaneView::Chat)
+            .map(|_| self.sidebar.chat_mode());
+        let prompts = session
+            .filter(|session| {
+                matches!(
+                    session.mode,
+                    SessionMode::Interactive | SessionMode::PlainShell
+                )
+            })
+            .filter(|_| !shown.hides_terminal())
+            .map(|_| self.pane_prompt_jumps(pane_id, cx));
+        HeaderCluster {
+            pop_out,
+            stop,
+            views,
+            compact,
+            move_tab: session_id.is_some(),
+            prompts,
+        }
+    }
+
+    /// Whether pane `pane_id` of the tab on screen draws its header
+    /// collapsed: its cluster moved into the ⋯ menu, as the main window
+    /// last laid its grid out.
+    #[must_use]
+    pub fn pane_header_collapsed(&self, pane_id: &str, cx: &App) -> bool {
+        let Some(tab_id) = self.tabs.active_tab().map(|tab| tab.id.clone()) else {
+            return false;
+        };
+        let session_id = self
+            .tab_pane_sessions(&tab_id)
+            .into_iter()
+            .find(|(id, _)| id == pane_id)
+            .and_then(|(_, session)| session);
+        let parts = session_id
+            .as_ref()
+            .and_then(|_| self.pane_session_in(&tab_id, pane_id))
+            .map(|(host, session)| self.session_header_parts(&host, session));
+        let main = self.layouts.main();
+        let target = self.header_target(
+            &tab_id,
+            pane_id,
+            session_id.as_deref(),
+            parts.as_ref(),
+            main,
+        );
+        let cluster = self.header_cluster(target.tab_id, target.pane_id, target.session_id, cx);
+        self.header_overflow_anchor(&target, &cluster, cx).is_some()
+    }
+
+    /// The header `pane_id` of tab `tab_id` builds in window `here`, for
+    /// session `session_id` and the parts it draws: its tips show below the
+    /// row, or at the mouse when the tab draws in its pop-out window, which
+    /// keeps gpui's tooltips.
+    fn header_target<'a>(
+        &'a self,
+        tab_id: &'a str,
+        pane_id: &'a str,
+        session_id: Option<&'a str>,
+        parts: Option<&'a PaneHeaderParts>,
+        here: WindowId,
+    ) -> HeaderTarget<'a> {
+        let at = if self.is_tab_popped(tab_id) {
+            TipAt::Mouse
+        } else {
+            TipAt::BelowRow
+        };
+        HeaderTarget {
+            tab_id,
+            pane_id,
+            session_id,
+            parts,
+            at,
+            here,
+        }
+    }
+
+    /// Pane `pane_id`'s card as window `here` last laid its grid out, in
+    /// window coordinates; `None` before the grid has been laid out.
+    fn pane_card(&self, tab_id: &str, pane_id: &str, here: WindowId) -> Option<tabs::Rect> {
+        let bounds = self.layouts.grid(here)?;
+        let grid = self.tabs.tab(tab_id)?.grid()?;
+        tabs::pane_rects(grid, grid_rect(bounds), PANE_GUTTER)
+            .into_iter()
+            .find(|(id, _)| id == pane_id)
+            .map(|(_, rect)| rect)
+    }
+
+    /// Where the ⋯ menu of `target`'s header opens, its top right corner
+    /// just under the ⋯ button, when its header is too narrow for `cluster`
+    /// beside the name at its minimum; `None` while the cluster fits.
+    fn header_overflow_anchor(
+        &self,
+        target: &HeaderTarget<'_>,
+        cluster: &HeaderCluster,
+        cx: &App,
+    ) -> Option<Point<Pixels>> {
+        let card = self.pane_card(target.tab_id, target.pane_id, target.here)?;
+        let fit = pane_header_fit::HeaderFit {
+            // The card's border takes a pixel on each side.
+            width: card.width - 2.0 * CARD_BORDER,
+            glyph: target.parts.map_or(0.0, |_| GlyphSize::Leaf.px()),
+            chips: target.parts.map_or_else(Vec::new, |parts| {
+                parts
+                    .chips
+                    .iter()
+                    .map(|chip| chip_width(chip, cx))
+                    .collect()
+            }),
+            cluster: cluster_item_widths(cluster, cx),
+            close: HEADER_BUTTON_SIZE,
+        };
+        pane_header_fit::collapses(&fit).then(|| overflow_menu_anchor(card, cx))
     }
 
     /// The session shown by pane `pane_id` of the tab on screen, with the
@@ -2415,7 +2624,7 @@ impl RootView {
 
     /// A prompt button's click: closes the gutter menu as a wheel scroll
     /// does, then scrolls pane `pane_id` to the prompt `dir` names.
-    fn jump_prompt(
+    pub(crate) fn jump_prompt(
         &mut self,
         pane_id: &str,
         dir: Dir,
@@ -2846,7 +3055,7 @@ fn header_chip(
         .flex_none()
         .items_center()
         .h(ui_px(cx, CHIP_HEIGHT))
-        .px(px(7.0))
+        .px(px(CHIP_PAD))
         .rounded(px(CHIP_RADIUS))
         .border_1()
         .border_color(gpui::rgba(t.transparent))
@@ -3167,7 +3376,7 @@ fn view_segments(
         let tip = if enabled { tip } else { AGENT_DOWN_TIP };
         let segment = header_button(pane_id, action, label, tip, at, cx)
             .w_auto()
-            .px(px(8.0))
+            .px(px(HEADER_SEGMENT_PAD))
             .when(view == shown, |segment| {
                 segment.bg(gpui::rgb(t.chip)).text_color(gpui::rgb(t.text))
             });
@@ -3191,7 +3400,7 @@ fn view_segments(
         .flex()
         .flex_none()
         .items_center()
-        .gap(px(2.0))
+        .gap(px(HEADER_SEGMENT_GAP))
         .children(segments)
         .into_any_element()
 }
@@ -3422,6 +3631,216 @@ fn popout_column(toolbar: AnyElement, body: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
+/// What a pane header builds: its ids, the session it shows with the header
+/// parts it draws, its buttons' tip place and the window it draws in.
+#[derive(Clone, Copy)]
+struct HeaderTarget<'a> {
+    tab_id: &'a str,
+    pane_id: &'a str,
+    session_id: Option<&'a str>,
+    parts: Option<&'a PaneHeaderParts>,
+    at: TipAt,
+    here: WindowId,
+}
+
+/// What a pane header's cluster, Pop out to the prompt arrows, holds.
+pub(crate) struct HeaderCluster {
+    /// Pop out, when the session can attach: whether an open pop-out
+    /// already shows the session, which dims it.
+    pub(crate) pop_out: Option<bool>,
+    /// Stop, its armed confirm or the exit code; `None` for an empty pane.
+    pub(crate) stop: Option<StopSlot>,
+    /// The Terminal / Chat / Summary switch, when the session offers a
+    /// chat: the view shown and whether the agent is up.
+    pub(crate) views: Option<(PaneView, bool)>,
+    /// Compact, while the switch shows the chat: the chat mode.
+    pub(crate) compact: Option<crate::chat::ChatMode>,
+    /// Move to new tab, on a pane with a session.
+    pub(crate) move_tab: bool,
+    /// The prompt arrows, on a terminal: whether each has a prompt to
+    /// scroll to.
+    pub(crate) prompts: Option<(bool, bool)>,
+}
+
+/// What the header shows in Stop's place.
+pub(crate) enum StopSlot {
+    Stop,
+    /// Confirm stop and Cancel.
+    Armed,
+    /// The stopped session's exit code, as the header spells it.
+    ExitCode(String),
+}
+
+/// What the header's ⋯ button tips.
+const OVERFLOW_TIP: &str = "More";
+
+/// The width of a pane card's border, on each side.
+const CARD_BORDER: f32 = 1.0;
+/// How far below a header row its ⋯ menu opens.
+const MENU_BELOW_HEADER: f32 = 2.0;
+
+/// A header text button's padding on each side (`header_text_button`).
+const HEADER_TEXT_BUTTON_PAD: f32 = 4.0;
+/// A switch segment's or Compact's padding on each side.
+const HEADER_SEGMENT_PAD: f32 = 8.0;
+/// The gap between the switch's segments.
+const HEADER_SEGMENT_GAP: f32 = 2.0;
+/// A text chip's padding on each side.
+const CHIP_PAD: f32 = 7.0;
+
+/// The ⋯ button a narrow header shows in place of its cluster: a press
+/// opens the menu of the cluster's buttons at `menu_at`. Its tip shows `at`.
+fn overflow_button(
+    tab_id: &str,
+    pane_id: &str,
+    menu_at: Point<Pixels>,
+    at: TipAt,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = theme(cx);
+    let ids = (tab_id.to_owned(), pane_id.to_owned());
+    header_button(pane_id, "pane-overflow", "", OVERFLOW_TIP, at, cx)
+        .child(
+            svg()
+                .path(SIDEBAR_MORE_ICON)
+                .size(px(15.0))
+                .flex_none()
+                .text_color(gpui::rgb(t.text_2)),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.press_on_header_control(event, window, cx);
+                let (tab, pane) = &ids;
+                this.open_pane_overflow_menu(tab, pane, menu_at, window, cx);
+            }),
+        )
+        .into_any_element()
+}
+
+/// The width of each item a header puts between its chips and Close, in
+/// header order: Pop out to the prompt arrows, a segmented switch counting
+/// as one item.
+fn cluster_item_widths(cluster: &HeaderCluster, cx: &App) -> Vec<f32> {
+    let text = HeaderText { cx };
+    let mut items = Vec::new();
+    items.extend(cluster.pop_out.is_some().then(|| text.button("Pop out")));
+    items.extend(cluster.stop.as_ref().map(|stop| stop_width(stop, &text)));
+    items.extend(cluster.views.is_some().then(|| view_segments_width(&text)));
+    items.extend(cluster.compact.is_some().then(|| text.segment("Compact")));
+    items.extend([HEADER_BUTTON_SIZE, HEADER_BUTTON_SIZE]);
+    items.extend(cluster.move_tab.then_some(HEADER_BUTTON_SIZE));
+    if cluster.prompts.is_some() {
+        items.extend([HEADER_BUTTON_SIZE, HEADER_BUTTON_SIZE]);
+    }
+    items
+}
+
+/// The width of the item a header draws in Stop's place: Stop's text
+/// button, or the stopped session's exit code label.
+fn stop_width(stop: &StopSlot, text: &HeaderText<'_>) -> f32 {
+    text.button(match stop {
+        StopSlot::ExitCode(label) => label,
+        StopSlot::Stop | StopSlot::Armed => "Stop",
+    })
+}
+
+/// The width of a session's Terminal / Chat / Summary switch: its three
+/// segments and the gaps between them.
+fn view_segments_width(text: &HeaderText<'_>) -> f32 {
+    let views = [PaneView::Terminal, PaneView::Chat, PaneView::Summary];
+    let labels: f32 = views
+        .iter()
+        .map(|view| text.segment(view_segment(*view).0))
+        .sum();
+    labels + 2.0 * HEADER_SEGMENT_GAP
+}
+
+/// Where a header's ⋯ menu opens on card `card`: its top right corner just
+/// under the ⋯ button, which sits a card border and the row's right padding
+/// in from the card's right edge.
+fn overflow_menu_anchor(card: tabs::Rect, cx: &App) -> Point<Pixels> {
+    let right = card.x + card.width
+        - CARD_BORDER
+        - pane_header_fit::PAD_RIGHT
+        - HEADER_BUTTON_SIZE
+        - pane_header_fit::GAP;
+    let below = card.y + CARD_BORDER + ui_px(cx, PANE_HEADER_HEIGHT) / px(1.0) + MENU_BELOW_HEADER;
+    point(px(right), px(below))
+}
+
+/// Text a pane header draws, measured in the font and size it draws it in.
+struct HeaderText<'a> {
+    cx: &'a App,
+}
+
+impl HeaderText<'_> {
+    /// The width of `text` in the UI font at the header's text size.
+    fn ui(&self, text: &str) -> f32 {
+        text_width(
+            self.cx,
+            text,
+            crate::fonts::ui_family(self.cx),
+            crate::fonts::ui_weight(self.cx, FontWeight::NORMAL),
+            ui_px(self.cx, UI_TEXT_SIZE),
+        )
+    }
+
+    /// A header text button's width: `text` and its padding on each side.
+    fn button(&self, text: &str) -> f32 {
+        self.ui(text) + 2.0 * HEADER_TEXT_BUTTON_PAD
+    }
+
+    /// A switch segment's or Compact's width: `text` and its padding on
+    /// each side.
+    fn segment(&self, text: &str) -> f32 {
+        self.ui(text) + 2.0 * HEADER_SEGMENT_PAD
+    }
+}
+
+/// The width `text` takes in `family` at `weight` and `size`, in px: the
+/// sum of its characters' advances.
+fn text_width(
+    cx: &App,
+    text: &str,
+    family: impl Into<SharedString>,
+    weight: FontWeight,
+    size: Pixels,
+) -> f32 {
+    let text_system = cx.text_system();
+    let font_id = text_system.resolve_font(&gpui::Font {
+        weight,
+        ..gpui::font(family)
+    });
+    text.chars()
+        .map(|ch| {
+            text_system
+                .advance(font_id, size, ch)
+                .map_or(0.0, |advance| advance.width / px(1.0))
+        })
+        .sum()
+}
+
+/// The width `chip` takes in a header that has room for it: its icon's
+/// square, or its text with padding and border.
+fn chip_width(chip: &HeaderChip, cx: &App) -> f32 {
+    let square = ui_px(cx, CHIP_HEIGHT) / px(1.0);
+    match chip.kind {
+        HeaderChipKind::Runtime if chip.icon.is_some() => square,
+        HeaderChipKind::Trusted => square,
+        _ => {
+            let text = text_width(
+                cx,
+                &chip.text,
+                DEFAULT_FAMILY,
+                FontWeight::NORMAL,
+                ui_px(cx, CHIP_TEXT_SIZE),
+            );
+            text + 2.0 * CHIP_PAD + 2.0
+        }
+    }
+}
+
 /// The header's Stop or exit code, in a row a left press on which never
 /// starts a pane drag.
 fn header_controls(cx: &mut Context<RootView>) -> Div {
@@ -3518,7 +3937,14 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     canvas(
         move |bounds, window, cx| {
             let window_id = window.window_handle().window_id();
-            root.update(cx, |this, _| this.layouts.set_grid(window_id, bounds));
+            root.update(cx, |this, cx| {
+                if this.layouts.grid(window_id) != Some(bounds) {
+                    this.layouts.set_grid(window_id, bounds);
+                    // The pane headers decide whether they collapse from
+                    // these bounds: the next frame draws them by the new ones.
+                    cx.notify();
+                }
+            });
         },
         |_, (), _, _| {},
     )

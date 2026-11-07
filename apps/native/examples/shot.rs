@@ -7,8 +7,9 @@
 //! `cargo run -p rustling-tulip-native --example shot -- [<view>] [<out.png>]`
 //!
 //! Views: `main` (the default: the sidebar and a split tab), `main-compact`
-//! (the same window with the sidebar's leaves one line each),
-//! `source-control`, `diff`, `settings`, `spawn` (the spawn dialog with its
+//! (the same window with the sidebar's leaves one line each), `main-narrow`
+//! (the tulip tab split three ways, its narrow headers' buttons in their ⋯
+//! menus), `source-control`, `diff`, `settings`, `spawn` (the spawn dialog with its
 //! Target dropdown open), `viewer` (a viewer tab
 //! over a small Rust file, scrolled to a line) and `viewer-md` (a viewer tab
 //! over a Markdown file, rendered), `dashboard`, `connections` (the host
@@ -194,6 +195,7 @@ fn main() -> Result<()> {
 enum View {
     Main,
     MainCompact,
+    MainNarrow,
     SourceControl,
     Diff,
     Settings,
@@ -228,9 +230,10 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 33] = [
+    const ALL: [Self; 34] = [
         Self::Main,
         Self::MainCompact,
+        Self::MainNarrow,
         Self::SourceControl,
         Self::Diff,
         Self::Settings,
@@ -268,6 +271,7 @@ impl View {
         match self {
             Self::Main => "main",
             Self::MainCompact => "main-compact",
+            Self::MainNarrow => "main-narrow",
             Self::SourceControl => "source-control",
             Self::Diff => "diff",
             Self::Settings => "settings",
@@ -373,7 +377,7 @@ impl View {
             // The Gates panel over the fake daemon's gate state.
             Self::Gates => root.shown_activity() == Activity::Gates,
             Self::OpenShell => root.shell_dialog_open(),
-            Self::Main | Self::MainCompact => {
+            Self::Main | Self::MainCompact | Self::MainNarrow => {
                 !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
             }
             Self::SourceControl => root.activity() == Activity::SourceControl,
@@ -525,6 +529,7 @@ impl Shot {
             View::ViewerMd => Some(README_MD),
             View::Main
             | View::MainCompact
+            | View::MainNarrow
             | View::SourceControl
             | View::Diff
             | View::Settings
@@ -1177,7 +1182,7 @@ fn drive(
     cx: &mut App,
 ) -> Result<()> {
     match view {
-        View::Main | View::MainCompact | View::MultiHost | View::Toast => Ok(()),
+        View::Main | View::MainCompact | View::MainNarrow | View::MultiHost | View::Toast => Ok(()),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
         View::OpenShell => open_shell(window, cx),
@@ -1723,8 +1728,27 @@ fn pane(id: &str, session: &str) -> GridNode {
 }
 
 /// The Petal session above its shell; the `multi-host` shot shows "box"'s
-/// session in the shell's place.
+/// session in the shell's place, and the `main-narrow` shot sets the
+/// Petal session, its shell and an empty pane side by side, each too
+/// narrow for its header's buttons.
 fn tulip_grid(view: View) -> GridNode {
+    if view == View::MainNarrow {
+        return GridNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.34,
+            first: Box::new(pane("p1", "s-petal")),
+            second: Box::new(GridNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(pane("p2", "s-shell")),
+                second: Box::new(GridNode::Pane {
+                    pane_id: "p5".to_owned(),
+                    session_id: None,
+                    host: None,
+                }),
+            }),
+        };
+    }
     let second = if view.on_hosts() {
         GridNode::Pane {
             pane_id: "p2".to_owned(),

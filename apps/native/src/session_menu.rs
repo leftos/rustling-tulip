@@ -57,7 +57,7 @@ use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 /// What the pane header's Pop out does.
-const POP_OUT_TIP: &str = "Open this pane in a window of its own";
+pub(crate) const POP_OUT_TIP: &str = "Open this pane in a window of its own";
 /// What a session pop-out's Close window does.
 const CLOSE_WINDOW_TIP: &str = "Close this window; the session is left as it is";
 
@@ -1160,6 +1160,7 @@ impl RootView {
         // menu is open at a time across the windows.
         self.close_shell_menu(window, cx);
         self.close_empty_pane_menu(window, cx);
+        self.close_pane_overflow_menu(window, cx);
         // A menu open in another window hands that window's keyboard back.
         self.close_session_menu(window, cx);
         self.prefills.clear();
@@ -4086,7 +4087,12 @@ fn swatch_row(
 
 /// A clickable menu row with a ✓ in the swatch's slot while `checked`,
 /// tagged `<selector>-check`; unchecked leaves the slot empty.
-fn check_row(selector: &str, label: &'static str, checked: bool, t: &UiTheme) -> Stateful<Div> {
+pub(crate) fn check_row(
+    selector: &str,
+    label: &'static str,
+    checked: bool,
+    t: &UiTheme,
+) -> Stateful<Div> {
     let check = format!("{selector}-check");
     let slot = div()
         .flex()
@@ -4225,6 +4231,7 @@ impl RootView {
         self.close_tab_menu(window, cx);
         self.close_more_menu(window, cx);
         self.close_empty_pane_menu(window, cx);
+        self.close_pane_overflow_menu(window, cx);
         self.overlays
             .opened(Overlay::ShellMenu, window.window_handle().window_id());
         self.shell_menu = Some(ShellMenu {

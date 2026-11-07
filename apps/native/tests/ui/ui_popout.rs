@@ -1065,6 +1065,39 @@ fn drawn_in_popout(popout: &mut VisualTestContext, selector: &'static str) -> bo
     popout.debug_bounds(selector).is_some()
 }
 
+/// Widens the pop-out window to 1800 px, room for two side-by-side pane
+/// headers' buttons beside their names.
+fn widen_popout(popout: &mut VisualTestContext) {
+    popout.simulate_resize(size(px(1800.0), px(720.0)));
+    popout.run_until_parked();
+}
+
+#[gpui::test]
+fn a_tab_popout_at_its_default_size_moves_header_buttons_into_the_overflow_menu(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &split_tabs());
+    pop_out_tab(&mut h, "t1");
+    let mut popout = h.popout_window();
+
+    assert!(
+        drawn_in_popout(&mut popout, "pane-overflow-p1"),
+        "a half-width header of a 1100 px pop-out shows ⋯"
+    );
+    click_in_popout(&mut popout, "pane-overflow-p1");
+
+    assert_eq!(
+        h.root(|root, _| root.pane_overflow_menu().map(ToOwned::to_owned)),
+        Some("p1".to_owned()),
+        "the ⋯ press opens p1's menu"
+    );
+    assert!(
+        drawn_in_popout(&mut popout, "pane-overflow-menu"),
+        "the menu draws in the pop-out window"
+    );
+}
+
 /// Presses `selector` in the pop-out window.
 fn click_in_popout(popout: &mut VisualTestContext, selector: &'static str) {
     popout.run_until_parked();
@@ -2411,6 +2444,8 @@ fn tab_popout_shows_its_grid_and_splits(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &split_tabs());
     assert_eq!(pop_out_tab(&mut h, "t1"), OpenOutcome::Opened);
     let mut popout = h.popout_window();
+    // Wide enough for both headers' buttons; at 1100 px they move into ⋯.
+    widen_popout(&mut popout);
     h.sent();
 
     for part in [
@@ -2732,6 +2767,8 @@ fn pane_pop_out_is_disabled_in_a_tab_popout(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &split_tabs());
     pop_out_tab(&mut h, "t1");
     let mut popout = h.popout_window();
+    // Wide enough for both headers' buttons; at 1100 px they move into ⋯.
+    widen_popout(&mut popout);
 
     assert!(
         drawn_in_popout(&mut popout, "pane-popout-p1"),
@@ -3068,6 +3105,8 @@ fn split_in_a_tab_popout_focuses_the_new_pane(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = t1_popped(cx, &dir, &split_tabs());
     let mut popout = h.popout_window();
+    // Wide enough for both headers' buttons; at 1100 px they move into ⋯.
+    widen_popout(&mut popout);
     click_in_popout(&mut popout, "split-right-p2");
 
     h.send(DaemonMessage::TabUpdated {
