@@ -609,11 +609,24 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_new_client_restarts_polling_after_a_no_account_park() {
-        let mut rig = rig(vec![Ok(report(10.0, None)), Ok(report(10.0, None))], 1);
+        // The first poll is held on the gate while the client leaves, so the
+        // driver reads the count 0 when it returns, whenever its blocking
+        // thread gets to run.
+        let (release, gate) = std::sync::mpsc::channel();
+        let mut rig = rig_with(
+            vec![Ok(report(10.0, None)), Ok(report(10.0, None))],
+            1,
+            Some(gate),
+        );
         rig.next_call().await;
 
         rig.clients.send_replace(0);
-        settle().await;
+        // Dropping the sender releases this poll and every later one.
+        drop(release);
+        // The poll's broadcast: the driver reads the count right after it,
+        // with no await between, so it is parked at 0 by the time the test
+        // runs again.
+        assert_eq!(pct_of(&rig.next_event().await), Some(10.0));
         rig.clients.send_replace(1);
         rig.next_call().await;
 
