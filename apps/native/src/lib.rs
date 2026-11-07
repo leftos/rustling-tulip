@@ -26,6 +26,11 @@ mod chat_tail;
 mod chat_view;
 mod cleanup_failed;
 mod cleanup_failed_view;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the remote image paste is what calls it")
+)]
+mod clipboard_image;
 mod combobox;
 mod connection;
 pub mod connection_picker;

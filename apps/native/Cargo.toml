@@ -29,7 +29,6 @@ workspace = true
 # for PrintWindow) written as a PNG. Off by default.
 driver = [
     "dep:interprocess",
-    "dep:png",
     "windows/Win32_Security",
     "windows/Win32_Security_Authorization",
     "windows/Win32_Storage_Xps",
@@ -99,7 +98,8 @@ rodio = { version = "0.23.0", default-features = false, features = [
     "vorbis",
 ] }
 interprocess = { version = "2", features = ["tokio"], optional = true }
-png = { version = "0.18", optional = true }
+# Pasting a copied bitmap into a remote session sends it as a PNG.
+png = "0.18"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 # The app's own toasts reach their window through its native handle.
@@ -136,6 +136,8 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 # property keys, `Win32_System_Com_StructuredStorage` and `Win32_System_Variant`
 # for their values). The taskbar badge draws its icon through GDI
 # (`Win32_Graphics_Gdi`) and sets it through `Win32_UI_Shell`'s taskbar list.
+# A copied bitmap is read through the clipboard (`Win32_System_DataExchange`,
+# `Win32_System_Memory`).
 windows = { version = "0.61", features = [
     "Data_Xml_Dom",
     "Foundation",
@@ -147,6 +149,8 @@ windows = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_System_Variant",
