@@ -1,6 +1,6 @@
 # rustling-tulip phone app
 
-The web app a phone opens over the tailnet: the installable shell the daemon serves from its `pwa` folder (`crates/daemon/src/server/pwa_static.rs`), built with Vite and plain TypeScript. The service worker in `src/sw.ts` is hand-written; the runtime dependencies are `jsqr` (the QR scanner's fallback) and `@xterm/xterm` with `@xterm/addon-fit` (the terminal).
+The web app a phone opens over the tailnet (how to install and pair it is in [docs/phone-app.md](../../docs/phone-app.md)): the installable shell the daemon serves from its `pwa` folder (`crates/daemon/src/server/pwa_static.rs`), built with Vite and plain TypeScript. The service worker in `src/sw.ts` is hand-written; the runtime dependencies are `jsqr` (the QR scanner's fallback) and `@xterm/xterm` with `@xterm/addon-fit` (the terminal).
 
 ## Scripts
 

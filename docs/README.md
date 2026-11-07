@@ -18,6 +18,7 @@ The start page for working on rustling-tulip: a native Windows desktop client (G
 - [tracer-abi.md](tracer-abi.md): the daemon/tracer ABI, its stability contract and what counts as a bump.
 - [release.md](release.md): how a versioned release is cut, from the Linear release pipeline to the GitHub release.
 - [remote-hand-checklist.md](remote-hand-checklist.md): the by-hand checks of remote access over a real tailnet, run before a release that touches it.
+- [phone-app.md](phone-app.md): putting the phone app on an iPhone and pairing it with a PC, its notification switches, and what to check when it misbehaves.
 - [ux-audit.md](ux-audit.md): the UX audit of the retired Tauri app, kept for its findings (its paths resolve on the `tauri` branch).
 - [plans/MAIN.md](plans/MAIN.md): the plan snapshot, generated from Linear team RT (open work by wave); the `plans/` folder holds the design files open items link.
 - [research/](research/): research notes on outside tools and docs.

@@ -79,6 +79,7 @@ It is alpha software.
 - Ctrl+click a file path in a remote session's terminal, or use Fetch file…, to copy the file to this PC and open it. An HTML page brings its images and stylesheets with it.
 - Ctrl+click a folder path to fetch the whole folder, with progress and Cancel, leaving out `.git`, `node_modules` and caches. A fetched file's notice offers Fetch whole folder, and a fetched folder's offers Reveal.
 - When a host's session count changed since your last visit, the app offers to keep your layout, open all its sessions or start empty.
+- An iPhone on the tailnet can open the same sessions as a Home Screen web app with push notifications; see [the phone app guide](docs/phone-app.md).
 
 ### Remote access over SSH
 
