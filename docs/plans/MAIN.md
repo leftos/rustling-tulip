@@ -32,7 +32,6 @@
   - [ ] RT-1102 Test the Dashboard settings shown in Settings, not the saved ones
   - [ ] RT-1103 Confirm before removing a saved Claude account in Settings › Accounts
 - [ ] RT-526 Show a scrollbar on every scrolling area of the native client
-- [ ] RT-1167 Move a narrow pane header's buttons from Pop out onwards into an overflow menu · release vNext
 - [ ] RT-753 Stitch a hard-wrapped terminal path whose continuation row is indented
 - [ ] RT-1168 Let fixed-size controls grow to fit their contents across the native client · release vNext+1
 - [ ] RT-544 Take the bind and cert files off the tailnet listener's paused-clock schedule tests
@@ -62,11 +61,7 @@
 
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge · release vNext
   - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext
-    - [ ] RT-1155 PW.6c: Store the VAPID keys and push subscriptions under a push folder · release vNext
-    - [ ] RT-1156 PW.6d: Handle push registration per device and drop it when a device is blocked or forgotten · release vNext
-    - [ ] RT-1157 PW.6e: Push Needs you and Finished to subscribed devices · release vNext
-    - [ ] RT-1158 PW.6f: Show pushes and open their session from the service worker · release vNext
-    - [ ] RT-1159 PW.6g: Turn push on from a Notifications panel on the phone · release vNext
+    - [/] RT-1157 PW.6e: Push Needs you and Finished to subscribed devices · release vNext
   - [ ] RT-368 PW.7: Home Screen badge with the Needs you count · release vNext
   - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
 - [ ] RT-1126 Precache the phone app's hashed assets so its first offline open is complete
@@ -76,10 +71,8 @@
 ## Wave 5 — Attention feed on the desktop
 
 - [ ] RT-87 Daemon attention feed: one event stream for needs-you, hand-offs, progress, done and fleet items
-- [ ] RT-1161 Show a toast's whole question and answers, with each option's description in a hover tooltip · release vNext
 - [ ] RT-88 Turn Needs You into an attention inbox with streams, unread state and mark unread
 - [ ] RT-89 Answer permissions and single-choice questions from Windows toasts
-- [ ] RT-1165 Name the session's repo or workspace on every native toast, beside the session · release vNext
 - [ ] RT-91 Clear and continue: one click runs /clear then /nextup, refused while work runs
 - [ ] RT-92 Show context %, cost and prompt-cache expiry on each session
 - [ ] RT-93 Fleet items: stuck agents and per-repo inbox requests
@@ -92,6 +85,9 @@
 - [ ] RT-765 Preview a toast sound from the Settings list without choosing it
 - [ ] RT-769 Log every toast decision
 - [ ] RT-1105 Show toast popups at any of eight spots around the screen, chosen in Settings
+- [ ] RT-1178 Keep every waiting session's toast and answers on screen when a toast grows tall
+- [ ] RT-1179 Re-place open toasts when the UI text size or font changes
+- [ ] RT-1180 Decide a toast's Sent state from the session on its own host
 
 ## Wave 6 — Remote enhancements
 
@@ -545,6 +541,12 @@
 - [ ] RT-1170 Keep the phone chat's scroll position across the Terminal toggle
 - [ ] RT-1171 Anchor a multi-line nu prompt's gutter mark on its first line under ConPTY
 - [ ] RT-1172 Find why a click on a This PC pane keeps focus on a remote pane after This PC reconnects
+- [ ] RT-1174 Stop a pane header flickering for one frame on each resize step
+- [ ] RT-1175 Measure pane header fit once per tab render instead of per pane per frame
+- [ ] RT-1176 Measure a toast's height with font fallback so emoji or CJK text is not clipped
+- [ ] RT-1177 Keep the push handler's file I/O out from under the device lock
+- [ ] RT-1182 Stop the phone's Notifications panel waiting forever when the service worker never registers
+- [ ] RT-1183 Send a push round's targets concurrently so one slow push service holds no other device
 
 ## Design files
 
@@ -563,7 +565,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-367, RT-368, RT-369, RT-881, RT-1126, RT-1155, RT-1158, RT-1160, Wave 4 — Mobile app (iPhone PWA over Tailscale)
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-367, RT-368, RT-369, RT-881, RT-1126, RT-1160, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
