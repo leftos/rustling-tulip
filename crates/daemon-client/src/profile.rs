@@ -2,7 +2,7 @@
 //! daemon uses, decided by its token's integrity level.
 //!
 //! An ordinary daemon (below High integrity) keeps today's folders: config in
-//! the roaming config dir, binaries, worktrees, `daemon-id`, tailnet and
+//! the roaming config dir, binaries, worktrees, `daemon-id`, tailnet, push and
 //! summarizer under the machine-local data dir. An elevated daemon (at or above
 //! High, the rule `daemon::integrity::IntegrityLevel::is_elevated` applies too)
 //! keeps all of them under its own protected root, `<data_local>/elevated`
@@ -190,6 +190,9 @@ pub struct ProfileRoots {
     pub daemon_id: PathBuf,
     /// The tailnet listener's certificate dir.
     pub tailnet: PathBuf,
+    /// The push folder: the VAPID key pair and the device subscriptions.
+    /// Under a config override it moves inside it, as the account store does.
+    pub push: PathBuf,
     /// The summarizer's working folder.
     pub summarizer: PathBuf,
     /// The account store's root: the saved agent logins the daemon switches
@@ -211,6 +214,8 @@ pub struct Overrides {
     pub worktrees: Option<PathBuf>,
     /// `RUSTLING_TULIP_TAILNET_DIR`.
     pub tailnet: Option<PathBuf>,
+    /// `RUSTLING_TULIP_PUSH_DIR`, made absolute against the current dir.
+    pub push: Option<PathBuf>,
     /// `RUSTLING_TULIP_ACCOUNTS_DIR`, made absolute against the current dir.
     pub accounts: Option<PathBuf>,
 }
@@ -221,8 +226,8 @@ impl Overrides {
     ///
     /// # Errors
     ///
-    /// `RUSTLING_TULIP_CONFIG_DIR` or `RUSTLING_TULIP_ACCOUNTS_DIR` could not
-    /// be made absolute.
+    /// `RUSTLING_TULIP_CONFIG_DIR`, `RUSTLING_TULIP_ACCOUNTS_DIR` or
+    /// `RUSTLING_TULIP_PUSH_DIR` could not be made absolute.
     pub fn from_env() -> anyhow::Result<Self> {
         Self::from_lookup(|name| std::env::var_os(name))
     }
@@ -254,11 +259,25 @@ impl Overrides {
                 })
             })
             .transpose()?;
+        // The push folder holds a private key: the same rule the account
+        // store follows, since a relative value would name a folder under
+        // whatever cwd the daemon started in.
+        let push = set("RUSTLING_TULIP_PUSH_DIR")
+            .map(|value| {
+                std::path::absolute(&value).with_context(|| {
+                    format!(
+                        "resolving RUSTLING_TULIP_PUSH_DIR={} to an absolute path",
+                        value.to_string_lossy()
+                    )
+                })
+            })
+            .transpose()?;
         Ok(Self {
             config,
             binaries: set("RUSTLING_TULIP_BINARIES_DIR").map(PathBuf::from),
             worktrees: set("RUSTLING_TULIP_WORKTREES_DIR").map(PathBuf::from),
             tailnet: set("RUSTLING_TULIP_TAILNET_DIR").map(PathBuf::from),
+            push,
             accounts,
         })
     }
@@ -314,6 +333,16 @@ pub fn roots_for(
     } else {
         base.join("account-login")
     };
+    // The push folder holds a private key, so it follows the account store's
+    // rule: a daemon isolated by its config dir alone never reaches the real
+    // one.
+    let push = overrides.push.clone().unwrap_or_else(|| {
+        if overrides.config.is_some() {
+            config.join("push")
+        } else {
+            base.join("push")
+        }
+    });
     ProfileRoots {
         binaries: overrides
             .binaries
@@ -327,6 +356,7 @@ pub fn roots_for(
             .tailnet
             .clone()
             .unwrap_or_else(|| base.join("tailnet")),
+        push,
         summarizer: base.join("summarizer"),
         accounts,
         account_login,
@@ -529,13 +559,14 @@ mod tests {
     }
 
     /// Every path field of `roots`, named.
-    fn fields(roots: &ProfileRoots) -> [(&'static str, &PathBuf); 8] {
+    fn fields(roots: &ProfileRoots) -> [(&'static str, &PathBuf); 9] {
         [
             ("config", &roots.config),
             ("binaries", &roots.binaries),
             ("worktrees", &roots.worktrees),
             ("daemon_id", &roots.daemon_id),
             ("tailnet", &roots.tailnet),
+            ("push", &roots.push),
             ("summarizer", &roots.summarizer),
             ("accounts", &roots.accounts),
             ("account_login", &roots.account_login),
@@ -564,6 +595,7 @@ mod tests {
                 worktrees: data_local.join("worktrees"),
                 daemon_id: data_local.join("daemon-id"),
                 tailnet: data_local.join("tailnet"),
+                push: data_local.join("push"),
                 summarizer: data_local.join("summarizer"),
                 accounts: data_local.join("accounts"),
                 account_login: data_local.join("account-login"),
@@ -595,6 +627,7 @@ mod tests {
             binaries: Some(scratch.join("binaries")),
             worktrees: Some(scratch.join("worktrees")),
             tailnet: Some(scratch.join("tailnet")),
+            push: Some(scratch.join("push")),
             accounts: None,
         };
         for profile in [Profile::Ordinary, Profile::Elevated] {
@@ -603,6 +636,7 @@ mod tests {
             assert_eq!(roots.binaries, scratch.join("binaries"), "{profile:?}");
             assert_eq!(roots.worktrees, scratch.join("worktrees"), "{profile:?}");
             assert_eq!(roots.tailnet, scratch.join("tailnet"), "{profile:?}");
+            assert_eq!(roots.push, scratch.join("push"), "{profile:?}");
             assert_eq!(
                 roots.daemon_id,
                 scratch.join("config").join("daemon-id"),
@@ -629,13 +663,69 @@ mod tests {
         };
         let ordinary = roots_of(Profile::Ordinary, &only_tailnet);
         assert_eq!(ordinary.tailnet, scratch.join("tailnet"));
+        assert_eq!(ordinary.push, data_local().join("push"));
         assert_eq!(ordinary.daemon_id, data_local().join("daemon-id"));
         assert_eq!(ordinary.config, config_default());
         let elevated = roots_of(Profile::Elevated, &only_tailnet);
         assert_eq!(elevated.tailnet, scratch.join("tailnet"));
+        assert_eq!(elevated.push, data_local().join("elevated").join("push"));
         assert_eq!(
             elevated.daemon_id,
             data_local().join("elevated").join("daemon-id")
+        );
+
+        // `RUSTLING_TULIP_PUSH_DIR` alone sets the push folder for both
+        // profiles and leaves the other folders on the profile.
+        let only_push = Overrides::from_lookup(|name| {
+            (name == "RUSTLING_TULIP_PUSH_DIR").then(|| scratch.join("push").into_os_string())
+        })
+        .expect("resolve");
+        for profile in [Profile::Ordinary, Profile::Elevated] {
+            let roots = roots_of(profile, &only_push);
+            assert_eq!(roots.push, scratch.join("push"), "{profile:?}");
+        }
+        assert_eq!(
+            roots_of(Profile::Ordinary, &only_push).tailnet,
+            data_local().join("tailnet")
+        );
+        assert_eq!(
+            roots_of(Profile::Elevated, &only_push).tailnet,
+            data_local().join("elevated").join("tailnet")
+        );
+    }
+
+    #[test]
+    fn an_overridden_config_dir_keeps_push_inside_it() {
+        let config = std::env::temp_dir()
+            .join("rt-push-config-override")
+            .join("config");
+        let overrides = Overrides {
+            config: Some(config.clone()),
+            ..Overrides::default()
+        };
+        for profile in [Profile::Ordinary, Profile::Elevated] {
+            assert_eq!(
+                roots_of(profile, &overrides).push,
+                config.join("push"),
+                "{profile:?}: an isolated daemon never reaches the real push folder"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relative_push_override_is_made_absolute() {
+        let relative = Overrides::from_lookup(|name| {
+            (name == "RUSTLING_TULIP_PUSH_DIR").then(|| OsString::from("rel/push"))
+        })
+        .expect("resolve");
+        let push = relative.push.expect("the push override is set");
+        assert!(push.is_absolute(), "{}", push.display());
+        assert_eq!(
+            push,
+            std::env::current_dir()
+                .expect("current dir")
+                .join("rel")
+                .join("push")
         );
     }
 
@@ -658,6 +748,7 @@ mod tests {
                 worktrees: config.join("worktrees"),
                 daemon_id: config.join("daemon-id"),
                 tailnet: config.join("tailnet"),
+                push: config.join("push"),
                 summarizer: config.join("summarizer"),
                 accounts: config.join("accounts"),
                 account_login: config.join("account-login"),

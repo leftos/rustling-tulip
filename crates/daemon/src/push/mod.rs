@@ -4,6 +4,8 @@
 //! push service's answer sorted into what the caller does next
 //! (`docs/plans/mobile-app.md`, "Push").
 
+pub(crate) mod keys;
 pub(crate) mod send;
+pub(crate) mod store;
 pub(crate) mod vapid;
 pub(crate) mod webpush;

@@ -13,11 +13,12 @@ use crate::{DaemonSpec, LaunchError, TestShell};
 pub const STUB_MARKER: &str = "[rt-e2e agent stub]";
 
 /// The daemon's directories under the scratch root.
-const SCRATCH_DIRS: [&str; 6] = [
+const SCRATCH_DIRS: [&str; 7] = [
     "config",
     "binaries",
     "worktrees",
     "tailnet",
+    "push",
     "ui",
     "fake-bin",
 ];
@@ -67,6 +68,12 @@ pub(crate) fn isolated_envs(
         (
             "RUSTLING_TULIP_TAILNET_DIR",
             root.join("tailnet").into_os_string(),
+        ),
+        // The push folder: the live tier never writes the user's real VAPID
+        // key or subscriptions.
+        (
+            "RUSTLING_TULIP_PUSH_DIR",
+            root.join("push").into_os_string(),
         ),
         // The account store: never the user's saved logins. The store
         // creates the folder itself, owner-only, when it first opens it.
@@ -209,4 +216,45 @@ fn path_with_stub(root: &Path) -> Result<OsString, LaunchError> {
     let inherited = std::env::var_os("PATH").unwrap_or_default();
     let dirs = std::iter::once(root.join("fake-bin")).chain(std::env::split_paths(&inherited));
     Ok(std::env::join_paths(dirs)?)
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a test asserts its preconditions with expect"
+)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{SCRATCH_DIRS, env_value, isolated_envs};
+    use crate::{DaemonSpec, TestShell};
+
+    fn spec(scratch_root: PathBuf) -> DaemonSpec {
+        DaemonSpec {
+            name: "unit".to_owned(),
+            scratch_root,
+            repo_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            bin_dir: PathBuf::from("no-such-profile"),
+            extra_env: Vec::new(),
+            shell: TestShell::Cmd,
+        }
+    }
+
+    #[test]
+    fn the_push_dir_is_isolated_under_the_scratch_root() {
+        let root = std::env::temp_dir().join(format!("rt-push-env-{}", std::process::id()));
+
+        let envs =
+            isolated_envs(&spec(root.clone())).expect("every registered agent has a fake CLI");
+
+        assert!(
+            SCRATCH_DIRS.contains(&"push"),
+            "the scratch root makes a push folder"
+        );
+        assert_eq!(
+            env_value(&envs, "RUSTLING_TULIP_PUSH_DIR"),
+            Some(root.join("push").into_os_string()),
+            "the live tier never writes the user's real push keys"
+        );
+    }
 }

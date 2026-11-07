@@ -143,6 +143,12 @@ It also holds `configs/<n>.json` (each account's `oauthAccount` block), `setting
 
 It has a `.lock` file and one lock file beside each shared file. It sits outside the config dir, and account settings never go in `state.json`.
 
+The push feature keeps its files in a machine-local root beside those, `ProjectDirs::data_local_dir().join("push")` (overridable with `RUSTLING_TULIP_PUSH_DIR`, made absolute against the current dir), `%LOCALAPPDATA%\leftos\rustling-tulip\data\push\` on Windows. An elevated daemon's is under its elevated root, and while `RUSTLING_TULIP_CONFIG_DIR` overrides the config dir and `RUSTLING_TULIP_PUSH_DIR` is unset, it is `<config>/push`, as the account store's is. The folder is 0700 on Unix.
+
+It holds `vapid.json` (`{"private_key": "<base64url of the 32-byte P-256 scalar>"}`, created on first use, never rotated: deleting the folder is the reset; owner-only on Unix) and `subscriptions.json` (`{"devices": {"<device id>": {"kind": "web_push", "endpoint", "p256dh", "auth", "needs_you", "finished", "created_at"}}}`, one entry per device, keyed by that device's `devices.json` record id, which push leaves untouched).
+
+A corrupt file of either is never overwritten: `vapid.json` fails with an error naming it, and `subscriptions.json` loads empty with a warning and refuses saves.
+
 The daemon-driven account login keeps its scratch folder, one `<session id>` folder per login, under `account-login` (`ProfileRoots::account_login`): `<data dir>/account-login/` normally, `<config dir>/account-login/<session id>` while `RUSTLING_TULIP_CONFIG_DIR` overrides the config dir, so an elevated daemon uses its own root.
 
 The folder is owner-only off Windows (on Windows it inherits the data dir's access list) and holds the login's `CLAUDE_CONFIG_DIR` (on macOS the login's Keychain item is deleted with it). It is never under the user's Claude home.
