@@ -93,7 +93,7 @@ Toolchain: Vite builds `apps/pwa/` into `apps/pwa/dist`, with pnpm, oxlint and o
 
 ## Badge
 
-The badge is the number of sessions in Needs you. The page sets it with `navigator.setAppBadge(n)` (`0` clears it) on every snapshot while it runs, and every push carries the count in `app_badge` (or the service worker sets it on iOS before 18.4).
+The badge is the number of sessions in Needs you. The page sets it with `navigator.setAppBadge(n)` (`0` clears it) on every snapshot while it runs (once the session list has loaded: a reconnect leaves the badge as it was until the next snapshot, and a browser without the Badging API gets none), and every push carries the count in `app_badge` (or the service worker sets it on iOS before 18.4).
 
 A push must show a notification, so no push lowers the badge silently: a prompt answered elsewhere while the app is closed leaves the count high until the app opens or the next push arrives. The badge shows once notifications are allowed ([pwa-iphone.md](../research/pwa-iphone.md) §2).
 
@@ -112,7 +112,7 @@ Item ids are PW.1, PW.2, … (phone web app), distinct from the macOS plan's M0�
 - [x] **PW.4 Home.** The grouped list with rows that never move, the Needs you tray with one compact card at a time, yes/no and permission answers typed as the option's number, Stop and Resume. Proved by vitest over the list model (a status change keeps row order) and a live e2e against an isolated daemon with fake-claude raising a prompt.
 - [x] **PW.5 Session screen, first cut.** The chat-first session screen: the composer, Quick and Keys (collie's layouts), and the prompt sheet. Proved by vitest over the sheet's answer keys.
 - [ ] **PW.6 Web Push.** The VAPID key store, the subscription messages, the sender with the payload, options and error handling above, the per-device Needs you and Finished switches, and the service worker's `push` and `notificationclick` handlers. Proved by the RFC 8291 vector, sender tests against a local fake push service (a 410 deletes, a 403 keeps, a replacement endpoint replaces, the topic rule), and the hand checklist.
-- [ ] **PW.7 Badge.** `setAppBadge` from the Needs you count on each snapshot and on push for iOS before 18.4. Proved by vitest over the count and the hand checklist.
+- [x] **PW.7 Badge.** `setAppBadge` from the Needs you count on each snapshot and on push for iOS before 18.4. Proved by vitest over the count and the hand checklist.
 - [ ] **PW.8 Install guide and hand checklist.** A doc for turning remote access on, installing from Safari and pairing, and the checklist on the real iPhone: push while locked and off the tailnet, the tap landing on the session, the badge, a reinstall's new endpoint replacing the old one, and Safari's storage eviction asking for a token again.
 - [x] **PW.9 Full terminal** (Wave 8, RT-108). xterm.js fed `PtyOutput` and the `Scrollback` that answers `LoadScrollback`, a key bar under it (the Keys tray keys, a sticky Ctrl, and Quick, whose reply is typed into the terminal), the PTY size through RT-184, and the Terminal toggle in the session screen's header, which replaces the chat, composer and prompt sheet and opens a fresh attach each time it is turned on.
 - [ ] **PW.10 Chat** (Wave 8, RT-109). The chat mirror's entries (RT-51) above the status line, in the chat look ruled above.

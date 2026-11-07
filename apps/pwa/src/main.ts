@@ -1,3 +1,4 @@
+import { browserBadgeEnv, createBadge } from "./badge";
 import { mountHomeView } from "./home-view";
 import { reset as resetHome, type HomeModel } from "./home-model";
 import { mountNotificationsView } from "./notifications-view";
@@ -84,9 +85,11 @@ const homeSection = document.getElementById("home");
 // Home's one model: Home folds it, and a session's screen reads it to name
 // its session and to tell when the session is gone.
 let homeModel: HomeModel = resetHome();
+const badge = createBadge(browserBadgeEnv());
 if (homeSection !== null) {
   mountHomeView(homeSection, connection, intro, openSession, (model) => {
     homeModel = model;
+    badge.update(model);
   });
 }
 const notificationsSection = document.getElementById("notifications");
