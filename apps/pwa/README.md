@@ -31,6 +31,8 @@ An unpaired phone gets `Welcome` then `DevicePairFailed { reason: "device not ap
 - `src/scanner.ts`: the `CodeScanner` seam: the rear camera read with `BarcodeDetector` when it reads QR codes, else jsQR on the main thread; it accepts only a six-digit code and releases the camera on stop.
 - `src/keys.ts`: named keys and Ctrl chords to the bytes a terminal sends, the Keys tray in collie's order, and `keyInput`, which wraps bytes as a `SendInput`.
 - `src/quick.ts`: collie's quick-reply groups (yes and no; continue, commit and push, retry, skip, drastically simplify; `y` and `n` for a plain shell), each sent as its text and Enter.
+- `src/home-model.ts`: the Home list's model (pure): sessions grouped as the desktop sidebar groups them, rows that keep their place when their state changes, the Needs you tray (sessions waiting for an answer, longest wait first) and each card's one-tap answers.
+- `src/home-actions.ts`: the Home's requests (pure): answer a card, Stop on a second tap, Resume as the desktop does (duplicating a stopped session and discarding the original, or resuming an abandoned one), and the replies that clear or refuse them.
 - `src/socket.ts`: the driver, with the socket, timers, visibility and token store injected. A Welcome that does not arrive in 10 s is a failure; backgrounding closes the socket and clears timers; returning to the foreground reconnects at once with the attempt counter reset. The daemon's usual initial state after a connect is the resync.
 - `src/backoff.ts`: 500 ms doubling, capped at 10 s, the native client's numbers.
 - `src/hello.ts`: builds the `Hello`.
