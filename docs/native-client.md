@@ -1036,7 +1036,7 @@ A viewer tab is refused ("Viewer tabs can't be popped out"). A pane keeps its id
 
 A pop-out opens 1100×720 (minimum 700×400), centred on the main window's display; each further one opens 32 px right and down of the one before it. Its title is the session's label or the tab's name, and a session pop-out whose session the daemon has removed reads "Session not found". Only the main window's close runs the quit flow; closing a pop-out docks it back.
 
-Dock back is the close of every kind: a pane returns to its grid, a tab's pill loses its mark, a session pop-out simply closes. It sends nothing, so it never stops a session or removes a tab. A pane pop-out closes by itself when its pane leaves every tab, and a tab pop-out when its tab does; a session pop-out stays open after its session stops. Pop-outs have no app shortcuts and no Pop out button of their own.
+Dock back is the close of every kind: a pane returns to its grid, a tab's pill loses its mark, a session pop-out simply closes. It sends nothing, so it never stops a session or removes a tab. A pane pop-out closes by itself when its pane leaves every tab, and a tab pop-out when its tab does; a session pop-out stays open after its session stops. Pop-outs have no Pop out button of their own, and their only app shortcuts are Ctrl+Shift+M and Ctrl+Shift+U on their pane and Ctrl+Shift+P, which opens the jump palette in the main window.
 
 The main window keeps the popped content's place as a card, which is not a terminal and holds no keyboard. A popped pane's grid slot draws a card with the session's label, "Popped out to its own window", Focus window and Dock back; a popped tab draws the same card over its body while it is the active tab, and its pill shows a muted ↗ ("Popped out"). Focus window raises the pop-out and focuses its terminal or diff.
 
@@ -1059,6 +1059,38 @@ Once per launch, when the tabs and sessions have both arrived (a remote session'
 A restore leaves the keyboard in the main window and raises it only if it was active, and an entry whose pane, tab or session is gone is dropped (a pane that moved reopens under its new tab). A saved pane pop-out whose remote session is gone, or is being forgotten, never opens; `native.log` records at info "a saved pop-out's pane is gone or being forgotten; dropped". A reconnect reopens nothing.
 
 Quitting closes the pop-outs with the app after saving the open set, and the exit dialog counts sessions only. Closing every window, the main one included, keeps the pop-outs for the next launch. A missing `popouts` key or a value that is not a list loads as empty, and an entry whose key does not decode is dropped alone.
+
+## Jump palette
+
+Ctrl+Shift+P (Cmd+Shift+P too on macOS; Alt held, or Ctrl and Cmd together, is not the key) opens the jump palette from anywhere, a focused terminal included: the root key capture takes it before the terminal sees it (`is_quick_jump_key`, `quick_jump_view.rs`). In a pop-out it opens in the main window, which comes forward. It never opens while a menu, a dialog or Settings holds the main window. Esc, the key again or a press outside the panel closes it and gives the keyboard back to the active pane. The key is Ctrl+Shift+P rather than Ctrl+K so Ctrl+K stays the terminal's kill-to-end.
+
+The palette is main-window only, as the spawn dialog is, so it has no `Overlay` variant. The state (entries, ranking, highlight, Enter's `JumpAction`) is plain Rust in `quick_jump.rs`, unit-tested; `quick_jump_view.rs` draws and routes keys; `RootView::jump_to` runs the action.
+
+- **Panel**: 560 px wide, 64 px under the window's top, a query field (placeholder "Jump to a pane, tab, session or repo") over rows that scroll past twelve. Up and Down move the highlight, Enter or a click jumps.
+- **Rows**, across every connected host: `[PANE]` (each pane on screen in any tab, by its session's label), `[TAB]`, `[SESSION]` (a sidebar session in no pane), and `[REPO]`, `[WS]` and `[DIR]` (each sidebar container); a row of another host ends ` · host`.
+- **Order**: with an empty query, panes and tabs by last focus (an in-memory history, lost on quit), then tabs never focused each with its panes, then sessions in no pane, then containers in sidebar order. A typed query ranks with `fuzzy.rs` (the spawn Target list's matcher), the kind tags never matched and the host name a second, lower-ranked field. With no match one dimmed row reads "No matching pane, tab, session or repo", and Enter keeps the palette open.
+- **Jumping**: a pane row focuses that exact pane (`show_session_on`), and a popped pane or tab brings its window forward; a tab row shows the tab; a session row places the session as a sidebar click does. A repo, workspace or folder row reveals its sidebar row, doing only what is needed: expanding the sidebar, showing Sessions, switching the Tabs view to Repos, setting the filter to All and unfolding its host; then it focuses the row and scrolls the sidebar to it. Rows vary in height, so the sidebar scrolls the container's group to the top (gpui `scroll_to_top_of_item`) only when its row is not fully in view.
+- **Preselected target**: a jump to a repo or workspace makes it the Target of the next New Session opened from the toolbar, `+ Session` or Ctrl+Shift+N (`spawn_form::initial_target` takes it ahead of the focused pane's session). It clears on a click on another sidebar row, a leaf or a host header, on a pane focus, on a change of the sidebar's view or filter, and when its container leaves the registry; a New Session dialog that opens with it uses it up.
+
+Specs: `ui_quick_jump.rs`; `native-shot jump` draws the open palette.
+
+## Keyboard shortcuts
+
+The app's own keys, taken by the root key capture (`on_key_capture`, `on_shortcut`, `tab_key`, `is_spawn_shortcut`) before the terminal sees them unless noted:
+
+| Key | Action |
+|---|---|
+| Ctrl+Shift+P | Jump palette, from anywhere (see "Jump palette") |
+| Ctrl+Shift+N | Spawn dialog, from anywhere; Ctrl+N does the same outside a terminal |
+| Ctrl+Shift+T | New tab, from anywhere; Ctrl+T does the same outside a terminal |
+| Ctrl+Tab, Ctrl+Shift+Tab | Next and previous tab |
+| Ctrl+1 to Ctrl+9 | Show the nth tab |
+| Ctrl+Shift+G | Rearrange the active tab's panes to the automatic grid |
+| Ctrl+B | Fold or unfold the sidebar, outside a terminal |
+| Ctrl+, | Settings |
+| Ctrl+= and Ctrl+- | The focused session's font size; with Shift, the active tab's; Ctrl+0 clears both |
+| Ctrl+Shift+M, Ctrl+Shift+U | The focused pane's Chat and Summary views (see "Chat and summary panes") |
+| Esc | Closes the open menu, flyout, dialog or palette |
 
 ## Keyboard reachability
 

@@ -109,6 +109,7 @@ mod preset_prompts;
 pub(crate) mod preset_wizard;
 mod preset_wizard_view;
 mod quick_jump;
+mod quick_jump_view;
 mod quit;
 mod quit_view;
 mod recover;
@@ -934,6 +935,8 @@ pub struct RootView {
     /// The tabs and panes that took focus, most recent first, for the jump
     /// palette's order.
     focus_history: quick_jump::FocusHistory,
+    /// The jump palette while it is open.
+    quick_jump: Option<quick_jump_view::QuickJumpState>,
     /// Where the focused container row was last painted, by its key: a
     /// key that opens its menu anchors it there.
     focused_row_bounds: Option<(String, Bounds<Pixels>)>,
@@ -1566,6 +1569,7 @@ impl RootView {
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_reveal: None,
             focus_history: quick_jump::FocusHistory::default(),
+            quick_jump: None,
             focused_row_bounds: None,
             hovered_container: None,
             rail_tip: activity_bar::RailTipSuppression::default(),
@@ -2653,13 +2657,25 @@ impl RootView {
         self.tabs.tabs().iter().map(|tab| tab.id.clone()).collect()
     }
 
+    /// Whether anything holds the main window that the jump palette must not
+    /// open over: a dialog, modal or Settings ([`Self::overlay_open`]), any
+    /// menu, the flyout or accounts popover, the sidebar's More menu, or the
+    /// connecting overlay.
+    pub(crate) fn main_window_held(&self) -> bool {
+        self.overlay_open()
+            || self.menu_open()
+            || self.sidebar_more_open()
+            || self.conn().overlay().is_some()
+    }
+
     /// Whether a dialog, modal or menu is drawn over the panes and holds the
     /// keyboard: the Settings modal, the spawn, Shell…, Fetch file…,
     /// delete-worktree, repo/workspace Remove, discard, stash drop, run,
     /// recover, Manage worktrees, layout chooser, cleanup-failed, exit and
-    /// pane dialogs and menus, or a modal notice.
+    /// pane dialogs and menus, a modal notice, or the jump palette.
     fn overlay_open(&self) -> bool {
         self.spawn_dialog.is_some()
+            || self.quick_jump.is_some()
             || self.shell_dialog.is_some()
             || self.fetch_dialog.is_some()
             || self.host_path_prompt.is_some()
@@ -5381,14 +5397,8 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
-        if self.pane_ui.move_panes.is_some() {
-            if self.on_move_panes_key(ks, window, cx) {
-                cx.stop_propagation();
-            }
-            return;
-        }
-        if self.creator_dialog_open() {
-            if self.on_creator_dialogs_key(ks, window, cx) {
+        if let Some(taken) = self.on_palette_or_pane_dialogs_key(ks, window, cx) {
+            if taken {
                 cx.stop_propagation();
             }
             return;
@@ -5509,6 +5519,26 @@ impl RootView {
         }
     }
 
+    /// While the jump palette, the Move panes dialog or a creator dialog
+    /// is open (in that order), it has the key: `Some` of whether it took
+    /// it; `None` with none of them open.
+    fn on_palette_or_pane_dialogs_key(
+        &mut self,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        if self.quick_jump.is_some() {
+            Some(self.on_quick_jump_key(ks, window, cx))
+        } else if self.pane_ui.move_panes.is_some() {
+            Some(self.on_move_panes_key(ks, window, cx))
+        } else if self.creator_dialog_open() {
+            Some(self.on_creator_dialogs_key(ks, window, cx))
+        } else {
+            None
+        }
+    }
+
     /// The root's own keys; returns whether `ks` was one. Esc closes a
     /// context menu or the flyout. Ctrl+B toggles the sidebar and Ctrl+N
     /// opens the spawn dialog only when no terminal and no tab rename has
@@ -5550,6 +5580,8 @@ impl RootView {
             self.focused_pane_view_key(key, window, cx);
         } else if self.is_spawn_shortcut(ks, window, cx) {
             self.open_spawn_dialog(crate::spawn_view::SpawnEntry::Toolbar, window, cx);
+        } else if is_quick_jump_key(ks) {
+            self.open_quick_jump(window, cx);
         } else {
             return self.on_tab_shortcut(ks, window, cx);
         }
@@ -5782,6 +5814,18 @@ fn moves_source_control_inputs(msg: &DaemonMessage) -> bool {
     )
 }
 
+/// Whether `keystroke` is the jump palette's key: Ctrl+Shift+P, and on macOS
+/// Cmd+Shift+P too; Alt held, or Ctrl and Cmd together, is not.
+pub(crate) fn is_quick_jump_key(keystroke: &Keystroke) -> bool {
+    let m = keystroke.modifiers;
+    if !keystroke.key.eq_ignore_ascii_case("p") || !m.shift || m.alt {
+        return false;
+    }
+    let ctrl = m.control && !m.platform;
+    let cmd = cfg!(target_os = "macos") && m.platform && !m.control;
+    ctrl || cmd
+}
+
 /// The font-size shortcut `ks` is, if any: Ctrl with `=` (or the `+` Shift
 /// types on a US layout) and `-` (or the `_` it shifts to), and Ctrl+0.
 /// Shift makes a step act on the tab's override; Ctrl+Shift+0 is nothing.
@@ -5903,6 +5947,7 @@ impl Render for RootView {
             // confirmation to show.
             .children(self.chip_layer(crate::fonts::ui_text_size(cx), &theme(cx)))
             .children(self.spawn_dialog_layers(cx))
+            .children(self.quick_jump_layer(cx))
             .children(self.shell_dialog_layer(cx))
             .children(self.fetch_dialog_layer(cx))
             .children(self.host_path_prompt_layer(cx))

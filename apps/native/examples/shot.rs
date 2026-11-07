@@ -195,6 +195,7 @@ enum View {
     Settings,
     SettingsClaude,
     Spawn,
+    Jump,
     Viewer,
     ViewerMd,
     Dashboard,
@@ -221,7 +222,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 30] = [
+    const ALL: [Self; 31] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -229,6 +230,7 @@ impl View {
         Self::Settings,
         Self::SettingsClaude,
         Self::Spawn,
+        Self::Jump,
         Self::Viewer,
         Self::ViewerMd,
         Self::Dashboard,
@@ -263,6 +265,7 @@ impl View {
             Self::Settings => "settings",
             Self::SettingsClaude => "settings-claude",
             Self::Spawn => "spawn",
+            Self::Jump => "jump",
             Self::Viewer => "viewer",
             Self::ViewerMd => "viewer-md",
             Self::Dashboard => "dashboard",
@@ -371,6 +374,7 @@ impl View {
                 root.settings_open() && root.open_sound_list() == Some(NotifyKind::NeedsYou)
             }
             Self::Spawn => root.spawn_dialog_open(),
+            Self::Jump => root.quick_jump_open(),
             Self::Viewer | Self::ViewerMd => {
                 root.active_tab_id() == Some(VIEWER_TAB)
                     && root
@@ -508,6 +512,7 @@ impl Shot {
             | View::Settings
             | View::SettingsClaude
             | View::Spawn
+            | View::Jump
             | View::Dashboard
             | View::DashboardCompact
             | View::Connections
@@ -1149,6 +1154,7 @@ fn drive(
             Ok(())
         }
         View::SpawnHosts => press("ctrl-shift-n", window, cx),
+        View::Jump => press("ctrl-shift-p", window, cx),
         View::Dashboard | View::DashboardCompact => {
             let y = (DASHBOARD_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
             #[expect(

@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- Ctrl+Shift+P opens a jump palette: type to find any open pane, tab, session, repo or workspace, and Enter goes straight there.
+
 ### Fixed
 
 - Clicking a Needs you or Finished toast, the Windows notification or the app's own, now shows that pane's tab and gives the pane keyboard focus.

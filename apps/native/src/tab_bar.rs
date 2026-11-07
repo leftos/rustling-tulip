@@ -1058,7 +1058,7 @@ impl RootView {
     }
 
     /// A context menu or a popup Esc closes is open.
-    fn menu_open(&self) -> bool {
+    pub(crate) fn menu_open(&self) -> bool {
         self.tab_menu.is_some()
             || self.open_in_main(Overlay::EmptyPaneMenu)
             || self.open_in_main(Overlay::SessionMenu)

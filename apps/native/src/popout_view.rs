@@ -1,7 +1,8 @@
 //! A pop-out window's root: the popped pane's or session's toolbar and
 //! terminal, or a popped tab's toolbar and whole grid or diff, drawn from the main
-//! window's [`RootView`] over its one daemon connection. It registers no app
-//! shortcuts, so every key goes to the terminal.
+//! window's [`RootView`] over its one daemon connection. Its one app-wide
+//! shortcut is Ctrl+Shift+P, which opens the main window's jump palette;
+//! past its own pane keys, every other key goes to the terminal.
 
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
@@ -319,9 +320,9 @@ impl RootView {
     }
 
     /// A key in a pop-out window: the pane-close dialog it draws takes
-    /// every key, Esc closes a menu it draws, and Ctrl+Shift+M switches its
-    /// pane between terminal and chat. Anything else goes on to its
-    /// terminal.
+    /// every key, Esc closes a menu it draws, Ctrl+Shift+M switches its
+    /// pane between terminal and chat, and Ctrl+Shift+P opens the jump
+    /// palette in the main window. Anything else goes on to its terminal.
     pub(crate) fn on_popout_key(
         &mut self,
         event: &KeyDownEvent,
@@ -347,6 +348,10 @@ impl RootView {
             // Swallowed even with nothing to switch: Ctrl+M is Enter and
             // Ctrl+U a line kill to the terminal.
             self.window_pane_view_key(here, key, window, cx);
+            true
+        } else if crate::is_quick_jump_key(ks) {
+            // The palette is the main window's: it opens there, in front.
+            self.open_in_main_window(cx, Self::open_quick_jump);
             true
         } else {
             false

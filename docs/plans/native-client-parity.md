@@ -185,7 +185,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [x] Tab pop-out: full grid (split, drag, close) or a diff tab, Close window; spawning disabled with a hint; closes when the tab is removed — `TabWindow.tsx` (native: the pop-out has Dock back, not Close window, and a viewer tab is refused; the pill keeps a ↗ mark and a card shows in the main window while it is active; spawn buttons read "Spawn from the main window")
 - [x] Session pop-out (session with no pane): Stop, Close window; stays open after the session stops — `SessionWindow.tsx` (native: Stop and Close window)
 - [x] **(hard)** Opening an existing pop-out focuses it; title is the session or tab name; 1100×720 (min 700×400); "not found" state — `lib.rs` (native: an overlapping pop-out raises the open one; a session pop-out reads "Session not found" once the daemon removes the session)
-- [x] Pop-outs have no app shortcuts and no Pop out button of their own — `App.tsx`, `SessionPane.tsx` (native: app shortcuts do nothing in a pop-out)
+- [x] Pop-outs have no app shortcuts and no Pop out button of their own — `App.tsx`, `SessionPane.tsx` (native: app shortcuts do nothing in a pop-out, except Ctrl+Shift+M, Ctrl+Shift+U and Ctrl+Shift+P, which opens the jump palette in the main window)
 
 ## Remote / LAN
 

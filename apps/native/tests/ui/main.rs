@@ -58,6 +58,7 @@ mod ui_panes;
 mod ui_popout;
 mod ui_preset_wizard;
 mod ui_prompt_jump;
+mod ui_quick_jump;
 mod ui_quit;
 mod ui_recover;
 mod ui_remote;

@@ -279,7 +279,6 @@ fn container_entry(container: &ContainerInput) -> Option<Entry> {
 
 /// The palette's state: its entries, the query, the entries the query
 /// matches (best first) and the highlighted one among them.
-#[cfg_attr(not(test), expect(dead_code, reason = "the palette view drives it"))]
 #[derive(Debug, Clone)]
 pub struct QuickJump {
     entries: Vec<Entry>,
@@ -290,7 +289,6 @@ pub struct QuickJump {
     highlight: usize,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "the palette view drives it"))]
 impl QuickJump {
     /// The palette over `entries`, with an empty query: every entry, the
     /// first highlighted.

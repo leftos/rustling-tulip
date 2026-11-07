@@ -759,7 +759,13 @@
       "paths": [
         "apps/native/src/quick_jump.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^quick_jump::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^quick_jump::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_quick_jump)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/quick_jump_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^quick_jump(_view)?::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_quick_jump)::/))"
     },
     {
       "paths": [
@@ -1333,6 +1339,12 @@
     },
     {
       "paths": [
+        "apps/native/tests/ui/ui_quick_jump.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_quick_jump)::/))"
+    },
+    {
+      "paths": [
         "apps/native/tests/ui/ui_quit.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_quit)::/))"
@@ -1581,7 +1593,7 @@
       "paths": [
         "apps/native/src/popout_view.rs"
       ],
-      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_popout)::/)"
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_popout|ui_quick_jump)::/)"
     },
     {
       "paths": [
