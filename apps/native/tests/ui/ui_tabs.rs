@@ -843,6 +843,85 @@ fn menu_hides_rearrange_under_two_panes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_inactive_tabs_menu_offers_no_rearrange_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = grid_of(&["s1", "s2"]);
+    fixture.tabs.push(tab(
+        "t2",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p3", Some("s3")),
+            pane("p4", Some("s4")),
+        ),
+    ));
+    fixture.sessions.push(session("s3").build());
+    fixture.sessions.push(session("s4").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t1".to_owned()),
+        "the first tab is active"
+    );
+
+    h.right_click_on("tab-t2");
+    let rows = h.root(|root, _| root.tab_menu_rows());
+    assert!(
+        !rows.contains(&"tab-menu-grid-auto".to_owned()),
+        "an inactive tab's menu offers no rearrange rows: {rows:?}"
+    );
+    assert!(
+        !menu_text(&mut h).contains(&"Rearrange panes".to_owned()),
+        "and no rearrange label"
+    );
+
+    h.keys("escape");
+    assert_eq!(
+        h.root(|root, _| root.tab_menu().map(str::to_owned)),
+        None,
+        "Esc closes the menu"
+    );
+    h.right_click_on("tab-t1");
+    let rows = h.root(|root, _| root.tab_menu_rows());
+    assert!(
+        rows.contains(&"tab-menu-grid-auto".to_owned()),
+        "the active tab's menu offers them: {rows:?}"
+    );
+}
+
+#[gpui::test]
+fn a_popped_out_tabs_menu_keeps_its_rearrange_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = grid_of(&["s1", "s2"]);
+    fixture.tabs.push(tab(
+        "t2",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p3", Some("s3")),
+            pane("p4", Some("s4")),
+        ),
+    ));
+    fixture.sessions.push(session("s3").build());
+    fixture.sessions.push(session("s4").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    h.right_click_on("tab-t2");
+    h.click_on("tab-menu-popout");
+    assert_eq!(h.window_count(), 2, "the tab has a window of its own");
+    assert_eq!(
+        h.root(|root, _| root.tab_menu().map(str::to_owned)),
+        None,
+        "the menu closed"
+    );
+
+    h.right_click_on("tab-t2");
+    let rows = h.root(|root, _| root.tab_menu_rows());
+    assert!(
+        rows.contains(&"tab-menu-grid-auto".to_owned()),
+        "a popped-out tab's panes are on screen, so its menu keeps the rearrange rows: {rows:?}"
+    );
+}
+
+#[gpui::test]
 fn close_others_arms_then_sends_close_for_each_other(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &three_tabs());

@@ -345,6 +345,8 @@ While a tab is untouched since its pick, the daemon rebuilds it on every pane ad
 
 A concrete grid keeps its column count (a three-column pick with a fourth pane is three plus one) and carries `aspect: None`.
 
+The tab menu offers the rearrange section (Auto, the Grid submenu, Side by side, Stacked) only for a tab whose panes are on screen: the active tab, or a tab popped out into its own window. Any other tab's menu leaves the section out; "Move panes to new tab…" stays on every tab, since it moves panes out rather than re-laying the tab.
+
 The automatic pick names no count at all: the tab menu's `Auto` row (the Grid submenu's, and the flat row a two-pane tab shows), the first-connect chooser's `Auto` shape, the Move panes dialog's `Auto` shape and Ctrl+Shift+G all send `RearrangeLayout::Grid { cols: 0, aspect: Some(<pane area width / height>) }`, on an additive `#[serde(default)]` field and without a protocol bump.
 
 The daemon keeps the tab automatic and fits the columns to that aspect with the aspect-aware best fit (`crates/daemon/src/tabs.rs::best_fit_grid_cols`, moved there from the client), falling back to `ceil(sqrt(N))` when no aspect is known: an older client's bare `cols: 0`, the `AutoGrid` preset and the all-sessions `InitLayout` build. Every later rebuild re-picks from the aspect the tab remembers, so adding or removing a pane keeps the grid fitting its area.

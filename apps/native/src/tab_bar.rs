@@ -164,15 +164,22 @@ impl RootView {
 
     /// Every line of `menu`: the Grid submenu alone while it is open, else
     /// rename (not for a viewer tab, whose pill shows its file's name), the
-    /// rearrange section, the font section, the close rows and the merge
-    /// section.
+    /// rearrange section (only for the active tab or a popped-out tab, the
+    /// tabs whose panes are on screen), the font section, the close rows and
+    /// the merge section.
     fn tab_menu_lines(&self, menu: &TabMenu) -> Vec<MenuLine> {
         let tabs = self.tabs.tabs();
         let Some(tab) = self.tabs.tab(&menu.tab_id) else {
             return Vec::new();
         };
         let bound = tab.grid().map_or(0, bound_pane_count);
-        let rearrange = rearrange_lines(bound, self.pane_area_aspect(), menu.grid_open);
+        let rearrange = if self.tabs.active_id() == Some(menu.tab_id.as_str())
+            || self.is_tab_popped(&menu.tab_id)
+        {
+            rearrange_lines(bound, self.pane_area_aspect(), menu.grid_open)
+        } else {
+            Vec::new()
+        };
         let submenu = rearrange
             .iter()
             .any(|line| line.selector() == Some("tab-menu-grid-back"));

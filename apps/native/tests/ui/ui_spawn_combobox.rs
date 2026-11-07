@@ -257,6 +257,10 @@ fn target_highlight(h: &mut Harness<'_>) -> Option<String> {
     h.root(|root, _| root.spawn_target_highlight())
 }
 
+fn focus(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.spawn_dialog_focus())
+}
+
 fn selected(h: &mut Harness<'_>) -> Vec<String> {
     h.root(|root, _| root.spawn_dialog_selected())
 }
@@ -338,6 +342,30 @@ fn typing_narrows_target_list(cx: &mut TestAppContext) {
     h.keys("escape");
     assert!(!target_list_open(&mut h), "the next Esc closes it");
     assert!(is_open(&mut h));
+}
+
+#[gpui::test]
+fn second_escape_after_the_target_list_closes_the_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_yaat());
+    h.click_on("sidebar-add-session");
+    h.click_on("spawn-target");
+    assert!(target_list_open(&mut h), "the list opened");
+
+    h.keys("escape");
+    assert!(!target_list_open(&mut h), "the first Esc closes the list");
+    assert!(is_open(&mut h), "and keeps the dialog");
+    assert_eq!(
+        focus(&mut h).as_deref(),
+        Some("spawn-target"),
+        "the keyboard returns to the Target field"
+    );
+
+    h.keys("escape");
+    assert!(
+        !is_open(&mut h),
+        "the second Esc closes the dialog, as with a list never opened"
+    );
 }
 
 #[gpui::test]
