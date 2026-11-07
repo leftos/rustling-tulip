@@ -4,7 +4,12 @@ A phone client for the daemon, for the owner's own use: check on sessions, answe
 
 ## Rulings
 
-- **A PWA on the iPhone.** The phone app is a web app the daemon serves, installed with Safari's Share, Add to Home Screen. The owner's primary phone is an iPhone; native apps can follow later if the owner decides to expand. Android Chrome runs the same pages, but nothing is built or checked for it.
+- **A PWA on the iPhone.** The phone app is a web app the daemon serves, installed with Safari's Share, Add to Home Screen. The owner's primary phone is an iPhone. Android Chrome runs the same pages, but nothing is built or checked for it.
+- **Native apps follow, through Expo / React Native.** Native iPhone and Android apps come after the PWA, which is how the phone side iterates fast now, so the PWA is shaped to carry over ([native-mobile-path.md](../research/2026-11-07-native-mobile-path.md)).
+
+  Its conventions: logic in pure reducers with no DOM, thin views, platform features (storage, push, QR scanning, badge, visibility) behind injected seams, the socket on the standard `WebSocket` surface, wire types only from the generator, and the stored pairing record `{host, port, token}` rather than the page's origin.
+
+  Native apps reach people other than the owner, so their push goes through a relay holding the Apple and Firebase keys (RT-1137), and PW.6's push registration carries a `kind`. A native app requires the Tailscale app on the phone, as the PWA does, rather than embedding its own tailnet node.
 - **Scope, in phases:** monitor and respond first, then a full terminal, then the conversation view.
 - **Reach: Tailscale only.** The phone reaches the daemon's tailnet listener (`crates/daemon/src/tailnet_listener.rs`) with its `tailscale cert` TLS, a public-CA certificate Safari trusts with nothing pinned; there is no relay and no pinned TLS. This is the "attach from outside the tailnet" non-goal in [architecture.md](../architecture.md#non-goals) held, not reversed.
 - **Per-device credentials:** each approved phone holds its own device token (TS.3b, RT-166), revocable from the native client's Settings by the block list (RT-96). A phone whose storage Safari evicted asks for a token again.
