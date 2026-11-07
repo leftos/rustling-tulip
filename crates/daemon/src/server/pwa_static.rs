@@ -47,8 +47,10 @@ const LOOPBACK_ONLY_PATHS: &[&str] = &["/shutdown", "/proof", "/pair", "/hook/"]
 
 /// The folder the listener serves the phone app from: a non-empty
 /// `override_dir` wins; else the install folder `bin_templates` names; else
-/// beside the daemon's own exe; else there is none. No existence check: the
-/// caller answers `503` per request while the folder is missing.
+/// beside the daemon's own exe; else there is none. In a macOS app bundle, whose
+/// binaries sit in `Contents/MacOS`, the folder is `Contents/Resources/pwa`. No
+/// existence check: the caller answers `503` per request while the folder is
+/// missing.
 pub(super) fn resolve_pwa_dir(
     override_dir: Option<&OsStr>,
     bin_templates: Option<&Path>,
@@ -58,8 +60,23 @@ pub(super) fn resolve_pwa_dir(
         return Some(PathBuf::from(dir));
     }
     bin_templates
-        .map(|dir| dir.join("pwa"))
-        .or_else(|| exe_dir.map(|dir| dir.join("pwa")))
+        .map(pwa_dir_in)
+        .or_else(|| exe_dir.map(pwa_dir_in))
+}
+
+/// The phone app's folder for a folder the daemon's binaries sit in: a macOS app
+/// bundle's `Contents/MacOS` keeps it in `Contents/Resources/pwa`, since the
+/// bundle's signature seals `Resources` and rejects non-code files in `MacOS`;
+/// every other folder keeps it beside itself, as `pwa`.
+fn pwa_dir_in(dir: &Path) -> PathBuf {
+    let bundle_contents = dir.parent().filter(|contents| {
+        (dir.file_name() == Some(OsStr::new("MacOS")))
+            && (contents.file_name() == Some(OsStr::new("Contents")))
+    });
+    bundle_contents.map_or_else(
+        || dir.join("pwa"),
+        |contents| contents.join("Resources").join("pwa"),
+    )
 }
 
 /// Log once, at listener start, when the resolved folder cannot serve a page.
@@ -290,6 +307,60 @@ mod tests {
     #[test]
     fn resolve_pwa_dir_is_none_with_nothing() {
         assert_eq!(resolve_pwa_dir(None, None, None), None);
+    }
+
+    #[test]
+    fn resolve_pwa_dir_uses_a_bundles_resources_folder() {
+        let bundle_binaries = Path::new("rustling-tulip.app")
+            .join("Contents")
+            .join("MacOS");
+        let expected = Path::new("rustling-tulip.app")
+            .join("Contents")
+            .join("Resources")
+            .join("pwa");
+        assert_eq!(
+            resolve_pwa_dir(None, Some(bundle_binaries.as_path()), None),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn resolve_pwa_dir_uses_a_bundles_resources_folder_from_the_exe_dir() {
+        let bundle_binaries = Path::new("rustling-tulip.app")
+            .join("Contents")
+            .join("MacOS");
+        let expected = Path::new("rustling-tulip.app")
+            .join("Contents")
+            .join("Resources")
+            .join("pwa");
+        assert_eq!(
+            resolve_pwa_dir(None, None, Some(bundle_binaries.as_path())),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn resolve_pwa_dir_keeps_pwa_beside_a_folder_named_macos_outside_a_bundle() {
+        let binaries = Path::new("tools").join("MacOS");
+        assert_eq!(
+            resolve_pwa_dir(None, Some(binaries.as_path()), None),
+            Some(binaries.join("pwa"))
+        );
+    }
+
+    #[test]
+    fn resolve_pwa_dir_keeps_the_override_inside_a_bundle() {
+        let bundle_binaries = Path::new("rustling-tulip.app")
+            .join("Contents")
+            .join("MacOS");
+        assert_eq!(
+            resolve_pwa_dir(
+                Some(OsString::from("override").as_os_str()),
+                Some(bundle_binaries.as_path()),
+                None,
+            ),
+            Some(PathBuf::from("override"))
+        );
     }
 
     #[test]

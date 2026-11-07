@@ -273,9 +273,10 @@ pub(super) fn build_tailnet_router_with_pwa(
 
 /// The folder the tailnet listener serves the phone app from: the
 /// `RUSTLING_TULIP_PWA_DIR` override, else `<bin_templates>/pwa` (the install
-/// folder), else `<the daemon exe's folder>/pwa`. The daemon runs from a
-/// hashed copy in the binaries cache, so its own exe folder is only right for
-/// a direct `cargo run`.
+/// folder), else `<the daemon exe's folder>/pwa`. In a macOS app bundle, whose
+/// binaries sit in `Contents/MacOS`, the folder is `Contents/Resources/pwa`. The
+/// daemon runs from a hashed copy in the binaries cache, so its own exe folder is
+/// only right for a direct `cargo run`.
 fn tailnet_pwa_dir(hub: &Hub) -> Option<PathBuf> {
     let override_dir = std::env::var_os(pwa_static::PWA_DIR_ENV);
     let exe_dir = std::env::current_exe()

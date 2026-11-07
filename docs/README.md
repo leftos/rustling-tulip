@@ -72,7 +72,7 @@ docs/
 .\rt.ps1 test
 ```
 
-The phone app in `apps/pwa` is not a Cargo member. It needs Node.js and pnpm (`.\rt.ps1 setup` installs both). `.\rt.ps1 build -Pwa` installs its packages and builds it, replacing `target\<profile>\pwa` with `apps/pwa/dist/`; `.\rt.ps1 installer` always does the same and ships the folder as `pwa` in the install folder. No other verb builds it. For its tests run `pnpm --dir apps/pwa test` (vitest) as a `tools/gate.ps1 run` call. Its scripts are listed in `apps/pwa/README.md`.
+The phone app in `apps/pwa` is not a Cargo member. It needs Node.js and pnpm (`.\rt.ps1 setup` installs both). `.\rt.ps1 build -Pwa` installs its packages and builds it, replacing `target\<profile>\pwa` with `apps/pwa/dist/`; `.\rt.ps1 installer` always does the same and ships the folder as `pwa` in the install folder. No other verb builds it; on a Mac, `tools/installer/pack-macos.ps1` builds it into the app bundle's `Contents/Resources/pwa`. For its tests run `pnpm --dir apps/pwa test` (vitest) as a `tools/gate.ps1 run` call. Its scripts are listed in `apps/pwa/README.md`.
 
 `.\rt.ps1 help` lists the other commands.
 

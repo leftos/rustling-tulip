@@ -4,9 +4,10 @@
   its .sha256: ad-hoc signed, or with -Sign signed with the Developer ID, notarized and stapled.
 
 .DESCRIPTION
-  Runs on a Mac from the repo root or anywhere in the tree. Builds the three release binaries
-  (unless -SkipBuild), assembles rustling-tulip.app in a fresh staging folder under -OutDir,
-  signs the binaries and then the bundle, and writes beside the staging folder:
+  Runs on a Mac from the repo root or anywhere in the tree. Builds the three release binaries and
+  the phone app (unless -SkipBuild), assembles rustling-tulip.app in a fresh staging folder under
+  -OutDir with the phone app in Contents/Resources/pwa, signs the binaries and then the bundle,
+  and writes beside the staging folder:
     rustling-tulip-<version>-macos-arm64.dmg
     rustling-tulip-<version>-macos-arm64.zip
     rustling-tulip-<version>-macos-arm64.zip.sha256
@@ -24,7 +25,8 @@
   Where the staging folder and the three assets go. Default: target/installer under the repo root.
 
 .PARAMETER SkipBuild
-  Use the binaries already in target/release instead of running cargo build --release.
+  Use the binaries already in target/release and the phone app already built in apps/pwa/dist,
+  instead of running cargo build --release and the phone app's pnpm install and build.
 
 .PARAMETER Sign
   Sign with the Developer ID Application identity, notarize and staple the app and the disk image.
@@ -171,10 +173,20 @@ function Assert-Assessment([string]$What, [string[]]$Expect, [string[]]$Argument
 $version = Get-WorkspaceVersion
 $binaries = 'rustling-tulip-native', 'rustling-tulipd', 'rt-tracer'
 $release = Join-Path $root 'target/release'
+$pwaDist = Join-Path $root 'apps/pwa/dist'
 
 if (-not $SkipBuild) {
+  if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) { throw 'pnpm not found: the phone app needs Node and pnpm on this Mac' }
   cargo build --release --manifest-path (Join-Path $root 'Cargo.toml') -p rustling-tulip-native -p daemon -p tracer
   Assert-LastExit 'cargo build --release'
+  # The phone app is a bundle resource, never a Contents/MacOS file: codesign refuses non-code there.
+  pnpm --dir (Join-Path $root 'apps/pwa') install --frozen-lockfile
+  Assert-LastExit 'pnpm install (apps/pwa)'
+  pnpm --dir (Join-Path $root 'apps/pwa') build
+  Assert-LastExit 'pnpm build (apps/pwa)'
+}
+if (-not (Test-Path -LiteralPath (Join-Path $pwaDist 'index.html') -PathType Leaf)) {
+  throw "missing $pwaDist/index.html (build the phone app, or drop -SkipBuild)"
 }
 foreach ($bin in $binaries) {
   if (-not (Test-Path -LiteralPath (Join-Path $release $bin) -PathType Leaf)) { throw "missing $release/$bin (build it, or drop -SkipBuild)" }
@@ -196,6 +208,8 @@ foreach ($bin in $binaries) {
   /bin/cp -p (Join-Path $release $bin) (Join-Path $macOS $bin)
   Assert-LastExit "cp $bin"
 }
+/bin/cp -Rp $pwaDist (Join-Path $resources 'pwa')
+Assert-LastExit 'cp apps/pwa/dist'
 Build-AppIcon $staging (Join-Path $resources 'icon.icns')
 Remove-Item -LiteralPath (Join-Path $staging 'icon.iconset') -Recurse -Force
 Build-InfoPlist $version (Join-Path $app 'Contents/Info.plist')
@@ -245,6 +259,8 @@ try {
     }
     codesign --force --sign - $app
     Assert-LastExit 'codesign rustling-tulip.app'
+    codesign --verify --deep --strict --verbose=2 $app
+    Assert-LastExit 'codesign --verify rustling-tulip.app'
   }
 
   ditto -c -k --keepParent $app $zip

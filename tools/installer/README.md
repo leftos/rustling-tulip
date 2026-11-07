@@ -107,14 +107,14 @@ It is built from the SVGs in `icon/`: `icon.svg` for 24 px and up, and `icon-16.
 
 ## macOS app and disk image
 
-`pack-macos.ps1` builds the macOS app bundle `rustling-tulip.app` (Apple Silicon, arm64 only), a disk image holding it and the zip the app's updater downloads. It runs on a Mac with PowerShell 7 (`pwsh`), Rust and the Xcode command-line tools; it refuses to run anywhere else. From another machine over SSH, copy or clone the tree to the Mac first and run it there:
+`pack-macos.ps1` builds the macOS app bundle `rustling-tulip.app` (Apple Silicon, arm64 only), a disk image holding it and the zip the app's updater downloads. It runs on a Mac with PowerShell 7 (`pwsh`), Rust, the Xcode command-line tools, Node and pnpm: it builds the phone app with pnpm and puts it in the bundle at `Contents/Resources/pwa`, where a Mac daemon looks for it; it refuses to run anywhere else. From another machine over SSH, copy or clone the tree to the Mac first and run it there:
 
 ```sh
 pwsh -NoProfile -File tools/installer/pack-macos.ps1 [-OutDir <dir>] [-SkipBuild] [-Sign]
 ```
 
 - `-OutDir <dir>`: where the staging folder and the assets go; default `target/installer` under the repo root.
-- `-SkipBuild`: use the binaries already in `target/release` instead of running `cargo build --release -p rustling-tulip-native -p daemon -p tracer`.
+- `-SkipBuild`: use the binaries already in `target/release` and the phone app already built in `apps/pwa/dist`, instead of running `cargo build --release -p rustling-tulip-native -p daemon -p tracer` and the phone app's pnpm install and build.
 - `-Sign`: sign with the Developer ID, notarize and staple instead of ad-hoc signing ("macOS code signing" below).
 
 The script stops at the first native command that fails. It assembles the bundle in a fresh `macos-staging/dmg-root/` under `-OutDir`:
@@ -123,6 +123,7 @@ The script stops at the first native command that fails. It assembles the bundle
 |---|---|
 | `Contents/MacOS/rustling-tulip-native` | the client, the bundle's executable |
 | `Contents/MacOS/rustling-tulipd`, `Contents/MacOS/rt-tracer` | the daemon and the tracer, beside the client, where the client looks for them |
+| `Contents/Resources/pwa` | the phone app's built files, from `apps/pwa/dist` (`index.html`, `assets/`, `sw.js`); the daemon's tailnet listener serves them |
 | `Contents/Resources/icon.icns` | the app icon, built with `sips` and `iconutil` from `icon/icon-1024.png` |
 | `Contents/Info.plist` | from `macos/Info.plist.template`: bundle id `dev.leftos.rustling-tulip`, minimum macOS 13.0, both version keys set to the numeric part of the workspace version (`0.9.0` for `0.9.0-alpha`) |
 
