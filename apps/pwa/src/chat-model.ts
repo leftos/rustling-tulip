@@ -256,7 +256,11 @@ function knownEntry(entry: ChatEntry): boolean {
   }
 }
 
-/** Applies appended rows: a known id replaces its row in place, a new one is pushed. */
+/**
+ * Applies appended rows: a known id replaces its row in place, a new one is pushed.
+ * A prompt still waiting on the running turn draws after every other row, so the turn's own
+ * rows landing later never sit above it.
+ */
 function upsert(entries: readonly ChatEntry[], added: readonly ChatEntry[]): ChatEntry[] {
   const next = [...entries];
   for (const entry of added) {
@@ -267,7 +271,13 @@ function upsert(entries: readonly ChatEntry[], added: readonly ChatEntry[]): Cha
       next[at] = entry;
     }
   }
+  next.sort((a, b) => Number(isPending(a)) - Number(isPending(b)));
   return next;
+}
+
+/** Whether `entry` is a user message still waiting on the running turn. */
+function isPending(entry: ChatEntry): boolean {
+  return entry.kind === "user" && entry.pending === true;
 }
 
 /**

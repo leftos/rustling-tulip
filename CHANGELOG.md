@@ -21,6 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A prompt you send while Claude is busy shows below the turn it waits on, on the desktop and the phone, instead of above it.
 - A reply streaming into Chat no longer breaks into stray paragraphs or gains blank lines inside its code blocks.
 - After `/compact`, Chat shows the next reply once, with no row left stuck on "writing".
 - A long paste in Chat shows as its text, without Claude Code's pasted-content tags around it.

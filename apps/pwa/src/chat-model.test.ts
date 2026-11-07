@@ -143,6 +143,75 @@ test("chat_append_appends_and_removes", () => {
   ]);
 });
 
+const PENDING: ChatEntry = { kind: "user", id: "pending:1", text: "Also the docs.", pending: true };
+const PENDING_LATER: ChatEntry = {
+  kind: "user",
+  id: "pending:2",
+  text: "And the log.",
+  pending: true,
+};
+const TOOL: ChatEntry = {
+  kind: "tool",
+  id: "t1",
+  name: "Read",
+  summary: "src/chat.rs",
+  input: "{}",
+};
+const CONFIRMED: ChatEntry = { kind: "answer", id: "a3", text: "Done." };
+const LIVE: ChatEntry = { kind: "answer", id: "live:m1", text: "Working.", live: true };
+const SETTLED: ChatEntry = { kind: "user", id: "u2", text: "Also the docs." };
+
+/** `at` after one append of `entries`. */
+function appended(at: ChatState, entries: ChatEntry[]): ChatState {
+  return chatStep(
+    at,
+    { type: "message", message: { type: "chat_append", session_id: "s1", entries } },
+    counter(),
+  ).state;
+}
+
+/** The ids of the state's rows, in display order. */
+function rowIds(state: ChatState): string[] {
+  return state.entries.map((entry) => entry.id);
+}
+
+test("chat_pending_prompt_stays_below_entries_that_arrive_after_it", () => {
+  const state = appended(appended(LOADED, [PENDING]), [CONFIRMED, TOOL]);
+
+  expect(rowIds(state)).toEqual(["u1", "a1", "a3", "t1", "pending:1"]);
+});
+
+test("chat_two_pending_prompts_keep_their_order", () => {
+  const state = appended(appended(LOADED, [PENDING, PENDING_LATER]), [CONFIRMED]);
+
+  expect(rowIds(state)).toEqual(["u1", "a1", "a3", "pending:1", "pending:2"]);
+});
+
+test("chat_live_answer_lands_above_a_pending_prompt", () => {
+  const state = appended(appended(LOADED, [PENDING]), [LIVE]);
+
+  expect(rowIds(state)).toEqual(["u1", "a1", "live:m1", "pending:1"]);
+});
+
+test("chat_a_removed_pending_prompt_leaves_the_next_one_waiting", () => {
+  const queued = appended(LOADED, [PENDING, PENDING_LATER]);
+  const step = chatStep(
+    queued,
+    {
+      type: "message",
+      message: {
+        type: "chat_append",
+        session_id: "s1",
+        entries: [SETTLED],
+        removed: ["pending:1"],
+      },
+    },
+    counter(),
+  );
+
+  expect(rowIds(step.state)).toEqual(["u1", "a1", "u2", "pending:2"]);
+});
+
 test("chat_screen_changed_replaces_the_screen_and_latest_prompt_follows_it", () => {
   expect(latestPrompt(LOADED)).toBeNull();
 

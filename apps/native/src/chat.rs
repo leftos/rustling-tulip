@@ -198,7 +198,9 @@ impl ChatLog {
     /// is pushed, an id that left (trimmed off the top or removed) and an
     /// entry kind this build does not know are skipped, and the rows past
     /// [`DISPLAY_CAP`] drop off the top, counted into `hidden` with their
-    /// expansion forgotten.
+    /// expansion forgotten. A prompt still waiting on the running turn draws
+    /// after every other row, so the turn's own rows landing later never sit
+    /// above it.
     pub fn upsert(&mut self, entries: Vec<ChatEntry>) {
         for entry in entries {
             let Some(id) = entry_id(&entry).map(ToOwned::to_owned) else {
@@ -216,6 +218,8 @@ impl ChatLog {
                 None => self.entries.push(entry),
             }
         }
+        self.entries
+            .sort_by_key(|entry| matches!(entry, ChatEntry::User { pending: true, .. }));
         self.trim();
     }
 
@@ -1556,6 +1560,53 @@ mod tests {
             composer: ComposerState::Dialog,
             prompt,
         }
+    }
+
+    /// A user row the daemon echoed for a prompt still waiting on the
+    /// running turn.
+    fn pending_user(id: &str) -> ChatEntry {
+        ChatEntry::User {
+            id: id.to_owned(),
+            text: format!("message {id}"),
+            pending: true,
+        }
+    }
+
+    #[test]
+    fn a_pending_prompt_stays_below_entries_that_arrive_after_it() {
+        let mut log = ChatLog::default();
+        log.upsert(vec![user("u-1")]);
+        log.upsert(vec![pending_user("pending:1")]);
+        log.upsert(vec![answer("a-1", false), tool("t-1", None)]);
+        assert_eq!(ids(&log), ["u-1", "a-1", "t-1", "pending:1"]);
+    }
+
+    #[test]
+    fn two_pending_prompts_keep_their_order() {
+        let mut log = ChatLog::default();
+        log.upsert(vec![pending_user("pending:1"), pending_user("pending:2")]);
+        log.upsert(vec![answer("a-1", false)]);
+        assert_eq!(ids(&log), ["a-1", "pending:1", "pending:2"]);
+    }
+
+    #[test]
+    fn a_live_answer_lands_above_a_pending_prompt() {
+        let mut log = ChatLog::default();
+        log.upsert(vec![pending_user("pending:1")]);
+        log.upsert(vec![answer("live:m1", true)]);
+        assert_eq!(ids(&log), ["live:m1", "pending:1"]);
+    }
+
+    #[test]
+    fn a_removed_pending_prompt_leaves_the_next_one_waiting() {
+        let mut log = ChatLog::default();
+        log.upsert(vec![
+            user("u-1"),
+            pending_user("pending:1"),
+            pending_user("pending:2"),
+        ]);
+        log.append(vec![user("u-2")], &["pending:1".to_owned()]);
+        assert_eq!(ids(&log), ["u-1", "u-2", "pending:2"]);
     }
 
     /// A log holding one row past the display cap: `row0` dropped off the
