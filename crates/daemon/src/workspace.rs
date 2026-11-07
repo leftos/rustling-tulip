@@ -11,6 +11,11 @@ use protocol::{
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent per-member facts the spawn steps each read; \
+              no two of them form a state an enum would name"
+)]
 pub struct ResolvedMember {
     pub repo: RepoEntry,
     pub branch_exists: bool,
@@ -33,6 +38,10 @@ pub struct ResolvedMember {
     /// from branch-name derivation. Pinned members already have a worktree on
     /// disk, so nothing is created or checked out for them.
     pub pinned: bool,
+    /// Whether the member repo is a git repository (its `RepoEntry::is_git`).
+    /// A plain member runs in its own folder whatever the spawn asked for:
+    /// no worktree, no branch, no git call.
+    pub git: bool,
 }
 
 /// Inputs that decide where each workspace member runs.
@@ -92,15 +101,30 @@ pub async fn resolve_workspace(
         ));
     }
 
-    let member_paths: Vec<PathBuf> = repos.iter().map(|r| PathBuf::from(&r.path)).collect();
-    let worktrees: Vec<PathBuf> = if use_worktree {
-        member_worktree_paths(worktrees_root, &workspace.name, &repos, branch_name).await?
+    // Only the git members get a worktree; a plain member runs in its own
+    // folder and takes no part in the group folder's layout.
+    let git_members: Vec<RepoEntry> = repos.iter().filter(|r| r.is_git).cloned().collect();
+    let mut worktrees = if use_worktree && !git_members.is_empty() {
+        member_worktree_paths(worktrees_root, &workspace.name, &git_members, branch_name).await?
     } else {
-        member_paths.clone()
-    };
+        Vec::new()
+    }
+    .into_iter();
 
     let mut resolved = Vec::with_capacity(repos.len());
-    for ((repo, path), worktree_path) in repos.into_iter().zip(member_paths).zip(worktrees) {
+    for repo in repos {
+        let path = PathBuf::from(&repo.path);
+        if !repo.is_git {
+            resolved.push(plain_member(repo));
+            continue;
+        }
+        let worktree_path = if use_worktree {
+            worktrees
+                .next()
+                .ok_or_else(|| anyhow!("no worktree path for member {}", repo.name))?
+        } else {
+            path.clone()
+        };
         info!(repo_id = %repo.id, repo_path = %repo.path, "resolve_workspace: listing branches for member");
         let exists = git::list_branches(&path)
             .await
@@ -130,9 +154,27 @@ pub async fn resolve_workspace(
             working_path,
             use_worktree,
             pinned,
+            git: true,
         });
     }
     Ok((workspace, resolved))
+}
+
+/// A member that is not a git repo: it runs in its own folder, with no
+/// worktree, no branch and no base.
+fn plain_member(repo: RepoEntry) -> ResolvedMember {
+    info!(repo_id = %repo.id, repo_path = %repo.path, "resolve_workspace: plain member runs in its own folder");
+    let working_path = PathBuf::from(&repo.path);
+    ResolvedMember {
+        repo,
+        branch_exists: false,
+        effective_base: None,
+        resolved_base: String::new(),
+        working_path,
+        use_worktree: false,
+        pinned: false,
+        git: false,
+    }
 }
 
 /// Worktree path of each member for a workspace session on `branch_name`.
@@ -162,11 +204,12 @@ async fn member_worktree_paths(
     Ok(out)
 }
 
-/// Build one preview row per member, including the fork-point measurements
-/// that tell the user where each branch would actually be cut from.
+/// Build one preview row per git member, including the fork-point
+/// measurements that tell the user where each branch would actually be cut
+/// from. A plain member has no branch to preview and gets no row.
 pub async fn previews(resolved: &[ResolvedMember], branch_name: &str) -> Vec<MemberSpawnPreview> {
     let mut out = Vec::with_capacity(resolved.len());
-    for member in resolved {
+    for member in resolved.iter().filter(|m| m.git) {
         out.push(preview_for(member, branch_name).await);
     }
     out
@@ -268,7 +311,8 @@ pub async fn ensure_branches(
     if matches!(worktree_reuse, WorktreeReusePolicy::RefuseLeftover) {
         refuse_member_leftovers(resolved, branch_name).await?;
     }
-    for (i, member) in resolved.iter().enumerate() {
+    // A plain member runs in its own folder: nothing to create or check out.
+    for (i, member) in resolved.iter().enumerate().filter(|(_, m)| m.git) {
         info!(
             idx = i,
             repo_id = %member.repo.id,
@@ -419,6 +463,7 @@ mod tests {
                 path: repo.to_string_lossy().into_owned(),
                 default_branch: Some("main".to_string()),
                 default_use_worktree: true,
+                is_git: true,
                 appearance: AppearanceOverrides::default(),
                 last_agent: None,
                 last_spawn_config: None,
@@ -431,6 +476,7 @@ mod tests {
             working_path,
             use_worktree: true,
             pinned: false,
+            git: true,
         }
     }
 

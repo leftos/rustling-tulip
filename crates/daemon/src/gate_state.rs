@@ -1524,6 +1524,7 @@ mod tests {
                         path: (*folder).to_owned(),
                         default_branch: None,
                         default_use_worktree: true,
+                        is_git: true,
                         appearance: AppearanceOverrides::default(),
                         last_agent: None,
                         last_spawn_config: None,

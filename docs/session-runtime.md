@@ -24,6 +24,8 @@ A session whose exit arrives while Windows is logging off or shutting down (`Get
 
 A qualifying one is an interactive Claude session with a spawn config, its own conversation id and an existing transcript, its worktrees still pinned to their folders, its in-place checkout still on its branch. The rest stay abandoned, listed in Recover.
 
+A recover or rerun plan for a folder that is not a git repository (register-then-agent, an already-registered plain repo, or a session recorded with a single spawn config in a plain repo) is an unpinned spawn in place with no branch.
+
 Pre-C.3 sidecars without tracer fields fall through to the read-only `insert_orphan` path; their underlying children almost never survive a daemon death, so that branch is effectively only for downgrade scenarios.
 
 ## Session status
@@ -112,6 +114,8 @@ Token and cost figures exist only for headless runs, where they come from the CL
 
 Multi-repo workspace sessions spawn one `claude` process with `cwd = members[0].worktree_path` and `--add-dir <path>` for every additional member. Worktrees are created/reused per member via `git -C <repo> worktree add` under the shared `<worktrees-root>/wt.<branch-slug>/<workspace-slug>/` directory (see [on-disk.md](on-disk.md) — the layout preserves inter-member relative paths within a workspace).
 
+A member that is not a git repository (`RepoEntry.is_git` false) runs in its own folder with an empty branch, gets no worktree, and is left out of the spawn preview rows; `daemon.log` notes it as "resolve_workspace: plain member runs in its own folder".
+
 The "reuse-or-create" policy is encoded in `workspace.rs`. VS Code `.code-workspace` files are auto-detected when adding a repo and surfaced as a `VscodeWorkspaceSuggestion` event.
 
 ## Tracer-backed PTY sessions
@@ -151,5 +155,7 @@ The daemon cannot answer in its place, because `clients` is normally empty at th
 The watcher is `crates/daemon/src/git_watch.rs`. Each registered repo gets a recursive `notify`-based watcher with a 750 ms debounce. Inside the debouncer callback, `classify_event` filters paths against a hand-maintained allowlist: only `.git/index`, `.git/HEAD`, `.git/refs/**`, `.git/reftable/**` (a reftable-backend repo's refs; it wakes the stash refresh too), a handful of in-progress operation markers, and any non-excluded working-tree path can wake the refresher.
 
 `.git/objects/`, `.git/logs/HEAD`, `FETCH_HEAD`, lock files, and well-known build/cache dirs (`target/`, `node_modules/`, `dist/`, `.next/`, `.venv/`, `__pycache__/`, …) are ignored so a `cargo build` or `pnpm install` doesn't spin up `git status` forever.
+
+A registered folder with no `.git` (judged by `git::folder_has_git`) gets only a cheap init watcher; when `.git` appears the watcher is promoted to the full one and the daemon refreshes every `is_git` flag, broadcasting `Repos` when one changed.
 
 The refresher tracks two flags — `status` and `stash` — and only invokes `git stash list` when a stash ref actually changed. The refresher parks while `Hub.client_count` is 0 (an RAII `ClientCountGuard` in `client_session` maintains the count); the next reconnect triggers one catch-up `repo_status` + `stash_list` before resuming event-driven refresh. The daemon accepts multiple WS clients, so each client window opens its own connection.

@@ -10,7 +10,7 @@ pub(crate) use self::shell::resolve_agent_program;
 pub(super) use self::shell::{
     HostOs, ShellProbe, detect_shells, is_known_shell_id, split_custom_command,
 };
-pub(super) use self::worktree::target_uses_worktree;
+pub(super) use self::worktree::{is_repo_folder, target_uses_worktree};
 
 use self::hook_settings::{HookSettings, write_hook_files, write_hook_settings};
 use self::shell::{
@@ -18,9 +18,9 @@ use self::shell::{
     plan_launch, resolve_shell_program, typed_command,
 };
 use self::worktree::{
-    SinglePlan, classify_worktree_error, log_fork_point, materialize_single_worktree,
-    pinned_branch, preview_single_spawn, reject_pin_without_worktree, single_worktree_target,
-    worktree_paths_for_config,
+    SinglePlan, classify_worktree_error, drop_repo_folders, log_fork_point,
+    materialize_single_worktree, pinned_branch, preview_single_spawn, reject_pin_without_worktree,
+    single_worktree_target, worktree_paths_for_config,
 };
 use super::connection::ConnCtx;
 use super::git::{active_sessions_using_worktree, worktree_in_use_failure};
@@ -329,7 +329,7 @@ where
     env_secrets::seal_rows(&mut req.extra_env, &req.secret_env_keys)?;
     // Capture the persist-able config before destructuring so duplicates
     // can be reconstructed verbatim from the session record / sidecar.
-    let stored_config = protocol::SpawnConfig::from_request(&req);
+    let mut stored_config = protocol::SpawnConfig::from_request(&req);
     let SpawnRequest {
         label,
         target,
@@ -391,7 +391,7 @@ where
             worktree_reuse,
             existing_worktree,
         } => {
-            spawn_single(
+            let (resolution, in_place) = spawn_single(
                 hub,
                 &repo_id,
                 SinglePlan {
@@ -403,7 +403,20 @@ where
                     existing_worktree,
                 },
             )
-            .await?
+            .await?;
+            // A folder that is not a usable git tree ran in place: store it
+            // so, or a later close would offer to delete its "worktree".
+            if in_place
+                && let SpawnTarget::Single {
+                    use_worktree,
+                    existing_worktree,
+                    ..
+                } = &mut stored_config.target
+            {
+                *use_worktree = false;
+                *existing_worktree = None;
+            }
+            resolution
         }
         SpawnTarget::Workspace {
             workspace_id,
@@ -1290,7 +1303,7 @@ async fn spawn_interactive_session(
         exe_path: tracer_spawn.tracer_exe_path.to_string_lossy().into_owned(),
     };
     let started_at = Utc::now();
-    let record = interactive_record(
+    let mut record = interactive_record(
         NewInteractive {
             session_id: session_id.clone(),
             label,
@@ -1310,6 +1323,7 @@ async fn spawn_interactive_session(
         },
         Some(Arc::clone(&pty)),
     );
+    drop_repo_folders(hub, &mut record);
     let meta = pty
         .pid()
         .and_then(|pid| match interactive_meta(&record, pid, tracer) {
@@ -1560,7 +1574,7 @@ async fn spawn_plain_shell_session(
     let pid = pty.pid();
 
     let started_at = Utc::now();
-    let record = plain_shell_record(
+    let mut record = plain_shell_record(
         NewPlainShell {
             session_id: session_id.clone(),
             label: label.clone(),
@@ -1579,6 +1593,7 @@ async fn spawn_plain_shell_session(
         },
         Some(Arc::clone(&pty)),
     );
+    drop_repo_folders(hub, &mut record);
 
     // Two-stage insert — see spawn_interactive_session for the same pattern
     // and rationale, including the held hook events applied here.
@@ -2103,6 +2118,7 @@ fn spawn_headless_session(
         busy_excluded,
     }
     .into_record();
+    drop_repo_folders(hub, &mut record);
     push_recent_action(&mut record, "headless session started".to_string());
     // Held unpublished until the child runs, so a failed spawn is never
     // broadcast and the first snapshot clients see carries its handle.
@@ -2191,11 +2207,14 @@ pub(super) fn send_spawn_failure(
     let _ = out_tx.send(msg);
 }
 
+/// Resolve a single-repo spawn. The flag is true when the repo is not a
+/// usable git working tree and the session runs in its folder, whatever the
+/// request asked about worktrees.
 async fn spawn_single(
     hub: &Hub,
     repo_id: &str,
     plan: SinglePlan<'_>,
-) -> anyhow::Result<SpawnResolution> {
+) -> anyhow::Result<(SpawnResolution, bool)> {
     let SinglePlan {
         branch_name,
         base_branch,
@@ -2228,8 +2247,16 @@ async fn spawn_single(
             branch: branch_name.to_string(),
             worktree_path: repo_path.to_string_lossy().into_owned(),
         };
-        let label = format!("{}: {branch_name}", repo.name);
-        return Ok((SessionKind::Single, vec![member], repo_path, label, None));
+        // A plain folder's spawn names no branch: its label is the repo alone.
+        let label = if branch_name.is_empty() {
+            repo.name.clone()
+        } else {
+            format!("{}: {branch_name}", repo.name)
+        };
+        return Ok((
+            (SessionKind::Single, vec![member], repo_path, label, None),
+            true,
+        ));
     }
 
     // Base branch used when the target needs to be *created*. See
@@ -2301,7 +2328,10 @@ async fn spawn_single(
         worktree_path: working_path.to_string_lossy().into_owned(),
     };
     let label = format!("{}: {member_branch}", repo.name);
-    Ok((SessionKind::Single, vec![member], working_path, label, None))
+    Ok((
+        (SessionKind::Single, vec![member], working_path, label, None),
+        false,
+    ))
 }
 
 fn spawn_standalone_shell(cwd: Option<&str>) -> anyhow::Result<SpawnResolution> {
@@ -2412,7 +2442,7 @@ async fn spawn_workspace(
     if use_worktree {
         let created: Vec<&Path> = resolved
             .iter()
-            .filter(|m| !m.pinned)
+            .filter(|m| m.git && !m.pinned)
             .map(|m| m.working_path.as_path())
             .collect();
         crate::worktrees_admin::mark_group(
@@ -2422,7 +2452,7 @@ async fn spawn_workspace(
             &created,
         );
         for member in &resolved {
-            if member.pinned {
+            if member.pinned || !member.git {
                 continue;
             }
             let repo_path = PathBuf::from(&member.repo.path);
@@ -2440,7 +2470,10 @@ async fn spawn_workspace(
     for member in &resolved {
         // A pinned member runs on whatever its worktree already has checked
         // out, which need not be the branch the group's directory is named for.
-        let branch = if member.pinned {
+        // A plain member runs in its own folder and has no branch.
+        let branch = if !member.git {
+            String::new()
+        } else if member.pinned {
             pinned_branch(&member.working_path, branch_name).await
         } else {
             branch_name.to_string()
@@ -2452,7 +2485,12 @@ async fn spawn_workspace(
             worktree_path: member.working_path.to_string_lossy().into_owned(),
         });
     }
-    let label = format!("{}: {branch_name}", workspace.name);
+    // An all-plain workspace spawns with no branch: its label is the name alone.
+    let label = if branch_name.is_empty() {
+        workspace.name.clone()
+    } else {
+        format!("{}: {branch_name}", workspace.name)
+    };
     Ok((
         SessionKind::Workspace,
         members,
@@ -2607,8 +2645,8 @@ mod tests {
     use crate::server::test_support::{
         DEEPSEEK_KEY_SENTINEL, MISSING_SECRET_ID, ScratchDir, UNSET_REF, deepseek_key,
         deepseek_spawn, dispatch_one, env, env_ref_repo_hub, env_spawn, git_init, git_ok,
-        hook_settings_file, hook_test_hub, idle_record, lookup_a, no_key, repo_entry, secret_ref,
-        spawnless_test_hub, test_hub, workspace_entry,
+        hook_settings_file, hook_test_hub, idle_record, lookup_a, no_key, repo_entry,
+        repo_entry_plain, secret_ref, spawnless_test_hub, test_hub, workspace_entry,
     };
     use protocol::SessionEnd;
     use tokio::sync::broadcast;
@@ -2845,6 +2883,7 @@ mod tests {
                     path: repo.to_string_lossy().into_owned(),
                     default_branch: None,
                     default_use_worktree: true,
+                    is_git: true,
                     appearance: AppearanceOverrides::default(),
                     last_agent: None,
                     last_spawn_config: None,
@@ -5855,6 +5894,232 @@ mod tests {
                 "{msg:?}"
             );
             assert!(foreign.join("keep.txt").is_file());
+        }
+
+        /// The request a client sends for a plain folder: no worktree, no
+        /// branch.
+        fn plain_plan() -> SinglePlan<'static> {
+            SinglePlan {
+                branch_name: "",
+                base_branch: None,
+                use_worktree: false,
+                checkout_strategy: None,
+                worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+                existing_worktree: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn a_plain_folder_spawns_in_place_labelled_by_its_name() {
+            let (hub, scratch) = test_hub("plain-single");
+            let notes = scratch.path().join("notes");
+            std::fs::create_dir_all(&notes).expect("create the plain folder");
+            hub.state
+                .mutate(|s| s.repos.push(repo_entry_plain("r1", "Notes", &notes)))
+                .expect("register the folder");
+
+            let ((kind, members, cwd, label, workspace), in_place) =
+                spawn_single(&hub, "r1", plain_plan())
+                    .await
+                    .expect("a plain folder spawns without a branch");
+
+            assert!(in_place, "a plain folder runs in place");
+            assert_eq!(kind, SessionKind::Single);
+            assert_eq!(label, "Notes", "no branch in the label");
+            assert_eq!(key(&cwd.to_string_lossy()), key(&notes.to_string_lossy()));
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0].branch, "", "a plain member has no branch");
+            assert_eq!(workspace, None);
+        }
+
+        /// A workspace `w1` of a git repo `web` (first) and a plain folder
+        /// `notes`; returns their folders.
+        fn seed_mixed_workspace(hub: &Hub, scratch: &Path) -> (PathBuf, PathBuf) {
+            let web = scratch.join("src").join("web");
+            let notes = scratch.join("src").join("notes");
+            seed_repo(&web);
+            std::fs::create_dir_all(&notes).expect("create the plain folder");
+            hub.state
+                .mutate(|s| {
+                    s.repos.push(repo_entry("web", "web", &web));
+                    s.repos.push(repo_entry_plain("notes", "notes", &notes));
+                    s.workspaces
+                        .push(workspace_entry("w1", "Mixed", &["web", "notes"]));
+                })
+                .expect("register the workspace");
+            (web, notes)
+        }
+
+        #[tokio::test]
+        async fn a_workspace_spawn_runs_a_plain_member_in_its_folder() {
+            let (hub, scratch) = test_hub("mixed-ws-spawn");
+            let (_web, notes) = seed_mixed_workspace(&hub, scratch.path());
+
+            let (kind, members, _cwd, _label, _ws) = spawn_workspace(
+                &hub,
+                "w1",
+                ws::ResolveRequest {
+                    branch_name: "feat",
+                    explicit_base: None,
+                    use_worktree: true,
+                    pins: &[],
+                },
+                protocol::WorktreeReusePolicy::Reuse,
+            )
+            .await
+            .expect("a mixed workspace spawns");
+
+            assert_eq!(kind, SessionKind::Workspace);
+            assert_eq!(members.len(), 2);
+            let web_tree = PathBuf::from(&members[0].worktree_path);
+            assert!(
+                web_tree.starts_with(hub.state.worktrees_dir()),
+                "the git member gets a worktree: {members:?}"
+            );
+            assert!(web_tree.join("seed.txt").is_file(), "{members:?}");
+            assert_eq!(members[0].branch, "feat");
+            assert_eq!(
+                key(&members[1].worktree_path),
+                key(&notes.to_string_lossy()),
+                "the plain member runs in its own folder"
+            );
+            assert_eq!(members[1].branch, "", "a plain member has no branch");
+            assert!(
+                !notes.join(".git").exists(),
+                "nothing ran git in the plain folder"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_plain_single_spawn_is_stored_without_a_worktree() {
+            let (hub, scratch) = spawnless_test_hub("plain-single-stored");
+            let notes = scratch.path().join("notes");
+            std::fs::create_dir_all(&notes).expect("create the plain folder");
+            hub.state
+                .mutate(|s| s.repos.push(repo_entry_plain("r1", "Notes", &notes)))
+                .expect("register the folder");
+            let target = SpawnTarget::Single {
+                repo_id: "r1".to_owned(),
+                branch_name: "feat".to_owned(),
+                base_branch: None,
+                use_worktree: true,
+                checkout_strategy: None,
+                worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+                existing_worktree: None,
+            };
+            let req = env_spawn(target, SessionMode::PlainShell, Vec::new(), None);
+
+            // The spawnless hub starts no child; the config is stored first.
+            let _ = spawn_session(&hub, req, None, false).await;
+
+            let stored = hub
+                .state
+                .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+                .expect("the spawn config is stored");
+            assert!(
+                matches!(
+                    stored.target,
+                    SpawnTarget::Single {
+                        use_worktree: false,
+                        existing_worktree: None,
+                        ..
+                    }
+                ),
+                "a plain folder never stores a worktree: {:?}",
+                stored.target
+            );
+        }
+
+        #[tokio::test]
+        async fn an_all_plain_workspace_is_labelled_by_its_name() {
+            let (hub, scratch) = test_hub("all-plain-ws-label");
+            let notes = scratch.path().join("notes");
+            std::fs::create_dir_all(&notes).expect("create the plain folder");
+            hub.state
+                .mutate(|s| {
+                    s.repos.push(repo_entry_plain("notes", "notes", &notes));
+                    s.workspaces.push(workspace_entry("w1", "Docs", &["notes"]));
+                })
+                .expect("register the workspace");
+
+            let (_kind, members, _cwd, label, _ws) = spawn_workspace(
+                &hub,
+                "w1",
+                ws::ResolveRequest {
+                    branch_name: "",
+                    explicit_base: None,
+                    use_worktree: false,
+                    pins: &[],
+                },
+                protocol::WorktreeReusePolicy::Reuse,
+            )
+            .await
+            .expect("an all-plain workspace spawns in place");
+
+            assert_eq!(label, "Docs", "no branch in the label");
+            assert_eq!(
+                key(&members[0].worktree_path),
+                key(&notes.to_string_lossy())
+            );
+        }
+
+        #[test]
+        fn a_plain_members_folder_is_not_a_session_worktree() {
+            let (hub, scratch) = spawnless_test_hub("plain-worktree-list");
+            let web = scratch.path().join("web");
+            let web_tree = scratch.path().join("wt.feat").join("web");
+            let notes = scratch.path().join("notes");
+            hub.state
+                .mutate(|s| {
+                    s.repos.push(repo_entry("web", "web", &web));
+                    s.repos.push(repo_entry_plain("notes", "notes", &notes));
+                })
+                .expect("register the repos");
+            let member = |id: &str, branch: &str, path: &Path| SessionMember {
+                repo_id: id.to_owned(),
+                repo_name: id.to_owned(),
+                branch: branch.to_owned(),
+                worktree_path: path.to_string_lossy().into_owned(),
+            };
+            let mut record = idle_record("s1");
+            record.members = vec![
+                member("web", "feat", &web_tree),
+                member("notes", "", &notes),
+            ];
+            record.worktree_paths = record
+                .members
+                .iter()
+                .map(|m| m.worktree_path.clone())
+                .collect();
+
+            drop_repo_folders(&hub, &mut record);
+
+            assert_eq!(
+                record.worktree_paths,
+                [web_tree.to_string_lossy().into_owned()],
+                "only the git member's worktree is the session's"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_workspace_preview_leaves_a_plain_member_out() {
+            let (hub, scratch) = test_hub("mixed-ws-preview");
+            seed_mixed_workspace(&hub, scratch.path());
+
+            let msg = dispatch_one(
+                &hub,
+                ClientMessage::PreviewWorkspaceSpawn {
+                    workspace_id: "w1".to_string(),
+                    branch_name: "feat".to_string(),
+                    base_branch: None,
+                    request_id: None,
+                },
+            )
+            .await;
+
+            let rows = workspace_previews(msg).expect("a workspace spawn preview");
+            let ids: Vec<&str> = rows.iter().map(|r| r.repo_id.as_str()).collect();
+            assert_eq!(ids, ["web"], "only the git member has a preview row");
         }
     }
 

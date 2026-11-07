@@ -279,6 +279,7 @@ mod tests {
             path: format!("D:/src/{id}"),
             default_branch: None,
             default_use_worktree: true,
+            is_git: true,
             appearance: AppearanceOverrides::default(),
             last_agent: None,
             last_spawn_config: last,

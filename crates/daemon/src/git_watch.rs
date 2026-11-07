@@ -359,6 +359,10 @@ pub fn start(
                 &mut guard,
             );
             info!(repo_id, "git_watch: promoted init watcher to active");
+            drop(guard);
+            // The folder now holds `.git`: its entry turns into a repo, and
+            // every client hears of it.
+            announce_git_changes_async(&state_for_promote, &state_events_for_promote).await;
         }
     });
 
@@ -642,6 +646,39 @@ async fn worktree_refresher_task(
     debug!(repo_id, worktree = %worktree_path, "git_watch: worktree refresher exiting");
 }
 
+/// Refresh every registered repo's `is_git` ([`crate::registry::refresh_is_git`])
+/// and, when a flag changed, broadcast the refreshed list as
+/// `StateEvent::Repos` so every client learns it. Returns whether a flag
+/// changed.
+pub(crate) fn announce_git_changes(
+    state: &AppState,
+    state_events: &broadcast::Sender<StateEvent>,
+) -> bool {
+    if !crate::registry::refresh_is_git(state) {
+        return false;
+    }
+    broadcast_repos(state, state_events);
+    true
+}
+
+/// [`announce_git_changes`] with the folders checked on a blocking thread,
+/// for async callers.
+pub(crate) async fn announce_git_changes_async(
+    state: &Arc<AppState>,
+    state_events: &broadcast::Sender<StateEvent>,
+) -> bool {
+    if !crate::registry::refresh_is_git_async(state).await {
+        return false;
+    }
+    broadcast_repos(state, state_events);
+    true
+}
+
+fn broadcast_repos(state: &AppState, state_events: &broadcast::Sender<StateEvent>) {
+    let repos = state.with_persisted(|s| s.repos.clone());
+    let _ = state_events.send(StateEvent::Repos(repos));
+}
+
 /// Add watchers for newly-added repos and drop watchers for repos that
 /// disappeared from the registry. Existing entries are left untouched —
 /// re-creating a watcher on every broadcast would tear down and rebuild
@@ -689,7 +726,7 @@ fn spawn_watcher(
     // recursive one. Once `.git` appears (e.g. the user runs `git init` in
     // the registered folder), the init watcher promotes itself to a full
     // recursive watcher via `promote_tx`.
-    if !repo_path.join(".git").exists() {
+    if !crate::git::folder_has_git(&repo_path) {
         spawn_init_watcher(repo, promote_tx, handles);
         return;
     }
@@ -950,6 +987,61 @@ async fn refresh_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the promotion supervisor runs once `.git` appears in a plain
+    /// folder: the entry turns into a repo and `Repos` is broadcast with it.
+    #[test]
+    #[expect(clippy::expect_used, reason = "test preconditions")]
+    fn a_plain_folder_that_gains_git_is_announced_as_a_repo() {
+        let root =
+            std::env::temp_dir().join(format!("rt-git-watch-promote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = root.join("notes");
+        std::fs::create_dir_all(&folder).expect("create the plain folder");
+        let dirs = crate::paths::Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            remote_config_file: root.join("remote.json"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+            bin_templates: None,
+        };
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        let mut entry: RepoEntry = serde_json::from_value(serde_json::json!({
+            "id": "r-notes",
+            "name": "notes",
+            "path": folder.to_string_lossy(),
+            "default_branch": null,
+        }))
+        .expect("repo fixture");
+        entry.is_git = false;
+        state
+            .mutate(|s| s.repos.push(entry))
+            .expect("register the folder");
+        let (events, mut rx) = broadcast::channel(8);
+
+        assert!(
+            !announce_git_changes(&state, &events),
+            "nothing to announce yet"
+        );
+        assert!(rx.try_recv().is_err(), "no Repos for an unchanged list");
+
+        std::fs::create_dir_all(folder.join(".git")).expect("git init the folder");
+        assert!(
+            announce_git_changes(&state, &events),
+            "the folder is a repo now"
+        );
+        match rx.try_recv() {
+            Ok(StateEvent::Repos(repos)) => {
+                assert_eq!(repos.len(), 1);
+                assert!(repos[0].is_git, "the broadcast carries the flag: {repos:?}");
+            }
+            other => unreachable!("expected Repos, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn repo() -> PathBuf {
         if cfg!(windows) {

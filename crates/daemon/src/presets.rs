@@ -3024,6 +3024,7 @@ mod tests {
                 path: "X:/tmp/repo".to_string(),
                 default_branch: Some("main".to_string()),
                 default_use_worktree: false,
+                is_git: true,
                 appearance: protocol::AppearanceOverrides::default(),
                 last_agent: None,
                 last_spawn_config: None,

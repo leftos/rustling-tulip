@@ -1099,6 +1099,7 @@ mod tests {
             path: format!("C:/fixture/{id}"),
             default_branch: None,
             default_use_worktree: false,
+            is_git: true,
             appearance: protocol::AppearanceOverrides::default(),
             last_agent: None,
             last_spawn_config: Some(config),

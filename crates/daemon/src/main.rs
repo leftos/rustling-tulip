@@ -274,6 +274,9 @@ async fn run_daemon(
     }
 
     let state = state::AppState::load_or_default(&dirs).context("loading persisted state")?;
+    // A `state.json` written before `is_git` existed reads every repo as git,
+    // and a folder may have gained or lost `.git` while the daemon was down.
+    registry::refresh_is_git(&state);
     // The saved level takes effect from this point of the start: tracing, the
     // start banner and the state load above already logged at the default.
     if state.detailed_logging() {

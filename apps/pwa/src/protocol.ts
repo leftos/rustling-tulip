@@ -442,6 +442,15 @@ export interface RepoEntry {
    * carry this field yet.
    */
   default_use_worktree?: boolean;
+  /**
+   * Whether the folder is a git repository: true when its root holds
+   * `.git` (a folder or a file), so a repo with no commits counts as git.
+   * The daemon sets it when the repo is added and refreshes it before a
+   * client reads the list, so a folder that later gets `git init` turns
+   * into a repo without being added again. Reads `true` when absent, as in
+   * a `state.json` written before the field existed.
+   */
+  is_git?: boolean;
   /** Appearance defaults inherited by sessions spawned from this repo. */
   appearance?: AppearanceOverrides;
   /**

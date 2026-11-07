@@ -757,6 +757,7 @@ pub(super) fn blocked_discard_message(
     members: &[SessionMember],
 ) -> Option<DaemonMessage> {
     let mut blockers = Vec::new();
+    let repos = hub.state.with_persisted(|s| s.repos.clone());
     for action in cleanup {
         if !action.remove_worktree {
             continue;
@@ -764,6 +765,11 @@ pub(super) fn blocked_discard_message(
         let Some(member) = members.iter().find(|m| m.repo_id == action.repo_id) else {
             continue;
         };
+        // A member in its repo's own folder is never removed, so it blocks
+        // nothing.
+        if super::spawn::is_repo_folder(member, &repos) {
+            continue;
+        }
         let users = active_sessions_using_worktree(hub, &member.worktree_path, Some(session_id));
         if !users.is_empty() {
             let labels = users
@@ -1102,6 +1108,7 @@ mod tests {
                     path: repo.to_string_lossy().into_owned(),
                     default_branch: None,
                     default_use_worktree: true,
+                    is_git: true,
                     appearance: AppearanceOverrides::default(),
                     last_agent: None,
                     last_spawn_config: None,
@@ -1165,6 +1172,7 @@ mod tests {
                     path: folder.to_string_lossy().into_owned(),
                     default_branch: None,
                     default_use_worktree: true,
+                    is_git: true,
                     appearance: AppearanceOverrides::default(),
                     last_agent: None,
                     last_spawn_config: None,

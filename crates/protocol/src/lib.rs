@@ -602,6 +602,14 @@ pub struct RepoEntry {
     /// carry this field yet.
     #[serde(default = "default_true")]
     pub default_use_worktree: bool,
+    /// Whether the folder is a git repository: true when its root holds
+    /// `.git` (a folder or a file), so a repo with no commits counts as git.
+    /// The daemon sets it when the repo is added and refreshes it before a
+    /// client reads the list, so a folder that later gets `git init` turns
+    /// into a repo without being added again. Reads `true` when absent, as in
+    /// a `state.json` written before the field existed.
+    #[serde(default = "default_true")]
+    pub is_git: bool,
     /// Appearance defaults inherited by sessions spawned from this repo.
     #[serde(default)]
     pub appearance: AppearanceOverrides,
@@ -10143,6 +10151,7 @@ mod tests {
         let repo: RepoEntry = serde_json::from_str(legacy).expect("parse legacy repo");
         assert_eq!(repo.last_agent, None);
         assert!(repo.default_use_worktree, "default_use_worktree default");
+        assert!(repo.is_git, "an entry without is_git reads as a git repo");
         assert!(repo.last_spawn_config.is_none());
     }
 

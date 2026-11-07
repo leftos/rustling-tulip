@@ -313,6 +313,9 @@ pub(super) fn push_initial_state(
     client_id: &str,
     needs_layout_chooser: bool,
 ) {
+    // A folder may have gained or lost `.git` since the list was last read;
+    // the other clients hear of a change through the broadcast.
+    crate::git_watch::announce_git_changes(&hub.state, &hub.state_events);
     let (repos, workspaces, container_order, session_order) = hub.state.with_persisted(|s| {
         (
             s.repos.clone(),
@@ -456,6 +459,37 @@ mod tests {
             }
         }
         reports
+    }
+
+    #[test]
+    fn initial_repos_report_a_folder_without_git_as_plain() {
+        let (hub, scratch) = test_hub("initial-repos-plain");
+        let folder = scratch.path().join("notes");
+        std::fs::create_dir_all(&folder).expect("create the plain folder");
+        hub.state
+            .mutate(|s| {
+                s.repos.push(crate::server::test_support::repo_entry(
+                    "r-notes", "notes", &folder,
+                ));
+            })
+            .expect("register the folder as git");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+
+        push_initial_state(&hub, &out_tx, "c1", false);
+
+        let mut repos = None;
+        while let Ok(message) = out_rx.try_recv() {
+            if let DaemonMessage::Repos { repos: sent } = message {
+                repos = Some(sent);
+            }
+        }
+        let repos = repos.expect("the initial state carries the repos");
+        assert_eq!(repos.len(), 1);
+        assert!(!repos[0].is_git, "the refresh ran first: {repos:?}");
+        assert!(
+            !hub.state.with_persisted(|s| s.repos[0].is_git),
+            "the corrected flag is saved"
+        );
     }
 
     #[test]

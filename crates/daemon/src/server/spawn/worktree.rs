@@ -37,6 +37,44 @@ pub(super) fn worktree_paths_for_config(
     }
 }
 
+/// Whether `member` runs in its repo's own registered folder: the user's
+/// folder, never a worktree the daemon made, so nothing may remove it.
+pub(in crate::server) fn is_repo_folder(
+    member: &protocol::SessionMember,
+    repos: &[protocol::RepoEntry],
+) -> bool {
+    repos
+        .iter()
+        .find(|r| r.id == member.repo_id)
+        .is_some_and(|repo| {
+            crate::paths::normalize_path_key(&repo.path)
+                == crate::paths::normalize_path_key(&member.worktree_path)
+        })
+}
+
+/// Drop from `record.worktree_paths` every member folder that is not a
+/// worktree: a member whose repo is not a git repo, or that runs in its
+/// repo's registered folder. A workspace spawned with worktrees on runs its
+/// plain members in the user's own folders, which a "Delete worktree" must
+/// never reach.
+pub(in crate::server) fn drop_repo_folders(hub: &Hub, record: &mut crate::session::SessionRecord) {
+    if record.worktree_paths.is_empty() {
+        return;
+    }
+    let repos = hub.state.with_persisted(|s| s.repos.clone());
+    let not_worktrees: Vec<String> = record
+        .members
+        .iter()
+        .filter(|m| {
+            is_repo_folder(m, &repos) || repos.iter().any(|r| r.id == m.repo_id && !r.is_git)
+        })
+        .map(|m| crate::paths::normalize_path_key(&m.worktree_path))
+        .collect();
+    record
+        .worktree_paths
+        .retain(|p| !not_worktrees.contains(&crate::paths::normalize_path_key(p)));
+}
+
 /// Map a raw `git worktree add` failure to a tailored `SpawnFailure`. Known
 /// git refusals (branch already checked out, path already exists) get an
 /// actionable message; anything else falls back to git's full stderr chain.

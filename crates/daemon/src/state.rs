@@ -1108,10 +1108,50 @@ mod tests {
 
         assert_eq!(persisted.repos.len(), 1, "the repo is kept");
         assert_v0_5_1_repo(&persisted.repos[0]);
+        assert!(
+            persisted.repos[0].is_git,
+            "a repo saved before is_git existed reads as git"
+        );
         assert_eq!(persisted.workspaces.len(), 1, "the workspace is kept");
         assert_v0_5_1_workspace(&persisted.workspaces[0]);
         assert_v0_5_1_layout(&persisted);
         assert_v0_5_1_host_settings(&persisted);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A v0.5.1-alpha repo whose folder holds no `.git` loads as git, and the
+    /// first refresh corrects it without touching its worktree default.
+    #[test]
+    fn v0_5_1_alpha_repo_without_git_is_corrected_by_the_first_refresh() {
+        let dirs = scratch_dirs("v051-plain");
+        let folder = dirs.config.join("alpha");
+        std::fs::create_dir_all(&folder).expect("create the plain folder");
+        let folder_json =
+            serde_json::to_string(&folder.to_string_lossy()).expect("encode the folder path");
+        let shaped = V0_5_1_STATE_JSON.replacen(
+            r#""path": "X:\\dev\\alpha""#,
+            &format!(r#""path": {folder_json}"#),
+            1,
+        );
+        assert_ne!(shaped, V0_5_1_STATE_JSON, "the repo path was rewritten");
+        std::fs::write(&dirs.state_file, shaped).expect("write the v0.5.1 state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("the v0.5.1 state.json loads");
+        assert!(
+            state.with_persisted(|s| s.repos[0].is_git),
+            "an absent is_git reads as git"
+        );
+
+        assert!(
+            crate::registry::refresh_is_git(&state),
+            "the flag is corrected"
+        );
+        let repo = state.with_persisted(|s| s.repos[0].clone());
+        assert!(!repo.is_git, "a folder without .git is plain: {repo:?}");
+        assert!(
+            !repo.default_use_worktree,
+            "the saved worktree default is kept"
+        );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

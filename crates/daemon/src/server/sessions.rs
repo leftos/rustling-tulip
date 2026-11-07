@@ -2,7 +2,9 @@
 use super::connection::{ConnCtx, PtyLane};
 use super::git::{blocked_discard_message, probe_locking_processes, retry_worktree_cleanup};
 use super::recovery::{mark_history_recovered, record_end, recovery_conversation_exists};
-use super::spawn::{remove_hook_settings, send_spawn_failure, spawn_session, target_uses_worktree};
+use super::spawn::{
+    is_repo_folder, remove_hook_settings, send_spawn_failure, spawn_session, target_uses_worktree,
+};
 use super::tabs::close_session_panes;
 use super::{Hub, StateEvent};
 use crate::branch_fate::{FateInput, SessionBase};
@@ -1156,6 +1158,12 @@ pub(super) fn write_meta_then_sync(hub: &Hub, meta: &orphan::OrphanMeta) {
     hub.sessions.write_sidecar(meta);
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the cleanup actions with its refusal, grace, \
+              repo-folder guard, removal and prune steps in order; split, the \
+              guard would sit away from the removal it protects"
+)]
 pub(crate) async fn discard_session(
     hub: &Hub,
     session_id: &str,
@@ -1234,6 +1242,14 @@ pub(crate) async fn discard_session(
         let Some(repo) = repo else {
             continue;
         };
+        if is_repo_folder(member, std::slice::from_ref(&repo)) {
+            info!(
+                %session_id,
+                folder = %member.worktree_path,
+                "discard_session: member runs in its repo's own folder, not a worktree; left in place"
+            );
+            continue;
+        }
         let repo_path = repo.path.clone();
         // Resolved while the session record is still intact, and only for the
         // mode that consults them.
@@ -1430,6 +1446,85 @@ mod tests {
     use protocol::{SessionKind, SessionMode};
     use std::collections::HashMap;
     use tokio::sync::Mutex as AsyncMutex;
+
+    /// A discard that removes worktrees leaves a plain member's folder, the
+    /// user's own, in place, even when the session's list names it, and
+    /// still removes the git member's worktree.
+    #[tokio::test]
+    async fn a_discard_never_removes_a_plain_members_folder() {
+        use crate::server::test_support::{git_init, git_ok, repo_entry_plain};
+        let (hub, scratch) = test_hub("discard-plain-member");
+        let web = scratch.path().join("web");
+        let notes = scratch.path().join("notes");
+        std::fs::create_dir_all(&web).expect("create the git repo");
+        std::fs::create_dir_all(&notes).expect("create the plain folder");
+        std::fs::write(notes.join("keep.txt"), "mine\n").expect("write the user's file");
+        git_init(&web);
+        git_ok(&web, &["commit", "--allow-empty", "-m", "seed"]);
+        let web_tree = hub.state.worktrees_dir().join("wt.feat").join("web");
+        git_ok(
+            &web,
+            &["worktree", "add", "-b", "feat", &web_tree.to_string_lossy()],
+        );
+        hub.state
+            .mutate(|s| {
+                s.repos.push(repo_entry("web", "web", &web));
+                s.repos.push(repo_entry_plain("notes", "notes", &notes));
+            })
+            .expect("register the repos");
+        let member = |id: &str, branch: &str, path: &Path| SessionMember {
+            repo_id: id.to_owned(),
+            repo_name: id.to_owned(),
+            branch: branch.to_owned(),
+            worktree_path: path.to_string_lossy().into_owned(),
+        };
+        let mut record = idle_record("s1");
+        record.kind = SessionKind::Workspace;
+        record.status = SessionStatus::Stopped;
+        record.members = vec![
+            member("web", "feat", &web_tree),
+            member("notes", "", &notes),
+        ];
+        // The list an older build recorded: every member, the plain one too.
+        record.worktree_paths = record
+            .members
+            .iter()
+            .map(|m| m.worktree_path.clone())
+            .collect();
+        record.spawn_config = Some(protocol::SpawnConfig {
+            target: SpawnTarget::Workspace {
+                workspace_id: "w1".to_owned(),
+                branch_name: "feat".to_owned(),
+                base_branch: None,
+                use_worktree: true,
+                worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+                existing_worktrees: Vec::new(),
+            },
+            mode: SessionMode::Interactive,
+            dangerously_skip_permissions: false,
+            agent: None,
+            extra_env: Vec::new(),
+        });
+        hub.sessions.insert(record);
+        let cleanup: Vec<protocol::CleanupAction> = ["web", "notes"]
+            .iter()
+            .map(|id| protocol::CleanupAction {
+                repo_id: (*id).to_owned(),
+                remove_worktree: true,
+                branch: BranchCleanup::Keep,
+            })
+            .collect();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        discard_session(&hub, "s1", &cleanup, &out_tx).await;
+
+        assert!(
+            notes.join("keep.txt").is_file(),
+            "the plain member's folder is the user's and stays"
+        );
+        assert!(!web_tree.exists(), "the git member's worktree is removed");
+    }
+
     /// Output the PTY produced after the snapshot waits in its live receiver;
     /// the reply must still reach the client first. Multi-threaded, so a
     /// forwarder spawned before the reply is queued gets the chance to win.

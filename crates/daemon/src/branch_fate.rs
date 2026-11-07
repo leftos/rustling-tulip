@@ -224,6 +224,7 @@ mod tests {
             path: path.to_string_lossy().into_owned(),
             default_branch: default_branch.map(str::to_string),
             default_use_worktree: true,
+            is_git: true,
             appearance: protocol::AppearanceOverrides::default(),
             last_agent: None,
             last_spawn_config: None,

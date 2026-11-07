@@ -533,6 +533,7 @@ pub(super) fn env_ref_repo_hub(tag: &str) -> (Hub, ScratchDir, PathBuf) {
                 path: repo.to_string_lossy().into_owned(),
                 default_branch: None,
                 default_use_worktree: false,
+                is_git: true,
                 appearance: AppearanceOverrides::default(),
                 last_agent: None,
                 last_spawn_config: None,
@@ -1029,9 +1030,20 @@ pub(super) fn repo_entry(id: &str, name: &str, path: &Path) -> protocol::RepoEnt
         path: path.to_string_lossy().into_owned(),
         default_branch: None,
         default_use_worktree: true,
+        is_git: true,
         appearance: AppearanceOverrides::default(),
         last_agent: None,
         last_spawn_config: None,
+    }
+}
+
+/// [`repo_entry`] for a plain folder: not a git repo, so it never defaults
+/// to a worktree.
+pub(super) fn repo_entry_plain(id: &str, name: &str, path: &Path) -> protocol::RepoEntry {
+    protocol::RepoEntry {
+        default_use_worktree: false,
+        is_git: false,
+        ..repo_entry(id, name, path)
     }
 }
 

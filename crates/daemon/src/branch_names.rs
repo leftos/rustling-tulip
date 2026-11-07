@@ -403,6 +403,7 @@ mod tests {
             path: path.to_string_lossy().into_owned(),
             default_branch: Some("main".to_string()),
             default_use_worktree: true,
+            is_git: true,
             appearance: AppearanceOverrides::default(),
             last_agent: None,
             last_spawn_config: None,

@@ -943,7 +943,7 @@ fn history_item(
     };
     let folder_is_git_repo = folder
         .as_deref()
-        .is_some_and(|folder| Path::new(folder).join(".git").exists());
+        .is_some_and(|folder| crate::git::folder_has_git(Path::new(folder)));
     let folder_repo_id = folder
         .as_deref()
         .and_then(|folder| repo_at(repos, folder))
@@ -1160,7 +1160,12 @@ pub fn plan_recovery(
                 .collect();
             // A Single target has no `--add-dir`s, so a session that had some
             // keeps them in the folder instead of joining the new repo.
-            let target = if add_dirs.is_empty() {
+            // A folder without `.git` can't be pinned: it runs in place with
+            // no branch. One that is missing keeps the pin, whose spawn then
+            // says why it can't run.
+            let target = if add_dirs.is_empty() && is_plain_folder(path) {
+                unpinned_single(String::new())
+            } else if add_dirs.is_empty() {
                 let branch = recorded_branch(&entry.members);
                 pinned_single(String::new(), path, branch)
             } else {
@@ -1377,7 +1382,8 @@ fn entry_members(entry: &HistoryEntry, folder: &str, repos: &[RepoEntry]) -> Vec
     }
 }
 
-/// The recorded `target` with every member pinned to the folder it ran in,
+/// The recorded `target` with every member pinned to the folder it ran in
+/// (a Single whose repo is not a git repo runs in place instead, unpinned),
 /// or `None` when some member can't be: a Single with other than one member
 /// or whose repo is no longer registered, or a workspace that is gone or
 /// whose members no longer match.
@@ -1397,8 +1403,15 @@ pub(crate) fn pin_recorded(
             let [only] = members else {
                 return None;
             };
-            let registered_repo = registered.repos.iter().any(|r| r.id == *repo_id);
-            (registered_repo && only.repo_id == *repo_id).then(|| SpawnTarget::Single {
+            let repo = registered.repos.iter().find(|r| r.id == *repo_id)?;
+            if only.repo_id != *repo_id {
+                return None;
+            }
+            // A plain folder can't be pinned: it runs in place with no branch.
+            if !repo.is_git {
+                return Some(unpinned_single(repo_id.clone()));
+            }
+            Some(SpawnTarget::Single {
                 repo_id: repo_id.clone(),
                 branch_name: branch_name.clone(),
                 base_branch: base_branch.clone(),
@@ -1447,6 +1460,10 @@ fn folder_target(
     if let [only] = members
         && let Some(repo) = member_repo(only, registered.repos)
     {
+        // A plain folder can't be pinned: it runs in place with no branch.
+        if !repo.is_git {
+            return unpinned_single(repo.id.clone());
+        }
         return pinned_single(
             repo.id.clone(),
             &only.worktree_path,
@@ -1558,6 +1575,26 @@ fn pinned_single(repo_id: String, path: &str, branch_name: String) -> SpawnTarge
         worktree_reuse: WorktreeReusePolicy::Reuse,
         existing_worktree: Some(path.to_owned()),
     }
+}
+
+/// A Single target on `repo_id`, a folder that is not a git repo: it runs in
+/// the folder itself, with no worktree, no pin and no branch.
+fn unpinned_single(repo_id: String) -> SpawnTarget {
+    SpawnTarget::Single {
+        repo_id,
+        branch_name: String::new(),
+        base_branch: None,
+        use_worktree: false,
+        checkout_strategy: None,
+        worktree_reuse: WorktreeReusePolicy::Reuse,
+        existing_worktree: None,
+    }
+}
+
+/// Whether `path` is an existing folder with no `.git`.
+fn is_plain_folder(path: &str) -> bool {
+    let path = Path::new(path);
+    path.is_dir() && !crate::git::folder_has_git(path)
 }
 
 /// The agent resuming `conversation` in `target` with `spawn`'s options and
@@ -4334,6 +4371,94 @@ mod recovery_tests {
         );
         assert_every_member_pinned(&plan.request.target, 1);
         assert_eq!(plan.request.resume_conversation.as_deref(), Some(CONV));
+    }
+
+    /// The Single target a plain folder recovers into: in place, with no pin
+    /// and no branch, which `spawn_single` runs in the folder.
+    fn plain_target(repo_id: &str) -> SpawnTarget {
+        SpawnTarget::Single {
+            repo_id: repo_id.to_owned(),
+            branch_name: String::new(),
+            base_branch: None,
+            use_worktree: false,
+            checkout_strategy: None,
+            worktree_reuse: WorktreeReusePolicy::Reuse,
+            existing_worktree: None,
+        }
+    }
+
+    #[test]
+    fn register_repo_then_claude_runs_a_folder_without_git_unpinned() {
+        let folder =
+            std::env::temp_dir().join(format!("rt-history-plain-register-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).expect("create the plain folder");
+        let path = folder.to_string_lossy().into_owned();
+        let entry = folder_only(vec![imported("", &path)]);
+        let how = RecoverAs::RegisterRepoThenAgent { path: path.clone() };
+
+        let mut plan = plan(&entry, &item(how, Some(CONV))).expect("plan");
+        plan.bind_registered_repo("r-new");
+
+        assert_eq!(plan.register_repo.as_deref(), Some(path.as_str()));
+        assert_eq!(plan.request.target, plain_target("r-new"));
+        assert_eq!(
+            plan.placeholder_branch_folder(),
+            None,
+            "no branch is read from a plain folder"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_recorded_single_in_a_registered_folder_without_git_recovers_unpinned() {
+        let mut notes = repo("r-notes", r"D:\notes");
+        notes.is_git = false;
+        let mut entry = folder_only(vec![member("r-notes", r"D:\notes")]);
+        entry.spawn_config = Some(SpawnConfig {
+            target: SpawnTarget::Single {
+                repo_id: "r-notes".to_owned(),
+                branch_name: "main".to_owned(),
+                base_branch: None,
+                use_worktree: true,
+                checkout_strategy: None,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktree: None,
+            },
+            mode: SessionMode::Interactive,
+            dangerously_skip_permissions: true,
+            agent: Some(claude(&[("model", "opus")])),
+            extra_env: Vec::new(),
+        });
+
+        let req = plan_in(&entry, &item(RecoverAs::Agent, Some(CONV)), &[notes], &[])
+            .expect("plan")
+            .request;
+
+        assert_eq!(req.target, plain_target("r-notes"));
+        assert_eq!(
+            model_of(&req),
+            Some("opus"),
+            "the recorded options are kept"
+        );
+        assert!(
+            req.dangerously_skip_permissions,
+            "the recorded flags are kept"
+        );
+        assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
+    }
+
+    #[test]
+    fn a_registered_folder_without_git_recovers_unpinned() {
+        let mut notes = repo("r-notes", r"D:\notes");
+        notes.is_git = false;
+        let entry = folder_only(vec![imported("r-notes", r"D:\notes")]);
+
+        let req = plan_in(&entry, &item(RecoverAs::Agent, Some(CONV)), &[notes], &[])
+            .expect("plan")
+            .request;
+
+        assert_eq!(req.target, plain_target("r-notes"));
+        assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
     }
 
     #[test]

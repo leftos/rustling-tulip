@@ -28,6 +28,9 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
     let ConnCtx { out_tx, .. } = *ctx;
     match msg {
         ClientMessage::ListRepos => {
+            // A folder may have gained or lost `.git` since the list was last
+            // read; the other clients hear of a change through the broadcast.
+            crate::git_watch::announce_git_changes_async(&hub.state, &hub.state_events).await;
             let repos = hub.state.with_persisted(|s| s.repos.clone());
             let _ = out_tx.send(DaemonMessage::Repos { repos });
         }
@@ -650,6 +653,33 @@ mod tests {
         HANG_GUARD, dispatch_err, dispatch_one, repo_entry, test_hub, workspace_entry,
     };
     use std::path::Path;
+
+    #[tokio::test]
+    async fn list_repos_reports_a_folder_without_git_as_plain_and_broadcasts_it() {
+        let (hub, scratch) = test_hub("list-repos-plain");
+        let folder = scratch.path().join("notes");
+        std::fs::create_dir_all(&folder).expect("create the plain folder");
+        hub.state
+            .mutate(|s| s.repos.push(repo_entry("r-notes", "notes", &folder)))
+            .expect("register the folder as git");
+        let mut events = hub.state_events.subscribe();
+
+        let reply = dispatch_one(&hub, ClientMessage::ListRepos).await;
+
+        match reply {
+            DaemonMessage::Repos { repos } => {
+                assert_eq!(repos.len(), 1);
+                assert!(!repos[0].is_git, "the refresh ran first: {repos:?}");
+            }
+            other => unreachable!("expected Repos, got {other:?}"),
+        }
+        match events.try_recv() {
+            Ok(StateEvent::Repos(repos)) => {
+                assert!(!repos[0].is_git, "other clients hear of it: {repos:?}");
+            }
+            other => unreachable!("expected a Repos broadcast, got {other:?}"),
+        }
+    }
 
     /// The scan reply on `out_rx`, waited for: the scan runs off the
     /// dispatch task, so it lands after `handle` returns.

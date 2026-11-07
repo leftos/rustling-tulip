@@ -71,9 +71,10 @@ pub async fn add_repo(
     if !path.is_dir() {
         return Err(anyhow!("path is not a directory: {path_str}"));
     }
-    // Non-git folders (no `.git`, or `git init` with no commits yet) are
-    // accepted: the spawn path skips worktree + branch ops when the folder
-    // isn't a usable git working tree.
+    // A folder without `.git` is kept as a folder entry with `is_git: false`,
+    // which never defaults to a worktree. A `git init` with no commits yet is
+    // `is_git: true`, but the spawn path still skips worktree and branch ops
+    // until the folder is a usable git working tree.
     let canonical =
         simplify_path(&std::fs::canonicalize(path).context("canonicalizing repo path")?);
     let canonical_str = canonical.to_string_lossy().into_owned();
@@ -95,13 +96,21 @@ pub async fn add_repo(
         )
     });
     ensure_group_slug_free(state, &name, None)?;
-    let default_branch = git::default_branch(&canonical).await;
+    let is_git = git::folder_has_git(&canonical);
+    // A plain folder has no branches of its own; asking git there would
+    // answer for whatever repo encloses it.
+    let default_branch = if is_git {
+        git::default_branch(&canonical).await
+    } else {
+        None
+    };
     let entry = RepoEntry {
         id: Uuid::new_v4().to_string(),
         name,
         path: canonical_str,
         default_branch,
-        default_use_worktree: true,
+        default_use_worktree: is_git,
+        is_git,
         appearance: AppearanceOverrides::default(),
         last_agent: None,
         last_spawn_config: None,
@@ -118,6 +127,91 @@ pub async fn add_repo(
         entry
     })?;
     Ok(registered)
+}
+
+/// Bring every registered repo's `is_git` in line with its folder
+/// ([`git::folder_has_git`]): a folder that gained `.git` turns into a repo,
+/// one that lost it into a plain folder. A repo whose folder is missing keeps
+/// its flag, and `default_use_worktree` is never touched. `state.json` is
+/// written only when a flag changed. Returns whether one did.
+///
+/// The folders are checked with the state unlocked, so a slow or detached
+/// drive stalls only this caller. An async caller uses
+/// [`refresh_is_git_async`], which checks them on a blocking thread.
+pub fn refresh_is_git(state: &AppState) -> bool {
+    let judged = judge_is_git(&listed_repos(state));
+    apply_is_git(state, &judged)
+}
+
+/// [`refresh_is_git`] with the folders checked on a blocking thread.
+pub async fn refresh_is_git_async(state: &std::sync::Arc<AppState>) -> bool {
+    let listed = listed_repos(state);
+    let judged = match tokio::task::spawn_blocking(move || judge_is_git(&listed)).await {
+        Ok(judged) => judged,
+        Err(err) => {
+            tracing::warn!(?err, "checking the registered folders for .git failed");
+            return false;
+        }
+    };
+    apply_is_git(state, &judged)
+}
+
+/// Each registered repo's id, folder and current flag, copied under the lock.
+fn listed_repos(state: &AppState) -> Vec<(String, String, bool)> {
+    state.with_persisted(|s| {
+        s.repos
+            .iter()
+            .map(|r| (r.id.clone(), r.path.clone(), r.is_git))
+            .collect()
+    })
+}
+
+/// The repos whose flag differs from their folder, with the new flag. A
+/// missing folder is left out, so it keeps its flag. Touches the disk.
+fn judge_is_git(listed: &[(String, String, bool)]) -> Vec<(String, bool)> {
+    listed
+        .iter()
+        .filter_map(|(id, path, was_git)| {
+            let path = Path::new(path);
+            if !path.is_dir() {
+                return None;
+            }
+            let is_git = git::folder_has_git(path);
+            (is_git != *was_git).then(|| (id.clone(), is_git))
+        })
+        .collect()
+}
+
+/// Write the `judged` flags, re-reading each repo by id under the lock: one
+/// removed meanwhile is skipped. Returns whether a flag changed.
+fn apply_is_git(state: &AppState, judged: &[(String, bool)]) -> bool {
+    if judged.is_empty() {
+        return false;
+    }
+    match state.mutate(|s| {
+        let mut changed = false;
+        for (id, is_git) in judged {
+            if let Some(repo) = s.repos.iter_mut().find(|r| &r.id == id)
+                && repo.is_git != *is_git
+            {
+                repo.is_git = *is_git;
+                changed = true;
+            }
+        }
+        changed
+    }) {
+        Ok(changed) => {
+            if changed {
+                tracing::info!(repos = ?judged, "refreshed which registered folders are git repos");
+            }
+            changed
+        }
+        Err(err) => {
+            tracing::warn!(?err, "saving the refreshed is_git flags failed");
+            // The in-memory list changed even though the file did not.
+            true
+        }
+    }
 }
 
 pub fn set_repo_worktree_default(
@@ -514,5 +608,106 @@ mod tests {
         assert_eq!(repos.len(), 1, "one folder, one entry: {repos:?}");
         assert_eq!(first.id, second.id, "both callers get the one entry");
         assert_eq!(repos.first().map(|repo| &repo.id), Some(&first.id));
+    }
+
+    #[tokio::test]
+    async fn adding_a_folder_judges_it_by_its_git_entry() {
+        let dirs = scratch_dirs("add-is-git");
+        let plain = dirs.config.join("plain");
+        let git_dir = dirs.config.join("git-dir");
+        let git_file = dirs.config.join("git-file");
+        std::fs::create_dir_all(&plain).expect("create the plain folder");
+        std::fs::create_dir_all(git_dir.join(".git")).expect("create a .git folder");
+        std::fs::create_dir_all(&git_file).expect("create the git-file folder");
+        std::fs::write(git_file.join(".git"), "gitdir: elsewhere").expect("write a .git file");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+
+        let added = add_repo(&state, &plain.to_string_lossy(), None)
+            .await
+            .expect("a plain folder is added");
+        assert!(!added.is_git, "a folder without .git is plain: {added:?}");
+        assert!(
+            !added.default_use_worktree,
+            "a plain folder never defaults to a worktree: {added:?}"
+        );
+
+        for folder in [&git_dir, &git_file] {
+            let added = add_repo(&state, &folder.to_string_lossy(), None)
+                .await
+                .expect("a git folder is added");
+            assert!(added.is_git, "{} holds .git: {added:?}", folder.display());
+            assert!(added.default_use_worktree, "{added:?}");
+        }
+    }
+
+    /// A registered entry for `path` with the given flags.
+    fn flagged(id: &str, path: &Path, is_git: bool, default_use_worktree: bool) -> RepoEntry {
+        RepoEntry {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            path: path.to_string_lossy().into_owned(),
+            default_branch: None,
+            default_use_worktree,
+            is_git,
+            appearance: AppearanceOverrides::default(),
+            last_agent: None,
+            last_spawn_config: None,
+        }
+    }
+
+    /// The `is_git` and `default_use_worktree` flags of repo `id`.
+    fn flags_of(state: &AppState, id: &str) -> Option<(bool, bool)> {
+        state.with_persisted(|s| {
+            s.repos
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| (r.is_git, r.default_use_worktree))
+        })
+    }
+
+    #[test]
+    fn refresh_is_git_follows_the_folders_git_entry() {
+        let dirs = scratch_dirs("refresh-is-git");
+        let folder = dirs.config.join("folder");
+        let missing = dirs.config.join("missing");
+        std::fs::create_dir_all(&folder).expect("create the folder");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        state
+            .mutate(|s| {
+                s.repos.push(flagged("r-folder", &folder, false, true));
+                s.repos.push(flagged("r-missing", &missing, true, false));
+            })
+            .expect("seed the repos");
+
+        // Nothing differs: no change is reported and state.json is not
+        // written again.
+        std::fs::remove_file(&dirs.state_file).expect("remove state.json");
+        assert!(!refresh_is_git(&state), "nothing changed");
+        assert!(
+            !dirs.state_file.exists(),
+            "an unchanged refresh writes nothing"
+        );
+
+        std::fs::create_dir_all(folder.join(".git")).expect("git init the folder");
+        assert!(refresh_is_git(&state), "the folder became a repo");
+        assert_eq!(flags_of(&state, "r-folder"), Some((true, true)));
+        assert!(dirs.state_file.exists(), "the change is saved");
+
+        std::fs::remove_dir_all(folder.join(".git")).expect("remove .git");
+        assert!(refresh_is_git(&state), "the folder stopped being a repo");
+        assert_eq!(
+            flags_of(&state, "r-folder"),
+            Some((false, true)),
+            "default_use_worktree is never touched"
+        );
+        assert_eq!(
+            flags_of(&state, "r-missing"),
+            Some((true, false)),
+            "a missing folder keeps its flags"
+        );
+        assert!(
+            !refresh_is_git(&state),
+            "a second refresh finds nothing new"
+        );
     }
 }

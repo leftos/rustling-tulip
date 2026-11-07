@@ -128,6 +128,15 @@ pub async fn current_branch(repo: &Path) -> anyhow::Result<Option<String>> {
     Ok((!trimmed.is_empty() && trimmed != "HEAD").then(|| trimmed.to_string()))
 }
 
+/// Whether the folder at `path` is a git repository: its root holds `.git`,
+/// a folder or a file (a linked worktree or a submodule). A repo with no
+/// commits counts; [`is_initialized`] is the stricter check. Only stats the
+/// path, so it is cheap enough to call per repo on the async path.
+#[must_use]
+pub fn folder_has_git(path: &Path) -> bool {
+    path.join(".git").exists()
+}
+
 /// Whether `repo` is a usable git working tree — i.e. it has both a `.git`
 /// entry AND at least one commit. Folders that are not git repos, or were
 /// just `git init`'d without an initial commit, return `false`. Callers use
