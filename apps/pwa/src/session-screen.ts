@@ -5,6 +5,7 @@ import type { ConnectionStateName } from "./connection-machine";
 import { displayLabel } from "./home-screen";
 import type { HomeModel } from "./home-model";
 import { KEY_TRAY, type KeyTrayEntry } from "./keys";
+import { parseMarkdown, type MdBlock } from "./markdown";
 import {
   SHEET_KEYS,
   isVisible,
@@ -65,6 +66,8 @@ export interface ChatRow {
   readonly pending: boolean;
   /** An answer still arriving. */
   readonly live: boolean;
+  /** An answer row's text as Markdown blocks; absent on every other row. */
+  readonly markdown?: readonly MdBlock[];
 }
 
 /** The composer as the view paints it. */
@@ -173,6 +176,8 @@ export interface SessionScreenInput {
   readonly sendRefused: boolean;
   /** The page has had a ready, paired connection in this visit (the latch Home shares). */
   readonly connectedOnce: boolean;
+  /** The view's parse cache for answer rows, which each build refreshes to the chat's answers. */
+  readonly answers: AnswerCache;
 }
 
 /** What the screen knows of its session from Home's model. */
@@ -272,7 +277,7 @@ export function sessionScreen(input: SessionScreenInput): SessionScreen {
     toggle,
     keyBar: null,
     hiddenLine: chat.hidden > 0 ? `${chat.hidden} earlier messages` : null,
-    rows: chat.entries.map(rowFor),
+    rows: chatRows(chat.entries, input.answers),
     notice,
     keys: [],
     composer: composerView(input.composer, input.offline),
@@ -299,8 +304,45 @@ export function samePart(left: unknown, right: unknown): boolean {
   return sameValue(left, right);
 }
 
+/** An answer's text and the blocks parsed from it. */
+export interface ParsedAnswer {
+  readonly text: string;
+  readonly blocks: readonly MdBlock[];
+}
+
+/**
+ * Each answer's parsed blocks by entry id, with the text they were parsed
+ * from. The live answer repaints on every chunk, so an answer is parsed again
+ * only when its text changed; each build keeps only the ids still in the chat.
+ */
+export type AnswerCache = Map<string, ParsedAnswer>;
+
+/** The chat's entries as rows, refreshing the answers' parse cache to the chat's ids. */
+function chatRows(entries: readonly ChatEntry[], answers: AnswerCache): ChatRow[] {
+  const kept: AnswerCache = new Map();
+  const rows = entries.map((entry) => rowFor(entry, answers, kept));
+  answers.clear();
+  for (const [id, parsed] of kept) {
+    answers.set(id, parsed);
+  }
+  return rows;
+}
+
+/** An answer's blocks, from the cache when its text is unchanged. */
+function answerBlocks(
+  id: string,
+  text: string,
+  answers: AnswerCache,
+  kept: AnswerCache,
+): readonly MdBlock[] {
+  const known = kept.get(id) ?? answers.get(id);
+  const blocks = known !== undefined && known.text === text ? known.blocks : parseMarkdown(text);
+  kept.set(id, { text, blocks });
+  return blocks;
+}
+
 /** One entry as the row the chat draws for it. */
-function rowFor(entry: ChatEntry): ChatRow {
+function rowFor(entry: ChatEntry, answers: AnswerCache, kept: AnswerCache): ChatRow {
   switch (entry.kind) {
     case "user":
       return {
@@ -319,6 +361,7 @@ function rowFor(entry: ChatEntry): ChatRow {
         detail: null,
         pending: false,
         live: entry.live === true,
+        markdown: answerBlocks(entry.id, entry.text, answers, kept),
       };
     case "tool":
       return {

@@ -15,6 +15,7 @@ import type { ConnectedLatch } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
 import type { HomeModel } from "./home-model";
 import type { KeyTrayEntry } from "./keys";
+import { renderMarkdown } from "./markdown-view";
 import {
   NO_SHEET,
   SHEET_KEYS,
@@ -37,6 +38,7 @@ import {
   sameScreen,
   sessionLook,
   sessionScreen,
+  type AnswerCache,
   type ChatRow,
   type ComposerView,
   type DockKind,
@@ -109,6 +111,8 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   let drawnSheetId: string | null = null;
   let timer: number | undefined;
   const expanded = new Set<string>();
+  /** Each answer's parsed Markdown, so the live answer is parsed only when its text grows. */
+  const answers: AnswerCache = new Map();
 
   function newRequestId(): string {
     return crypto.randomUUID();
@@ -230,6 +234,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       status,
       sendRefused,
       connectedOnce: connectedOnce.connected(),
+      answers,
     });
     if (drawn !== null && sameScreen(drawn, screen)) {
       return;
@@ -312,8 +317,15 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   }
 
   function bubble(row: ChatRow, className: string): HTMLElement {
-    const node = element("p", `session-row ${className}`);
-    node.textContent = row.text;
+    let node: HTMLElement;
+    if (row.kind === "answer" && row.markdown !== undefined) {
+      // The agent's answer as Markdown; the view builds text nodes only (markdown-view.ts).
+      node = element("div", `session-row ${className} session-md`);
+      node.append(renderMarkdown(document, row.markdown));
+    } else {
+      node = element("p", `session-row ${className}`);
+      node.textContent = row.text;
+    }
     if (row.pending) {
       node.classList.add("session-pending");
     }

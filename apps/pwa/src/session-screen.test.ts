@@ -18,6 +18,7 @@ import {
   parseRoute,
   sessionLook,
   sessionScreen,
+  type AnswerCache,
   type DockKind,
   type SessionScreen,
 } from "./session-screen";
@@ -89,6 +90,7 @@ interface Overrides {
   readonly status?: ConnectionStateName;
   readonly sendRefused?: boolean;
   readonly connectedOnce?: boolean;
+  readonly answers?: AnswerCache;
 }
 
 /** The screen over the brief's defaults. */
@@ -108,6 +110,7 @@ function screen(overrides: Overrides = {}): SessionScreen {
     status: overrides.status ?? "ready",
     sendRefused: overrides.sendRefused ?? false,
     connectedOnce: overrides.connectedOnce ?? true,
+    answers: overrides.answers ?? new Map(),
   });
 }
 
@@ -202,6 +205,47 @@ test("a user entry and an answer draw as bubbles", () => {
     ["user", "Add the reset on a target switch"],
     ["answer", "Added reset_for_target."],
   ]);
+});
+
+test("an answer row carries its Markdown blocks; user, tool and muted rows carry none", () => {
+  const answer: ChatEntry = { kind: "answer", id: "a2", text: "**Done**\n\n- one" };
+  const view = screen({ chat: loaded([USER, answer, TOOL, RECEIPT]) });
+  expect(view.rows.map((row) => [row.kind, row.markdown])).toEqual([
+    ["user", undefined],
+    [
+      "answer",
+      [
+        { kind: "paragraph", spans: [{ text: "Done", strong: true }] },
+        {
+          kind: "list",
+          ordered: false,
+          start: 1,
+          items: [{ task: null, blocks: [{ kind: "paragraph", spans: [{ text: "one" }] }] }],
+        },
+      ],
+    ],
+    ["tool", undefined],
+    ["muted", undefined],
+  ]);
+  expect(view.rows.filter((row) => "markdown" in row).map((row) => row.kind)).toEqual(["answer"]);
+});
+
+test("an answer's blocks are parsed once for the same id and text", () => {
+  const answers: AnswerCache = new Map();
+  const first = screen({ chat: loaded([ANSWER]), answers }).rows[0]?.markdown;
+  const again = screen({ chat: loaded([ANSWER]), answers }).rows[0]?.markdown;
+  expect(first).toBeDefined();
+  expect(again).toBe(first);
+  expect(answers.get("a1")?.blocks).toBe(first);
+  const longer: ChatEntry = { kind: "answer", id: "a1", text: "Added reset_for_target. More." };
+  const grown = screen({ chat: loaded([longer]), answers }).rows[0]?.markdown;
+  expect(grown).not.toBe(first);
+  expect(grown).toEqual([
+    { kind: "paragraph", spans: [{ text: "Added reset_for_target. More." }] },
+  ]);
+  // The cache keeps only the answers still in the chat.
+  screen({ chat: loaded([USER]), answers });
+  expect([...answers.keys()]).toEqual([]);
 });
 
 test("a tool call is one line with its name and summary", () => {

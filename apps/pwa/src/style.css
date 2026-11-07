@@ -2,6 +2,8 @@
 
 :root {
   color-scheme: dark;
+  /* The surface behind code in the agent's answers: the user bubble's colour. */
+  --md-code-bg: #313244;
 }
 
 html,
@@ -482,6 +484,144 @@ body[data-route="session"] #notifications {
 .session-pending,
 .session-live {
   opacity: 0.7;
+}
+
+/* An answer drawn as Markdown: its blocks break lines themselves, and a wide
+   code block or table scrolls inside its own box, never the page. */
+.session-md {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+}
+
+.session-md .md > :first-child {
+  margin-top: 0;
+}
+
+.session-md .md > :last-child {
+  margin-bottom: 0;
+}
+
+.session-md p,
+.session-md ul,
+.session-md ol,
+.session-md blockquote,
+.session-md pre,
+.session-md .md-table {
+  margin: 6px 0;
+}
+
+.session-md h1,
+.session-md h2,
+.session-md h3,
+.session-md h4,
+.session-md h5,
+.session-md h6 {
+  margin: 10px 0 4px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.session-md h1 {
+  font-size: 1.3rem;
+}
+
+.session-md h2 {
+  font-size: 1.2rem;
+}
+
+.session-md h3 {
+  font-size: 1.1rem;
+}
+
+.session-md h4,
+.session-md h5,
+.session-md h6 {
+  font-size: 1rem;
+}
+
+.session-md ul,
+.session-md ol {
+  padding-left: 1.4em;
+}
+
+.session-md li > p {
+  margin: 2px 0;
+}
+
+.session-md .md-task {
+  list-style: none;
+}
+
+.session-md .md-task input {
+  margin: 0 6px 0 -1.2em;
+  vertical-align: middle;
+}
+
+.session-md blockquote {
+  padding-left: 10px;
+  border-left: 3px solid #45475a;
+  color: #a6adc8;
+}
+
+.session-md code,
+.session-md pre {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.session-md code {
+  white-space: pre-wrap;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--md-code-bg);
+}
+
+.session-md pre {
+  overflow-x: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--md-code-bg);
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.session-md pre code {
+  white-space: pre;
+  padding: 0;
+  background: none;
+}
+
+.session-md .md-table {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.session-md table {
+  border-collapse: collapse;
+}
+
+.session-md th,
+.session-md td {
+  padding: 4px 8px;
+  border: 1px solid #45475a;
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
+
+.session-md th {
+  background: var(--md-code-bg);
+  font-weight: 600;
+}
+
+.session-md hr {
+  margin: 10px 0;
+  border: 0;
+  border-top: 1px solid #45475a;
+}
+
+.session-md a {
+  color: #89b4fa;
 }
 
 .session-tool {
