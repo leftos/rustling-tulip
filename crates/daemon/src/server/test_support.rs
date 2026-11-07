@@ -739,14 +739,38 @@ pub(crate) fn unproven_listener() -> (u16, std::sync::mpsc::Receiver<Vec<u8>>) {
 /// to `url`'s path on it; `url`'s authority is what the upgrade's `Host`
 /// carries. The serving task lives until the test's runtime ends.
 async fn scratch_ws_client(app: axum::Router, url: impl FnOnce(u16) -> String) -> WsClient {
+    scratch_ws_client_with_headers(app, url, &[])
+        .await
+        .expect("the WebSocket upgrade succeeds")
+}
+
+/// [`scratch_ws_client`] with `headers` added to the upgrade request: what a
+/// browser sends and a bare URL cannot carry (`Origin`). The upgrade's own
+/// error comes back, so a test can read the refusal a listener answers with.
+async fn scratch_ws_client_with_headers(
+    app: axum::Router,
+    url: impl FnOnce(u16) -> String,
+    headers: &[(&str, &str)],
+) -> Result<WsClient, tokio_tungstenite::tungstenite::Error> {
+    use axum::http::header::{HeaderName, HeaderValue};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
     let port = scratch_listener(app).await;
     let tcp = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
         .await
         .expect("connect to the scratch listener");
-    let (client, _) = tokio_tungstenite::client_async(url(port), tcp)
+    let mut request = url(port)
+        .into_client_request()
+        .expect("a WebSocket client request");
+    for (name, value) in headers {
+        request.headers_mut().append(
+            HeaderName::try_from(*name).expect("a header name"),
+            HeaderValue::try_from(*value).expect("a header value"),
+        );
+    }
+    tokio_tungstenite::client_async(request, tcp)
         .await
-        .expect("the WebSocket upgrade succeeds");
-    client
+        .map(|(client, _)| client)
 }
 
 /// A tailnet `/ws` connection the listener's acceptor admitted as `peer`,
@@ -774,6 +798,30 @@ pub(super) async fn tailnet_ws_client_under(
         crate::tailnet_listener::AuthorizedPeer::for_tests(peer, server_life),
     ));
     scratch_ws_client(app, |_| "ws://host.tail1234.ts.net:8787/ws".to_owned()).await
+}
+
+/// [`tailnet_ws_client_under`] with `headers` added to the upgrade request
+/// (`Origin`, as a browser sends it), and the upgrade's own error when the
+/// listener refuses the request.
+pub(super) async fn tailnet_ws_client_with_headers(
+    hub: &Hub,
+    peer: tailnet::PeerIdentity,
+    headers: &[(&str, &str)],
+) -> Result<WsClient, tokio_tungstenite::tungstenite::Error> {
+    let names = super::remote::name_slot();
+    super::remote::set_serving_name(&names, Some("host.tail1234.ts.net".to_owned()));
+    let app = super::remote::build_tailnet_router(hub.clone(), names, 8787).layer(axum::Extension(
+        crate::tailnet_listener::AuthorizedPeer::for_tests(
+            peer,
+            tokio_util::sync::CancellationToken::new(),
+        ),
+    ));
+    scratch_ws_client_with_headers(
+        app,
+        |_| "ws://host.tail1234.ts.net:8787/ws".to_owned(),
+        headers,
+    )
+    .await
 }
 
 /// A loopback `/ws` connection, served on a scratch listener.

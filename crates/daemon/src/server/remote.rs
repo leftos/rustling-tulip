@@ -531,8 +531,8 @@ mod tests {
     use crate::server::handshake::push_initial_state;
     use crate::server::test_support::{
         ScratchDir, WsClient, dispatch_all, dispatch_one_as, hello, hook_request, idle_record,
-        loopback_ws_client, tailnet_ws_client_under, test_hub, test_hub_in, test_peer, ws_next,
-        ws_send,
+        loopback_ws_client, tailnet_ws_client_under, tailnet_ws_client_with_headers, test_hub,
+        test_hub_in, test_peer, ws_next, ws_send,
     };
     use crate::tailnet_listener::CertFailedCause;
     use axum::body::Body;
@@ -2055,6 +2055,86 @@ mod tests {
             "the device is told its request expired: {told:?}"
         );
         assert!(ws_next(&mut device).await.is_none(), "then it is closed");
+    }
+
+    /// A browser reports the page's own origin on the tailnet upgrade; a
+    /// device holding an issued token is served, never put into pairing.
+    #[tokio::test]
+    async fn tailnet_ws_with_the_pwa_origin_and_a_device_token_is_served() {
+        let (hub, _scratch) = test_hub("pwa-origin-served");
+        let (_device_id, token) = crate::sync::lock(&hub.devices)
+            .issue(&test_peer(), chrono::Utc::now())
+            .expect("issue a device token");
+        let origin = "https://host.tail1234.ts.net:8787";
+        let mut client = tailnet_ws_client_with_headers(&hub, test_peer(), &[("Origin", origin)])
+            .await
+            .expect("the browser's upgrade succeeds");
+
+        ws_send(&mut client, &hello(&token, None)).await;
+        let welcome = ws_next(&mut client)
+            .await
+            .expect("a Welcome before the connection closes");
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome {
+                    origin: Some(protocol::ConnectionOrigin::Remote),
+                    ..
+                }
+            ),
+            "the daemon welcomes the browser as a remote connection: {welcome:?}"
+        );
+        let features = match welcome {
+            DaemonMessage::Welcome { features, .. } => features,
+            _ => Vec::new(),
+        };
+        assert!(
+            features
+                .iter()
+                .any(|feature| feature == protocol::FEATURE_DEVICE_PAIRING),
+            "the daemon lists device pairing: {features:?}"
+        );
+
+        // A device without a valid token would have been told so straight
+        // after `Welcome`; this one is served the daemon's initial state.
+        ws_send(&mut client, &ClientMessage::ListRepos).await;
+        let mut before_repos = Vec::new();
+        loop {
+            let message = ws_next(&mut client)
+                .await
+                .expect("the daemon answers before the connection closes");
+            if matches!(message, DaemonMessage::Repos { .. }) {
+                break;
+            }
+            before_repos.push(message);
+        }
+        assert!(
+            !before_repos
+                .iter()
+                .any(|message| matches!(message, DaemonMessage::DevicePairFailed { .. })),
+            "a served device is never told its token failed: {before_repos:?}"
+        );
+    }
+
+    /// A page served from another origin never reaches the socket at all.
+    #[tokio::test]
+    async fn tailnet_ws_with_a_foreign_origin_is_refused() {
+        let (hub, _scratch) = test_hub("pwa-origin-refused");
+        let refused = tailnet_ws_client_with_headers(
+            &hub,
+            test_peer(),
+            &[("Origin", "https://evil.example")],
+        )
+        .await;
+        let status = refused.err().and_then(|err| match err {
+            tokio_tungstenite::tungstenite::Error::Http(response) => Some(response.status()),
+            _ => None,
+        });
+        assert_eq!(
+            status,
+            Some(StatusCode::FORBIDDEN),
+            "a foreign Origin is refused at the upgrade"
+        );
     }
 
     #[tokio::test]

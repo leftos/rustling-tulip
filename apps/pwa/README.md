@@ -19,6 +19,16 @@ Run from this folder, or from the repo root as `pnpm --dir apps/pwa <script>`:
 
 `src/protocol.ts` is generated from `crates/protocol` and is never edited by hand; oxlint and oxfmt skip it. After a protocol change, regenerate it from the repo root with `cargo run -p protocol-ts` (through `tools/gate.ps1 run`) and commit the result: the `generated_protocol_ts_is_current` test in `tools/protocol-ts` fails while the file is stale. A switch over a tag keeps a default branch, since a newer daemon can send tags the file does not list.
 
+## Connection
+
+The page opens one WebSocket to `wss://{host}/ws` (its own origin) on load and sends `Hello` with its stored device token, `protocol_version` and `protocol_versions`, and no `client_id`; there is no UI yet, and the state shows only in the console (`pwa connection {kind: "status", state}`). Until PW.3 pairing supplies a store the token is empty, so an unpaired phone gets `Welcome` then `DevicePairFailed` and the page stops redialling until the token changes.
+
+- `src/connection-machine.ts`: a pure reducer over the states idle, connecting, handshaking, ready, backoff, hidden and notApproved.
+- `src/socket.ts`: the driver, with the socket, timers, visibility and token store injected. A Welcome that does not arrive in 10 s is a failure; backgrounding closes the socket and clears timers; returning to the foreground reconnects at once with the attempt counter reset. The daemon's usual initial state after a connect is the resync.
+- `src/backoff.ts`: 500 ms doubling, capped at 10 s, the native client's numbers.
+- `src/hello.ts`: builds the `Hello`.
+- `src/token-store.ts`: the `TokenStore` seam PW.3 implements; `memoryTokenStore` meanwhile.
+
 ## Build output
 
 `dist/` holds `index.html`, `sw.js`, `manifest.webmanifest` and the icons at the top level under their stable names, and the hashed page assets under `assets/`. The daemon serves that folder from beside its install (`pwa`), or from the folder `RUSTLING_TULIP_PWA_DIR` names for a dev run: hashed assets are cached immutably, everything else is revalidated.

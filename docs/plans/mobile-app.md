@@ -36,7 +36,7 @@ iPhone: Home Screen web app, Tailscale app connected
 daemon ──HTTPS POST, VAPID-signed, encrypted payload──▶ web.push.apple.com ──▶ iPhone (on or off the tailnet)
 ```
 
-What already exists: the opt-in tailnet listener (switched by `remote.json` and `ConfigureRemote`) with `tailscale cert` TLS and certificate renewal, the owner rule in `crates/tailnet`, constant-time secret checks (`crates/daemon/src/secret.rs`), and the tailnet router (`build_tailnet_router` in `crates/daemon/src/server/remote.rs`), whose `/ws` upgrade already accepts `Origin` exactly `https://{name}:{port}`, the PWA's origin (invariant 6 in `remote-access.md`).
+What already exists: the opt-in tailnet listener (switched by `remote.json` and `ConfigureRemote`) with `tailscale cert` TLS and certificate renewal, the owner rule in `crates/tailnet`, constant-time secret checks (`crates/daemon/src/secret.rs`), and the tailnet router (`build_tailnet_router_with_pwa` in `crates/daemon/src/server/remote.rs`), whose `/ws` upgrade already accepts `Origin` exactly `https://{name}:{port}`, the PWA's origin (invariant 6 in `remote-access.md`).
 
 On a tailnet connection `Hello.auth_token` is the device's own token.
 
@@ -94,10 +94,10 @@ A push must show a notification, so no push lowers the badge silently: a prompt 
 
 Item ids are PW.1, PW.2, … (phone web app), distinct from the macOS plan's M0–M4. Each is one brief; daemon steps that touch `crates/protocol/src/lib.rs` or `crates/daemon/src/server.rs` run one at a time. Wave 4 holds PW.1 to PW.8; the later screens sit in their own waves.
 
-- [ ] **PW.1 Serve the app shell.** `apps/pwa/` scaffold (Vite, TypeScript, a manifest with `display: standalone`, `start_url` and `scope` `./`, icons, a precaching service worker) and the daemon's static routes on `build_tailnet_router` with the cache and security headers above.
+- [x] **PW.1 Serve the app shell.** `apps/pwa/` scaffold (Vite, TypeScript, a manifest with `display: standalone`, `start_url` and `scope` `./`, icons, a precaching service worker) and the daemon's static routes on `build_tailnet_router_with_pwa` with the cache and security headers above.
 
   Proved by router tests (a file, a hashed asset's immutable header, a deep link answered with the page, the loopback router serving none of it, the CSP header present) and a hand check: Add to Home Screen opens standalone.
-- [ ] **PW.2 Protocol types and the connection.** The generator over `crates/protocol` with its staleness test (`tools/protocol-ts`, writing `apps/pwa/src/protocol.ts`; built); the page's socket (`wss://{name}:{port}/ws`, `Hello` with the stored device token, `Welcome.features`), reconnect with backoff and a resync on `visibilitychange`. Proved by the staleness test, vitest over the reconnect state machine, and a daemon test that a browser-shaped `Origin` handshake with a device token is served.
+- [x] **PW.2 Protocol types and the connection.** The generator over `crates/protocol` with its staleness test (`tools/protocol-ts`, writing `apps/pwa/src/protocol.ts`; built); the page's socket (`wss://{name}:{port}/ws`, `Hello` with the stored device token, `Welcome.features`), reconnect with backoff and a resync on `visibilitychange`. Proved by the staleness test, vitest over the reconnect state machine, and a daemon test that a browser-shaped `Origin` handshake with a device token is served.
 - [ ] **PW.3 Pairing on the phone.** After TS.3b (RT-166): the no-token screen sends a pending request, the camera scanner reads the host's QR code with the typed code beside it, and the token is kept in IndexedDB with `navigator.storage.persist()` asked for. Whether iOS offers `BarcodeDetector` is unverified, so the step checks it first and otherwise justifies a QR decoder dependency. Proved by vitest over the pairing flow against a scripted socket and the hand checklist.
 - [ ] **PW.3b Host side of pairing** (RT-166, TS.3b). The Windows toast naming the device and its Tailscale login with Approve, the Waiting devices row in Settings → Remote access (the rows and approval dialog are built in `apps/native/src/pairing_view.rs`; the daemon-message fold and the toast are wired in N3), and the pairing code the daemon mints from the command line (`rustling-tulipd pair`, `crates/daemon/src/cli_pair.rs`, delivered; the toast and the row remain).
 
