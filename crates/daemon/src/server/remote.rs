@@ -1096,6 +1096,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tailnet_router_answers_404_on_loopback_only_paths() {
+        let (hub, scratch) = test_hub("tailnet-pwa-loopback-only");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        for uri in ["/proof", "/shutdown", "/pair", "/hook/s1"] {
+            let response = router
+                .clone()
+                .oneshot(static_request(Method::GET, uri))
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert!(response.headers().get("x-rt-proof").is_none(), "{uri}");
+            assert!(
+                !body_text(response).await.contains("PWA-INDEX"),
+                "{uri} served the page"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn tailnet_router_never_leaves_the_folder() {
         let (hub, scratch) = test_hub("tailnet-pwa-traversal");
         let root = pwa_fixture(&scratch);

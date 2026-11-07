@@ -36,6 +36,15 @@ const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 /// pins an old build.
 const NO_CACHE: &str = "no-cache";
 
+/// The paths only the loopback listener serves: `build_loopback_router`'s
+/// `/shutdown`, `/proof` and `/hook/{session_id}` routes (matched by the
+/// `/hook/` prefix, since the entry carries a trailing `/`), plus `/pair`, the
+/// pairing route the tailnet router must never answer. The fallback answers
+/// `404` for each of them, whatever the method and whether or not the phone
+/// app's folder is installed, so a tailnet client never reaches a `503`, nor a
+/// deep link to the app's page, on a path only the host's own listener has.
+const LOOPBACK_ONLY_PATHS: &[&str] = &["/shutdown", "/proof", "/pair", "/hook/"];
+
 /// The folder the listener serves the phone app from: a non-empty
 /// `override_dir` wins; else the install folder `bin_templates` names; else
 /// beside the daemon's own exe; else there is none. No existence check: the
@@ -76,10 +85,22 @@ pub(super) async fn serve(State(state): State<TailnetState>, req: Request) -> Re
     with_headers(response, &path)
 }
 
-/// The answer before the security and cache headers: nothing for a write,
-/// `503` without an installed folder, else the file `ServeDir` finds, with an
-/// extension-less miss answered by the page so a deep link opens the app.
+/// Whether `path` is one of the loopback router's own routes: equal to one of
+/// [`LOOPBACK_ONLY_PATHS`]' entry, or under an entry that ends in `/`.
+fn is_loopback_only_path(path: &str) -> bool {
+    LOOPBACK_ONLY_PATHS
+        .iter()
+        .any(|route| path == *route || (route.ends_with('/') && path.starts_with(*route)))
+}
+
+/// The answer before the security and cache headers: `404` for a path only the
+/// loopback listener serves, nothing for a write, `503` without an installed
+/// folder, else the file `ServeDir` finds, with an extension-less miss answered
+/// by the page so a deep link opens the app.
 async fn answer(folder: Option<&Path>, method: Method, path: &str, req: Request) -> Response {
+    if is_loopback_only_path(path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if method != Method::GET && method != Method::HEAD {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -269,6 +290,23 @@ mod tests {
     #[test]
     fn resolve_pwa_dir_is_none_with_nothing() {
         assert_eq!(resolve_pwa_dir(None, None, None), None);
+    }
+
+    #[test]
+    fn is_loopback_only_path_matches_the_loopback_routes() {
+        for path in ["/proof", "/shutdown", "/pair", "/hook/s1", "/hook/"] {
+            assert!(is_loopback_only_path(path), "{path} is loopback only");
+        }
+        for path in [
+            "/",
+            "/s/abc",
+            "/assets/app.js",
+            "/hooks",
+            "/proofs",
+            "/pairing",
+        ] {
+            assert!(!is_loopback_only_path(path), "{path} is not loopback only");
+        }
     }
 
     #[test]
