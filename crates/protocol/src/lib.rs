@@ -91,6 +91,14 @@ pub const FEATURE_GATE_STATE: &str = "gate_state";
 /// [`ClientMessage::UnregisterPush`]).
 pub const FEATURE_WEB_PUSH: &str = "web_push";
 
+/// `Welcome.features` entry: the daemon saves a file a client sends into a
+/// session's folder ([`ClientMessage::UploadFile`]).
+pub const FEATURE_UPLOAD_FILE: &str = "upload_file";
+
+/// The most file bytes one [`ClientMessage::UploadFile`] carries, checked by
+/// the client before sending and by the daemon.
+pub const UPLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -4045,6 +4053,23 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         automatic: bool,
     },
+    /// Upload a file into a session's folder: the daemon decodes `data_b64`
+    /// (standard base64, as [`ClientMessage::SendInput`] carries) into a
+    /// `rt-uploads` folder under the session's own folder and answers
+    /// [`DaemonMessage::FileUploaded`] with the saved path, or a
+    /// [`DaemonMessage::Error`] carrying `request_id`. A file over
+    /// [`UPLOAD_MAX_BYTES`] is refused with the `too_large` code. Advertised
+    /// by the `upload_file` feature.
+    UploadFile {
+        /// Client-assigned request id, echoed on the answer.
+        request_id: String,
+        session_id: String,
+        /// The file's name: only its last path component survives, with a
+        /// fixed character set and a timestamp of the daemon's own.
+        name: String,
+        /// The file's bytes, standard base64.
+        data_b64: String,
+    },
     Resize {
         session_id: String,
         cols: u16,
@@ -6180,6 +6205,13 @@ pub enum DaemonMessage {
         kind: PathKind,
         size: u64,
     },
+    /// The answer to [`ClientMessage::UploadFile`]: the file is saved at
+    /// `path`, the absolute host path as display text.
+    FileUploaded {
+        request_id: String,
+        session_id: String,
+        path: String,
+    },
     /// Bytes of a file followed by [`ClientMessage::TailFile`], base64,
     /// at most 64 KiB a message. `path` is the path as the request named it;
     /// `offset` is the file offset of the first byte. `reset` means the file
@@ -6347,9 +6379,10 @@ pub enum DaemonMessage {
         /// change or git read (`RepoStatus`, `ListStashes`, `ListCommits`,
         /// `GetCommit`, `GetRemoteUrl`), spawn preview (`PreviewSpawn`,
         /// `PreviewWorkspaceSpawn`), branch-name suggestion
-        /// (`SuggestBranchName`), preset list (`ListPresets`) or chat request
-        /// (`LoadChat`, `LoadSummary`, `ChatSend`, `ChatAnswer`) that failed,
-        /// on the reply to its requester.
+        /// (`SuggestBranchName`), preset list (`ListPresets`), an upload
+        /// (`UploadFile`) or chat request (`LoadChat`, `LoadSummary`,
+        /// `ChatSend`, `ChatAnswer`) that failed, on the reply to its
+        /// requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         /// The failure's stable machine-readable code, one of
@@ -7665,6 +7698,52 @@ mod tests {
                 &back,
                 ClientMessage::ForgetHostSessions { host, session_ids, all: true, request_id: Some(id) }
                     if host == "tailnet:laptop" && session_ids.is_empty() && id == "req-4"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn upload_file_round_trips() {
+        let msg = ClientMessage::UploadFile {
+            request_id: "req-1".to_owned(),
+            session_id: "s1".to_owned(),
+            name: "shot.png".to_owned(),
+            data_b64: "aGk=".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"upload_file""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::UploadFile { request_id, session_id, name, data_b64 }
+                    if request_id == "req-1"
+                        && session_id == "s1"
+                        && name == "shot.png"
+                        && data_b64 == "aGk="
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn file_uploaded_round_trips() {
+        let msg = DaemonMessage::FileUploaded {
+            request_id: "req-1".to_owned(),
+            session_id: "s1".to_owned(),
+            path: r"C:\work\.tmp\rt-uploads\shot.png".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"file_uploaded""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::FileUploaded { request_id, session_id, path }
+                    if request_id == "req-1"
+                        && session_id == "s1"
+                        && path == r"C:\work\.tmp\rt-uploads\shot.png"
             ),
             "{json}"
         );

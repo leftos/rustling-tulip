@@ -579,6 +579,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_line_of_eleven_mebibytes_crosses_the_bridge() {
+        let (hub, _scratch) = test_hub("cli-bridge-large-line");
+        let port = serve_loopback(&hub).await;
+        let mut bridge = Bridge::start(port, TEST_BUDGETS);
+        bridge.send(&hello_line()).await;
+        let first = bridge.next_message().await;
+        assert!(matches!(first, DaemonMessage::Welcome { .. }), "{first:?}");
+
+        // The daemon echoes the request id whole, so the reply proves the line
+        // reached the daemon as one.
+        let request_id = "r".repeat(11 * 1024 * 1024);
+        bridge
+            .send(&format!(
+                "\n{{\"type\":\"list_env_names\",\"request_id\":\"{request_id}\"}}\n"
+            ))
+            .await;
+
+        let mut echoed = false;
+        for _ in 0..100 {
+            let line = bridge.next_raw().await;
+            assert!(!line.is_empty(), "stdout ended before the EnvNames reply");
+            let message = known(&line);
+            if let DaemonMessage::EnvNames {
+                request_id: Some(id),
+                ..
+            } = &message
+            {
+                assert_eq!(id, &request_id, "the request id did not cross whole");
+                echoed = true;
+                break;
+            }
+        }
+        assert!(
+            echoed,
+            "no EnvNames reply followed the eleven-mebibyte line"
+        );
+    }
+
+    #[tokio::test]
     async fn bridge_exits_when_the_daemon_closes() {
         let (hub, _scratch) = test_hub("cli-bridge-closed");
         let port = serve_loopback(&hub).await;

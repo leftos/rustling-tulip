@@ -41,6 +41,7 @@ mod screen;
 mod settings;
 mod summarizer;
 mod tail;
+mod upload;
 pub(crate) use self::recovery::RecoveryClaims;
 
 mod sessions;
@@ -1005,6 +1006,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::FetchFolder { .. } | ClientMessage::StatPath { .. }) => {
             folder::handle(hub, m, ctx).await;
         }
+        m @ ClientMessage::UploadFile { .. } => upload::handle(hub, m, ctx).await?,
         ClientMessage::CancelFetch { id } => cancel_fetch(ctx.fetches, &id).await,
         m @ (ClientMessage::TailFile { .. } | ClientMessage::UntailFile { .. }) => {
             tail::handle(hub, m, ctx).await;

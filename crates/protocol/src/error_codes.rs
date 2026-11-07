@@ -70,6 +70,9 @@ pub const ACCOUNT_UNSUPPORTED: &str = "account_unsupported";
 pub const ACCOUNT_FAILED: &str = "account_failed";
 /// A gate slot count write failed.
 pub const GATE_WRITE_FAILED: &str = "gate_write_failed";
+/// A request carried more data than the daemon accepts, such as a file over
+/// [`crate::UPLOAD_MAX_BYTES`] in [`crate::ClientMessage::UploadFile`].
+pub const TOO_LARGE: &str = "too_large";
 
 /// Every code in the catalogue.
 pub const ALL: &[&str] = &[
@@ -103,6 +106,7 @@ pub const ALL: &[&str] = &[
     ACCOUNT_UNSUPPORTED,
     ACCOUNT_FAILED,
     GATE_WRITE_FAILED,
+    TOO_LARGE,
 ];
 
 #[cfg(test)]

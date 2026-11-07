@@ -112,6 +112,12 @@ export const FEATURE_GATE_STATE = "gate_state";
 export const FEATURE_WEB_PUSH = "web_push";
 
 /**
+ * `Welcome.features` entry: the daemon saves a file a client sends into a
+ * session's folder ([`ClientMessage::UploadFile`]).
+ */
+export const FEATURE_UPLOAD_FILE = "upload_file";
+
+/**
  * The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
  * right after `Welcome` when its `Hello` carried no valid device token: the
  * connection stays open as a pairing connection. The daemon also answers it
@@ -3178,6 +3184,23 @@ export type ClientMessage =
    */
   | { type: "send_input"; session_id: string; data_b64: string; automatic?: boolean }
   /**
+   * Upload a file into a session's folder: the daemon decodes `data_b64`
+   * (standard base64, as [`ClientMessage::SendInput`] carries) into a
+   * `rt-uploads` folder under the session's own folder and answers
+   * [`DaemonMessage::FileUploaded`] with the saved path, or a
+   * [`DaemonMessage::Error`] carrying `request_id`. A file over
+   * [`UPLOAD_MAX_BYTES`] is refused with the `too_large` code. Advertised
+   * by the `upload_file` feature.
+   *
+   * `request_id`: Client-assigned request id, echoed on the answer.
+   *
+   * `name`: The file's name: only its last path component survives, with a
+   * fixed character set and a timestamp of the daemon's own.
+   *
+   * `data_b64`: The file's bytes, standard base64.
+   */
+  | { type: "upload_file"; request_id: string; session_id: string; name: string; data_b64: string }
+  /**
    * `claim`: True when the sending pane had keyboard or pointer input in the
    * last few seconds, or when this client just resized the pane (its
    * window, a split divider, the sidebar, or its own font change):
@@ -4918,6 +4941,11 @@ export type DaemonMessage =
    */
   | { type: "path_stat"; id: string; kind: PathKind; size: number }
   /**
+   * The answer to [`ClientMessage::UploadFile`]: the file is saved at
+   * `path`, the absolute host path as display text.
+   */
+  | { type: "file_uploaded"; request_id: string; session_id: string; path: string }
+  /**
    * Bytes of a file followed by [`ClientMessage::TailFile`], base64,
    * at most 64 KiB a message. `path` is the path as the request named it;
    * `offset` is the file offset of the first byte. `reset` means the file
@@ -5043,9 +5071,10 @@ export type DaemonMessage =
    * change or git read (`RepoStatus`, `ListStashes`, `ListCommits`,
    * `GetCommit`, `GetRemoteUrl`), spawn preview (`PreviewSpawn`,
    * `PreviewWorkspaceSpawn`), branch-name suggestion
-   * (`SuggestBranchName`), preset list (`ListPresets`) or chat request
-   * (`LoadChat`, `LoadSummary`, `ChatSend`, `ChatAnswer`) that failed,
-   * on the reply to its requester.
+   * (`SuggestBranchName`), preset list (`ListPresets`), an upload
+   * (`UploadFile`) or chat request (`LoadChat`, `LoadSummary`,
+   * `ChatSend`, `ChatAnswer`) that failed, on the reply to its
+   * requester.
    *
    * `code`: The failure's stable machine-readable code, one of
    * [`error_codes`]; a client keeps a code it does not know as an
@@ -5471,4 +5500,9 @@ export const ErrorCode = {
   ACCOUNT_FAILED: "account_failed",
   /** A gate slot count write failed. */
   GATE_WRITE_FAILED: "gate_write_failed",
+  /**
+   * A request carried more data than the daemon accepts, such as a file over
+   * [`crate::UPLOAD_MAX_BYTES`] in [`crate::ClientMessage::UploadFile`].
+   */
+  TOO_LARGE: "too_large",
 } as const;
