@@ -1,0 +1,29 @@
+[package]
+name = "protocol-ts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Generates the phone app's TypeScript protocol types (apps/pwa/src/protocol.ts) from crates/protocol's source; a development tool, never shipped"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "protocol-ts"
+path = "src/main.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+# protocol-version.json, and JSON string literals for the emitted TypeScript.
+serde_json = { workspace = true }
+# Parses crates/protocol's source; the protocol crate itself is not a dependency.
+syn = { version = "2.0.117", features = ["full", "parsing"] }

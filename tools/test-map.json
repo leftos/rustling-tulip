@@ -70,7 +70,13 @@
       "paths": [
         "crates/protocol/**"
       ],
-      "filter": "rdeps(protocol)"
+      "filter": "rdeps(protocol) | package(protocol-ts)"
+    },
+    {
+      "paths": [
+        "tools/protocol-ts/**"
+      ],
+      "filter": "package(protocol-ts)"
     },
     {
       "paths": [

@@ -1,4 +1,4 @@
 {
   "plugins": ["typescript", "import", "unicorn"],
-  "ignorePatterns": ["dist"]
+  "ignorePatterns": ["dist", "src/protocol.ts"]
 }

@@ -15,6 +15,7 @@ members = [
     "apps/native",
     "tools/rt-driver-mcp",
     "tools/folder-bench",
+    "tools/protocol-ts",
 ]
 
 [workspace.package]

@@ -79,8 +79,9 @@ The native client uses the Rust types from `crates/protocol` directly; there is 
 ## After the edits
 
 1. Run `cargo build` to confirm the workspace compiles.
-2. Run `cargo nextest run -p protocol --cargo-profile test-release` and the native client's UI spec that covers the message (`cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_<name>`).
-3. Run `cargo clippy --all-targets --all-features -- -D warnings`.
+2. Run `cargo run -p protocol-ts` through the gate to regenerate `apps/pwa/src/protocol.ts` and commit the result; the `generated_protocol_ts_is_current` test fails while it is stale. The generator exits non-zero naming the item when a new type uses a serde attribute or a type it does not map.
+3. Run `cargo nextest run -p protocol --cargo-profile test-release` and the native client's UI spec that covers the message (`cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_<name>`).
+4. Run `cargo clippy --all-targets --all-features -- -D warnings`.
 
 ## Common mistakes to catch
 

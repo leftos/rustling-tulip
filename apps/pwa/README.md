@@ -15,6 +15,10 @@ Run from this folder, or from the repo root as `pnpm --dir apps/pwa <script>`:
 | `fmt` / `fmt:check` | oxfmt, rewrite or check                                                                                                       |
 | `test`              | vitest, one pass                                                                                                              |
 
+## Protocol types
+
+`src/protocol.ts` is generated from `crates/protocol` and is never edited by hand; oxlint and oxfmt skip it. After a protocol change, regenerate it from the repo root with `cargo run -p protocol-ts` (through `tools/gate.ps1 run`) and commit the result: the `generated_protocol_ts_is_current` test in `tools/protocol-ts` fails while the file is stale. A switch over a tag keeps a default branch, since a newer daemon can send tags the file does not list.
+
 ## Build output
 
 `dist/` holds `index.html`, `sw.js`, `manifest.webmanifest` and the icons at the top level under their stable names, and the hashed page assets under `assets/`. The daemon serves that folder from beside its install (`pwa`), or from the folder `RUSTLING_TULIP_PWA_DIR` names for a dev run: hashed assets are cached immutably, everything else is revalidated.

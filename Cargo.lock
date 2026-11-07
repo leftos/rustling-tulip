@@ -5225,6 +5225,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "protocol-ts"
+version = "0.10.0-alpha"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "psm"
 version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"

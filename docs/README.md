@@ -47,6 +47,7 @@ tools/
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
   folder-bench/ - the dev-only harness that generates folder fixtures and times folder-transfer candidates to the builder; never shipped
   installer/    - the NSIS installer script, and `pack-macos.ps1`, which builds the macOS app bundle and disk image on a Mac
+  protocol-ts/  - the generator that writes the wire types as TypeScript into `apps/pwa/src/protocol.ts`, with its staleness test; never shipped
   rt-driver-mcp/ - the `rt-driver` MCP server that launches and drives an isolated native client; never shipped
 docs/
   README.md     - this page: the docs start page and the glossary
@@ -72,7 +73,7 @@ docs/
 .\rt.ps1 test
 ```
 
-The phone app in `apps/pwa` is not a Cargo member. It needs Node.js and pnpm (`.\rt.ps1 setup` installs both). `.\rt.ps1 build -Pwa` installs its packages and builds it, replacing `target\<profile>\pwa` with `apps/pwa/dist/`; `.\rt.ps1 installer` always does the same and ships the folder as `pwa` in the install folder. No other verb builds it; on a Mac, `tools/installer/pack-macos.ps1` builds it into the app bundle's `Contents/Resources/pwa`. For its tests run `pnpm --dir apps/pwa test` (vitest) as a `tools/gate.ps1 run` call. Its scripts are listed in `apps/pwa/README.md`.
+The phone app in `apps/pwa` is not a Cargo member. It needs Node.js and pnpm (`.\rt.ps1 setup` installs both). `.\rt.ps1 build -Pwa` installs its packages and builds it, replacing `target\<profile>\pwa` with `apps/pwa/dist/`; `.\rt.ps1 installer` always does the same and ships the folder as `pwa` in the install folder. No other verb builds it; on a Mac, `tools/installer/pack-macos.ps1` builds it into the app bundle's `Contents/Resources/pwa`. For its tests run `pnpm --dir apps/pwa test` (vitest) as a `tools/gate.ps1 run` call. Its scripts are listed in `apps/pwa/README.md`. Its wire types, `apps/pwa/src/protocol.ts`, are generated: `cargo run -p protocol-ts` rewrites them after a change in `crates/protocol`.
 
 `.\rt.ps1 help` lists the other commands.
 
@@ -190,6 +191,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Gate slot**: one of a pool's seats (heavy or light) that the machine's gate hands to a build or test command; the daemon reads each pool's slots and pushes them as `GateState`, and the count per pool is set in `slot-counts.json`.
 - **Gates view**: the native-client rail panel and footer pill over the daemon host's gate slots, recent runs and last seven days; see `docs/native-client.md` ("Gates").
 - **GD.1, GD.9**: step ids of the finished gate dashboard design (GD steps), named in commit messages; its decisions are in `docs/native-client.md` ("Gates") and `docs/architecture.md` ("Gates view").
+- **Generated protocol types**: `apps/pwa/src/protocol.ts`, the wire types as TypeScript (plus `PROTOCOL_VERSION`, `FEATURE_*` and `ErrorCode`), written by `cargo run -p protocol-ts` from the source of `crates/protocol`; never edited by hand.
 - **Hand-off ready**: a session whose orchestrator ended its turn with `Run /clear, then /nextup to continue.` and has no background work left (RT-85).
 - **Hand shell back**: the status watcher's step (`hand_shell_back` in `pty_state.rs`) for a shell whose agent has ended: it leaves hook-driven mode, clears `background`, ends a `Working` or `AwaitingInput` turn at `Idle` and announces the agent's end (`docs/session-runtime.md`).
 - **Hang guard**: the only wall-clock bound a test may carry, a deadline so long (120 s in-process, 300 s for the live and smoke tiers, `support::live::HANG_GUARD`) that only a hang reaches it, failing with a message starting "hung:"; every other wait is on an event.
@@ -338,6 +340,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **SSH target**: `Target::Ssh`, a host the native client reaches by running `ssh` with an `~/.ssh/config` alias or `user@host[:port]` and `rustling-tulipd bridge` (or the saved host's `remote_command`), speaking the protocol over the child's stdio; the SSH login is the owner, so there is no device token; `apps/native/src/ssh.rs`, `docs/native-client.md`, `docs/plans/ssh-remote.md`.
 - **Stage (folder fetch)**: the hidden `.{id}.part` folder beside a fetched folder's target, where the client unpacks the host's stream; on done it replaces any earlier copy of the folder, and a cancel or failure deletes it. See `docs/native-client.md` ("Fetched files").
 - **Staging folder**: `$INSTDIR\.staging`, where the installer extracts a setup's files before the staged `rustling-tulipd apply-update` swaps them into the install folder; the installer removes it afterwards. On macOS the update's staging folder is the hidden `.rustling-tulip-update-<version>-<8 hex>/` beside the installed app, which the next launch removes (`docs/auto-update.md`).
+- **Staleness test**: `generated_protocol_ts_is_current` in the `protocol-ts` package, which fails when the checked-in `apps/pwa/src/protocol.ts` differs from what the generator would write.
 - **Status glyph**: the shape-and-colour mark for a session's status in the native client (working arc, asking diamond, waiting ring, idle dot); see `docs/native-client.md`.
 - **Status sequence (`status_seq`)**: the count of status changes on a `SessionSnapshot` (default 0), raised by one on each change (a reattach or orphan rebuild that changes the stored status included) and kept in the sidecar's `meta.json`; a client compares it to tell a newer snapshot from an older one.
 - **Status-change log**: the planned `activity/<key>.jsonl` files in the config dir, one line per status change of a session or dispatch run, kept 2 hours and across daemon restarts, which the activity track draws from; see `docs/plans/dashboard.md`.
