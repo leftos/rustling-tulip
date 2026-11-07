@@ -403,6 +403,12 @@ mod tests {
 
     fn sidebar(sessions: Vec<SessionSnapshot>) -> SidebarModel {
         let mut model = SidebarModel::default();
+        // A turn marks a session unseen only while its agent is up, which
+        // takes the host's agent descriptors.
+        model.set_agents(
+            &crate::target::HostKey::Local,
+            agent_registry::descriptors(),
+        );
         model.apply(
             &crate::target::HostKey::Local,
             &DaemonMessage::Repos {
