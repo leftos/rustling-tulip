@@ -1,8 +1,21 @@
+import { clickTarget, parsePush, shouldCloseNotification } from "./push-payload";
 import { MANIFEST_URL, PAGE_URL, shouldStorePage, strategyFor } from "./sw-strategy";
 
 // The WebWorker lib types `self` as the base `WorkerGlobalScope`; this worker
 // is a service worker, whose scope adds `skipWaiting` and `clients`.
 declare const self: ServiceWorkerGlobalScope;
+
+// The WebWorker lib leaves out two things this worker needs: the Badging API,
+// which iOS before 18.4 sets the badge only through, and the notification
+// option that makes a same-tag replacement alert again.
+declare global {
+  interface NotificationOptions {
+    renotify?: boolean;
+  }
+  interface WorkerNavigator {
+    setAppBadge(contents?: number): Promise<void>;
+  }
+}
 
 // The shell cache: the page and its manifest, precached on install so an
 // installed app opens while the phone is offline.
@@ -45,6 +58,63 @@ self.addEventListener("fetch", (event: FetchEvent) => {
   event.respondWith(strategy === "cache-first" ? cacheFirst(request) : networkFirstPage(request));
 });
 
+// A push must show a notification: a push the user never sees is a session
+// that waits for them unannounced. iOS 18.4 and later show a declarative push
+// themselves only while no service worker is installed; once this one is, they
+// deliver it to its `push` handler too, so the notification shown here is the
+// one shown on every version. iOS 16.4 to 18.3 sets the badge only from here.
+self.addEventListener("push", (event: PushEvent) => {
+  event.waitUntil(
+    (async () => {
+      const shown = parsePush(event.data?.text() ?? null, self.location.origin);
+      const options: NotificationOptions = {
+        body: shown.body,
+        data: { navigate: shown.navigate },
+      };
+      if (shown.tag !== null) {
+        options.tag = shown.tag;
+        // A newer push about the same session replaces the older notification
+        // and alerts again, so it never arrives unannounced.
+        options.renotify = true;
+      }
+      await self.registration.showNotification(shown.title, options);
+      if (shown.badge !== null && "setAppBadge" in self.navigator) {
+        try {
+          await self.navigator.setAppBadge(shown.badge);
+        } catch (error) {
+          // The badge is best effort: the notification has already shown, so a
+          // refusal here must not fail the push.
+          console.warn("setAppBadge failed", error);
+        }
+      }
+    })(),
+  );
+});
+
+// A tap opens the session the push named: an open window of this app is
+// focused and navigated to it, else a new one is opened. The notification
+// closes only once that open has produced a window, so a tap that fails leaves
+// it there to tap again.
+self.addEventListener("notificationclick", (event: NotificationEvent) => {
+  event.waitUntil(
+    (async () => {
+      const url = clickTarget(event.notification.data, self.location.origin);
+      // `type: "window"` answers with window clients, which carry `focus` and
+      // `navigate`; the lib types them as plain clients.
+      const windows = (await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      })) as readonly WindowClient[];
+      const client = windows[0];
+      const navigated = client === undefined ? null : await focusAndNavigate(client, url);
+      const opened = navigated ?? (await self.clients.openWindow(url));
+      if (shouldCloseNotification(opened)) {
+        event.notification.close();
+      }
+    })(),
+  );
+});
+
 // A hashed asset never changes under its name, so the first copy is the one
 // served from then on.
 async function cacheFirst(request: Request): Promise<Response> {
@@ -78,5 +148,19 @@ async function networkFirstPage(request: Request): Promise<Response> {
       return cached;
     }
     throw error;
+  }
+}
+
+// Focus comes first: it needs the click's window-interaction allowance, which a
+// page load can outlast. A null answer means no window took the navigation, as
+// an uncontrolled page on a first install or after a hard reload does not.
+async function focusAndNavigate(client: WindowClient, url: string): Promise<WindowClient | null> {
+  try {
+    await client.focus();
+    return await client.navigate(url);
+  } catch (error) {
+    // The window refused the focus or the navigation; its caller opens a new one instead.
+    console.warn("opening the session in the open window failed; opening a new one", error);
+    return null;
   }
 }
