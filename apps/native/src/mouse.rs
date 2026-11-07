@@ -392,6 +392,11 @@ impl Tracker {
         }
     }
 
+    /// No gesture is in progress: no button this tracker followed is down.
+    pub fn idle(&self) -> bool {
+        self.gesture.is_none()
+    }
+
     /// The gesture a move belongs to, or `None` when no button is down.
     pub fn moving(&self) -> Option<Gesture> {
         self.gesture
@@ -891,6 +896,28 @@ mod tests {
         assert_eq!(tracker.up(Button::Right), Some(Gesture::Report));
         assert_eq!(tracker.up(Button::Right), None);
         assert_eq!(tracker.moving(), None);
+    }
+
+    #[test]
+    fn tracker_is_idle_only_between_gestures() {
+        let mode = TermMode::MOUSE_REPORT_CLICK;
+        let mut tracker = Tracker::default();
+        assert!(tracker.idle());
+        assert_eq!(tracker.down(Button::Right, TermMode::empty(), false), None);
+        assert!(tracker.idle(), "an ignored press starts no gesture");
+
+        tracker.down(Button::Left, mode, false);
+        assert!(!tracker.idle());
+        tracker.down(Button::Right, mode, false);
+        tracker.up(Button::Left);
+        assert!(!tracker.idle(), "the right button is still down");
+        tracker.up(Button::Right);
+        assert!(tracker.idle());
+
+        tracker.down(Button::Left, TermMode::empty(), false);
+        assert!(!tracker.idle(), "a selection is a gesture too");
+        tracker.up(Button::Left);
+        assert!(tracker.idle());
     }
 
     #[test]

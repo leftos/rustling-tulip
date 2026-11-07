@@ -3619,10 +3619,14 @@ impl<'a> Harness<'a> {
 
     /// A right-button press and release at `at`.
     pub fn right_click(&mut self, at: Point<Pixels>) {
+        self.right_click_with(at, Modifiers::none());
+    }
+
+    /// A right-button press and release at `at`, with `modifiers` held.
+    pub fn right_click_with(&mut self, at: Point<Pixels>, modifiers: Modifiers) {
         self.cx
-            .simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
-        self.cx
-            .simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+            .simulate_mouse_down(at, MouseButton::Right, modifiers);
+        self.cx.simulate_mouse_up(at, MouseButton::Right, modifiers);
         self.cx.run_until_parked();
     }
 

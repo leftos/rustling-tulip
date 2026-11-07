@@ -1564,6 +1564,44 @@ impl TerminalPane {
             cx.notify();
             return;
         }
+        // A right-click outside a gesture pastes this client's clipboard, as
+        // Ctrl+V does: the program never sees the press, so a program on
+        // another host cannot answer it from that host's clipboard. With no
+        // text on the clipboard it sends nothing, not Ctrl+V's `^V`, which
+        // such a program would answer the same way.
+        if event.button == MouseButton::Right && !event.modifiers.shift && self.tracker.idle() {
+            let text = cx.read_from_clipboard().and_then(|item| item.text());
+            if text.is_some_and(|text| !text.is_empty()) {
+                self.paste(cx);
+            }
+            cx.notify();
+            return;
+        }
+        // Shift+right-click is the way to a program's own right button: the
+        // press is reported, without Shift, when the program asked for
+        // mouse reports, and its release follows in `on_mouse_up`.
+        if event.button == MouseButton::Right
+            && event.modifiers.shift
+            && self.tracker.idle()
+            && mouse::reports(self.term.mode(), false)
+            && self.cell_at(event.position).is_some()
+        {
+            if self
+                .tracker
+                .down(mouse::Button::Right, self.term.mode(), false)
+                == Some(Gesture::Report)
+            {
+                self.report(
+                    mouse::Button::Right,
+                    mouse::ReportKind::Press,
+                    without_shift(event.modifiers),
+                    event.position,
+                    false,
+                );
+            }
+            cx.notify();
+            return;
+        }
         let (Some(cell), Some(button)) =
             (self.cell_at(event.position), report_button(event.button))
         else {
@@ -1830,10 +1868,17 @@ impl TerminalPane {
         }
         match gesture {
             Some(Gesture::Report) => {
+                // Shift is how a right press reaches the program, so its
+                // release, like its press, is reported without it.
+                let modifiers = if button == mouse::Button::Right {
+                    without_shift(event.modifiers)
+                } else {
+                    event.modifiers
+                };
                 self.report(
                     button,
                     mouse::ReportKind::Release,
-                    event.modifiers,
+                    modifiers,
                     event.position,
                     false,
                 );
@@ -2028,6 +2073,15 @@ fn report_button(button: MouseButton) -> Option<mouse::Button> {
         MouseButton::Middle => Some(mouse::Button::Middle),
         MouseButton::Right => Some(mouse::Button::Right),
         MouseButton::Navigate(_) => None,
+    }
+}
+
+/// `modifiers` with Shift released: a Shift+right-click reaches the program
+/// as a plain right-button report.
+fn without_shift(modifiers: Modifiers) -> Modifiers {
+    Modifiers {
+        shift: false,
+        ..modifiers
     }
 }
 

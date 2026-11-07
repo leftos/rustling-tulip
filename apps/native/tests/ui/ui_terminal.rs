@@ -12,7 +12,7 @@ use crate::support;
 use std::time::Duration;
 
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
-use gpui::{Modifiers, Point, TestAppContext, point, px, size};
+use gpui::{Modifiers, MouseButton, Point, TestAppContext, point, px, size};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection};
 use rustling_tulip_native::fonts::FontSettings;
 use rustling_tulip_native::ui_theme::UiTheme;
@@ -390,6 +390,116 @@ fn sgr_mouse_reports_clicks_and_shift_selects_instead(cx: &mut TestAppContext) {
         "releasing Shift keeps selecting"
     );
     assert_eq!(h.clipboard().as_deref(), Some("hello"));
+}
+
+#[gpui::test]
+fn right_click_pastes_the_clipboard_under_mouse_reporting(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b[?1000h\x1b[?1006h");
+    h.set_clipboard("x");
+
+    let at = h.cell_center("p1", 2, 3);
+    h.right_click(at);
+    assert_eq!(
+        h.sent_input("s1"),
+        b"x",
+        "a right-click pastes here, never a report to the program"
+    );
+}
+
+#[gpui::test]
+fn right_click_pastes_the_clipboard_without_mouse_reporting(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.set_clipboard("x");
+
+    let at = h.cell_center("p1", 2, 3);
+    h.right_click(at);
+    assert_eq!(h.sent_input("s1"), b"x");
+}
+
+#[gpui::test]
+fn right_click_paste_brackets_when_the_child_asks(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b[?2004h");
+    h.set_clipboard("x");
+
+    let at = h.cell_center("p1", 2, 3);
+    h.right_click(at);
+    assert_eq!(h.sent_input("s1"), b"\x1b[200~x\x1b[201~");
+}
+
+#[gpui::test]
+fn right_click_with_an_empty_clipboard_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    assert_eq!(h.clipboard(), None, "the test clipboard starts empty");
+
+    let at = h.cell_center("p1", 2, 3);
+    h.right_click(at);
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "no clipboard text: no ^V, no report"
+    );
+
+    h.pty("s1", b"\x1b[?1000h\x1b[?1006h");
+    h.right_click(at);
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "no clipboard text under mouse reporting: no ^V, no report"
+    );
+}
+
+#[gpui::test]
+fn shift_right_click_reports_the_press_under_mouse_reporting(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b[?1000h\x1b[?1006h");
+    h.set_clipboard("x");
+
+    let at = h.cell_center("p1", 2, 3);
+    h.right_click_with(at, Modifiers::shift());
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\x1b[<2;3;4M\x1b[<2;3;4m",
+        "Shift reaches the program's right button, without the Shift bit, and never pastes"
+    );
+}
+
+#[gpui::test]
+fn shift_right_click_without_mouse_reporting_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.set_clipboard("x");
+
+    let at = h.cell_center("p1", 2, 3);
+    h.right_click_with(at, Modifiers::shift());
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "Shift+right-click neither pastes nor reports"
+    );
+}
+
+#[gpui::test]
+fn right_click_during_a_left_drag_does_not_paste(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b[?1000h\x1b[?1006h");
+    h.set_clipboard("x");
+
+    let at = h.cell_center("p1", 2, 3);
+    h.cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    h.cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+    h.cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+    h.cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    h.cx.run_until_parked();
+    let sent = h.sent_input("s1");
+    assert!(
+        !sent.contains(&b'x'),
+        "a right press inside a gesture goes to the tracker, not the paste: {sent:?}"
+    );
 }
 
 #[gpui::test]
