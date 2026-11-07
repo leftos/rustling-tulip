@@ -17,6 +17,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - A right-click in a terminal pastes this computer's clipboard, even in a session on another host; Shift+right-click still reaches programs that use the mouse.
+- A Nushell pane's command dots sit on each prompt's own row, so no stray dot is left after `clear`, and Copy command, Re-run and the prompt jumps work there.
 - A long folder path in Open a shell, or long text in any one-line field, stays inside its box and scrolls to follow the cursor instead of running under Browse.
 - Clicking a Needs you or Finished toast, the Windows notification or the app's own, now shows that pane's tab and gives the pane keyboard focus.
 - A session whose agent exits back into its shell keeps its name in the sidebar instead of switching to the shell's folder.

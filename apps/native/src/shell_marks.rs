@@ -1,5 +1,6 @@
-//! Shell integration marks: the `OSC 133` prompt, output and end marks and
-//! the `OSC 633;E` command line a plain shell writes around each command,
+//! Shell integration marks: the `OSC 133` prompt, output and end marks, the
+//! `OSC 133;B` prompt's end, which moves a prompt marked below it up to its
+//! row, and the `OSC 633;E` command line a plain shell writes around each command,
 //! found by a scanner that reads the same bytes as the terminal, and the
 //! command records they build.
 //!
@@ -53,7 +54,8 @@ pub struct ShellDot {
 /// One finished command. Rows are absolute (see the module docs).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
-    /// The row the prompt was drawn on (`OSC 133;A`).
+    /// The row the prompt was drawn on: where `OSC 133;A` arrived, or where
+    /// `OSC 133;B` arrived when the prompt was marked below its end.
     pub prompt: u64,
     /// The row the output started on (`OSC 133;C`), when the shell said and
     /// the row is still known.
@@ -162,6 +164,8 @@ pub fn decode_command(raw: &str) -> String {
 pub enum Mark {
     /// `133;A`: the prompt is being drawn.
     Prompt,
+    /// `133;B`: the prompt is drawn and the input starts.
+    InputStart,
     /// `133;C`: the command's output starts.
     Output,
     /// `133;D[;code]`: the command ended.
@@ -258,6 +262,7 @@ fn parse_osc(params: &[&[u8]]) -> Option<Mark> {
     let (&kind, args) = rest.split_first()?;
     match (code, kind) {
         (b"133", b"A") => Some(Mark::Prompt),
+        (b"133", b"B") => Some(Mark::InputStart),
         (b"133", b"C") => Some(Mark::Output),
         (b"133", b"D") => {
             let exit = args
@@ -278,6 +283,9 @@ fn parse_osc(params: &[&[u8]]) -> Option<Mark> {
 #[derive(Clone, Debug)]
 struct Open {
     prompt: u64,
+    /// The row the prompt's `133;A` arrived on, which `input` leaves as it
+    /// is when it moves `prompt` up.
+    marked: u64,
     output: Option<u64>,
     output_col: usize,
     command: Option<String>,
@@ -296,15 +304,21 @@ pub struct Records {
 }
 
 impl Records {
-    /// A prompt on row `abs`. The same row again is a redraw of the same
-    /// prompt; a new row drops a command that never ended (an empty Enter
-    /// or Ctrl+C), which gets no dot.
+    /// A prompt on row `abs`. The open prompt's row, or the row its
+    /// `133;A` arrived on before `133;B` moved it up, is a redraw of the
+    /// same prompt; any other row drops a command that never ended (an
+    /// empty Enter or Ctrl+C), which gets no dot.
     pub fn prompt(&mut self, abs: u64, at: Option<Instant>) {
-        if self.open.as_ref().is_some_and(|open| open.prompt == abs) {
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.prompt == abs || open.marked == abs)
+        {
             return;
         }
         self.open = Some(Open {
             prompt: abs,
+            marked: abs,
             output: None,
             output_col: 0,
             command: None,
@@ -312,6 +326,22 @@ impl Records {
             output_at: None,
             ran: false,
         });
+    }
+
+    /// The prompt ended on row `abs`. A prompt cannot start below its own
+    /// end, so an open prompt anchored below `abs` was marked with the
+    /// cursor parked elsewhere (`ConPTY` passes nu's `133;A` through with the
+    /// cursor on the last row, inside reedline's synchronized paint), and
+    /// moves up to `abs`. A prompt at or above its end, multi-line ones
+    /// included, keeps its row; a prompt whose command already ran is left
+    /// alone.
+    pub fn input(&mut self, abs: u64) {
+        if let Some(open) = self.open.as_mut()
+            && !open.ran
+            && abs < open.prompt
+        {
+            open.prompt = abs;
+        }
     }
 
     /// The output starts on row `abs`, the cursor at column `col`.
@@ -360,6 +390,7 @@ impl Records {
     pub fn apply(&mut self, mark: Mark, abs: u64, col: usize, at: Option<Instant>) {
         match mark {
             Mark::Prompt => self.prompt(abs, at),
+            Mark::InputStart => self.input(abs),
             Mark::Output => self.output(abs, col, at),
             Mark::End(exit) => self.end(abs, col, exit, at),
             Mark::Command(text) => self.command(text),
@@ -515,11 +546,12 @@ mod tests {
             found,
             [
                 Split::Mark(Mark::Prompt),
+                Split::Mark(Mark::InputStart),
                 Split::Mark(Mark::Command("ls".to_owned())),
                 Split::Mark(Mark::Output),
                 Split::Mark(Mark::End(Some(2))),
             ],
-            "B is ignored"
+            "every mark in order"
         );
         let bare = splits(b"\x1b]133;D\x07\x1b]133;D;x\x07");
         assert_eq!(bare[0].1, Split::Mark(Mark::End(None)));
@@ -687,6 +719,63 @@ mod tests {
         let record = records.iter().next().expect("a record");
         assert_eq!(record.output, Some(6));
         assert_eq!(record.prompt_at, Some(t));
+    }
+
+    #[test]
+    fn input_moves_a_prompt_marked_below_it_up() {
+        let mut records = Records::default();
+        records.prompt(23, None);
+        records.input(3);
+        assert_eq!(
+            records.anchors(),
+            [3],
+            "the prompt is anchored on its own row"
+        );
+    }
+
+    #[test]
+    fn a_repaint_on_the_parked_row_is_a_redraw() {
+        let t = Instant::now();
+        let mut records = Records::default();
+        records.prompt(23, Some(t));
+        records.input(3);
+        records.prompt(23, Some(t + ms(10)));
+        records.input(3);
+        assert_eq!(records.anchors(), [3], "one open prompt on its own row");
+        records.output(4, 0, Some(t + ms(20)));
+        records.end(5, 0, Some(0), Some(t + ms(30)));
+        let record = records.iter().next().expect("a record");
+        assert_eq!(record.prompt, 3);
+        assert_eq!(
+            record.prompt_at,
+            Some(t),
+            "the repaint keeps the first prompt's time"
+        );
+    }
+
+    #[test]
+    fn input_keeps_a_prompt_at_or_above_it() {
+        let mut records = Records::default();
+        records.prompt(3, None);
+        records.input(3);
+        assert_eq!(records.anchors(), [3], "an end on the prompt's own row");
+        records.prompt(2, None);
+        records.input(4);
+        assert_eq!(
+            records.anchors(),
+            [2],
+            "a multi-line prompt keeps its first row"
+        );
+    }
+
+    #[test]
+    fn input_leaves_a_prompt_whose_command_ran() {
+        let mut records = Records::default();
+        records.prompt(23, None);
+        records.output(24, 0, None);
+        records.input(3);
+        assert_eq!(records.running_prompt(), Some(23));
+        assert_eq!(records.anchors(), [23, 24]);
     }
 
     #[test]

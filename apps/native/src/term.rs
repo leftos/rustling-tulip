@@ -3033,4 +3033,38 @@ mod shell_tests {
             assert_eq!(term.command_text(&record), "", "{record:?}");
         }
     }
+
+    /// nu's prompt as `ConPTY` passes it on (nu 0.116.1 measured): reedline
+    /// paints inside a synchronized update with the cursor hidden, so `ConPTY`
+    /// renders the erase below the anchor down to the last row and passes
+    /// `133;A` through with the cursor parked there, then moves to the
+    /// prompt's row, draws it and ends with `133;B`.
+    fn conpty_nu_prompt(row: usize, rows: usize) -> String {
+        let mut s = format!("\x1b[?2026h\x1b[{row};1H");
+        for _ in row..rows {
+            s.push_str("\x1b[K\r\n");
+        }
+        s.push_str("\x1b[K\x1b[?25l\x1b[80C\x1b]133;A;k=i;click_events=1\x1b\\");
+        format!(
+            "{s}\x1b[{row};1HX:\\w> \x1b]133;P;k=r\x1b\\\x1b[40C 11/06/2026 12:31:53 PM\x1b]133;B\x1b\\\x1b[?2026l\x1b[{row};7H\x1b[?25h"
+        )
+    }
+
+    #[test]
+    fn a_nu_prompt_painted_through_conpty_gets_its_dot_on_its_own_row() {
+        let (mut term, _) = shell(80, 24, 100);
+        term.feed(conpty_nu_prompt(1, 24).as_bytes());
+        term.feed(b"ls\r\n\x1b]133;C\x1b\\out\r\n\x1b]133;D;0\x1b\\");
+        term.feed(conpty_nu_prompt(3, 24).as_bytes());
+        assert_eq!(
+            dot_rows(&term),
+            [0],
+            "the `ls` prompt is row 0: {:#?}",
+            dump(&term)
+        );
+        // nu's `clear`, as ConPTY passes it on, takes the cleared prompt's dot with it.
+        term.feed(b"clear\r\n\x1b]133;C\x1b\\\x1b[H\x1b[2J\x1b[3J\x1b]133;D;0\x1b\\");
+        term.feed(conpty_nu_prompt(1, 24).as_bytes());
+        assert_eq!(dot_rows(&term), [] as [usize; 0], "{:#?}", dump(&term));
+    }
 }
