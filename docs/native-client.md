@@ -274,10 +274,13 @@ This doc records the decisions a change to the client needs to know; what each f
 
 ## Accounts chip and popover
 
-The footer's accounts chip (`footer-accounts`) and its popover (`accounts-popover`) show This PC's saved accounts and switch between them (`accounts.rs` model, `accounts_view.rs` view, the chip in `footer_bar` in `lib.rs`). Only This PC's footer has them; a remote host's accounts are not shown.
+The footer's accounts chip (`footer-accounts`) and its popover (`accounts-popover`) show one host's saved accounts and switch between them (`accounts.rs` model, `accounts_view.rs` view, the chip in `footer_bar` in `lib.rs`).
 
-- **Chip**: "{alias or email} · 5h {n}% · 7d {n}%" for the active account, or "No active account"; its tooltip is "{agent label} accounts". It is drawn only when This PC lists `accounts` in `Welcome.features` and its account list is non-empty. A click opens or closes the popover.
-- **Popover**: a header "{agent label} accounts" with, while the host runs an engine, an "Auto-switch: On" or "Auto-switch: Off" toggle and, while on, "at {n}%" between − and + buttons that step the threshold by 5 within 50 to 95 (a step past a bound is disabled); notes for a paused auto-switch ("Auto-switch paused: {reason}"), an error message and a forecast line.
+- **Which host**: `RootView::accounts_chip_host` picks it with `accounts::chip_host`. A host counts when its connection lists `accounts` in `Welcome.features` and its account list is non-empty; a remote host counts only while its connection is open and it is no other host's duplicate.
+
+  The chip follows the focused pane's host when it counts, else This PC when it counts, else the first remote host that counts in the saved hosts' order. With no host counting there is no chip. The popover opens on that host and keeps it until it closes, even when the focus moves to another host's pane; its list, header, Switch and auto-switch controls all use it, and so does the chip while it is open.
+- **Chip**: "{alias or email} · 5h {n}% · 7d {n}%" for the active account, or "No active account", ending in " · {host name}" when the host is not this machine (`footer-accounts-host`; a window launched against another machine names that machine for its This PC entry too); its tooltip is the popover's header. A click opens or closes the popover.
+- **Popover**: a header "{agent label} accounts", or "{agent label} accounts on {host name}" for a host that is not this machine, with, while the host runs an engine, an "Auto-switch: On" or "Auto-switch: Off" toggle and, while on, "at {n}%" between − and + buttons that step the threshold by 5 within 50 to 95 (a step past a bound is disabled); notes for a paused auto-switch ("Auto-switch paused: {reason}"), an error message and a forecast line.
 
   Then one row per account with its tags (In use, sign-in refused, out of rotation), a reason line where one applies ("Log in again from Settings › Accounts", "Store read-only"), its 5h and 7d usage lines with their reset ("resets HH:MM", "resets Ddd HH:MM", "not started", "used up · back HH:MM") and a Switch button.
 
@@ -289,7 +292,9 @@ The footer's accounts chip (`footer-accounts`) and its popover (`accounts-popove
 
 ## Settings › Accounts
 
-The Accounts tab (`accounts_settings.rs` draws it, `accounts.rs` holds its texts and row actions; the tab rows are in `settings_view.rs`, its search entries in `settings_search.rs`) manages This PC's saved accounts and the auto-switch rules. It is listed only while the Settings target manages the daemon (This PC) and that host lists `accounts` in `Welcome.features`; the daemon lists it only on 64-bit Windows and macOS hosts with an accounts service, and the client never checks its own OS.
+The Accounts tab (`accounts_settings.rs` draws it, `accounts.rs` holds its texts and row actions; the tab rows are in `settings_view.rs`, its search entries in `settings_search.rs`) shows the saved accounts and the auto-switch rules of the host the Settings selector shows (`settings_host`), This PC or a remote host. It is listed while that host lists `accounts` in `Welcome.features`, and moving the selector to another host drops the alias fields and any unsent edit in them, and, while the tab shows, asks the new host for its list.
+
+The daemon lists the feature only on 64-bit Windows and macOS hosts with an accounts service, and the client never checks its own OS.
 
 - **Account table**: one row per account with its tags, usage bars and reset times, then Switch (the row in use has none), an alias field, Up and Down (they move the row in the rotation order) and Remove. Remove on the row in use reads "Switch first" instead of a button.
 - **Add current login**: saves the login the agent is using now, with a note beside it not to `/logout` first, since logging out can revoke the account being left.
@@ -299,7 +304,7 @@ The Accounts tab (`accounts_settings.rs` draws it, `accounts.rs` holds its texts
 - **Auto-switch block**: the on/off toggle, "Switch at" (the threshold) and Hysteresis steppers, and Cooldown, Strategy and Forecast window choice rows. A host whose `Accounts` answer carries no engine shows "Auto-switch is not available on this host" instead. A paused engine adds "Auto-switch paused: {reason}".
 - **Forecast line**: the fleet verdict ("Rotation lasts the next 7 days", "Runs dry at {when}", "All accounts used up", then "back {when}" and the account count), drawn only while the daemon sends a verdict.
 - **Writes**: every control sends its account write at once (`SwitchAccount`, `AddCurrentLogin`, `RemoveAccount`, `SetAccountAlias`, `SetAccountOrder`, `SetAutoSwitch`, `SetAutoSwitchRules`, and `StartAccountLogin` and `CancelAccountLogin` for the login), never through Apply or OK. One write is in flight at a time, and every write control is disabled until its answer; the page shows what the next `Accounts` or `AccountsUpdated` carries.
-- **Remote origin**: when the daemon's `Welcome` calls this connection `Remote`, the admin controls (alias, Up, Down, Remove, Add current login, Log in a new account…, Cancel login) are disabled with the tooltip "Only on the machine running the daemon".
+- **Administration stays local**: on any host but this machine (This PC on a local target; a remote host over the tailnet or SSH, or a window launched against another machine, is not), and on this machine when its daemon's `Welcome` calls this connection `Remote`, the admin controls (alias, Up, Down, Remove, Add current login, Log in a new account…, Cancel login) are disabled with the tooltip "Only on the machine running the daemon". Switch and the auto-switch block stay live and send to the shown host.
 
 The popover's auto-switch toggle and threshold stepper (see "Accounts chip and popover") send the same `SetAutoSwitch`. The account toasts are under "Notifications".
 

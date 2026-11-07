@@ -1,7 +1,7 @@
-//! The Settings › Accounts page: This PC's saved accounts, one row each with
-//! Switch, the alias field, Up and Down and Remove, then Add current login,
-//! Log in a new account and its Cancel, the running login's status line, and
-//! the auto-switch block. Every control sends its account write at once
+//! The Settings › Accounts page: the saved accounts of the host Settings
+//! shows (`settings_host`), one row each with Switch, the alias field, Up
+//! and Down and Remove, then Add current login, Log in a new account and
+//! its Cancel, the running login's status line, and the auto-switch block. Every control sends its account write at once
 //! through [`RootView::send_account_write`] (never Apply), the page shows
 //! what the next `Accounts` or `AccountsUpdated` carries, and every write
 //! control waits while a write is pending. The texts and the rows' actions
@@ -27,13 +27,11 @@ use crate::settings_view::{
     settings_button, toggle,
 };
 use crate::spawn_view::{DISABLED_OPACITY, field};
-use crate::target::HostKey;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, tagged_text, tooltip};
 
-/// Why an admin control is disabled on a connection the daemon calls
-/// remote.
+/// Why an admin control is disabled on any host but this machine.
 const REMOTE_ORIGIN_TIP: &str = "Only on the machine running the daemon";
 /// The auto-switch block's note while the host reports no engine.
 const AUTO_MISSING: &str = "Auto-switch is not available on this host";
@@ -112,7 +110,8 @@ impl AccountsControl {
         }
     }
 
-    /// Whether it is an admin control, which a remote origin disables.
+    /// Whether it is an admin control, which every host but this machine
+    /// disables.
     const fn admin(self) -> bool {
         matches!(
             self,
@@ -160,7 +159,8 @@ impl AliasFields {
 struct Page {
     /// An account write is pending.
     writing: bool,
-    /// The daemon calls this connection remote.
+    /// The admin controls are locked: the host is not this machine, or its
+    /// daemon calls this connection remote.
     locked: bool,
     focused: Option<SettingsControl>,
 }
@@ -176,27 +176,36 @@ struct Stepper {
 }
 
 impl RootView {
-    /// Whether Settings offers the Accounts tab: on the host whose daemon
-    /// this client manages, while its connection lists the feature.
+    /// Whether Settings offers the Accounts tab: while the connection to
+    /// the host Settings shows lists the feature.
     pub(crate) fn accounts_tab_offered(&self) -> bool {
-        self.capabilities_of(&self.settings_host).manages_daemon()
-            && self
-                .conn_of(&self.settings_host)
-                .is_some_and(|conn| conn.supports(FEATURE_ACCOUNTS))
+        self.conn_of(&self.settings_host)
+            .is_some_and(|conn| conn.supports(FEATURE_ACCOUNTS))
     }
 
-    /// Whether This PC's daemon calls this connection remote, which
-    /// disables the admin controls.
+    /// Whether the admin controls are disabled: on any host but this
+    /// machine (the Local key on a local target), and on this machine when
+    /// its daemon calls this connection remote.
     fn accounts_admin_locked(&self) -> bool {
-        self.conn_of(&HostKey::Local)
-            .and_then(crate::connection::Connection::origin)
-            == Some(ConnectionOrigin::Remote)
+        !self.is_this_machine(&self.settings_host)
+            || self
+                .conn_of(&self.settings_host)
+                .and_then(crate::connection::Connection::origin)
+                == Some(ConnectionOrigin::Remote)
     }
 
-    /// The Accounts tab was selected: This PC is asked for its list, as the
-    /// popover does, and the alias fields are built.
+    /// Settings moved to another host: the alias fields, and any edit they
+    /// hold, belong to the host they were built for and go.
+    pub(crate) fn drop_account_alias_fields(&mut self) {
+        self.settings_pending.account_aliases = AliasFields::default();
+    }
+
+    /// The Accounts tab was selected, or Settings moved to another host
+    /// while it shows: the host Settings shows is asked for its list, as
+    /// the popover does, and the alias fields are built.
     pub(crate) fn on_accounts_tab_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ask_accounts_if_listed(&HostKey::Local);
+        let host = self.settings_host.clone();
+        self.ask_accounts_if_listed(&host);
         self.hold_account_alias_fields(window, cx);
     }
 
@@ -210,9 +219,10 @@ impl RootView {
         if self.settings_tab != SettingsTab::Accounts {
             return;
         }
+        let host = self.settings_host.clone();
         let listed: Vec<(u32, String, String)> = self
             .accounts
-            .accounts(&HostKey::Local)
+            .accounts(&host)
             .iter()
             .map(|account| {
                 (
@@ -222,7 +232,7 @@ impl RootView {
                 )
             })
             .collect();
-        let writing = self.accounts.writing(&HostKey::Local);
+        let writing = self.accounts.writing(&host);
         let fields = &mut self.settings_pending.account_aliases.0;
         fields.retain(|field| listed.iter().any(|(number, ..)| *number == field.number));
         for (number, alias, email) in listed {
@@ -293,9 +303,10 @@ impl RootView {
 
     /// Sends account `number`'s alias as its field reads, when the user
     /// edited it; a blank field clears it. Nothing while a write is pending
-    /// or on a remote origin. Returns whether it sent.
+    /// or while the admin controls are locked (any host but this machine).
+    /// Returns whether it sent.
     fn commit_alias(&mut self, number: u32, cx: &mut Context<Self>) -> bool {
-        let host = HostKey::Local;
+        let host = self.settings_host.clone();
         if self.accounts_admin_locked() || self.accounts.writing(&host) {
             return false;
         }
@@ -375,7 +386,7 @@ impl RootView {
     /// that take input now. An alias field stays in the ring through a
     /// pending write, read-only, so the keyboard is not pulled from it.
     pub(crate) fn accounts_controls(&self, live_only: bool) -> Vec<SettingsControl> {
-        let host = HostKey::Local;
+        let host = self.settings_host.clone();
         let writing = self.accounts.writing(&host);
         let locked = self.accounts_admin_locked();
         let switching = self.accounts.switching(&host);
@@ -443,7 +454,8 @@ impl RootView {
 
     /// A press of the page's `control`: its account write, sent at once
     /// unless a write is pending; an admin control sends nothing on a
-    /// remote origin, and a choice already selected nothing either.
+    /// host that is not this machine, and a choice already selected nothing
+    /// either.
     pub(crate) fn press_accounts_control(
         &mut self,
         control: AccountsControl,
@@ -452,7 +464,7 @@ impl RootView {
         if control.admin() && self.accounts_admin_locked() {
             return;
         }
-        let host = HostKey::Local;
+        let host = self.settings_host.clone();
         match control {
             AccountsControl::Switch(number) => {
                 self.send_account_write(
@@ -526,7 +538,7 @@ impl RootView {
     /// A press of the auto-switch block's `control`, while the host
     /// reports an auto-switch state.
     fn press_auto_control(&mut self, control: AccountsControl, cx: &mut Context<Self>) {
-        let host = HostKey::Local;
+        let host = self.settings_host.clone();
         let auto = self.accounts.auto(&host).cloned();
         match control {
             AccountsControl::AutoSwitch => {
@@ -618,10 +630,12 @@ impl RootView {
         }
     }
 
-    /// Sends This PC's daemon a `SetAutoSwitchRules` carrying `rules`.
+    /// Sends the host Settings shows a `SetAutoSwitchRules` carrying
+    /// `rules`.
     fn send_rules(&mut self, rules: Rules, cx: &mut Context<Self>) {
+        let host = self.settings_host.clone();
         self.send_account_write(
-            &HostKey::Local,
+            &host,
             WriteAction::Rules,
             |request_id| ClientMessage::SetAutoSwitchRules {
                 hysteresis_pct: rules.hysteresis_pct,
@@ -642,7 +656,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let t = theme(cx);
-        let host = HostKey::Local;
+        let host = self.settings_host.clone();
         let now = Utc::now();
         let list = self.accounts.accounts(&host);
         let writing = self.accounts.writing(&host);
@@ -880,8 +894,9 @@ impl RootView {
             .child(removal)
     }
 
-    /// Account `number`'s alias field; on a remote origin, or before the
-    /// field is built, a dimmed frame showing the alias that takes no keys.
+    /// Account `number`'s alias field; while locked (any host but this
+    /// machine), or before the field is built, a dimmed frame showing the
+    /// alias that takes no keys.
     fn alias_view(&self, number: u32, page: Page, cx: &mut Context<Self>) -> AnyElement {
         let control = AccountsControl::Alias(number).control();
         if let Some(field) = self
@@ -898,7 +913,7 @@ impl RootView {
         let t = theme(cx);
         let alias = self
             .accounts
-            .accounts(&HostKey::Local)
+            .accounts(&self.settings_host)
             .iter()
             .find(|account| account.number == number)
             .and_then(|account| account.alias.clone())
@@ -923,7 +938,7 @@ impl RootView {
     fn auto_section(&self, page: Page, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
         let block = section(ui_text_size(cx), ui_weight_shift(cx), AUTO_SECTION);
-        let Some(auto) = self.accounts.auto(&HostKey::Local) else {
+        let Some(auto) = self.accounts.auto(&self.settings_host) else {
             return block.child(
                 div()
                     .driver_id(|| "settings-accounts-auto-missing".to_owned())
@@ -1027,7 +1042,8 @@ struct Rules {
     rate_window_minutes: Option<u32>,
 }
 
-/// `button` with the remote-origin tooltip while `locked`.
+/// `button` with the tooltip naming why it is locked (any host but this
+/// machine) while `locked`.
 fn locked_tip(button: Stateful<Div>, locked: bool) -> Stateful<Div> {
     button.when(locked, |button| button.tooltip(tooltip(REMOTE_ORIGIN_TIP)))
 }

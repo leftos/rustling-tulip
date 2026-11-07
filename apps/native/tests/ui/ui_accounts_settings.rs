@@ -222,7 +222,7 @@ fn the_accounts_tab_is_listed_only_on_this_pc_with_the_feature(cx: &mut TestAppC
     h.click_on(&remote_row());
     assert!(
         !tab_listed(&mut h),
-        "a remote target's daemon is not this client's"
+        "a remote host whose daemon does not list accounts offers no tab"
     );
     h.click_on("settings-host-local");
     assert!(tab_listed(&mut h), "This PC lists it again");
@@ -843,4 +843,155 @@ fn login_controls_are_locked_on_a_remote_host(cx: &mut TestAppContext) {
     h.send(login_msg(AccountLoginState::Started, None, None));
     press(&mut h, "settings-accounts-cancel-login");
     assert!(writes(&mut h).is_empty(), "Cancel login is locked too");
+}
+
+/// The newest `ListAccounts` request id in `sent`.
+fn list_id_in(sent: Vec<ClientMessage>) -> Option<String> {
+    sent.into_iter().rev().find_map(|msg| match msg {
+        ClientMessage::ListAccounts { request_id } => request_id,
+        _ => None,
+    })
+}
+
+#[gpui::test]
+fn a_remote_hosts_accounts_show_on_its_settings_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    // This PC (the client's own daemon) keeps no account.
+    shown(&mut h, Vec::new(), None);
+    // The remote host keeps three and lists the feature.
+    let mut features = daemon_features();
+    features.push(protocol::FEATURE_ACCOUNTS.to_owned());
+    let mut host = h.host(&remote());
+    host.connect_keeping_sent_with(features);
+    let asked = list_id_in(host.sent()).expect("the remote host is asked on its Welcome");
+    host.send(accounts_reply(trio(), Some(auto_switch(None)), &asked));
+
+    h.click_on("settings-open");
+    h.click_on(&remote_row());
+    assert!(
+        tab_listed(&mut h),
+        "a remote host that lists accounts offers its Accounts tab"
+    );
+    h.click_on("settings-tab-accounts");
+    let mut host = h.host(&remote());
+    let asked = list_id_in(host.sent()).expect("the tab asks the remote host, not This PC");
+    host.send(accounts_reply(trio(), Some(auto_switch(None)), &asked));
+    assert!(
+        drawn(&mut h, "settings-accounts-switch-2"),
+        "the remote host's rows are drawn"
+    );
+
+    press(&mut h, "settings-accounts-remove-3");
+    assert!(
+        h.host(&remote()).sent().is_empty(),
+        "administration stays on the machine running the daemon"
+    );
+    press(&mut h, "settings-accounts-switch-2");
+    let sent = h.host(&remote()).sent();
+    assert!(
+        sent.iter()
+            .any(|msg| matches!(msg, ClientMessage::SwitchAccount { number: 2, .. })),
+        "Switch goes to the remote host: {sent:?}"
+    );
+    assert!(
+        !h.sent()
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::SwitchAccount { .. })),
+        "and not to This PC"
+    );
+}
+
+/// Settings open on the remote host's Accounts page: This PC keeps no
+/// account, the remote host lists the feature and keeps [`trio`], nothing
+/// sent left unread on it.
+fn remote_page(h: &mut Harness<'_>) {
+    shown(h, Vec::new(), None);
+    let mut features = daemon_features();
+    features.push(protocol::FEATURE_ACCOUNTS.to_owned());
+    let mut host = h.host(&remote());
+    host.connect_keeping_sent_with(features);
+    let asked = list_id_in(host.sent()).expect("the remote host is asked on its Welcome");
+    host.send(accounts_reply(trio(), Some(auto_switch(None)), &asked));
+    h.click_on("settings-open");
+    h.click_on(&remote_row());
+    h.click_on("settings-tab-accounts");
+    let mut host = h.host(&remote());
+    let asked = list_id_in(host.sent()).expect("the tab asks the remote host");
+    host.send(accounts_reply(trio(), Some(auto_switch(None)), &asked));
+    h.sent();
+}
+
+#[gpui::test]
+fn a_window_launched_against_another_machine_locks_administration(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    // The window's own connection, under the Local key, reaches an SSH
+    // host whose daemon calls it local.
+    let mut features = daemon_features();
+    features.push(protocol::FEATURE_ACCOUNTS.to_owned());
+    let mut conn = Connection::for_target(Target::parse_ssh("devbox", None).expect("an SSH host"));
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_welcome(PROTOCOL, features, None);
+    h.event(NetEvent::State(conn));
+    h.send_welcome(PROTOCOL);
+    let id = listed(&mut h);
+    h.send(accounts_reply(trio(), Some(auto_switch(None)), &id));
+    on_page(&mut h, trio(), Some(auto_switch(None)));
+
+    for selector in [
+        "settings-accounts-remove-3",
+        "settings-accounts-up-2",
+        "settings-accounts-add-login",
+        "settings-accounts-login",
+    ] {
+        press(&mut h, selector);
+        assert!(
+            writes(&mut h).is_empty(),
+            "{selector} is disabled on another machine"
+        );
+    }
+    press(&mut h, "settings-accounts-switch-2");
+    let sent = one_write(&mut h);
+    assert!(
+        matches!(sent, ClientMessage::SwitchAccount { number: 2, .. }),
+        "Switch stays live: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_remote_hosts_accounts_lock_administration(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    remote_page(&mut h);
+
+    for selector in [
+        "settings-accounts-up-2",
+        "settings-accounts-down-2",
+        "settings-accounts-login",
+    ] {
+        press(&mut h, selector);
+        assert!(
+            h.host(&remote()).sent().is_empty(),
+            "{selector} is disabled on a remote host"
+        );
+    }
+    press(&mut h, "settings-accounts-alias-2");
+    h.keys("ctrl-a");
+    type_line(&mut h, "work");
+    h.keys("enter");
+    assert!(
+        h.host(&remote()).sent().is_empty(),
+        "the alias field takes no edit on a remote host"
+    );
+
+    press(&mut h, "settings-accounts-switch-2");
+    let sent = h.host(&remote()).sent();
+    assert!(
+        sent.iter()
+            .any(|msg| matches!(msg, ClientMessage::SwitchAccount { number: 2, .. })),
+        "Switch stays live and goes to the remote host: {sent:?}"
+    );
+    assert!(writes(&mut h).is_empty(), "nothing goes to This PC");
 }

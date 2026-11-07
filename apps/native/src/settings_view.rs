@@ -1388,6 +1388,9 @@ impl RootView {
     /// holds `host`'s page state, built as selecting the tab would when
     /// `host` has none. Every host's drafts stay.
     fn show_settings_host(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        if host != self.settings_host {
+            self.drop_account_alias_fields();
+        }
         self.settings_host = host;
         self.keep_offered_tab();
         self.settings_control = None;
@@ -1405,6 +1408,9 @@ impl RootView {
             }
             if self.settings_tab == SettingsTab::Dashboard {
                 self.hold_dashboard_tab(window, cx);
+            }
+            if self.settings_tab == SettingsTab::Accounts {
+                self.on_accounts_tab_selected(window, cx);
             }
         }
         cx.notify();

@@ -1,13 +1,13 @@
-//! The footer's accounts chip and its popover: This PC's saved accounts,
-//! drawn from [`crate::accounts`]'s models. The view only renders and
-//! forwards clicks; the fold, the stale-reply rule and every text live in
-//! the model.
+//! The footer's accounts chip and its popover: one host's saved accounts
+//! ([`RootView::accounts_chip_host`]), drawn from [`crate::accounts`]'s
+//! models. The view only renders and forwards clicks; the fold, the
+//! stale-reply rule and every text live in the model.
 
 use chrono::Utc;
 use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, div, prelude::*, px, relative};
 use protocol::{AutoSwitchState, ClientMessage, DaemonMessage, FEATURE_ACCOUNTS};
 
-use crate::accounts::{self, Bar, Chip, Level, Row, Tag, WindowLine, WriteAction};
+use crate::accounts::{self, Bar, Chip, ChipCandidate, Level, Row, Tag, WindowLine, WriteAction};
 use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_text_size, ui_weight, ui_weight_shift};
@@ -98,12 +98,54 @@ impl RootView {
             .is_some_and(|conn| conn.supports(FEATURE_ACCOUNTS))
     }
 
-    /// This PC's chip, while the footer draws one.
-    fn accounts_chip_model(&self) -> Option<Chip> {
-        accounts::chip(
-            self.lists_accounts(&HostKey::Local),
-            self.accounts.accounts(&HostKey::Local),
-        )
+    /// The host whose accounts the chip and popover show: the focused
+    /// pane's host when it lists accounts, else This PC when it does, else
+    /// the first connected remote host in saved order that does; `None`
+    /// when no host does.
+    pub(crate) fn accounts_chip_host(&self) -> Option<HostKey> {
+        let connected = self.connected_hosts();
+        let mut held = self.held_hosts();
+        held.sort_by_key(|host| self.rank(host));
+        let hosts: Vec<ChipCandidate> = held
+            .into_iter()
+            .map(|host| ChipCandidate {
+                connected: connected.contains(&host),
+                listed: self.lists_accounts(&host) && !self.accounts.accounts(&host).is_empty(),
+                host,
+            })
+            .collect();
+        accounts::chip_host(&self.focused_host(), &hosts)
+    }
+
+    /// The host the chip and popover show now: while the popover is open,
+    /// the host it opened on, else [`Self::accounts_chip_host`].
+    fn accounts_shown_host(&self) -> Option<HostKey> {
+        if self.accounts_open
+            && let Some(host) = self.accounts.popover_host()
+        {
+            return Some(host.clone());
+        }
+        self.accounts_chip_host()
+    }
+
+    /// The shown host and its chip, while the footer draws one.
+    fn accounts_chip_model(&self) -> Option<(HostKey, Chip)> {
+        let host = self.accounts_shown_host()?;
+        let chip = accounts::chip(self.lists_accounts(&host), self.accounts.accounts(&host))?;
+        Some((host, chip))
+    }
+
+    /// Whether `host` is this machine: the Local key on a local target. A
+    /// window launched against another machine holds it under the Local
+    /// key too.
+    pub(crate) fn is_this_machine(&self, host: &HostKey) -> bool {
+        *host == HostKey::Local && self.conn().target().is_local()
+    }
+
+    /// `host`'s name when it is not this machine, which the chip and the
+    /// popover header add.
+    fn accounts_host_name(&self, host: &HostKey) -> Option<String> {
+        (!self.is_this_machine(host)).then(|| self.host_name(host))
     }
 
     /// Closes the accounts popover once the footer draws no chip, so it
@@ -122,7 +164,11 @@ impl RootView {
     /// The chip's text, while the footer draws it.
     #[must_use]
     pub fn accounts_chip_text(&self) -> Option<String> {
-        self.accounts_chip_model().map(|chip| chip.text())
+        self.accounts_chip_model()
+            .map(|(host, chip)| match self.accounts_host_name(&host) {
+                Some(name) => format!("{} · {name}", chip.text()),
+                None => chip.text(),
+            })
     }
 
     /// Whether the accounts popover is open.
@@ -137,14 +183,16 @@ impl RootView {
         self.flyout_open
     }
 
-    /// The account whose Switch This PC's daemon has not answered yet.
+    /// The account whose Switch the shown host has not answered yet.
     #[must_use]
     pub fn accounts_switching(&self) -> Option<u32> {
-        self.accounts.switching(&HostKey::Local)
+        self.accounts_shown_host()
+            .and_then(|host| self.accounts.switching(&host))
     }
 
-    /// Opens the accounts popover, closing the daemon flyout and asking
-    /// This PC for the list afresh, or closes it when open.
+    /// Opens the accounts popover on the chip's host, which it keeps while
+    /// it stays open, closing the daemon flyout and asking that host for
+    /// the list afresh, or closes it when open.
     pub fn toggle_accounts(&mut self) {
         if self.accounts_open {
             self.close_flyout();
@@ -152,14 +200,21 @@ impl RootView {
         }
         self.close_flyout();
         self.accounts_open = true;
-        self.ask_accounts_if_listed(&HostKey::Local);
+        let host = self.accounts_chip_host();
+        self.accounts.set_popover_host(host.clone());
+        if let Some(host) = host {
+            self.ask_accounts_if_listed(&host);
+        }
     }
 
-    /// Sends This PC's daemon a switch to account `number`, unless a write
+    /// Sends the shown host a switch to account `number`, unless a write
     /// is pending.
     fn switch_account(&mut self, number: u32, cx: &mut Context<Self>) {
+        let Some(host) = self.accounts_shown_host() else {
+            return;
+        };
         self.send_account_write(
-            &HostKey::Local,
+            &host,
             WriteAction::Switch(number),
             |request_id| ClientMessage::SwitchAccount { number, request_id },
             cx,
@@ -185,20 +240,26 @@ impl RootView {
         true
     }
 
-    /// The popover's title, from This PC's default agent.
-    fn accounts_header(&self) -> String {
+    /// The popover's title, from `host`'s default agent, naming `host`
+    /// unless it is This PC.
+    fn accounts_header(&self, host: &HostKey) -> String {
         let label = self
             .sidebar
-            .agents(&HostKey::Local)
+            .agents(host)
             .first()
             .map(|descriptor| descriptor.label.as_str());
-        accounts::header(label)
+        let header = accounts::header(label);
+        match self.accounts_host_name(host) {
+            Some(name) => format!("{header} on {name}"),
+            None => header,
+        }
     }
 
     /// The footer's accounts chip: a dot, the account in use and its two
     /// windows' bars; a click opens or closes the popover.
     pub(crate) fn accounts_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let chip = self.accounts_chip_model()?;
+        let (host, chip) = self.accounts_chip_model()?;
+        let host_name = self.accounts_host_name(&host);
         let t = theme(cx);
         let open = self.accounts_open;
         let in_use = chip.five_hour.is_some() || chip.seven_day.is_some();
@@ -277,7 +338,12 @@ impl RootView {
                         ))
                 }))
                 .children(windows)
-                .tooltip(tooltip(self.accounts_header()))
+                .children(host_name.map(|name| {
+                    div()
+                        .text_color(gpui::rgb(t.subtle))
+                        .child(tagged_text("footer-accounts-host", name))
+                }))
+                .tooltip(tooltip(self.accounts_header(&host)))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.toggle_accounts();
                     cx.notify();
@@ -290,14 +356,15 @@ impl RootView {
     /// per account and when the newest usage was fetched.
     pub(crate) fn accounts_popover(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let host = HostKey::Local;
+        let host = self.accounts_shown_host().unwrap_or(HostKey::Local);
         let now = Utc::now();
         let list = self.accounts.accounts(&host);
         let auto = self.accounts.auto(&host);
         let switching = self.accounts.switching(&host);
         let writing = self.accounts.writing(&host);
-        let controls =
-            auto.map_or_else(Vec::new, |auto| Self::auto_controls(auto, writing, &t, cx));
+        let controls = auto.map_or_else(Vec::new, |auto| {
+            Self::auto_controls(&host, auto, writing, &t, cx)
+        });
         let head = div()
             .flex()
             .items_center()
@@ -311,7 +378,7 @@ impl RootView {
                     .text_size(ui_px(cx, 14.0))
                     .child(tagged_text(
                         "accounts-header".to_owned(),
-                        self.accounts_header(),
+                        self.accounts_header(&host),
                     )),
             )
             .children(controls);
@@ -363,6 +430,7 @@ impl RootView {
     /// while it is on, the threshold stepper; every control takes a click
     /// only while no write is pending.
     fn auto_controls(
+        host: &HostKey,
         auto: &AutoSwitchState,
         writing: bool,
         t: &UiTheme,
@@ -370,6 +438,7 @@ impl RootView {
     ) -> Vec<AnyElement> {
         let on = auto.enabled;
         let toggle_enabled = !writing;
+        let toggle_host = host.clone();
         let toggle = outlined_button(
             ui_text_size(cx),
             ui_weight_shift(cx),
@@ -390,7 +459,7 @@ impl RootView {
         .when(toggle_enabled, |button| {
             button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.send_account_write(
-                    &HostKey::Local,
+                    &toggle_host,
                     WriteAction::AutoSwitch,
                     |request_id| ClientMessage::SetAutoSwitch {
                         enabled: Some(!on),
@@ -404,6 +473,7 @@ impl RootView {
         let mut controls = vec![div().flex_none().child(toggle).into_any_element()];
         if auto.enabled {
             controls.push(Self::threshold_button(
+                host,
                 auto.threshold_pct,
                 false,
                 writing,
@@ -421,6 +491,7 @@ impl RootView {
                     .into_any_element(),
             );
             controls.push(Self::threshold_button(
+                host,
                 auto.threshold_pct,
                 true,
                 writing,
@@ -434,12 +505,14 @@ impl RootView {
     /// The threshold stepper's `up` or down button, disabled when the step
     /// leaves the bounds or a write is pending.
     fn threshold_button(
+        host: &HostKey,
         current: f64,
         up: bool,
         writing: bool,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let host = host.clone();
         let selector = if up {
             "accounts-auto-up"
         } else {
@@ -461,7 +534,7 @@ impl RootView {
             button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 if let Some(threshold) = step {
                     this.send_account_write(
-                        &HostKey::Local,
+                        &host,
                         WriteAction::AutoSwitch,
                         |request_id| ClientMessage::SetAutoSwitch {
                             enabled: None,

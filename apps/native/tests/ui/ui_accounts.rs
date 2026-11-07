@@ -123,6 +123,171 @@ fn the_chip_shows_the_active_account_and_its_bars(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_footer_chip_follows_the_focused_panes_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::remote_in_pane(
+        cx,
+        &dir,
+        &serde_json::json!({}),
+        &[],
+        support::session("b1").build(),
+    );
+    // This PC keeps main and ops, yet the focused pane's host wins.
+    shown(&mut h, pair());
+    // The remote host, whose pane p2 has the keyboard, keeps lab.
+    let mut features = support::daemon_features();
+    features.push(protocol::FEATURE_ACCOUNTS.to_owned());
+    let mut host = h.host(&support::saved_remote());
+    host.connect_keeping_sent_with(features);
+    let asked = host
+        .sent()
+        .into_iter()
+        .rev()
+        .find_map(|msg| match msg {
+            ClientMessage::ListAccounts { request_id } => request_id,
+            _ => None,
+        })
+        .expect("the remote host is asked on its Welcome");
+    host.send(accounts_reply(
+        vec![
+            account(1, "lab")
+                .active()
+                .five_hour(61.0)
+                .seven_day(40.0)
+                .build(),
+        ],
+        None,
+        &asked,
+    ));
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "the remote pane still has the keyboard"
+    );
+    assert_eq!(
+        chip_text(&mut h).as_deref(),
+        Some("lab · 5h 61% · 7d 40% · box"),
+        "the chip shows the focused pane's host and names it"
+    );
+    assert!(drawn(&mut h, "footer-accounts-host=box"));
+}
+
+/// This PC keeps [`pair`] and shows `a1` in tab `t1`; the saved remote host
+/// keeps lab (in use) and ops2 and shows `b1` in tab `t2`, which is shown.
+fn remote_tab_shown<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    support::seed_ui(
+        dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": support::REMOTE, "port": 8787 }] }),
+    );
+    let fixture = support::Fixture {
+        sessions: vec![support::session("a1").build()],
+        tabs: vec![
+            support::tab("t1", &support::pane("p1", Some("a1"))),
+            support::tab("t2", &support::remote_pane("p2", "b1")),
+        ],
+        ..support::Fixture::default()
+    };
+    // This PC lists the feature before the layout arrives.
+    let mut h = Harness::open(cx, dir);
+    shown(&mut h, pair());
+    h.load(&fixture);
+    h.answer_scrollback("a1", b"");
+    // A pane takes the keyboard, so the tab shortcuts reach the window.
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, gpui::Modifiers::none());
+    let mut features = support::daemon_features();
+    features.push(protocol::FEATURE_ACCOUNTS.to_owned());
+    let mut host = h.host(&support::saved_remote());
+    host.connect_keeping_sent_with(features);
+    let asked = host
+        .sent()
+        .into_iter()
+        .rev()
+        .find_map(|msg| match msg {
+            ClientMessage::ListAccounts { request_id } => request_id,
+            _ => None,
+        })
+        .expect("the remote host is asked on its Welcome");
+    host.send(accounts_reply(
+        vec![
+            account(1, "lab").active().build(),
+            account(2, "ops2").build(),
+        ],
+        None,
+        &asked,
+    ));
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![support::session("b1").build()],
+    });
+    h.keys("ctrl-tab");
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "the remote host's tab is shown"
+    );
+    h.sent();
+    h.host(&support::saved_remote()).sent();
+    h
+}
+
+#[gpui::test]
+fn an_open_popover_keeps_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_tab_shown(cx, &dir);
+    h.click_on("footer-accounts");
+    assert!(h.root(|root, _| root.accounts_open()), "the chip opens it");
+    let mut host = h.host(&support::saved_remote());
+    let asked = host
+        .sent()
+        .into_iter()
+        .rev()
+        .find_map(|msg| match msg {
+            ClientMessage::ListAccounts { request_id } => request_id,
+            _ => None,
+        })
+        .expect("opening asks the remote host");
+    host.send(accounts_reply(
+        vec![
+            account(1, "lab").active().build(),
+            account(2, "ops2").build(),
+        ],
+        None,
+        &asked,
+    ));
+
+    // This PC's pane takes the focus while the popover stays open, as a
+    // jump to it does.
+    let action = h
+        .root(|root, _| {
+            root.quick_jump_entries().into_iter().find(|entry| {
+                entry.kind.tag() == "[PANE]" && format!("{:?}", entry.action).contains("\"p1\"")
+            })
+        })
+        .map(|entry| entry.action)
+        .expect("a [PANE] entry for This PC's pane");
+    h.root_update(move |root, window, cx| root.jump_to(action, window, cx));
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p1"),
+        "This PC's pane is focused now"
+    );
+    assert!(h.root(|root, _| root.accounts_open()), "the popover stays");
+    h.click_on("accounts-switch-2");
+    let sent = h.host(&support::saved_remote()).sent();
+    assert!(
+        sent.iter()
+            .any(|msg| matches!(msg, ClientMessage::SwitchAccount { number: 2, .. })),
+        "Switch goes to the host the popover opened on: {sent:?}"
+    );
+    assert!(
+        !h.sent()
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::SwitchAccount { .. })),
+        "and not to This PC"
+    );
+}
+
+#[gpui::test]
 fn no_chip_without_the_feature_or_accounts(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::open(cx, &dir);

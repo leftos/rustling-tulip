@@ -153,9 +153,22 @@ pub(crate) struct AccountsState {
     /// each host, until a switch or the host's `Welcome`: the engine sends
     /// one on every tick that finds every account used up.
     exhausted_raised: HashMap<HostKey, Option<DateTime<Utc>>>,
+    /// The host the accounts popover showed when it last opened; it keeps
+    /// that host while it stays open.
+    popover_host: Option<HostKey>,
 }
 
 impl AccountsState {
+    /// The host the accounts popover showed when it last opened.
+    pub(crate) const fn popover_host(&self) -> Option<&HostKey> {
+        self.popover_host.as_ref()
+    }
+
+    /// The accounts popover opened on `host`.
+    pub(crate) fn set_popover_host(&mut self, host: Option<HostKey>) {
+        self.popover_host = host;
+    }
+
     /// The body of the account toast `event` from `host` raises, as
     /// [`account_toast`] words it, `wanted` when the Account switches toggle
     /// is on: an `AllExhausted` raises only when its reset differs from the
@@ -565,6 +578,39 @@ pub(crate) fn chip(supports: bool, accounts: &[AccountSnapshot]) -> Option<Chip>
         seven_day: active.seven_day.as_ref().map(|window| bar(window, false)),
         signed_out: false,
     })
+}
+
+/// What [`chip_host`] knows about one host the window holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChipCandidate {
+    pub(crate) host: HostKey,
+    /// Its connection is open, it is no other host's duplicate.
+    pub(crate) connected: bool,
+    /// Its connection lists the accounts feature and its list is not empty.
+    pub(crate) listed: bool,
+}
+
+/// The host whose accounts the footer chip and popover show, from `hosts`
+/// (This PC first, then the remote hosts in saved order): the focused
+/// pane's host when it is connected and lists accounts, else This PC when
+/// it does, else the first connected remote host that does; `None` when
+/// no host does.
+pub(crate) fn chip_host(focused: &HostKey, hosts: &[ChipCandidate]) -> Option<HostKey> {
+    let shows = |candidate: &&ChipCandidate| {
+        candidate.listed && (candidate.connected || candidate.host == HostKey::Local)
+    };
+    hosts
+        .iter()
+        .filter(shows)
+        .find(|candidate| candidate.host == *focused)
+        .or_else(|| {
+            hosts
+                .iter()
+                .filter(shows)
+                .find(|candidate| candidate.host == HostKey::Local)
+        })
+        .or_else(|| hosts.iter().find(shows))
+        .map(|candidate| candidate.host.clone())
 }
 
 /// The chip of `active`, whose sign-in was refused: its name and the tag,
@@ -1062,11 +1108,11 @@ mod tests {
     };
 
     use super::{
-        AccountsState, AliasChange, Level, RELOGIN_LINE, Removal, RowActions, STORE_READ_ONLY,
-        Segment, Tag, WriteAction, account_toast, add_login_note, age_text, alias_change, bar,
-        checked_line, chip, cooldown_segments, forecast, header, hysteresis_step, login_status,
-        moved_order, paused_line, row, row_actions, strategy_segments, threshold_step,
-        window_segments,
+        AccountsState, AliasChange, ChipCandidate, Level, RELOGIN_LINE, Removal, RowActions,
+        STORE_READ_ONLY, Segment, Tag, WriteAction, account_toast, add_login_note, age_text,
+        alias_change, bar, checked_line, chip, chip_host, cooldown_segments, forecast, header,
+        hysteresis_step, login_status, moved_order, paused_line, row, row_actions,
+        strategy_segments, threshold_step, window_segments,
     };
     use crate::target::HostKey;
 
@@ -1694,6 +1740,73 @@ mod tests {
         );
         older.fetched_at = None;
         assert_eq!(checked_line(&[older], now()), None, "nothing fetched yet");
+    }
+
+    fn candidate(host: &HostKey, connected: bool, listed: bool) -> ChipCandidate {
+        ChipCandidate {
+            host: host.clone(),
+            connected,
+            listed,
+        }
+    }
+
+    fn remote_key(name: &str) -> HostKey {
+        HostKey::Remote(name.to_owned())
+    }
+
+    #[test]
+    fn the_chip_follows_the_focused_panes_host_when_it_lists_accounts() {
+        let pc = remote_key("pc");
+        let hosts = [
+            candidate(&HostKey::Local, true, true),
+            candidate(&pc, true, true),
+        ];
+        assert_eq!(chip_host(&pc, &hosts), Some(pc));
+    }
+
+    #[test]
+    fn the_chip_falls_back_to_this_pc_when_the_focused_host_lists_none() {
+        let pc = remote_key("pc");
+        let hosts = [
+            candidate(&HostKey::Local, true, true),
+            candidate(&pc, true, false),
+        ];
+        assert_eq!(chip_host(&pc, &hosts), Some(HostKey::Local));
+    }
+
+    #[test]
+    fn the_chip_falls_back_to_the_first_connected_remote_host_that_lists_accounts() {
+        let offline = remote_key("offline");
+        let empty = remote_key("empty");
+        let first = remote_key("first");
+        let second = remote_key("second");
+        let hosts = [
+            candidate(&HostKey::Local, true, false),
+            candidate(&offline, false, true),
+            candidate(&empty, true, false),
+            candidate(&first, true, true),
+            candidate(&second, true, true),
+        ];
+        assert_eq!(
+            chip_host(&HostKey::Local, &hosts),
+            Some(first),
+            "the first in saved order that is connected and lists accounts"
+        );
+        assert_eq!(
+            chip_host(&offline, &hosts),
+            Some(remote_key("first")),
+            "an offline focused host is passed over"
+        );
+    }
+
+    #[test]
+    fn no_chip_host_when_no_host_lists_accounts() {
+        let pc = remote_key("pc");
+        let hosts = [
+            candidate(&HostKey::Local, true, false),
+            candidate(&pc, false, true),
+        ];
+        assert_eq!(chip_host(&HostKey::Local, &hosts), None);
     }
 
     #[test]
