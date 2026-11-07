@@ -1,5 +1,6 @@
 //! Remote access over the tailnet: its switch, listener, router and serving name, remote status, and LAN refusals.
 use super::connection::{AuthKind, client_session_until};
+use super::pwa_static;
 use super::{Hub, StateEvent};
 use crate::paths::Dirs;
 use crate::tailnet_listener::{AuthorizedPeer, ListenerStatus, TailnetListener};
@@ -11,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use protocol::{ClientMessage, DaemonMessage};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
@@ -232,20 +233,59 @@ fn tailnet_upgrade_allowed(headers: &HeaderMap, name: Option<&str>, port: u16) -
 }
 
 #[derive(Clone)]
-struct TailnetState {
+pub(super) struct TailnetState {
     hub: Hub,
     names: NameSlot,
     port: u16,
+    pub(super) pwa_dir: Option<PathBuf>,
 }
 
-/// The router the tailnet listener serves: `/ws` and `/health` only. It never
-/// carries `/shutdown` or a CORS layer, so a tailnet client cannot
-/// manage the host's process and a browser cannot act for another origin.
+/// The router with no phone app: `/ws`, `/health`, and `503` for every other
+/// path. The listener resolves a folder and calls
+/// [`build_tailnet_router_with_pwa`]; this is the router the tests build.
+#[cfg(test)]
 pub(super) fn build_tailnet_router(hub: Hub, names: NameSlot, port: u16) -> Router {
+    build_tailnet_router_with_pwa(hub, names, port, None)
+}
+
+/// The router the tailnet listener serves: `/ws` and `/health`, and every
+/// other path answered by the phone app's files when `pwa_dir` holds them,
+/// else `503`. It never carries `/shutdown` or a CORS layer, so a tailnet
+/// client cannot manage the host's process and a browser cannot act for
+/// another origin.
+pub(super) fn build_tailnet_router_with_pwa(
+    hub: Hub,
+    names: NameSlot,
+    port: u16,
+    pwa_dir: Option<PathBuf>,
+) -> Router {
     Router::new()
         .route("/ws", get(tailnet_ws_handler))
         .route("/health", get(|| async { "ok" }))
-        .with_state(TailnetState { hub, names, port })
+        .fallback(pwa_static::serve)
+        .with_state(TailnetState {
+            hub,
+            names,
+            port,
+            pwa_dir,
+        })
+}
+
+/// The folder the tailnet listener serves the phone app from: the
+/// `RUSTLING_TULIP_PWA_DIR` override, else `<bin_templates>/pwa` (the install
+/// folder), else `<the daemon exe's folder>/pwa`. The daemon runs from a
+/// hashed copy in the binaries cache, so its own exe folder is only right for
+/// a direct `cargo run`.
+fn tailnet_pwa_dir(hub: &Hub) -> Option<PathBuf> {
+    let override_dir = std::env::var_os(pwa_static::PWA_DIR_ENV);
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    pwa_static::resolve_pwa_dir(
+        override_dir.as_deref(),
+        hub.dirs.bin_templates.as_deref(),
+        exe_dir.as_deref(),
+    )
 }
 
 /// The peer the tailnet listener's acceptor admitted. Extracting it refuses
@@ -339,7 +379,10 @@ fn start_tailnet_listener(
         }
     };
     let names = name_slot();
-    let router = build_tailnet_router(hub.clone(), Arc::clone(&names), remote.port);
+    let pwa_dir = tailnet_pwa_dir(hub);
+    pwa_static::log_missing_folder(pwa_dir.as_deref());
+    let router =
+        build_tailnet_router_with_pwa(hub.clone(), Arc::clone(&names), remote.port, pwa_dir);
     let listener = TailnetListener::start(router, tailnet_dir, remote.port, shutdown);
     let relay = RemoteRelay {
         remote_status: Arc::clone(&hub.remote_status),
@@ -818,6 +861,366 @@ mod tests {
             response.status(),
             StatusCode::FORBIDDEN,
             "a request without an AuthorizedPeer never becomes a connection"
+        );
+    }
+
+    /// The Content-Security-Policy every static answer must carry.
+    const EXPECTED_CSP: &str = concat!(
+        "default-src 'none'; script-src 'self'; style-src 'self'; ",
+        "img-src 'self' data:; font-src 'self'; connect-src 'self'; ",
+        "manifest-src 'self'; worker-src 'self'; base-uri 'none'; ",
+        "frame-ancestors 'none'; form-action 'none'",
+    );
+
+    /// A fixture phone-app folder under `scratch`, beside the `secret.txt` no
+    /// request may ever serve.
+    fn pwa_fixture(scratch: &ScratchDir) -> PathBuf {
+        let root = scratch.path().join("pwa");
+        std::fs::create_dir_all(root.join("assets")).expect("create the assets folder");
+        for (path, body) in [
+            ("index.html", "<!doctype html><title>PWA-INDEX</title>"),
+            ("assets/app.0123abcd.js", "console.log('app');"),
+            ("sw.js", "self.addEventListener('fetch', () => {});"),
+            ("manifest.webmanifest", "{\"name\":\"rustling-tulip\"}"),
+        ] {
+            std::fs::write(root.join(path), body).expect("write a fixture file");
+        }
+        std::fs::write(scratch.path().join("secret.txt"), "SECRET-MARKER")
+            .expect("write the secret outside the folder");
+        root
+    }
+
+    fn static_request(method: Method, uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .expect("build the request")
+    }
+
+    fn header_text(response: &Response, name: &str) -> String {
+        response
+            .headers()
+            .get(name)
+            .expect("the header is set")
+            .to_str()
+            .expect("the header is ASCII")
+            .to_owned()
+    }
+
+    /// Percent-encode a path's bytes for a request URI.
+    fn uri_encode(path: &Path) -> String {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        let mut out = String::new();
+        for byte in path.display().to_string().bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b':') {
+                out.push(char::from(byte));
+            } else {
+                out.push('%');
+                out.push(char::from(HEX[usize::from(byte >> 4)]));
+                out.push(char::from(HEX[usize::from(byte & 0x0F)]));
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_serves_the_pwa_index() {
+        let (hub, scratch) = test_hub("tailnet-pwa-index");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        let response = router
+            .oneshot(static_request(Method::GET, "/"))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(header_text(&response, "cache-control"), "no-cache");
+        assert!(body_text(response).await.contains("PWA-INDEX"));
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_marks_hashed_assets_immutable() {
+        let (hub, scratch) = test_hub("tailnet-pwa-asset");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        let response = router
+            .oneshot(static_request(Method::GET, "/assets/app.0123abcd.js"))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_text(&response, "cache-control"),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_answers_a_deep_link_with_the_index() {
+        let (hub, scratch) = test_hub("tailnet-pwa-deep-link");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        let response = router
+            .oneshot(static_request(Method::GET, "/s/abc123"))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("PWA-INDEX"));
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_keeps_a_missing_asset_404() {
+        let (hub, scratch) = test_hub("tailnet-pwa-missing-asset");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        let response = router
+            .oneshot(static_request(Method::GET, "/assets/missing.js"))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(header_text(&response, "cache-control"), "no-cache");
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_serves_sw_and_manifest_uncached() {
+        let (hub, scratch) = test_hub("tailnet-pwa-sw");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        for uri in ["/sw.js", "/manifest.webmanifest"] {
+            let response = router
+                .clone()
+                .oneshot(static_request(Method::GET, uri))
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(header_text(&response, "cache-control"), "no-cache", "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_sets_security_headers_on_every_static_answer() {
+        let (hub, scratch) = test_hub("tailnet-pwa-headers");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        let (hub_503, _scratch_503) = test_hub("tailnet-pwa-headers-503");
+        let no_folder = build_tailnet_router(hub_503, name_slot(), 8787);
+        let responses = [
+            router
+                .clone()
+                .oneshot(static_request(Method::GET, "/"))
+                .await
+                .expect("the router answers"),
+            router
+                .clone()
+                .oneshot(static_request(Method::GET, "/assets/missing.js"))
+                .await
+                .expect("the router answers"),
+            router
+                .clone()
+                .oneshot(static_request(Method::POST, "/"))
+                .await
+                .expect("the router answers"),
+            no_folder
+                .oneshot(static_request(Method::GET, "/"))
+                .await
+                .expect("the router answers"),
+        ];
+        for response in responses {
+            assert_eq!(
+                header_text(&response, "content-security-policy"),
+                EXPECTED_CSP
+            );
+            assert_eq!(header_text(&response, "x-content-type-options"), "nosniff");
+            assert_eq!(header_text(&response, "referrer-policy"), "no-referrer");
+            assert!(
+                response
+                    .headers()
+                    .get("access-control-allow-origin")
+                    .is_none(),
+                "the router carries no CORS layer"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_refuses_writes_to_static_paths() {
+        let (hub, scratch) = test_hub("tailnet-pwa-writes");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        for (method, uri) in [
+            (Method::POST, "/"),
+            (Method::PUT, "/index.html"),
+            (Method::DELETE, "/sw.js"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(static_request(method.clone(), uri))
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+            assert!(
+                !body_text(response).await.contains("PWA-INDEX"),
+                "{method} {uri} served the page"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_answers_503_without_the_folder() {
+        let (hub, _scratch) = test_hub("tailnet-pwa-none");
+        let none = build_tailnet_router(hub, name_slot(), 8787);
+        let (hub_without_index, scratch) = test_hub("tailnet-pwa-no-index");
+        let folder = scratch.path().join("pwa");
+        std::fs::create_dir_all(&folder).expect("create the folder");
+        let without_index =
+            build_tailnet_router_with_pwa(hub_without_index, name_slot(), 8787, Some(folder));
+        for router in [none, without_index] {
+            for uri in ["/", "/s/x"] {
+                let response = router
+                    .clone()
+                    .oneshot(static_request(Method::GET, uri))
+                    .await
+                    .expect("the router answers");
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+                assert_eq!(
+                    header_text(&response, "content-type"),
+                    "text/plain; charset=utf-8",
+                    "{uri}"
+                );
+                assert_eq!(
+                    body_text(response).await,
+                    "The phone app is not installed with this daemon.",
+                    "{uri}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_never_leaves_the_folder() {
+        let (hub, scratch) = test_hub("tailnet-pwa-traversal");
+        let root = pwa_fixture(&scratch);
+        let absolute = uri_encode(&scratch.path().join("secret.txt"));
+        let router = build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(root));
+        let uris = [
+            "/../secret.txt".to_owned(),
+            "/..%2fsecret.txt".to_owned(),
+            "/%2e%2e/secret.txt".to_owned(),
+            "/%2e%2e%2fsecret.txt".to_owned(),
+            "/..%5csecret.txt".to_owned(),
+            "/assets/..%5c..%5csecret.txt".to_owned(),
+            "/assets/%2e%2e/%2e%2e/secret.txt".to_owned(),
+            format!("/{absolute}"),
+            format!("/%5c%5c%3f%5c{absolute}"),
+        ];
+        for uri in uris {
+            let response = router
+                .clone()
+                .oneshot(static_request(Method::GET, &uri))
+                .await
+                .expect("the router answers");
+            let body = body_text(response).await;
+            assert!(
+                !body.contains("SECRET-MARKER"),
+                "{uri} served a file outside the folder: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_keeps_ws_and_health_ahead_of_the_pwa() {
+        let (hub, scratch) = test_hub("tailnet-pwa-precedence");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        let health = router
+            .clone()
+            .oneshot(static_request(Method::GET, "/health"))
+            .await
+            .expect("the router answers");
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(body_text(health).await, "ok");
+        let ws = router
+            .oneshot(static_request(Method::GET, "/ws"))
+            .await
+            .expect("the router answers");
+        assert!(
+            !body_text(ws).await.contains("PWA-INDEX"),
+            "the page is not served at /ws"
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_router_serves_no_pwa() {
+        let (hub, _scratch) = test_hub("loopback-pwa");
+        let router = build_loopback_router(hub);
+        for uri in ["/", "/index.html"] {
+            let response = router
+                .clone()
+                .oneshot(static_request(Method::GET, uri))
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert!(!body_text(response).await.contains("PWA-INDEX"), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_keeps_asset_paths_out_of_the_deep_link_rule() {
+        let (hub, scratch) = test_hub("tailnet-pwa-asset-paths");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        for uri in ["/assets/", "/assets/foo", "/assets/x%2Ejs"] {
+            let response = router
+                .clone()
+                .oneshot(static_request(Method::GET, uri))
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(header_text(&response, "cache-control"), "no-cache", "{uri}");
+            assert!(
+                !body_text(response).await.contains("PWA-INDEX"),
+                "{uri} was answered with the page"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_reads_an_encoded_dot_as_a_file_name() {
+        let (hub, scratch) = test_hub("tailnet-pwa-encoded-dot");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        let response = router
+            .oneshot(static_request(Method::GET, "/x%2Ejs"))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_keeps_an_asset_304_immutable() {
+        let (hub, scratch) = test_hub("tailnet-pwa-asset-304");
+        let router =
+            build_tailnet_router_with_pwa(hub, name_slot(), 8787, Some(pwa_fixture(&scratch)));
+        let first = router
+            .clone()
+            .oneshot(static_request(Method::GET, "/assets/app.0123abcd.js"))
+            .await
+            .expect("the router answers");
+        assert_eq!(first.status(), StatusCode::OK);
+        let last_modified = header_text(&first, "last-modified");
+        let conditional = router
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.0123abcd.js")
+                    .header("if-modified-since", last_modified)
+                    .body(Body::empty())
+                    .expect("build the request"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(conditional.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            header_text(&conditional, "cache-control"),
+            "public, max-age=31536000, immutable"
         );
     }
 

@@ -74,7 +74,8 @@ which = "8.0"
 # save, and refusing the spawn, when a quote is unclosed).
 shell-words = "1.1"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+# `fs` serves the phone app's files from the tailnet router's fallback.
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 notify = "8"
 notify-debouncer-full = "0.7"
 regex = "1.11"

@@ -34,6 +34,7 @@ mod tabs;
 mod hooks;
 pub(crate) mod live_devices;
 mod pairing;
+mod pwa_static;
 mod recovery;
 mod screen;
 mod settings;

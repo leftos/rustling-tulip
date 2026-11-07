@@ -121,6 +121,13 @@
     },
     {
       "paths": [
+        "crates/daemon/src/server/pwa_static.rs",
+        "crates/daemon/src/server/remote.rs"
+      ],
+      "filter": "package(daemon) & (test(/^server::pwa_static::/) | test(/^server::remote::/))"
+    },
+    {
+      "paths": [
         "crates/daemon/src/accounts/mod.rs",
         "crates/daemon/src/accounts/driver.rs",
         "crates/daemon/src/accounts/engine.rs",
