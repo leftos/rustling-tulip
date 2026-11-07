@@ -13,11 +13,17 @@ import {
   type PairingEvent,
   type PairingState,
 } from "./pairing";
-import type { DaemonMessage } from "./protocol";
+import type { ClientMessage, DaemonMessage } from "./protocol";
 import type { TokenStore } from "./token-store";
 
 /** The subset of `WebSocket` the connection uses, so a test can stand one in. */
 export interface WebSocketLike {
+  /**
+   * `1` while the socket is open (`WebSocket.OPEN`). A socket that reports
+   * anything else is written nothing, since a write on a closing or closed
+   * socket is dropped without an error.
+   */
+  readonly readyState?: number;
   send(data: string): void;
   close(): void;
   onopen: ((event: unknown) => void) | null;
@@ -70,6 +76,12 @@ export interface Connection {
   askToPair(): void;
   /** The user entered or scanned `code` for the open request. */
   redeem(code: string): void;
+  /**
+   * Send `message` to the daemon. Only a `ready` connection sends: any other
+   * state drops it and answers `false`, so the screen shows the connection as
+   * offline. Nothing is queued across a reconnect.
+   */
+  send(message: ClientMessage): boolean;
   /**
    * Forget the device token: clear this host's stored record and redial
    * without a token, landing on the pairing channel.
@@ -359,6 +371,28 @@ export function createConnection(deps: ConnectionDeps): Connection {
     }
   }
 
+  function send(message: ClientMessage): boolean {
+    // An unpaired connection is ready for the pairing messages only: the
+    // daemon drops anything else there, so claiming a send would show success
+    // for a frame that never leaves.
+    if (
+      stopped ||
+      state.name !== "ready" ||
+      state.unpaired === true ||
+      socket === undefined ||
+      socket.readyState !== 1
+    ) {
+      return false;
+    }
+    try {
+      socket.send(JSON.stringify(message));
+    } catch (error) {
+      console.warn("pwa: sending a message failed", error);
+      return false;
+    }
+    return true;
+  }
+
   function forget(): void {
     if (!stopped) {
       forgetToken();
@@ -372,6 +406,7 @@ export function createConnection(deps: ConnectionDeps): Connection {
     subscribe,
     askToPair,
     redeem,
+    send,
     forget,
     pairingState: () => pairing,
   };
