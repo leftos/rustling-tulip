@@ -60,9 +60,16 @@
 
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge · release vNext
   - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext
+    - [ ] RT-1155 PW.6c: Store the VAPID keys and push subscriptions under a push folder · release vNext
+    - [ ] RT-1156 PW.6d: Handle push registration per device and drop it when a device is blocked or forgotten · release vNext
+    - [ ] RT-1157 PW.6e: Push Needs you and Finished to subscribed devices · release vNext
+    - [ ] RT-1158 PW.6f: Show pushes and open their session from the service worker · release vNext
+    - [ ] RT-1159 PW.6g: Turn push on from a Notifications panel on the phone · release vNext
   - [ ] RT-368 PW.7: Home Screen badge with the Needs you count · release vNext
   - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
 - [ ] RT-1126 Precache the phone app's hashed assets so its first offline open is complete
+- [ ] RT-1152 Spike GPUI on iOS: the session list in the simulator, text input and Return · release vNext+1
+- [ ] RT-1160 Hold phone pushes while the owner is active at the desktop · release vNext
 
 ## Wave 5 — Attention feed on the desktop
 
@@ -90,7 +97,7 @@
 - [ ] RT-686 Update a connected remote host's daemon from the client, with automatic session recovery
 - [ ] RT-99 Pick between candidates when a clicked path matches several files
 - [ ] RT-100 Open an unchanged fetched file from the local cache
-- [ ] RT-101 Paste an image or drop a file into a remote session
+- [ ] RT-101 Paste an image or drop a file into a remote session · release vNext
 - [ ] RT-102 Resume a remote connection without replaying scrollback
 - [ ] RT-590 Fail a spawn whose secret Credential Manager refuses, instead of hanging
 - [ ] RT-536 Host SSH remote sessions on Linux and macOS machines
@@ -112,9 +119,6 @@
 - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
 - [ ] RT-106 PW.12: Phone files: viewer with Share and Save, worktree tree, send photos and files into a session
 - [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies
-- [/] RT-108 PW.9: Phone terminal: xterm.js with collie's key bar · release vNext
-  - [ ] RT-1150 PW.9c: Draw the phone terminal with xterm.js behind a seam · release vNext
-  - [ ] RT-1151 PW.9d: Put the phone terminal behind the session screen's Terminal toggle · release vNext
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-142 Phone: tap a Linear identifier to see its card
 - [ ] RT-588 Key the chat pane's answer cache by its text, not its length
@@ -313,7 +317,6 @@
 - [ ] RT-1034 macOS updates: serialize update starts with a lock the client and apply-update both take
 - [ ] RT-1035 macOS updates: tell a standard user in /Applications what can work, not to move the app
 - [ ] RT-1036 macOS toasts: hold app toasts back during Focus and over a full-screen app
-- [ ] RT-1071 Show a failed tailnet scan's error under the On your tailnet header, not wrapped beside it
 - [ ] RT-1118 Fix the macOS smoke test's capture_live_login call so the Mac workspace clippy passes
 
 ## Agent CLIs
@@ -525,8 +528,6 @@
 - [ ] RT-1046 Stop four agent-api icon conformance tests leaking past nextest's leak timeout
 - [ ] RT-1052 Show seconds in a Gates row's time and usual under ten minutes
 - [ ] RT-1056 Get colour query replies (OSC 10/11) through ConPTY to programs on Windows hosts
-- [ ] RT-1063 Keep a statusline ending in %, \$ or # under Claude's box from reading as the shell's prompt · release vNext
-- [ ] RT-1067 Remove the stray dot at the bottom-left of a plain Nushell pane · release vNext
 - [ ] RT-1125 Type into a shell with the send verb once its hand-started agent has ended
 - [ ] RT-1128 Harden the protocol TypeScript generator against module files, cfg_attr derives and duplicate consts
 - [ ] RT-1129 Let workspaces with non-git members share them and follow .git appearing or vanishing
@@ -535,6 +536,17 @@
 - [ ] RT-1132 Treat an all-folder workspace like a folder in the spawn dialog and launch last, and stop fetching folder members
 - [ ] RT-1133 Tag registered folders DIR in the compact Dashboard and drop Source Control's stale pinned host
 - [ ] RT-1138 Honour a hide while the phone app forgets a refused token
+- [ ] RT-1162 Tick the phone terminal's load timer only while a load is pending
+- [ ] RT-1170 Keep the phone chat's scroll position across the Terminal toggle
+- [ ] RT-1171 Anchor a multi-line nu prompt's gutter mark on its first line under ConPTY
+- [ ] RT-1172 Find why a click on a This PC pane keeps focus on a remote pane after This PC reconnects
+
+## No project
+
+- [ ] RT-1161 Show a toast's whole question and answers, with each option's description in a hover tooltip · release vNext
+- [ ] RT-1165 Name the session's repo or workspace on every native toast, beside the session · release vNext
+- [ ] RT-1167 Move a narrow pane header's buttons from Pop out onwards into an overflow menu · release vNext
+- [ ] RT-1168 Let fixed-size controls grow to fit their contents across the native client · release vNext+1
 
 ## Design files
 
@@ -553,7 +565,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-367, RT-368, RT-369, RT-881, RT-1126, Wave 4 — Mobile app (iPhone PWA over Tailscale)
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-367, RT-368, RT-369, RT-881, RT-1126, RT-1155, RT-1158, RT-1160, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
