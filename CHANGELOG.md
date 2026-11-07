@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- Your phone gets a notification when a session needs you or finishes, even with the phone app closed: turn it on from the Notifications button on the phone app's Home.
 - The phone app opens a session as a chat: read the conversation, send messages, answer prompts from a bottom sheet, and send keys and quick replies.
 - The phone's session screen has a Terminal toggle: the live terminal with a key bar (Esc, Tab, arrows, a sticky Ctrl, Quick), and plain shells open straight on it.
 - The phone app's Home lists your sessions grouped as on the desktop, with a Needs you tray to answer prompts in one tap, and Stop and Resume on each session.

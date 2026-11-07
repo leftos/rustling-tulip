@@ -366,7 +366,7 @@ pub(super) fn appearance_registry(tag: &str) -> (Arc<SessionRegistry>, Dirs) {
 }
 
 /// An idle standalone session `id` with no process behind it.
-pub(super) fn idle_record(id: &str) -> SessionRecord {
+pub(crate) fn idle_record(id: &str) -> SessionRecord {
     SessionRecord {
         id: id.to_string(),
         label: id.to_string(),

@@ -96,6 +96,16 @@ A `Notification` `idle_prompt` does not leave `AwaitingInput` while a hook-repor
 
 Each status change logs its cause at debug under the `status_trace` target, which the default log filters leave out: a hook-driven change names the hook event (`hook_status.rs`), a screen-driven change names the rule that fired, logged only when a screen read changes the status (`pty_state.rs`), the session record logs what it stamped (`session.rs`), and the hook route logs each hook it receives, holds for its spawn or drops (`server/hooks.rs`). The native client logs each notification it raises or skips, with the skip's reason (`notify.rs`). `RUST_LOG=status_trace=debug` shows them; the Detailed logging switch turns them on from Settings.
 
+## Phone pushes
+
+The daemon pushes Needs you and Finished to every subscribed device for its whole life, with or without a client connected (`push/trigger.rs`, started by `start_hub_tasks`; design in `docs/plans/mobile-app.md` "Push"). It watches the registry's `SessionEvent`s and judges each snapshot against the status it last saw of that session, by the rules of the desktop's toasts (`apps/native/src/notify.rs`).
+
+Needs you fires when a session enters `AwaitingInput` from another status and is neither inactive nor abandoned. Finished fires when an agent session (never a plain shell) lands `Idle` with no `background` work, from `Working` or from `Idle` with `background` set. A session seen for the first time raises nothing, so one already awaiting input when the daemon starts raises nothing until it next changes; a removed session is forgotten, so its next appearance is a first sighting. After a lagged event stream the trigger re-seeds from the registry and raises nothing for what it missed.
+
+Nothing is sent while the tailnet listener is not serving. The body is the session's label and the badge is the Needs you count. A throttled or failing push service is backed off per push-service origin (30 s, doubling to 10 min), and a 404 or 410 deletes the subscription.
+
+The log says error `push: the HTTP client did not build; no push is sent until the daemon restarts`, warn `push: the session event stream lagged; re-seeded`, and debug `push: a round is done` (`answered`).
+
 ## Chat mirror
 
 The chat mirror serves a Claude session's chat from its transcript and its screen, and types into its PTY (`chat_mirror.rs`, `transcript_tail.rs`, `server/chat.rs`, the plugin's `chat_entries.rs` and `dialogs.rs`; design in `docs/architecture.md` "Chat mirror").

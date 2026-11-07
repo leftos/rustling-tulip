@@ -9,12 +9,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use protocol::{RemoteState, SessionMode, SessionSnapshot, SessionStatus};
 use reqwest::Url;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
 use super::send::{self, Outcome, PushPolicy};
@@ -23,6 +24,7 @@ use super::store::Subscription;
 use super::vapid::{JwtCache, VapidKey};
 use super::webpush::{self, Subscriber};
 use crate::devices::DeviceStore;
+use crate::session::{SessionEvent, SessionRegistry};
 use crate::sync::lock;
 
 /// The body of a push whose session has no name but its id.
@@ -153,6 +155,19 @@ pub(crate) fn needs_you_count<'a>(snapshots: impl IntoIterator<Item = &'a Sessio
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
+/// `snapshots` with `snapshot` standing for its session, added when the
+/// registry no longer holds it: the event can be newer than the registry read.
+fn with_snapshot(
+    mut snapshots: Vec<SessionSnapshot>,
+    snapshot: &SessionSnapshot,
+) -> Vec<SessionSnapshot> {
+    match snapshots.iter_mut().find(|seen| seen.id == snapshot.id) {
+        Some(seen) => *seen = snapshot.clone(),
+        None => snapshots.push(snapshot.clone()),
+    }
+    snapshots
+}
+
 /// The session's name in a push: its user label, else its label; the
 /// product name when the only name it has is its id. A name over
 /// [`LABEL_MOST`] characters is cut to that many, the last one `…`, so the
@@ -238,6 +253,24 @@ pub(crate) struct Alert<'a> {
     pub session: &'a SessionSnapshot,
     /// The Needs you count the badge shows.
     pub count: u32,
+}
+
+/// What one session event raises.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Step {
+    /// A push to deliver.
+    Alert {
+        /// The change it reports.
+        kind: PushKind,
+        /// The session it is about.
+        session: Box<SessionSnapshot>,
+        /// The Needs you count the badge shows.
+        count: u32,
+    },
+    /// Nothing to send.
+    Nothing,
+    /// The event stream closed; the task ends.
+    End,
 }
 
 /// The answer one device's push service gave.
@@ -580,6 +613,114 @@ impl Trigger {
         self.failures.remove(key);
         true
     }
+
+    /// What one broadcast event raises. A lag re-seeds from the registry and
+    /// raises nothing for the missed window, a removal is forgotten, and an
+    /// update is judged against what was seen before it; the count takes the
+    /// event's own snapshot as its session's current state. No I/O.
+    pub(crate) fn step(
+        &mut self,
+        event: Result<SessionEvent, RecvError>,
+        sessions: &SessionRegistry,
+    ) -> Step {
+        match event {
+            Err(RecvError::Lagged(missed)) => {
+                tracing::warn!(missed, "push: the session event stream lagged; re-seeded");
+                self.tracker.seed(&sessions.snapshots());
+                Step::Nothing
+            }
+            Err(RecvError::Closed) => Step::End,
+            Ok(SessionEvent::Updated(snapshot, _origin)) => {
+                let Some(kind) = self.tracker.observe(&snapshot) else {
+                    return Step::Nothing;
+                };
+                let count = needs_you_count(with_snapshot(sessions.snapshots(), &snapshot).iter());
+                Step::Alert {
+                    kind,
+                    session: snapshot,
+                    count,
+                }
+            }
+            Ok(SessionEvent::Removed(id)) => {
+                self.tracker.forget(&id);
+                Step::Nothing
+            }
+            Ok(_) => Step::Nothing,
+        }
+    }
+}
+
+/// What the push task reads and watches.
+pub(crate) struct Sources {
+    /// Every session's registry: the event stream and the Needs you count.
+    pub sessions: Arc<SessionRegistry>,
+    /// `Hub::devices`, taken first.
+    pub devices: Arc<Mutex<DeviceStore>>,
+    /// `Hub::push`, a leaf taken after `devices`.
+    pub push: Arc<Mutex<PushState>>,
+    /// The tailnet listener's current state, read once per alert.
+    pub remote: Arc<dyn Fn() -> RemoteState + Send + Sync>,
+    /// Flips to `true` when the daemon is stopping.
+    pub shutdown: tokio::sync::watch::Receiver<bool>,
+}
+
+/// Run the trigger for the daemon's lifetime, clients or none: every session
+/// change it raises a push for is delivered. The HTTP client is built here;
+/// a failed build logs and starts nothing.
+pub(crate) fn spawn(sources: Sources) -> Option<tokio::task::JoinHandle<()>> {
+    let client = match send::client() {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::error!(
+                err = format!("{err:#}"),
+                "push: the HTTP client did not build; no push is sent until the daemon restarts"
+            );
+            return None;
+        }
+    };
+    let Sources {
+        sessions,
+        devices,
+        push,
+        remote,
+        mut shutdown,
+    } = sources;
+    let mut trigger = Trigger::new(client);
+    Some(tokio::spawn(async move {
+        // Subscribe before seeding, so no change after the seed is lost.
+        let mut events = sessions.subscribe();
+        trigger.tracker.seed(&sessions.snapshots());
+        if *shutdown.borrow() {
+            return;
+        }
+        loop {
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
+                event = events.recv() => match trigger.step(event, &sessions) {
+                    Step::Alert { kind, session, count } => {
+                        // Read the listener's state once, before any `.await`,
+                        // so no watch guard is held across one.
+                        let remote_state = remote();
+                        let stores = Stores {
+                            devices: &devices,
+                            push: &push,
+                        };
+                        let answered = trigger
+                            .deliver(stores, &remote_state, Alert { kind, session: &session, count }, Utc::now())
+                            .await;
+                        tracing::debug!(answered = answered.len(), "push: a round is done");
+                    }
+                    Step::Nothing => {}
+                    Step::End => return,
+                },
+            }
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -589,21 +730,24 @@ impl Trigger {
 )]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use chrono::Utc;
     use p256::elliptic_curve::Generate;
     use p256::elliptic_curve::sec1::ToSec1Point;
-    use protocol::{RemoteState, SessionSnapshot};
+    use protocol::{RemoteState, SessionSnapshot, SessionStatus};
     use reqwest::Url;
+    use tokio::sync::broadcast::error::RecvError;
     use tokio::time::Instant;
 
     use super::{
-        Alert, BACKOFF_FIRST, BACKOFF_MOST, Delivery, PushKind, Stores, Tracker, Trigger, label,
-        needs_you_count, origin, payload,
+        Alert, BACKOFF_FIRST, BACKOFF_MOST, Delivery, PushKind, Sources, Step, Stores, Tracker,
+        Trigger, label, needs_you_count, origin, payload, spawn,
     };
     use crate::devices::DeviceStore;
+    use crate::paths::Dirs;
     use crate::push::send::{Outcome, client, topic};
     use crate::push::state::PushState;
     use crate::push::store::Subscription;
@@ -611,6 +755,8 @@ mod tests {
         Fake, Server, TESTS, fake_push_service, fake_push_service_hooked, fake_push_service_with,
     };
     use crate::push::webpush::{self, Subscriber};
+    use crate::server::test_support::idle_record;
+    use crate::session::{SessionEvent, SessionRegistry};
     use crate::sync::lock;
 
     fn snapshot(fields: &serde_json::Value) -> SessionSnapshot {
@@ -1260,5 +1406,239 @@ mod tests {
             "the old endpoint's count is dropped"
         );
         assert!(!trigger.failures.contains_key(&(device, url.to_string())));
+    }
+
+    // ---- the event step ----
+
+    /// A registry over the setup's scratch dir, its sessions folder made.
+    fn registry(setup: &Setup) -> Arc<SessionRegistry> {
+        let dirs = Dirs {
+            config: setup.dir.clone(),
+            state_file: setup.dir.join("state.json"),
+            handshake_file: setup.dir.join("daemon.json"),
+            remote_config_file: setup.dir.join("remote.json"),
+            sessions_dir: setup.dir.join("sessions"),
+            worktrees_dir: setup.dir.join("worktrees"),
+            binaries_dir: setup.dir.join("binaries"),
+            bin_templates: None,
+        };
+        std::fs::create_dir_all(&dirs.sessions_dir).expect("create sessions dir");
+        SessionRegistry::new(dirs)
+    }
+
+    /// The snapshot an update of `s1` to `status` carries, and its event.
+    fn update(status: &str) -> (SessionSnapshot, Result<SessionEvent, RecvError>) {
+        let snapshot = snapshot(&serde_json::json!({ "status": status }));
+        let event = Ok(SessionEvent::Updated(Box::new(snapshot.clone()), None));
+        (snapshot, event)
+    }
+
+    #[test]
+    fn event_step_raises_needs_you_on_entering_awaiting_input() {
+        let setup = setup("step-needs-you");
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        let mut trigger = trigger();
+        trigger.tracker.seed(&sessions.snapshots());
+        let (_, working) = update("working");
+        assert_eq!(trigger.step(working, &sessions), Step::Nothing);
+
+        let (asking, event) = update("awaiting_input");
+
+        assert_eq!(
+            trigger.step(event, &sessions),
+            Step::Alert {
+                kind: PushKind::NeedsYou,
+                session: Box::new(asking),
+                count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn event_step_counts_the_triggering_session_by_its_event() {
+        let setup = setup("step-count");
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        let mut trigger = trigger();
+        trigger.tracker.seed(&sessions.snapshots());
+
+        // The registry still shows the session working; the event shows it
+        // asking, and the count must follow the event.
+        let (asking, event) = update("awaiting_input");
+
+        assert_eq!(
+            trigger.step(event, &sessions),
+            Step::Alert {
+                kind: PushKind::NeedsYou,
+                session: Box::new(asking),
+                count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn event_step_reseeds_on_lag_and_raises_nothing() {
+        let setup = setup("step-lag");
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::AwaitingInput);
+        let mut trigger = trigger();
+        trigger.tracker.seed([&status("working")]);
+
+        assert_eq!(
+            trigger.step(Err(RecvError::Lagged(5)), &sessions),
+            Step::Nothing
+        );
+
+        let (_, event) = update("awaiting_input");
+        assert_eq!(
+            trigger.step(event, &sessions),
+            Step::Nothing,
+            "the re-seed already saw this state"
+        );
+    }
+
+    #[test]
+    fn event_step_forgets_a_removed_session() {
+        let setup = setup("step-removed");
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        let mut trigger = trigger();
+        trigger.tracker.seed([&status("working")]);
+
+        assert_eq!(
+            trigger.step(Ok(SessionEvent::Removed("s1".to_owned())), &sessions),
+            Step::Nothing
+        );
+        let (_, event) = update("idle");
+        assert_eq!(
+            trigger.step(event, &sessions),
+            Step::Nothing,
+            "seen for the first time again"
+        );
+    }
+
+    #[test]
+    fn event_step_ends_when_the_stream_closes() {
+        let setup = setup("step-closed");
+        let sessions = registry(&setup);
+        let mut trigger = trigger();
+
+        assert_eq!(trigger.step(Err(RecvError::Closed), &sessions), Step::End);
+    }
+
+    // ---- the task ----
+
+    /// Wait until the fake has seen `want` POSTs; the hang guard fails the
+    /// test as hung.
+    async fn wait_for_posts(fake: &Fake, want: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while fake.posts() < want {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the push arrives");
+    }
+
+    /// The task's sources over the setup's stores, the listener serving.
+    fn sources(
+        setup: &Setup,
+        sessions: &Arc<SessionRegistry>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Sources {
+        Sources {
+            sessions: Arc::clone(sessions),
+            devices: Arc::clone(&setup.devices),
+            push: Arc::clone(&setup.push),
+            remote: Arc::new(serving),
+            shutdown,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_task_pushes_needs_you_and_finished() {
+        let setup = setup("task-pushes");
+        let device = setup.pair(1);
+        let (url, fake, _server) = fake_push_service(201, "").await;
+        setup.subscribe(&device, url.as_str(), true, true);
+        let sessions = registry(&setup);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = spawn(sources(&setup, &sessions, shutdown_rx)).expect("the push task starts");
+        // Let the task subscribe and seed before the changes it must see.
+        tokio::task::yield_now().await;
+
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        sessions.update("s1", |record| record.status = SessionStatus::AwaitingInput);
+        wait_for_posts(&fake, 1).await;
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        sessions.update("s1", |record| record.status = SessionStatus::Idle);
+        wait_for_posts(&fake, 2).await;
+
+        let header = {
+            let seen = fake.seen.lock().expect("unpoisoned");
+            let second = &seen[1];
+            second
+                .0
+                .get("topic")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            header.as_deref(),
+            Some(topic("s1").as_str()),
+            "the Finished push's topic"
+        );
+
+        shutdown_tx.send_replace(true);
+        let joined = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("the task ends");
+        joined.expect("the task ends cleanly");
+    }
+
+    #[tokio::test]
+    async fn a_session_present_at_start_raises_nothing_until_it_changes() {
+        let setup = setup("task-first-seen");
+        let device = setup.pair(1);
+        let (url, fake, _server) = fake_push_service(201, "").await;
+        setup.subscribe(&device, url.as_str(), true, true);
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::AwaitingInput);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = spawn(sources(&setup, &sessions, shutdown_rx)).expect("the push task starts");
+        // The task seeds with the session already asking; that raises nothing.
+        tokio::task::yield_now().await;
+
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        sessions.update("s1", |record| record.status = SessionStatus::Idle);
+        wait_for_posts(&fake, 1).await;
+
+        assert_eq!(fake.posts(), 1, "the start state raised nothing");
+
+        shutdown_tx.send_replace(true);
+        let joined = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("the task ends");
+        joined.expect("the task ends cleanly");
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_the_task() {
+        let setup = setup("task-shutdown");
+        let sessions = registry(&setup);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = spawn(sources(&setup, &sessions, shutdown_rx)).expect("the push task starts");
+
+        shutdown_tx.send_replace(true);
+
+        let joined = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("the task ends");
+        joined.expect("the task ends cleanly");
     }
 }

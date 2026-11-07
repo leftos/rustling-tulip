@@ -180,6 +180,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Fetched copy**: the file a remote-host fetch saved under the download root, which opens in the viewer or an external app in place of the host's file. See `docs/native-client.md` ("Fetched files").
 - **Final look**: the last discovery pass for a session still without a conversation id, run inline in `history::record_session_end` before the history entry is built, so an id found late reaches the entry.
 - **File reference**: how a prompt names a repo-relative file so an agent reads it (`Agent::file_reference`; Claude's is `@<path>`, the default the bare path); a folder preset's prompt files use it.
+- **Finished**: a push or toast saying an agent session's turn ended: it landed `Idle` with no background work, from `Working` or from `Idle` with background work, and is not a plain shell; the daemon's phone rule mirrors the desktop's (`docs/session-runtime.md` "Phone pushes").
 - **First-connect chooser**: the dialog a client with no saved tab layout gets when it connects, offering start empty, open all active sessions in a chosen arrangement, adopt a previous layout or copy another client's; see `docs/native-client.md` ("Tab layouts").
 - **Fix round**: review findings sent back to the worker that made the change.
 - **Fold row**: the last row of a Compact Dashboard block, which holds what the block does not draw as rows: `+N idle` with those sessions' labels when the view is too short, and `+N ended` for ended sessions; see `docs/plans/dashboard.md` ("Compact").
@@ -248,6 +249,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native`; see `docs/native-client.md`.
 - **Need-you band**: the band atop the Dashboard's By repo view: the waiting sessions with their asks, the accounts card and Linear Questions counted by repo; see `docs/plans/dashboard.md`.
 - **Needs You**: the native client's rail panel listing every session waiting on the user, longest wait first; see `docs/native-client.md`.
+- **Needs you**: a push or toast saying a session started waiting on the user: it entered `AwaitingInput` from another status and is neither inactive nor abandoned; the phone's Home Screen badge counts these sessions (`docs/session-runtime.md` "Phone pushes").
 - **Needs you group**: the first group of the Dashboard's By status view: the sessions that wait on the user (`AwaitingInput`, or `Idle` when the Answer rule holds), longest wait first; see `docs/plans/dashboard.md` ("Grouping and order").
 - **Nested rows**: the Dashboard rows under a Working row (under an open drawer too, once RT-789 builds it), one per node of the session's agent tree below the main agent, indented with a `└` branch; see `docs/plans/dashboard.md`.
 - **Not approved**: the native client's connection state for a tailnet host that answered `Welcome` and then `DevicePairFailed { "device not approved" }` (`State::NotApproved` in `apps/native/src/connection.rs`); the socket stays open, it shows as "not paired", and it redials only on Reconnect now.

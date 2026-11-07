@@ -1315,6 +1315,17 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
         },
         crate::idle_exit::GRACE_PERIOD,
     );
+    // Phone pushes for Needs you and Finished; runs with or without clients.
+    crate::push::trigger::spawn(crate::push::trigger::Sources {
+        sessions: Arc::clone(&hub.sessions),
+        devices: Arc::clone(&hub.devices),
+        push: Arc::clone(&hub.push),
+        remote: {
+            let remote = Arc::clone(&hub.remote_status);
+            Arc::new(move || remote.borrow().snapshot.state.clone())
+        },
+        shutdown: hub.shutdown_tx.subscribe(),
+    });
 }
 
 /// Test-only record of the last spawn spec's environment built on this
