@@ -1,4 +1,5 @@
 import { browserBadgeEnv, createBadge } from "./badge";
+import { openWebSocket } from "./browser-socket";
 import { mountHomeView } from "./home-view";
 import { reset as resetHome, type HomeModel } from "./home-model";
 import { mountNotificationsView } from "./notifications-view";
@@ -8,7 +9,7 @@ import { browserPushPort } from "./push-port";
 import { browserScannerEnv, createCodeScanner } from "./scanner";
 import { parseRoute, type Route } from "./session-screen";
 import { mountSessionView } from "./session-view";
-import { createConnection, type WebSocketLike } from "./socket";
+import { createConnection } from "./socket";
 import { indexedDbTokenStore } from "./token-store";
 
 // Registers the hand-written service worker, which precaches the shell so an
@@ -18,36 +19,6 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register(SW_URL, { scope: SW_SCOPE }).catch((error: unknown) => {
     console.error("service worker registration failed", error);
   });
-}
-
-/** The real `WebSocket`, behind the connection's small surface. */
-function openWebSocket(url: string): WebSocketLike {
-  const socket = new WebSocket(url);
-  const like: WebSocketLike = {
-    send: (data) => {
-      socket.send(data);
-    },
-    close: () => {
-      socket.close();
-    },
-    onopen: null,
-    onmessage: null,
-    onclose: null,
-    onerror: null,
-  };
-  socket.onopen = (event) => {
-    like.onopen?.(event);
-  };
-  socket.onmessage = (event) => {
-    like.onmessage?.(event);
-  };
-  socket.onclose = (event) => {
-    like.onclose?.(event);
-  };
-  socket.onerror = (event) => {
-    like.onerror?.(event);
-  };
-  return like;
 }
 
 // The daemon's tailnet listener admits only its own origin, so the page dials

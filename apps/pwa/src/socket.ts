@@ -23,7 +23,7 @@ export interface WebSocketLike {
    * anything else is written nothing, since a write on a closing or closed
    * socket is dropped without an error.
    */
-  readonly readyState?: number;
+  readonly readyState: number;
   send(data: string): void;
   close(): void;
   onopen: ((event: unknown) => void) | null;

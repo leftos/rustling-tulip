@@ -413,6 +413,8 @@ test("machine_non_welcome_during_handshaking_is_ignored", () => {
 class FakeSocket implements WebSocketLike {
   readonly frames: string[] = [];
   closed = false;
+  /** `WebSocket.OPEN`. */
+  readyState = 1;
   onopen: ((event: unknown) => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onclose: ((event: unknown) => void) | null = null;
