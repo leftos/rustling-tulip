@@ -370,6 +370,15 @@ pub enum StateEvent {
     /// Mirrors [`protocol::DaemonMessage::PendingDevices`]; only loopback
     /// connections forward it.
     PendingDevices(Vec<protocol::PendingDevice>),
+    /// The approved devices with their live connection counts, at the
+    /// registry generation they were read, broadcast whenever a count
+    /// changes. Mirrors [`protocol::DaemonMessage::Devices`]; only loopback
+    /// connections forward it, and each drops a list older than one it
+    /// already forwarded.
+    Devices {
+        generation: u64,
+        devices: Vec<protocol::DeviceInfo>,
+    },
     /// Broadcast on every summarizer change: its settings, a key set,
     /// deleted or refused, and each billed call. Mirrors
     /// [`protocol::DaemonMessage::SummarizerStatus`]; it carries key states,
@@ -559,6 +568,9 @@ pub async fn run(
         crate::summarizer::turns::Turns::new(Arc::clone(&sessions), Arc::clone(&summarizer));
     // The account login runs its sessions on this hub, set once it is built.
     let login_hub = Arc::new(std::sync::OnceLock::new());
+    let devices = load_devices(&dirs);
+    let live_devices =
+        live_devices::LiveDevices::notifying(pairing::devices_notifier(&devices, &state_events));
     let hub = Hub {
         state,
         sessions,
@@ -587,10 +599,10 @@ pub async fn run(
         pending_hooks: crate::hook_status::PendingHooks::default(),
         live_lines,
         chat_mirror: outlets.chat,
-        devices: load_devices(&dirs),
+        devices,
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: pairing::PairingWaiters::default(),
-        live_devices: live_devices::LiveDevices::default(),
+        live_devices,
         push: push_state(),
         presence: Arc::default(),
         dashboard,

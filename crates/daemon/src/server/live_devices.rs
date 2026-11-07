@@ -8,17 +8,29 @@
 //! held, this lock is taken before [`super::Hub::devices`].
 //!
 //! A pairing connection and a loopback connection are never registered.
+//!
+//! Every registration and every deregistration raises the registry's
+//! generation, so a reader can tell two snapshots apart. A guard's drop also
+//! calls the notifier, when the registry has one, once the registry lock is
+//! released and the guard has left the map.
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
 
+/// Called with the registry after one of its connections deregisters, once
+/// the registry lock is released and the guard has left the map.
+pub type Notifier = Arc<dyn Fn(&LiveDevices) + Send + Sync>;
+
 /// Each device's served connections: a key per connection and the token
-/// that ends it.
+/// that ends it, the generation stamped on every registration change, and
+/// the notifier the hub installed (none in a bare registry).
 #[derive(Default)]
 struct Registry {
     next_key: u64,
+    generation: u64,
     by_device: HashMap<String, Vec<(u64, CancellationToken)>>,
+    notify: Option<Notifier>,
 }
 
 /// The live registry the hub holds; clones share one map.
@@ -28,6 +40,17 @@ pub struct LiveDevices {
 }
 
 impl LiveDevices {
+    /// A registry that calls `notify` after every deregistration, with the
+    /// registry to read. A [`Default`] registry calls nothing.
+    pub fn notifying(notify: Notifier) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Registry {
+                notify: Some(notify),
+                ..Registry::default()
+            })),
+        }
+    }
+
     /// Take the registry's lock. Take it before [`super::Hub::devices`]
     /// when both are held, and drop no [`LiveConnection`] while holding it.
     pub fn lock(&self) -> LiveLock<'_> {
@@ -58,6 +81,7 @@ impl LiveLock<'_> {
     /// connection stays registered until the returned guard drops or the
     /// device is cut.
     pub fn register(&mut self, device_id: &str, life: CancellationToken) -> LiveConnection {
+        self.registry.generation += 1;
         let key = self.registry.next_key;
         self.registry.next_key += 1;
         self.registry
@@ -84,6 +108,12 @@ impl LiveLock<'_> {
         connections.len()
     }
 
+    /// The registry's generation: raised by every registration and every
+    /// deregistration.
+    pub fn generation(&self) -> u64 {
+        self.registry.generation
+    }
+
     /// How many served connections `device_id` has.
     pub fn connected(&self, device_id: &str) -> u32 {
         self.registry
@@ -95,8 +125,9 @@ impl LiveLock<'_> {
     }
 }
 
-/// One registered connection; dropping it deregisters the connection, on
-/// every exit path a panic included.
+/// One registered connection; dropping it deregisters the connection on
+/// every exit path a panic included, raises the generation and, when the
+/// registry has a notifier, calls it once the registry lock is released.
 pub struct LiveConnection {
     registry: Arc<Mutex<Registry>>,
     device_id: String,
@@ -121,13 +152,23 @@ impl LiveConnection {
 
 impl Drop for LiveConnection {
     fn drop(&mut self) {
-        let mut registry = crate::sync::lock(&self.registry);
-        let Some(connections) = registry.by_device.get_mut(&self.device_id) else {
-            return;
+        let notify = {
+            let mut registry = crate::sync::lock(&self.registry);
+            registry.generation += 1;
+            if let Some(connections) = registry.by_device.get_mut(&self.device_id) {
+                connections.retain(|(key, _)| *key != self.key);
+                if connections.is_empty() {
+                    registry.by_device.remove(&self.device_id);
+                }
+            }
+            registry.notify.clone()
         };
-        connections.retain(|(key, _)| *key != self.key);
-        if connections.is_empty() {
-            registry.by_device.remove(&self.device_id);
+        // The lock is released by now; the notifier takes it itself, so
+        // calling it under the guard would deadlock.
+        if let Some(notify) = notify {
+            notify(&LiveDevices {
+                inner: Arc::clone(&self.registry),
+            });
         }
     }
 }
@@ -152,7 +193,8 @@ impl Eq for LiveConnection {}
 
 #[cfg(test)]
 mod tests {
-    use super::LiveDevices;
+    use super::{LiveDevices, Notifier};
+    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -197,5 +239,40 @@ mod tests {
         drop(other);
         assert_eq!(live.lock().connected("d1"), 0);
         assert_eq!(live.lock().connected("d2"), 0);
+    }
+
+    #[test]
+    fn a_deregistration_notifies_after_it_leaves_and_raises_the_generation() {
+        let seen: Arc<std::sync::Mutex<Vec<(u64, u32)>>> = Arc::default();
+        let recorded = Arc::clone(&seen);
+        let notify: Notifier = Arc::new(move |registry: &LiveDevices| {
+            let lock = registry.lock();
+            crate::sync::lock(&recorded).push((lock.generation(), lock.connected("d1")));
+        });
+        let live = LiveDevices::notifying(notify);
+
+        let guard = live.lock().register("d1", CancellationToken::new());
+        let after_register = live.lock().generation();
+        drop(guard);
+        let after_drop = live.lock().generation();
+
+        let seen = crate::sync::lock(&seen);
+        assert_eq!(
+            seen.len(),
+            1,
+            "one notification per deregistration: {seen:?}"
+        );
+        assert_eq!(
+            seen[0].1, 0,
+            "the notifier reads the registry after the guard left it"
+        );
+        assert_eq!(
+            seen[0].0, after_drop,
+            "the generation it reads is the one the drop raised"
+        );
+        assert!(
+            after_drop > after_register,
+            "register and deregister each raise the generation"
+        );
     }
 }

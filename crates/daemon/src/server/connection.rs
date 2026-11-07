@@ -744,6 +744,10 @@ fn spawn_state_forwarder(
 ) -> tokio::task::JoinHandle<()> {
     let hub = hub.clone();
     tokio::spawn(async move {
+        // The highest devices generation this connection forwarded; a list
+        // at or below it was overtaken on the way and would show a stale
+        // count.
+        let mut forwarded_devices = 0_u64;
         loop {
             match rx.recv().await {
                 Ok(StateEvent::Repos(repos)) => {
@@ -864,6 +868,15 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::PendingDevices(requests)) => {
                     if local {
                         let _ = out_tx.send(DaemonMessage::PendingDevices { requests });
+                    }
+                }
+                Ok(StateEvent::Devices {
+                    generation,
+                    devices,
+                }) => {
+                    if local && generation > forwarded_devices {
+                        forwarded_devices = generation;
+                        let _ = out_tx.send(DaemonMessage::Devices { devices });
                     }
                 }
                 Ok(StateEvent::SummarizerStatus {
@@ -1591,6 +1604,221 @@ mod tests {
             "the daemon sends Close before it ends the blocked device's connection"
         );
         assert_eq!(hub.live_devices.lock().connected(&device_id), 0);
+    }
+
+    /// A guard far past any passing run, for a spec that only waits on an
+    /// event.
+    const EVENT_GUARD: Duration = Duration::from_secs(10);
+
+    /// The next `StateEvent::Devices` on `events` whose entry for `device_id`
+    /// reports `connected`; every other event and count is skipped. Fails as
+    /// hung when none arrives within [`EVENT_GUARD`].
+    async fn next_devices_event(
+        events: &mut broadcast::Receiver<StateEvent>,
+        device_id: &str,
+        connected: u32,
+    ) -> Vec<protocol::DeviceInfo> {
+        tokio::time::timeout(EVENT_GUARD, async {
+            loop {
+                match events.recv().await {
+                    Ok(StateEvent::Devices { devices, .. })
+                        if devices
+                            .iter()
+                            .any(|d| d.device_id == device_id && d.connected == connected) =>
+                    {
+                        return devices;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        unreachable!("the daemon's state event channel stays open")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("hung: no devices event with the expected count arrived")
+    }
+
+    /// A device as a `Devices` message carries it, for the forwarder specs.
+    fn device_info(device_id: &str, connected: u32) -> protocol::DeviceInfo {
+        protocol::DeviceInfo {
+            device_id: device_id.to_owned(),
+            name: "phone".to_owned(),
+            login: "owner@example.com".to_owned(),
+            created_at: chrono::Utc::now(),
+            last_seen: None,
+            revoked: false,
+            connected,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_connecting_broadcasts_its_connected_count() {
+        let (hub, _scratch) = test_hub("devices-connect-broadcast");
+        let (device_id, token) = crate::sync::lock(&hub.devices)
+            .issue(&test_peer(), chrono::Utc::now())
+            .expect("issue a device token");
+        let mut events = hub.state_events.subscribe();
+        let (mut client, _server_life) = tailnet_ws_client(&hub, test_peer()).await;
+        ws_send(&mut client, &hello(&token, None)).await;
+        read_until(&mut client, is_remote_status).await;
+
+        next_devices_event(&mut events, &device_id, 1).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_disconnecting_broadcasts_its_connected_count() {
+        let (hub, _scratch) = test_hub("devices-disconnect-broadcast");
+        let (device_id, token) = crate::sync::lock(&hub.devices)
+            .issue(&test_peer(), chrono::Utc::now())
+            .expect("issue a device token");
+        let mut events = hub.state_events.subscribe();
+        let (mut client, server_life) = tailnet_ws_client(&hub, test_peer()).await;
+        ws_send(&mut client, &hello(&token, None)).await;
+        read_until(&mut client, is_remote_status).await;
+        next_devices_event(&mut events, &device_id, 1).await;
+
+        // The path Remote access switching off takes: the listener's token
+        // ends the connection.
+        server_life.cancel();
+
+        next_devices_event(&mut events, &device_id, 0).await;
+    }
+
+    /// The handshake registers the device before it negotiates the protocol
+    /// version, so a negotiation that fails must still broadcast the count
+    /// back, or a client keeps showing the device as connected.
+    #[tokio::test]
+    async fn a_failed_negotiation_after_registration_broadcasts_the_count_back() {
+        let (hub, _scratch) = test_hub("devices-failed-negotiation");
+        let (device_id, token) = crate::sync::lock(&hub.devices)
+            .issue(&test_peer(), chrono::Utc::now())
+            .expect("issue a device token");
+        let mut events = hub.state_events.subscribe();
+        let (mut client, _server_life) = tailnet_ws_client(&hub, test_peer()).await;
+        let unsupported = protocol::ClientMessage::Hello {
+            protocol_version: u32::MAX,
+            protocol_versions: vec![u32::MAX],
+            auth_token: token,
+            client_id: Some("test-client".to_owned()),
+            client_name: None,
+        };
+        ws_send(&mut client, &unsupported).await;
+
+        next_devices_event(&mut events, &device_id, 1).await;
+        next_devices_event(&mut events, &device_id, 0).await;
+    }
+
+    #[tokio::test]
+    async fn a_loopback_connection_forwards_the_devices_event() {
+        let (hub, _scratch) = test_hub("devices-event-loopback");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            true,
+        );
+        let device = device_info("device-1", 2);
+
+        let _ = hub.state_events.send(StateEvent::Devices {
+            generation: 1,
+            devices: vec![device.clone()],
+        });
+
+        let message = next_message(&mut rx).await;
+        forwarder.abort();
+        assert!(
+            matches!(&message, DaemonMessage::Devices { devices } if *devices == [device]),
+            "{message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_connection_does_not_forward_the_devices_event() {
+        let (hub, _scratch) = test_hub("devices-event-tailnet");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            false,
+        );
+
+        let _ = hub.state_events.send(StateEvent::Devices {
+            generation: 1,
+            devices: vec![device_info("device-1", 1)],
+        });
+        // An event every connection forwards, sent after it: reaching the
+        // sentinel first proves the devices event was not forwarded.
+        let _ = hub.state_events.send(StateEvent::SessionsReordered {
+            container_id: "sentinel".to_owned(),
+            ordered_ids: Vec::new(),
+        });
+
+        let message = next_message(&mut rx).await;
+        forwarder.abort();
+        assert!(
+            matches!(
+                &message,
+                DaemonMessage::SessionsReordered { container_id, .. } if container_id == "sentinel"
+            ),
+            "a tailnet connection forwards no devices event: {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_devices_event_is_not_forwarded() {
+        let (hub, _scratch) = test_hub("devices-stale-event");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            true,
+        );
+        let newer = device_info("device-1", 2);
+        let older = device_info("device-1", 1);
+
+        let _ = hub.state_events.send(StateEvent::Devices {
+            generation: 2,
+            devices: vec![newer.clone()],
+        });
+        // Sent after the newer list but read at a lower generation: a client
+        // that took it would show the older count.
+        let _ = hub.state_events.send(StateEvent::Devices {
+            generation: 1,
+            devices: vec![older],
+        });
+        // An event every connection forwards, sent after both: everything the
+        // client got before the sentinel is read here.
+        let _ = hub.state_events.send(StateEvent::SessionsReordered {
+            container_id: "sentinel".to_owned(),
+            ordered_ids: Vec::new(),
+        });
+
+        let mut forwarded = Vec::new();
+        loop {
+            let message = next_message(&mut rx).await;
+            if matches!(
+                &message,
+                DaemonMessage::SessionsReordered { container_id, .. } if container_id == "sentinel"
+            ) {
+                break;
+            }
+            forwarded.push(message);
+        }
+        forwarder.abort();
+        assert!(
+            matches!(
+                forwarded.as_slice(),
+                [DaemonMessage::Devices { devices }] if *devices == [newer]
+            ),
+            "only the generation-2 list is forwarded: {forwarded:?}"
+        );
     }
 
     /// The handshake deadline is far past the guard, so only the server's end

@@ -74,6 +74,7 @@ Run it by hand before a release that touches remote access (the daemon's tailnet
 ## 6. Turning remote access off while connected
 
 - [ ] With the device connected, turn the host's switch off. **Expect:** the device's connection drops at once and the host's sidebar header reads `Offline` and then `Connecting…` as it retries, its rows dimmed and the device's own sessions unaffected; nothing listens on 8787.
+- [ ] With the device still connected, look at the host's Settings → Remote access `Devices` section as the switch goes off. **Expect:** the device's row stops saying `Connected` without reopening Settings.
 - [ ] Turn the host's switch back on. **Expect:** the device reconnects by itself, with no Pair dialog.
 - [ ] Change the host's port to `8788` and `Apply` while the device is connected. **Expect:** the device drops and keeps retrying 8787. On the device, add `<host>` with Port `8788` under `+ Add host` (Tailnet). **Expect:** it connects. Set the host's port back to 8787 afterwards.
 

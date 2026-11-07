@@ -199,7 +199,16 @@ fn check_hello_auth(
             }
         }
         AuthKind::Tailnet(peer) => match authorize_device(hub, peer, presented, life) {
-            Some(live) => HelloAuth::Device(live),
+            Some(live) => {
+                // The connection is registered and its locks are released by
+                // now, so a client's list can follow the count it added.
+                super::pairing::broadcast_devices(
+                    &hub.live_devices,
+                    &hub.devices,
+                    &hub.state_events,
+                );
+                HelloAuth::Device(live)
+            }
             None => HelloAuth::Pairing,
         },
     }

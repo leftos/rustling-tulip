@@ -150,6 +150,10 @@ pub(super) fn build_test_hub(
     let turns =
         crate::summarizer::turns::Turns::new(Arc::clone(&sessions), Arc::clone(&summarizer));
     let live_lines = crate::hook_status::LiveLines::default();
+    let devices = Arc::new(std::sync::Mutex::new(devices));
+    let live_devices = super::live_devices::LiveDevices::notifying(
+        super::pairing::devices_notifier(&devices, &state_events),
+    );
     let chat_mirror = crate::chat_mirror::ChatMirror::new(
         Arc::clone(&sessions),
         live_lines.clone(),
@@ -185,10 +189,10 @@ pub(super) fn build_test_hub(
         pending_hooks: crate::hook_status::PendingHooks::default(),
         live_lines,
         chat_mirror,
-        devices: Arc::new(std::sync::Mutex::new(devices)),
+        devices,
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: super::pairing::PairingWaiters::default(),
-        live_devices: super::live_devices::LiveDevices::default(),
+        live_devices,
         push,
         presence: Arc::default(),
         dashboard,

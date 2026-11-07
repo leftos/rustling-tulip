@@ -22,6 +22,7 @@
 //! subscription after their `devices` change. Nothing takes `devices` or
 //! `live_devices` while holding `push`.
 use super::connection::{AuthKind, ConnCtx, ConnLife, Inbound, undecoded_reply};
+use super::live_devices::{LiveDevices, Notifier};
 use super::{Hub, StateEvent};
 use crate::devices::{
     CODE_LIFETIME, PairError, PairingBook, PendingView, REQUEST_LIFETIME, RequestId,
@@ -38,7 +39,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 /// Each waiting request's connection, by request id.
@@ -781,11 +782,23 @@ fn broadcast_pending(hub: &Hub, book: &PairingBook) {
     broadcast_views(hub, book.pending());
 }
 
-/// Reply with every approved device and its live connection count; no
-/// token, hash or address ever leaves the store.
-fn send_devices(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let live = hub.live_devices.lock();
-    let devices = crate::sync::lock(&hub.devices)
+/// Every approved device and its live connection count, with the registry
+/// generation they were read at; no token, hash or address ever leaves the
+/// store. Never call while holding [`Hub::live_devices`] or
+/// [`Hub::devices`]: it takes both itself.
+pub(crate) fn device_list(hub: &Hub) -> (u64, Vec<protocol::DeviceInfo>) {
+    list_devices(&hub.live_devices, &hub.devices)
+}
+
+/// [`device_list`] over a live registry and a device store rather than a hub,
+/// so the registry's own notifier builds the same list.
+fn list_devices(
+    live_devices: &LiveDevices,
+    devices: &std::sync::Mutex<crate::devices::DeviceStore>,
+) -> (u64, Vec<protocol::DeviceInfo>) {
+    let live = live_devices.lock();
+    let generation = live.generation();
+    let devices = crate::sync::lock(devices)
         .list()
         .iter()
         .map(|record| protocol::DeviceInfo {
@@ -799,7 +812,42 @@ fn send_devices(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
         })
         .collect();
     drop(live);
+    (generation, devices)
+}
+
+/// Reply with every approved device and its live connection count.
+fn send_devices(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    let (_, devices) = device_list(hub);
     let _ = out_tx.send(DaemonMessage::Devices { devices });
+}
+
+/// Broadcast the approved devices and their live connection counts, with the
+/// generation they were read at, so a forwarder drops a list overtaken by one
+/// it has already sent. Never call while holding [`Hub::live_devices`] or
+/// [`Hub::devices`]: the list takes both itself.
+pub(crate) fn broadcast_devices(
+    live_devices: &LiveDevices,
+    devices: &std::sync::Mutex<crate::devices::DeviceStore>,
+    state_events: &broadcast::Sender<StateEvent>,
+) {
+    let (generation, devices) = list_devices(live_devices, devices);
+    let _ = state_events.send(StateEvent::Devices {
+        generation,
+        devices,
+    });
+}
+
+/// The notifier a hub's live registry calls after a connection deregisters:
+/// [`broadcast_devices`] over the hub's own device store and event channel.
+pub(crate) fn devices_notifier(
+    devices: &Arc<std::sync::Mutex<crate::devices::DeviceStore>>,
+    state_events: &broadcast::Sender<StateEvent>,
+) -> Notifier {
+    let devices = Arc::clone(devices);
+    let state_events = state_events.clone();
+    Arc::new(move |live_devices: &LiveDevices| {
+        broadcast_devices(live_devices, &devices, &state_events);
+    })
 }
 
 #[cfg(test)]
@@ -1718,12 +1766,30 @@ mod tests {
         let mut local = local_client(&hub).await;
         let (device_id, token) = issue(&hub, &test_peer());
         let (mut device, _life) = served_client(&hub, test_peer(), &token).await;
+        // The registration is broadcast to this loopback client too: read it
+        // now, so the next devices list is the one the revoke answers with.
+        read_until(&mut local, |m| {
+            matches!(m, DaemonMessage::Devices { devices }
+                if devices.iter().any(|d| d.device_id == device_id && d.connected == 1))
+        })
+        .await;
 
         ws_send(&mut local, &revoke(&device_id)).await;
-        read_until(&mut local, |m| matches!(m, DaemonMessage::Devices { .. })).await;
+        read_until(&mut local, |m| {
+            matches!(m, DaemonMessage::Devices { devices }
+                if devices.iter().any(|d| d.device_id == device_id && d.revoked))
+        })
+        .await;
         ends(&mut device).await;
+        // A second device is issued after the revoke, so the list that names
+        // it is the one `ListDevices` answered with, never a pushed one.
+        let (second_id, _) = issue(&hub, &other_peer());
         ws_send(&mut local, &ClientMessage::ListDevices).await;
-        read_until(&mut local, |m| matches!(m, DaemonMessage::Devices { .. })).await;
+        read_until(&mut local, |m| {
+            matches!(m, DaemonMessage::Devices { devices }
+                if devices.iter().any(|d| d.device_id == second_id))
+        })
+        .await;
     }
 
     #[tokio::test]
