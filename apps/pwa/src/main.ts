@@ -1,7 +1,9 @@
 import { mountHomeView } from "./home-view";
 import { reset as resetHome, type HomeModel } from "./home-model";
+import { mountNotificationsView } from "./notifications-view";
 import { SW_SCOPE, SW_URL } from "./paths";
 import { mountPairingView } from "./pairing-view";
+import { browserPushPort } from "./push-port";
 import { browserScannerEnv, createCodeScanner } from "./scanner";
 import { parseRoute, type Route } from "./session-screen";
 import { mountSessionView } from "./session-view";
@@ -86,6 +88,15 @@ if (homeSection !== null) {
   mountHomeView(homeSection, connection, intro, openSession, (model) => {
     homeModel = model;
   });
+}
+const notificationsSection = document.getElementById("notifications");
+if (notificationsSection !== null) {
+  mountNotificationsView(
+    notificationsSection,
+    document.getElementById("notifications-open"),
+    connection,
+    browserPushPort(),
+  );
 }
 
 // The session screen owns the page at `/s/{id}`, and Home owns it everywhere
