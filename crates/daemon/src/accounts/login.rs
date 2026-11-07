@@ -179,6 +179,7 @@ impl LoginRunner for SessionRunner {
                 env_remove: cmd.env_remove,
                 cwd,
                 label: LOGIN_TITLE.to_owned(),
+                user_label: Some(LOGIN_TITLE.to_owned()),
             };
             #[cfg(test)]
             if let Some(spawner) = spawner {
@@ -2869,6 +2870,7 @@ mod tests {
             let output = pty.output.subscribe();
             let mut rec = record(&spec.session_id, SessionMode::PlainShell);
             rec.label.clone_from(&spec.label);
+            rec.user_label.clone_from(&spec.user_label);
             let exit = insert_live_notifying(&hub.sessions, &hub.dirs, rec, &pty);
             let snapshot = crate::sync::lock(
                 &hub.sessions
@@ -3161,6 +3163,27 @@ mod tests {
             )
         );
         assert!(rig.dirs().is_empty(), "{:?}", rig.dirs());
+    }
+
+    #[tokio::test]
+    async fn login_session_carries_its_title_as_the_user_label() {
+        let sessions = FakeSessions::new(None);
+        let mut rig = rig_with("login-user-label", Some(&sessions));
+        let session = rig.start_running("l1").await;
+        let _ = rig.login_event().await;
+
+        let rec = rig
+            .hub
+            .sessions
+            .get(&session)
+            .expect("the login session was spawned");
+        let rec = crate::sync::lock(&rec);
+        assert_eq!(
+            rec.user_label.as_deref(),
+            Some(LOGIN_TITLE),
+            "the sidebar shows the title the login's hint names"
+        );
+        assert_eq!(rec.label, LOGIN_TITLE);
     }
 
     #[tokio::test]

@@ -1700,6 +1700,9 @@ pub(crate) struct CommandSpec {
     pub(crate) cwd: PathBuf,
     /// The session's title.
     pub(crate) label: String,
+    /// The name the caller gave the session, which the clients show in place
+    /// of a derived one; `None` for a title the spawn itself derived.
+    pub(crate) user_label: Option<String>,
 }
 
 /// A published command session: its snapshot, how its exit was handled
@@ -1748,6 +1751,7 @@ pub(crate) async fn spawn_command_session(
         env_remove,
         cwd,
         label,
+        user_label,
     } = spec;
     // The plain shell's environment (the keep-list, the passthrough
     // variables, TERM), the command's own values on top, its removals last.
@@ -1786,7 +1790,7 @@ pub(crate) async fn spawn_command_session(
     let pty = tracer_spawn.handle;
     let pid = pty.pid();
     let started_at = Utc::now();
-    let record = plain_shell_record(
+    let mut record = plain_shell_record(
         NewPlainShell {
             session_id: session_id.clone(),
             label: label.clone(),
@@ -1805,6 +1809,7 @@ pub(crate) async fn spawn_command_session(
         },
         Some(Arc::clone(&pty)),
     );
+    record.user_label = user_label;
     let pending = hub.sessions.insert_pending(record);
     let (notice, exit) = tokio::sync::oneshot::channel();
     let snap_tx = crate::session::attach_lifecycle_notifying(
@@ -2666,6 +2671,7 @@ mod tests {
                 env_remove: vec!["PATH".to_owned()],
                 cwd: scratch.path().to_owned(),
                 label: "login".to_owned(),
+                user_label: None,
             },
         )
         .await;

@@ -32,7 +32,7 @@ use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::sidebar::DashboardView;
-use crate::status_glyph::{Glyph, GlyphSize, Shape, glyph, glyph_view};
+use crate::status_glyph::{Glyph, GlyphSize, Shape, glyph, glyph_view, marker_mode};
 use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
@@ -347,10 +347,11 @@ impl RootView {
                 )
             },
             |s| {
+                let up = self.sidebar.session_agent_up(s);
                 glyph(
                     s.status,
                     s.background,
-                    s.mode,
+                    marker_mode(s.mode, up),
                     self.sidebar.is_unseen(&s.id),
                     t,
                 )

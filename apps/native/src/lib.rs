@@ -6039,7 +6039,11 @@ impl RootView {
                 this.open_connection_picker(window, cx);
             }));
         let text = footer.pill();
-        let counts = status_counts(self.sidebar.all_sessions(), |id| self.sidebar.is_unseen(id));
+        let counts = status_counts(
+            self.sidebar.all_sessions(),
+            |id| self.sidebar.is_unseen(id),
+            |s| self.sidebar.session_agent_up(s),
+        );
         let pill = div()
             .id("daemon-pill")
             .driver_id(|| "daemon-pill".to_owned())

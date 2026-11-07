@@ -578,6 +578,8 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
   It is a spinning arc while working, an amber diamond with `?` while asking, a faint hollow ring while spawning, a small dot when idle or stopped (dimmed), a red dot with `×` on error, and a ring with a spinning arc in the Working colour while the turn is over but background work still runs (the snapshot's `background` flag on an `Idle` session).
 
   An agent session (never a plain shell) whose turn ends (working to idle) while this client is not showing it focused is an **unseen turn** and shows a green hollow ring until its leaf is clicked or a focused pane shows it; any other status clears it. The unseen set is per window and not saved.
+
+  The waiting marker (the leaf's green waiting ring, the footer's "N waiting", the sidebar's unseen mark) applies only while the session's agent is up in its pane: an agent that exited back to its shell is idle, never counted waiting or marked unseen, and drops an unseen mark it held.
 - **Petal chrome**: the look follows the user's Petal canvas, https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, saved in `docs/plans/canvases/petal/` (a board per view; the Dashboard, Settings → Alerts, Conversation and phone boards are targets for the waves that build those features).
 
   The rail is 52 px on `SUNKEN` with 36 px tiles and a 2 px coral active bar; the tab bar 38 px on `SURFACE`, the active tab on `GROUND`; the footer 28 px on `SUNKEN`. Panes are cards with an 8 px radius, 6 px apart inside 6 px of padding (`PANE_GUTTER`; the sidebar and source-control handles keep `DIVIDER_WIDTH`), the terminal inset by the 1 px border with square inner corners.
@@ -645,6 +647,8 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
 
   A headless session that exists anyway (spawned by another client) keeps its sidebar leaf and an inert tab pill; a pane bound to one shows the muted line `Headless session — not shown in this client` (no stats bar or action log) and keeps it once stopped, with no exited overlay; the note holds the pane's focus, so a click focuses the pane and app shortcuts such as Ctrl+N still work. The daemon's headless path and the protocol are unchanged.
 - **Session labels, chips and endings**: every label goes through `display_label`, with the full label in a tooltip. A session's terminal title names it once the agent's title glyph is stripped (the descriptor's title rules), and a title that is only the agent's placeholder falls through to the session label, then the runtime tag, then the id.
+
+  A session whose agent has exited back into its shell keeps the label the user or spawn gave it (such as `nu-hosted`) rather than the shell's terminal title; the tooltip still lists the terminal title. The account login session (Settings › Accounts › Log in a new account) carries "Log in a new account" as its user-set label (the field a rename sets), so its row and standalone group header read it, and that group draws no folder banner or Add repo link; any other standalone shell group whose session has no user-set name keeps its banner.
 
   The title rules come from the host's last agent list, kept while the host reconnects (`label_agents`), so a reconnect does not turn a session's label into the placeholder; behaviour that needs a live agent list still reads the connection's own.
 

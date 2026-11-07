@@ -131,6 +131,37 @@ fn plain_shell_becomes_chat_capable_when_promoted(cx: &mut TestAppContext) {
     );
 }
 
+/// Whether leaf `id` holds a finished turn this client has not shown.
+fn leaf_unseen(h: &mut Harness<'_>, id: &str) -> Option<bool> {
+    h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .flat_map(|c| c.leaves)
+            .find(|leaf| leaf.id == id)
+            .map(|leaf| leaf.unseen)
+    })
+}
+
+#[gpui::test]
+fn a_turn_ending_after_the_agent_exited_is_not_waiting(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").status("working").build(),
+        request_id: None,
+    });
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").program_name("nu").build(),
+        request_id: None,
+    });
+    assert_eq!(
+        leaf_unseen(&mut h, "s1"),
+        Some(false),
+        "nothing waits on the user: the pane is back to its shell"
+    );
+}
+
 #[gpui::test]
 fn leaf_reads_the_shell_after_claude_exits(cx: &mut TestAppContext) {
     let dir = TestDir::new();

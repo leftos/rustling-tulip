@@ -12,6 +12,9 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - Clicking a Needs you or Finished toast, the Windows notification or the app's own, now shows that pane's tab and gives the pane keyboard focus.
+- A session whose agent exits back into its shell keeps its name in the sidebar instead of switching to the shell's folder.
+- The account login session reads "Log in a new account" in the sidebar, not its run id, and has no Add repo banner.
+- A session whose agent has exited no longer shows the green waiting ring or counts as waiting in the footer.
 - Once an agent started by hand in a shell exits, `rustling-tulipd sessions` shows a plain shell again and the pane drops the agent's title.
 - A Claude started by hand in a shell, or a session whose transcript folder is still new, no longer fills the daemon log with errors and warnings.
 

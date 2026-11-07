@@ -36,7 +36,7 @@ use crate::sidebar::{
     RepoSort, SessionsUnderRepos, SidebarView, can_attach, chip_tip,
 };
 use crate::spawn_view::SpawnEntry;
-use crate::status_glyph::{GlyphSize, glyph, glyph_view};
+use crate::status_glyph::{GlyphSize, glyph, glyph_view, marker_mode};
 use crate::tabs::{SessionRef, TabPill};
 use crate::target::HostKey;
 use crate::target::Target;
@@ -1398,9 +1398,24 @@ fn container_rows(
     let dim = ctx.dimmed.containers.contains(&container.key);
     let mut rows = vec![dimmed(row, dim).into_any_element()];
     if !container.collapsed {
-        if matches!(container.kind, ContainerKind::Dir | ContainerKind::Shell)
-            && let Some(path) = container.path.as_deref()
-        {
+        // A standalone group the user named (an account login) is the user's
+        // own session, not a folder offering Add repo.
+        let folder_banner = match container.kind {
+            ContainerKind::Dir => container.path.is_some(),
+            ContainerKind::Shell => {
+                container.path.is_some()
+                    && !container
+                        .leaves
+                        .iter()
+                        .any(|leaf| leaf.user_label.is_some())
+            }
+            ContainerKind::Workspace
+            | ContainerKind::Repo
+            | ContainerKind::Detached
+            | ContainerKind::Tab
+            | ContainerKind::Unbound => false,
+        };
+        if folder_banner && let Some(path) = container.path.as_deref() {
             let banner = path_banner(container, path, add_workspace, cx);
             rows.push(dimmed(banner, dim).into_any_element());
         }
@@ -2841,7 +2856,13 @@ fn label_head(offset: i8, shift: i8, leaf: &Leaf, key: &str, t: &UiTheme) -> Vec
     let seen_idle = seen_idle(leaf);
     let mut parts = vec![
         glyph_view(
-            glyph(leaf.status, leaf.background, leaf.mode, leaf.unseen, t),
+            glyph(
+                leaf.status,
+                leaf.background,
+                marker_mode(leaf.mode, leaf.agent_up),
+                leaf.unseen,
+                t,
+            ),
             GlyphSize::Leaf,
             &format!("leaf-glyph-{key}"),
             t,
@@ -3228,6 +3249,8 @@ mod tests {
             mode: SessionMode::Interactive,
             agent: Some(AgentId("claude".to_owned())),
             label: "s1".to_owned(),
+            user_label: None,
+            agent_up: true,
             subline: Some("main".to_owned()),
             runtime: Some("claude".to_owned()),
             icon: None,

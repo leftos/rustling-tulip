@@ -104,12 +104,26 @@ impl GlyphSize {
     }
 }
 
-/// The glyph a session with `status` in `mode` shows. An idle session whose
-/// turn left `background` work running shows the background ring, seen or
-/// not; `background` beside any other status is ignored. An idle agent
+/// The mode a session's marker reads: an idle session shows the waiting ring
+/// only while its agent is up, so a session whose agent has ended back into
+/// its shell (`agent_up` false, by [`crate::sidebar::agent_is_up`]) reads as
+/// a plain shell here, whatever its mode.
+#[must_use]
+pub fn marker_mode(mode: SessionMode, agent_up: bool) -> SessionMode {
+    if agent_up {
+        mode
+    } else {
+        SessionMode::PlainShell
+    }
+}
+
+/// The glyph a session with `status` shows; `mode` is [`marker_mode`], so an
+/// agent that has left its shell reads as a plain shell. An idle session
+/// whose turn left `background` work running shows the background ring, seen
+/// or not; `background` beside any other status is ignored. An idle agent
 /// session whose turn this client has not seen (`unseen`) shows the waiting
-/// ring; an idle plain shell otherwise shows the idle dot. Its colour
-/// comes from `t`.
+/// ring; an idle plain shell otherwise shows the idle dot. Its colour comes
+/// from `t`.
 #[must_use]
 pub fn glyph(
     status: SessionStatus,
@@ -299,6 +313,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_agent_that_ended_reads_as_a_plain_shell() {
+        assert_eq!(
+            marker_mode(SessionMode::Interactive, true),
+            SessionMode::Interactive
+        );
+        assert_eq!(
+            marker_mode(SessionMode::Interactive, false),
+            SessionMode::PlainShell
+        );
+        assert_eq!(
+            marker_mode(SessionMode::PlainShell, true),
+            SessionMode::PlainShell,
+            "a shell named with an agent still reads as a shell"
+        );
+        let marker = |up: bool| {
+            let mode = marker_mode(SessionMode::Interactive, up);
+            glyph(SessionStatus::Idle, false, mode, true, T).shape
+        };
+        assert_eq!(
+            marker(false),
+            Shape::Idle,
+            "its finished turn is not waiting on the user"
+        );
+        assert_eq!(marker(true), Shape::Waiting, "while it is up it is");
     }
 
     #[test]

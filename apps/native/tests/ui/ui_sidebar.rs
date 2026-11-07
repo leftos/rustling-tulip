@@ -2171,6 +2171,43 @@ fn banner_add_repo_sends_the_folder_without_a_picker(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_shell_group_the_user_named_draws_no_add_repo_banner(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![
+            session("run-7")
+                .shell("D:/scratch/login-run-7")
+                .user_label("Log in a new account")
+                .build(),
+            session("plain").shell("D:/elsewhere").build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    for selector in [
+        "container-standalone:run-7-banner",
+        "container-standalone:run-7-add-repo",
+    ] {
+        assert!(!painted(&mut h, selector), "{selector} is drawn");
+    }
+    assert_eq!(
+        home_of(&mut h, "run-7").map(|(_, name, _, _)| name),
+        Some("Log in a new account".to_owned()),
+        "the group header reads the name the user gave it"
+    );
+    assert!(
+        painted(&mut h, "container-standalone:plain-banner"),
+        "a shell group with no user name keeps its folder banner"
+    );
+    assert!(
+        painted(&mut h, "container-standalone:plain-add-repo"),
+        "and its Add repo"
+    );
+}
+
+#[gpui::test]
 fn folder_scans_run_once_per_distinct_path_and_welcome_clears_them(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = banner_fixture();

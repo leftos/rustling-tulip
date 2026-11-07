@@ -180,6 +180,11 @@ pub struct Leaf {
     /// The agent driving the session; `None` for a plain shell.
     pub agent: Option<AgentId>,
     pub label: String,
+    /// The name the user gave the session; `None` when it has none.
+    pub user_label: Option<String>,
+    /// The session's agent is the program up in its pane
+    /// ([`agent_is_up`]), so an agent that has ended reads false.
+    pub agent_up: bool,
     /// The line under the label: the branch, the members' repos and
     /// branches, or a shell's folder.
     pub subline: Option<String>,
@@ -1410,7 +1415,9 @@ impl HostSlice {
     /// An agent session whose turn ends while another session is shown
     /// focused joins the unseen set: it goes idle with no background work
     /// left, from working or from idle with background work. Any status but
-    /// idle leaves the set, so it holds only idle sessions.
+    /// idle leaves the set, so it holds only idle sessions, and so does an
+    /// update that shows the session's agent gone: only an agent still up in
+    /// its pane waits on the user.
     fn note_turn(
         &mut self,
         before: Option<(SessionStatus, bool)>,
@@ -1421,12 +1428,13 @@ impl HostSlice {
             before,
             Some((SessionStatus::Working, _) | (SessionStatus::Idle, true))
         );
+        let up = agent_is_up(session, self.label_agents());
         match session.status {
+            SessionStatus::Idle if !up => {
+                self.unseen.remove(&session.id);
+            }
             SessionStatus::Idle
-                if turn_running
-                    && !session.background
-                    && session.mode != SessionMode::PlainShell
-                    && focused != Some(session.id.as_str()) =>
+                if turn_running && !session.background && focused != Some(session.id.as_str()) =>
             {
                 self.unseen.insert(session.id.clone());
             }
@@ -1686,6 +1694,13 @@ impl SidebarModel {
     #[must_use]
     pub fn session_label_agents(&self, id: &str) -> &[AgentDescriptor] {
         self.slice_of_session(id).label_agents()
+    }
+
+    /// Whether session `s`'s agent is the program up in its pane, by
+    /// [`agent_is_up`] and the label agent list of the host that lists it.
+    #[must_use]
+    pub fn session_agent_up(&self, s: &SessionSnapshot) -> bool {
+        agent_is_up(s, self.session_label_agents(&s.id))
     }
 
     /// Fold a message from `host`'s daemon into that host's slice; a whole
@@ -3070,12 +3085,15 @@ fn leaf(
     label_agents: &[AgentDescriptor],
 ) -> Leaf {
     let runtime = runtime_label(s, label_agents);
+    let up = agent_up(s, runtime.as_deref(), label_agents).is_some();
     Leaf {
         id: s.id.clone(),
         status: s.status,
         mode: s.mode,
         agent: s.agent.clone(),
         label: display_label(s, label_agents),
+        user_label: non_empty(s.user_label.as_deref()).map(str::to_owned),
+        agent_up: up,
         subline: subline(s, HOME.as_deref(), tabs_view),
         icon: runtime_icon(s, runtime.as_deref(), label_agents),
         runtime,
@@ -3519,7 +3537,8 @@ fn path_leaf_name(path: &str) -> String {
 
 /// The name a session shows: its user label, a plain shell's directory, a
 /// meaningful terminal title, its label, its runtime (an agent's tag from
-/// its descriptor in `agents`), then its id.
+/// its descriptor in `agents`), then its id. A session whose agent has
+/// ended back into its shell skips the title, which is then the shell's own.
 pub fn display_label(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> String {
     let cwd_leaf = || {
         (s.mode == SessionMode::PlainShell)
@@ -3527,7 +3546,12 @@ pub fn display_label(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> String 
             .flatten()
             .map(path_leaf_name)
     };
-    let title = || session_title(s, agents).filter(|t| !is_noisy_shell_title(t));
+    let title = || {
+        if agent_exited(s, agents) {
+            return None;
+        }
+        session_title(s, agents).filter(|t| !is_noisy_shell_title(t))
+    };
     non_empty(s.user_label.as_deref())
         .map(str::to_owned)
         .or_else(cwd_leaf)
@@ -3691,6 +3715,25 @@ pub(crate) fn agent_up<'a>(
 ) -> Option<&'a AgentDescriptor> {
     let descriptor = descriptor_for(agents, s.agent.as_ref()?)?;
     (runtime == Some(descriptor.tag.as_str())).then_some(descriptor)
+}
+
+/// Whether the agent that drove `s` has ended and left its shell in the
+/// pane: the session is interactive and names an agent, the daemon reports a
+/// program of its own there, and that program is not the agent's tag. A
+/// session whose program the daemon does not know, or whose agent the
+/// descriptor list does not hold, is not one.
+fn agent_exited(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> bool {
+    s.mode == SessionMode::Interactive
+        && s.agent.is_some()
+        && non_empty(s.program_name.as_deref()).is_some()
+        && agent_up(s, runtime_label(s, agents).as_deref(), agents).is_none()
+}
+
+/// Whether `s`'s agent is the program up in its pane: [`agent_up`] against
+/// the descriptor list `agents`.
+#[must_use]
+pub fn agent_is_up(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> bool {
+    agent_up(s, runtime_label(s, agents).as_deref(), agents).is_some()
 }
 
 /// Whether a leaf click may attach the terminal to the session: only
@@ -4777,6 +4820,54 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn label_keeps_the_label_after_the_agent_exits_into_the_shell() {
+        let agents = [claude_descriptor()];
+        let mut s = session("id");
+        s.label = "nu-hosted".to_owned();
+        s.terminal_title = Some("C:\\Program Files\\nu\\nu.exe".to_owned());
+        s.program_name = Some("nu".to_owned());
+        assert_eq!(
+            display_label(&s, &agents),
+            "nu-hosted",
+            "the title is the shell's own once the agent is gone"
+        );
+        assert_eq!(
+            label_tooltip(&s, &agents),
+            "nu-hosted\nTerminal title: C:\\Program Files\\nu\\nu.exe",
+            "the hover still lists the title"
+        );
+        s.program_name = Some(agents[0].tag.clone());
+        assert_eq!(
+            display_label(&s, &agents),
+            "C:\\Program Files\\nu\\nu.exe",
+            "while the agent is up its title still names the session"
+        );
+    }
+
+    #[test]
+    fn a_leaf_knows_whether_its_agent_is_up() {
+        let agents = [claude_descriptor()];
+        let mut s = session("id");
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false, &agents);
+        assert!(listed.agent_up, "no known program: the agent is up");
+        s.program_name = Some("nu".to_owned());
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false, &agents);
+        assert!(!listed.agent_up, "the shell around the agent is up");
+    }
+
+    #[test]
+    fn a_user_named_shell_reads_its_label_in_the_row_and_the_group() {
+        let mut login = shell("run-7", Some("C:\\login\\run-7"), SessionKind::Standalone);
+        login.user_label = Some("Log in a new account".to_owned());
+        assert_eq!(display_label(&login, &[]), "Log in a new account");
+        let tree = Fixture::new(vec![], vec![], vec![login]).build();
+        let group = tree.first().expect("the shell's group");
+        assert_eq!(group.kind, ContainerKind::Shell);
+        assert_eq!(group.name, "Log in a new account", "the group header");
+        assert_eq!(group.leaves[0].label, "Log in a new account", "the row");
+    }
+
+    #[test]
     fn tooltip_leaves_out_a_placeholder_title() {
         let agents = [claude_descriptor()];
         assert_eq!(
@@ -4937,6 +5028,7 @@ pub(crate) mod tests {
 
     fn model_with(sessions: Vec<SessionSnapshot>) -> SidebarModel {
         let mut model = SidebarModel::new(UiState::default());
+        model.set_agents(&crate::target::HostKey::Local, vec![claude_descriptor()]);
         model.apply(
             &crate::target::HostKey::Local,
             &DaemonMessage::Repos {
@@ -5174,6 +5266,32 @@ pub(crate) mod tests {
         let mut model = model_with(vec![sh.clone()]);
         finish_turn(&mut model, &sh);
         assert!(!model.is_unseen("s"));
+    }
+
+    #[test]
+    fn a_turn_ending_after_the_agent_exited_is_not_unseen() {
+        let mut a = in_repo("a", "r1");
+        a.program_name = Some("nu".to_owned());
+        let mut model = model_with(vec![a.clone(), in_repo("b", "r1")]);
+        model.set_focused_session(Some("b"));
+        finish_turn(&mut model, &a);
+        assert!(!unseen_of(&model, "a"), "its agent had left the shell");
+    }
+
+    #[test]
+    fn an_agent_exiting_drops_its_unseen_mark() {
+        let a = in_repo("a", "r1");
+        let mut model = model_with(vec![a.clone(), in_repo("b", "r1")]);
+        model.set_focused_session(Some("b"));
+        finish_turn(&mut model, &a);
+        assert!(
+            unseen_of(&model, "a"),
+            "precondition: the turn ended unseen"
+        );
+        let mut exited = a.clone();
+        exited.program_name = Some("nu".to_owned());
+        set_status(&mut model, &exited, SessionStatus::Idle);
+        assert!(!unseen_of(&model, "a"), "the agent is gone, nothing waits");
     }
 
     #[test]

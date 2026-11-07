@@ -9,7 +9,7 @@ use protocol::{SessionMode, SessionSnapshot, SessionStatus};
 use crate::LOG_FILE;
 use crate::connection::Connection;
 use crate::net::HandshakeInfo;
-use crate::status_glyph::{Glyph, Shape, glyph};
+use crate::status_glyph::{Glyph, Shape, glyph, marker_mode};
 use crate::ui_theme::UiTheme;
 
 /// How many sessions show each of the glyphs the footer counts.
@@ -89,22 +89,25 @@ impl StatusCounts {
 }
 
 /// Counts `sessions` by the glyph each shows, `is_unseen` telling whether a
-/// session's finished turn is in the client's unseen set. A plain shell
-/// shows the idle dot whatever the set says, so it is never waiting. A
-/// session marked "Don't count as busy" is never working or background, but
-/// still needs you when it asks.
+/// session's finished turn is in the client's unseen set and `is_agent_up`
+/// whether its agent is the program up in its pane. A session whose agent is
+/// not up shows the idle dot whatever the set says, so it is never waiting,
+/// as a plain shell is not. A session marked "Don't count as busy" is never
+/// working or background, but still needs you when it asks.
 #[must_use]
 pub fn status_counts<'a>(
     sessions: impl IntoIterator<Item = &'a SessionSnapshot>,
     is_unseen: impl Fn(&str) -> bool,
+    is_agent_up: impl Fn(&SessionSnapshot) -> bool,
 ) -> StatusCounts {
     let mut counts = StatusCounts::default();
     for session in sessions {
         let unseen = is_unseen(&session.id);
+        let mode = marker_mode(session.mode, is_agent_up(session));
         match glyph(
             session.status,
             session.background,
-            session.mode,
+            mode,
             unseen,
             &UiTheme::CONTRAST,
         )
@@ -272,9 +275,15 @@ mod tests {
         session(id, status, SessionMode::Interactive)
     }
 
+    /// Whether `s`'s agent is the program up in its pane, against the
+    /// registry's descriptors as the daemon sends them.
+    fn up(s: &SessionSnapshot) -> bool {
+        crate::sidebar::agent_is_up(s, &agent_registry::descriptors())
+    }
+
     fn counts(sessions: &[SessionSnapshot], unseen: &[&str]) -> StatusCounts {
         let unseen: HashSet<&str> = unseen.iter().copied().collect();
-        status_counts(sessions, |id| unseen.contains(id))
+        status_counts(sessions, |id| unseen.contains(id), up)
     }
 
     fn span(kind: CountKind, text: &str) -> CountSpan {
@@ -361,6 +370,25 @@ mod tests {
                 ..StatusCounts::default()
             },
             "the headless agent counts, the shell does not"
+        );
+    }
+
+    #[test]
+    fn a_session_whose_agent_exited_is_not_waiting() {
+        let mut exited = agent("gone", SessionStatus::Idle);
+        exited.program_name = Some("nu".to_owned());
+        assert_eq!(
+            counts(&[exited], &["gone"]),
+            StatusCounts::default(),
+            "its agent is no longer up, so nothing waits on the user"
+        );
+        assert_eq!(
+            counts(&[agent("idle", SessionStatus::Idle)], &["idle"]),
+            StatusCounts {
+                waiting: 1,
+                ..StatusCounts::default()
+            },
+            "an idle agent session whose turn was not seen waits"
         );
     }
 
