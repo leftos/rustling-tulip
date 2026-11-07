@@ -51,3 +51,8 @@ summarizer-spend.json
 themes/*.json
 # The account store under the data dir
 accounts.json
+# The push folder's VAPID key and device subscriptions, under the data dir
+vapid.json
+subscriptions.json
+push/vapid.json
+push/subscriptions.json
