@@ -290,7 +290,9 @@ fn compile_or_reject(agent: &AgentId, rules: &ScreenRules) -> CompiledRules {
 /// which a row holding one of an agent's box glyphs never matches: PowerShell's
 /// `PS <path>>`, its bare fallback `PS>`, and a nested prompt's repeated `>`
 /// (`PS <path>>>`), cmd's `<drive>:\<path>>`, and a POSIX shell's row ending
-/// in `$`, `#` or `%`, which may be the sigil alone.
+/// in `$`, `#` or `%`, which may be the sigil alone. The POSIX form needs a
+/// non-blank first column, which keeps an agent's statusline and footer rows,
+/// drawn inside its own left spacing, from reading as the prompt.
 const SHELL_PROMPTS: [(&str, bool); 3] = [
     (r"^PS(?: [^>]*)?>+$", false),
     (r"^[A-Za-z]:\\[^>]*>$", false),
@@ -1336,6 +1338,7 @@ mod tests {
             "❯",
             "  ⏵⏵ auto mode on · 1 shell",
             "  ctx:  11%  |  ds: $  17.40  |  Opus 5.5",
+            "  ctx:  11%  |  ds: $  17.40  |  12%",
             "· Cooking… (21s · ↓ 1.1k tokens)",
             "",
         ];
@@ -1424,6 +1427,42 @@ mod tests {
                 !last_row_is_shell_prompt(&screen),
                 "the agent's footer under {above:?} read as a prompt"
             );
+        }
+    }
+
+    /// Claude draws its statusline, and every footer row under its box,
+    /// inside its built-in left spacing (a statusline's `padding` only adds
+    /// to it), so a statusline ending in `%`, `$` or `#` is never the shell's
+    /// prompt, even as the bottom row with no mode line below it.
+    #[test]
+    fn a_statusline_ending_in_a_sigil_is_not_the_shells_prompt() {
+        let capture = include_str!("fixtures/v03-ready.txt");
+        let lines: Vec<&str> = capture.lines().collect();
+        let status = prompt_row(&lines) + 2;
+        assert!(
+            lines[status].starts_with("  sub: 5h"),
+            "the capture's statusline row: {:?}",
+            lines[status]
+        );
+        for statusline in [
+            "  ctx 12%",
+            "  ctx:  12%  |  cost: $",
+            "  main #",
+            "  %",
+            "    ctx 12%",
+        ] {
+            for keep_footer in [true, false] {
+                let mut rows: Vec<&str> = lines[..status].to_vec();
+                rows.push(statusline);
+                if keep_footer {
+                    rows.extend_from_slice(&lines[status + 1..]);
+                }
+                let screen = screen_from(&rows.join("\r\n"));
+                assert!(
+                    !last_row_is_shell_prompt(&screen),
+                    "the statusline {statusline:?} (footer below: {keep_footer}) read as a prompt"
+                );
+            }
         }
     }
 
