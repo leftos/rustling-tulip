@@ -118,6 +118,16 @@ export const FEATURE_WEB_PUSH = "web_push";
 export const FEATURE_UPLOAD_FILE = "upload_file";
 
 /**
+ * `Welcome.features` entry: the daemon records whether its owner is at the
+ * desk from [`ClientMessage::ReportPresence`], and while one live connection
+ * reports `active` it holds a push to a subscription whose `hold_at_desk` is
+ * on: a Needs you push arrives when the owner leaves, if the session still
+ * needs the user, and a Finished push is dropped. A client sends a report
+ * only to a daemon that lists it.
+ */
+export const FEATURE_CLIENT_PRESENCE = "client_presence";
+
+/**
  * The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
  * right after `Welcome` when its `Hello` carried no valid device token: the
  * connection stays open as a pairing connection. The daemon also answers it
@@ -3748,10 +3758,27 @@ export type ClientMessage =
   /**
    * Registers (or replaces) this device's one push subscription and its
    * Needs you and Finished switches; answered by `PushStatus`.
+   *
+   * `hold_at_desk`: Whether this subscription is held while the owner is at the desk:
+   * its Needs you push arrives when the owner leaves, if the session
+   * still needs the user, and its Finished push is dropped then. On
+   * unless the phone turns it off.
    */
-  | { type: "register_push"; registration: PushRegistration; needs_you: boolean; finished: boolean; request_id: string }
+  | { type: "register_push"; registration: PushRegistration; needs_you: boolean; finished: boolean; hold_at_desk?: boolean; request_id: string }
   /** Removes this device's push subscription; answered by `PushStatus`. */
   | { type: "unregister_push"; request_id: string }
+  /**
+   * Reports whether the owner is at the desk on this connection: `active`
+   * while the client's window is focused and its own machine has taken
+   * keyboard or mouse input in the last 180 seconds. Sent on connect and
+   * whenever that answer changes, to a daemon listing
+   * [`FEATURE_CLIENT_PRESENCE`]; the daemon answers nothing, and the
+   * connection stops counting when it closes. While any connection reports
+   * `active`, a push to a subscription with `hold_at_desk` on is held: its
+   * Needs you push arrives when the owner leaves, if the session still
+   * needs the user, and its Finished push is dropped.
+   */
+  | { type: "report_presence"; active: boolean }
   /**
    * Scan the current worktrees root and report every `wt.<branch>/`
    * group found under it, cross-referenced against the live and
@@ -5141,8 +5168,13 @@ export type DaemonMessage =
    * This device's push state: the daemon's VAPID public key (base64url,
    * the page's `applicationServerKey`), the registered endpoint (`None`
    * when none; never printed in `{:?}`), and the two switches.
+   *
+   * `hold_at_desk`: Whether this subscription is held while the owner is at the desk:
+   * its Needs you push arrives when the owner leaves, if the session
+   * still needs the user, and its Finished push is dropped then. True
+   * when nothing is registered.
    */
-  | { type: "push_status"; vapid_public_key: string; endpoint?: Secret | null; needs_you: boolean; finished: boolean; request_id?: string | null }
+  | { type: "push_status"; vapid_public_key: string; endpoint?: Secret | null; needs_you: boolean; finished: boolean; hold_at_desk?: boolean; request_id?: string | null }
   /**
    * The answer to [`ClientMessage::LoadChat`], sent to the requester with
    * its `request_id`: the session's chat as it stands. `hidden` counts the

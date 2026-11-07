@@ -95,6 +95,14 @@ pub const FEATURE_WEB_PUSH: &str = "web_push";
 /// session's folder ([`ClientMessage::UploadFile`]).
 pub const FEATURE_UPLOAD_FILE: &str = "upload_file";
 
+/// `Welcome.features` entry: the daemon records whether its owner is at the
+/// desk from [`ClientMessage::ReportPresence`], and while one live connection
+/// reports `active` it holds a push to a subscription whose `hold_at_desk` is
+/// on: a Needs you push arrives when the owner leaves, if the session still
+/// needs the user, and a Finished push is dropped. A client sends a report
+/// only to a daemon that lists it.
+pub const FEATURE_CLIENT_PRESENCE: &str = "client_presence";
+
 /// The most file bytes one [`ClientMessage::UploadFile`] carries, checked by
 /// the client before sending and by the daemon.
 pub const UPLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -4721,11 +4729,29 @@ pub enum ClientMessage {
         registration: PushRegistration,
         needs_you: bool,
         finished: bool,
+        /// Whether this subscription is held while the owner is at the desk:
+        /// its Needs you push arrives when the owner leaves, if the session
+        /// still needs the user, and its Finished push is dropped then. On
+        /// unless the phone turns it off.
+        #[serde(default = "default_true")]
+        hold_at_desk: bool,
         request_id: String,
     },
     /// Removes this device's push subscription; answered by `PushStatus`.
     UnregisterPush {
         request_id: String,
+    },
+    /// Reports whether the owner is at the desk on this connection: `active`
+    /// while the client's window is focused and its own machine has taken
+    /// keyboard or mouse input in the last 180 seconds. Sent on connect and
+    /// whenever that answer changes, to a daemon listing
+    /// [`FEATURE_CLIENT_PRESENCE`]; the daemon answers nothing, and the
+    /// connection stops counting when it closes. While any connection reports
+    /// `active`, a push to a subscription with `hold_at_desk` on is held: its
+    /// Needs you push arrives when the owner leaves, if the session still
+    /// needs the user, and its Finished push is dropped.
+    ReportPresence {
+        active: bool,
     },
     /// Scan the current worktrees root and report every `wt.<branch>/`
     /// group found under it, cross-referenced against the live and
@@ -6478,6 +6504,12 @@ pub enum DaemonMessage {
         endpoint: Option<Secret>,
         needs_you: bool,
         finished: bool,
+        /// Whether this subscription is held while the owner is at the desk:
+        /// its Needs you push arrives when the owner leaves, if the session
+        /// still needs the user, and its Finished push is dropped then. True
+        /// when nothing is registered.
+        #[serde(default = "default_true")]
+        hold_at_desk: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -7047,6 +7079,7 @@ mod tests {
             },
             needs_you: true,
             finished: false,
+            hold_at_desk: true,
             request_id: "r1".to_owned(),
         };
         let wire: serde_json::Value = serde_json::to_value(&msg).expect("serializes");
@@ -7089,6 +7122,7 @@ mod tests {
             registration,
             needs_you,
             finished,
+            hold_at_desk,
             request_id,
         }) = decoded
         else {
@@ -7097,6 +7131,7 @@ mod tests {
         assert_eq!(registration, PushRegistration::Unknown);
         assert!(needs_you);
         assert!(!finished);
+        assert!(hold_at_desk, "a registration without the switch is held");
         assert_eq!(request_id, "r");
     }
 
@@ -7107,6 +7142,7 @@ mod tests {
             endpoint: None,
             needs_you: true,
             finished: true,
+            hold_at_desk: true,
             request_id: Some("r1".to_owned()),
         };
         let value = serde_json::to_value(&msg).expect("serializes");
@@ -7114,6 +7150,67 @@ mod tests {
         assert!(value.get("endpoint").is_none(), "{value}");
         let back: DaemonMessage = serde_json::from_value(value.clone()).expect("decodes");
         assert_eq!(serde_json::to_value(&back).expect("serializes"), value);
+    }
+
+    #[test]
+    fn report_presence_round_trips() {
+        let msg = ClientMessage::ReportPresence { active: true };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"report_presence""#), "{json}");
+        assert!(json.contains(r#""active":true"#), "{json}");
+        let decoded = InboundClientMessage::from_json_str(&json).expect("decodes");
+        let InboundClientMessage::Known(back) = decoded else {
+            panic!("{json} decodes as a known message");
+        };
+        assert_eq!(
+            serde_json::to_value(&back).expect("serializes"),
+            serde_json::to_value(&msg).expect("serializes"),
+        );
+        assert_eq!(FEATURE_CLIENT_PRESENCE, "client_presence");
+    }
+
+    #[test]
+    fn register_push_without_hold_at_desk_reads_true() {
+        let json = r#"{"type":"register_push","registration":{"kind":"web_push","endpoint":"https://web.push.apple.com/send/abc","p256dh":"BPubKey","auth":"authsecret"},"needs_you":true,"finished":false,"request_id":"r1"}"#;
+        let decoded = InboundClientMessage::from_json_str(json).expect("decodes");
+        let InboundClientMessage::Known(ClientMessage::RegisterPush { hold_at_desk, .. }) = decoded
+        else {
+            panic!("{json} decodes as RegisterPush");
+        };
+        assert!(hold_at_desk, "a phone that sends no switch is held");
+    }
+
+    #[test]
+    fn push_status_round_trips_hold_at_desk() {
+        let msg = DaemonMessage::PushStatus {
+            vapid_public_key: "BKey".to_owned(),
+            endpoint: None,
+            needs_you: true,
+            finished: false,
+            hold_at_desk: false,
+            request_id: Some("r1".to_owned()),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""hold_at_desk":false"#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("decodes");
+        assert_eq!(
+            serde_json::to_value(&back).expect("serializes"),
+            serde_json::to_value(&msg).expect("serializes"),
+        );
+        let without: DaemonMessage = serde_json::from_str(
+            r#"{"type":"push_status","vapid_public_key":"BKey","needs_you":true,"finished":false}"#,
+        )
+        .expect("a status without the switch decodes");
+        assert!(
+            matches!(
+                without,
+                DaemonMessage::PushStatus {
+                    hold_at_desk: true,
+                    ..
+                }
+            ),
+            "{without:?}"
+        );
     }
 
     #[test]

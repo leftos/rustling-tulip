@@ -206,6 +206,9 @@ pub struct Hub {
     /// behind one lock taken after [`Hub::devices`] when both are held and
     /// never before it.
     pub(crate) push: Arc<std::sync::Mutex<crate::push::state::PushState>>,
+    /// The live connections whose client last reported the owner at the
+    /// desk. A leaf lock, taken on its own; nothing is stored.
+    pub(crate) presence: Arc<crate::presence::Presence>,
     /// The Dashboard's facts service: its watchers, its reader cache and the
     /// facts it last sent each watcher.
     pub dashboard: crate::dashboard::Dashboard,
@@ -589,6 +592,7 @@ pub async fn run(
         pairing_waiters: pairing::PairingWaiters::default(),
         live_devices: live_devices::LiveDevices::default(),
         push: push_state(),
+        presence: Arc::default(),
         dashboard,
         summarizer,
         turns,
@@ -868,6 +872,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::GetPushStatus { .. }
         | ClientMessage::RegisterPush { .. }
         | ClientMessage::UnregisterPush { .. }) => push::handle(hub, &m, ctx),
+        ClientMessage::ReportPresence { active } => hub.presence.report(ctx.connection, active),
         ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
             // Hello: already consumed by handshake; ignore subsequent ones.
             // Attach: no-op — PTY forwarders are started by LoadScrollback
@@ -1322,6 +1327,7 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
         sessions: Arc::clone(&hub.sessions),
         devices: Arc::clone(&hub.devices),
         push: Arc::clone(&hub.push),
+        presence: Arc::clone(&hub.presence),
         remote: {
             let remote = Arc::clone(&hub.remote_status);
             Arc::new(move || remote.borrow().snapshot.state.clone())

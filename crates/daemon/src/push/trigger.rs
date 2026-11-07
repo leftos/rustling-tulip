@@ -24,6 +24,7 @@ use super::store::Subscription;
 use super::vapid::{JwtCache, VapidKey};
 use super::webpush::{self, Subscriber};
 use crate::devices::DeviceStore;
+use crate::presence::Presence;
 use crate::session::{SessionEvent, SessionRegistry};
 use crate::sync::lock;
 
@@ -253,6 +254,13 @@ pub(crate) struct Alert<'a> {
     pub session: &'a SessionSnapshot,
     /// The Needs you count the badge shows.
     pub count: u32,
+    /// Whether the owner was at the desk when the alert was raised, read once
+    /// per alert before any `.await`.
+    pub at_desk: bool,
+    /// Whether only the targets whose `hold_at_desk` is on are pushed to: a
+    /// held Needs you push delivered once the owner left the desk, after the
+    /// other targets got it the first time.
+    pub only_held: bool,
 }
 
 /// What one session event raises.
@@ -292,10 +300,12 @@ struct Target {
     jwt: String,
 }
 
-/// A round's targets and the daemon's VAPID public key.
+/// A round's targets, the daemon's VAPID public key, and how many targets
+/// the desk held back.
 struct Round {
     public_key: String,
     targets: Vec<Target>,
+    held: u32,
 }
 
 /// What a round signs its JWTs with: the daemon's key, its public point
@@ -326,6 +336,10 @@ pub(crate) struct Trigger {
     /// Failures in a row by (device id, endpoint), so a new endpoint starts
     /// at zero.
     failures: HashMap<(String, String), u32>,
+    /// The sessions whose Needs you push was held at the desk; it is
+    /// delivered to the held subscriptions when the owner leaves, if the
+    /// session still needs the user then.
+    held: HashSet<String>,
 }
 
 impl Trigger {
@@ -337,6 +351,7 @@ impl Trigger {
             jwt: JwtCache::default(),
             backoff: HashMap::new(),
             failures: HashMap::new(),
+            held: HashSet::new(),
         }
     }
 
@@ -358,9 +373,19 @@ impl Trigger {
             );
             return Vec::new();
         };
-        let Some(round) = self.collect(stores, alert.kind, &origin, now) else {
+        let Some(round) = self.collect(
+            stores,
+            alert.kind,
+            &origin,
+            now,
+            alert.at_desk,
+            alert.only_held,
+        ) else {
             return Vec::new();
         };
+        if alert.kind == PushKind::NeedsYou && round.held > 0 {
+            self.held.insert(alert.session.id.clone());
+        }
         let live: HashSet<(&str, &str)> = round
             .targets
             .iter()
@@ -385,13 +410,19 @@ impl Trigger {
     }
 
     /// The round's targets, read under `devices` then `push`; both are
-    /// released when it returns. `None` when the push state does not load.
+    /// released when it returns. A target whose subscription holds at the
+    /// desk is left out while `at_desk`, and counted in [`Round::held`], so
+    /// its session can be delivered when the owner leaves; `only_held` is
+    /// that later round, keeping only those targets. `None` when the push
+    /// state does not load.
     fn collect(
         &mut self,
         stores: Stores<'_>,
         kind: PushKind,
         origin: &str,
         now: DateTime<Utc>,
+        at_desk: bool,
+        only_held: bool,
     ) -> Option<Round> {
         let devices = lock(stores.devices);
         let mut push = lock(stores.push);
@@ -414,7 +445,15 @@ impl Trigger {
             now,
         };
         let mut targets = Vec::new();
+        let mut held = 0_u32;
         for (device_id, subscription) in loaded.subs.iter().filter(|(_, s)| kind.wanted_by(s)) {
+            if only_held && !subscription.hold_at_desk {
+                continue;
+            }
+            if at_desk && subscription.hold_at_desk {
+                held += 1;
+                continue;
+            }
             match self.target(&signer, device_id, subscription, policy) {
                 Ok(target) => targets.push(target),
                 Err(err) => tracing::warn!(
@@ -424,10 +463,29 @@ impl Trigger {
                 ),
             }
         }
+        if held > 0 {
+            tracing::debug!(
+                held,
+                kind = ?kind,
+                "push: the owner is at the desk; the round's held pushes wait for the owner to leave"
+            );
+        }
         Some(Round {
             public_key,
             targets,
+            held,
         })
+    }
+
+    /// The held sessions still present and still needing the user, as their
+    /// current snapshots.
+    fn held_now(&self, sessions: &SessionRegistry) -> Vec<SessionSnapshot> {
+        let snapshots = sessions.snapshots();
+        self.held
+            .iter()
+            .filter_map(|id| snapshots.iter().find(|seen| &seen.id == id).cloned())
+            .filter(needs_you)
+            .collect()
     }
 
     /// One subscription as a target: its endpoint checked, its keys read
@@ -631,6 +689,9 @@ impl Trigger {
             }
             Err(RecvError::Closed) => Step::End,
             Ok(SessionEvent::Updated(snapshot, _origin)) => {
+                if !needs_you(&snapshot) {
+                    self.held.remove(&snapshot.id);
+                }
                 let Some(kind) = self.tracker.observe(&snapshot) else {
                     return Step::Nothing;
                 };
@@ -642,6 +703,7 @@ impl Trigger {
                 }
             }
             Ok(SessionEvent::Removed(id)) => {
+                self.held.remove(&id);
                 self.tracker.forget(&id);
                 Step::Nothing
             }
@@ -658,6 +720,9 @@ pub(crate) struct Sources {
     pub devices: Arc<Mutex<DeviceStore>>,
     /// `Hub::push`, a leaf taken after `devices`.
     pub push: Arc<Mutex<PushState>>,
+    /// The live connections reporting the owner at the desk, a leaf lock read
+    /// once per alert.
+    pub presence: Arc<Presence>,
     /// The tailnet listener's current state, read once per alert.
     pub remote: Arc<dyn Fn() -> RemoteState + Send + Sync>,
     /// Flips to `true` when the daemon is stopping.
@@ -682,12 +747,14 @@ pub(crate) fn spawn(sources: Sources) -> Option<tokio::task::JoinHandle<()>> {
         sessions,
         devices,
         push,
+        presence,
         remote,
         mut shutdown,
     } = sources;
     let mut trigger = Trigger::new(client);
     Some(tokio::spawn(async move {
         // Subscribe before seeding, so no change after the seed is lost.
+        let mut desk = presence.subscribe();
         let mut events = sessions.subscribe();
         trigger.tracker.seed(&sessions.snapshots());
         if *shutdown.borrow() {
@@ -703,24 +770,83 @@ pub(crate) fn spawn(sources: Sources) -> Option<tokio::task::JoinHandle<()>> {
                 }
                 event = events.recv() => match trigger.step(event, &sessions) {
                     Step::Alert { kind, session, count } => {
-                        // Read the listener's state once, before any `.await`,
-                        // so no watch guard is held across one.
+                        // Read the listener's state and the desk's once, before
+                        // any `.await`, so no watch guard or lock is held
+                        // across one.
                         let remote_state = remote();
+                        let at_desk = presence.at_desk();
                         let stores = Stores {
                             devices: &devices,
                             push: &push,
                         };
                         let answered = trigger
-                            .deliver(stores, &remote_state, Alert { kind, session: &session, count }, Utc::now())
+                            .deliver(
+                                stores,
+                                &remote_state,
+                                Alert { kind, session: &session, count, at_desk, only_held: false },
+                                Utc::now(),
+                            )
                             .await;
                         tracing::debug!(answered = answered.len(), "push: a round is done");
                     }
                     Step::Nothing => {}
                     Step::End => return,
                 },
+                changed = desk.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    // The owner left the desk: what was held now arrives,
+                    // to the subscriptions that held it only.
+                    if !*desk.borrow_and_update() {
+                        deliver_held(&mut trigger, &sessions, &devices, &push, &remote).await;
+                    }
+                }
             }
         }
     }))
+}
+
+/// Deliver the held Needs you pushes once the owner left the desk, to the
+/// subscriptions whose `hold_at_desk` is on only: the others got the push
+/// when it was raised. A session that no longer needs the user or is gone
+/// sends nothing. Nothing is queued once the held list is cleared.
+async fn deliver_held(
+    trigger: &mut Trigger,
+    sessions: &SessionRegistry,
+    devices: &Mutex<DeviceStore>,
+    push: &Mutex<PushState>,
+    remote: &Arc<dyn Fn() -> RemoteState + Send + Sync>,
+) {
+    let sessions_due = trigger.held_now(sessions);
+    trigger.held.clear();
+    if sessions_due.is_empty() {
+        return;
+    }
+    let remote_state = remote();
+    for session in &sessions_due {
+        let count = needs_you_count(with_snapshot(sessions.snapshots(), session).iter());
+        let stores = Stores { devices, push };
+        let answered = trigger
+            .deliver(
+                stores,
+                &remote_state,
+                Alert {
+                    kind: PushKind::NeedsYou,
+                    session,
+                    count,
+                    at_desk: false,
+                    only_held: true,
+                },
+                Utc::now(),
+            )
+            .await;
+        tracing::debug!(
+            session = %session.id,
+            answered = answered.len(),
+            "push: a held Needs you push is delivered"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -748,6 +874,7 @@ mod tests {
     };
     use crate::devices::DeviceStore;
     use crate::paths::Dirs;
+    use crate::presence::Presence;
     use crate::push::send::{Outcome, client, topic};
     use crate::push::state::PushState;
     use crate::push::store::Subscription;
@@ -1006,6 +1133,18 @@ mod tests {
         }
 
         fn subscribe(&self, device_id: &str, endpoint: &str, needs_you: bool, finished: bool) {
+            self.subscribe_holding(device_id, endpoint, needs_you, finished, true);
+        }
+
+        /// [`Setup::subscribe`] with the at-desk hold switch set.
+        fn subscribe_holding(
+            &self,
+            device_id: &str,
+            endpoint: &str,
+            needs_you: bool,
+            finished: bool,
+            hold_at_desk: bool,
+        ) {
             put(
                 &self.devices,
                 &self.push,
@@ -1013,6 +1152,7 @@ mod tests {
                 endpoint,
                 needs_you,
                 finished,
+                hold_at_desk,
             );
         }
 
@@ -1031,6 +1171,7 @@ mod tests {
         endpoint: &str,
         needs_you: bool,
         finished: bool,
+        hold_at_desk: bool,
     ) {
         let secret = p256::SecretKey::try_generate().expect("a P-256 key");
         let p256dh = URL_SAFE_NO_PAD.encode(secret.public_key().to_sec1_point(false).as_bytes());
@@ -1049,6 +1190,7 @@ mod tests {
                     auth,
                     needs_you,
                     finished,
+                    hold_at_desk,
                     created_at: "2026-11-07T00:00:00Z".to_owned(),
                 },
             )
@@ -1082,6 +1224,8 @@ mod tests {
                     kind,
                     session: &session,
                     count: 1,
+                    at_desk: false,
+                    only_held: false,
                 },
                 Utc::now(),
             )
@@ -1100,6 +1244,56 @@ mod tests {
         let (url, fake, server) = fake_push_service(code, "").await;
         setup.subscribe(&device, url.as_str(), true, true);
         (setup, device, url, fake, server)
+    }
+
+    /// Two paired devices, each on its own fake push service: the first held
+    /// at the desk, the second not. Drives one round with `at_desk` and
+    /// returns how many POSTs each fake saw.
+    async fn posts_at_the_desk(tag: &str, at_desk: bool) -> (usize, usize) {
+        let setup = setup(tag);
+        let held = setup.pair(1);
+        let sent = setup.pair(2);
+        let (held_url, held_fake, _held_server) = fake_push_service(201, "").await;
+        let (sent_url, sent_fake, _sent_server) = fake_push_service(201, "").await;
+        setup.subscribe_holding(&held, held_url.as_str(), true, true, true);
+        setup.subscribe_holding(&sent, sent_url.as_str(), true, true, false);
+
+        let session = session();
+        trigger()
+            .deliver(
+                setup.stores(),
+                &serving(),
+                Alert {
+                    kind: PushKind::NeedsYou,
+                    session: &session,
+                    count: 1,
+                    at_desk,
+                    only_held: false,
+                },
+                Utc::now(),
+            )
+            .await;
+
+        (
+            held_fake.seen.lock().expect("unpoisoned").len(),
+            sent_fake.seen.lock().expect("unpoisoned").len(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_held_subscription_gets_nothing_at_the_desk() {
+        let (held_posts, sent_posts) = posts_at_the_desk("hold-at-desk", true).await;
+
+        assert_eq!(held_posts, 0, "the held device gets no POST at the desk");
+        assert_eq!(sent_posts, 1, "the device that is not held gets its POST");
+    }
+
+    #[tokio::test]
+    async fn nothing_is_held_away_from_the_desk() {
+        let (held_posts, sent_posts) = posts_at_the_desk("hold-away", false).await;
+
+        assert_eq!(held_posts, 1, "away from the desk the held device gets one");
+        assert_eq!(sent_posts, 1, "and so does the other device");
     }
 
     #[tokio::test]
@@ -1197,7 +1391,7 @@ mod tests {
             let devices = Arc::clone(&setup.devices);
             let push = Arc::clone(&setup.push);
             let device = device.clone();
-            Box::new(move || put(&devices, &push, &device, fresh, true, true))
+            Box::new(move || put(&devices, &push, &device, fresh, true, true, true))
         };
         let (url, fake, _server) = fake_push_service_hooked(410, hook).await;
         setup.subscribe(&device, url.as_str(), true, true);
@@ -1547,12 +1741,14 @@ mod tests {
     fn sources(
         setup: &Setup,
         sessions: &Arc<SessionRegistry>,
+        presence: &Arc<Presence>,
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Sources {
         Sources {
             sessions: Arc::clone(sessions),
             devices: Arc::clone(&setup.devices),
             push: Arc::clone(&setup.push),
+            presence: Arc::clone(presence),
             remote: Arc::new(serving),
             shutdown,
         }
@@ -1565,8 +1761,10 @@ mod tests {
         let (url, fake, _server) = fake_push_service(201, "").await;
         setup.subscribe(&device, url.as_str(), true, true);
         let sessions = registry(&setup);
+        let presence = Arc::new(Presence::default());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let handle = spawn(sources(&setup, &sessions, shutdown_rx)).expect("the push task starts");
+        let handle = spawn(sources(&setup, &sessions, &presence, shutdown_rx))
+            .expect("the push task starts");
         // Let the task subscribe and seed before the changes it must see.
         tokio::task::yield_now().await;
 
@@ -1607,10 +1805,12 @@ mod tests {
         let (url, fake, _server) = fake_push_service(201, "").await;
         setup.subscribe(&device, url.as_str(), true, true);
         let sessions = registry(&setup);
+        let presence = Arc::new(Presence::default());
         sessions.insert(idle_record("s1"));
         sessions.update("s1", |record| record.status = SessionStatus::AwaitingInput);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let handle = spawn(sources(&setup, &sessions, shutdown_rx)).expect("the push task starts");
+        let handle = spawn(sources(&setup, &sessions, &presence, shutdown_rx))
+            .expect("the push task starts");
         // The task seeds with the session already asking; that raises nothing.
         tokio::task::yield_now().await;
 
@@ -1628,11 +1828,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_needs_you_held_at_the_desk_arrives_when_the_owner_leaves() {
+        let setup = setup("task-held-left");
+        let holding = setup.pair(1);
+        let other = setup.pair(2);
+        let (held_url, held_fake, _held_server) = fake_push_service(201, "").await;
+        let (other_url, other_fake, _other_server) = fake_push_service(201, "").await;
+        setup.subscribe_holding(&holding, held_url.as_str(), true, true, true);
+        setup.subscribe_holding(&other, other_url.as_str(), true, true, false);
+        let sessions = registry(&setup);
+        let presence = Arc::new(Presence::default());
+        presence.report(1, true);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = spawn(sources(&setup, &sessions, &presence, shutdown_rx))
+            .expect("the push task starts");
+        tokio::task::yield_now().await;
+
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        sessions.update("s1", |record| record.status = SessionStatus::AwaitingInput);
+        // The other device's push proves the round ran while the owner was at
+        // the desk, where the held device got nothing.
+        wait_for_posts(&other_fake, 1).await;
+        assert_eq!(
+            held_fake.posts(),
+            0,
+            "the push is held while the owner is at the desk"
+        );
+
+        presence.report(1, false);
+
+        wait_for_posts(&held_fake, 1).await;
+        assert_eq!(held_fake.posts(), 1, "the held push arrives once he leaves");
+        assert_eq!(
+            other_fake.posts(),
+            1,
+            "the other device is not pushed twice"
+        );
+        let header = {
+            let seen = held_fake.seen.lock().expect("unpoisoned");
+            seen[0]
+                .0
+                .get("topic")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            header.as_deref(),
+            Some(topic("s1").as_str()),
+            "the late push is about the held session"
+        );
+
+        shutdown_tx.send_replace(true);
+        let joined = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("the task ends");
+        joined.expect("the task ends cleanly");
+    }
+
+    #[tokio::test]
+    async fn a_held_session_answered_before_the_owner_leaves_sends_nothing() {
+        let setup = setup("task-held-answered");
+        let holding = setup.pair(1);
+        let other = setup.pair(2);
+        let (held_url, held_fake, _held_server) = fake_push_service(201, "").await;
+        let (other_url, other_fake, _other_server) = fake_push_service(201, "").await;
+        setup.subscribe_holding(&holding, held_url.as_str(), true, true, true);
+        setup.subscribe_holding(&other, other_url.as_str(), true, true, false);
+        let sessions = registry(&setup);
+        let presence = Arc::new(Presence::default());
+        presence.report(1, true);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = spawn(sources(&setup, &sessions, &presence, shutdown_rx))
+            .expect("the push task starts");
+        tokio::task::yield_now().await;
+
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        sessions.update("s1", |record| record.status = SessionStatus::AwaitingInput);
+        // The other device's push proves the round ran while the owner was at
+        // the desk; then the session is answered, all before he leaves.
+        wait_for_posts(&other_fake, 1).await;
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        presence.report(1, false);
+
+        // The later session's push, raised away from the desk, is the only
+        // one the held device gets: the answered session's never arrives.
+        sessions.insert(idle_record("s2"));
+        sessions.update("s2", |record| record.status = SessionStatus::Working);
+        sessions.update("s2", |record| record.status = SessionStatus::AwaitingInput);
+        wait_for_posts(&held_fake, 1).await;
+
+        assert_eq!(
+            held_fake.posts(),
+            1,
+            "only the later session's push arrives; the answered one never did"
+        );
+
+        shutdown_tx.send_replace(true);
+        let joined = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("the task ends");
+        joined.expect("the task ends cleanly");
+    }
+
+    #[tokio::test]
+    async fn the_late_push_skips_devices_that_got_it_the_first_time() {
+        let setup = setup("task-late-held-only");
+        let holding = setup.pair(1);
+        let other = setup.pair(2);
+        let (held_url, held_fake, _held_server) = fake_push_service(201, "").await;
+        let (other_url, other_fake, _other_server) = fake_push_service(201, "").await;
+        setup.subscribe_holding(&holding, held_url.as_str(), true, true, true);
+        setup.subscribe_holding(&other, other_url.as_str(), true, true, false);
+        let sessions = registry(&setup);
+        let presence = Arc::new(Presence::default());
+        presence.report(1, true);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = spawn(sources(&setup, &sessions, &presence, shutdown_rx))
+            .expect("the push task starts");
+        tokio::task::yield_now().await;
+
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        sessions.update("s1", |record| record.status = SessionStatus::AwaitingInput);
+        wait_for_posts(&other_fake, 1).await;
+        assert_eq!(
+            held_fake.posts(),
+            0,
+            "the first push reaches only the device that is not held"
+        );
+
+        presence.report(1, false);
+
+        wait_for_posts(&held_fake, 1).await;
+        assert_eq!(
+            (held_fake.posts(), other_fake.posts()),
+            (1, 1),
+            "the leaving sends one more, to the held device only"
+        );
+
+        shutdown_tx.send_replace(true);
+        let joined = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("the task ends");
+        joined.expect("the task ends cleanly");
+    }
+
+    #[tokio::test]
     async fn shutdown_ends_the_task() {
         let setup = setup("task-shutdown");
         let sessions = registry(&setup);
+        let presence = Arc::new(Presence::default());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let handle = spawn(sources(&setup, &sessions, shutdown_rx)).expect("the push task starts");
+        let handle = spawn(sources(&setup, &sessions, &presence, shutdown_rx))
+            .expect("the push task starts");
 
         shutdown_tx.send_replace(true);
 

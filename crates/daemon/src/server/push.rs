@@ -82,8 +82,15 @@ fn serve(
             registration,
             needs_you,
             finished,
+            hold_at_desk,
             ..
-        } => Some(subscription(registration, *needs_you, *finished, policy)?),
+        } => Some(subscription(
+            registration,
+            *needs_you,
+            *finished,
+            *hold_at_desk,
+            policy,
+        )?),
         _ => None,
     };
     let loaded = push.load(&devices).map_err(|err| Refusal::internal(&err))?;
@@ -122,6 +129,7 @@ fn subscription(
     registration: &PushRegistration,
     needs_you: bool,
     finished: bool,
+    hold_at_desk: bool,
     policy: crate::push::send::PushPolicy,
 ) -> Result<Subscription, Refusal> {
     let PushRegistration::WebPush {
@@ -147,6 +155,7 @@ fn subscription(
         auth: auth.0.clone(),
         needs_you,
         finished,
+        hold_at_desk,
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     })
 }
@@ -160,6 +169,7 @@ fn push_status(loaded: &Loaded, device_id: &str, request_id: &str) -> DaemonMess
         endpoint: stored.map(|sub| Secret(sub.endpoint.clone())),
         needs_you: stored.is_some_and(|sub| sub.needs_you),
         finished: stored.is_some_and(|sub| sub.finished),
+        hold_at_desk: stored.is_none_or(|sub| sub.hold_at_desk),
         request_id: Some(request_id.to_owned()),
     }
 }
@@ -216,6 +226,7 @@ mod tests {
             },
             needs_you: true,
             finished: false,
+            hold_at_desk: true,
             request_id: "p2".to_owned(),
         }
     }
@@ -226,13 +237,14 @@ mod tests {
     }
 
     /// The reply's `PushStatus` fields, failing on anything else.
-    fn status(reply: &DaemonMessage, want_id: &str) -> (String, Option<String>, bool, bool) {
+    fn status(reply: &DaemonMessage, want_id: &str) -> (String, Option<String>, bool, bool, bool) {
         match reply {
             DaemonMessage::PushStatus {
                 vapid_public_key,
                 endpoint,
                 needs_you,
                 finished,
+                hold_at_desk,
                 request_id,
             } => {
                 assert_eq!(request_id.as_deref(), Some(want_id), "{reply:?}");
@@ -241,6 +253,7 @@ mod tests {
                     endpoint.as_ref().map(|e| e.0.clone()),
                     *needs_you,
                     *finished,
+                    *hold_at_desk,
                 )
             }
             other => panic!("want PushStatus, got {other:?}"),
@@ -293,6 +306,10 @@ mod tests {
         );
         assert!(!first.0.is_empty(), "the key is sent");
         assert_eq!((first.1.as_deref(), first.2, first.3), (None, false, false));
+        assert!(
+            first.4,
+            "nothing registered reports the hold switch in its default, on"
+        );
         let second = status(
             &dispatch_one_as(&hub, get_push_status(), &tailnet()).await,
             "p1",
@@ -346,6 +363,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_push_stores_hold_at_desk() {
+        let (hub, scratch) = test_hub("push-hold-at-desk");
+        let device_id = pair(&hub);
+        let (p256dh, auth) = keys();
+        let mut msg = register_with(APPLE, p256dh, auth);
+        if let ClientMessage::RegisterPush { hold_at_desk, .. } = &mut msg {
+            *hold_at_desk = false;
+        }
+
+        let reply = status(&dispatch_one_as(&hub, msg, &tailnet()).await, "p2");
+
+        assert!(!reply.4, "the status echoes the switch");
+        let stored = SubscriptionStore::load(&push_dir(&scratch).join(SUBSCRIPTIONS_FILE));
+        assert!(
+            !stored.get(&device_id).expect("stored").hold_at_desk,
+            "the subscription is stored with the switch off"
+        );
+    }
+
+    #[tokio::test]
     async fn unregister_removes_the_subscription() {
         let (hub, scratch) = test_hub("push-unregister");
         pair(&hub);
@@ -370,6 +407,7 @@ mod tests {
             registration: protocol::PushRegistration::Unknown,
             needs_you: true,
             finished: true,
+            hold_at_desk: true,
             request_id: "p2".to_owned(),
         };
         refused(
@@ -567,6 +605,7 @@ mod tests {
                         auth: auth.clone(),
                         needs_you: true,
                         finished: true,
+                        hold_at_desk: true,
                         created_at: "2026-11-07T00:00:00Z".to_owned(),
                     },
                 )

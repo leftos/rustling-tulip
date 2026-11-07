@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 /// The subscriptions file's name inside the push folder.
 pub(crate) const SUBSCRIPTIONS_FILE: &str = "subscriptions.json";
 
+/// A subscription written without the at-desk hold switch is held.
+fn default_true() -> bool {
+    true
+}
+
 /// One device's subscription and the two switches the phone app sets. Its
 /// `Debug` redacts the endpoint (a capability URL) and both keys, `auth`
 /// being the RFC 8291 secret, so no log carries them.
@@ -29,6 +34,10 @@ pub(crate) struct Subscription {
     pub needs_you: bool,
     /// The device's Finished switch.
     pub finished: bool,
+    /// Whether this subscription's pushes are held while the owner is at the
+    /// desk; on unless the phone turns it off.
+    #[serde(default = "default_true")]
+    pub hold_at_desk: bool,
     /// When the subscription was stored, RFC 3339 UTC; the caller reads the
     /// clock, never this store.
     pub created_at: String,
@@ -44,6 +53,7 @@ impl std::fmt::Debug for Subscription {
             .field("auth", &REDACTED)
             .field("needs_you", &self.needs_you)
             .field("finished", &self.finished)
+            .field("hold_at_desk", &self.hold_at_desk)
             .field("created_at", &self.created_at)
             .finish()
     }
@@ -281,12 +291,31 @@ mod tests {
             auth: "auth-secret".to_owned(),
             needs_you,
             finished,
+            hold_at_desk: true,
             created_at: "2026-11-07T00:00:00Z".to_owned(),
         }
     }
 
     fn ids(store: &SubscriptionStore) -> Vec<String> {
         store.iter().map(|(id, _)| id.to_owned()).collect()
+    }
+
+    #[test]
+    fn a_subscription_without_hold_at_desk_reads_true() {
+        let scratch = Scratch::new("hold-default");
+        std::fs::write(
+            scratch.file(),
+            r#"{"devices":{"dev-1":{"kind":"web_push","endpoint":"https://push.example/one","p256dh":"p256dh-key","auth":"auth-secret","needs_you":true,"finished":false,"created_at":"2026-11-07T00:00:00Z"}}}"#,
+        )
+        .expect("write the subscriptions file");
+
+        let store = scratch.store();
+
+        let stored = store.get("dev-1").expect("the device's subscription");
+        assert!(
+            stored.hold_at_desk,
+            "a subscription written without the switch is held at the desk"
+        );
     }
 
     #[test]

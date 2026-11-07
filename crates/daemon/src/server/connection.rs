@@ -267,18 +267,21 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
     client_session_until(hub, socket, auth, None).await;
 }
 
-/// The guards that end `connection`'s Dashboard watch and unload its chats
-/// when dropped.
+/// The guards that end `connection`'s Dashboard watch, unload its chats and
+/// stop it counting as at the desk when dropped, on every way out, panic
+/// included.
 fn connection_watches(
     hub: &Hub,
     connection: u64,
 ) -> (
     crate::dashboard::WatchGuard,
     crate::chat_mirror::ChatLoadGuard,
+    crate::presence::PresenceGuard,
 ) {
     (
         hub.dashboard.watch_guard(connection),
         hub.chat_mirror.guard(connection),
+        crate::presence::PresenceGuard::new(Arc::clone(&hub.presence), connection),
     )
 }
 
@@ -400,8 +403,9 @@ pub(super) async fn client_session_until<S: Socket>(
     // Subscribe to global session events. After splitting PtyOutput out, this
     // channel only carries low-volume control events.
     let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
-    // End any Dashboard watch and chat load of this connection on every way
-    // out, panic included; dropped before `out_tx`, since each holds a clone.
+    // End any Dashboard watch and chat load of this connection, and stop it
+    // counting as at the desk, on every way out, panic included; dropped
+    // before `out_tx`, since the first two hold clones.
     let watches = connection_watches(&hub, connection);
     let event_task = spawn_session_forwarder(Arc::clone(&hub.sessions), out_tx.clone(), connection);
 
@@ -1501,6 +1505,66 @@ mod tests {
         assert!(
             closed_with_a_close_frame(&mut client).await,
             "the daemon sends Close before it ends the connection"
+        );
+    }
+
+    /// Send a `ReportPresence` on `client` and wait for the `ListEnvNames`
+    /// that follows it, proving the daemon handled the report.
+    async fn report_presence(client: &mut WsClient, active: bool) {
+        ws_send(client, &protocol::ClientMessage::ReportPresence { active }).await;
+        ws_send(
+            client,
+            &protocol::ClientMessage::ListEnvNames {
+                request_id: Some("after".to_owned()),
+            },
+        )
+        .await;
+        read_until(client, |message| {
+            matches!(
+                message,
+                DaemonMessage::EnvNames { request_id, .. }
+                    if request_id.as_deref() == Some("after")
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn report_presence_marks_the_connection_active() {
+        let (hub, _scratch) = test_hub("presence-report");
+        let mut client = loopback_ws_client(&hub).await;
+        ws_send(&mut client, &hello(&hub.auth_token, None)).await;
+
+        report_presence(&mut client, true).await;
+
+        assert!(
+            hub.presence.at_desk(),
+            "the connection that reported active counts as at the desk"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_connection_is_no_longer_at_the_desk() {
+        let (hub, _scratch) = test_hub("presence-closed");
+        let mut client = loopback_ws_client(&hub).await;
+        ws_send(&mut client, &hello(&hub.auth_token, None)).await;
+        report_presence(&mut client, true).await;
+        assert!(
+            hub.presence.at_desk(),
+            "the connection counts before it closes"
+        );
+
+        drop(client);
+
+        let forgotten = tokio::time::timeout(Duration::from_secs(10), async {
+            while hub.presence.at_desk() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            forgotten.is_ok(),
+            "a closed connection stops counting at the desk"
         );
     }
 

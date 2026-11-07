@@ -190,6 +190,7 @@ pub(super) fn build_test_hub(
         pairing_waiters: super::pairing::PairingWaiters::default(),
         live_devices: super::live_devices::LiveDevices::default(),
         push,
+        presence: Arc::default(),
         dashboard,
         summarizer,
         turns,

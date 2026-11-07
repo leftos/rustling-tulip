@@ -102,9 +102,11 @@ The daemon pushes Needs you and Finished to every subscribed device for its whol
 
 Needs you fires when a session enters `AwaitingInput` from another status and is neither inactive nor abandoned. Finished fires when an agent session (never a plain shell) lands `Idle` with no `background` work, from `Working` or from `Idle` with `background` set. A session seen for the first time raises nothing, so one already awaiting input when the daemon starts raises nothing until it next changes; a removed session is forgotten, so its next appearance is a first sighting. After a lagged event stream the trigger re-seeds from the registry and raises nothing for what it missed.
 
+While the owner is at the desk, the pushes of subscriptions whose `hold_at_desk` is on are held (`presence.rs`). The owner is at the desk while any live connection last reported `active` through `ReportPresence` (a client listing `client_presence` sends it; a closed connection stops counting; nothing is stored, so a restarted daemon starts with the owner away). A held Needs you push is delivered to those subscriptions when the owner leaves the desk, if its session still needs the user then (a session answered or removed meanwhile sends nothing); a held Finished push is dropped. Subscriptions with `hold_at_desk` off get every push as before.
+
 Nothing is sent while the tailnet listener is not serving. The body is the session's label and the badge is the Needs you count. A throttled or failing push service is backed off per push-service origin (30 s, doubling to 10 min), and a 404 or 410 deletes the subscription.
 
-The log says error `push: the HTTP client did not build; no push is sent until the daemon restarts`, warn `push: the session event stream lagged; re-seeded`, and debug `push: a round is done` (`answered`).
+The log says error `push: the HTTP client did not build; no push is sent until the daemon restarts`, warn `push: the session event stream lagged; re-seeded`, and debug `push: a round is done` (`answered`), `push: the owner is at the desk; the round's held pushes wait for the owner to leave` and `push: a held Needs you push is delivered`.
 
 ## Chat mirror
 

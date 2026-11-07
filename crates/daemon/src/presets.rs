@@ -2970,6 +2970,7 @@ mod tests {
             pairing_waiters: Arc::default(),
             live_devices: crate::server::live_devices::LiveDevices::default(),
             push: crate::server::test_support::push_state_in(scratch.path().join("push")),
+            presence: Arc::default(),
             dashboard,
             turns,
             summarizer,

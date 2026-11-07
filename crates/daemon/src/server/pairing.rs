@@ -1784,6 +1784,7 @@ mod tests {
                         auth: "auth".to_owned(),
                         needs_you: true,
                         finished: false,
+                        hold_at_desk: true,
                         created_at: "2026-11-07T00:00:00Z".to_owned(),
                     },
                 )
