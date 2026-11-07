@@ -15,3 +15,4 @@ crates/daemon/Cargo.toml:agent-claude # the daemon's dev-dependency for its test
 crates/daemon/src/summarizer/providers.rs # the summarizer's provider table names each provider it calls over HTTP
 crates/daemon/src/server/test_support.rs # test-only module (declared under #[cfg(test)] in server.rs) driving the Claude plugin
 tools/test-map.json:\.claude/ # Claude Code's own config folder, ignored by the test map
+tools/rt-driver-mcp/src/tools.rs:RUSTLING_TULIP_CLAUDE|CLAUDE_CONFIG_DIR # the dev-only driver tool's launch env allowlist names the Claude plugin's override and home variables for a real-Claude run

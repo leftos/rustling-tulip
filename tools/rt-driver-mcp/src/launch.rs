@@ -2,6 +2,7 @@
 //! copy, start the driven client against it, and wait until its endpoint
 //! answers.
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -35,13 +36,15 @@ const DRIVER_ENV: &str = "RUSTLING_TULIP_DRIVER";
 const OFFSCREEN_ENV: &str = "RUSTLING_TULIP_OFFSCREEN_WINDOW";
 
 /// What to launch: `scratch` is the session's own folder under the repo's
-/// `.tmp/driver/`.
+/// `.tmp/driver/`; `env` is set on the isolated daemon after its isolation
+/// variables, so a row can point an agent or the tailnet at a real CLI.
 pub struct LaunchSpec {
     pub session: String,
     pub repo_root: PathBuf,
     pub build_dir: PathBuf,
     pub scratch: PathBuf,
     pub shell: TestShell,
+    pub env: Vec<(&'static str, OsString)>,
 }
 
 /// A driven client's discovery file, as the endpoint writes it.
@@ -64,7 +67,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<Session, String> {
         scratch_root: spec.scratch.clone(),
         repo_root: spec.repo_root.clone(),
         bin_dir: bin.clone(),
-        extra_env: Vec::new(),
+        extra_env: spec.env.clone(),
         shell: spec.shell,
     };
     let removed = dev_daemon::removed_envs(&daemon_spec);
@@ -289,6 +292,7 @@ mod tests {
             build_dir: root.join("empty-build"),
             scratch: scratch.clone(),
             shell: TestShell::Cmd,
+            env: Vec::new(),
         };
         std::fs::create_dir_all(&spec.build_dir).expect("makes the empty build folder");
 

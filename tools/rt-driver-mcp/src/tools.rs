@@ -2,9 +2,11 @@
 //! `screenshot`. A tool failure is a result with `isError`, never a
 //! JSON-RPC error, so the agent reads its message and the error feed.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
+use daemon_client::isolation::under_tmp;
 use dev_daemon::TestShell;
 use serde_json::{Map, Value, json};
 
@@ -15,6 +17,18 @@ use crate::session::{Session, Sessions};
 /// What every session argument tells the agent.
 const SESSION_DOC: &str =
     "The session name `launch` returned; pass it on every call (there is no default session).";
+
+/// The variables `launch`'s `env` may set: the agent and tailnet CLIs and the
+/// phone app's folder. No isolation folder is settable. The one folder on the
+/// list, `RUSTLING_TULIP_TAILNET_DIR`, must sit under `.tmp` like the
+/// isolation folders.
+const ALLOWED_ENV: &[&str] = &[
+    "RUSTLING_TULIP_CLAUDE",
+    "CLAUDE_CONFIG_DIR",
+    "RUSTLING_TULIP_TAILSCALE",
+    "RUSTLING_TULIP_PWA_DIR",
+    "RUSTLING_TULIP_TAILNET_DIR",
+];
 
 /// A tool's result: its content items and whether it failed.
 pub struct ToolResult {
@@ -59,6 +73,7 @@ pub fn list() -> Value {
                 "build_dir": {"type": "string", "description": "The folder holding the driver build; default <repo_root>/target/test-release."},
                 "repo_root": {"type": "string", "description": "The checkout to run from; default the server's --repo-root."},
                 "shell": {"type": "string", "enum": ["cmd", "default"], "description": "The isolated daemon's shell: cmd (default) for a fixed prompt and echo, or default to leave it to the Default shell setting with shell integration on."},
+                "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Variables set on the isolated daemon and the client after the isolation ones, for a run against a real Claude or the phone app; only RUSTLING_TULIP_CLAUDE, CLAUDE_CONFIG_DIR, RUSTLING_TULIP_TAILSCALE, RUSTLING_TULIP_PWA_DIR and RUSTLING_TULIP_TAILNET_DIR are accepted. The config, binaries and worktrees folders stay isolated under .tmp whatever is set."},
             }),
             &["session"],
             [false, false, false],
@@ -168,7 +183,7 @@ impl Tools {
     fn launch(&mut self, args: &Map<String, Value>) -> Result<ToolResult, String> {
         check_args(
             args,
-            &["session", "build_dir", "repo_root", "shell"],
+            &["session", "build_dir", "repo_root", "shell", "env"],
             &["session"],
         )?;
         let shell = match optional_string(args, "shell")? {
@@ -180,6 +195,7 @@ impl Tools {
                 ));
             }
         };
+        let env = launch_env(args)?;
         let session = string_arg(args, "session")?.to_owned();
         check_session_name(&session)?;
         if self.sessions.contains(&session) {
@@ -206,6 +222,7 @@ impl Tools {
             build_dir,
             scratch,
             shell,
+            env,
         })?;
         let summary = launched.summary();
         tracing::info!(%summary, "launched");
@@ -327,6 +344,53 @@ fn optional_string<'a>(args: &'a Map<String, Value>, key: &str) -> Result<Option
     }
 }
 
+/// `args.env` as environment rows, in the object's own order, refusing a name
+/// off [`ALLOWED_ENV`], a value that is not a string, an empty value and a
+/// tailnet folder that is not an absolute path under `.tmp`.
+fn launch_env(args: &Map<String, Value>) -> Result<Vec<(&'static str, OsString)>, String> {
+    let Some(env) = args.get("env") else {
+        return Ok(Vec::new());
+    };
+    let Some(rows) = env.as_object() else {
+        return Err("env must be an object of names to strings".to_owned());
+    };
+    rows.iter()
+        .map(|(name, value)| {
+            let allowed = ALLOWED_ENV
+                .iter()
+                .find(|allowed| **allowed == name.as_str())
+                .copied()
+                .ok_or_else(|| format!("env may only set {}, not {name:?}", allowlist_of_env()))?;
+            let Some(value) = value.as_str() else {
+                return Err(format!("env value for {name} must be a string"));
+            };
+            if value.is_empty() {
+                return Err(format!("env value for {name} must not be empty"));
+            }
+            // The one folder a row may set: a real certificate folder for a
+            // phone-app run, never the user's own.
+            if allowed == "RUSTLING_TULIP_TAILNET_DIR" {
+                let path = Path::new(value);
+                if !path.is_absolute() || !under_tmp(path) {
+                    return Err(format!(
+                        "env value for {name} must be an absolute path under a .tmp folder, \
+                         not {value:?}"
+                    ));
+                }
+            }
+            Ok((allowed, OsString::from(value)))
+        })
+        .collect()
+}
+
+/// [`ALLOWED_ENV`] as a refusal words it: `a, b, c, d or e`.
+fn allowlist_of_env() -> String {
+    match ALLOWED_ENV.split_last() {
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 /// Refuses a name that cannot be a folder name of its own.
 fn check_session_name(name: &str) -> Result<(), String> {
     let fits = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
@@ -406,11 +470,12 @@ mod tests {
         reason = "a spec fails with the message of the step it lost"
     )]
 
+    use std::ffi::OsString;
     use std::path::PathBuf;
 
-    use serde_json::{Value, json};
+    use serde_json::{Map, Value, json};
 
-    use super::{Step, Tools, list, run_batch};
+    use super::{Step, Tools, launch_env, list, run_batch};
     use crate::pipe::{CallError, Transport};
 
     /// Answers each method from a script and records the calls.
@@ -499,6 +564,133 @@ mod tests {
         assert!(
             text.contains("shell must be \"cmd\" or \"default\", not \"bash\""),
             "{text}"
+        );
+    }
+
+    /// `args` holding only `env`.
+    fn env_args(env: Value) -> Map<String, Value> {
+        let mut args = Map::new();
+        args.insert("env".to_owned(), env);
+        args
+    }
+
+    #[test]
+    fn launch_env_is_empty_without_the_parameter() {
+        let rows = launch_env(&Map::new()).expect("no env is no rows");
+        assert!(rows.is_empty(), "{rows:?}");
+    }
+
+    #[test]
+    fn launch_env_keeps_allowed_names_in_order() {
+        let tailnet = std::env::current_dir()
+            .expect("the test runs in a folder")
+            .join(".tmp")
+            .join("driver")
+            .join("tailnet");
+        let tailnet = tailnet.to_str().expect("a UTF-8 path");
+        let env = json!({
+            "CLAUDE_CONFIG_DIR": "C:\\tmp\\claude",
+            "RUSTLING_TULIP_TAILNET_DIR": tailnet,
+            "RUSTLING_TULIP_CLAUDE": "C:\\tmp\\claude.exe",
+            "RUSTLING_TULIP_PWA_DIR": "C:\\tmp\\pwa",
+            "RUSTLING_TULIP_TAILSCALE": "C:\\tmp\\tailscale.exe",
+        });
+        let rows = launch_env(&env_args(env.clone())).expect("every name is allowed");
+
+        let expected: Vec<String> = env
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        let names: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names, expected,
+            "rows follow the object's order, none dropped"
+        );
+        for (name, value) in &rows {
+            let given = env[*name].as_str().expect("a string");
+            assert_eq!(value.to_str(), Some(given), "{name}");
+        }
+    }
+
+    #[test]
+    fn launch_env_refuses_a_name_off_the_allowlist() {
+        let args = env_args(json!({"RUSTLING_TULIP_CONFIG_DIR": "C:\\tmp\\config"}));
+        let refused = launch_env(&args).expect_err("an isolation variable is not settable");
+        assert_eq!(
+            refused,
+            "env may only set RUSTLING_TULIP_CLAUDE, CLAUDE_CONFIG_DIR, RUSTLING_TULIP_TAILSCALE, \
+             RUSTLING_TULIP_PWA_DIR or RUSTLING_TULIP_TAILNET_DIR, not \"RUSTLING_TULIP_CONFIG_DIR\""
+        );
+    }
+
+    #[test]
+    fn launch_env_refuses_a_non_string_value() {
+        let args = env_args(json!({"RUSTLING_TULIP_CLAUDE": 7}));
+        let refused = launch_env(&args).expect_err("a non-string is refused");
+        assert_eq!(
+            refused,
+            "env value for RUSTLING_TULIP_CLAUDE must be a string"
+        );
+    }
+
+    #[test]
+    fn launch_env_refuses_an_empty_value() {
+        let args = env_args(json!({"CLAUDE_CONFIG_DIR": ""}));
+        let refused = launch_env(&args).expect_err("an empty value is refused");
+        assert_eq!(refused, "env value for CLAUDE_CONFIG_DIR must not be empty");
+    }
+
+    #[test]
+    fn launch_env_refuses_a_non_object() {
+        let args = env_args(json!("RUSTLING_TULIP_CLAUDE=C:\\claude.exe"));
+        let refused = launch_env(&args).expect_err("a string is not an object");
+        assert_eq!(refused, "env must be an object of names to strings");
+    }
+
+    #[test]
+    fn launch_env_refuses_a_tailnet_dir_outside_tmp() {
+        for value in ["C:\\Users\\x\\tailnet", "tailnet"] {
+            let args = env_args(json!({"RUSTLING_TULIP_TAILNET_DIR": value}));
+            let refused = launch_env(&args).expect_err("only a folder under .tmp is accepted");
+            assert_eq!(
+                refused,
+                format!(
+                    "env value for RUSTLING_TULIP_TAILNET_DIR must be an absolute path under a \
+                     .tmp folder, not {value:?}"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn launch_env_keeps_a_tailnet_dir_under_tmp() {
+        let tailnet = std::env::current_dir()
+            .expect("the test runs in a folder")
+            .join(".tmp")
+            .join("driver")
+            .join("tailnet");
+        let tailnet = tailnet.to_str().expect("a UTF-8 path");
+
+        let rows = launch_env(&env_args(json!({"RUSTLING_TULIP_TAILNET_DIR": tailnet})))
+            .expect("an absolute path under a .tmp folder is accepted");
+
+        assert_eq!(
+            rows,
+            vec![("RUSTLING_TULIP_TAILNET_DIR", OsString::from(tailnet))]
+        );
+    }
+
+    #[test]
+    fn the_launch_schema_lists_env() {
+        let launch = launch_tool();
+        let env = &launch["inputSchema"]["properties"]["env"];
+        assert_eq!(env["type"], json!("object"), "{launch}");
+        assert_eq!(
+            env["additionalProperties"],
+            json!({"type": "string"}),
+            "{launch}"
         );
     }
 }

@@ -167,7 +167,7 @@ Source: `docs/native-client.md` ("Tests"), `apps/native/examples/shot.rs`, `apps
 
 A driven client runs against an isolated daemon whose config, binaries and worktrees dirs are absolute and under a `.tmp` folder, so the owner's real sessions, settings and logs stay untouched: a client with default dirs attaches to the user's real daemon and resizes their PTYs, and a daemon whose binaries dir is not under `.tmp` reaps the installed app's tracers.
 
-The driver gate refuses a driven run otherwise (exit 4), and `launch` starts an `IsolatedDaemon` (`crates/dev-daemon`) under `<repo_root>/.tmp/driver/<session>-<server pid>/`, with every registered agent's override pointed at its fake CLI.
+The driver gate refuses a driven run otherwise (exit 4), and `launch` starts an `IsolatedDaemon` (`crates/dev-daemon`) under `<repo_root>/.tmp/driver/<session>-<server pid>/`, with every registered agent's override pointed at its fake CLI, unless `launch`'s allowlisted `env` names a real one (`RUSTLING_TULIP_CLAUDE`).
 
 The client is ready when its discovery file appears and the endpoint answers `ping`, not when the process starts. The agent starts it itself, in the background, and stops it with `stop` when finished; a client the owner already had running is never driven.
 
