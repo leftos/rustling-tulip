@@ -86,10 +86,30 @@ Describe 'tools/sim/sim.ps1' {
         $r.Lines[1] | Should -BeLike '*"$HOME/.local/bin/idb" ui tap 200 400 --udid <udid>*'
     }
 
-    It 'swipes between two points on the booted device' {
+    It 'swipes between two points on the booted device with the default duration' {
         $r = Invoke-Sim @('swipe', '100', '600', '100', '100')
         $r.ExitCode | Should -Be 0
-        $r.Lines[1] | Should -BeLike '*ui swipe 100 600 100 100 --udid <udid>*'
+        $r.Lines[1] | Should -BeLike '*ui swipe 100 600 100 100 --duration 0.4 --udid <udid>*'
+    }
+
+    It 'swipes with an explicit duration in seconds' {
+        $r = Invoke-Sim @('swipe', '100', '600', '100', '100', '0.25')
+        $r.ExitCode | Should -Be 0
+        $r.Lines[1] | Should -BeLike '*ui swipe 100 600 100 100 --duration 0.25 --udid <udid>*'
+    }
+
+    It 'refuses a swipe duration that is not a positive number' {
+        foreach ($seconds in @('abc', '-1')) {
+            $r = Invoke-Sim @('swipe', '100', '600', '100', '100', $seconds)
+            $r.ExitCode | Should -Be 2 -Because "duration [$seconds]"
+            $r.Output | Should -BeLike '*duration*' -Because "duration [$seconds]"
+        }
+    }
+
+    It 'presses the Home button on the booted device' {
+        $r = Invoke-Sim @('home')
+        $r.ExitCode | Should -Be 0
+        $r.Lines[1] | Should -BeLike '*"$HOME/.local/bin/idb" ui button HOME --udid <udid>*'
     }
 
     It 'types text so zsh delivers spaces, quotes, $ and ; literally' {
@@ -105,6 +125,19 @@ Describe 'tools/sim/sim.ps1' {
         $r.Lines[1] | Should -BeLike '*ui key 40 --udid <udid>*'
     }
 
+    It 'terminates an app on the booted simulator' {
+        $r = Invoke-Sim @('terminate', 'com.apple.webapp')
+        $r.ExitCode | Should -Be 0
+        $r.Lines[0] | Should -Be "ssh -o BatchMode=yes builder@mac-mini zsh -lc 'xcrun simctl list devices'"
+        $r.Lines[1].Contains("xcrun simctl terminate booted 'com.apple.webapp'") | Should -BeTrue -Because "printed [$($r.Lines[1])]"
+    }
+
+    It 'refuses terminate without a bundle id' {
+        $r = Invoke-Sim @('terminate')
+        $r.ExitCode | Should -Be 2
+        $r.Output | Should -BeLike '*terminate <bundle id>*'
+    }
+
     It 'prints the accessibility tree' {
         $r = Invoke-Sim @('describe')
         $r.ExitCode | Should -Be 0
@@ -115,6 +148,16 @@ Describe 'tools/sim/sim.ps1' {
         $r = Invoke-Sim @('shutdown')
         $r.ExitCode | Should -Be 0
         $r.Lines[1] | Should -Be "ssh -o BatchMode=yes builder@mac-mini zsh -lc 'xcrun simctl shutdown booted'"
+    }
+
+    It 'kills idb and its companion in one ssh call, looking up no device' {
+        $r = Invoke-Sim @('reset')
+        $r.ExitCode | Should -Be 0
+        $r.Lines.Count | Should -Be 1
+        $r.Lines[0] | Should -BeLike '*"$HOME/.local/bin/idb" kill*'
+        $r.Lines[0] | Should -BeLike '*pkill idb_companion*'
+        $r.Lines[0] | Should -BeLike "*true'"
+        $r.Output | Should -Not -BeLike '*simctl list devices*'
     }
 
     It 'lists the verbs and exits 2 on an unknown verb' {

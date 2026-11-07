@@ -23,6 +23,7 @@ $MacBuilder = 'builder@mac-mini'
 $DefaultDevice = 'iPhone 17'
 $RemoteShot = '/tmp/sim-rt-shot.png'
 $PrintOnly = ($env:SIM_PRINT_ONLY -eq '1')
+$DefaultSwipeDuration = '0.4'
 
 # The client's path and companion. ~/.local/bin is not on the builder's login PATH, so the client
 # is called by path, and IDB_COMPANION_PATH names the companion, which fb-idb reads before it
@@ -65,11 +66,15 @@ $VerbList = @(
     'sim.ps1 open <url>                  open a URL in Mobile Safari on the booted simulator',
     'sim.ps1 shot <local path.png>       screenshot the booted simulator to a local PNG',
     'sim.ps1 tap <x> <y>                 tap a point, in the points describe reports',
-    'sim.ps1 swipe <x1> <y1> <x2> <y2>   swipe between two points',
+    'sim.ps1 swipe <x1> <y1> <x2> <y2> [<seconds>]',
+    '                                    swipe between two points in <seconds> (default 0.4)',
+    'sim.ps1 home                        press the Home button',
     'sim.ps1 text <string>               type a string',
     'sim.ps1 key <keycode>               press a key',
+    'sim.ps1 terminate <bundle id>       terminate an app on the booted simulator',
     'sim.ps1 describe                    print the accessibility tree as JSON',
-    'sim.ps1 shutdown                    shut the booted simulator down'
+    'sim.ps1 shutdown                    shut the booted simulator down',
+    'sim.ps1 reset                       kill idb and its companion, which fixes a stale connection'
 )
 
 # Single-quotes a value for zsh, escaping an embedded quote the shell way.
@@ -90,6 +95,18 @@ function Exit-Usage([string] $Message) {
     [Console]::Error.WriteLine("sim: $Message")
     foreach ($line in $VerbList) { Write-Command $line }
     exit 2
+}
+
+# Whether a swipe duration is a positive number of seconds. It is passed through as typed, so
+# `0.25` stays `0.25`; a fast swipe does not scroll a web view, which is what the default avoids.
+function Test-SwipeDuration([string] $Value) {
+    $seconds = 0.0
+    $parsed = [double]::TryParse(
+        $Value,
+        [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref] $seconds)
+    return $parsed -and [double]::IsFinite($seconds) -and $seconds -gt 0
 }
 
 # The last line a failed command wrote to stderr, or its exit code when it wrote none.
@@ -222,8 +239,16 @@ switch ($verb) {
         Invoke-Idb -Verb 'tap' -Arguments ('tap {0} {1}' -f $rest[0], $rest[1])
     }
     'swipe' {
-        if ($rest.Count -ne 4) { Exit-Usage 'swipe needs <x1> <y1> <x2> <y2>' }
-        Invoke-Idb -Verb 'swipe' -Arguments ('swipe {0} {1} {2} {3}' -f $rest[0], $rest[1], $rest[2], $rest[3])
+        if ($rest.Count -lt 4 -or $rest.Count -gt 5) { Exit-Usage 'swipe needs <x1> <y1> <x2> <y2> [<seconds>]' }
+        $seconds = if ($rest.Count -eq 5) { [string] $rest[4] } else { $DefaultSwipeDuration }
+        if (-not (Test-SwipeDuration $seconds)) {
+            Exit-Usage ("swipe duration must be a positive number of seconds, not '{0}'" -f $seconds)
+        }
+        Invoke-Idb -Verb 'swipe' -Arguments ('swipe {0} {1} {2} {3} --duration {4}' -f $rest[0], $rest[1], $rest[2], $rest[3], $seconds)
+    }
+    'home' {
+        if ($rest.Count -ne 0) { Exit-Usage 'home takes no arguments' }
+        Invoke-Idb -Verb 'home' -Arguments 'button HOME'
     }
     'text' {
         if ($rest.Count -ne 1) { Exit-Usage 'text needs <string>' }
@@ -233,6 +258,12 @@ switch ($verb) {
         if ($rest.Count -ne 1) { Exit-Usage 'key needs <keycode>' }
         Invoke-Idb -Verb 'key' -Arguments ('key ' + [string] $rest[0])
     }
+    'terminate' {
+        if ($rest.Count -ne 1) { Exit-Usage 'terminate needs <bundle id>' }
+        Get-BootedUdid 'terminate' | Out-Null
+        $snippet = 'xcrun simctl terminate booted ' + (ConvertTo-ZshQuoted ([string] $rest[0]))
+        Invoke-Remote -Verb 'terminate' -Snippet $snippet | Out-Null
+    }
     'describe' {
         if ($rest.Count -ne 0) { Exit-Usage 'describe takes no arguments' }
         Invoke-Idb -Verb 'describe' -Arguments 'describe-all' -ShowOutput
@@ -241,6 +272,11 @@ switch ($verb) {
         if ($rest.Count -ne 0) { Exit-Usage 'shutdown takes no arguments' }
         Get-BootedUdid 'shutdown' | Out-Null
         Invoke-Remote -Verb 'shutdown' -Snippet 'xcrun simctl shutdown booted' | Out-Null
+    }
+    'reset' {
+        if ($rest.Count -ne 0) { Exit-Usage 'reset takes no arguments' }
+        # The trailing `true` keeps a companion that is not running from failing the reset.
+        Invoke-Remote -Verb 'reset' -Snippet ($IdbPrefix + '"$HOME/.local/bin/idb" kill; pkill idb_companion; true') | Out-Null
     }
     default {
         Exit-Usage ("unknown verb '{0}'" -f $verb)
