@@ -1,3 +1,4 @@
+import { RECONNECTING_BAR, connectionBar } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
 import { disarm, errorFor, type HomeActions } from "./home-actions";
 import { homeGroups, needsYou, type HomeGroup, type HomeModel, type TrayCard } from "./home-model";
@@ -12,14 +13,6 @@ import type { PromptChoice, SessionSnapshot, SessionStatus } from "./protocol";
 /** The statuses a session shows Stop in: it is up, or being started. */
 const LIVE: ReadonlySet<SessionStatus> = new Set(["spawning", "working", "awaiting_input", "idle"]);
 
-/** The statuses Home survives once it has shown: the connection is coming back. */
-const RECONNECTING: ReadonlySet<ConnectionStateName> = new Set([
-  "connecting",
-  "handshaking",
-  "backoff",
-  "hidden",
-]);
-
 /** The statuses where the pairing screen owns the page; Home never stands there. */
 const PAIRING_SCREEN: ReadonlySet<ConnectionStateName> = new Set(["pairing", "notApproved"]);
 
@@ -27,9 +20,8 @@ const PAIRING_SCREEN: ReadonlySet<ConnectionStateName> = new Set(["pairing", "no
 export const STOP = "Stop";
 export const STOP_ARMED = "Tap again to stop";
 
-/** The bars Home can show at the top. */
-export const RECONNECTING_BAR = "Reconnecting…";
-export const OFFLINE_BAR = "Offline";
+/** What Home says once the host's session list has loaded with nothing in it. */
+export const NO_SESSIONS = "No sessions";
 
 /** What a card says while its answer is on its way to the daemon. */
 export const SENDING = "Sending…";
@@ -117,6 +109,8 @@ export interface HomeScreen {
   /** The tray's card, or null when nothing needs the user. */
   readonly card: CardView | null;
   readonly groups: readonly GroupView[];
+  /** `No sessions` once the list has loaded empty; null before it loads, and with any session. */
+  readonly empty: string | null;
 }
 
 /**
@@ -133,10 +127,7 @@ export function homeVisible(status: ConnectionStateName, shown: boolean, paired:
 
 /** The bar Home shows at `state`: the reconnecting one wins over a refused send. */
 export function homeBar(state: HomeState): string | null {
-  if (state.shown && RECONNECTING.has(state.status)) {
-    return RECONNECTING_BAR;
-  }
-  return state.offline ? OFFLINE_BAR : null;
+  return connectionBar(state.status, state.shown, state.offline);
 }
 
 /** The card index to show for `index` among `count` cards; 0 when there are none. */
@@ -189,13 +180,16 @@ export function homeScreen(model: HomeModel, actions: HomeActions, state: HomeSt
   const cards = needsYou(model);
   const at = cardIndex(cards, state.card, state.index);
   const shown = cards[at];
+  const groups = homeGroups(model).map((group) => groupView(group, actions, actionsEnabled));
   return {
     visible: homeVisible(state.status, state.shown, state.paired),
     bar,
     actionsEnabled,
     index: at,
     card: shown === undefined ? null : cardView(shown, cards, at, actions, actionsEnabled),
-    groups: homeGroups(model).map((group) => groupView(group, actions, actionsEnabled)),
+    groups,
+    // Before the first list the model is empty too, so only a loaded one says so.
+    empty: model.loaded && groups.length === 0 && shown === undefined ? NO_SESSIONS : null,
   };
 }
 

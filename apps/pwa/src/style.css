@@ -128,13 +128,25 @@ p {
   display: none !important;
 }
 
-/* Home: the Needs you tray pinned over the groups, one group per container. */
-.home-bar {
+/* Home: the Needs you tray pinned over the groups, one group per container.
+   The connection bar is Home's and the session screen's alike. */
+.home-bar,
+.session-bar {
   margin: 0 0 12px;
   padding: 8px 12px;
   border-radius: 12px;
   color: #1e1e2e;
   background: #f38ba8;
+}
+
+/* The session column's gap already spaces it from what follows. */
+.session-bar {
+  margin: 0;
+}
+
+.home-empty {
+  margin: 0;
+  color: #a6adc8;
 }
 
 .home-tray {
@@ -349,11 +361,12 @@ p {
   font-size: 1rem;
 }
 
-/* The session screen: a full-height column with the chat scrolling between the
-   header and the composer, the docks above the composer, and the prompt sheet
-   over all of it. The composer is sticky at the column's foot, and the viewport
-   meta's `interactive-widget=resizes-content` shrinks the column when the
-   on-screen keyboard opens, so the box stays above it. */
+/* The session screen: a column with the chat scrolling between the header and
+   the composer at its foot, the docks above the composer, and the prompt sheet
+   over all of it. iOS Safari pans the page under the on-screen keyboard rather
+   than resizing it, so the column is sized to the visual viewport: the view
+   sets `--vv-top` and `--vv-height` from `window.visualViewport`, and without
+   them the column fills the screen. */
 body[data-route="session"] #home,
 body[data-route="session"] #notifications-open,
 body[data-route="session"] #notifications {
@@ -362,7 +375,10 @@ body[data-route="session"] #notifications {
 
 .session {
   position: fixed;
-  inset: 0;
+  top: var(--vv-top, 0px);
+  right: 0;
+  left: 0;
+  height: var(--vv-height, 100%);
   z-index: 2;
   display: flex;
   flex-direction: column;
@@ -373,6 +389,11 @@ body[data-route="session"] #notifications {
   padding-bottom: max(8px, env(safe-area-inset-bottom));
   padding-left: max(12px, env(safe-area-inset-left));
   background: #1e1e2e;
+}
+
+/* With the keyboard up the column ends at the keyboard, not the home indicator. */
+#session[data-keyboard="open"] {
+  padding-bottom: 8px;
 }
 
 .session-header {
@@ -553,8 +574,6 @@ body[data-route="session"] #notifications {
 }
 
 .session-composer {
-  position: sticky;
-  bottom: 0;
   display: grid;
   gap: 6px;
 }

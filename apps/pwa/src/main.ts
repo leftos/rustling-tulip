@@ -1,6 +1,8 @@
 import { browserBadgeEnv, createBadge } from "./badge";
 import { openWebSocket } from "./browser-socket";
+import { createConnectedLatch } from "./connection-bar";
 import { mountHomeView } from "./home-view";
+import { isInstalled } from "./installed";
 import { reset as resetHome, type HomeModel } from "./home-model";
 import { mountNotificationsView } from "./notifications-view";
 import { SW_SCOPE, SW_URL } from "./paths";
@@ -51,17 +53,35 @@ const pairingSection = document.getElementById("pairing");
 if (pairingSection !== null) {
   mountPairingView(pairingSection, connection, createCodeScanner(browserScannerEnv()));
 }
-const intro = document.getElementById("intro");
+const introHeader = document.getElementById("intro");
+const intro =
+  introHeader === null
+    ? null
+    : {
+        header: introHeader,
+        line: document.getElementById("intro-line"),
+        installed: isInstalled(navigator),
+      };
 const homeSection = document.getElementById("home");
 // Home's one model: Home folds it, and a session's screen reads it to name
 // its session and to tell when the session is gone.
 let homeModel: HomeModel = resetHome();
 const badge = createBadge(browserBadgeEnv());
+// Whether the page has had a ready, paired connection: Home and the session
+// screen share it, so neither shows `Reconnecting…` before the first connect.
+const connectedOnce = createConnectedLatch();
 if (homeSection !== null) {
-  mountHomeView(homeSection, connection, intro, openSession, (model) => {
-    homeModel = model;
-    badge.update(model);
-  });
+  mountHomeView(
+    homeSection,
+    connection,
+    intro,
+    openSession,
+    (model) => {
+      homeModel = model;
+      badge.update(model);
+    },
+    connectedOnce,
+  );
 }
 const notificationsSection = document.getElementById("notifications");
 if (notificationsSection !== null) {
@@ -104,6 +124,7 @@ function show(): void {
       connection,
       home: () => homeModel,
       onBack: back,
+      connectedOnce,
     }),
   };
 }

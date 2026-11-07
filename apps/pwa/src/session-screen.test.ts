@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 
 import { INITIAL_CHAT, chatStep, type ChatState } from "./chat-model";
+import type { ConnectionStateName } from "./connection-machine";
 import { INITIAL_COMPOSER, unsent as unsentComposer, type ComposerModel } from "./composer";
 import { reset as resetHome } from "./home-model";
 import { KEY_TRAY } from "./keys";
@@ -85,6 +86,9 @@ interface Overrides {
   readonly terminal?: boolean;
   readonly ctrlArmed?: boolean;
   readonly mirrorRefused?: boolean;
+  readonly status?: ConnectionStateName;
+  readonly sendRefused?: boolean;
+  readonly connectedOnce?: boolean;
 }
 
 /** The screen over the brief's defaults. */
@@ -101,8 +105,39 @@ function screen(overrides: Overrides = {}): SessionScreen {
     terminal: overrides.terminal ?? false,
     ctrlArmed: overrides.ctrlArmed ?? false,
     mirrorRefused: overrides.mirrorRefused ?? false,
+    status: overrides.status ?? "ready",
+    sendRefused: overrides.sendRefused ?? false,
+    connectedOnce: overrides.connectedOnce ?? true,
   });
 }
+
+test("session_screen_shows_no_bar_before_the_first_connect", () => {
+  // A deep link opened cold: nothing has been ready yet, so nothing is coming back.
+  expect(screen({ status: "connecting", connectedOnce: false }).bar).toBeNull();
+  // Ready once, then dropped: the connection is coming back.
+  expect(screen({ status: "backoff", connectedOnce: true }).bar).toBe("Reconnecting…");
+});
+
+test("session_screen_shows_reconnecting_while_the_connection_comes_back", () => {
+  for (const status of ["connecting", "handshaking", "backoff", "hidden"] as const) {
+    expect(screen({ status }).bar, status).toBe("Reconnecting…");
+    expect(screen({ status, terminal: true }).bar, `${status} terminal`).toBe("Reconnecting…");
+    expect(screen({ status, ended: true }).bar, `${status} ended`).toBe("Reconnecting…");
+    // Reconnecting wins over a refused send, as on Home.
+    expect(screen({ status, sendRefused: true }).bar, `${status} refused`).toBe("Reconnecting…");
+  }
+});
+
+test("session_screen_shows_offline_after_a_refused_send", () => {
+  expect(screen({ sendRefused: true }).bar).toBe("Offline");
+  expect(screen({ sendRefused: true, terminal: true }).bar).toBe("Offline");
+});
+
+test("session_screen_shows_no_bar_while_the_connection_is_open", () => {
+  expect(screen().bar).toBeNull();
+  expect(screen({ terminal: true }).bar).toBeNull();
+  expect(screen({ ended: true }).bar).toBeNull();
+});
 
 /** One session as Home's model holds it. */
 function session(id: string, overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {

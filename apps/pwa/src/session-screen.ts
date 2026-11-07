@@ -1,5 +1,7 @@
 import type { ChatState } from "./chat-model";
 import type { ComposerModel } from "./composer";
+import { connectionBar } from "./connection-bar";
+import type { ConnectionStateName } from "./connection-machine";
 import { displayLabel } from "./home-screen";
 import type { HomeModel } from "./home-model";
 import { KEY_TRAY, type KeyTrayEntry } from "./keys";
@@ -123,6 +125,8 @@ export interface SheetView {
 export interface SessionScreen {
   readonly back: string;
   readonly title: string;
+  /** The connection bar under the header, as Home draws it; null when the connection is fine. */
+  readonly bar: string | null;
   /** The whole screen's text when the session is gone; null otherwise. */
   readonly endText: string | null;
   /** Whether the terminal pane is shown: the toggle is on, or the chat was refused. */
@@ -164,6 +168,11 @@ export interface SessionScreenInput {
   readonly ctrlArmed: boolean;
   /** The chat mirror refused this session once while the screen was mounted. */
   readonly mirrorRefused: boolean;
+  readonly status: ConnectionStateName;
+  /** A send has been refused since the last `ready`. */
+  readonly sendRefused: boolean;
+  /** The page has had a ready, paired connection in this visit (the latch Home shares). */
+  readonly connectedOnce: boolean;
 }
 
 /** What the screen knows of its session from Home's model. */
@@ -208,10 +217,13 @@ export function sessionLook(model: HomeModel, sessionId: string): SessionLook {
 
 /** The session screen for one input. */
 export function sessionScreen(input: SessionScreenInput): SessionScreen {
+  // Before the first connect nothing is coming back, so a cold deep link shows no bar.
+  const bar = connectionBar(input.status, input.connectedOnce, input.sendRefused);
   if (input.ended) {
     return {
       back: BACK,
       title: input.title,
+      bar,
       endText: ENDED_TEXT,
       terminal: false,
       toggle: null,
@@ -236,6 +248,7 @@ export function sessionScreen(input: SessionScreenInput): SessionScreen {
     return {
       back: BACK,
       title: input.title,
+      bar,
       endText: null,
       terminal: true,
       toggle,
@@ -253,6 +266,7 @@ export function sessionScreen(input: SessionScreenInput): SessionScreen {
   return {
     back: BACK,
     title: input.title,
+    bar,
     endText: null,
     terminal: false,
     toggle,

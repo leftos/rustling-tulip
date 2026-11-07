@@ -11,6 +11,7 @@ import {
   unsent as unsentComposer,
   type ComposerModel,
 } from "./composer";
+import type { ConnectedLatch } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
 import type { HomeModel } from "./home-model";
 import type { KeyTrayEntry } from "./keys";
@@ -47,6 +48,7 @@ import {
 } from "./session-screen";
 import type { Connection } from "./socket";
 import { mountTerminal, type TerminalView } from "./terminal-view";
+import { sessionBox } from "./viewport";
 
 /** What a session screen is mounted over. */
 export interface SessionViewOptions {
@@ -56,6 +58,8 @@ export interface SessionViewOptions {
   readonly home: () => HomeModel;
   /** Where the Back button and the browser's own back go. */
   readonly onBack: () => void;
+  /** The page's has-connected latch, which Home holds too. */
+  readonly connectedOnce: ConnectedLatch;
 }
 
 /**
@@ -67,7 +71,7 @@ export interface SessionViewOptions {
  * off the page, so nothing it wired can send for the session it left.
  */
 export function mountSessionView(container: HTMLElement, options: SessionViewOptions): () => void {
-  const { sessionId, connection, onBack } = options;
+  const { sessionId, connection, onBack, connectedOnce } = options;
   const readHome = options.home;
 
   let chat: ChatState = INITIAL_CHAT;
@@ -88,6 +92,12 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   let mirrorRefused = false;
   /** `Offline: not sent` for a dropped Key or Quick tap, until a send lands. */
   let offline: string | null = null;
+  /** A send has been refused since the last `ready`, which the bar shows as `Offline`. */
+  let sendRefused = false;
+  /** A key bar or terminal-dock tap is being typed into the pane right now. */
+  let userTerminalInput = false;
+  /** That tap's send was refused. */
+  let terminalRefused = false;
   let drawn: SessionScreen | null = null;
   let drawnRows: readonly ChatRow[] | null = null;
   let drawnHidden: string | null = null;
@@ -114,6 +124,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   });
   const header = element("div", "session-header");
   header.append(back, title, toggle);
+  const barEl = element("p", "session-bar");
 
   const ended = element("p", "session-ended");
   const chatEl = element("div", "session-chat");
@@ -146,7 +157,8 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   const sheetKeys = element("div", "session-sheet-keys");
   for (const key of SHEET_KEYS) {
     const node = button("session-sheet-key", key.label, () => {
-      sendNow(sheetKey(sessionId, key.key));
+      sendUser(sheetKey(sessionId, key.key));
+      update();
     });
     sheetKeys.append(node);
   }
@@ -160,6 +172,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
 
   container.append(
     header,
+    barEl,
     ended,
     chatEl,
     notice,
@@ -175,6 +188,26 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   function sendNow(message: ClientMessage | null): boolean {
     return message === null ? true : connection.send(message);
   }
+
+  /** Sends one message the user asked for, and notes it when the connection refused it. */
+  function sendUser(message: ClientMessage): boolean {
+    const sent = connection.send(message);
+    if (!sent) {
+      sendRefused = true;
+      terminalRefused = true;
+    }
+    return sent;
+  }
+
+  /**
+   * The terminal's connection: a send made while a key bar or terminal-dock
+   * tap is typed into the pane is the user's, so its refusal counts; the
+   * pane's own replies and keys typed into xterm go straight through.
+   */
+  const terminalConnection: Connection = {
+    ...connection,
+    send: (message) => (userTerminalInput ? sendUser(message) : connection.send(message)),
+  };
 
   function update(): void {
     syncTimer();
@@ -194,6 +227,9 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       terminal: terminalOn,
       ctrlArmed,
       mirrorRefused,
+      status,
+      sendRefused,
+      connectedOnce: connectedOnce.connected(),
     });
     if (drawn !== null && sameScreen(drawn, screen)) {
       return;
@@ -210,6 +246,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     title.hidden = screen.title === "";
     toggle.hidden = screen.toggle === null;
     toggle.textContent = screen.toggle ?? "";
+    showText(barEl, screen.bar);
     showText(ended, screen.endText);
     showText(notice, screen.notice);
     chatEl.hidden = screen.endText !== null || screen.terminal;
@@ -364,7 +401,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     }
     terminalView = mountTerminal({
       sessionId,
-      connection,
+      connection: terminalConnection,
       container: terminalEl,
       newRequestId,
       reason: terminalOn ? "toggle" : "attach",
@@ -484,7 +521,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     const result = answerFor(sheet, sessionId, prompt, answer, newRequestId);
     sheet = result.state;
     if (result.message !== null) {
-      if (connection.send(result.message)) {
+      if (sendUser(result.message)) {
         offline = null;
         sheetBox.value = "";
       } else {
@@ -501,7 +538,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     composer = result.state;
     const sending = composer.sending;
     if (result.message !== null && sending !== null) {
-      if (connection.send(result.message)) {
+      if (sendUser(result.message)) {
         offline = null;
       } else {
         composer = unsentComposer(composer, sending.requestId, OFFLINE_NOT_SENT);
@@ -512,7 +549,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
 
   /** A Key or Quick tap: a dropped one shows the offline line until a send lands. */
   function sendInput(message: ClientMessage): void {
-    offline = connection.send(message) ? null : OFFLINE_NOT_SENT;
+    offline = sendUser(message) ? null : OFFLINE_NOT_SENT;
     update();
   }
 
@@ -525,8 +562,14 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     if (terminalView === null) {
       return;
     }
-    offline = connection.status() === "ready" ? null : OFFLINE_NOT_SENT;
-    act();
+    terminalRefused = false;
+    userTerminalInput = true;
+    try {
+      act();
+    } finally {
+      userTerminalInput = false;
+    }
+    offline = terminalRefused ? OFFLINE_NOT_SENT : null;
     ctrlArmed = terminalView.pane.ctrlArmed();
     update();
   }
@@ -592,9 +635,13 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     if (notice.kind === "status") {
       status = notice.state;
       if (status === "ready") {
+        if (connection.paired()) {
+          connectedOnce.mark();
+        }
         composer = resetComposer(composer);
         sheet = resetSheet(sheet);
         offline = null;
+        sendRefused = false;
         // A chat dropped while the page was hidden is entered again; one still
         // held reloads, since the daemon resends its state only to a fresh load.
         apply(
@@ -616,9 +663,11 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   });
   apply(chatStep(chat, { type: "enter", sessionId }, newRequestId));
   update();
+  const stopViewport = trackViewport(container);
 
   return () => {
     // Off the page first: nothing this view wired can fire again.
+    stopViewport();
     container.replaceChildren();
     container.hidden = true;
     terminalView?.destroy();
@@ -629,6 +678,40 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       timer = undefined;
     }
     apply(chatStep(chat, { type: "leave" }, newRequestId));
+  };
+}
+
+/**
+ * Keeps `container` over the visual viewport while the screen is mounted, as
+ * `--vv-top` and `--vv-height`, which `.session` is sized from, and marks it
+ * `data-keyboard="open"` while the keyboard is up. A browser
+ * without `visualViewport` keeps the screen at its full height. The returned
+ * function removes the listeners and the variables.
+ */
+function trackViewport(container: HTMLElement): () => void {
+  const viewport = window.visualViewport;
+  if (viewport === null) {
+    return () => {};
+  }
+  const place = (): void => {
+    const box = sessionBox(viewport, window.innerHeight);
+    container.style.setProperty("--vv-top", `${box.top}px`);
+    container.style.setProperty("--vv-height", `${box.height}px`);
+    if (box.keyboardOpen) {
+      container.dataset["keyboard"] = "open";
+    } else {
+      delete container.dataset["keyboard"];
+    }
+  };
+  viewport.addEventListener("resize", place);
+  viewport.addEventListener("scroll", place);
+  place();
+  return () => {
+    viewport.removeEventListener("resize", place);
+    viewport.removeEventListener("scroll", place);
+    container.style.removeProperty("--vv-top");
+    container.style.removeProperty("--vv-height");
+    delete container.dataset["keyboard"];
   };
 }
 

@@ -267,6 +267,18 @@ test("home_screen_shows_the_status_words", () => {
   }
 });
 
+test("home_screen_says_no_sessions_when_loaded_and_empty", () => {
+  const empty: HomeModel = { ...model([]), loaded: true };
+  expect(homeScreen(empty, NO_ACTIONS, view()).empty).toBe("No sessions");
+
+  // Before the first session list: nothing extra.
+  expect(homeScreen(model([]), NO_ACTIONS, view()).empty).toBeNull();
+
+  // A loaded list with one session draws its row, not the line.
+  const one: HomeModel = { ...model([session("s1")]), loaded: true };
+  expect(homeScreen(one, NO_ACTIONS, view()).empty).toBeNull();
+});
+
 test("home_screen_shows_the_offline_bar", () => {
   expect(homeScreen(model([]), NO_ACTIONS, view({ offline: true })).bar).toBe("Offline");
   expect(homeScreen(model([]), NO_ACTIONS, view()).bar).toBeNull();

@@ -1,5 +1,5 @@
 import type { NewRequestId } from "./home-actions";
-import { OFFLINE_BAR } from "./home-screen";
+import { OFFLINE_BAR } from "./connection-bar";
 import type { ClientMessage, DaemonMessage } from "./protocol";
 import type { PushKeys, PushPermission } from "./push-port";
 

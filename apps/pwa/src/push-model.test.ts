@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 
 import type { NewRequestId } from "./home-actions";
-import { OFFLINE_BAR } from "./home-screen";
+import { OFFLINE_BAR } from "./connection-bar";
 import type { DaemonMessage } from "./protocol";
 import {
   ALLOW_LABEL,

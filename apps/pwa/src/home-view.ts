@@ -19,9 +19,18 @@ import {
   type HomeState,
   type RowView,
 } from "./home-screen";
+import type { ConnectedLatch } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
+import { introLineShown } from "./installed";
 import type { ClientMessage } from "./protocol";
 import type { Connection } from "./socket";
+
+/** The page's intro header, its install line, and whether the page runs from the Home Screen. */
+export interface Intro {
+  readonly header: HTMLElement;
+  readonly line: HTMLElement | null;
+  readonly installed: boolean;
+}
 
 /**
  * Home over one connection: it folds the notices into the model and the
@@ -36,14 +45,14 @@ import type { Connection } from "./socket";
 export function mountHomeView(
   container: HTMLElement,
   connection: Connection,
-  intro: HTMLElement | null,
+  intro: Intro | null,
   onOpen: (sessionId: string) => void,
   onModel: (model: HomeModel) => void,
+  connectedOnce: ConnectedLatch,
 ): () => void {
   let model: HomeModel = resetModel();
   let actions: HomeActions = resetActions();
   let status: ConnectionStateName = "idle";
-  let shown = false;
   let cardId: string | null = null;
   let lastIndex = 0;
   let offline = false;
@@ -64,13 +73,15 @@ export function mountHomeView(
     const state: HomeState = {
       status,
       paired: connection.paired(),
-      shown,
+      shown: connectedOnce.connected(),
       card: cardId,
       index: lastIndex,
       offline,
     };
     const screen = homeScreen(model, actions, state);
-    shown = shown || screen.visible;
+    if (screen.visible) {
+      connectedOnce.mark();
+    }
     cardId = screen.card?.sessionId ?? null;
     lastIndex = screen.index;
     // A repaint rebuilds every button, so a tap lands on a node that is
@@ -85,7 +96,7 @@ export function mountHomeView(
   function paint(screen: HomeScreen): void {
     container.hidden = !screen.visible;
     if (intro !== null) {
-      intro.hidden = screen.visible;
+      intro.header.hidden = screen.visible;
     }
     const nodes: HTMLElement[] = [];
     if (screen.bar !== null) {
@@ -98,6 +109,11 @@ export function mountHomeView(
     }
     for (const group of screen.groups) {
       nodes.push(groupSection(group));
+    }
+    if (screen.empty !== null) {
+      const empty = element("p", "home-empty");
+      empty.textContent = screen.empty;
+      nodes.push(empty);
     }
     container.replaceChildren(...nodes);
   }
@@ -288,6 +304,11 @@ export function mountHomeView(
     const node = document.createElement(tag);
     node.className = className;
     return node;
+  }
+
+  // The install line never changes in a page visit; Home hides the whole header anyway.
+  if (intro !== null && intro.line !== null) {
+    intro.line.hidden = !introLineShown(intro.installed);
   }
 
   const unsubscribe = connection.subscribe((notice) => {

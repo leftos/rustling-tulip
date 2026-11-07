@@ -1,4 +1,5 @@
 import { base64urlToBytes } from "./base64url";
+import { isInstalled } from "./installed";
 
 /**
  * What a push subscription gives the page: its endpoint and the two keys,
@@ -129,12 +130,6 @@ export function memoryPushPort(options: MemoryPushOptions = {}): MemoryPushPort 
     asked,
     held: () => keys,
   };
-}
-
-/** Whether the page runs from the Home Screen: iOS reports `standalone`, other browsers the display mode. */
-function isInstalled(where: Navigator): boolean {
-  const ios = where as Navigator & { readonly standalone?: boolean };
-  return ios.standalone === true || matchMedia("(display-mode: standalone)").matches;
 }
 
 /** The phone's subscription now, once its service worker is active. */
