@@ -30,7 +30,7 @@ use rustling_tulip_native::{
     PairingActionSink, PairingToast, PhysicalRect, QuitFn, RootDeps, RootView, SavePicker, ScPanel,
     Sounder, TaskbarBadge, ToastPlacer, Transport, WorkArea, bind_keys, log_paths,
     remote_access::Autostart,
-    set_bitmap_reader, spawn_net,
+    set_bitmap_reader, set_idle_reader, spawn_net,
     target::{HostKey, Target},
     ui_theme::UiTheme,
     update::{AlreadyRunning, LastResult, Ready, Updater},
@@ -2697,6 +2697,8 @@ impl<'a> Harness<'a> {
         cx.update(bind_keys);
         // A spec never reads the developer's own clipboard bitmap.
         cx.update(|cx| set_bitmap_reader(cx, || Ok(None)));
+        // Nor the developer's own idle time: input came just now.
+        cx.update(|cx| set_idle_reader(cx, || Some(Duration::ZERO)));
         let (tx, commands) = unbounded();
         let (events, rx) = unbounded();
         let clock = TestClock::new();
@@ -2771,6 +2773,8 @@ impl<'a> Harness<'a> {
         cx.update(bind_keys);
         // A spec never reads the developer's own clipboard bitmap.
         cx.update(|cx| set_bitmap_reader(cx, || Ok(None)));
+        // Nor the developer's own idle time: input came just now.
+        cx.update(|cx| set_idle_reader(cx, || Some(Duration::ZERO)));
         let (tx, net_commands) = unbounded();
         let (net_events, rx) = unbounded();
         spawn_net(net, Target::Local, net_commands, net_events);

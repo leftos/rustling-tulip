@@ -1081,6 +1081,18 @@
     },
     {
       "paths": [
+        "apps/native/src/presence.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^presence::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_presence)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_presence.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_presence)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/text_input.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^text_input::/))"

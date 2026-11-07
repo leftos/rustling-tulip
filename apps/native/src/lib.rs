@@ -114,6 +114,7 @@ mod pane_menu;
 mod paste_upload;
 mod popout_view;
 mod popouts;
+mod presence;
 mod preset_launch;
 mod preset_prompts;
 pub(crate) mod preset_wizard;
@@ -334,6 +335,7 @@ pub use crate::pairing::{
     approve_message, deny_message,
 };
 pub use crate::popouts::{OpenOutcome, PopoutKey, SavedPopout};
+pub use crate::presence::{IdleReader, set_idle_reader};
 pub use crate::preset_wizard::{LaunchButton, NextButton};
 pub use crate::quit_view::QuitFn;
 pub use crate::recover_view::RecoverRow;
@@ -1080,6 +1082,10 @@ pub struct RootView {
     ui_save_timer: Option<Task<()>>,
     /// Wakes the view when a resize's automatic grid re-pick is due.
     auto_grid_timer: Option<Task<()>>,
+    /// Whether the owner is at the desk, as last reported to the hosts.
+    presence: presence::PresenceReport,
+    /// Re-reads [`Self::presence`] every [`presence::RECHECK_EVERY`].
+    presence_timer: Option<Task<()>>,
     /// A header Stop waiting for its second click.
     confirm: HeaderStopConfirm,
     /// The Detached banner's Stop all waiting for its second click.
@@ -1426,6 +1432,7 @@ impl RootView {
                 root.set_link_mode(false, cx);
             }
             root.dismiss_skipped_toasts(window.is_window_active(), cx);
+            root.report_presence(window, cx);
         })
         .detach();
         cx.observe_window_bounds(window, |root, window, cx| {
@@ -1636,6 +1643,8 @@ impl RootView {
             ui_save_deadline: None,
             ui_save_timer: None,
             auto_grid_timer: None,
+            presence: presence::PresenceReport::default(),
+            presence_timer: None,
             confirm: HeaderStopConfirm::default(),
             detached_stop_all: sidebar_view::DetachedStopAll::default(),
             duplicates: Duplicates::default(),
@@ -1756,6 +1765,7 @@ impl RootView {
         };
         view.arm_needs_you_repaint(cx);
         view.start_update_checks(cx);
+        view.watch_presence(window, cx);
         view.connect_saved_hosts(window, cx);
         view.watch_taskbar_button(window, cx);
         view
@@ -5089,6 +5099,10 @@ impl RootView {
         self.forget_uploads_of(host);
         self.reset_host(host, window, cx);
         self.ask_accounts_if_listed(host);
+        // A new connection knows nothing yet: it hears the current answer
+        // whether or not it changed.
+        let active = Self::presence_now(window, cx);
+        self.send_presence_to(host, active);
         if *host != HostKey::Local {
             self.ask_history(host);
             return;
@@ -5098,6 +5112,56 @@ impl RootView {
         self.reset_devices(window, cx);
         self.ask_pending_devices();
         self.ask_devices();
+    }
+
+    /// Whether the owner is at the desk now: the window active and, where the
+    /// idle time can be read, input within [`presence::IDLE_LIMIT`].
+    fn presence_now(window: &Window, cx: &App) -> bool {
+        presence::is_active(window.is_window_active(), presence::idle_reader(cx)())
+    }
+
+    /// Reads whether the owner is at the desk and, when the answer changed
+    /// since it was last sent, sends it to every connected host that takes
+    /// presence reports.
+    fn report_presence(&mut self, window: &Window, cx: &App) {
+        let Some(active) = self.presence.next(Self::presence_now(window, cx)) else {
+            return;
+        };
+        for host in self.connected_hosts() {
+            self.send_presence_to(&host, active);
+        }
+    }
+
+    /// Sends `active` to `host` when its daemon lists
+    /// [`protocol::FEATURE_CLIENT_PRESENCE`].
+    fn send_presence_to(&self, host: &HostKey, active: bool) {
+        if self
+            .conn_of(host)
+            .is_some_and(|conn| conn.supports(protocol::FEATURE_CLIENT_PRESENCE))
+        {
+            self.send_to(host, ClientMessage::ReportPresence { active });
+        }
+    }
+
+    /// Takes the first presence reading, then re-reads it every
+    /// [`presence::RECHECK_EVERY`], so walking away from an active window
+    /// flips it; the loop ends with the view.
+    fn watch_presence(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.report_presence(window, cx);
+        self.presence_timer = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(presence::RECHECK_EVERY)
+                    .await;
+                // Fails only when the view is gone, and the loop with it.
+                let checked = this.update_in(cx, |root, window, cx| {
+                    root.report_presence(window, cx);
+                });
+                if checked.is_err() {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Whether `host` has sent its session list since its latest `Welcome`,
