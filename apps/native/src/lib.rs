@@ -3268,7 +3268,8 @@ impl RootView {
             }
             return;
         }
-        if let Some(target) = launch_last::suggestion_target(&config) {
+        if let Some(target) = launch_last::suggestion_target(&config, self.sidebar.repos_of(&host))
+        {
             let (generation, request_id) =
                 self.launch_last.begin(config, placement, target.clone());
             self.send_to(
@@ -3281,7 +3282,7 @@ impl RootView {
             Self::arm_launch_last_timeout(generation, cx);
             return;
         }
-        let request = launch_last::replay_request(&config, None);
+        let request = launch_last::replay_request(&config, self.sidebar.repos_of(&host), None);
         let open_in = placement.open_in();
         self.spawn_on(&host, request, open_in, cx);
     }
@@ -3352,7 +3353,11 @@ impl RootView {
         if let Some(target) = Target::from_suggest(host, target) {
             self.branch_cache.remove(&target);
         }
-        let request = launch_last::replay_request(&pending.config, Some(name.clone()));
+        let request = launch_last::replay_request(
+            &pending.config,
+            self.sidebar.repos_of(host),
+            Some(name.clone()),
+        );
         let open_in = pending.placement.open_in();
         self.spawn_on(host, request, open_in, cx);
     }

@@ -88,13 +88,29 @@ pub(crate) fn stored_config(
 }
 
 /// The repo or workspace a worktree config asks a fresh branch name about;
-/// `None` when the config runs in place or outside a repo.
+/// `None` when the config runs in place, outside a repo, or in a folder that
+/// is no git repository.
 #[must_use]
-pub(crate) fn suggestion_target(config: &SpawnConfig) -> Option<SuggestTarget> {
-    if !uses_worktree(&config.target) {
+pub(crate) fn suggestion_target(
+    config: &SpawnConfig,
+    repos: &[RepoEntry],
+) -> Option<SuggestTarget> {
+    if !uses_worktree(&config.target) || replays_in_place(&config.target, repos) {
         return None;
     }
     config.target.suggest_target()
+}
+
+/// Whether `target` spawns into a registered folder that is not a git
+/// repository: it runs in place whatever the stored config says.
+fn replays_in_place(target: &SpawnTarget, repos: &[RepoEntry]) -> bool {
+    match target {
+        SpawnTarget::Single { repo_id, .. } => repos
+            .iter()
+            .find(|repo| &repo.id == repo_id)
+            .is_some_and(|repo| !repo.is_git),
+        SpawnTarget::Workspace { .. } | SpawnTarget::Standalone { .. } => false,
+    }
 }
 
 /// Whether a target creates worktrees, so a replay needs a branch name no
@@ -113,10 +129,30 @@ fn uses_worktree(target: &SpawnTarget) -> bool {
 }
 
 /// The request a replay sends: the stored config as a duplicate, with the
-/// fresh branch name a worktree launch waited for.
+/// fresh branch name a worktree launch waited for. A folder that is no git
+/// repository runs in place, on no branch, whatever the stored config says.
 #[must_use]
-pub(crate) fn replay_request(config: &SpawnConfig, fresh_branch: Option<String>) -> SpawnRequest {
-    config.to_duplicate_request(fresh_branch)
+pub(crate) fn replay_request(
+    config: &SpawnConfig,
+    repos: &[RepoEntry],
+    fresh_branch: Option<String>,
+) -> SpawnRequest {
+    let mut request = config.to_duplicate_request(fresh_branch);
+    if replays_in_place(&request.target, repos)
+        && let SpawnTarget::Single {
+            branch_name,
+            base_branch,
+            use_worktree,
+            existing_worktree,
+            ..
+        } = &mut request.target
+    {
+        branch_name.clear();
+        *base_branch = None;
+        *use_worktree = false;
+        *existing_worktree = None;
+    }
+    request
 }
 
 /// A launch waiting for the daemon's fresh branch name.
@@ -272,6 +308,13 @@ mod tests {
         }
     }
 
+    fn plain_repo_entry(id: &str) -> RepoEntry {
+        RepoEntry {
+            is_git: false,
+            ..repo_entry(id, None)
+        }
+    }
+
     fn repo_entry(id: &str, last: Option<SpawnConfig>) -> RepoEntry {
         RepoEntry {
             id: id.to_owned(),
@@ -308,17 +351,20 @@ mod tests {
     #[test]
     fn a_worktree_target_asks_for_a_branch_and_an_in_place_one_does_not() {
         assert_eq!(
-            suggestion_target(&config(single("r1", true))),
+            suggestion_target(&config(single("r1", true)), &[]),
             Some(suggest_repo("r1"))
         );
-        assert_eq!(suggestion_target(&config(single("r1", false))), None);
+        assert_eq!(suggestion_target(&config(single("r1", false)), &[]), None);
         assert_eq!(
-            suggestion_target(&config(workspace_target(true))),
+            suggestion_target(&config(workspace_target(true)), &[]),
             Some(SuggestTarget::Workspace {
                 workspace_id: "w1".to_owned()
             })
         );
-        assert_eq!(suggestion_target(&config(workspace_target(false))), None);
+        assert_eq!(
+            suggestion_target(&config(workspace_target(false)), &[]),
+            None
+        );
     }
 
     #[test]
@@ -661,7 +707,7 @@ mod tests {
     fn a_replay_without_a_fresh_branch_keeps_the_stored_target() {
         let stored = config(single("r1", false));
         assert_eq!(
-            replay_request(&stored, None).target,
+            replay_request(&stored, &[], None).target,
             stored.target,
             "the in-place target replays verbatim"
         );
@@ -679,7 +725,7 @@ mod tests {
             *worktree_reuse = WorktreeReusePolicy::Reuse;
             *existing_worktree = Some("D:/wt/old".to_owned());
         }
-        let request = replay_request(&stored, Some("feat/fresh".to_owned()));
+        let request = replay_request(&stored, &[], Some("feat/fresh".to_owned()));
         let SpawnTarget::Single {
             branch_name,
             worktree_reuse,
@@ -692,6 +738,48 @@ mod tests {
         assert_eq!(branch_name, "feat/fresh");
         assert_eq!(*worktree_reuse, WorktreeReusePolicy::RefuseLeftover);
         assert_eq!(*existing_worktree, None, "the leftover pin is cleared");
+    }
+
+    #[test]
+    fn a_replay_into_a_folder_runs_in_place() {
+        let stored = config(single("r1", true));
+        let repos = vec![plain_repo_entry("r1")];
+        assert_eq!(
+            suggestion_target(&stored, &repos),
+            None,
+            "no branch name is waited for"
+        );
+        let SpawnTarget::Single {
+            branch_name,
+            base_branch,
+            use_worktree,
+            existing_worktree,
+            ..
+        } = replay_request(&stored, &repos, Some("feat/fresh".to_owned())).target
+        else {
+            panic!("expected a single-repo target");
+        };
+        assert!(branch_name.is_empty(), "a folder runs on no branch");
+        assert_eq!(base_branch, None);
+        assert!(!use_worktree, "and in place");
+        assert_eq!(existing_worktree, None, "pinning no worktree");
+    }
+
+    #[test]
+    fn a_replay_into_a_git_repo_keeps_its_worktree_config() {
+        let stored = config(single("r1", true));
+        let repos = vec![repo_entry("r1", None)];
+        assert_eq!(suggestion_target(&stored, &repos), Some(suggest_repo("r1")));
+        let SpawnTarget::Single {
+            branch_name,
+            use_worktree,
+            ..
+        } = replay_request(&stored, &repos, Some("feat/fresh".to_owned())).target
+        else {
+            panic!("expected a single-repo target");
+        };
+        assert_eq!(branch_name, "feat/fresh");
+        assert!(use_worktree, "a git repo keeps its worktree launch");
     }
 
     #[test]

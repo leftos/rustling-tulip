@@ -24,5 +24,5 @@ Design for RT-932: a folder that is not a git repository can be added to the sid
 ## Steps
 
 - [x] NG.1: protocol `RepoEntry.is_git` (doc comment, `docs/wire-protocol.md`); the daemon's flag, its refresh, `default_use_worktree` for a folder, the workspace spawn's per-member skip, the git watcher's refresh when `.git` appears, and the recover plan for a plain folder; the state test in the oldest released shape; daemon tests.
-- [ ] NG.2: the spawn dialog's hide rules (`spawn_form.rs`, `spawn_view.rs`), the `[DIR]` tag in the Target list, launch-last and duplicate; spawn specs.
+- [x] NG.2: the spawn dialog's hide rules (`spawn_form.rs`, `spawn_view.rs`), the `[DIR]` tag in the Target list, launch-last and duplicate; spawn specs.
 - [ ] NG.3: the sidebar tag and branch chip, the container menu's git items, the Add repo hints, recover's register offer; `docs/native-client.md`.

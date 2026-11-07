@@ -1380,6 +1380,14 @@ pub fn repo(id: &str, path: &str) -> RepoEntry {
     serde_json::from_value(json!({ "id": id, "name": id, "path": path })).expect("repo fixture")
 }
 
+/// `repo(id, path)` as a folder that is not a git repository.
+pub fn plain_repo(id: &str, path: &str) -> RepoEntry {
+    RepoEntry {
+        is_git: false,
+        ..repo(id, path)
+    }
+}
+
 pub fn workspace(id: &str, members: &[&str]) -> WorkspaceEntry {
     serde_json::from_value(json!({ "id": id, "name": id, "member_repo_ids": members }))
         .expect("workspace fixture")

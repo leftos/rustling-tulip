@@ -1401,6 +1401,9 @@ impl SpawnForm {
         cache: &BranchCache,
         now: Instant,
     ) -> Vec<ClientMessage> {
+        if self.plain_single_target() {
+            return Vec::new();
+        }
         let (SpawnTarget::Single {
             branch_name,
             base_branch,
@@ -1478,19 +1481,21 @@ impl SpawnForm {
             ..BranchField::default()
         };
         let mut messages = Vec::new();
-        if let Some(repo_id) = self.branches_repo_id() {
-            messages.push(ClientMessage::ListBranches { repo_id });
+        if !self.plain_single_target() {
+            if let Some(repo_id) = self.branches_repo_id() {
+                messages.push(ClientMessage::ListBranches { repo_id });
+            }
+            if self.use_worktree {
+                messages.extend(self.seed_suggestion(cache, now));
+            } else {
+                self.branch.value = self.in_place_default();
+            }
+            messages.extend(
+                self.fetch_repo_ids()
+                    .into_iter()
+                    .map(|repo_id| ClientMessage::FetchRepo { repo_id }),
+            );
         }
-        if self.use_worktree {
-            messages.extend(self.seed_suggestion(cache, now));
-        } else {
-            self.branch.value = self.in_place_default();
-        }
-        messages.extend(
-            self.fetch_repo_ids()
-                .into_iter()
-                .map(|repo_id| ClientMessage::FetchRepo { repo_id }),
-        );
         if moved {
             messages.push(self.ask_env_names());
         }
@@ -1599,12 +1604,37 @@ impl SpawnForm {
             .find_map(|id| self.repo(id))
     }
 
+    /// Whether the worktree and branch choices show: the one repo holds a git
+    /// repository, or at least one member of the workspace does. A target the
+    /// host does not list, and a member it does not list, keep them.
+    pub(crate) fn git_choices_shown(&self) -> bool {
+        match &self.target {
+            Target::Repo { id, .. } => self.repo(id).is_none_or(|r| r.is_git),
+            Target::Workspace { id, .. } => self.workspace(id).is_none_or(|w| {
+                w.member_repo_ids
+                    .iter()
+                    .any(|id| self.repo(id).is_none_or(|r| r.is_git))
+            }),
+        }
+    }
+
+    /// Whether the target is one repo that is not a git repository: its
+    /// spawn runs in place and asks the daemon for no branch.
+    fn plain_single_target(&self) -> bool {
+        matches!(self.target, Target::Repo { .. }) && !self.git_choices_shown()
+    }
+
     /// The repo whose branches seed the fields: the repo, or a workspace's
-    /// first member.
+    /// first git member, else its first member.
     fn defaults_repo(&self) -> Option<&RepoEntry> {
         match &self.target {
             Target::Repo { id, .. } => self.repo(id),
-            Target::Workspace { id, .. } => self.workspace(id).and_then(|w| self.first_member(w)),
+            Target::Workspace { id, .. } => self.workspace(id).and_then(|w| {
+                w.member_repo_ids
+                    .iter()
+                    .find_map(|id| self.repo(id).filter(|r| r.is_git))
+                    .or_else(|| self.first_member(w))
+            }),
         }
     }
 
@@ -1839,9 +1869,10 @@ impl SpawnForm {
         self.preview.can_request()
     }
 
-    /// Whether the base branch field shows: a new worktree.
+    /// Whether the base branch field shows: a new worktree, on a target that
+    /// offers a branch at all.
     fn base_shown(&self) -> bool {
-        self.use_worktree && !self.pinning()
+        self.git_choices_shown() && self.use_worktree && !self.pinning()
     }
 
     /// New refs move the base (until edited) and an untouched in-place
@@ -2540,7 +2571,12 @@ impl SpawnForm {
             Target::Repo { id, .. } => {
                 let repo = host.and_then(|h| h.repos.iter().find(|r| &r.id == id));
                 let name = repo.map_or(id.as_str(), |r| r.name.as_str());
-                format!("[REPO]  {name}")
+                let tag = if repo.is_none_or(|r| r.is_git) {
+                    "REPO"
+                } else {
+                    "DIR"
+                };
+                format!("[{tag}]  {name}")
             }
             Target::Workspace { id, .. } => {
                 match host.and_then(|h| h.workspaces.iter().find(|w| &w.id == id)) {
@@ -3074,9 +3110,11 @@ impl SpawnForm {
     }
 
     /// Whether Spawn can go: a branch name or a picked worktree, and no env
-    /// row with a problem.
+    /// row with a problem. A folder spawn asks for neither.
     pub(crate) fn can_submit(&self) -> bool {
-        let located = if self.pinning() {
+        let located = if !self.git_choices_shown() {
+            true
+        } else if self.pinning() {
             self.selected_option().is_some()
         } else {
             !self.branch.value.trim().is_empty()
@@ -3165,6 +3203,9 @@ impl SpawnForm {
     /// The worktree and branch controls: a repo's checkbox leads, a
     /// workspace's branch field does.
     fn worktree_controls(&self) -> Vec<Control> {
+        if !self.git_choices_shown() {
+            return Vec::new();
+        }
         let mut branch = Vec::new();
         if !self.pinning() {
             branch.push(Control::Branch);
@@ -3464,20 +3505,26 @@ impl SpawnForm {
     }
 
     fn spawn_target(&self) -> SpawnTarget {
-        let pick = self.selected_option().filter(|_| self.pinning());
-        let branch_name = pick.map_or_else(
-            || self.branch.value.trim().to_owned(),
-            |o| o.branch_name.clone(),
-        );
+        let plain = self.plain_single_target();
+        let pick = self.selected_option().filter(|_| self.pinning() && !plain);
+        let branch_name = if plain {
+            String::new()
+        } else {
+            pick.map_or_else(
+                || self.branch.value.trim().to_owned(),
+                |o| o.branch_name.clone(),
+            )
+        };
+        let use_worktree = self.use_worktree && !plain;
         let base = self.base.value.trim();
         let base_branch =
-            (self.use_worktree && pick.is_none() && !base.is_empty()).then(|| base.to_owned());
+            (use_worktree && pick.is_none() && !base.is_empty()).then(|| base.to_owned());
         match &self.target {
             Target::Repo { id, .. } => SpawnTarget::Single {
                 repo_id: id.clone(),
                 branch_name,
                 base_branch,
-                use_worktree: self.use_worktree,
+                use_worktree,
                 checkout_strategy: None,
                 worktree_reuse: self.reuse_policy(),
                 existing_worktree: pick.and_then(|o| match &o.pin {
@@ -3489,7 +3536,7 @@ impl SpawnForm {
                 workspace_id: id.clone(),
                 branch_name,
                 base_branch,
-                use_worktree: self.use_worktree,
+                use_worktree,
                 worktree_reuse: self.reuse_policy(),
                 existing_worktrees: pick
                     .and_then(|o| match &o.pin {
@@ -3897,6 +3944,67 @@ mod tests {
 
     fn open_repo(repo: RepoEntry) -> SpawnForm {
         Setup::repos(vec![repo]).open(&mut BranchCache::default()).0
+    }
+
+    /// `repo(id)` as a folder that is not a git repository.
+    fn plain(id: &str) -> RepoEntry {
+        RepoEntry {
+            is_git: false,
+            ..repo(id)
+        }
+    }
+
+    #[test]
+    fn a_git_repo_shows_the_worktree_and_branch_choices() {
+        assert!(open_repo(repo("r1")).git_choices_shown());
+    }
+
+    #[test]
+    fn a_folder_hides_the_worktree_and_branch_choices() {
+        assert!(!open_repo(plain("r3")).git_choices_shown());
+    }
+
+    #[test]
+    fn a_repo_the_host_does_not_list_keeps_the_choices() {
+        let mut form = open_repo(repo("r1"));
+        form.hosts[0].repos.clear();
+        assert!(form.git_choices_shown(), "nothing says it is a folder");
+    }
+
+    #[test]
+    fn a_workspace_shows_the_choices_while_one_member_is_git() {
+        let setup = Setup {
+            repos: vec![plain("r3"), repo("r1")],
+            workspaces: vec![workspace("w1", &["r3", "r1"]), workspace("w2", &["r3"])],
+            focused: Some(session_in(Some("r3"), Some("w1"))),
+            ..Setup::repos(Vec::new())
+        };
+        let mut cache = BranchCache::default();
+        let (mut form, _) = setup.open(&mut cache);
+        assert!(form.git_choices_shown(), "r1 is a git member");
+        assert_eq!(
+            form.defaults_repo().map(|r| r.id.clone()),
+            Some("r1".to_owned()),
+            "the first git member seeds the branch fields"
+        );
+
+        form.load_target(
+            Target::workspace(&HostKey::Local, "w2"),
+            &mut cache,
+            Instant::now(),
+        );
+        assert!(!form.git_choices_shown(), "no member is a git repo");
+    }
+
+    #[test]
+    fn a_folder_spawn_needs_no_branch_name() {
+        let folder = open_repo(plain("r3"));
+        assert_eq!(folder.branch(), "", "no branch is seeded for a folder");
+        assert!(folder.can_submit(), "Spawn can go without one");
+
+        let git = open_repo(repo("r1"));
+        assert_eq!(git.branch(), "", "a git repo waits for its suggestion");
+        assert!(!git.can_submit(), "and Spawn waits with it");
     }
 
     /// Every default on, so a case can tell the dialog read them.

@@ -356,8 +356,9 @@ impl RootView {
         ];
         chosen.extend(form.chosen_options());
         chosen.extend(form.trusted().then_some(Control::Trusted));
-        chosen.extend(form.use_worktree().then_some(Control::UseWorktree));
-        chosen.extend(form.use_worktree().then_some(Control::Mode(form.mode())));
+        let worktree = form.git_choices_shown() && form.use_worktree();
+        chosen.extend(worktree.then_some(Control::UseWorktree));
+        chosen.extend(worktree.then_some(Control::Mode(form.mode())));
         chosen.extend(
             form.existing_selected()
                 .map(|key| Control::Existing(key.to_owned())),
@@ -1768,6 +1769,9 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let form = &dialog.form;
+        if !form.git_choices_shown() {
+            return Vec::new();
+        }
         let now = (self.now)();
         let branch = (!form.pinning()).then(|| branch_field(dialog, focus, now, cx));
         let mut worktree = vec![worktree_checkbox(form, focus, cx)];

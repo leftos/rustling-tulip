@@ -115,6 +115,34 @@ fn with_workspace() -> Fixture {
     fixture
 }
 
+/// [`fixture`] with the plain folder `r3` beside the repos.
+fn with_plain_folder() -> Fixture {
+    let mut fixture = fixture();
+    fixture.repos.push(support::plain_repo("r3", "C:/r3"));
+    fixture
+}
+
+/// [`with_plain_folder`] with workspace `w1` of `r3` alone and `w2` of `r3`
+/// and `r1`.
+fn with_folder_workspaces() -> Fixture {
+    let mut fixture = with_plain_folder();
+    fixture.workspaces = vec![
+        support::workspace("w1", &["r3"]),
+        support::workspace("w2", &["r3", "r1"]),
+    ];
+    fixture
+}
+
+/// The worktree and branch selectors a folder target hides.
+const HIDDEN_FOR_A_FOLDER: [&str; 6] = [
+    "spawn-worktree",
+    "spawn-worktree-mode-new",
+    "spawn-worktree-mode-existing",
+    "spawn-branch",
+    "spawn-branch-random",
+    "spawn-base-branch",
+];
+
 #[gpui::test]
 fn the_target_field_opens_a_dropdown_of_repos_and_workspaces(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -1415,6 +1443,156 @@ fn dialog_takes_the_spawn_boards_sizes(cx: &mut TestAppContext) {
         cancel.right() < submit.left() && submit.right() <= h.bounds("spawn-panel").right(),
         "Cancel, then Spawn at the right: {cancel:?} {submit:?}"
     );
+}
+
+#[gpui::test]
+fn a_folder_target_draws_no_worktree_or_branch_fields(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut folder = Fixture::single(session("s1").in_repo("r3").build());
+    folder.repos = vec![support::plain_repo("r3", "C:/r3")];
+    let mut h = Harness::with(cx, &dir, &folder);
+    open(&mut h);
+    assert!(
+        selected(&mut h).contains(&"spawn-target-repo-r3".to_owned()),
+        "the dialog opens on the folder: {:?}",
+        selected(&mut h)
+    );
+    for selector in HIDDEN_FOR_A_FOLDER {
+        assert!(
+            !painted(&mut h, selector),
+            "{selector} is not drawn for a folder"
+        );
+    }
+
+    let mut seen = vec![focus(&mut h).expect("a focus")];
+    for _ in 0..12 {
+        h.keys("tab");
+        seen.push(focus(&mut h).expect("a focus"));
+    }
+    assert!(
+        seen.iter()
+            .all(|focused| !HIDDEN_FOR_A_FOLDER.contains(&focused.as_str())),
+        "Tab cycles without the hidden controls: {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|focused| focused.starts_with("spawn-agent-")),
+        "and reaches the runtimes: {seen:?}"
+    );
+}
+
+#[gpui::test]
+fn a_folder_target_spawns_in_place_with_no_branch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_plain_folder());
+    open(&mut h);
+
+    h.click_on("spawn-target");
+    h.click_on("spawn-target-repo-r3");
+    let sent = h.sent();
+    assert!(
+        !lists_branches(&sent, "r3"),
+        "no branch list for a folder: {sent:?}"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, ClientMessage::FetchRepo { repo_id } if repo_id == "r3")),
+        "no fetch for a folder: {sent:?}"
+    );
+    assert_eq!(suggestions(&sent, "r3"), 0, "and no branch name asked for");
+    assert!(
+        !selected(&mut h).contains(&"spawn-worktree".to_owned()),
+        "the retargeted form ticks no worktree: {:?}",
+        selected(&mut h)
+    );
+
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(
+        request.target,
+        SpawnTarget::Single {
+            repo_id: "r3".to_owned(),
+            branch_name: String::new(),
+            base_branch: None,
+            use_worktree: false,
+            checkout_strategy: None,
+            worktree_reuse: WorktreeReusePolicy::default(),
+            existing_worktree: None,
+        },
+        "the folder spawns in place, on no branch"
+    );
+}
+
+#[gpui::test]
+fn a_folder_target_is_tagged_dir_in_the_target_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_plain_folder());
+    open(&mut h);
+    assert!(
+        painted(&mut h, "spawn-target-chosen=[REPO]  r1"),
+        "a git repo keeps the REPO tag"
+    );
+
+    h.click_on("spawn-target");
+    h.click_on("spawn-target-repo-r3");
+    assert!(
+        painted(&mut h, "spawn-target-chosen=[DIR]  r3"),
+        "a folder is tagged DIR"
+    );
+}
+
+#[gpui::test]
+fn a_workspace_with_one_git_member_keeps_the_worktree_choice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_folder_workspaces());
+    open(&mut h);
+
+    h.click_on("spawn-target");
+    h.click_on("spawn-target-workspace-w2");
+    for selector in [
+        "spawn-worktree",
+        "spawn-worktree-mode-new",
+        "spawn-branch",
+        "spawn-base-branch",
+    ] {
+        assert!(
+            painted(&mut h, selector),
+            "{selector} shows for a mixed workspace"
+        );
+    }
+    let sent = h.sent();
+    assert!(
+        lists_branches(&sent, "r1"),
+        "the git member's branches: {sent:?}"
+    );
+    assert!(!lists_branches(&sent, "r3"), "not the folder's: {sent:?}");
+}
+
+#[gpui::test]
+fn a_workspace_of_folders_draws_no_worktree_choice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut folders = Fixture::single(session("s1").build());
+    folders.repos = vec![support::plain_repo("r3", "C:/r3")];
+    folders.workspaces = vec![support::workspace("w1", &["r3"])];
+    let mut h = Harness::with(cx, &dir, &folders);
+    open(&mut h);
+    assert!(
+        selected(&mut h).contains(&"spawn-target-workspace-w1".to_owned()),
+        "the dialog opens on the workspace: {:?}",
+        selected(&mut h)
+    );
+    for selector in [
+        "spawn-worktree",
+        "spawn-worktree-mode-new",
+        "spawn-branch",
+        "spawn-base-branch",
+    ] {
+        assert!(
+            !painted(&mut h, selector),
+            "{selector} is not drawn for folders"
+        );
+    }
 }
 
 #[gpui::test]
