@@ -20,6 +20,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Pasting an image into a Claude pane on Windows works: with an image on the clipboard, Ctrl+V sends Claude its own image-paste key.
 - A window connected to another computer shows that computer's Claude accounts in Settings › Accounts and the footer, and can switch them; adding, removing and renaming stay on the computer that runs them.
 - A right-click in a terminal pastes this computer's clipboard, even in a session on another host; Shift+right-click still reaches programs that use the mouse.
+- The Gates view and its footer pill show only on a computer with the gate installed, not on one where only old gate files remain.
 - A Nushell pane's command dots sit on each prompt's own row, so no stray dot is left after `clear`, and Copy command, Re-run and the prompt jumps work there.
 - The Connections dialog shows each host's details whole, wrapping between them instead of squeezing "4 sessions" into a column one letter wide, and a failed tailnet scan's error sits on its own lines under its heading.
 - A long folder path in Open a shell, or long text in any one-line field, stays inside its box and scrolls to follow the cursor instead of running under Browse.

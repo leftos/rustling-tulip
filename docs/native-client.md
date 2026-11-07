@@ -921,9 +921,9 @@ A click is a leaf click: it focuses or places the session's pane and clears the 
 
 ## Gates
 
-A rail item after Source control (`Activity::Gates`, selector `activity-gates`) opens a panel of the gate slots on This PC's daemon host. It is a rail view plus a footer pill, not a Dashboard tab. The item shows only while This PC's daemon lists `gate_state` and has pushed a gate state, and only a 64-bit Windows daemon does; another host's state is ignored, and the state is cleared on This PC's `Welcome` and when its connection closes.
+A rail item after Source control (`Activity::Gates`, selector `activity-gates`) opens a panel of the gate slots on This PC's daemon host. It is a rail view plus a footer pill, not a Dashboard tab. The item shows only while This PC's daemon lists `gate_state` and has pushed a gate state, and only a 64-bit Windows daemon with the gate installed does (it checks on each poll, so the item, pill and panel hide and return live, with no restart); another host's state is ignored, and the state is cleared on This PC's `Welcome` and when its connection closes.
 
-A daemon reports gate state, idle included, once the host's gate has run at least once, and none before that. The item's badge (`gates-badge`) counts busy plus held slots across the local pools in the accent colour, and is hidden at 0.
+A daemon reports gate state, idle included, while the gate is installed on its host and the gate's state folder exists; an installed PC that has not yet run a gate still shows the item, and a leftover state folder alone does not. The item's badge (`gates-badge`) counts busy plus held slots across the local pools in the accent colour, and is hidden at 0.
 
 The model is plain Rust (`gates.rs`) and the panel is `gates_view.rs`. `Activity::Gates` sits before `Sessions`, which stays the last `#[serde(other)]` variant, so an older build reading a saved `"activity": "gates"` shows Sessions. `RootView::shown_activity` reads a stored Gates as Sessions while there is no state, and keeps the stored value for the state's return.
 

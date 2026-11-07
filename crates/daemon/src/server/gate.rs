@@ -27,12 +27,19 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
     }
 }
 
+/// The gate state a request is served from, or `None` when the daemon holds none or the gate is not installed on this
+/// host: such a PC has its requests refused with `unsupported_message`, while `Welcome.features` still lists
+/// `gate_state`, so a leftover state file is never read or written.
+fn served(hub: &Hub) -> Option<&GateHub> {
+    hub.gate_state.as_ref().filter(|gate| gate.installed())
+}
+
 /// Read the gate's run history and answer it from a task of its own, the
 /// read on a blocking thread. The registered repos are snapshotted first, so
 /// no lock is held across the read. A read that fails or stops answers an
 /// empty history: the view shows no history and its slots stay up.
 fn history(hub: &Hub, request_id: Option<String>, ctx: &ConnCtx<'_>) {
-    let Some(gate) = &hub.gate_state else {
+    let Some(gate) = served(hub) else {
         let _ = ctx.out_tx.send(error(
             error_codes::UNSUPPORTED_MESSAGE,
             "the gate view is not served by this daemon".to_owned(),
@@ -90,7 +97,7 @@ fn set_slot_count(
     let refuse = |code: &str, message: &str, request_id| {
         let _ = ctx.out_tx.send(error(code, message.to_owned(), request_id));
     };
-    let Some(gate) = &hub.gate_state else {
+    let Some(gate) = served(hub) else {
         refuse(
             error_codes::UNSUPPORTED_MESSAGE,
             "the gate view is not served by this daemon",
@@ -385,6 +392,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gate_slot_count_is_refused_without_the_gate_installed() {
+        let (mut hub, _scratch, path) = gate_hub("gate-not-installed");
+        hub.gate_state
+            .as_mut()
+            .expect("the gate state was enabled")
+            .set_installed_check(Arc::new(|| false));
+
+        let reply = dispatch_one(&hub, set(GateSlotKind::Heavy, Some(3), "w1")).await;
+
+        let (code, request_id, message) = error_of(reply);
+        assert_eq!(code.as_deref(), Some(error_codes::UNSUPPORTED_MESSAGE));
+        assert_eq!(request_id.as_deref(), Some("w1"));
+        assert_eq!(message, "the gate view is not served by this daemon");
+        assert!(!path.exists(), "nothing was written");
+    }
+
+    #[tokio::test]
     async fn gate_slot_count_without_gate_state_is_unsupported() {
         let (hub, _scratch) = test_hub("gate-unsupported");
 
@@ -456,7 +480,7 @@ mod tests {
         let (release_tx, release_rx) = std_mpsc::channel::<()>();
         let started = Mutex::new(started_tx);
         let release = Mutex::new(release_rx);
-        hub.gate_state = Some(GateHub::new(
+        let mut gate = GateHub::new(
             Arc::new(move || {
                 let _ = started
                     .lock()
@@ -469,7 +493,9 @@ mod tests {
                 Some(path.clone())
             }),
             source(|_| None),
-        ));
+        );
+        gate.set_installed_check(Arc::new(|| true));
+        hub.gate_state = Some(gate);
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
         tokio::time::timeout(

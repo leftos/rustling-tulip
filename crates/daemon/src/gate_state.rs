@@ -8,7 +8,8 @@
     )
 )]
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -223,10 +224,10 @@ pub(crate) fn to_wire(
     }
 }
 
-/// Reads the gate's state from the given inputs and probes, or `None` when no gate has ever run on this machine.
+/// Reads the gate's state from the given inputs and probes, or `None` when the gate's state folder is not there.
 ///
-/// The signal is the `gate` folder under the per-user local application data folder, which the gate creates before it
-/// writes anything; a failed check also reads as no state, and is logged.
+/// The signal is the `gate` folder under the per-user local application data folder, which the gate's installer and
+/// every gate run create before anything is written; a failed check also reads as no state, and is logged.
 pub(crate) fn read_once(
     inputs: &::gate_state::StateInputs,
     processes: &dyn ::proc_table::ProcessTable,
@@ -249,10 +250,58 @@ pub(crate) fn read_once(
     ))
 }
 
-/// Reads this host's live gate state, naming each live gate's repo from `repos`, or `None` when the gate's inputs
-/// cannot be read or no gate has run here.
+/// The process environment, as [`gate_installed`] asks it.
+fn process_env(name: &str) -> Option<OsString> {
+    std::env::var_os(name)
+}
+
+/// The user install's gate program, `%LOCALAPPDATA%\gate\bin\gate.exe`, or `None` when the variable is unset or empty.
+fn local_gate(env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let root = env("LOCALAPPDATA").filter(|root| !root.is_empty())?;
+    Some(Path::new(&root).join("gate").join("bin").join("gate.exe"))
+}
+
+/// The admin or builder install's gate program, `<Program Files root>\gate\bin\gate.exe`, where the root is
+/// `GATE_LAUNCHER_PROGRAM_FILES` when it is set and not empty, else `%ProgramFiles%`, or `None` when neither is set.
+fn program_files_gate(env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let root = env("GATE_LAUNCHER_PROGRAM_FILES")
+        .filter(|root| !root.is_empty())
+        .or_else(|| env("ProgramFiles").filter(|root| !root.is_empty()))?;
+    Some(Path::new(&root).join("gate").join("bin").join("gate.exe"))
+}
+
+/// Whether `path` holds a program file: a `NotFound` is no program and logs nothing, and any other failure is logged
+/// and reads as no program.
+fn gate_program_present(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            warn!(%error, path = %path.display(), "gate state: a gate program could not be checked");
+            false
+        }
+    }
+}
+
+/// Whether this host is set up to run gates: a `gate.exe` at the two install paths `tools/gate.ps1` uses, the user
+/// install under `%LOCALAPPDATA%\gate\bin` and the admin or builder install under `<Program Files root>\gate\bin`,
+/// whose root `GATE_LAUNCHER_PROGRAM_FILES` overrides when it is set and not empty. `GATE_BOX_EXE`, a routed builder
+/// job's own gate, is deliberately not consulted: it names the gate of that run, not the one this host installed. PATH
+/// is not searched, and a leftover `gate.exe.*.old` does not count.
+///
+/// `env` and `present` are the daemon's process environment and program check; tests pass fakes.
+fn gate_installed(env: impl Fn(&str) -> Option<OsString>, present: impl Fn(&Path) -> bool) -> bool {
+    program_files_gate(&env).is_some_and(|exe| present(&exe))
+        || local_gate(&env).is_some_and(|exe| present(&exe))
+}
+
+/// Reads this host's live gate state, naming each live gate's repo from `repos`, or `None` when the gate is not
+/// installed here, the gate's inputs cannot be read, or the gate's state folder is not there.
 #[cfg(all(windows, target_pointer_width = "64"))]
 pub(crate) fn read_live(repos: &RepoFolders) -> Option<protocol::GateState> {
+    if !gate_installed(process_env, gate_program_present) {
+        return None;
+    }
     let inputs = match ::gate_state::live_inputs() {
         Ok(inputs) => inputs,
         Err(error) => {
@@ -506,6 +555,9 @@ pub(crate) fn live_history_source() -> HistorySource {
     Arc::new(|_: RepoFolders| None)
 }
 
+/// Whether this host is set up to run gates, asked before a slot-count write or a history read.
+pub(crate) type InstalledCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// The hub's current gate state, `None` until a read finds a gate. The poll is its only writer; a connection reads it
 /// at its initial state and when its state stream lags, and otherwise takes the poll's broadcasts. A slot-count write
 /// never publishes: it asks the poll to read again ([`GateHub::repoll`]), so a write and a tick never publish out of
@@ -515,6 +567,7 @@ pub(crate) struct GateHub {
     current: Arc<watch::Sender<Option<protocol::GateState>>>,
     counts_path: CountsPath,
     history: HistorySource,
+    installed: InstalledCheck,
     repoll: Arc<Notify>,
 }
 
@@ -526,8 +579,20 @@ impl GateHub {
             current: Arc::new(watch::Sender::new(None)),
             counts_path,
             history,
+            installed: Arc::new(|| gate_installed(process_env, gate_program_present)),
             repoll: Arc::new(Notify::new()),
         }
+    }
+
+    /// Whether this host is set up to run gates, asked before a slot-count write or a history read.
+    pub(crate) fn installed(&self) -> bool {
+        (self.installed)()
+    }
+
+    /// Answer [`GateHub::installed`] with `check` from now on, so a test can stand on a host without the gate.
+    #[cfg(test)]
+    pub(crate) fn set_installed_check(&mut self, check: InstalledCheck) {
+        self.installed = check;
     }
 
     /// The lookup of the gate's counts file.
@@ -638,6 +703,7 @@ async fn read_and_publish(
 )]
 mod tests {
     use std::collections::VecDeque;
+    use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -667,8 +733,8 @@ mod tests {
     use crate::state::AppState;
 
     use super::{
-        GateHub, GateReader, POLL_INTERVAL, RepoFolders, history_to_wire, read_once, same_state,
-        spawn_poll, to_wire,
+        GateHub, GateReader, POLL_INTERVAL, RepoFolders, gate_installed, history_to_wire,
+        read_once, same_state, spawn_poll, to_wire,
     };
 
     /// The moment a test describes.
@@ -1534,6 +1600,120 @@ mod tests {
         Arc::new(state)
     }
 
+    /// The user install's gate program under a fake `%LOCALAPPDATA%`.
+    const USER_GATE: &str = r"C:\Users\me\AppData\Local\gate\bin\gate.exe";
+    /// The admin install's gate program under a fake `%ProgramFiles%`.
+    const ADMIN_GATE: &str = r"C:\Program Files\gate\bin\gate.exe";
+
+    /// An environment holding exactly `vars`.
+    fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let vars: Vec<(String, OsString)> = vars
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
+            .collect();
+        move |name: &str| {
+            vars.iter()
+                .find(|(known, _)| known.as_str() == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    /// A file set holding exactly `paths`.
+    fn files(paths: &[&str]) -> impl Fn(&Path) -> bool {
+        let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        move |path: &Path| paths.iter().any(|known| known.as_path() == path)
+    }
+
+    #[test]
+    fn gate_installed_finds_the_user_install() {
+        let env = env_of(&[("LOCALAPPDATA", r"C:\Users\me\AppData\Local")]);
+
+        assert!(gate_installed(env, files(&[USER_GATE])));
+    }
+
+    #[test]
+    fn gate_installed_finds_the_admin_install() {
+        let env = env_of(&[
+            ("LOCALAPPDATA", r"C:\Users\me\AppData\Local"),
+            ("ProgramFiles", r"C:\Program Files"),
+        ]);
+
+        assert!(gate_installed(env, files(&[ADMIN_GATE])));
+    }
+
+    #[test]
+    fn gate_installed_honours_the_launcher_program_files_root() {
+        let env = env_of(&[
+            ("GATE_LAUNCHER_PROGRAM_FILES", r"D:\Program Files"),
+            ("ProgramFiles", r"C:\Program Files"),
+        ]);
+
+        assert!(gate_installed(
+            env,
+            files(&[r"D:\Program Files\gate\bin\gate.exe"])
+        ));
+    }
+
+    #[test]
+    fn gate_installed_is_false_with_only_the_gate_folder() {
+        let env = env_of(&[
+            ("LOCALAPPDATA", r"C:\Users\me\AppData\Local"),
+            ("ProgramFiles", r"C:\Program Files"),
+        ]);
+        let present = files(&[
+            r"C:\Users\me\AppData\Local\gate\cutover.flag",
+            r"C:\Users\me\AppData\Local\gate\v1\state.json",
+        ]);
+
+        assert!(!gate_installed(env, present));
+    }
+
+    #[test]
+    fn gate_installed_ignores_program_files_under_a_launcher_root() {
+        let env = env_of(&[
+            ("GATE_LAUNCHER_PROGRAM_FILES", r"D:\Program Files"),
+            ("ProgramFiles", r"C:\Program Files"),
+        ]);
+
+        assert!(!gate_installed(env, files(&[ADMIN_GATE])));
+    }
+
+    #[test]
+    fn gate_installed_falls_back_to_program_files_under_an_empty_launcher_root() {
+        let env = env_of(&[
+            ("GATE_LAUNCHER_PROGRAM_FILES", ""),
+            ("ProgramFiles", r"C:\Program Files"),
+        ]);
+
+        assert!(gate_installed(env, files(&[ADMIN_GATE])));
+    }
+
+    #[test]
+    fn gate_installed_skips_an_empty_install_root() {
+        let env = env_of(&[("LOCALAPPDATA", ""), ("ProgramFiles", "")]);
+        let present = files(&[r"gate\bin\gate.exe", r"C:\Program Files\gate\bin\gate.exe"]);
+
+        assert!(!gate_installed(env, present));
+    }
+
+    #[test]
+    fn gate_installed_is_false_for_a_leftover_old_program() {
+        let env = env_of(&[("LOCALAPPDATA", r"C:\Users\me\AppData\Local")]);
+
+        assert!(!gate_installed(
+            env,
+            files(&[r"C:\Users\me\AppData\Local\gate\bin\gate.exe.123.old"])
+        ));
+    }
+
+    #[test]
+    fn gate_installed_is_false_without_the_environment() {
+        assert!(!gate_installed(
+            env_of(&[]),
+            files(&[USER_GATE, ADMIN_GATE])
+        ));
+    }
+
     /// The poll names each live gate's repo from the repos the registry holds at the read.
     #[tokio::test(start_paused = true)]
     async fn gate_poll_names_repos_from_the_registry() {
@@ -1682,6 +1862,22 @@ mod tests {
             Some(second),
             "the watch holds what was sent"
         );
+        rig.task.abort();
+    }
+
+    /// A read that stops finding the gate tells the clients the state is gone.
+    #[tokio::test(start_paused = true)]
+    async fn gate_poll_sends_the_state_gone() {
+        let first = idle_on("TESTBOX");
+        let mut rig = poll_rig(vec![Some(first.clone()), None], 1);
+
+        assert_eq!(rig.next_event().await, Some(Some(first)));
+        assert_eq!(
+            rig.next_event().await,
+            Some(None),
+            "the clients are told the state is gone"
+        );
+        assert_eq!(*rig.gate.current(), None, "the watch holds no state");
         rig.task.abort();
     }
 

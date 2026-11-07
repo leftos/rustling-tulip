@@ -224,7 +224,8 @@ pub(crate) fn enable_gate_state_with_history(
     counts_path: Option<PathBuf>,
     history: crate::gate_state::HistorySource,
 ) {
-    let gate = crate::gate_state::GateHub::new(Arc::new(move || counts_path.clone()), history);
+    let mut gate = crate::gate_state::GateHub::new(Arc::new(move || counts_path.clone()), history);
+    gate.set_installed_check(Arc::new(|| true));
     gate.publish(state, &hub.state_events);
     hub.gate_state = Some(gate);
 }
