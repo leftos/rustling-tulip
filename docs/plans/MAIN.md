@@ -61,12 +61,9 @@
 
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge · release vNext
   - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext
-    - [/] RT-1157 PW.6e: Push Needs you and Finished to subscribed devices · release vNext
-  - [ ] RT-368 PW.7: Home Screen badge with the Needs you count · release vNext
   - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
 - [ ] RT-1126 Precache the phone app's hashed assets so its first offline open is complete
 - [ ] RT-1152 Spike GPUI on iOS: the session list in the simulator, text input and Return · release vNext+1
-- [ ] RT-1160 Hold phone pushes while the owner is active at the desktop · release vNext
 
 ## Wave 5 — Attention feed on the desktop
 
@@ -97,7 +94,7 @@
 - [ ] RT-686 Update a connected remote host's daemon from the client, with automatic session recovery
 - [ ] RT-99 Pick between candidates when a clicked path matches several files
 - [ ] RT-100 Open an unchanged fetched file from the local cache
-- [ ] RT-101 Paste an image or drop a file into a remote session · release vNext
+- [/] RT-101 Paste an image or drop a file into a remote session · release vNext
 - [ ] RT-102 Resume a remote connection without replaying scrollback
 - [ ] RT-590 Fail a spawn whose secret Credential Manager refuses, instead of hanging
 - [ ] RT-536 Host SSH remote sessions on Linux and macOS machines
@@ -547,6 +544,8 @@
 - [ ] RT-1177 Keep the push handler's file I/O out from under the device lock
 - [ ] RT-1182 Stop the phone's Notifications panel waiting forever when the service worker never registers
 - [ ] RT-1183 Send a push round's targets concurrently so one slow push service holds no other device
+- [ ] RT-1187 Don't count or push a session removed before the push trigger reads its update
+- [ ] RT-1188 Give pane_header_fit.rs a test-map row so rt.ps1 test -Validate passes
 
 ## Design files
 
@@ -565,7 +564,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-367, RT-368, RT-369, RT-881, RT-1126, RT-1160, Wave 4 — Mobile app (iPhone PWA over Tailscale)
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-367, RT-369, RT-881, RT-1126, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
