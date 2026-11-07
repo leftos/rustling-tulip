@@ -15,6 +15,9 @@ last-result.json
 updates/last-result.json
 # Upstream gpui source the docs cite
 elements/text.rs
+src/window.rs
+# The gate's per-pool slot counts, in the gate's own data dir
+slot-counts.json
 # Spike scratch files, kept outside the repo
 hooklog.mjs
 mksettings.mjs
