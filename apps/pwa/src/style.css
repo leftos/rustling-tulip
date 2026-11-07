@@ -29,3 +29,93 @@ h1 {
 p {
   margin: 0;
 }
+
+/* The pairing screen sits inside the body's padding, so the safe-area insets
+   the body already applies keep its buttons and preview clear of the notch and
+   the home indicator. */
+.pairing-title {
+  margin: 24px 0 8px;
+  font-size: 1.35rem;
+}
+
+.pairing-body,
+.pairing-error {
+  margin: 0 0 16px;
+}
+
+.pairing-error {
+  color: #f38ba8;
+}
+
+.pairing-ask,
+.pairing-pair,
+.pairing-code {
+  min-height: 44px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  font-family: inherit;
+}
+
+.pairing-ask,
+.pairing-pair {
+  border: 0;
+  padding: 0 20px;
+  color: #1e1e2e;
+  background: #89b4fa;
+  font-size: 1rem;
+}
+
+.pairing-ask:disabled {
+  opacity: 0.5;
+}
+
+.pairing-scanner {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+
+.pairing-scanner[hidden] {
+  display: none;
+}
+
+.pairing-video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 12px;
+  background: #11111b;
+}
+
+.pairing-video[hidden] {
+  display: none;
+}
+
+.pairing-camera-note {
+  color: #a6adc8;
+}
+
+.pairing-entry {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.pairing-entry[hidden] {
+  display: none;
+}
+
+.pairing-label {
+  font-size: 0.95rem;
+}
+
+.pairing-code {
+  width: 100%;
+  padding: 0 12px;
+  border: 1px solid #45475a;
+  color: #cdd6f4;
+  background: #313244;
+  font-size: 1.25rem;
+  letter-spacing: 0.2em;
+}

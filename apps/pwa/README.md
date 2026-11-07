@@ -21,12 +21,14 @@ Run from this folder, or from the repo root as `pnpm --dir apps/pwa <script>`:
 
 ## Connection
 
-The page opens one WebSocket to `wss://{host}/ws` (its own origin) on load and sends `Hello` with its stored device token, `protocol_version` and `protocol_versions`, and no `client_id`; there is no UI yet, and the state shows only in the console (`pwa connection {kind: "status", state}`, `pwa pairing <model>`).
+The page opens one WebSocket to `wss://{host}/ws` (its own origin) on load and sends `Hello` with its stored device token, `protocol_version` and `protocol_versions`, and no `client_id`. The connection status shows in the console (`pwa connection {kind: "status", state}`); an unpaired phone shows the pairing screen.
 
 An unpaired phone gets `Welcome` then `DevicePairFailed { reason: "device not approved" }`, and the socket stays open as the pairing channel (state `pairing`); nothing redials by itself there. `Connection.askToPair()` sends the request (redialling first when the channel has closed), `Connection.redeem(code)` sends the six-digit code once the owner approves, and the `device_token` reply is stored and the page redials with it. A stored token the daemon refuses with `device not approved` is forgotten and the phone falls back to pairing; `Connection.forget()` does the same on demand. Any other refusal of a token stops at `notApproved`.
 
 - `src/connection-machine.ts`: a pure reducer over the states idle, connecting, handshaking, ready, backoff, hidden, pairing and notApproved.
 - `src/pairing.ts`: a pure reducer over the pairing steps (asking, pending, approved, denied, paired) and the error text the screen shows.
+- `src/pairing-screen.ts`: what the pairing screen shows for a pairing model, connection status and camera state (pure); `src/pairing-view.ts` renders it and wires its buttons, typed code and scanner to the connection. The screen shows only on the pairing channel, or once paired until the connection is ready.
+- `src/scanner.ts`: the `CodeScanner` seam: the rear camera read with `BarcodeDetector` when it reads QR codes, else jsQR on the main thread; it accepts only a six-digit code and releases the camera on stop.
 - `src/socket.ts`: the driver, with the socket, timers, visibility and token store injected. A Welcome that does not arrive in 10 s is a failure; backgrounding closes the socket and clears timers; returning to the foreground reconnects at once with the attempt counter reset. The daemon's usual initial state after a connect is the resync.
 - `src/backoff.ts`: 500 ms doubling, capped at 10 s, the native client's numbers.
 - `src/hello.ts`: builds the `Hello`.

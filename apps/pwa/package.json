@@ -11,6 +11,9 @@
     "fmt:check": "oxfmt --check",
     "test": "vitest run"
   },
+  "dependencies": {
+    "jsqr": "1.4.0"
+  },
   "devDependencies": {
     "fake-indexeddb": "6.2.7",
     "oxfmt": "0.76.0",

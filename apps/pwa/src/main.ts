@@ -1,4 +1,6 @@
 import { SW_SCOPE, SW_URL } from "./paths";
+import { mountPairingView } from "./pairing-view";
+import { browserScannerEnv, createCodeScanner } from "./scanner";
 import { createConnection, type WebSocketLike } from "./socket";
 import { indexedDbTokenStore } from "./token-store";
 
@@ -64,10 +66,14 @@ const connection = createConnection({
   tokenStore: indexedDbTokenStore(),
 });
 
-// The connection's notices, the pairing model's included, go to the console.
+// The pairing screen fills the page's section from the pairing model and the
+// camera; every other notice stays on the console.
+const pairingSection = document.getElementById("pairing");
+if (pairingSection !== null) {
+  mountPairingView(pairingSection, connection, createCodeScanner(browserScannerEnv()));
+}
 connection.subscribe((notice) => {
   if (notice.kind === "pairing") {
-    console.info("pwa pairing", notice.pairing);
     return;
   }
   console.info("pwa connection", notice);
