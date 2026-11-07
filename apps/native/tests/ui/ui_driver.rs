@@ -103,8 +103,8 @@ fn driver_unknown_method_lists_methods(cx: &mut TestAppContext) {
     assert_eq!(
         failed.hint.as_deref(),
         Some(
-            "methods: action, click, drag, find, key, move, pane_text, ping, screenshot, state, \
-             type_text, wait_for, wheel"
+            "methods: action, click, drag, find, key, move, pane_text, paste, ping, screenshot, \
+             state, type_text, wait_for, wheel"
         )
     );
 }
@@ -341,6 +341,48 @@ fn driver_type_text_refuses_control_characters_and_types_nothing(cx: &mut TestAp
     assert!(
         h.sent_input("s1").is_empty(),
         "a refused text types nothing"
+    );
+}
+
+#[gpui::test]
+fn driver_paste_reaches_the_focused_pane_with_its_newlines(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = focused_pane(cx, &dir);
+
+    let pasted = result(&mut h, "paste", json!({"text": "echo one\necho two"}));
+
+    assert_eq!(pasted, json!({"pasted": 17}));
+    let sent = h.sent_input("s1");
+    assert!(
+        sent.ends_with(b"echo one\recho two"),
+        "the pane's session got both lines: {:?}",
+        String::from_utf8_lossy(&sent)
+    );
+}
+
+#[gpui::test]
+fn driver_paste_puts_the_clipboard_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = focused_pane(cx, &dir);
+    h.set_clipboard("kept");
+
+    result(&mut h, "paste", json!({"text": "echo hi"}));
+
+    assert_eq!(h.clipboard(), Some("kept".to_owned()));
+}
+
+#[gpui::test]
+fn driver_paste_refuses_empty_text_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = focused_pane(cx, &dir);
+
+    let failed = failure(&mut h, "paste", json!({"text": ""}));
+
+    assert_eq!(failed.code, ErrorCode::BadParams);
+    assert_eq!(failed.message, "text is empty");
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "a refused paste sends nothing"
     );
 }
 

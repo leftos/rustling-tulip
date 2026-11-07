@@ -1232,6 +1232,7 @@ An error reply names a code (`unknown_method`, `bad_params`, `not_found`, `not_v
 | `key` | `keys`: one keystroke, such as `ctrl-,` | `{"pressed": keys}` | `bad_params` for more than one keystroke or an unreadable one |
 | `move` | a target (`x`, `y` or `element`) | `{"at": {"x", "y"}}` | target errors as below |
 | `pane_text` | `pane?` | `{"pane", "lines", "text"}`: the visible rows only, never scrollback; `text` is those rows as one string with a soft-wrapped line joined (no newline where it wrapped), `lines` the grid rows as drawn, one string each; the default pane is the active tab's focused pane, else its first | `not_found` for an unknown pane (the hint lists the active tab's panes) or a tab with no pane |
+| `paste` | `text` | `{"pasted": n}`: the text pasted into whatever holds focus as Ctrl+V (Cmd+V on macOS) pastes it, newlines included; the clipboard is put back as it was, or left holding the text when it was empty | `bad_params` for an empty text |
 | `ping` | none | `{"version"}` | none |
 | `screenshot` | none | `{"path", "width", "height"}` | `refused` as above; the in-process handler also refuses it, since only the pipe answers it |
 | `state` | none | the window's size and scale, `active_tab`, `tabs`, the shown tab's `panes`, `sessions` and `overlay` | none |

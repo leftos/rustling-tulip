@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Every method a request may name, sorted.
-pub const METHODS: [&str; 13] = [
+pub const METHODS: [&str; 14] = [
     "action",
     "click",
     "drag",
@@ -18,6 +18,7 @@ pub const METHODS: [&str; 13] = [
     "key",
     "move",
     "pane_text",
+    "paste",
     "ping",
     "screenshot",
     "state",
@@ -177,6 +178,14 @@ pub struct FindParams {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TypeTextParams {
+    pub text: String,
+}
+
+/// `paste`'s params: the text to paste into what holds focus, newlines
+/// included.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PasteParams {
     pub text: String,
 }
 
@@ -534,7 +543,7 @@ mod tests {
                 "error": {
                     "code": "unknown_method",
                     "message": "unknown method: nope",
-                    "hint": "methods: action, click, drag, find, key, move, pane_text, ping, screenshot, state, type_text, wait_for, wheel",
+                    "hint": "methods: action, click, drag, find, key, move, pane_text, paste, ping, screenshot, state, type_text, wait_for, wheel",
                 },
             })
         );

@@ -4,14 +4,15 @@
 //! key it dispatches reaches the view's own handlers, which update
 //! it, so the view must not be borrowed while they run.
 
-use gpui::{App, Bounds, Context, Entity, Keystroke, Modifiers, Pixels, Window};
+use gpui::{App, Bounds, ClipboardItem, Context, Entity, Keystroke, Modifiers, Pixels, Window};
 use serde_json::{Value, json};
 
 use crate::RootView;
 use crate::driver::pointer;
 use crate::driver::protocol::{
     ActionParams, ClickParams, DragParams, ErrorCode, FindParams, KeyParams, MoveParams,
-    PaneTextParams, ParamError, Reply, Request, Target, TypeTextParams, WaitParams, WheelParams,
+    PaneTextParams, ParamError, PasteParams, Reply, Request, Target, TypeTextParams, WaitParams,
+    WheelParams,
 };
 use crate::driver::registry::{self, Entry};
 use crate::driver::wait::{PREDICATE_SHAPES, Predicate, StateTest, parse_predicate, value_at};
@@ -23,6 +24,10 @@ const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// What a refused `type_text` suggests instead.
 const TYPE_TEXT_HINT: &str = "type_text takes printable text; press Enter, Tab or Escape with key";
+
+/// The keystroke `paste` dispatches: the one a user presses to paste, Ctrl+V
+/// (Cmd+V on macOS).
+const PASTE_KEYSTROKE: &str = "secondary-v";
 
 /// The actions `action` knows, as an unknown one's hint lists them.
 const ACTIONS_HINT: &str = "actions: open_settings, new_shell, open_spawn, toggle_sidebar, \
@@ -41,6 +46,7 @@ pub fn handle(
         "find" => find(request, window, cx),
         "key" => key(request, window, cx),
         "type_text" => type_text(request, window, cx),
+        "paste" => paste(request, window, cx),
         "pane_text" => pane_text(request, root.read(cx), cx),
         "action" => action(request, root, window, cx),
         // It awaits a capture thread, so the pipe's dispatcher answers it.
@@ -173,6 +179,29 @@ fn type_text(request: &Request, window: &mut Window, cx: &mut App) -> Result<Val
         window.dispatch_keystroke(stroke, cx);
     }
     Ok(json!({ "typed": params.text.chars().count() }))
+}
+
+/// Pastes the params' text into what holds focus, the way a user's paste
+/// shortcut does: the clipboard carries the text while the keystroke is
+/// dispatched, and is put back as it was afterwards.
+fn paste(request: &Request, window: &mut Window, cx: &mut App) -> Result<Value, Reply> {
+    let params: PasteParams = request.params()?;
+    if params.text.is_empty() {
+        return Err(request.fail(ErrorCode::BadParams, "text is empty".to_owned()));
+    }
+    let stroke = Keystroke::parse(PASTE_KEYSTROKE).map_err(|_| {
+        request.fail(
+            ErrorCode::Refused,
+            format!("{PASTE_KEYSTROKE} is not a keystroke"),
+        )
+    })?;
+    let kept = cx.read_from_clipboard();
+    cx.write_to_clipboard(ClipboardItem::new_string(params.text.clone()));
+    window.dispatch_keystroke(stroke, cx);
+    if let Some(kept) = kept {
+        cx.write_to_clipboard(kept);
+    }
+    Ok(json!({ "pasted": params.text.chars().count() }))
 }
 
 /// The visible rows of the params' pane, else of the active tab's focused
