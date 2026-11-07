@@ -8,9 +8,9 @@ use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId,
-    Entity, FocusHandle, FontWeight, HighlightStyle, MouseButton, MouseDownEvent, Pixels, Point,
-    SharedString, Stateful, StyledText, Subscription, Window, WindowId, anchored, canvas, deferred,
-    div, point, prelude::*, px, relative, svg,
+    Entity, ExternalPaths, FocusHandle, FontWeight, HighlightStyle, MouseButton, MouseDownEvent,
+    Pixels, Point, SharedString, Stateful, StyledText, Subscription, Window, WindowId, anchored,
+    canvas, deferred, div, point, prelude::*, px, relative, svg,
 };
 use protocol::{
     AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, SessionMember, SessionMode,
@@ -2237,6 +2237,28 @@ impl RootView {
         cx.notify();
     }
 
+    /// Files dropped from the desktop on the shown tab: they go to the pane
+    /// under the pointer, unless it is popped out.
+    fn on_file_drop(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane_id) = self.file_drop_target(window) else {
+            tracing::debug!("a file drop on no pane that takes one; ignored");
+            return;
+        };
+        self.drop_files(&pane_id, paths.paths(), cx);
+    }
+
+    /// The pane of the shown tab under the pointer in `window`, when it
+    /// takes a file drop: a popped pane's card takes none.
+    fn file_drop_target(&self, window: &Window) -> Option<String> {
+        let here = window.window_handle().window_id();
+        let tab = self.window_tab(here)?;
+        let rect = grid_rect(self.layouts.grid(here)?);
+        let at = window.mouse_position();
+        let at = (at.x / px(1.0), at.y / px(1.0));
+        let (pane_id, _) = drag::pane_target(tab.grid()?, rect, PANE_GUTTER, at)?;
+        (!self.is_pane_popped(&pane_id)).then_some(pane_id)
+    }
+
     /// Sends what a pane or leaf drop does: a pane move with its undo entry,
     /// or the request that places an unbound session, with none.
     pub(crate) fn send_leaf_drop(&mut self, drop: LeafDrop, cx: &mut Context<Self>) {
@@ -3874,6 +3896,7 @@ fn drop_layer(tab_id: &str, cx: &mut Context<RootView>) -> Stateful<Div> {
         .size_full()
         .on_drag_move(cx.listener(RootView::on_pane_drag_move))
         .on_drop(cx.listener(RootView::on_pane_drop))
+        .on_drop(cx.listener(RootView::on_file_drop))
         .on_mouse_move(|_, _, cx| {
             if cx.has_active_drag() {
                 cx.stop_propagation();

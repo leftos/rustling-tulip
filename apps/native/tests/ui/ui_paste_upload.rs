@@ -7,6 +7,8 @@
     reason = "a spec fails with the message of the precondition it lost"
 )]
 
+use std::path::{Path, PathBuf};
+
 use crate::support;
 
 use base64::Engine as _;
@@ -412,5 +414,201 @@ fn an_upload_whose_host_reconnects_is_forgotten(cx: &mut TestAppContext) {
         h.host(&support::saved_remote()).sent_input("b1"),
         b"hi",
         "the pane takes input again"
+    );
+}
+
+/// The title of the toast a dropped file that cannot go up shows.
+const DROP_FAILED_TITLE: &str = "Couldn't drop the file";
+
+/// `name` written under `dir` with `bytes`, its path returned.
+fn file_in(dir: &TestDir, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, bytes).expect("write the dropped file");
+    path
+}
+
+/// `path` as a drop pastes it: quoted when it holds a space.
+fn quoted(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if path.contains(' ') {
+        format!("\"{path}\"")
+    } else {
+        path.into_owned()
+    }
+}
+
+/// Drops `paths` on pane `pane_id`.
+fn drop_on(h: &mut Harness<'_>, pane_id: &str, paths: &[PathBuf]) {
+    h.root_update(|root, _window, cx| root.drop_files(pane_id, paths, cx));
+}
+
+#[gpui::test]
+fn dropping_files_on_a_local_session_pastes_their_paths(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    h.sent();
+    let files = TestDir::new();
+    let one = file_in(&files, "one.txt", b"1");
+    let spaced = file_in(&files, "with space.txt", b"2");
+    drop_on(&mut h, "p1", &[one.clone(), spaced.clone()]);
+    let sent = h.sent();
+    assert!(
+        uploads_in(&sent).is_empty(),
+        "nothing is uploaded: {sent:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&support::input_to(&sent, "a1")),
+        format!("{} {}", quoted(&one), quoted(&spaced)),
+        "both local paths paste, the spaced one quoted"
+    );
+    assert!(
+        uploads_in(&h.host(&support::saved_remote()).sent()).is_empty(),
+        "nothing goes to the remote host"
+    );
+}
+
+#[gpui::test]
+fn dropping_files_on_a_remote_session_uploads_them_one_after_another_and_pastes_the_paths(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let files = TestDir::new();
+    let one = file_in(&files, "one.txt", b"first");
+    let two = file_in(&files, "two.txt", b"second");
+    drop_on(&mut h, "p2", &[one, two]);
+    let sent = h.host(&support::saved_remote()).sent();
+    let [first]: [Upload; 1] = uploads_in(&sent).try_into().expect("one upload at a time");
+    assert_eq!(first.session_id, "b1");
+    assert_eq!(first.name, "one.txt");
+    assert_eq!(first.bytes, b"first");
+    assert!(!has_input(&sent), "nothing pasted yet: {sent:?}");
+
+    answer(&mut h, &first, "/work/one.txt");
+    let sent = h.host(&support::saved_remote()).sent();
+    let [second]: [Upload; 1] = uploads_in(&sent)
+        .try_into()
+        .expect("the answer sends the next file");
+    assert_eq!(second.name, "two.txt");
+    assert_eq!(second.bytes, b"second");
+    assert!(
+        !has_input(&sent),
+        "nothing pasted before the last answer: {sent:?}"
+    );
+
+    answer(&mut h, &second, "/work/two.txt");
+    assert_eq!(
+        h.host(&support::saved_remote()).sent_input("b1"),
+        b"/work/one.txt /work/two.txt",
+        "both host paths paste together"
+    );
+}
+
+#[gpui::test]
+fn a_dropped_folder_on_a_remote_session_is_skipped_with_a_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let files = TestDir::new();
+    let folder = files.path().join("sub");
+    std::fs::create_dir(&folder).expect("make the dropped folder");
+    let file = file_in(&files, "file.txt", b"f");
+    drop_on(&mut h, "p2", &[folder, file]);
+    let shown = toasts(&mut h);
+    assert_eq!(
+        shown
+            .iter()
+            .filter(|toast| {
+                **toast
+                    == (
+                        "Folders can't be dropped into a remote session".to_owned(),
+                        None,
+                    )
+            })
+            .count(),
+        1,
+        "{shown:?}"
+    );
+    let upload = the_upload(&mut h);
+    assert_eq!(upload.name, "file.txt");
+}
+
+#[gpui::test]
+fn a_dropped_file_over_the_cap_is_skipped_with_a_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let files = TestDir::new();
+    let big = file_in(&files, "big.bin", &vec![7; UPLOAD_MAX_BYTES + 1]);
+    let small = file_in(&files, "small.txt", b"s");
+    drop_on(&mut h, "p2", &[big, small]);
+    assert!(
+        toasts(&mut h).contains(&(
+            DROP_FAILED_TITLE.to_owned(),
+            Some("big.bin is larger than 8 MiB.".to_owned())
+        )),
+        "{:?}",
+        toasts(&mut h)
+    );
+    let upload = the_upload(&mut h);
+    assert_eq!(upload.name, "small.txt");
+}
+
+#[gpui::test]
+fn a_drop_on_a_host_without_upload_file_toasts_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_agent(cx, &dir, &[]);
+    let files = TestDir::new();
+    let file = file_in(&files, "file.txt", b"f");
+    drop_on(&mut h, "p2", &[file]);
+    let sent = h.host(&support::saved_remote()).sent();
+    assert!(
+        uploads_in(&sent).is_empty(),
+        "nothing is uploaded: {sent:?}"
+    );
+    assert!(!has_input(&sent), "nothing is typed: {sent:?}");
+    assert!(
+        toasts(&mut h).contains(&(
+            "This host can't receive pasted images or files until it is updated".to_owned(),
+            None
+        )),
+        "{:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn a_refused_upload_mid_drop_pastes_what_was_uploaded_and_stops(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let files = TestDir::new();
+    let paths = [
+        file_in(&files, "one.txt", b"1"),
+        file_in(&files, "two.txt", b"2"),
+        file_in(&files, "three.txt", b"3"),
+    ];
+    drop_on(&mut h, "p2", &paths);
+    let first = the_upload(&mut h);
+    answer(&mut h, &first, "/work/one.txt");
+    let second = the_upload(&mut h);
+    assert_eq!(second.name, "two.txt");
+    let message = "the host's disk is full";
+    h.host(&support::saved_remote()).send(DaemonMessage::Error {
+        message: message.to_owned(),
+        request_id: Some(second.request_id.clone()),
+        code: None,
+    });
+    assert!(
+        toasts(&mut h).contains(&(DROP_FAILED_TITLE.to_owned(), Some(message.to_owned()))),
+        "{:?}",
+        toasts(&mut h)
+    );
+    let sent = h.host(&support::saved_remote()).sent();
+    assert!(
+        uploads_in(&sent).is_empty(),
+        "the rest of the drop is abandoned: {sent:?}"
+    );
+    assert_eq!(
+        support::input_to(&sent, "b1"),
+        b"/work/one.txt",
+        "the path already returned is pasted"
     );
 }
