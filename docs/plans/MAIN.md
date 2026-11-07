@@ -31,7 +31,6 @@
 - [ ] RT-699 Keep the terminal link tip off dialogs and the link, and name Cmd on macOS
 - [ ] RT-918 Split the agent launch command by Windows rules on Windows, so backslash paths survive
 - [ ] RT-921 Default shell: move the save check off the runtime, and detect WSL that is really installed
-- [ ] RT-932 Add non-git folders to the sidebar, with no worktree or branch choice when spawning into one · release vNext
 - [ ] RT-959 Default shell: verify Nushell raw-string programs, give the resume the launch's .cmd checks, and skip a familyless Automatic shell
 - [ ] RT-1086 Open a Ctrl+clicked path that ends in a ?query or #fragment, reading #L4 as a line
 
@@ -55,9 +54,7 @@
   - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext
   - [ ] RT-368 PW.7: Home Screen badge with the Needs you count · release vNext
   - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
-  - [ ] RT-370 PW.2: Protocol types for the PWA and its connection · release vNext
   - [ ] RT-104 PW.4: Phone Home: grouped list and Needs you tray; answer prompts, stop and resume · release vNext
-  - [ ] RT-1127 PW.1b: Ship the phone app's folder in the macOS app bundle · release vNext
 - [ ] RT-1126 Precache the phone app's hashed assets so its first offline open is complete
 
 ## Wave 5 — Attention feed on the desktop
@@ -512,16 +509,18 @@
 - [ ] RT-1045 Give two unknown-kind gate pools distinct selectors in the Gates view
 - [ ] RT-1046 Stop four agent-api icon conformance tests leaking past nextest's leak timeout
 - [ ] RT-1052 Show seconds in a Gates row's time and usual under ten minutes
-- [ ] RT-1055 Show a Ctrl+clicked file fetch's size, progress and Cancel in its toast · release vNext
 - [ ] RT-1056 Get colour query replies (OSC 10/11) through ConPTY to programs on Windows hosts
-- [ ] RT-1057 Name the account login session "Log in a new account" in the sidebar, not its run id · release vNext
 - [ ] RT-1059 Keep a long folder path clear of Browse in the Open a shell dialog · release vNext
 - [ ] RT-1060 Close the new-session dialog on Escape after Escape closed its Target list · release vNext
 - [ ] RT-1063 Keep a statusline ending in %, \$ or # under Claude's box from reading as the shell's prompt · release vNext
-- [ ] RT-1064 Keep a spawned agent session's label after its agent exits into the shell · release vNext
-- [ ] RT-1066 Match the waiting ring and footer count to the session's idle status after a hand-started agent exits · release vNext
 - [ ] RT-1067 Remove the stray dot at the bottom-left of a plain Nushell pane · release vNext
 - [ ] RT-1125 Type into a shell with the send verb once its hand-started agent has ended
+- [ ] RT-1128 Harden the protocol TypeScript generator against module files, cfg_attr derives and duplicate consts
+- [ ] RT-1129 Let workspaces with non-git members share them and follow .git appearing or vanishing
+- [ ] RT-1130 Hide the account login session's scratch folder subline and Open in items
+- [ ] RT-1131 Make Finished toasts and every status marker use the agent-up rule, and cache it per session
+- [ ] RT-1132 Treat an all-folder workspace like a folder in the spawn dialog and launch last, and stop fetching folder members
+- [ ] RT-1133 Tag registered folders DIR in the compact Dashboard and drop Source Control's stale pinned host
 
 ## No project
 
@@ -558,11 +557,10 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-365, RT-366, RT-367, RT-368, RT-369, RT-370, RT-881, RT-1126, RT-1127, Wave 4 — Mobile app (iPhone PWA over Tailscale)
+- [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-365, RT-366, RT-367, RT-368, RT-369, RT-881, RT-1126, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
-- [non-git-folders.md](non-git-folders.md) — RT-932
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-101, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, RT-1111, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
 - [remote-access.md](remote-access.md) — RT-686, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
