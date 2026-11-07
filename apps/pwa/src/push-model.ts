@@ -29,8 +29,11 @@ export const NEEDS_YOU_LABEL = "Needs you";
 /** The switch that pushes finished sessions. */
 export const FINISHED_LABEL = "Finished";
 
-/** The two switches beside the main one, by the field they set. */
-export type PushSwitchName = "needsYou" | "finished";
+/** The switch that holds pushes while the owner is at their computer. */
+export const HOLD_AT_DESK_LABEL = "Hold while I'm at my computer";
+
+/** The three switches beside the main one, by the field they set. */
+export type PushSwitchName = "needsYou" | "finished" | "holdAtDesk";
 
 /** What the phone's browser offers, as the panel reads it from the port. */
 export interface PushDevice {
@@ -49,12 +52,14 @@ export interface PushDaemon {
   readonly endpoint: string | null;
   readonly needsYou: boolean;
   readonly finished: boolean;
+  readonly holdAtDesk: boolean;
 }
 
-/** The two switches a register carries. */
+/** The three switches a register carries. */
 export interface PushSwitches {
   readonly needsYou: boolean;
   readonly finished: boolean;
+  readonly holdAtDesk: boolean;
 }
 
 /**
@@ -115,9 +120,10 @@ export interface PushScreen {
   readonly message: string | null;
   /** The main switch; null in the states that cannot change anything. */
   readonly allow: PushSwitch | null;
-  /** The two switches; null unless the phone is subscribed. */
+  /** The three switches; null unless the phone is subscribed. */
   readonly needsYou: PushSwitch | null;
   readonly finished: PushSwitch | null;
+  readonly holdAtDesk: PushSwitch | null;
   readonly error: string | null;
 }
 
@@ -134,7 +140,7 @@ export function deviceRead(state: PushState, device: PushDevice): PushState {
 /**
  * What the panel shows: the state text for a browser or permission that
  * cannot push, else the switches — the main one alone while the phone holds no
- * subscription, all three once it does. While a register is out the two
+ * subscription, all of them once it does. While a register is out the three
  * switches show what it asked for, and a reply that refuses it leaves the
  * daemon's earlier values.
  */
@@ -150,6 +156,7 @@ export function pushScreen(state: PushState): PushScreen {
       allow: null,
       needsYou: null,
       finished: null,
+      holdAtDesk: null,
     };
   }
   if (!state.device.installed) {
@@ -160,6 +167,7 @@ export function pushScreen(state: PushState): PushScreen {
       allow: null,
       needsYou: null,
       finished: null,
+      holdAtDesk: null,
     };
   }
   if (state.device.permission === "denied") {
@@ -170,6 +178,7 @@ export function pushScreen(state: PushState): PushScreen {
       allow: null,
       needsYou: null,
       finished: null,
+      holdAtDesk: null,
     };
   }
   const busy = pending !== null;
@@ -181,7 +190,15 @@ export function pushScreen(state: PushState): PushScreen {
     enabled: !busy && (subscribed || state.daemon !== null),
   };
   if (!subscribed) {
-    return { ...base, kind: "off", message: null, allow, needsYou: null, finished: null };
+    return {
+      ...base,
+      kind: "off",
+      message: null,
+      allow,
+      needsYou: null,
+      finished: null,
+      holdAtDesk: null,
+    };
   }
   return {
     ...base,
@@ -196,6 +213,11 @@ export function pushScreen(state: PushState): PushScreen {
     finished: {
       label: FINISHED_LABEL,
       on: requested?.finished ?? state.daemon?.finished ?? true,
+      enabled: !busy,
+    },
+    holdAtDesk: {
+      label: HOLD_AT_DESK_LABEL,
+      on: requested?.holdAtDesk ?? state.daemon?.holdAtDesk ?? true,
       enabled: !busy,
     },
   };
@@ -245,6 +267,7 @@ export function foldStatus(
     endpoint: message.endpoint ?? null,
     needsYou: message.needs_you,
     finished: message.finished,
+    holdAtDesk: message.hold_at_desk ?? true,
   };
   const pending = state.pending;
   if (
@@ -272,7 +295,11 @@ export function foldStatus(
       return register(
         next,
         keys,
-        { needsYou: daemon.needsYou, finished: daemon.finished },
+        {
+          needsYou: daemon.needsYou,
+          finished: daemon.finished,
+          holdAtDesk: daemon.holdAtDesk,
+        },
         false,
         newRequestId,
       );
@@ -352,6 +379,7 @@ export function subscribed(state: PushState, keys: PushKeys, newRequestId: NewRe
   const switches: PushSwitches = {
     needsYou: first || daemon.needsYou,
     finished: first || daemon.finished,
+    holdAtDesk: first || daemon.holdAtDesk,
   };
   const next: PushState = {
     ...state,
@@ -381,9 +409,9 @@ export function unsubscribed(state: PushState): PushState {
 }
 
 /**
- * One of the two switches tapped: re-sends the register with the phone's keys
- * and both values. The daemon's record keeps its values until its reply, so a
- * refusal leaves the earlier ones.
+ * One of the three switches tapped: re-sends the register with the phone's keys
+ * and all three values. The daemon's record keeps its values until its reply,
+ * so a refusal leaves the earlier ones.
  */
 export function setSwitch(
   state: PushState,
@@ -399,6 +427,7 @@ export function setSwitch(
   const switches: PushSwitches = {
     needsYou: which === "needsYou" ? value : daemon.needsYou,
     finished: which === "finished" ? value : daemon.finished,
+    holdAtDesk: which === "holdAtDesk" ? value : daemon.holdAtDesk,
   };
   return register(state, keys, switches, false, newRequestId);
 }
@@ -441,7 +470,7 @@ function statusRequest(
   };
 }
 
-/** The `register_push` for `keys` with the two switches the panel asked for. */
+/** The `register_push` for `keys` with the three switches the panel asked for. */
 function register(
   state: PushState,
   keys: PushKeys,
@@ -461,6 +490,7 @@ function register(
       },
       needs_you: switches.needsYou,
       finished: switches.finished,
+      hold_at_desk: switches.holdAtDesk,
       request_id: requestId,
     },
     effects: [],

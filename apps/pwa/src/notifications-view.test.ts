@@ -1,7 +1,14 @@
 import { expect, test } from "vitest";
 
 import { mountNotificationsView } from "./notifications-view";
-import { DONE, UNSUPPORTED } from "./push-model";
+import {
+  ALLOW_LABEL,
+  DONE,
+  FINISHED_LABEL,
+  HOLD_AT_DESK_LABEL,
+  NEEDS_YOU_LABEL,
+  UNSUPPORTED,
+} from "./push-model";
 import {
   FAKE_KEYS,
   memoryPushPort,
@@ -301,6 +308,7 @@ test("the main switch subscribes with the daemon's key and registers both switch
     },
     needs_you: true,
     finished: true,
+    hold_at_desk: true,
     request_id: expect.any(String),
   });
 });
@@ -335,7 +343,7 @@ test("a disconnect clears the request in flight", async () => {
   h.button.fire("click");
   await flush();
   const boxes = checkboxes(h.section);
-  expect(boxes.length).toBe(3);
+  expect(boxes.length).toBe(4);
   boxes[1]?.fire("change");
   await flush();
   expect(checkboxes(h.section)[1]?.disabled).toBe(true);
@@ -364,4 +372,46 @@ test("the panel hides when Home hides and on popstate", async () => {
 
   fakeWindow.fire("popstate");
   expect(h.section.hidden).toBe(true);
+});
+
+test("the panel shows the hold_at_desk switch", async () => {
+  const h = harness(memoryPushPort({ keys: KEYS }));
+  h.notice({ kind: "status", state: "ready" });
+  await flush();
+  h.notice({ kind: "message", message: status(requestIdOf(h.sent[0]), KEYS.endpoint) });
+
+  h.button.fire("click");
+  await flush();
+  const labels = h.section
+    .descendants()
+    .filter((node) => node.className === "notifications-switch-label")
+    .map((node) => node.textContent);
+  expect(labels).toEqual([ALLOW_LABEL, NEEDS_YOU_LABEL, FINISHED_LABEL, HOLD_AT_DESK_LABEL]);
+  expect(checkboxes(h.section)[3]?.checked).toBe(true);
+});
+
+test("tapping the hold_at_desk switch sends a register with it off", async () => {
+  const h = harness(memoryPushPort({ keys: KEYS }));
+  h.notice({ kind: "status", state: "ready" });
+  await flush();
+  h.notice({ kind: "message", message: status(requestIdOf(h.sent[0]), KEYS.endpoint) });
+
+  h.button.fire("click");
+  await flush();
+  checkboxes(h.section)[3]?.fire("change");
+  await flush();
+
+  expect(h.sent.at(-1)).toEqual({
+    type: "register_push",
+    registration: {
+      kind: "web_push",
+      endpoint: KEYS.endpoint,
+      p256dh: KEYS.p256dh,
+      auth: KEYS.auth,
+    },
+    needs_you: true,
+    finished: true,
+    hold_at_desk: false,
+    request_id: expect.any(String),
+  });
 });

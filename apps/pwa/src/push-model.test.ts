@@ -7,6 +7,7 @@ import {
   ALLOW_LABEL,
   DENIED,
   FINISHED_LABEL,
+  HOLD_AT_DESK_LABEL,
   NEEDS_YOU_LABEL,
   NOT_INSTALLED,
   UNSUPPORTED,
@@ -46,7 +47,14 @@ function device(extra: Partial<PushDevice> = {}): PushDevice {
 }
 
 function daemon(extra: Partial<PushDaemon> = {}): PushDaemon {
-  return { vapidPublicKey: VAPID, endpoint: null, needsYou: true, finished: true, ...extra };
+  return {
+    vapidPublicKey: VAPID,
+    endpoint: null,
+    needsYou: true,
+    finished: true,
+    holdAtDesk: true,
+    ...extra,
+  };
 }
 
 /** A subscribed phone: it holds {@link KEYS} and the daemon records that endpoint. */
@@ -204,6 +212,7 @@ test("a first enable subscribes with the daemon's key and registers both switche
     registration: REGISTRATION,
     needs_you: true,
     finished: true,
+    hold_at_desk: true,
     request_id: "r1",
   });
   expect(pushScreen(done.state).kind).toBe("on");
@@ -238,6 +247,7 @@ test("a switch tap re-sends the register with the phone's keys and both values",
     registration: REGISTRATION,
     needs_you: true,
     finished: true,
+    hold_at_desk: true,
     request_id: "r1",
   });
 });
@@ -275,6 +285,7 @@ test("the open check re-registers a different endpoint with the daemon's switche
     registration: REGISTRATION,
     needs_you: false,
     finished: true,
+    hold_at_desk: true,
     request_id: "r2",
   });
 });
@@ -353,4 +364,85 @@ test("a send the connection dropped is out of flight and says so", () => {
   const offline = markOffline(check.state);
   expect(offline.pending).toBeNull();
   expect(pushScreen(offline).error).toBe(OFFLINE_BAR);
+});
+
+test("a status without hold_at_desk reads on", () => {
+  const ids = counter();
+  const check = openCheck(onState(), ids);
+  const folded = foldStatus(
+    check.state,
+    status({ endpoint: KEYS.endpoint, request_id: requestIdOf(check) }),
+    ids,
+  );
+  expect(folded.message).toBeNull();
+  expect(folded.state.daemon?.holdAtDesk).toBe(true);
+  expect(pushScreen(folded.state).holdAtDesk?.on).toBe(true);
+});
+
+test("a first enable registers hold_at_desk on", () => {
+  const ids = counter();
+  const turned = turnOn(pushState(device(), daemon({ holdAtDesk: false })));
+  const done = subscribed(turned.state, KEYS, ids);
+  expect(done.message).toEqual({
+    type: "register_push",
+    registration: REGISTRATION,
+    needs_you: true,
+    finished: true,
+    hold_at_desk: true,
+    request_id: "r1",
+  });
+});
+
+test("tapping hold_at_desk registers it and keeps the other switches", () => {
+  const ids = counter();
+  const tapped = setSwitch(
+    onState({ needsYou: false, finished: true, holdAtDesk: true }),
+    "holdAtDesk",
+    false,
+    ids,
+  );
+  expect(tapped.message).toEqual({
+    type: "register_push",
+    registration: REGISTRATION,
+    needs_you: false,
+    finished: true,
+    hold_at_desk: false,
+    request_id: "r1",
+  });
+  expect(pushScreen(tapped.state).holdAtDesk?.on).toBe(false);
+  expect(pushScreen(tapped.state).holdAtDesk?.enabled).toBe(false);
+});
+
+test("the open check re-registers with the daemon's hold_at_desk", () => {
+  const ids = counter();
+  const check = openCheck(onState(), ids);
+  const folded = foldStatus(
+    check.state,
+    status({
+      endpoint: OTHER,
+      needs_you: false,
+      finished: true,
+      hold_at_desk: false,
+      request_id: requestIdOf(check),
+    }),
+    ids,
+  );
+  expect(folded.message).toEqual({
+    type: "register_push",
+    registration: REGISTRATION,
+    needs_you: false,
+    finished: true,
+    hold_at_desk: false,
+    request_id: "r2",
+  });
+});
+
+test("the screen shows hold_at_desk after finished only when on", () => {
+  const off = pushScreen(pushState(device(), daemon()));
+  expect(off.kind).toBe("off");
+  expect(off.holdAtDesk).toBeNull();
+
+  const on = pushScreen(onState({ finished: false, holdAtDesk: false }));
+  expect(on.kind).toBe("on");
+  expect(on.holdAtDesk).toEqual({ label: HOLD_AT_DESK_LABEL, on: false, enabled: true });
 });

@@ -23,6 +23,7 @@ import {
   type PushState,
   type PushStep,
   type PushSwitch,
+  type PushSwitchName,
 } from "./push-model";
 import type { PushPort } from "./push-port";
 import type { Connection } from "./socket";
@@ -150,6 +151,10 @@ export function mountNotificationsView(
     if (finished !== null) {
       rows.push(switchRow(finished, "finished"));
     }
+    const holdAtDesk = screen.holdAtDesk;
+    if (holdAtDesk !== null) {
+      rows.push(switchRow(holdAtDesk, "holdAtDesk"));
+    }
     if (rows.length > 0) {
       const switches = element("div", "notifications-switches");
       switches.append(...rows);
@@ -172,7 +177,7 @@ export function mountNotificationsView(
     apply(allow.on ? turnOff(state, newRequestId) : turnOn(state));
   }
 
-  function switchRow(view: PushSwitch, which: "needsYou" | "finished"): HTMLElement {
+  function switchRow(view: PushSwitch, which: PushSwitchName): HTMLElement {
     return toggle(view, () => {
       apply(setSwitch(state, which, !view.on, newRequestId));
     });
