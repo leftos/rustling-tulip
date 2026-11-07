@@ -24,6 +24,36 @@ const CF_DIB: u32 = 8;
 #[cfg(windows)]
 const CF_DIBV5: u32 = 17;
 
+/// Reads a copied bitmap off the system clipboard as a PNG: `None` when it
+/// holds none.
+pub type BitmapReader = fn() -> Result<Option<Vec<u8>>>;
+
+/// The bitmap reader a remote image paste falls back on.
+struct ClipboardBitmapReader(BitmapReader);
+
+impl gpui::Global for ClipboardBitmapReader {}
+
+/// Makes `reader` the bitmap reader a remote image paste falls back on when
+/// GPUI's clipboard holds no image; the UI specs install one that reads
+/// nothing, so they never see the developer's own clipboard.
+pub fn set_bitmap_reader(cx: &mut gpui::App, reader: BitmapReader) {
+    cx.set_global(ClipboardBitmapReader(reader));
+}
+
+/// The bitmap reader in use: the one [`set_bitmap_reader`] installed, else
+/// [`read_clipboard_bitmap`] on Windows and none elsewhere.
+pub(crate) fn bitmap_reader(cx: &gpui::App) -> BitmapReader {
+    cx.try_global::<ClipboardBitmapReader>()
+        .map_or(DEFAULT_READER, |reader| reader.0)
+}
+
+/// Windows' clipboard holds bitmaps GPUI does not read.
+#[cfg(windows)]
+const DEFAULT_READER: BitmapReader = read_clipboard_bitmap;
+/// Elsewhere GPUI's clipboard reads every image there is.
+#[cfg(not(windows))]
+const DEFAULT_READER: BitmapReader = || Ok(None);
+
 /// Converts a packed DIB to an RGBA PNG.
 ///
 /// `dib` is what `GetClipboardData` returns for `CF_DIB` or `CF_DIBV5`: a
@@ -41,13 +71,6 @@ pub(crate) fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
 /// Takes `CF_DIBV5` when the clipboard has it, else `CF_DIB`, and answers
 /// `None` when it holds neither.
 #[cfg(windows)]
-#[cfg_attr(
-    test,
-    expect(
-        dead_code,
-        reason = "the unit tests cover the conversion, not the clipboard"
-    )
-)]
 pub(crate) fn read_clipboard_bitmap() -> Result<Option<Vec<u8>>> {
     use windows::Win32::System::DataExchange::{IsClipboardFormatAvailable, OpenClipboard};
 

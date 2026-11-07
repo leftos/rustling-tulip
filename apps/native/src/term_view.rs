@@ -13,17 +13,18 @@ use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, ElementInputHandler,
-    EntityInputHandler, EventEmitter, FocusHandle, Font, FontFeatures, FontStyle, FontWeight,
-    HitboxBehavior, Hsla, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollWheelEvent,
-    SharedString, StrikethroughStyle, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle,
-    Window, WindowId, anchored, canvas, deferred, div, fill, font, outline, point, prelude::*, px,
-    size,
+    AnyElement, App, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle,
+    DispatchPhase, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle, Font,
+    FontFeatures, FontStyle, FontWeight, HitboxBehavior, Hsla, KeyDownEvent, Keystroke, Modifiers,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba,
+    ScrollWheelEvent, SharedString, StrikethroughStyle, Subscription, Task, TextRun,
+    UTF16Selection, UnderlineStyle, Window, WindowId, anchored, canvas, deferred, div, fill, font,
+    outline, point, prelude::*, px, size,
 };
 use protocol::{AgentDescriptor, ClientMessage, ImagePaste, SessionMode, SessionSnapshot};
 
 use crate::Clock;
+use crate::clipboard_image;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, FontSettings};
 use crate::hosts::HostSender;
@@ -31,6 +32,7 @@ use crate::links::{LinkKind, LinkSegment, TerminalLink};
 use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::open;
+use crate::paste_upload;
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
 use crate::shell_marks::{ShellDot, ShellStatus};
 use crate::term::prompt_nav::{self, Dir, Jump};
@@ -490,6 +492,13 @@ pub enum PaneEvent {
         pane_id: String,
         index: usize,
         at: Point<Pixels>,
+    },
+    /// The pane in a remote agent session pasted an image: the root uploads
+    /// it to the host and pastes the returned path back.
+    PasteImage {
+        session_id: String,
+        name: String,
+        bytes: Vec<u8>,
     },
 }
 
@@ -1426,25 +1435,49 @@ impl TerminalPane {
 
     fn paste(&mut self, cx: &mut Context<Self>) {
         self.note_input();
-        let text = cx.read_from_clipboard().and_then(|item| item.text());
+        let item = cx.read_from_clipboard();
+        let text = item.as_ref().and_then(ClipboardItem::text);
         let pasted = text.as_deref().filter(|text| !text.is_empty());
         if pasted.is_none() && self.remote && self.session.is_some_and(|s| s.agent_up) {
-            // The agent would read its own host's clipboard, not this one's.
-            // A remote shell still gets `^V`.
+            // The agent would read its own host's clipboard, not this one's,
+            // so an image goes up to that host as a file. A remote shell
+            // still gets `^V`.
+            if let Some(session_id) = self.attachment.session_id.clone()
+                && let Some((name, bytes)) = pasted_image(item.as_ref(), cx)
+            {
+                cx.emit(PaneEvent::PasteImage {
+                    session_id,
+                    name,
+                    bytes,
+                });
+            }
             return;
         }
-        let bracketed = self.term.bracketed_paste();
+        if let Some(text) = pasted {
+            if let Some(session_id) = self.attachment.session_id.clone() {
+                self.paste_text(text, &session_id, cx);
+            }
+            return;
+        }
+        // A clipboard with no text sends the agent's image-paste key and
+        // logs nothing, since nothing was pasted.
         let image_paste = self
             .session
             .map_or(ImagePaste::CtrlV, |session| session.image_paste);
-        let bytes = term_input::paste_input(text.as_deref(), bracketed, image_paste);
-        // A paste no session took is not logged: nothing saw it. A clipboard
-        // with no text sends the agent's image-paste key and logs nothing,
-        // since nothing was pasted.
-        let Some(text) = pasted else {
-            self.send_input(&bytes);
+        let bytes = term_input::paste_input(None, self.term.bracketed_paste(), image_paste);
+        self.send_input(&bytes);
+    }
+
+    /// Pastes `text` into the session, bracketed when the program asked,
+    /// while the pane still shows `session_id`.
+    pub(crate) fn paste_text(&mut self, text: &str, session_id: &str, cx: &mut Context<Self>) {
+        if self.attachment.session_id.as_deref() != Some(session_id) {
+            tracing::debug!(%session_id, "a paste for a session the pane no longer shows");
             return;
-        };
+        }
+        let bracketed = self.term.bracketed_paste();
+        let bytes = term_input::paste_bytes(text, bracketed);
+        // A paste no session took is not logged: nothing saw it.
         if let Some(session_id) = self.send_input(&bytes) {
             tracing::info!(
                 "{}",
@@ -1457,6 +1490,7 @@ impl TerminalPane {
                 )
             );
         }
+        cx.notify();
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1915,6 +1949,31 @@ impl TerminalPane {
 /// The number of pastes this process has logged, shared by every pane, so a
 /// paste's number names exactly one of them.
 static PASTES: AtomicU64 = AtomicU64::new(0);
+
+/// The image a paste on the clipboard `item` uploads, with the name it goes
+/// under: GPUI's first non-empty image entry, else the bitmap the system
+/// clipboard holds as a PNG (Windows), else `None`. A failed bitmap read is
+/// logged and counts as no image.
+fn pasted_image(item: Option<&ClipboardItem>, cx: &App) -> Option<(String, Vec<u8>)> {
+    let image = item.and_then(|item| {
+        item.entries().iter().find_map(|entry| match entry {
+            ClipboardEntry::Image(image) if !image.bytes.is_empty() => Some(image),
+            _ => None,
+        })
+    });
+    if let Some(image) = image {
+        let name = format!("paste.{}", paste_upload::extension_of(image.format));
+        return Some((name, image.bytes.clone()));
+    }
+    match clipboard_image::bitmap_reader(cx)() {
+        Ok(Some(png)) => Some(("paste.png".to_owned(), png)),
+        Ok(None) => None,
+        Err(err) => {
+            tracing::warn!("reading the clipboard's bitmap failed: {err:#}");
+            None
+        }
+    }
+}
 
 /// The next paste's number, counted from one for the process.
 fn next_paste_number() -> u64 {

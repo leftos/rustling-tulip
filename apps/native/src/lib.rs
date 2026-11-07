@@ -27,8 +27,11 @@ mod chat_view;
 mod cleanup_failed;
 mod cleanup_failed_view;
 #[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the remote image paste is what calls it")
+    not(any(test, windows)),
+    expect(
+        dead_code,
+        reason = "only Windows reads a copied bitmap off the clipboard"
+    )
 )]
 mod clipboard_image;
 mod combobox;
@@ -108,6 +111,7 @@ mod pane_close;
 mod pane_close_view;
 mod pane_header_fit;
 mod pane_menu;
+mod paste_upload;
 mod popout_view;
 mod popouts;
 mod preset_launch;
@@ -292,6 +296,7 @@ pub use crate::assets::Assets;
 pub use crate::changes_view::{
     DiscardConfirmView, ScAction, ScBucketRow, ScButton, ScFileRow, ScFolderRow, ScTreeRow,
 };
+pub use crate::clipboard_image::{BitmapReader, set_bitmap_reader};
 pub use crate::connection::Connection;
 pub use crate::dashboard::DashboardEntry;
 pub use crate::dashboard_band_view::enable_band_probe;
@@ -1310,6 +1315,8 @@ pub struct RootView {
     gates_ui: gates_view::GatesUi,
     /// The files being fetched from a remote host.
     fetches: file_fetch::FetchRegistry,
+    /// The pasted images sent to a remote host, waiting for their path.
+    uploads: paste_upload::PendingUploads,
     /// Where the open the run confirm asks about came from.
     run_confirm_origin: open_view::Origin,
     /// The folder fetched files are saved under, or why it could not be
@@ -1740,6 +1747,7 @@ impl RootView {
                 "{:x}",
                 uuid::Uuid::new_v4().as_u64_pair().0
             )),
+            uploads: paste_upload::PendingUploads::default(),
             run_confirm_origin: open_view::Origin::Link,
             remote_files_root: daemon_client::remote_files_dir()
                 .map(file_fetch_view::absolute_root)
@@ -4587,6 +4595,7 @@ impl RootView {
             || self.on_viewer_message(host, msg, window, cx)
             || self.on_dashboard_message(host, msg, window, cx)
             || self.on_sc_panel_message(host, msg, window, cx)
+            || self.on_upload_message(host, msg, cx)
     }
 
     /// Folds the message into the sidebar, and forgets the remembered
@@ -5008,6 +5017,7 @@ impl RootView {
                     || self.on_gates_refused(host, id, &message, cx)
                     || self.on_agent_command_error(host, id, code, &message, cx)
                     || self.on_preset_list_failed(id, &message, cx)
+                    || self.on_upload_refused(host, id, &message, cx)
             }
         };
         self.repo_remove.disarm();
@@ -5076,6 +5086,7 @@ impl RootView {
     /// afresh.
     fn on_welcome(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.lists_since_welcome.remove(host);
+        self.forget_uploads_of(host);
         self.reset_host(host, window, cx);
         self.ask_accounts_if_listed(host);
         if *host != HostKey::Local {

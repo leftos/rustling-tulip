@@ -30,7 +30,7 @@ use rustling_tulip_native::{
     PairingActionSink, PairingToast, PhysicalRect, QuitFn, RootDeps, RootView, SavePicker, ScPanel,
     Sounder, TaskbarBadge, ToastPlacer, Transport, WorkArea, bind_keys, log_paths,
     remote_access::Autostart,
-    spawn_net,
+    set_bitmap_reader, spawn_net,
     target::{HostKey, Target},
     ui_theme::UiTheme,
     update::{AlreadyRunning, LastResult, Ready, Updater},
@@ -1545,6 +1545,19 @@ pub fn remote_in_pane<'a>(
     repos: &[&str],
     remote: SessionSnapshot,
 ) -> Harness<'a> {
+    remote_in_pane_with_features(cx, dir, ui, repos, remote, &[])
+}
+
+/// [`remote_in_pane`], [`REMOTE`]'s daemon listing `features` beside
+/// [`daemon_features`].
+pub fn remote_in_pane_with_features<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    ui: &Value,
+    repos: &[&str],
+    remote: SessionSnapshot,
+    features: &[&str],
+) -> Harness<'a> {
     let mut hosts = vec![json!({ "name": REMOTE, "port": 8787 })];
     if let Some(more) = ui.get("saved_hosts").and_then(Value::as_array) {
         hosts.extend(more.iter().cloned());
@@ -1566,7 +1579,7 @@ pub fn remote_in_pane<'a>(
     let mut h = Harness::with(cx, dir, &fixture);
     h.answer_scrollback("a1", b"");
     let mut host = h.host(&saved_remote());
-    host.connect();
+    host.connect_with_features(features);
     host.send(DaemonMessage::Repos {
         repos: repos
             .iter()
@@ -2603,7 +2616,7 @@ pub fn rehosts(sent: &[ClientMessage]) -> Vec<Rehost> {
 }
 
 /// The input bytes `sent` carries to `session`, in order.
-fn input_to(sent: &[ClientMessage], session: &str) -> Vec<u8> {
+pub fn input_to(sent: &[ClientMessage], session: &str) -> Vec<u8> {
     sent.iter()
         .filter_map(|msg| match msg {
             ClientMessage::SendInput {
@@ -2682,6 +2695,8 @@ impl<'a> Harness<'a> {
         paths: Result<LogPaths, String>,
     ) -> Self {
         cx.update(bind_keys);
+        // A spec never reads the developer's own clipboard bitmap.
+        cx.update(|cx| set_bitmap_reader(cx, || Ok(None)));
         let (tx, commands) = unbounded();
         let (events, rx) = unbounded();
         let clock = TestClock::new();
@@ -2754,6 +2769,8 @@ impl<'a> Harness<'a> {
     /// does nothing here.
     pub fn open_on_net(cx: &'a mut TestAppContext, dir: &TestDir, net: NetDeps) -> Self {
         cx.update(bind_keys);
+        // A spec never reads the developer's own clipboard bitmap.
+        cx.update(|cx| set_bitmap_reader(cx, || Ok(None)));
         let (tx, net_commands) = unbounded();
         let (net_events, rx) = unbounded();
         spawn_net(net, Target::Local, net_commands, net_events);
@@ -3803,6 +3820,14 @@ impl<'a> Harness<'a> {
     pub fn set_clipboard(&mut self, text: &str) {
         self.cx
             .write_to_clipboard(gpui::ClipboardItem::new_string(text.to_owned()));
+    }
+
+    /// Puts an image of `format` holding `bytes` on the clipboard, alone.
+    pub fn set_clipboard_image(&mut self, format: gpui::ImageFormat, bytes: Vec<u8>) {
+        self.cx
+            .write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(
+                format, bytes,
+            )));
     }
 
     /// Moves the terminals' clock and the executor's timers together.

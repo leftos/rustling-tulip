@@ -401,7 +401,7 @@ fn a_paste_with_no_text_sends_the_agents_image_paste_key(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn a_paste_with_no_text_sends_nothing_to_a_remote_session(cx: &mut TestAppContext) {
+fn a_paste_with_no_text_or_image_sends_nothing_to_a_remote_agent(cx: &mut TestAppContext) {
     {
         let dir = TestDir::new();
         let shell = session("b1").shell("D:/x").build();
@@ -420,7 +420,14 @@ fn a_paste_with_no_text_sends_nothing_to_a_remote_session(cx: &mut TestAppContex
         .agent("test-agent")
         .program_name(&descriptor.tag)
         .build();
-    let mut h = support::remote_in_pane(cx, &dir, &serde_json::json!({}), &[], s.clone());
+    let mut h = support::remote_in_pane_with_features(
+        cx,
+        &dir,
+        &serde_json::json!({}),
+        &[],
+        s.clone(),
+        &[protocol::FEATURE_UPLOAD_FILE],
+    );
     let mut host = h.host(&support::saved_remote());
     host.send(DaemonMessage::Agents {
         agents: vec![descriptor],
@@ -432,9 +439,16 @@ fn a_paste_with_no_text_sends_nothing_to_a_remote_session(cx: &mut TestAppContex
     host.sent();
     h.set_clipboard("");
     h.keys("ctrl-v");
+    let sent = h.host(&support::saved_remote()).sent();
     assert!(
-        h.host(&support::saved_remote()).sent_input("b1").is_empty(),
+        support::input_to(&sent, "b1").is_empty(),
         "the agent would paste its own host's clipboard"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::UploadFile { .. })),
+        "with no image nothing is uploaded: {sent:?}"
     );
     h.set_clipboard("hi");
     h.keys("ctrl-v");

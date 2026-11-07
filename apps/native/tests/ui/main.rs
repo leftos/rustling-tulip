@@ -55,6 +55,7 @@ mod ui_pairing;
 mod ui_pane_drag;
 mod ui_pane_spawn;
 mod ui_panes;
+mod ui_paste_upload;
 mod ui_popout;
 mod ui_preset_wizard;
 mod ui_prompt_jump;

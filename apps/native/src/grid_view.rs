@@ -863,6 +863,11 @@ impl RootView {
             PaneEvent::ShellDotMenu { pane_id, index, at } => {
                 self.open_shell_menu(pane_id, *index, *at, window, cx);
             }
+            PaneEvent::PasteImage {
+                session_id,
+                name,
+                bytes,
+            } => self.on_paste_image(slot_id, session_id, name, bytes, cx),
         }
     }
 
