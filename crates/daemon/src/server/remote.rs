@@ -567,6 +567,35 @@ mod tests {
         (hub, scratch, service)
     }
 
+    #[test]
+    fn a_tailnet_connection_is_not_refused_the_push_messages() {
+        let push = [
+            ClientMessage::GetPushStatus {
+                request_id: "p1".to_owned(),
+            },
+            ClientMessage::RegisterPush {
+                registration: protocol::PushRegistration::WebPush {
+                    endpoint: protocol::Secret("https://push.example.com/send/abc".to_owned()),
+                    p256dh: "BPubKey".to_owned(),
+                    auth: protocol::Secret("auth".to_owned()),
+                },
+                needs_you: true,
+                finished: true,
+                request_id: "p2".to_owned(),
+            },
+            ClientMessage::UnregisterPush {
+                request_id: "p3".to_owned(),
+            },
+        ];
+        for msg in push {
+            assert_eq!(
+                host_only_refusal(&msg, &AuthKind::Tailnet(test_peer())),
+                None,
+                "{msg:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_tailnet_connection_is_refused_account_administration() {
         let (hub, _scratch, service) = accounts_hub("tailnet-account-admin");

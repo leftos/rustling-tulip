@@ -17,6 +17,10 @@ The rules of the daemon/client protocol that the types in `crates/protocol/src/l
 
   A blocked device's `DevicePairRequest` and redeem get `DevicePairFailed { reason: "device not approved" }`, and `ApproveDevice` for its request gets `Error "this device is blocked; forget it before approving it again"`; only `ForgetDevice` clears a block, answered with `Devices`. Every `Devices` reply carries `DeviceInfo.connected`, the device's served connection count.
 
+  Web Push is for paired phones on the tailnet. A daemon that lists `web_push` (`FEATURE_WEB_PUSH`) in `Welcome.features` serves this contract: `GetPushStatus { request_id }` (`get_push_status`), `RegisterPush { registration, needs_you, finished, request_id }` (`register_push`, `registration` tagged by `kind`: `web_push { endpoint, p256dh, auth }`, an unknown kind decoding as `Unknown`) and `UnregisterPush { request_id }` (`unregister_push`) are each answered by `PushStatus { vapid_public_key, endpoint, needs_you, finished, request_id }` (`push_status`, `endpoint` omitted when none is registered).
+
+  A daemon that does not list `web_push` answers a push request from a paired tailnet device with `Error` code `unsupported_message`, echoing its `request_id`. On any daemon, a loopback connection sending a push request gets `Error` code `invalid_request`, and an unpaired tailnet connection is on the pairing channel, where only pairing messages are answered.
+
   `Welcome.features` is the daemon's capability list: a client keeps unknown strings and asks only about ones it knows (`Connection::supports`), and a feature is listed only once the daemon fully honours it (`DAEMON_FEATURES` in `crates/daemon/src/server/handshake.rs`).
 
   `Welcome.origin` (`local` or `remote`; an unknown value decodes as `Unknown`, and it is omitted when absent) tells the client which listener accepted it: the loopback listener and the SSH bridge are `local`, the tailnet listener (pairing connections included) is `remote`. Only the daemon sets it, and it is a hint for the client's UI: the daemon's own checks use the connection's auth, never this value. The native client reads it as `Connection::origin()`.

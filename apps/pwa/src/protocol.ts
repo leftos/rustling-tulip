@@ -105,6 +105,13 @@ export const FEATURE_ACCOUNT_EVENTS = "account_events";
 export const FEATURE_GATE_STATE = "gate_state";
 
 /**
+ * `Welcome.features` entry: the daemon sends pushes to a registered phone
+ * ([`ClientMessage::GetPushStatus`], [`ClientMessage::RegisterPush`],
+ * [`ClientMessage::UnregisterPush`]).
+ */
+export const FEATURE_WEB_PUSH = "web_push";
+
+/**
  * The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
  * right after `Welcome` when its `Hello` carried no valid device token: the
  * connection stays open as a pairing connection. The daemon also answers it
@@ -2091,6 +2098,19 @@ export type EnvScope =
 export type Secret = string;
 
 /**
+ * How a device receives pushes, tagged by `kind`. A kind this build does not
+ * know decodes as `Unknown`, so a newer client's registration keeps the
+ * message decoding.
+ */
+export type PushRegistration =
+  /**
+   * A browser's Web Push subscription (RFC 8030): its endpoint and the
+   * `p256dh` and `auth` keys, base64url as `PushSubscription.toJSON()`
+   * gives them. `endpoint` and `auth` never print in `{:?}`.
+   */
+  | { kind: "web_push"; endpoint: Secret; p256dh: string; auth: Secret };
+
+/**
  * How a device's pairing request ended, carried by
  * [`DaemonMessage::DevicePairDecided`]. Serialized as a `snake_case` string
  * with a catch-all.
@@ -3683,6 +3703,19 @@ export type ClientMessage =
    */
   | { type: "forget_device"; device_id: string }
   /**
+   * Asks for this device's push state and the daemon's VAPID public key,
+   * answered by [`DaemonMessage::PushStatus`]. Tailnet devices only; a
+   * daemon that serves push makes its VAPID key pair on the first ask.
+   */
+  | { type: "get_push_status"; request_id: string }
+  /**
+   * Registers (or replaces) this device's one push subscription and its
+   * Needs you and Finished switches; answered by `PushStatus`.
+   */
+  | { type: "register_push"; registration: PushRegistration; needs_you: boolean; finished: boolean; request_id: string }
+  /** Removes this device's push subscription; answered by `PushStatus`. */
+  | { type: "unregister_push"; request_id: string }
+  /**
    * Scan the current worktrees root and report every `wt.<branch>/`
    * group found under it, cross-referenced against the live and
    * abandoned session registries. Daemon replies with
@@ -5061,6 +5094,12 @@ export type DaemonMessage =
   | { type: "device_pair_code"; request_id: string | null; code: Secret; expires_in_secs: number }
   /** Every approved device, sent to the owner's local client. */
   | { type: "devices"; devices: DeviceInfo[] }
+  /**
+   * This device's push state: the daemon's VAPID public key (base64url,
+   * the page's `applicationServerKey`), the registered endpoint (`None`
+   * when none; never printed in `{:?}`), and the two switches.
+   */
+  | { type: "push_status"; vapid_public_key: string; endpoint?: Secret | null; needs_you: boolean; finished: boolean; request_id?: string | null }
   /**
    * The answer to [`ClientMessage::LoadChat`], sent to the requester with
    * its `request_id`: the session's chat as it stands. `hidden` counts the

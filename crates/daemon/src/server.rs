@@ -34,6 +34,7 @@ mod tabs;
 mod hooks;
 pub(crate) mod live_devices;
 mod pairing;
+mod push;
 mod pwa_static;
 mod recovery;
 mod screen;
@@ -838,6 +839,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::ListDevices
         | ClientMessage::RevokeDevice { .. }
         | ClientMessage::ForgetDevice { .. }) => pairing::handle(hub, m, ctx),
+        m @ (ClientMessage::GetPushStatus { .. }
+        | ClientMessage::RegisterPush { .. }
+        | ClientMessage::UnregisterPush { .. }) => push::handle(hub, &m, ctx),
         ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
             // Hello: already consumed by handshake; ignore subsequent ones.
             // Attach: no-op — PTY forwarders are started by LoadScrollback

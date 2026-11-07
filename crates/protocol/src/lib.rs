@@ -86,6 +86,11 @@ pub const FEATURE_ACCOUNT_EVENTS: &str = "account_events";
 /// the connected daemon lists it.
 pub const FEATURE_GATE_STATE: &str = "gate_state";
 
+/// `Welcome.features` entry: the daemon sends pushes to a registered phone
+/// ([`ClientMessage::GetPushStatus`], [`ClientMessage::RegisterPush`],
+/// [`ClientMessage::UnregisterPush`]).
+pub const FEATURE_WEB_PUSH: &str = "web_push";
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -2686,6 +2691,24 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// How a device receives pushes, tagged by `kind`. A kind this build does not
+/// know decodes as `Unknown`, so a newer client's registration keeps the
+/// message decoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PushRegistration {
+    /// A browser's Web Push subscription (RFC 8030): its endpoint and the
+    /// `p256dh` and `auth` keys, base64url as `PushSubscription.toJSON()`
+    /// gives them. `endpoint` and `auth` never print in `{:?}`.
+    WebPush {
+        endpoint: Secret,
+        p256dh: String,
+        auth: Secret,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
 /// How a device's pairing request ended, carried by
 /// [`DaemonMessage::DevicePairDecided`]. Serialized as a `snake_case` string
 /// with a catch-all.
@@ -4640,6 +4663,25 @@ pub enum ClientMessage {
     ForgetDevice {
         device_id: String,
     },
+    // Web push
+    /// Asks for this device's push state and the daemon's VAPID public key,
+    /// answered by [`DaemonMessage::PushStatus`]. Tailnet devices only; a
+    /// daemon that serves push makes its VAPID key pair on the first ask.
+    GetPushStatus {
+        request_id: String,
+    },
+    /// Registers (or replaces) this device's one push subscription and its
+    /// Needs you and Finished switches; answered by `PushStatus`.
+    RegisterPush {
+        registration: PushRegistration,
+        needs_you: bool,
+        finished: bool,
+        request_id: String,
+    },
+    /// Removes this device's push subscription; answered by `PushStatus`.
+    UnregisterPush {
+        request_id: String,
+    },
     /// Scan the current worktrees root and report every `wt.<branch>/`
     /// group found under it, cross-referenced against the live and
     /// abandoned session registries. Daemon replies with
@@ -6374,6 +6416,18 @@ pub enum DaemonMessage {
     Devices {
         devices: Vec<DeviceInfo>,
     },
+    /// This device's push state: the daemon's VAPID public key (base64url,
+    /// the page's `applicationServerKey`), the registered endpoint (`None`
+    /// when none; never printed in `{:?}`), and the two switches.
+    PushStatus {
+        vapid_public_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<Secret>,
+        needs_you: bool,
+        finished: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// The answer to [`ClientMessage::LoadChat`], sent to the requester with
     /// its `request_id`: the session's chat as it stands. `hidden` counts the
     /// rows the display cap dropped in front of `entries`; `screen` is the
@@ -6928,6 +6982,85 @@ mod tests {
                 "{json} round-trips"
             );
         }
+    }
+
+    #[test]
+    fn push_registration_round_trips() {
+        let msg = ClientMessage::RegisterPush {
+            registration: PushRegistration::WebPush {
+                endpoint: Secret("https://push.example.com/send/abc".to_owned()),
+                p256dh: "BPubKey".to_owned(),
+                auth: Secret("authsecret".to_owned()),
+            },
+            needs_you: true,
+            finished: false,
+            request_id: "r1".to_owned(),
+        };
+        let wire: serde_json::Value = serde_json::to_value(&msg).expect("serializes");
+        assert_eq!(
+            wire["registration"]["endpoint"], "https://push.example.com/send/abc",
+            "the endpoint is a plain string on the wire"
+        );
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"register_push""#), "{json}");
+        assert!(json.contains(r#""kind":"web_push""#), "{json}");
+        let decoded = InboundClientMessage::from_json_str(&json).expect("decodes");
+        let InboundClientMessage::Known(back) = decoded else {
+            panic!("{json} decodes as a known message");
+        };
+        let ClientMessage::RegisterPush { registration, .. } = &back else {
+            panic!("{json} decodes as RegisterPush");
+        };
+        let ClientMessage::RegisterPush {
+            registration: sent, ..
+        } = &msg
+        else {
+            panic!("the sent message is RegisterPush");
+        };
+        assert_eq!(registration, sent);
+        assert_eq!(
+            serde_json::to_value(&back).expect("serializes"),
+            serde_json::to_value(&msg).expect("serializes"),
+        );
+        let printed = format!("{msg:?}");
+        assert!(!printed.contains("authsecret"), "{printed}");
+        assert!(!printed.contains("push.example.com"), "{printed}");
+        assert!(printed.contains("Secret(<redacted>)"), "{printed}");
+    }
+
+    #[test]
+    fn an_unknown_push_kind_decodes_as_unknown() {
+        let json = r#"{"type":"register_push","registration":{"kind":"apns","token":"x"},"needs_you":true,"finished":false,"request_id":"r"}"#;
+        let decoded = InboundClientMessage::from_json_str(json).expect("decodes");
+        let InboundClientMessage::Known(ClientMessage::RegisterPush {
+            registration,
+            needs_you,
+            finished,
+            request_id,
+        }) = decoded
+        else {
+            panic!("{json} decodes as RegisterPush");
+        };
+        assert_eq!(registration, PushRegistration::Unknown);
+        assert!(needs_you);
+        assert!(!finished);
+        assert_eq!(request_id, "r");
+    }
+
+    #[test]
+    fn push_status_omits_a_missing_endpoint() {
+        let msg = DaemonMessage::PushStatus {
+            vapid_public_key: "BKey".to_owned(),
+            endpoint: None,
+            needs_you: true,
+            finished: true,
+            request_id: Some("r1".to_owned()),
+        };
+        let value = serde_json::to_value(&msg).expect("serializes");
+        assert_eq!(value["type"], "push_status");
+        assert!(value.get("endpoint").is_none(), "{value}");
+        let back: DaemonMessage = serde_json::from_value(value.clone()).expect("decodes");
+        assert_eq!(serde_json::to_value(&back).expect("serializes"), value);
     }
 
     #[test]
