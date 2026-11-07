@@ -1244,14 +1244,14 @@ mod tests {
         let (a_tx, mut a_rx) = mpsc::unbounded_channel();
         fx.load(1, &a_tx, "ra").await;
         ids_until(&mut a_rx, "u-1").await;
-        fx.deliver(&live_body("P1", "m1", 0, "p0"));
+        fx.deliver(&live_body("P1", "m1", 0, "p0\n"));
         let (entries, _) = next_append(&mut a_rx).await;
         assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["live:m1"]);
 
         // On this one-thread runtime the follower runs only when the test
         // awaits, so the whole burst lands before it reads any of it.
         for index in 1..=BURST {
-            fx.deliver(&live_body("P1", "m1", index, &format!("p{index}")));
+            fx.deliver(&live_body("P1", "m1", index, &format!("p{index}\n")));
         }
         // The follower's first read is the lag, which resends the answers.
         let (entries, _) = next_append(&mut a_rx).await;
@@ -1277,7 +1277,7 @@ mod tests {
             }
         }
         let pieces: Vec<u64> = m1_text
-            .split('\n')
+            .lines()
             .map(|piece| {
                 piece
                     .trim_start_matches('p')

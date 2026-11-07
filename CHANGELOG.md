@@ -21,6 +21,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A reply streaming into Chat no longer breaks into stray paragraphs or gains blank lines inside its code blocks.
+- After `/compact`, Chat shows the next reply once, with no row left stuck on "writing".
 - Pasting an image into a Claude pane on Windows works: with an image on the clipboard, Ctrl+V sends Claude its own image-paste key.
 - A window connected to another computer shows that computer's Claude accounts in Settings › Accounts and the footer, and can switch them; adding, removing and renaming stay on the computer that runs them.
 - A right-click in a terminal pastes this computer's clipboard, even in a session on another host; Shift+right-click still reaches programs that use the mouse.

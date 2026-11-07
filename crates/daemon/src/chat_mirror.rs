@@ -1707,11 +1707,12 @@ impl LiveAnswer {
         format!("live:{}", self.key)
     }
 
+    /// The answer as it stands: its pieces in index order with nothing
+    /// between them, since each piece carries its own line breaks.
     fn entry(&self) -> ChatEntry {
-        let text: Vec<&str> = self.pieces.values().map(String::as_str).collect();
         ChatEntry::Answer {
             id: self.id(),
-            text: text.join("\n"),
+            text: self.pieces.values().map(String::as_str).collect(),
             live: true,
         }
     }
@@ -1774,7 +1775,8 @@ impl ChatState {
     /// its id or goes at the end, and a new answer takes the place of the
     /// live message it is the transcript's copy of. A new prompt ends the
     /// turn before it and the live answers of the prompts before it, and its
-    /// first entry begins a turn.
+    /// first entry begins a turn. A new turn end ends the live answers of
+    /// its prompt.
     fn apply_line(
         &mut self,
         plugin: &dyn AgentPlugin,
@@ -1802,6 +1804,12 @@ impl ChatState {
                 self.turn_starts.insert(id.clone());
             }
             let replaces = self.upsert(id, &entry, facts.timestamp, &mut change.removed);
+            if replaces.is_none()
+                && matches!(entry, ChatEntry::TurnEnd { .. })
+                && let Some(prompt) = self.turn_prompt.clone()
+            {
+                change.removed.extend(self.end_turn_live(&prompt));
+            }
             change.entries.push(entry);
             change.replaces.push(replaces);
         }
@@ -1878,29 +1886,42 @@ impl ChatState {
             .iter()
             .position(|live| live.prompt == prompt && live.ordinal == ordinal)?;
         let live = self.live.remove(at);
-        self.changed.remove(&live.key);
-        let id = live.id();
-        self.finished.insert(live.key);
-        Some(id)
+        Some(self.finish_live(live))
     }
 
     /// A prompt other than `prompt` was typed: the live answers of every
     /// other prompt leave, their turns over, and their ids are returned. A
     /// later piece of one of them is dropped.
     fn end_live_before(&mut self, prompt: Option<&str>) -> Vec<String> {
-        let (ended, kept): (Vec<LiveAnswer>, Vec<LiveAnswer>) = std::mem::take(&mut self.live)
-            .into_iter()
-            .partition(|live| Some(live.prompt.as_str()) != prompt);
+        self.end_live_where(|live| Some(live.prompt.as_str()) != prompt)
+    }
+
+    /// `prompt`'s turn ended: its live answers leave, whether or not their
+    /// transcript copies matched them, and their ids are returned. A later
+    /// piece of one of them is dropped; a piece of a new message under
+    /// `prompt` starts a new live answer.
+    fn end_turn_live(&mut self, prompt: &str) -> Vec<String> {
+        self.end_live_where(|live| live.prompt == prompt)
+    }
+
+    /// The live answers `ends` picks leave, finished; their ids.
+    fn end_live_where(&mut self, ends: impl Fn(&LiveAnswer) -> bool) -> Vec<String> {
+        let (ended, kept): (Vec<LiveAnswer>, Vec<LiveAnswer>) =
+            std::mem::take(&mut self.live).into_iter().partition(ends);
         self.live = kept;
         ended
             .into_iter()
-            .map(|live| {
-                self.changed.remove(&live.key);
-                let id = live.id();
-                self.finished.insert(live.key);
-                id
-            })
+            .map(|live| self.finish_live(live))
             .collect()
+    }
+
+    /// `live` left: it is no longer sent, a later piece of it is dropped;
+    /// its id.
+    fn finish_live(&mut self, live: LiveAnswer) -> String {
+        self.changed.remove(&live.key);
+        let id = live.id();
+        self.finished.insert(live.key);
+        id
     }
 
     /// The place in `entries` of the first entry a reply carries, `pending`
@@ -2267,7 +2288,7 @@ mod tests {
     fn live_pieces_join_in_index_order() {
         let mut chat = ChatState::default();
         chat.merge_live(live("P1", "m1", 1, "second"));
-        chat.merge_live(live("P1", "m1", 0, "first"));
+        chat.merge_live(live("P1", "m1", 0, "first\n"));
         assert_eq!(
             chat.take_changed_live(),
             [ChatEntry::Answer {
@@ -2277,6 +2298,17 @@ mod tests {
             }]
         );
         assert!(chat.take_changed_live().is_empty(), "nothing changed since");
+        chat.merge_live(live("P1", "m2", 0, "print(1)\n"));
+        chat.merge_live(live("P1", "m2", 1, "print(2)\n"));
+        assert_eq!(
+            chat.take_changed_live(),
+            [ChatEntry::Answer {
+                id: "live:m2".to_owned(),
+                text: "print(1)\nprint(2)\n".to_owned(),
+                live: true,
+            }],
+            "a piece carries its own line breaks: no blank line between them"
+        );
     }
 
     #[test]
@@ -2298,6 +2330,71 @@ mod tests {
             "a finished message stays gone"
         );
         assert_eq!(ids(&chat.reply().0), ["u-1", "a-1", "a-2"]);
+    }
+
+    /// The record of a turn's end, `uuid`, at second `n`.
+    fn turn_end(uuid: &str, n: usize) -> String {
+        serde_json::json!({
+            "type": "system", "subtype": "turn_duration", "uuid": uuid,
+            "timestamp": stamp(n), "durationMs": 4200,
+        })
+        .to_string()
+    }
+
+    fn has_live(entries: &[ChatEntry]) -> bool {
+        ids(entries).iter().any(|id| id.starts_with("live:"))
+    }
+
+    /// P1's turn with a live answer `live:m1` its transcript never matched,
+    /// ended; the change the turn's end made.
+    fn ended_unmatched_turn(chat: &mut ChatState) -> Change {
+        apply(chat, &prompt("u-1", 1, Some("P1"), "go"));
+        chat.merge_live(live("P1", "m1", 0, "on its way"));
+        assert_eq!(ids(&chat.take_changed_live()), ["live:m1"]);
+        apply(chat, &turn_end("e-1", 3))
+    }
+
+    #[test]
+    fn a_turn_end_ends_its_unmatched_live_answers() {
+        let mut chat = ChatState::default();
+        let change = ended_unmatched_turn(&mut chat);
+        assert_eq!(change.removed, ["live:m1"]);
+        assert!(!has_live(&chat.reply().0), "no live row outlives its turn");
+    }
+
+    #[test]
+    fn a_late_piece_of_an_ended_message_is_dropped() {
+        let mut chat = ChatState::default();
+        ended_unmatched_turn(&mut chat);
+        chat.merge_live(live("P1", "m1", 1, "late piece"));
+        assert!(chat.take_changed_live().is_empty(), "m1 is finished");
+        assert!(!has_live(&chat.reply().0));
+        chat.merge_live(live("P1", "m2", 0, "a later turn's"));
+        assert_eq!(
+            ids(&chat.take_changed_live()),
+            ["live:m2"],
+            "a turn's end does not block a later turn under the same prompt"
+        );
+    }
+
+    #[test]
+    fn a_reapplied_turn_end_keeps_the_new_live_answer() {
+        let mut chat = ChatState::default();
+        ended_unmatched_turn(&mut chat);
+        chat.merge_live(live("P1", "m2", 0, "a later turn's"));
+        let again = apply(&mut chat, &turn_end("e-1", 3));
+        assert!(again.removed.is_empty(), "{:?}", again.removed);
+        assert_eq!(ids(&chat.reply().0), ["u-1", "e-1", "live:m2"]);
+    }
+
+    #[test]
+    fn a_turn_end_keeps_another_prompts_live_answer() {
+        let mut chat = ChatState::default();
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        chat.merge_live(live("P2", "m2", 0, "the next turn's"));
+        let change = apply(&mut chat, &turn_end("e-1", 3));
+        assert!(change.removed.is_empty(), "{:?}", change.removed);
+        assert_eq!(ids(&chat.reply().0), ["u-1", "e-1", "live:m2"]);
     }
 
     #[test]
