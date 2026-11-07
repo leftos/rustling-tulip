@@ -1018,6 +1018,10 @@ A text file a terminal path link's Ctrl+Shift+click, a plain click on a Markdown
 - One toast covers the batch: `Fetching <page> and its media (n of m)`, dismissed when the page opens, or replaced in place by one Warning `Some of <page>'s media didn't load` ("{n} of {total} files failed or were skipped."). A media file never gets its own toast.
 - A lost connection mid-batch deletes the media part files, does not open the page and shows one Error `Couldn't fetch <page>'s media` ("The connection was lost."). A page saved after its connection closed opens without its media, with that message as a Warning.
 
+## Sizing
+
+Controls grow to fit their contents: a button, row, card, toast or dialog takes the width and height its text needs, wrapping text a user must read whole rather than cutting it off. A fixed or capped size is the exception, chosen where there is a reason (a column that must line up, a window edge, a list that scrolls), and that reason is written beside the cap in the code.
+
 ## Window
 
 The window's restore rect, maximized flag and monitor are saved in native-ui.json and restored on that monitor (the primary when it is gone); fullscreen is not restored. The title reads `(N) Tab — rustling-tulip` with N the active tab's sessions that need you (`Tab — rustling-tulip` at zero), or `(busy/total)` / `(idle/total)` in those count modes, set 350 ms after its last change. Closing the window runs the quit flow (keep running, stop keeping worktrees, stop removing them with per-session branch fate, or abandon), waiting for `shutdown_ack`.
