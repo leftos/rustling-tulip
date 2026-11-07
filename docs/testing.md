@@ -99,6 +99,10 @@ The `support` builders for account specs (`apps/native/tests/support/mod.rs`) ar
 
 An OS toast press is tested through the `NotifyRecorder` notifier: `Harness::notified_launches` lists the launch argument each notification carried, `Harness::activate_os_toast(index)` presses the notification at `index`, and `activate_toast_arg(arg)` presses with a raw argument, both delivering it through the window's activation sink as the toast activator does. `h.cx.deactivate_window()` simulates an inactive main window.
 
+## iPhone Simulator on the Mac mini
+
+`tools/sim/sim.ps1` drives Xcode's iPhone Simulator on the Mac mini builder from this PC, for a run that needs the phone app on a real simulator: `setup` installs idb 1.7.8 into `~/.local` with no admin rights, `boot` starts a device, `open`, `shot`, `describe`, `tap`, `text`, `swipe` and `key` drive it, and `shutdown` stops it. Screenshots come back to this PC over scp, and no Simulator window opens on the Mac. See [tools/sim/README.md](../tools/sim/README.md).
+
 ## Fake CLIs
 
 The `crates/agents/claude/fake/` shim (`fake-claude.cmd` or `fake-claude.sh`, plus `index.mjs`) replaces the real CLI in the e2e tier. The plugin returns it from `Agent::fake_cli` (`agent_api::FakeCli`, feature `test-support`), and the live harness (`apps/native/tests/support/live.rs`) sets each registered agent's override variable (`program_env_var()`, `RUSTLING_TULIP_CLAUDE` for Claude) to its fake through `agent-registry`, so the daemon path-resolves the CLI from that variable at spawn time.
