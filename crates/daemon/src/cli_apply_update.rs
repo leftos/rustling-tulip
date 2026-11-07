@@ -1,13 +1,14 @@
 //! The daemon's `apply-update` subcommand: put a staged release in place.
 //!
-//! The installer extracts every file it ships into `<install>\.staging` and
+//! The installer extracts everything it ships into `<install>\.staging` and
 //! runs the staged daemon as `rustling-tulipd apply-update --from <staging>
 //! --to <install> [--old-version <v>] [--update] [--relaunch]`. This takes the
 //! update lock, waits for the client to exit, stops the running daemon before
-//! any file is written, refuses while anything still runs from the install
-//! folder, swaps each file in through `<name>.new` and `<name>.old` (the client
-//! last, every swap rolled back on a failure), records the outcome in
-//! `last-result.json` and, when asked, starts the client again.
+//! anything is written, refuses while anything still runs from the install
+//! folder, swaps each file in through `<name>.new` and `<name>.old` and each
+//! folder [`STAGED_DIRS`] names whole by rename (the client last, every swap
+//! rolled back on a failure), records the outcome in `last-result.json` and,
+//! when asked, starts the client again.
 //!
 //! When `--to` is an `.app` bundle the bundle replaces those files: the
 //! installed app is renamed to `<name>.app.old`, the staged app is renamed into
@@ -34,6 +35,10 @@ pub const CLIENT_EXE: &str = "rustling-tulip-native";
 
 /// The folder inside an installed `.app` bundle that holds its executables.
 const BUNDLE_EXECUTABLES: [&str; 2] = ["Contents", "MacOS"];
+
+/// The folders a staging may ship and this command moves whole. A fixed list,
+/// so a stray staged folder cannot replace an arbitrary install subfolder.
+const STAGED_DIRS: [&str; 1] = ["pwa"];
 
 /// The probe file an update creates in a bundle's parent folder to prove it can
 /// put a bundle there.
@@ -200,10 +205,10 @@ pub struct Hooks<'a> {
 /// Apply the update `request` describes, writing one line per event to `out`,
 /// record the outcome in `result_file` and return the exit code: `0` applied,
 /// `2` the daemon did not stop, `3` something still runs from the install
-/// folder, `4` another update holds the lock, `5` a file could not be swapped
-/// (every swap was rolled back). When `to` is an `.app` bundle, the whole
-/// bundle is swapped by rename instead of each file, and the old app is put
-/// back when that fails.
+/// folder, `4` another update holds the lock, `5` a file or a staged folder
+/// could not be swapped (every swap was rolled back). When `to` is an `.app`
+/// bundle, the whole bundle is swapped by rename instead of each entry, and
+/// the old app is put back when that fails.
 pub async fn run(
     request: &Request,
     result_file: &Path,
@@ -381,11 +386,13 @@ fn is_client(name: Option<&OsStr>) -> bool {
     name.is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(CLIENT_EXE))
 }
 
-/// One file put in place: the installed path, and where its old copy went
+/// One entry put in place: the installed path, and where its old copy went
 /// when there was one.
 struct Swap {
     target: PathBuf,
     old: Option<PathBuf>,
+    /// A folder moved whole: it is put back or deleted with all it holds.
+    dir: bool,
 }
 
 /// A swap that failed, with the part of it that needs rolling back.
@@ -394,25 +401,28 @@ struct SwapError {
     partial: Option<Swap>,
 }
 
-/// Swap every file staged in `from` into `to`, the client last. On a failure,
-/// every swap made is rolled back and every `.new` file deleted, and the error
-/// is the line to report.
+/// Swap every staged entry in `from` into `to`: the staged folders first, then
+/// the files, the client last. On a failure, every swap made is rolled back
+/// and every `.new` entry deleted, and the error is the line to report.
 fn swap_all(from: &Path, to: &Path) -> Result<Vec<Swap>, String> {
-    let names = staged_names(from).map_err(|err| {
+    let plan = staged_plan(from).map_err(|err| {
         format!(
             "could not read {}: {err}; nothing was changed",
             from.display()
         )
     })?;
-    let names = swap_order(names);
     let mut done = Vec::new();
-    for name in &names {
-        match swap_one(from, to, name) {
+    for (name, kind) in &plan {
+        let swapped = match kind {
+            Staged::Dir => swap_dir(from, to, name),
+            Staged::File => swap_one(from, to, name),
+        };
+        match swapped {
             Ok(swap) => done.push(swap),
             Err(SwapError { err, partial }) => {
                 done.extend(partial);
                 let mut stuck = roll_back(&done);
-                stuck.extend(remove_new_files(to, &names));
+                stuck.extend(remove_new(to, &plan));
                 let name = name.display();
                 return Err(if stuck.is_empty() {
                     format!("could not replace {name}: {err}; every file was put back")
@@ -426,6 +436,31 @@ fn swap_all(from: &Path, to: &Path) -> Result<Vec<Swap>, String> {
         }
     }
     Ok(done)
+}
+
+/// One staged entry to put in place, and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Staged {
+    /// A regular file, copied through `<name>.new`.
+    File,
+    /// A folder of [`STAGED_DIRS`], moved whole by rename.
+    Dir,
+}
+
+/// The staged entries in `from` to put in place: each [`STAGED_DIRS`] folder
+/// present, then the regular files in swap order. Any other folder in the
+/// staging is ignored.
+fn staged_plan(from: &Path) -> std::io::Result<Vec<(OsString, Staged)>> {
+    let mut plan = Vec::new();
+    for name in STAGED_DIRS {
+        if from.join(name).is_dir() {
+            plan.push((OsString::from(name), Staged::Dir));
+        }
+    }
+    for name in swap_order(staged_names(from)?) {
+        plan.push((name, Staged::File));
+    }
+    Ok(plan)
 }
 
 /// The names of the regular files directly in `from`.
@@ -462,6 +497,7 @@ fn swap_one(from: &Path, to: &Path, name: &OsStr) -> Result<Swap, SwapError> {
     let swap = Swap {
         target,
         old: had_old.then_some(old),
+        dir: false,
     };
     match std::fs::rename(&new, &swap.target) {
         Ok(()) => Ok(swap),
@@ -469,6 +505,52 @@ fn swap_one(from: &Path, to: &Path, name: &OsStr) -> Result<Swap, SwapError> {
             err,
             partial: Some(swap),
         }),
+    }
+}
+
+/// Move the staged folder `from/name` into `to/name` whole: a leftover `.new`
+/// or `.old` is removed first, the staged folder is renamed to `.new`, the
+/// installed one to `.old`, and `.new` into place.
+fn swap_dir(from: &Path, to: &Path, name: &OsStr) -> Result<Swap, SwapError> {
+    let target = to.join(name);
+    let new = sibling(&target, "new");
+    let old = sibling(&target, "old");
+    remove_dir(&new).map_err(|err| SwapError { err, partial: None })?;
+    remove_dir(&old).map_err(|err| SwapError { err, partial: None })?;
+    std::fs::rename(from.join(name), &new).map_err(|err| SwapError { err, partial: None })?;
+    let had_old = match std::fs::rename(&target, &old) {
+        Ok(()) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(SwapError { err, partial: None }),
+    };
+    let swap = Swap {
+        target,
+        old: had_old.then_some(old),
+        dir: true,
+    };
+    match std::fs::rename(&new, &swap.target) {
+        Ok(()) => Ok(swap),
+        Err(err) => Err(SwapError {
+            err,
+            partial: Some(swap),
+        }),
+    }
+}
+
+/// Move the folder at `path` aside to its `.new` name, where [`remove_new`]
+/// clears it; an absent folder has nothing to move.
+fn move_aside(path: &Path) -> std::io::Result<()> {
+    match std::fs::rename(path, sibling(path, "new")) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// Remove the folder at `path` with everything in it; absent is fine.
+fn remove_dir(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
     }
 }
 
@@ -480,13 +562,20 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Undo `done`, newest first: each old copy goes back into place, and a file
-/// that had none is deleted. Returns the paths that could not be restored.
+/// Undo `done`, newest first: each old copy goes back into place, and an entry
+/// that had none is deleted. A folder's swapped copy is moved aside to
+/// `<name>.new` first, never deleted, so [`remove_new`] clears it and a failure
+/// anywhere leaves the install with a whole folder. Returns the paths that
+/// could not be restored.
 fn roll_back(done: &[Swap]) -> Vec<String> {
     let mut stuck = Vec::new();
     for swap in done.iter().rev() {
         let restored = match &swap.old {
+            Some(old) if swap.dir => {
+                move_aside(&swap.target).and_then(|()| std::fs::rename(old, &swap.target))
+            }
             Some(old) => std::fs::rename(old, &swap.target),
+            None if swap.dir => move_aside(&swap.target),
             None => match std::fs::remove_file(&swap.target) {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 other => other,
@@ -499,15 +588,21 @@ fn roll_back(done: &[Swap]) -> Vec<String> {
     stuck
 }
 
-/// Delete every `<name>.new` in `to`; returns those that could not be.
-fn remove_new_files(to: &Path, names: &[OsString]) -> Vec<String> {
+/// Delete every `<name>.new` entry the plan could have made in `to`; returns
+/// those that could not be.
+fn remove_new(to: &Path, plan: &[(OsString, Staged)]) -> Vec<String> {
     let mut stuck = Vec::new();
-    for name in names {
+    for (name, kind) in plan {
         let new = sibling(&to.join(name), "new");
-        match std::fs::remove_file(&new) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => stuck.push(format!("{} ({err})", new.display())),
+        let removed = match kind {
+            Staged::Dir => remove_dir(&new),
+            Staged::File => match std::fs::remove_file(&new) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            },
+        };
+        if let Err(err) = removed {
+            stuck.push(format!("{} ({err})", new.display()));
         }
     }
     stuck
@@ -613,8 +708,16 @@ fn clean_up(from: &Path, swapped: &[Swap], out: &mut impl Write) {
     if let Err(err) = std::fs::remove_dir_all(from) {
         say(out, &format!("could not remove {}: {err}", from.display()));
     }
-    for old in swapped.iter().filter_map(|swap| swap.old.as_ref()) {
-        if let Err(err) = std::fs::remove_file(old) {
+    for swap in swapped {
+        let Some(old) = swap.old.as_ref() else {
+            continue;
+        };
+        let removed = if swap.dir {
+            std::fs::remove_dir_all(old)
+        } else {
+            std::fs::remove_file(old)
+        };
+        if let Err(err) = removed {
             say(out, &format!("could not remove {}: {err}", old.display()));
         }
     }
@@ -919,6 +1022,21 @@ mod tests {
             std::fs::read_to_string(self.to.join(name)).ok()
         }
 
+        /// Gives the install folder a `pwa` holding an old index and asset.
+        fn with_installed_pwa(&self) {
+            write_pwa(&self.to, "old");
+        }
+
+        /// Gives the staging folder a `pwa` holding a new index and asset.
+        fn with_staged_pwa(&self) {
+            write_pwa(&self.from, "new");
+        }
+
+        /// The install folder's `pwa/<relative>`, when it exists.
+        fn installed_pwa(&self, relative: &str) -> Option<String> {
+            std::fs::read_to_string(self.to.join("pwa").join(relative)).ok()
+        }
+
         /// The install folder still holds the old release, no new file and no
         /// `.new` file, and the staging folder is untouched.
         fn assert_unchanged(&self) {
@@ -998,6 +1116,16 @@ mod tests {
         )
         .await;
         (code, String::from_utf8(out).expect("the output is UTF-8"))
+    }
+
+    /// A `pwa` folder under `root` holding a `<body> index` and the asset named
+    /// after `body`, so a replacement is told from a merge.
+    fn write_pwa(root: &Path, body: &str) {
+        let pwa = root.join("pwa");
+        std::fs::create_dir_all(pwa.join("assets")).expect("create the pwa folder");
+        std::fs::write(pwa.join("index.html"), format!("{body} index")).expect("write the index");
+        std::fs::write(pwa.join("assets").join(format!("{body}.js")), body)
+            .expect("write the asset");
     }
 
     fn bridge_in(to: &Path) -> Processes {
@@ -1189,6 +1317,242 @@ mod tests {
         fixture.assert_unchanged();
         assert_eq!(fixture.leftovers(".old"), vec![format!("{CLIENT_EXE}.old")]);
         assert_eq!(fixture.result_json()["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn apply_moves_the_staged_pwa_folder_into_place_replacing_the_old_one() {
+        let fixture = Fixture::new("apply-update-pwa-swap");
+        fixture.with_installed_pwa();
+        fixture.with_staged_pwa();
+
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request(false),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            fixture.installed_pwa("index.html").as_deref(),
+            Some("new index"),
+            "the new index is in place"
+        );
+        let assets = fixture.to.join("pwa").join("assets");
+        assert!(
+            !assets.join("old.js").exists(),
+            "the old asset is gone, not merged"
+        );
+        assert!(assets.join("new.js").is_file(), "the new asset is there");
+        assert_eq!(fixture.leftovers(".new"), Vec::<String>::new());
+        assert_eq!(fixture.leftovers(".old"), Vec::<String>::new());
+        assert!(!fixture.from.exists(), "the staging folder is removed");
+        assert_eq!(
+            fixture.installed(CLIENT_EXE).as_deref(),
+            Some(format!("new {CLIENT_EXE}").as_str()),
+            "the client was swapped too"
+        );
+
+        let order = Fixture::new("apply-update-pwa-order");
+        order.with_staged_pwa();
+        let plan = staged_plan(&order.from).expect("the staging folder reads");
+        assert_eq!(
+            plan.first().map(|(name, kind)| (name.clone(), *kind)),
+            Some((OsString::from("pwa"), Staged::Dir)),
+            "a folder goes in first: {plan:?}"
+        );
+        assert_eq!(
+            plan.last().map(|(name, kind)| (name.clone(), *kind)),
+            Some((OsString::from(CLIENT_EXE), Staged::File)),
+            "the client is swapped last: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_installs_the_pwa_folder_when_none_was_installed() {
+        let fixture = Fixture::new("apply-update-pwa-first-install");
+        fixture.with_staged_pwa();
+
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request(false),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            fixture.installed_pwa("index.html").as_deref(),
+            Some("new index")
+        );
+        assert!(
+            fixture
+                .to
+                .join("pwa")
+                .join("assets")
+                .join("new.js")
+                .is_file()
+        );
+        assert_eq!(fixture.leftovers(".old"), Vec::<String>::new());
+        assert_eq!(fixture.leftovers(".new"), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn apply_keeps_the_installed_pwa_folder_when_the_staging_has_none() {
+        let fixture = Fixture::new("apply-update-pwa-keep");
+        fixture.with_installed_pwa();
+
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request(false),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            fixture.installed_pwa("index.html").as_deref(),
+            Some("old index"),
+            "the installed folder is untouched"
+        );
+        assert!(
+            fixture
+                .to
+                .join("pwa")
+                .join("assets")
+                .join("old.js")
+                .is_file()
+        );
+        assert_eq!(fixture.leftovers(".old"), Vec::<String>::new());
+        assert_eq!(fixture.leftovers(".new"), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_failed_rename_puts_the_old_pwa_folder_back() {
+        let fixture = Fixture::new("apply-update-pwa-rollback");
+        fixture.with_installed_pwa();
+        fixture.with_staged_pwa();
+        // A folder where the client's `.old` goes makes its rename fail after
+        // the pwa folder was swapped.
+        let blocker = fixture.to.join(format!("{CLIENT_EXE}.old"));
+        std::fs::create_dir_all(&blocker).expect("create the blocking folder");
+        std::fs::write(blocker.join("keep"), "keep").expect("fill the blocking folder");
+
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request(false),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 5, "{out}");
+        assert!(out.ends_with("; every file was put back\n"), "{out}");
+        assert_eq!(
+            fixture.installed_pwa("index.html").as_deref(),
+            Some("old index"),
+            "the old folder is back"
+        );
+        let assets = fixture.to.join("pwa").join("assets");
+        assert!(assets.join("old.js").is_file(), "the old asset is back");
+        assert!(!assets.join("new.js").exists(), "no new asset was left");
+        assert!(!fixture.to.join("pwa.new").exists(), "no new copy was left");
+        assert!(
+            !fixture.to.join("pwa.old").exists(),
+            "nothing was left aside"
+        );
+        fixture.assert_unchanged();
+        assert_eq!(fixture.result_json()["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_install_leaves_no_pwa_folder() {
+        let fixture = Fixture::new("apply-update-pwa-first-install-rollback");
+        fixture.with_staged_pwa();
+        // The client's swap fails after the pwa folder went in, so the folder
+        // has to come out again with nothing to put back.
+        let blocker = fixture.to.join(format!("{CLIENT_EXE}.old"));
+        std::fs::create_dir_all(&blocker).expect("create the blocking folder");
+        std::fs::write(blocker.join("keep"), "keep").expect("fill the blocking folder");
+
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request(false),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 5, "{out}");
+        assert!(
+            !fixture.to.join("pwa").exists(),
+            "no half-installed folder is left"
+        );
+        assert!(
+            !fixture.to.join("pwa.new").exists(),
+            "the swapped copy is cleared"
+        );
+        fixture.assert_unchanged();
+    }
+
+    #[tokio::test]
+    async fn a_stale_pwa_old_folder_does_not_block_the_swap() {
+        let fixture = Fixture::new("apply-update-pwa-stale-old");
+        fixture.with_installed_pwa();
+        fixture.with_staged_pwa();
+        let stale = fixture.to.join("pwa.old");
+        std::fs::create_dir_all(&stale).expect("create the stale folder");
+        std::fs::write(stale.join("junk"), "junk").expect("fill the stale folder");
+
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request(false),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            fixture.installed_pwa("index.html").as_deref(),
+            Some("new index")
+        );
+        assert!(!stale.exists(), "the stale copy is removed");
+        assert!(!fixture.to.join("pwa.new").exists());
+    }
+
+    #[tokio::test]
+    async fn only_the_pwa_folder_is_swapped_from_the_staging() {
+        let fixture = Fixture::new("apply-update-pwa-whitelist");
+        fixture.with_staged_pwa();
+        let evil = fixture.from.join("evil");
+        std::fs::create_dir_all(&evil).expect("create another staged folder");
+        std::fs::write(evil.join("payload"), "payload").expect("fill it");
+
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request(false),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 0, "{out}");
+        assert!(fixture.installed_pwa("index.html").is_some());
+        assert!(
+            !fixture.to.join("evil").exists(),
+            "another staged folder is not moved"
+        );
     }
 
     #[tokio::test]

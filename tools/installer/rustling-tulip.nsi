@@ -1,9 +1,9 @@
 ; rustling-tulip per-user installer (NSIS 3, Modern UI 2).
 ;
-; Installs the three release binaries, a Start menu shortcut, an optional
-; desktop shortcut and the optional daemon autostart entry, puts its folder on
-; the user PATH, then registers itself in HKCU's uninstall list. No elevation:
-; everything lives under $LOCALAPPDATA and HKCU.
+; Installs the three release binaries and the phone app's built files, a Start
+; menu shortcut, an optional desktop shortcut and the optional daemon autostart
+; entry, puts its folder on the user PATH, then registers itself in HKCU's
+; uninstall list. No elevation: everything lives under $LOCALAPPDATA and HKCU.
 ;
 ; Built by `.\rt.ps1 installer`, which passes VERSION, NUMVERSION, BINDIR and
 ; OUTFILE; see tools/installer/README.md.
@@ -149,12 +149,13 @@ Function .onInit
   ClearErrors
 FunctionEnd
 
-; Puts the files staged in $INSTDIR\.staging in place with the staged daemon's
+; Puts what is staged in $INSTDIR\.staging in place with the staged daemon's
 ; own `apply-update` (crates/daemon/src/cli_apply_update.rs): it takes the
 ; update mutex, waits for the client to exit, stops the running daemon before
-; writing any file, refuses while anything still runs from $INSTDIR, swaps
-; each file in with the client last, rolls every swap back on a failure,
-; writes last-result.json and, under /RELAUNCH, starts the client again.
+; writing anything, refuses while anything still runs from $INSTDIR, swaps
+; each file in with the client last and the staged `pwa` folder whole, rolls
+; every swap back on a failure, writes last-result.json and, under /RELAUNCH,
+; starts the client again.
 ; Leaves its exit code in $0 ("error" when it could not be started) and its
 ; output in $1, then removes the staging folder.
 ;
@@ -210,13 +211,20 @@ Section "rustling-tulip" SEC_APP
   ClearErrors
   ReadRegStr $OldVersion HKCU "${UNINSTKEY}" "DisplayVersion"
   ClearErrors
-  ; Every file goes to the staging folder; only `apply-update` writes $INSTDIR.
+  ; Everything goes to the staging folder; only `apply-update` writes $INSTDIR.
   RMDir /r "$INSTDIR\.staging"
   SetOutPath "$INSTDIR\.staging"
   File "${BINDIR}\${DAEMONEXE}"
   File "${BINDIR}\${TRACEREXE}"
   File "${BINDIR}\${APPEXE}"
   File "${__FILEDIR__}\user-path.ps1"
+  ; The phone app the daemon serves over the tailnet. Its contents go straight
+  ; into `.staging\pwa`, leaving the staged folder for `apply-update` to move
+  ; whole; a missing or empty folder fails the build here (`/WX`) rather than
+  ; shipping a daemon that answers 503.
+  SetOutPath "$INSTDIR\.staging\pwa"
+  File /r "${BINDIR}\pwa\*.*"
+  SetOutPath "$INSTDIR\.staging"
   WriteUninstaller "$INSTDIR\.staging\uninstall.exe"
   SetOutPath "$INSTDIR"
   Call RtApplyUpdate
@@ -298,6 +306,9 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$INSTDIR\*.old"
   Delete "$INSTDIR\*.new"
+  RMDir /r "$INSTDIR\pwa"
+  RMDir /r "$INSTDIR\pwa.old"
+  RMDir /r "$INSTDIR\pwa.new"
   RMDir /r "$INSTDIR\.staging"
 
   Delete "$SMPROGRAMS\rustling-tulip.lnk"

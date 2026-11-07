@@ -1,6 +1,6 @@
 # Windows installer
 
-`rustling-tulip.nsi` is a hand-written NSIS 3 script (Modern UI 2) that packages the three release binaries into a per-user setup exe. `.\rt.ps1 installer` builds the binaries and runs `makensis`. The three binaries and the setup exe are code-signed (see "Code signing"); the uninstaller NSIS writes at install time is not yet.
+`rustling-tulip.nsi` is a hand-written NSIS 3 script (Modern UI 2) that packages the three release binaries and the phone app's built files into a per-user setup exe. `.\rt.ps1 installer` builds the binaries and the phone app and runs `makensis`; it needs Node.js and pnpm (`.\rt.ps1 setup` installs them) and fails without pnpm or when the app's build fails. The three binaries and the setup exe are code-signed (see "Code signing"); the uninstaller NSIS writes at install time is not yet.
 
 ## What it installs
 
@@ -9,6 +9,7 @@ A per-user install, no elevation: every path and registry key is under the curre
 | Installed | Where |
 |---|---|
 | `rustling-tulip-native.exe` (the GPUI client), `rustling-tulipd.exe` (the daemon), `rt-tracer.exe` (the per-session PTY supervisor) | `%LOCALAPPDATA%\Programs\rustling-tulip\` |
+| `pwa\` (the phone app's built files, from `apps/pwa/dist`; the daemon's tailnet listener serves them) | `%LOCALAPPDATA%\Programs\rustling-tulip\` |
 | Uninstaller | `%LOCALAPPDATA%\Programs\rustling-tulip\uninstall.exe` |
 | Start menu shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\rustling-tulip.lnk`; the installed client rewrites it at each start with the app id `leftos.RustlingTulip` and the toast activator CLSID `{354BE9DC-6D82-4269-8883-D13CE3E38648}`, so toast buttons pressed from Action Center reach it |
 | Toast activator (written by the installed client, not the installer) | `HKCU\Software\Classes\CLSID\{354BE9DC-6D82-4269-8883-D13CE3E38648}\LocalServer32`, default `"<install dir>\rustling-tulip-native.exe" -ToastActivated` |
@@ -32,7 +33,7 @@ The finish page offers "Run rustling-tulip", which starts the client unelevated.
 
 ## Staging and updates
 
-Every install extracts its files into `$INSTDIR\.staging` and runs the staged daemon's `rustling-tulipd apply-update --from <staging> --to $INSTDIR`, which stops the daemon and swaps the files in with rollback (`docs/auto-update.md`); the script removes `.staging` afterwards, and a non-zero exit shows `apply-update`'s message and aborts.
+Every install extracts its files, and the `pwa` folder (`File /r`; `makensis` fails without it), into `$INSTDIR\.staging` and runs the staged daemon's `rustling-tulipd apply-update --from <staging> --to $INSTDIR`, which stops the daemon and swaps the files in with rollback (`docs/auto-update.md`); the script removes `.staging` afterwards, and a non-zero exit shows `apply-update`'s message and aborts.
 
 The app's `Restart to update` runs the downloaded setup as `/S /UPDATE /RELAUNCH`: `/UPDATE` writes only the uninstall key's `DisplayVersion`, leaving the autostart value, the desktop shortcut and the PATH entry as they are, and `/RELAUNCH` has `apply-update` start the client again afterwards.
 
@@ -46,7 +47,7 @@ Every `rt-tracer.exe` supervisor survives, so a reinstall over a client with ses
 
 ## What uninstall removes and keeps
 
-Removed: the three exes, `user-path.ps1`, `uninstall.exe`, the install directory, both shortcuts, the `rustling-tulip-daemon` autostart value, the toast activator's `HKCU\Software\Classes\CLSID\{354BE9DC-…}` key, the uninstall registry key and the scheduled task `\leftos\rustling-tulip\daemon-{user SID}` that `rustling-tulipd bridge` may have registered (deleted right after the daemon is stopped; none is not an error).
+Removed: the three exes, the `pwa` folder (and a leftover `pwa.old` or `pwa.new`), `user-path.ps1`, `uninstall.exe`, the install directory, both shortcuts, the `rustling-tulip-daemon` autostart value, the toast activator's `HKCU\Software\Classes\CLSID\{354BE9DC-…}` key, the uninstall registry key and the scheduled task `\leftos\rustling-tulip\daemon-{user SID}` that `rustling-tulipd bridge` may have registered (deleted right after the daemon is stopped; none is not an error).
 
 Before it deletes the files, the uninstaller runs `user-path.ps1 -Remove`, which removes every user PATH entry naming the install directory (same comparison), leaves every other entry and its order as they were, deletes the `Path` value if nothing is left, and broadcasts `WM_SETTINGCHANGE`. It prints `Removed <dir> from the user PATH.` or `<dir> is not on the user PATH.`; a failure is logged the same way as on install and the uninstall carries on.
 

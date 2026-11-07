@@ -129,6 +129,12 @@
     },
     {
       "paths": [
+        "crates/daemon/src/cli_apply_update.rs"
+      ],
+      "filter": "package(daemon) & test(/^cli_apply_update::/)"
+    },
+    {
+      "paths": [
         "crates/daemon/src/accounts/mod.rs",
         "crates/daemon/src/accounts/driver.rs",
         "crates/daemon/src/accounts/engine.rs",

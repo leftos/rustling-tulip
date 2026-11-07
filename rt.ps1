@@ -12,13 +12,15 @@
                  client via `cargo run -p rustling-tulip-native`. This is
                  the default when no subcommand is given; same as `native`.
       build      Build only -- the daemon, tracer and native client. Debug
-                 by default; -Release for the release profile. Then sweeps
-                 build output older than 14 days out of target/ (needs
-                 cargo-sweep; a build without it skips the sweep).
+                 by default; -Release for the release profile. -Pwa also
+                 builds the phone app and stages it in target\<profile>\pwa
+                 (needs pnpm). Then sweeps build output older than 14 days
+                 out of target/ (needs cargo-sweep; a build without it
+                 skips the sweep).
       setup      Install/check Windows build prerequisites via winget:
-                 Git, Node.js LTS (the agents' fake CLIs need it), Rust/rustup,
-                 Visual Studio C++ Build Tools, cargo-sweep and
-                 cargo-nextest.
+                 Git, Node.js LTS and pnpm (the phone app's build and the
+                 agents' fake CLIs need them), Rust/rustup, Visual Studio
+                 C++ Build Tools, cargo-sweep and cargo-nextest.
       stop       Kill any running daemon and tracer process(es) and clean
                  the stale handshake file. No-op when nothing is running.
       restart    Build the daemon and tracer, stop the running daemon
@@ -55,8 +57,9 @@
                  nextest `--run-ignored only`, test-release profile) against
                  a real daemon isolated under `.tmp\native-e2e\`. The agents'
                  fake CLIs (crates\agents\claude\fake), fake-tailscale and
-                 fake-ssh need `node` on PATH. Refuses
-                 -Release: the test-only daemon stays in test-release.
+                 fake-ssh still need `node` on PATH; pnpm is not used here.
+                 Refuses -Release: the test-only daemon stays in
+                 test-release.
       native-smoke
                  Build the daemon and tracer, then run the native client's
                  OS smoke specs (`smoke_window`, `--run-ignored only`): the
@@ -82,11 +85,12 @@
                  `.tmp\shots\<view>.png` unless a second argument or -Out
                  gives another path, and prints the PNG's path.
       installer  Build the release binaries (daemon, tracer, native
-                 client), sign them with Azure Artifact Signing, then
-                 package them into an NSIS setup exe under
-                 `target\installer\`, sign that, and print its path.
-                 Always release; needs NSIS 3 (`winget install NSIS.NSIS`)
-                 and the signing setup on this PC.
+                 client) and the phone app (needs Node.js and pnpm), sign
+                 them with Azure Artifact Signing, then package them into
+                 an NSIS setup exe under `target\installer\`, sign that,
+                 and print its path. Always release; needs NSIS 3
+                 (`winget install NSIS.NSIS`) and the signing setup on this
+                 PC.
       help       Print the subcommand summary.
 
 .PARAMETER Command
@@ -127,6 +131,10 @@
 .PARAMETER Unsigned
     Applies to `installer`: build without code signing, for a test build on
     a PC not signed in to Azure.
+
+.PARAMETER Pwa
+    Applies to `build`: also build the phone app with pnpm and stage it in
+    `target\<profile>\pwa`, where the daemon looks for it.
 
 .EXAMPLE
     .\rt.ps1                       # = .\rt.ps1 launch
@@ -183,6 +191,9 @@ param(
     # signed in to Azure.
     [switch]$Unsigned,
 
+    # `build`: also build the phone app and stage it in target\<profile>\pwa.
+    [switch]$Pwa,
+
     # Extra arguments forwarded to the underlying tool (e.g. `cargo nextest
     # run` filters). Only meaningful for `launch`, `restart`, `test`, `clippy`,
     # `fmt`, `native`, `native-shot` (the view).
@@ -202,6 +213,9 @@ if ($HandsOff -and $Command -ne 'native-drive-check') {
 }
 if ($Unsigned -and $Command -ne 'installer') {
     throw '-Unsigned applies to installer only.'
+}
+if ($Pwa -and $Command -ne 'build') {
+    throw '-Pwa applies to build only.'
 }
 
 # ---------------------------------------------------------------------------
@@ -579,6 +593,8 @@ function Invoke-Setup {
     Write-Host '==> Installing/checking Windows build prerequisites...' -ForegroundColor Cyan
     Install-CommandDependency -CommandName 'git' -WingetId 'Git.Git' -DisplayName 'Git'
     Install-CommandDependency -CommandName 'node' -WingetId 'OpenJS.NodeJS.LTS' -DisplayName 'Node.js LTS'
+    Install-CommandDependency -CommandName 'pnpm' -WingetId 'pnpm.pnpm' -DisplayName 'pnpm'
+    Update-ProcessPath
 
     if ((Test-CommandAvailable 'cargo') -and (Test-CommandAvailable 'rustup')) {
         Write-Host '==> Rust/rustup already available.' -ForegroundColor DarkGray
@@ -608,6 +624,46 @@ function Invoke-Setup {
 # Subcommand entry points
 # ---------------------------------------------------------------------------
 
+# Builds the phone app with pnpm and stages it where the daemon looks for it:
+# target\<profile>\pwa, which is the template dir of a dev build and the
+# installer's BINDIR for a release one. Gate builders run cargo only, so this
+# runs only for `installer` and `build -Pwa`.
+function Invoke-PwaBuild {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidAssignmentToAutomaticVariable', '',
+        Justification = 'The parameter shadows the read-only $Profile path; this function never reads it.')]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('debug', 'release')]
+        [string]$Profile
+    )
+
+    if (-not (Test-CommandAvailable 'pnpm')) {
+        throw 'pnpm not found: run .\rt.ps1 setup.'
+    }
+
+    $pwaDir = Join-Path $ScriptDir 'apps/pwa'
+    Write-Host "==> Building the phone app ($Profile)..." -ForegroundColor Cyan
+    Invoke-Gated -Slot light -Name pwa-install -Command @('pnpm', '--dir', $pwaDir, 'install', '--frozen-lockfile')
+    Test-CargoExitOk 'pnpm install (apps/pwa)'
+    Invoke-Gated -Slot light -Name pwa-build -Command @('pnpm', '--dir', $pwaDir, 'build')
+    Test-CargoExitOk 'pnpm build (apps/pwa)'
+
+    $dist = Join-Path $pwaDir 'dist'
+    if (-not (Test-Path -LiteralPath $dist)) {
+        throw "the phone app's build left no $dist."
+    }
+    $target = Join-Path $ScriptDir "target/$Profile/pwa"
+    if (Test-Path -LiteralPath $target) {
+        Remove-Item -LiteralPath $target -Recurse -Force
+    }
+    $parentDir = Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $parentDir)) {
+        New-Item -ItemType Directory -Force -Path $parentDir | Out-Null
+    }
+    Copy-Item -LiteralPath $dist -Destination $target -Recurse -Force
+}
+
 function Invoke-Build {
     Assert-Tooling
     $buildArgs = @('build', '--manifest-path', $ManifestPath, '-p', 'daemon', '-p', 'tracer', '-p', 'rustling-tulip-native')
@@ -616,6 +672,7 @@ function Invoke-Build {
     Write-Host "==> Building daemon + tracer + native client ($modeLabel)..." -ForegroundColor Cyan
     Invoke-Gated -Slot heavy -Name build -Command (@('cargo') + $buildArgs)
     Test-CargoExitOk 'cargo build -p daemon -p tracer -p rustling-tulip-native'
+    if ($Pwa) { Invoke-PwaBuild -Profile $modeLabel }
     Invoke-BuildSweep
 }
 
@@ -763,6 +820,7 @@ function Invoke-Installer {
     )
     Invoke-Gated -Slot heavy -Name build-release -Command $releaseArgs
     Test-CargoExitOk 'cargo build --release -p daemon -p tracer -p rustling-tulip-native'
+    Invoke-PwaBuild -Profile 'release'
 
     if (-not $Unsigned) {
         Invoke-CodeSigning @(
