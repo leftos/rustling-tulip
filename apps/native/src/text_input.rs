@@ -134,6 +134,9 @@ pub struct TextInput {
     /// How far a multi-line input's rows are scrolled up to keep the caret's
     /// row in view.
     scroll_y: Pixels,
+    /// How far a single-line input's text is scrolled left to keep the
+    /// caret in view.
+    scroll_x: Pixels,
 }
 
 /// What an input draws: its text, or while masked a [`MASK`] for each
@@ -228,6 +231,7 @@ impl TextInput {
             draws: Draws::Text,
             goal_x: None,
             scroll_y: px(0.),
+            scroll_x: px(0.),
         }
     }
 
@@ -621,7 +625,8 @@ impl TextInput {
             return self.content.len();
         }
         let row = layout.row_at_y(position.y - bounds.top() + self.scroll_y);
-        let shown = layout.closest_in_row(row, position.x - bounds.left(), &self.shown());
+        let x = position.x - bounds.left() + self.scroll_x;
+        let shown = layout.closest_in_row(row, x, &self.shown());
         self.clamp_offset(self.offset_of_shown(shown))
     }
 
@@ -741,6 +746,27 @@ fn scroll_to_caret(
         scroll = caret_y + line_height - view_height;
     }
     let max_scroll = content_height - view_height;
+    if scroll > max_scroll {
+        scroll = max_scroll;
+    }
+    if scroll < px(0.) {
+        scroll = px(0.);
+    }
+    scroll
+}
+
+/// The scroll that keeps a single-line input's caret, `caret_x` from the
+/// text's left, in a view `width` wide over text `text_width` wide, moving
+/// as little as it can from `scroll_x`. Text no wider than the view never
+/// scrolls.
+fn caret_scroll_x(scroll_x: Pixels, caret_x: Pixels, width: Pixels, text_width: Pixels) -> Pixels {
+    let mut scroll = scroll_x;
+    if caret_x < scroll {
+        scroll = caret_x;
+    } else if caret_x > scroll + width {
+        scroll = caret_x - width;
+    }
+    let max_scroll = text_width - width;
     if scroll > max_scroll {
         scroll = max_scroll;
     }
@@ -1042,7 +1068,7 @@ impl EntityInputHandler for TextInput {
     ) -> Option<Bounds<Pixels>> {
         let layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
-        let origin = point(bounds.left(), bounds.top() - self.scroll_y);
+        let origin = point(bounds.left() - self.scroll_x, bounds.top() - self.scroll_y);
         let start = layout.position(self.to_shown(range.start));
         let end = layout.position(self.to_shown(range.end));
         let right = if end.y == start.y {
@@ -1065,7 +1091,7 @@ impl EntityInputHandler for TextInput {
         let local = self.last_bounds?.localize(&point)?;
         let layout = self.last_layout.as_ref()?;
         let row = layout.row_at_y(local.y + self.scroll_y);
-        let utf8_index = self.offset_of_shown(layout.index_in_row(row, local.x)?);
+        let utf8_index = self.offset_of_shown(layout.index_in_row(row, local.x + self.scroll_x)?);
         Some(offset_to_utf16(&self.content, utf8_index))
     }
 }
@@ -1312,27 +1338,40 @@ impl Element for TextElement {
         let layout = TextLayout::new(lines, line_height);
         let caret = layout.position(input.to_shown(input.cursor_offset()));
         let painted = input.painted_selection(input.focus_handle.is_focused(window));
-        let scroll_y = if multi_line {
+        let caret_width = px(2.);
+        let (scroll_x, scroll_y) = if multi_line {
             let view_height = bounds.size.height;
-            scroll_to_caret(
+            let scroll_y = scroll_to_caret(
                 input.scroll_y,
                 caret.y,
                 line_height,
                 view_height,
                 layout.height(),
-            )
+            );
+            (px(0.), scroll_y)
         } else {
-            px(0.)
+            // The view leaves the caret's own width at its right, so a caret
+            // at the text's end still draws inside the box.
+            let text_width = layout
+                .lines
+                .first()
+                .map_or(px(0.), |line| line.unwrapped_layout.width);
+            let view_width = bounds.size.width - caret_width;
+            let scroll_x = caret_scroll_x(input.scroll_x, caret.x, view_width, text_width);
+            (scroll_x, px(0.))
         };
-        let origin = point(bounds.left(), bounds.top() - scroll_y);
+        let origin = point(bounds.left() - scroll_x, bounds.top() - scroll_y);
         let (selection, cursor) = if let Some(painted) = painted {
             let shown = input.range_to_shown(&painted);
             (layout.selection_quads(&shown, origin, &t), None)
         } else {
-            let caret = Bounds::new(origin + caret, size(px(2.), line_height));
+            let caret = Bounds::new(origin + caret, size(caret_width, line_height));
             (Vec::new(), Some(fill(caret, rgb(t.input_cursor))))
         };
-        self.input.update(cx, |input, _| input.scroll_y = scroll_y);
+        self.input.update(cx, |input, _| {
+            input.scroll_x = scroll_x;
+            input.scroll_y = scroll_y;
+        });
         PrepaintState {
             layout: Some(layout),
             origin,
@@ -1353,7 +1392,7 @@ impl Element for TextElement {
     ) {
         let input = self.input.read(cx);
         let focus_handle = input.focus_handle.clone();
-        let mask = input.mode.is_multi_line().then_some(ContentMask { bounds });
+        let mask = Some(ContentMask { bounds });
         window.handle_input(
             &focus_handle,
             ElementInputHandler::new(bounds, self.input.clone()),
@@ -1384,12 +1423,56 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{ClipboardItem, Entity, EntityInputHandler as _, TestAppContext, VisualTestContext};
+    use gpui::{
+        ClipboardItem, Entity, EntityInputHandler as _, TestAppContext, VisualTestContext, px,
+    };
 
     use super::{
-        TextChanged, TextInput, TextInputEvent, bind_keys, next_boundary, offset_from_utf16,
-        offset_to_utf16, previous_boundary, single_line,
+        TextChanged, TextInput, TextInputEvent, bind_keys, caret_scroll_x, next_boundary,
+        offset_from_utf16, offset_to_utf16, previous_boundary, single_line,
     };
+
+    #[test]
+    fn text_narrower_than_the_box_never_scrolls() {
+        assert_eq!(caret_scroll_x(px(20.), px(50.), px(100.), px(80.)), px(0.));
+    }
+
+    #[test]
+    fn a_caret_past_the_right_edge_scrolls_to_sit_at_it() {
+        assert_eq!(
+            caret_scroll_x(px(0.), px(150.), px(100.), px(200.)),
+            px(50.)
+        );
+    }
+
+    #[test]
+    fn a_caret_left_of_the_scroll_scrolls_to_the_caret() {
+        assert_eq!(
+            caret_scroll_x(px(80.), px(30.), px(100.), px(200.)),
+            px(30.)
+        );
+    }
+
+    #[test]
+    fn a_caret_inside_the_view_keeps_the_scroll() {
+        assert_eq!(
+            caret_scroll_x(px(40.), px(90.), px(100.), px(200.)),
+            px(40.)
+        );
+    }
+
+    #[test]
+    fn text_shrinking_under_the_scroll_clamps_it_down() {
+        assert_eq!(
+            caret_scroll_x(px(80.), px(120.), px(100.), px(150.)),
+            px(50.)
+        );
+    }
+
+    #[test]
+    fn a_caret_at_the_start_scrolls_to_the_start() {
+        assert_eq!(caret_scroll_x(px(60.), px(0.), px(100.), px(300.)), px(0.));
+    }
 
     #[test]
     fn a_text_input_ignores_the_ui_weight() {

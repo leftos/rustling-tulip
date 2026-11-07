@@ -83,6 +83,7 @@ The views:
 - `themes-edit`: the theme editor on a duplicate of Nord.
 - `multi-host`: the sidebar grouped by host: This PC, "box" online with a repo and a session in the first tab's second pane, and "lab" offline.
 - `spawn-hosts`: the spawn dialog over those two hosts with its closed Target field.
+- `open-shell`: the Open a shell dialog with a folder path too long for its field, scrolled to the caret at its end.
 - `settings-hosts`: Settings on the Claude page with the host selector showing This PC.
 - `settings-accounts`: Settings on the Accounts tab, scrolled to the auto-switch block and its forecast.
 - `settings-sounds`: Settings on the Notifications tab with the Needs you sound list open.

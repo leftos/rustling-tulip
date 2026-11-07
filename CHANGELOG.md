@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A long folder path in Open a shell, or long text in any one-line field, stays inside its box and scrolls to follow the cursor instead of running under Browse.
 - Clicking a Needs you or Finished toast, the Windows notification or the app's own, now shows that pane's tab and gives the pane keyboard focus.
 - A session whose agent exits back into its shell keeps its name in the sidebar instead of switching to the shell's folder.
 - The account login session reads "Log in a new account" in the sidebar, not its run id, and has no Add repo banner.

@@ -32,7 +32,9 @@
 //! `settings-sounds` shows Settings on the Notifications tab with the Needs
 //! you sound dropdown open, and `toast` a Needs you card on a permission,
 //! with Allow and Deny, and a Finished card, as
-//! the app's own toasts draw them. `update` shows Settings scrolled to its
+//! the app's own toasts draw them. `open-shell` shows the Open a shell
+//! dialog with a folder path longer than its field, the caret at its end.
+//! `update` shows Settings scrolled to its
 //! update rows with a ready update in the footer, and `update-notes` the
 //! What's new window the footer's button opens over that ready update.
 //! The PNG goes to
@@ -219,10 +221,11 @@ enum View {
     SettingsSounds,
     Accounts,
     Gates,
+    OpenShell,
 }
 
 impl View {
-    const ALL: [Self; 31] = [
+    const ALL: [Self; 32] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -254,6 +257,7 @@ impl View {
         Self::Accounts,
         Self::Gates,
         Self::Toast,
+        Self::OpenShell,
     ];
 
     fn name(self) -> &'static str {
@@ -288,6 +292,7 @@ impl View {
             Self::SettingsSounds => "settings-sounds",
             Self::Accounts => "accounts",
             Self::Gates => "gates",
+            Self::OpenShell => "open-shell",
             Self::Toast => "toast",
         }
     }
@@ -362,6 +367,7 @@ impl View {
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
             Self::Gates => root.shown_activity() == Activity::Gates,
+            Self::OpenShell => root.shell_dialog_open(),
             Self::Main | Self::MainCompact => {
                 !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
             }
@@ -460,6 +466,10 @@ impl View {
     }
 }
 
+/// The folder the `open-shell` shot puts in the Open a shell dialog: longer
+/// than its field.
+const SHOT_SHELL_FOLDER: &str = r"C:\Users\someone\source\repos\a-very-long-folder-name\with\several\levels\of\nesting\to-overflow-the-field";
+
 /// The Ground the `themes-edit` shot types.
 const SHOT_EDITED_GROUND: &str = "#5a6478";
 
@@ -533,6 +543,7 @@ impl Shot {
             | View::SettingsSounds
             | View::Accounts
             | View::Gates
+            | View::OpenShell
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -1130,6 +1141,7 @@ fn drive(
         View::Main | View::MainCompact | View::MultiHost | View::Toast => Ok(()),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
+        View::OpenShell => open_shell(window, cx),
         View::SourceControl => {
             let y = (SOURCE_CONTROL_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
             #[expect(
@@ -2557,6 +2569,19 @@ fn show_gates(window: &mut Window, cx: &mut App) -> Result<()> {
         .flatten()
         .context("the window has no root view")?;
     root.update(cx, |root, cx| root.show_gates(window, cx));
+    Ok(())
+}
+
+/// Opens the Open a shell dialog on This PC with [`SHOT_SHELL_FOLDER`] in
+/// its folder field, the caret at its end.
+fn open_shell(window: &mut Window, cx: &mut App) -> Result<()> {
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    root.update(cx, |root, cx| {
+        root.open_shell_dialog_with_folder(SHOT_SHELL_FOLDER, window, cx);
+    });
     Ok(())
 }
 

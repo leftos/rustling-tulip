@@ -466,6 +466,25 @@ fn shell_browse_uses_the_picker_seam(cx: &mut TestAppContext) {
     assert_eq!(folder(&mut h).as_deref(), Some("C:/picked"));
 }
 
+/// A folder path longer than the field.
+const LONG_FOLDER: &str = r"C:\Users\someone\source\repos\a-very-long-folder-name\with\several\levels\of\nesting\to-overflow-the-field";
+
+#[gpui::test]
+fn a_long_folder_path_stays_clear_of_browse(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.open_shell_dialog_from_more();
+    h.click_on("shell-folder");
+    h.cx.simulate_input(LONG_FOLDER);
+    assert_eq!(folder(&mut h).as_deref(), Some(LONG_FOLDER));
+    let field = h.bounds("shell-folder");
+    let browse = h.bounds("shell-browse");
+    assert!(
+        field.right() <= browse.left(),
+        "the folder box ({field:?}) ends before Browse ({browse:?})"
+    );
+}
+
 #[gpui::test]
 fn browse_opens_at_the_typed_folder(cx: &mut TestAppContext) {
     let dir = TestDir::new();

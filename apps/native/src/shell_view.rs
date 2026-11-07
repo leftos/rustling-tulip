@@ -175,6 +175,23 @@ impl RootView {
         self.apply_shell_focus(window, cx);
     }
 
+    /// Opens the Shell… dialog on This PC with `folder` in its folder field,
+    /// the caret at its end, as a user typing it would leave it.
+    pub fn open_shell_dialog_with_folder(
+        &mut self,
+        folder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_shell_dialog(window, cx);
+        self.set_shell_host(HostKey::Local, window, cx);
+        if let Some(dialog) = &self.shell_dialog {
+            let input = dialog.folder_input.clone();
+            input.update(cx, |input, cx| input.set_text(folder.to_owned(), cx));
+        }
+        cx.notify();
+    }
+
     /// The form numbered [`Self::shell_generation`] for a shell on `host`,
     /// and its folder field's placeholder: on a host whose files this PC
     /// opens, the quick-shell default and this PC's path rules; elsewhere
