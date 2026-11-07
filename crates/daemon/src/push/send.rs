@@ -180,16 +180,7 @@ pub(crate) async fn send(
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use std::future::IntoFuture;
-    use std::sync::{Arc, Mutex};
-
-    use axum::Router;
-    use axum::body::Bytes;
-    use axum::extract::State;
-    use axum::http::{HeaderMap, StatusCode};
-    use axum::routing::post;
-    use tokio::task::JoinHandle;
-
+    use super::super::test_fake::{TESTS, fake_push_service, fake_push_service_with};
     use super::{Duration, Outcome, PushPolicy, Url, check_endpoint, client, send, topic};
 
     #[test]
@@ -213,9 +204,6 @@ mod tests {
 
     const PRODUCTION: PushPolicy = PushPolicy {
         allow_loopback_http: false,
-    };
-    const TESTS: PushPolicy = PushPolicy {
-        allow_loopback_http: true,
     };
 
     #[test]
@@ -276,75 +264,6 @@ mod tests {
         check_endpoint(endpoint, TESTS).expect("the tests' policy admits it");
         check_endpoint("http://localhost:8080/push/abc", TESTS)
             .expect_err("only the literal loopback address");
-    }
-
-    /// What the fake push service answers and what it was sent.
-    struct Fake {
-        status: u16,
-        reply: String,
-        reply_headers: Vec<(&'static str, String)>,
-        seen: Mutex<Vec<(HeaderMap, Bytes)>>,
-    }
-
-    async fn answer(
-        State(fake): State<Arc<Fake>>,
-        headers: HeaderMap,
-        body: Bytes,
-    ) -> (StatusCode, HeaderMap, String) {
-        fake.seen.lock().expect("unpoisoned").push((headers, body));
-        let mut reply_headers = HeaderMap::new();
-        for (name, value) in &fake.reply_headers {
-            reply_headers.insert(*name, value.parse().expect("a valid header value"));
-        }
-        (
-            StatusCode::from_u16(fake.status).expect("a valid status"),
-            reply_headers,
-            fake.reply.clone(),
-        )
-    }
-
-    /// Aborts the fake push service when the test ends.
-    struct Server(JoinHandle<()>);
-
-    impl Drop for Server {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
-
-    async fn fake_push_service(status: u16, reply: &str) -> (Url, Arc<Fake>, Server) {
-        fake_push_service_with(status, reply, &[]).await
-    }
-
-    async fn fake_push_service_with(
-        status: u16,
-        reply: &str,
-        reply_headers: &[(&'static str, &str)],
-    ) -> (Url, Arc<Fake>, Server) {
-        let fake = Arc::new(Fake {
-            status,
-            reply: reply.to_owned(),
-            reply_headers: reply_headers
-                .iter()
-                .map(|(name, value)| (*name, (*value).to_owned()))
-                .collect(),
-            seen: Mutex::new(Vec::new()),
-        });
-        let router = Router::new()
-            .route("/push/{id}", post(answer))
-            .with_state(Arc::clone(&fake));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind the fake push service");
-        let addr = listener.local_addr().expect("its address");
-        let task = tokio::spawn(async move {
-            axum::serve(listener, router)
-                .into_future()
-                .await
-                .expect("the fake push service serves");
-        });
-        let url = check_endpoint(&format!("http://{addr}/push/abc"), TESTS).expect("loopback");
-        (url, fake, Server(task))
     }
 
     const BODY: &[u8] = b"an encrypted record";

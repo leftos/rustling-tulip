@@ -108,6 +108,38 @@ impl PushState {
         self.loaded.is_some()
     }
 
+    /// Drop the loaded key and store, as a failed save does.
+    #[cfg(test)]
+    pub(crate) fn unload(&mut self) {
+        self.loaded = None;
+    }
+
+    /// Delete `device_id`'s subscription when the state is loaded and its
+    /// endpoint is still `endpoint` (see
+    /// [`SubscriptionStore::remove_if_endpoint`]). An unloaded state does
+    /// nothing, so the push trigger loads it first, holding `Hub::devices`
+    /// then this lock. A save failure is logged and unloads the state, as
+    /// [`Self::remove_device`] does.
+    pub(crate) fn remove_if_endpoint(&mut self, device_id: &str, endpoint: &str) {
+        let Some(loaded) = self.loaded.as_mut() else {
+            return;
+        };
+        match loaded.subs.remove_if_endpoint(device_id, endpoint) {
+            Ok(true) => {
+                tracing::info!(%device_id, "push: the push service dropped the device's subscription; it was deleted");
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(
+                    %device_id,
+                    err = format!("{err:#}"),
+                    "push: could not delete the device's dropped subscription; the push state is unloaded until the next request"
+                );
+                self.loaded = None;
+            }
+        }
+    }
+
     /// Delete `device_id`'s subscription when the state is loaded; an
     /// unloaded state has nothing in memory, and its file is swept on load.
     /// A failure is logged, never returned: the caller's block, forget or

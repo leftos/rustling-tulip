@@ -162,6 +162,29 @@ impl SubscriptionStore {
         Ok(true)
     }
 
+    /// Delete `device_id`'s subscription only while its endpoint is still
+    /// `endpoint`, and save; `Ok(false)` when the device has none or has
+    /// since registered another endpoint, so a push service's late "gone"
+    /// for the old endpoint never deletes the new one.
+    ///
+    /// # Errors
+    ///
+    /// The store is corrupt, or saving the file failed.
+    pub(crate) fn remove_if_endpoint(
+        &mut self,
+        device_id: &str,
+        endpoint: &str,
+    ) -> anyhow::Result<bool> {
+        if self
+            .devices
+            .get(device_id)
+            .is_none_or(|stored| stored.endpoint != endpoint)
+        {
+            return Ok(false);
+        }
+        self.remove(device_id)
+    }
+
     /// Drop every subscription whose device id is not in `known`, save when
     /// any was dropped, and return how many.
     ///
@@ -367,6 +390,64 @@ mod tests {
         assert!(
             !store.remove("dev-1").expect("remove again"),
             "a second removal has nothing to delete"
+        );
+    }
+
+    #[test]
+    fn remove_if_endpoint_deletes_the_endpoint_that_failed() {
+        let scratch = Scratch::new("remove-if-endpoint");
+        let mut store = scratch.store();
+        store
+            .put(
+                "dev-1",
+                subscription("https://push.example/one", true, false),
+            )
+            .expect("store the subscription");
+
+        assert!(
+            store
+                .remove_if_endpoint("dev-1", "https://push.example/one")
+                .expect("remove it")
+        );
+        assert!(
+            scratch.store().get("dev-1").is_none(),
+            "the removal is saved"
+        );
+        assert!(
+            !store
+                .remove_if_endpoint("dev-1", "https://push.example/one")
+                .expect("remove again"),
+            "a second removal has nothing to delete"
+        );
+    }
+
+    #[test]
+    fn remove_if_endpoint_keeps_a_re_registered_endpoint() {
+        let scratch = Scratch::new("remove-if-endpoint-stale");
+        let mut store = scratch.store();
+        store
+            .put(
+                "dev-1",
+                subscription("https://push.example/two", true, false),
+            )
+            .expect("store the re-registered subscription");
+
+        assert!(
+            !store
+                .remove_if_endpoint("dev-1", "https://push.example/one")
+                .expect("compare"),
+            "a stale endpoint deletes nothing"
+        );
+        let kept = scratch.store();
+        assert_eq!(
+            kept.get("dev-1").expect("still stored").endpoint,
+            "https://push.example/two"
+        );
+        assert!(
+            !store
+                .remove_if_endpoint("dev-2", "https://push.example/two")
+                .expect("compare"),
+            "a device with no subscription deletes nothing"
         );
     }
 

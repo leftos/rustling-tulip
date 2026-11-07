@@ -12,6 +12,9 @@ pub(crate) mod keys;
 pub(crate) mod send;
 pub(crate) mod state;
 pub(crate) mod store;
+#[cfg(test)]
+pub(crate) mod test_fake;
+pub(crate) mod trigger;
 pub(crate) mod vapid;
 pub(crate) mod webpush;
 

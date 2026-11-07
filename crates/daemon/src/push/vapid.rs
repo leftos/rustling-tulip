@@ -126,7 +126,8 @@ pub(crate) struct JwtCache {
 impl JwtCache {
     /// The token for `audience` at `now`: the cached one while it was signed
     /// under an hour ago with `key` for the same `subject`, else a new one
-    /// expiring twelve hours from `now`.
+    /// expiring twelve hours from `now`. `public_key` is `key`'s
+    /// [`VapidKey::public_b64url`], which the caller computes once.
     ///
     /// # Errors
     ///
@@ -134,11 +135,12 @@ impl JwtCache {
     pub(crate) fn token(
         &mut self,
         key: &VapidKey,
+        public_key: &str,
         audience: &str,
         subject: &str,
         now: DateTime<Utc>,
     ) -> anyhow::Result<String> {
-        let slot = (key.public_b64url(), audience.to_owned());
+        let slot = (public_key.to_owned(), audience.to_owned());
         if let Some(cached) = self.tokens.get(&slot) {
             let age = now - cached.signed_at;
             if cached.subject == subject && age >= TimeDelta::zero() && age < RESIGN_AFTER {
@@ -207,7 +209,7 @@ mod tests {
             .expect("round-trips");
         assert_eq!(b64(&key.public_b64url()).len(), 65);
         let token = JwtCache::default()
-            .token(&key, APPLE, SUBJECT, now())
+            .token(&key, &key.public_b64url(), APPLE, SUBJECT, now())
             .expect("signs");
 
         let (header, claims) = open(&token, &key);
@@ -226,15 +228,25 @@ mod tests {
     fn cache_reuses_inside_the_hour_and_resigns_at_it() {
         let key = VapidKey::generate().expect("a key");
         let mut cache = JwtCache::default();
-        let first = cache.token(&key, APPLE, SUBJECT, now()).expect("signs");
+        let first = cache
+            .token(&key, &key.public_b64url(), APPLE, SUBJECT, now())
+            .expect("signs");
         let inside = now() + TimeDelta::minutes(59) + TimeDelta::seconds(59);
         assert_eq!(
-            cache.token(&key, APPLE, SUBJECT, inside).expect("signs"),
+            cache
+                .token(&key, &key.public_b64url(), APPLE, SUBJECT, inside)
+                .expect("signs"),
             first
         );
 
         let at_hour = cache
-            .token(&key, APPLE, SUBJECT, now() + TimeDelta::hours(1))
+            .token(
+                &key,
+                &key.public_b64url(),
+                APPLE,
+                SUBJECT,
+                now() + TimeDelta::hours(1),
+            )
             .expect("signs");
         assert_ne!(at_hour, first);
         let (_, claims) = open(&at_hour, &key);
@@ -244,7 +256,13 @@ mod tests {
         );
 
         let other_subject = cache
-            .token(&key, APPLE, "https://other.tail1234.ts.net:7443", inside)
+            .token(
+                &key,
+                &key.public_b64url(),
+                APPLE,
+                "https://other.tail1234.ts.net:7443",
+                inside,
+            )
             .expect("signs");
         assert_ne!(other_subject, at_hour, "a new subject re-signs");
     }
@@ -253,13 +271,19 @@ mod tests {
     fn each_audience_gets_its_own_token() {
         let key = VapidKey::generate().expect("a key");
         let mut cache = JwtCache::default();
-        let apple = cache.token(&key, APPLE, SUBJECT, now()).expect("signs");
-        let mozilla = cache.token(&key, MOZILLA, SUBJECT, now()).expect("signs");
+        let apple = cache
+            .token(&key, &key.public_b64url(), APPLE, SUBJECT, now())
+            .expect("signs");
+        let mozilla = cache
+            .token(&key, &key.public_b64url(), MOZILLA, SUBJECT, now())
+            .expect("signs");
         assert_ne!(apple, mozilla);
         assert_eq!(open(&apple, &key).1["aud"], APPLE);
         assert_eq!(open(&mozilla, &key).1["aud"], MOZILLA);
         assert_eq!(
-            cache.token(&key, APPLE, SUBJECT, now()).expect("signs"),
+            cache
+                .token(&key, &key.public_b64url(), APPLE, SUBJECT, now())
+                .expect("signs"),
             apple
         );
     }
@@ -269,10 +293,12 @@ mod tests {
         let old_key = VapidKey::generate().expect("a key");
         let new_key = VapidKey::generate().expect("a key");
         let mut cache = JwtCache::default();
-        let old = cache.token(&old_key, APPLE, SUBJECT, now()).expect("signs");
+        let old = cache
+            .token(&old_key, &old_key.public_b64url(), APPLE, SUBJECT, now())
+            .expect("signs");
         let inside = now() + TimeDelta::minutes(30);
         let new = cache
-            .token(&new_key, APPLE, SUBJECT, inside)
+            .token(&new_key, &new_key.public_b64url(), APPLE, SUBJECT, inside)
             .expect("signs");
         assert_ne!(
             new, old,
