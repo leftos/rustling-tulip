@@ -79,11 +79,12 @@ use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::ui_theme::theme;
 use rustling_tulip_native::update::{LastResult, Ready, Updater};
 use rustling_tulip_native::{
-    Activity, AppToast, AppToastKind, AskBlock, AskChoice, Assets, Clock, Connection, FileFilter,
-    FilePicker, FolderPicker, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent,
-    Notifier, NotifyKind, NotifyState, OpenFailure, Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps,
-    RootView, SavePicker, SystemToastPlacer, TOAST_CARD_WIDTH, ToastKind, ToastPresses, ToastSpec,
-    Transport, ViewerLoad, bind_keys, card_height, key_of, remote_access::Autostart, toast_card,
+    Activity, AppToast, AppToastKind, AskBlock, AskChoice, Assets, CardText, Clock, Connection,
+    FileFilter, FilePicker, FolderPicker, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand,
+    NetEvent, Notifier, NotifyKind, NotifyState, OpenFailure, Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH,
+    RootDeps, RootView, SavePicker, SystemToastPlacer, TOAST_CARD_WIDTH, ToastKind, ToastPresses,
+    ToastSpec, Transport, ViewerLoad, bind_keys, card_height, key_of, remote_access::Autostart,
+    toast_card,
 };
 use serde_json::{Value, json};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -94,8 +95,8 @@ const WINDOW_SIZE: (u16, u16) = (1000, 640);
 /// status view.
 const DASHBOARD_WINDOW_SIZE: (u16, u16) = (2000, 900);
 
-/// The window `toast` draws its two cards in.
-const TOAST_WINDOW_SIZE: (u16, u16) = (420, 350);
+/// The window `toast` draws its three cards in.
+const TOAST_WINDOW_SIZE: (u16, u16) = (420, 760);
 /// The `dashboard-compact` shot's window: the 1080p the view must fit.
 const DASHBOARD_COMPACT_WINDOW_SIZE: (u16, u16) = (1920, 1080);
 /// The `summary` shot's window: tall enough for the split's top pane to
@@ -975,6 +976,7 @@ fn permission_ask() -> AskBlock {
         label: label.to_owned(),
         hint: None,
         choice,
+        description: None,
     };
     AskBlock {
         session_id: "s1".to_owned(),
@@ -989,6 +991,41 @@ fn permission_ask() -> AskBlock {
     }
 }
 
+/// The ask block of a single-choice question whose three answers are long
+/// sentences, each with a description.
+fn question_ask() -> AskBlock {
+    let choice = |index: u16, label: &str, description: &str| AskChoice {
+        label: label.to_owned(),
+        hint: Some((index + 1).to_string()),
+        choice: protocol::PromptChoice::Option { index },
+        description: Some(description.to_owned()),
+    };
+    AskBlock {
+        session_id: "s3".to_owned(),
+        label: "Question ·".to_owned(),
+        text: "Which way should the release go out?".to_owned(),
+        command: None,
+        since: Some(Utc::now()),
+        choices: vec![
+            choice(
+                0,
+                "Tag it now and publish the installer once the signing step has passed",
+                "The release goes out today, signed, with the notes as they stand.",
+            ),
+            choice(
+                1,
+                "Hold it until the phone app's terminal fixes land, then tag both together",
+                "One release carries both changes; the notes cover the phone app too.",
+            ),
+            choice(
+                2,
+                "Publish a preview build only, for the people who asked to try it first",
+                "Nothing is tagged; the preview channel gets the build.",
+            ),
+        ],
+    }
+}
+
 /// A card's controls, doing nothing: nothing presses them in a shot.
 fn idle_presses() -> ToastPresses {
     ToastPresses {
@@ -998,10 +1035,12 @@ fn idle_presses() -> ToastPresses {
     }
 }
 
-/// A Needs you card and a Finished card, as the app's own toasts draw them.
+/// A Needs you card, a Finished card and a Needs you card asking a question
+/// with long answers, as the app's own toasts draw them.
 struct ToastShot {
     needs_you: AppToast,
     finished: AppToast,
+    question: AppToast,
 }
 
 impl ToastShot {
@@ -1025,6 +1064,13 @@ impl ToastShot {
             )
             .waiting_on(Some(permission_ask()), None),
             finished: toast("s2", AppToastKind::Finished, "Finished", "Bramble"),
+            question: toast(
+                "s3",
+                AppToastKind::NeedsYou { has_answers: false },
+                "Needs you · web",
+                "Thistle: Which way should the release go out?",
+            )
+            .waiting_on(Some(question_ask()), None),
         }
     }
 }
@@ -1034,8 +1080,8 @@ impl Render for ToastShot {
         let card = |toast: &AppToast, cx: &App| {
             div()
                 .w(px(TOAST_CARD_WIDTH))
-                .h(px(card_height(toast)))
-                .child(toast_card(toast, false, idle_presses(), cx))
+                .h(px(card_height(toast, false, &CardText::new(cx), f32::MAX)))
+                .child(toast_card(toast, false, None, idle_presses(), cx))
         };
         div()
             .size_full()
@@ -1046,6 +1092,7 @@ impl Render for ToastShot {
             .bg(gpui::rgb(theme(cx).surface))
             .child(card(&self.needs_you, cx))
             .child(card(&self.finished, cx))
+            .child(card(&self.question, cx))
     }
 }
 

@@ -517,6 +517,9 @@ pub struct AskChoice {
     pub hint: Option<String>,
     /// What a press sends in `AnswerPrompt`.
     pub choice: PromptChoice,
+    /// The option's description, shown as the button's tooltip; `None` when
+    /// it has none, and for a permission's choices.
+    pub description: Option<String>,
 }
 
 /// The block under a waiting row: what the session asks, and the buttons
@@ -602,10 +605,16 @@ fn question_choices(questions: &[PendingQuestion]) -> Vec<AskChoice> {
         .enumerate()
         .map_while(|(index, label)| {
             let index = u16::try_from(index).ok()?;
+            let description = question
+                .option_descriptions
+                .get(usize::from(index))
+                .filter(|description| !description.is_empty())
+                .cloned();
             Some(AskChoice {
                 label: label.clone(),
                 hint: Some((u32::from(index) + 1).to_string()),
                 choice: PromptChoice::Option { index },
+                description,
             })
         })
         .collect()
@@ -664,6 +673,7 @@ fn permission_choice(label: &str, number: Option<u32>, choice: PromptChoice) -> 
         label: label.to_owned(),
         hint: number.map(|number| number.to_string()),
         choice,
+        description: None,
     }
 }
 
@@ -1173,6 +1183,7 @@ mod tests {
             question: text.to_owned(),
             header: String::new(),
             options: options.iter().map(|option| (*option).to_owned()).collect(),
+            option_descriptions: Vec::new(),
             multi_select,
         }
     }
@@ -1296,6 +1307,7 @@ mod tests {
                 question: "Deploy it?".to_owned(),
                 header: "Release".to_owned(),
                 options: Vec::new(),
+                option_descriptions: Vec::new(),
                 multi_select: false,
             }],
         });
@@ -1941,6 +1953,34 @@ mod tests {
                 ("main", Some("1"), PromptChoice::Option { index: 0 }),
                 ("dev", Some("2"), PromptChoice::Option { index: 1 }),
             ]
+        );
+    }
+
+    #[test]
+    fn an_options_description_rides_on_its_choice() {
+        let mut described = question("Which branch?", &["main", "dev"], false);
+        described.option_descriptions = vec!["The release branch.".to_owned(), String::new()];
+        let session = asking(PendingInput::Question {
+            questions: vec![described],
+        });
+        let block = block_of(&session, None);
+        let descriptions: Vec<Option<&str>> = block
+            .choices
+            .iter()
+            .map(|choice| choice.description.as_deref())
+            .collect();
+        assert_eq!(
+            descriptions,
+            [Some("The release branch."), None],
+            "an empty description is none"
+        );
+        let permission = block_of(&asking(bash("ls")), None);
+        assert!(
+            permission
+                .choices
+                .iter()
+                .all(|choice| choice.description.is_none()),
+            "a permission's choices carry none: {permission:?}"
         );
     }
 

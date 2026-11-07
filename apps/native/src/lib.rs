@@ -348,7 +348,9 @@ pub use crate::taskbar_badge::{BadgeOverlay, NoTaskbarBadge, TaskbarBadge};
 pub use crate::text_input::bind_keys;
 pub use crate::toast_stack::WIDTH as TOAST_CARD_WIDTH;
 pub use crate::toast_stack::{AppToast, AppToastKind, SessionKey, WorkArea, key_of};
-pub use crate::toast_view::{ToastPresses, card_height, toast_card};
+pub use crate::toast_view::{
+    CardText, TextMeasure, TextRole, ToastPresses, card_height, toast_card,
+};
 pub use crate::toast_window::{PhysicalRect, SystemToastPlacer, ToastPlacer};
 pub use crate::undo::{TabSnapshot, UndoEntry};
 pub use crate::viewer_tab::{
@@ -6505,4 +6507,30 @@ fn scan_key(path: &str) -> String {
 fn tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let text = text.into();
     move |_, cx| cx.new(|_| Tip(text.clone())).into()
+}
+
+/// The widest a description tooltip draws, in logical px. Only the
+/// Dashboard's ask buttons show one; a toast draws its descriptions inline,
+/// as its window would cut a tooltip.
+const DESCRIPTION_TIP_WIDTH: f32 = 320.0;
+
+/// A tooltip of a sentence or more, wrapping within
+/// [`DESCRIPTION_TIP_WIDTH`]: an answer's description.
+struct DescriptionTip(SharedString);
+
+impl Render for DescriptionTip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        tip_box(self.0.clone(), cx)
+            .max_w(px(DESCRIPTION_TIP_WIDTH))
+            .whitespace_normal()
+            .driver_id(|| format!("tooltip={}", self.0))
+    }
+}
+
+/// A wrapping tooltip reading `text`; see [`DescriptionTip`].
+pub(crate) fn description_tooltip(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| DescriptionTip(text.clone())).into()
 }

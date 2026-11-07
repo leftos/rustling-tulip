@@ -818,6 +818,11 @@ export interface PendingQuestion {
   header?: string;
   /** The choice labels, in the order the prompt shows them. */
   options?: string[];
+  /**
+   * Each option's description, in step with `options`: an empty string
+   * where an option has none. Empty from a daemon that predates it.
+   */
+  option_descriptions?: string[];
   /** True when the prompt accepts more than one choice. */
   multi_select?: boolean;
 }

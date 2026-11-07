@@ -980,6 +980,10 @@ pub struct PendingQuestion {
     /// The choice labels, in the order the prompt shows them.
     #[serde(default)]
     pub options: Vec<String>,
+    /// Each option's description, in step with `options`: an empty string
+    /// where an option has none. Empty from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_descriptions: Vec<String>,
     /// True when the prompt accepts more than one choice.
     #[serde(default)]
     pub multi_select: bool,
@@ -13116,6 +13120,16 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_question_without_option_descriptions_decodes_with_none() {
+        let question: PendingQuestion = serde_json::from_str(
+            r#"{"question":"Which branch?","header":"","options":["main","dev"],"multi_select":false}"#,
+        )
+        .expect("a question from a daemon that predates descriptions");
+        assert_eq!(question.option_descriptions, Vec::<String>::new());
+        assert_eq!(question.options, ["main", "dev"]);
+    }
+
+    #[test]
     fn pending_input_round_trips() {
         let cases = vec![
             PendingInput::Question {
@@ -13124,12 +13138,14 @@ mod tests {
                         question: "Do you prefer tea or coffee?".to_owned(),
                         header: "Drink".to_owned(),
                         options: vec!["Tea".to_owned(), "Coffee".to_owned()],
+                        option_descriptions: vec!["Hot leaves.".to_owned(), String::new()],
                         multi_select: true,
                     },
                     PendingQuestion {
                         question: "Which editor?".to_owned(),
                         header: String::new(),
                         options: Vec::new(),
+                        option_descriptions: Vec::new(),
                         multi_select: false,
                     },
                 ],

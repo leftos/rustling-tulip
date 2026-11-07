@@ -387,6 +387,14 @@ pub struct WorkArea {
     pub bottom: f32,
 }
 
+/// The tallest a toast may be in `area`: its height less both margins, and a
+/// pixel less, floored, so a card capped at it still passes [`place`]'s fit
+/// check whatever the rounding of a fractional work area.
+#[must_use]
+pub fn room(area: WorkArea) -> f32 {
+    (area.bottom - area.top - 2.0 * MARGIN - 1.0).floor()
+}
+
 /// Where each toast of `toasts` (its kind and height, newest last) sits in
 /// `area`: the newest nearest the bottom-right corner, older ones stacked
 /// upward a [`GAP`] apart, each [`WIDTH`] wide and [`MARGIN`] from the right
@@ -780,6 +788,22 @@ mod tests {
                 (0, (left_edge(), older_top)),
                 (1, (left_edge(), newest_top))
             ]
+        );
+    }
+
+    #[test]
+    fn a_toast_as_tall_as_the_room_fits_a_fractional_work_area() {
+        let fractional = WorkArea {
+            left: 0.0,
+            top: 38.4,
+            right: 1536.0,
+            bottom: 825.6,
+        };
+        let tallest = room(fractional);
+        assert_eq!(
+            place(fractional, &[(needs_you(false), tallest)]).len(),
+            1,
+            "a toast capped at the room is kept, not dismissed"
         );
     }
 

@@ -419,6 +419,75 @@ fn a_remote_session_shows_its_host_in_the_title(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn a_toast_names_the_sessions_repo_beside_its_title(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = sessions(&["s2", "s3"]);
+    fixture.sessions[1] = session("s2").in_repo("web").build();
+    fixture.sessions[2] = session("s3").in_workspace("w1").build();
+    fixture.workspaces.push(
+        serde_json::from_value(json!({ "id": "w1", "name": "site", "member_repo_ids": [] }))
+            .expect("a workspace"),
+    );
+    let mut h = opened(cx, &dir, &fixture, json!({}));
+
+    h.send(needs_you("s1"));
+    h.send(needs_you("s2"));
+    h.send(needs_you("s3"));
+
+    assert_eq!(
+        h.root(|root, _| root.shown_toasts()),
+        [
+            ("s1".to_owned(), "Needs you".to_owned()),
+            ("s2".to_owned(), "Needs you · web".to_owned()),
+            ("s3".to_owned(), "Needs you · site".to_owned()),
+        ],
+        "a repo session names its repo, a workspace session its workspace, a session in neither nothing"
+    );
+}
+
+/// Workspace `id` named `name`, with no member repos.
+fn workspace(id: &str, name: &str) -> protocol::WorkspaceEntry {
+    serde_json::from_value(json!({ "id": id, "name": name, "member_repo_ids": [] }))
+        .expect("a workspace")
+}
+
+#[gpui::test]
+fn a_toast_names_the_workspace_on_its_sessions_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [{ "name": support::REMOTE, "port": 8787 }],
+            "notifications": { "toast_style": "app" },
+        }),
+    );
+    let mut fixture = sessions(&["s2"]);
+    fixture.sessions[1] = session("s2").in_workspace("w2").in_repo("web").build();
+    fixture.workspaces.push(workspace("w1", "site"));
+    fixture.workspaces.push(workspace("w2", ""));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(DaemonMessage::Workspaces {
+        workspaces: vec![workspace("w1", "docs")],
+    });
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").in_workspace("w1").build()],
+    });
+
+    h.host(&saved_remote()).send(needs_you("b1"));
+    h.send(needs_you("s2"));
+
+    assert_eq!(
+        h.root(|root, _| root.shown_toasts()),
+        [
+            ("b1".to_owned(), "Needs you · docs · box".to_owned()),
+            ("s2".to_owned(), "Needs you · web".to_owned()),
+        ],
+        "the remote session names its own host's w1, not This PC's; an unnamed workspace falls back to its first repo"
+    );
+}
+
 /// A fixed status stamp, `minute` minutes into the fixture's hour.
 fn stamp(minute: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 1, 1, 9, minute, 0)
@@ -507,7 +576,7 @@ fn a_permission_toast_offers_allow_and_deny(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = raised(cx, &dir, permission());
 
-    assert_eq!(h.toasts_shown()[0].height, 182, "room for the command");
+    assert_eq!(h.toasts_shown()[0].height, 219, "room for the command");
     let mut toast = h.popout_window();
     for part in [
         "toast-command",
@@ -533,7 +602,7 @@ fn a_single_choice_question_offers_its_options(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = raised(cx, &dir, question(&["main", "dev", "next"]));
 
-    assert_eq!(h.toasts_shown()[0].height, 186, "a second row of choices");
+    assert_eq!(h.toasts_shown()[0].height, 221, "a row per choice");
     let mut toast = h.popout_window();
     for part in ["toast-answer-0", "toast-answer-1", "toast-answer-2"] {
         assert!(drawn(&mut toast, part), "{part} is drawn");
@@ -544,6 +613,143 @@ fn a_single_choice_question_offers_its_options(cx: &mut TestAppContext) {
     let sent = answers(h.sent());
     assert_eq!(sent.len(), 1, "one answer: {sent:?}");
     assert_eq!(sent[0].2, PromptChoice::Option { index: 2 });
+}
+
+#[gpui::test]
+fn a_long_answer_shows_whole_and_grows_the_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let long = "Merge it into main now, then tag the release and post the notes to the \
+                channel so the people waiting on it can start";
+    let mut fixture = sessions(&["s2", "s3"]);
+    fixture.sessions[1] = waiting("s2", stamp(1), question(&[long]));
+    fixture.sessions[2] = waiting("s3", stamp(1), question(&["main"]));
+    let mut h = opened(cx, &dir, &fixture, json!({}));
+
+    h.send(needs_you("s2"));
+    h.send(needs_you("s3"));
+
+    let shown = h.toasts_shown();
+    assert_eq!(shown.len(), 2, "both toasts are up: {shown:?}");
+    assert!(
+        shown[0].height > shown[1].height,
+        "the long answer's toast is taller: {shown:?}"
+    );
+    let mut toast = h.popout_window();
+    toast.run_until_parked();
+    let card = toast.debug_bounds("toast-card").expect("the card is drawn");
+    let answer = toast
+        .debug_bounds("toast-answer-0")
+        .expect("the answer is drawn");
+    // The card's inner width: its 1 px borders, its 3 px stripe and the
+    // words' 10 px padding each side.
+    assert_eq!(
+        answer.size.width,
+        card.size.width - px(25.0),
+        "the answer spans the card's inner width"
+    );
+}
+
+#[gpui::test]
+fn an_answer_shows_its_description_under_its_label(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let described = json!({
+        "kind": "question",
+        "questions": [{
+            "question": "Which branch?", "header": "", "options": ["main", "dev"],
+            "option_descriptions": ["The release branch.", ""], "multi_select": false,
+        }],
+    });
+    let mut fixture = sessions(&["s2", "s3"]);
+    fixture.sessions[1] = waiting("s2", stamp(1), described);
+    fixture.sessions[2] = waiting("s3", stamp(1), question(&["main", "dev"]));
+    let mut h = opened(cx, &dir, &fixture, json!({}));
+
+    h.send(needs_you("s2"));
+    h.send(needs_you("s3"));
+
+    let shown = h.toasts_shown();
+    assert_eq!(shown.len(), 2, "both toasts are up: {shown:?}");
+    assert!(
+        shown[0].height > shown[1].height,
+        "the described answer's toast is taller: {shown:?}"
+    );
+    let mut toast = h.popout_window();
+    toast.run_until_parked();
+    let answer = toast
+        .debug_bounds("toast-answer-0")
+        .expect("the answer is drawn");
+    let description = toast
+        .debug_bounds("toast-answer-0-description")
+        .expect("the description is drawn");
+    assert!(
+        description.left() >= answer.left()
+            && description.right() <= answer.right()
+            && description.top() >= answer.top()
+            && description.bottom() <= answer.bottom(),
+        "inside its button: {description:?} in {answer:?}"
+    );
+    assert!(
+        !drawn(&mut toast, "toast-answer-1-description"),
+        "an empty description draws nothing"
+    );
+}
+
+#[gpui::test]
+fn a_toast_with_a_wrapped_question_shows_its_title(cx: &mut TestAppContext) {
+    #[cfg(debug_assertions)]
+    rustling_tulip_native::ellipsis::enable_probe();
+    let dir = TestDir::new();
+    let long = json!({
+        "kind": "question",
+        "questions": [{
+            "question": "Which way should the release go out, now that the signing step has \
+                         passed, the phone app's terminal fixes have landed on main and the \
+                         notes cover both changes for the people waiting on them?",
+            "header": "", "options": ["now", "later"], "multi_select": false,
+        }],
+    });
+    let mut h = raised(cx, &dir, long);
+    let mut toast = h.popout_window();
+    toast.run_until_parked();
+
+    let title = toast
+        .debug_bounds("toast-title-s2")
+        .expect("the title is drawn");
+    assert!(
+        title.size.width >= px(100.0),
+        "the title takes the card's width: {title:?}"
+    );
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        rustling_tulip_native::ellipsis::drawn_text("toast-title-s2").as_deref(),
+        Some("Needs you"),
+        "the title is drawn whole"
+    );
+}
+
+#[gpui::test]
+fn an_answered_toast_shrinks_to_its_sent_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = raised(
+        cx,
+        &dir,
+        question(&[
+            "Tag it now and publish the installer once the signing step has passed",
+            "Hold it until the phone app's terminal fixes land, then tag both together",
+            "Publish a preview build only, for the people who asked to try it first",
+        ]),
+    );
+    let before = h.toasts_shown()[0].height;
+    let mut toast = h.popout_window();
+
+    press(&mut toast, "toast-answer-0");
+    assert!(drawn(&mut toast, "toast-sent"), "`Sent` takes their place");
+
+    let after = h.toasts_restacked().last().map(|rect| rect.height);
+    assert!(
+        after.is_some_and(|after| after < before),
+        "the window shrinks to the Sent row: {before} then {after:?}"
+    );
 }
 
 #[gpui::test]
@@ -798,7 +1004,7 @@ fn a_new_prompt_under_the_same_stamp_replaces_the_ask(cx: &mut TestAppContext) {
     assert_eq!(h.sounds().len(), sounds, "a new prompt plays no sound");
     assert_eq!(
         h.toasts_restacked().last().map(|rect| rect.height),
-        Some(182),
+        Some(219),
         "the card fits the new prompt"
     );
     assert!(

@@ -298,6 +298,7 @@ mod tests {
             question: text.to_owned(),
             header: header.to_owned(),
             options: Vec::new(),
+            option_descriptions: Vec::new(),
             multi_select: false,
         }
     }

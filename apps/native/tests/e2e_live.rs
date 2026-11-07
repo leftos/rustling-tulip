@@ -697,6 +697,7 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
                 question: "Do you prefer tea or coffee?".to_owned(),
                 header: "Drink".to_owned(),
                 options: vec!["Tea".to_owned(), "Coffee".to_owned()],
+                option_descriptions: vec![String::new(), String::new()],
                 multi_select: false,
             }],
         }),

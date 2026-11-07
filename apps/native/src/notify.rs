@@ -37,7 +37,7 @@ use crate::toast_stack::{
     ACCOUNTS_TOAST_KEY, AppToast, AppToastKind, MAX_TOAST_CHOICES, SessionKey, ToastStack, WIDTH,
     WorkArea, key_of, place,
 };
-use crate::toast_view::{ToastView, card_height};
+use crate::toast_view::{CardText, ToastView, card_height};
 use crate::toast_window::{PhysicalRect, ToastPlacer, to_physical};
 use crate::window_title::PRODUCT_NAME;
 
@@ -444,6 +444,9 @@ struct ToastWindow {
     handle: WindowHandle<ToastView>,
     /// The window's handle, for the placer.
     address: Option<usize>,
+    /// Whether an answer was out for the session when the window was last
+    /// placed: its card is shorter then, so a change places it again.
+    sent: bool,
 }
 
 /// Where the toasts go right now.
@@ -551,6 +554,20 @@ impl Notifications {
             _ => false,
         }
     }
+}
+
+/// A session toast's title line: `title`, then the session's repo or
+/// workspace (`group`) and its `host`, each when it is named, `" · "` between.
+/// An empty name counts as none.
+fn toast_title(title: &str, group: Option<&str>, host: Option<&str>) -> String {
+    let mut line = title.to_owned();
+    for part in [group, host].into_iter().flatten() {
+        if !part.is_empty() {
+            line.push_str(" · ");
+            line.push_str(part);
+        }
+    }
+    line
 }
 
 /// The title of the notification a session awaiting input raises.
@@ -986,7 +1003,7 @@ impl RootView {
             self.raise_app_toast(toast, cx);
             return;
         }
-        let title = toast.title.to_owned();
+        let title = self.app_toast_title(toast);
         let body = toast.body.to_owned();
         // A press on it shows its session's pane, as its own card's title
         // and `Go to pane` do.
@@ -1322,17 +1339,44 @@ impl RootView {
         Some(ask)
     }
 
-    /// `toast`'s title line, naming the session's host unless it is This PC.
+    /// `toast`'s title line, naming the session's repo or workspace when it
+    /// has one, and its host unless it is This PC.
     fn app_toast_title(&self, toast: &Toast<'_>) -> String {
-        self.host_title(toast.title, toast.host)
+        let group = self.toast_group(toast.host, toast.session_id);
+        let host = (*toast.host != HostKey::Local).then(|| self.host_name(toast.host));
+        toast_title(toast.title, group.as_deref(), host.as_deref())
+    }
+
+    /// The repo or workspace session `session_id` on `host` works in: its
+    /// workspace's name for a workspace session, else its first member's
+    /// repo name; `None` for a session in neither, such as a shell outside
+    /// any repo.
+    fn toast_group(&self, host: &HostKey, session_id: &str) -> Option<String> {
+        let session = self.sidebar.session_on(host, session_id)?;
+        // The session's own host's workspace: another host may hold one of
+        // the same id.
+        let workspace = session.workspace_id.as_deref().and_then(|id| {
+            self.sidebar
+                .workspaces_of(host)
+                .iter()
+                .find(|workspace| workspace.id == id)
+        });
+        workspace
+            .map(|workspace| workspace.name.clone())
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                session
+                    .members
+                    .first()
+                    .map(|member| member.repo_name.clone())
+            })
+            .filter(|name| !name.is_empty())
     }
 
     /// `title`, naming `host` unless it is This PC.
     fn host_title(&self, title: &str, host: &HostKey) -> String {
-        if *host == HostKey::Local {
-            return title.to_owned();
-        }
-        format!("{title} · {}", self.host_name(host))
+        let name = (*host != HostKey::Local).then(|| self.host_name(host));
+        toast_title(title, None, name.as_deref())
     }
 
     /// Puts `toast` on the stack, in a new window or in place of the
@@ -1398,9 +1442,18 @@ impl RootView {
     /// timer, as this ends every change to the stack.
     fn place_app_toasts(&mut self, screen: &ToastScreen, cx: &mut Context<Self>) {
         let items = self.notifications.toasts.stack.items().to_vec();
+        // A toast taller than the work area's room cannot be shown: its card
+        // is cut there.
+        let room = crate::toast_stack::room(screen.area);
+        let sent: Vec<bool> = items
+            .iter()
+            .map(|toast| self.toast_answer_out(&toast.key))
+            .collect();
+        let measure = CardText::new(cx);
         let heights: Vec<(AppToastKind, f32)> = items
             .iter()
-            .map(|toast| (toast.kind, card_height(toast)))
+            .zip(&sent)
+            .map(|(toast, sent)| (toast.kind, card_height(toast, *sent, &measure, room)))
             .collect();
         let placed = place(screen.area, &heights);
         for (index, toast) in items.iter().enumerate() {
@@ -1412,20 +1465,22 @@ impl RootView {
         }
         for (index, (left, top)) in placed {
             let toast = &items[index];
-            let height = card_height(toast);
+            let height = heights[index].1;
             let rect = to_physical(left, top, WIDTH, height, screen.dpi);
-            let toasts = &self.notifications.toasts;
-            if let Some(open) = toasts.windows.get(&toast.key) {
+            let toasts = &mut self.notifications.toasts;
+            if let Some(open) = toasts.windows.get_mut(&toast.key) {
+                open.sent = sent[index];
                 toasts.placer.restack(open.address, rect);
             } else {
                 let bounds = Bounds::new(point(px(left), px(top)), size(px(WIDTH), px(height)));
-                self.open_toast_window(toast, bounds, rect, screen.display, cx);
+                self.open_toast_window(toast, sent[index], bounds, rect, screen.display, cx);
             }
         }
         self.arm_toast_timer(cx);
     }
 
-    /// Opens `toast`'s window at `bounds` on `display` and hands it to the
+    /// Opens `toast`'s window at `bounds` on `display`, its height counted
+    /// with an answer out (`sent`) or not, and hands it to the
     /// placer to show on `rect`: the window opens unshown, and the placer
     /// orders it in once it has made the panel stay up (macOS) or shown it
     /// without activation (Windows). A window that fails to open, or that the
@@ -1434,6 +1489,7 @@ impl RootView {
     fn open_toast_window(
         &mut self,
         toast: &AppToast,
+        sent: bool,
         bounds: Bounds<gpui::Pixels>,
         rect: PhysicalRect,
         display: Option<DisplayId>,
@@ -1451,7 +1507,11 @@ impl RootView {
         });
         match opened {
             Ok(handle) => {
-                let open = ToastWindow { handle, address };
+                let open = ToastWindow {
+                    handle,
+                    address,
+                    sent,
+                };
                 self.notifications
                     .toasts
                     .windows
@@ -1645,25 +1705,35 @@ impl RootView {
         }
     }
 
+    /// Whether an answer is out for `key`'s session.
+    fn toast_answer_out(&self, key: &SessionKey) -> bool {
+        self.sidebar
+            .session(&key.1)
+            .is_some_and(|session| self.dashboard_answers.is_out(session))
+    }
+
     /// Tells each open toast's view its toast as the stack holds it and
-    /// whether an answer is out for its session. Waits for the effects to
-    /// flush, as a press on a toast runs inside its window's update.
+    /// whether an answer is out for its session, placing the toasts again
+    /// when that changed for one, as its card's height follows it. Waits for
+    /// the effects to flush, as a press on a toast runs inside its window's
+    /// update.
     pub(crate) fn refresh_app_toasts(&self, cx: &mut Context<Self>) {
-        let is_out = |id: &str| {
-            self.sidebar
-                .session(id)
-                .is_some_and(|session| self.dashboard_answers.is_out(session))
-        };
         let toasts = &self.notifications.toasts;
+        let mut flipped = false;
         let open: Vec<(WindowHandle<ToastView>, AppToast, bool)> = toasts
             .stack
             .items()
             .iter()
             .filter_map(|toast| {
                 let window = toasts.windows.get(&toast.key)?;
-                Some((window.handle, toast.clone(), is_out(&toast.key.1)))
+                let sent = self.toast_answer_out(&toast.key);
+                flipped |= sent != window.sent;
+                Some((window.handle, toast.clone(), sent))
             })
             .collect();
+        if flipped {
+            Self::after_toast_change(cx);
+        }
         cx.defer(move |cx| {
             for (handle, toast, sent) in open {
                 let told = handle.update(cx, |view, _, cx| view.show(toast, sent, cx));
@@ -1769,6 +1839,25 @@ fn toast_window_options(bounds: Bounds<gpui::Pixels>, display: Option<DisplayId>
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toast_title_names_the_group_and_the_host_that_are_known() {
+        let cases = [
+            (None, None, "Needs you", "neither"),
+            (Some("web"), None, "Needs you · web", "the repo alone"),
+            (None, Some("box"), "Needs you · box", "the host alone"),
+            (Some("web"), Some("box"), "Needs you · web · box", "both"),
+            (
+                Some(""),
+                Some("box"),
+                "Needs you · box",
+                "an empty group is none",
+            ),
+        ];
+        for (group, host, title, why) in cases {
+            assert_eq!(toast_title("Needs you", group, host), title, "{why}");
+        }
+    }
 
     #[test]
     fn a_toast_window_opens_unshown_so_the_placer_orders_it_in() {

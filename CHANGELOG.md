@@ -33,6 +33,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Changed
 
 - A background tab's right-click menu no longer offers Rearrange panes; the active tab and popped-out tabs still do.
+- A toast shows its whole question and every answer, one per row with Claude's description under each, and grows to fit them.
+- Toasts and notifications name the session's repo or workspace beside their title, so you can tell which project is asking.
 
 ## v0.10.2-alpha
 

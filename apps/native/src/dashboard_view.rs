@@ -889,6 +889,9 @@ fn ask_choice_button(
                 .child(hint),
         )
     })
+    .when_some(choice.description.clone(), |button, description| {
+        button.tooltip(crate::description_tooltip(description))
+    })
     .when_some(answer_at, |button, since| {
         button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.answer_from_dashboard(&session, since, answer, cx);

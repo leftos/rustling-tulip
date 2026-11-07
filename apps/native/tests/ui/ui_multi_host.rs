@@ -548,8 +548,11 @@ fn a_remote_session_asking_raises_a_notification_and_a_needs_you_row(cx: &mut Te
 
     assert_eq!(
         h.notified(),
-        [("Needs you".to_owned(), "test: Waiting for input".to_owned())],
-        "the toast names the session by its own host's agent"
+        [(
+            "Needs you · gone · box".to_owned(),
+            "test: Waiting for input".to_owned()
+        )],
+        "the toast names the session by its own host's agent, its repo and its host"
     );
     let rows: Vec<(String, String)> = h.root(|root, _| {
         root.needs_you_rows()

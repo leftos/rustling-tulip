@@ -16,31 +16,56 @@ use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::dashboard_rows::{AskBlock, AskChoice, GO_TO_PANE};
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px};
-use crate::toast_stack::{AppToast, AppToastKind, SessionKey};
+use crate::toast_stack::{AppToast, AppToastKind, SessionKey, WIDTH};
 use crate::ui_theme::theme;
 use crate::{RootView, UI_TEXT_SIZE};
 
-/// How tall a toast with no answers is, in logical px.
-const CARD_HEIGHT: f32 = 116.0;
+/// The card's 1 px border, above and below, in logical px.
+const CARD_FRAME: f32 = 2.0;
 
-/// What the `Go to pane` row adds to a toast's height, in logical px: a
-/// compact button's height. An account toast draws no such row.
-const GO_ROW_HEIGHT: f32 = 28.0;
+/// The padding round the card's words, in logical px: each side's.
+const WORDS_PAD: f32 = 10.0;
 
-/// How tall a toast with answers is, in logical px.
-const ANSWERS_HEIGHT: f32 = 152.0;
+/// The gap under the title, and between the head and the rows, in logical px.
+const HEAD_GAP: f32 = 4.0;
 
-/// What a permission's command adds to a toast's height, in logical px.
-const COMMAND_HEIGHT: f32 = 30.0;
+/// The gap between two rows (the command, each answer, `Go to pane`), in
+/// logical px.
+const ROW_GAP: f32 = 6.0;
 
-/// What a second row of answers adds to a toast's height, in logical px.
-const SECOND_ROW_HEIGHT: f32 = 34.0;
+/// The least lines the body is given room for: the card keeps the size it
+/// had when its body was cut at two lines, so a short toast does not shrink
+/// to a sliver beside the others in the stack.
+const BODY_LEAST_LINES: usize = 2;
 
-/// How many answers share a row.
-const ANSWERS_PER_ROW: usize = 2;
+/// A compact button's least height, in logical px.
+const BUTTON_LEAST: f32 = 28.0;
+
+/// A compact button's padding and border, above and below together, in
+/// logical px.
+const BUTTON_FRAME: f32 = 10.0;
+
+/// A compact button's padding and border, left and right together, in
+/// logical px.
+const BUTTON_SIDES: f32 = 26.0;
+
+/// A compact button's label size, as the buttons draw it.
+const BUTTON_TEXT: f32 = 12.0;
+
+/// The command box's padding and border, above and below together, in
+/// logical px.
+const COMMAND_FRAME: f32 = 8.0;
+
+/// The room a label leaves for its key hint, in logical px: the gap and a
+/// digit at the hint's size, with some to spare.
+const HINT_ROOM: f32 = 16.0;
 
 /// How wide the card's accent stripe is, in logical px.
 const STRIPE_WIDTH: f32 = 3.0;
+
+/// How wide the card's words are, in logical px: the toast less its border,
+/// its stripe and the words' padding.
+const WORDS_WIDTH: f32 = WIDTH - CARD_FRAME - STRIPE_WIDTH - 2.0 * WORDS_PAD;
 
 /// The command box's text size, as the Dashboard's ask block draws it.
 const SMALL_TEXT: f32 = 11.5;
@@ -48,35 +73,262 @@ const SMALL_TEXT: f32 = 11.5;
 /// The key hint's text size, as the Dashboard's ask block draws it.
 const CAPS_TEXT: f32 = 10.5;
 
+/// An answer's description's text size: the UI text size less 1.5 px, as
+/// the key hint's is.
+const DESCRIPTION_TEXT: f32 = UI_TEXT_SIZE - 1.5;
+
 /// What an answered toast draws in its choices' place.
 const SENT: &str = "Sent";
 
-/// How tall `toast`'s card is, in logical px: the height it is placed at.
-#[must_use]
-pub fn card_height(toast: &AppToast) -> f32 {
-    let Some(ask) = &toast.ask else {
-        return match toast.kind {
-            AppToastKind::Account => CARD_HEIGHT - GO_ROW_HEIGHT,
-            AppToastKind::NeedsYou { .. } | AppToastKind::Finished => CARD_HEIGHT,
+/// A text the card draws, which sets the size it is drawn at and the width
+/// it wraps at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextRole {
+    /// The title and the body (the question), at the UI text size across
+    /// the card's words.
+    Body,
+    /// A permission's command, one line in the mono box.
+    Command,
+    /// An answer's label, at a compact button's text size across the
+    /// button, less its key hint's room when `hinted`; `bold` for the first,
+    /// primary, answer.
+    Answer {
+        /// Whether it is drawn bold.
+        bold: bool,
+        /// Whether a key hint sits beside it.
+        hinted: bool,
+    },
+    /// An answer's description, under its label at the description's
+    /// smaller size, across the label's width.
+    Description {
+        /// Whether a key hint sits beside the label.
+        hinted: bool,
+    },
+}
+
+/// The slack, in logical px, between the height a card was placed at and
+/// its window's: a physical pixel's rounding, which must not cut its body.
+const PLACED_SLACK: f32 = 1.0;
+
+/// How the card's texts measure, so its height fits what it draws.
+pub trait TextMeasure {
+    /// How many lines `text` wraps to, drawn as `role`.
+    fn lines(&self, text: &str, role: TextRole) -> usize;
+    /// How tall one line of `role` is, in logical px.
+    fn line_height(&self, role: TextRole) -> f32;
+    /// The UI text size offset the card is drawn at, which sizes a
+    /// button's least height as the buttons draw it.
+    fn offset(&self) -> i8;
+}
+
+/// The card's texts measured by GPUI's line wrapper, at the font, size and
+/// width the card draws them at.
+pub struct CardText<'a> {
+    cx: &'a App,
+}
+
+impl<'a> CardText<'a> {
+    /// The measure of the card's texts in `cx`.
+    #[must_use]
+    pub fn new(cx: &'a App) -> Self {
+        Self { cx }
+    }
+
+    /// The font, size and wrap width `role` is drawn at.
+    fn font(&self, role: TextRole) -> (gpui::Font, gpui::Pixels, f32) {
+        let offset = fonts::ui_text_size(self.cx);
+        let shift = fonts::ui_weight_shift(self.cx);
+        let ui = |weight| gpui::Font {
+            weight: fonts::ui_weight_at(shift, weight),
+            ..gpui::font(fonts::ui_family(self.cx))
         };
+        match role {
+            TextRole::Body => (
+                ui(gpui::FontWeight::NORMAL),
+                fonts::ui_px_at(offset, UI_TEXT_SIZE),
+                WORDS_WIDTH,
+            ),
+            TextRole::Command => (
+                gpui::Font {
+                    weight: fonts::mono_weight(),
+                    ..gpui::font(DEFAULT_FAMILY)
+                },
+                fonts::ui_px_at(offset, SMALL_TEXT),
+                WORDS_WIDTH,
+            ),
+            TextRole::Answer { bold, hinted } => {
+                let weight = if bold {
+                    gpui::FontWeight::BOLD
+                } else {
+                    gpui::FontWeight::NORMAL
+                };
+                let hint = if hinted { HINT_ROOM } else { 0.0 };
+                (
+                    ui(weight),
+                    fonts::ui_px_at(offset, BUTTON_TEXT),
+                    WORDS_WIDTH - BUTTON_SIDES - hint,
+                )
+            }
+            TextRole::Description { hinted } => {
+                let hint = if hinted { HINT_ROOM } else { 0.0 };
+                (
+                    ui(gpui::FontWeight::NORMAL),
+                    fonts::ui_px_at(offset, DESCRIPTION_TEXT),
+                    WORDS_WIDTH - BUTTON_SIDES - hint,
+                )
+            }
+        }
+    }
+}
+
+impl TextMeasure for CardText<'_> {
+    fn lines(&self, text: &str, role: TextRole) -> usize {
+        let (font, size, width) = self.font(role);
+        let mut wrapper = self.cx.text_system().line_wrapper(font, size);
+        // The wrapper skips a line break; the text breaks there first.
+        text.split('\n')
+            .map(|line| {
+                wrapper
+                    .wrap_line(&[gpui::LineFragment::text(line)], px(width))
+                    .count()
+                    + 1
+            })
+            .sum()
+    }
+
+    fn line_height(&self, role: TextRole) -> f32 {
+        let (_, size, _) = self.font(role);
+        // GPUI's default line height, `phi()` times the text size, rounded
+        // as GPUI rounds a text style's line height. The rem size only
+        // matters to a rem length, which `phi()` is not.
+        let height = gpui::phi().to_pixels(size.into(), size);
+        (height / px(1.0)).round()
+    }
+
+    fn offset(&self) -> i8 {
+        fonts::ui_text_size(self.cx)
+    }
+}
+
+/// How `card_layout` lays a card out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CardLayout {
+    /// The card's height, in logical px: the height it is placed at.
+    pub height: f32,
+    /// The lines of the body (the question) the card shows.
+    pub body_lines: usize,
+    /// Whether the body is cut to `body_lines` for the rows to fit.
+    pub clamped: bool,
+    /// What the card takes besides the body's lines, in logical px: its
+    /// frame, title, gaps and rows.
+    pub fixed: f32,
+}
+
+/// How tall `toast`'s card is, in logical px, its texts measured by
+/// `measure`: the height it is placed at. The card grows to fit what it
+/// draws, up to `cap`, the work area's room: a toast taller than the screen
+/// cannot be shown, so the card is cut there.
+#[must_use]
+pub fn card_height(toast: &AppToast, sent: bool, measure: &dyn TextMeasure, cap: f32) -> f32 {
+    card_layout(toast, sent, measure, cap).height
+}
+
+/// How `toast`'s card lays out, `sent` when an answer is out for its
+/// session, its texts measured by `measure`, within `cap`.
+#[must_use]
+pub fn card_layout(
+    toast: &AppToast,
+    sent: bool,
+    measure: &dyn TextMeasure,
+    cap: f32,
+) -> CardLayout {
+    let line = measure.line_height(TextRole::Body);
+    let measured = measure
+        .lines(&toast.body, TextRole::Body)
+        .max(BODY_LEAST_LINES);
+    // A compact button's least height, as the buttons draw it at the UI
+    // text offset.
+    let least = fonts::ui_px_at(measure.offset(), BUTTON_LEAST) / px(1.0);
+    let button = |texts: &[(TextRole, usize)]| {
+        let words: f32 = texts
+            .iter()
+            .map(|(role, lines)| count(*lines) * measure.line_height(*role))
+            .sum();
+        (BUTTON_FRAME + words).max(least)
     };
-    let choices = ask.choices.len();
-    let base = if choices == 0 {
-        CARD_HEIGHT
-    } else {
-        ANSWERS_HEIGHT
+    let plain = TextRole::Answer {
+        bold: false,
+        hinted: false,
     };
-    let command = if ask.command.is_some() {
-        COMMAND_HEIGHT
-    } else {
-        0.0
-    };
-    let second_row = if choices > ANSWERS_PER_ROW {
-        SECOND_ROW_HEIGHT
-    } else {
-        0.0
-    };
-    base + command + second_row
+    // The rows `answer_block` draws, branch for branch.
+    let mut rows: Vec<f32> = Vec::new();
+    if let Some(ask) = &toast.ask {
+        if ask.command.is_some() {
+            rows.push(COMMAND_FRAME + measure.line_height(TextRole::Command));
+        }
+        if sent && !ask.choices.is_empty() {
+            rows.push(button(&[(plain, 1)]));
+        } else if ask.since.is_some() {
+            for (index, choice) in ask.choices.iter().enumerate() {
+                let hinted = choice.hint.is_some();
+                let label = TextRole::Answer {
+                    bold: index == 0,
+                    hinted,
+                };
+                let mut texts = vec![(label, measure.lines(&choice.label, label))];
+                if let Some(description) = described(choice) {
+                    let role = TextRole::Description { hinted };
+                    texts.push((role, measure.lines(description, role)));
+                }
+                rows.push(button(&texts));
+            }
+        }
+    }
+    if toast.kind != AppToastKind::Account {
+        rows.push(button(&[(plain, 1)]));
+    }
+    let gaps = count(rows.len().saturating_sub(1)) * ROW_GAP;
+    let fixed =
+        CARD_FRAME + 2.0 * WORDS_PAD + line + 2.0 * HEAD_GAP + rows.iter().sum::<f32>() + gaps;
+    let height = fixed + count(measured) * line;
+    if height <= cap {
+        return CardLayout {
+            height,
+            body_lines: measured,
+            clamped: false,
+            fixed,
+        };
+    }
+    // Too tall for the work area: the body is cut to the lines that fit, so
+    // the command, the answers and `Go to pane` stay on the card. A line of
+    // it always shows.
+    let fit = (1..measured)
+        .rev()
+        .find(|lines| fixed + count(*lines) * line <= cap)
+        .unwrap_or(1);
+    CardLayout {
+        height: cap,
+        body_lines: fit,
+        clamped: true,
+        fixed,
+    }
+}
+
+/// `choice`'s description, when it has one to draw.
+fn described(choice: &AskChoice) -> Option<&str> {
+    choice
+        .description
+        .as_deref()
+        .filter(|description| !description.is_empty())
+}
+
+/// `n` as a height multiplier.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a card's lines and rows are few"
+)]
+fn count(n: usize) -> f32 {
+    n as f32
 }
 
 /// An answer button's press: the wait it answers and the choice made.
@@ -116,6 +368,19 @@ fn answer_button(
     };
     let answer = Rc::clone(answer);
     let picked = choice.choice;
+    // The description draws under the label, inside the button: a tooltip
+    // is drawn inside the toast's window, which is only as tall as its
+    // card, so a long one would be cut.
+    let description = described(choice).map(|description| {
+        div()
+            .driver_id(|| format!("toast-answer-{index}-description"))
+            .text_size(fonts::ui_px_at(offset, DESCRIPTION_TEXT))
+            .font_weight(fonts::ui_weight_at(shift, gpui::FontWeight::NORMAL))
+            // On the filled primary button the muted colour has no contrast
+            // with the fill, so it keeps the button's own text colour.
+            .when(index != 0, |text| text.text_color(gpui::rgb(t.muted)))
+            .child(description.to_owned())
+    });
     make(
         offset,
         shift,
@@ -125,16 +390,17 @@ fn answer_button(
         Layer::Base,
         &t,
     )
-    .flex_1()
-    .min_w_0()
+    .w_full()
     .gap(px(6.0))
+    // The label and its description wrap and show whole; the card's height
+    // measures them.
     .child(
         div()
+            .flex()
+            .flex_col()
             .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(choice.label.clone()),
+            .child(div().child(choice.label.clone()))
+            .children(description),
     )
     .when_some(choice.hint.clone(), |button, hint| {
         button.child(
@@ -149,7 +415,7 @@ fn answer_button(
     .into_any_element()
 }
 
-/// `ask`'s command box, its choices two to a row, or, once an answer is
+/// `ask`'s command box, its choices one to a row, or, once an answer is
 /// `sent`, a disabled `Sent` in their place.
 fn answer_block(ask: &AskBlock, sent: bool, answer: &AnswerPress, cx: &App) -> Div {
     let t = theme(cx);
@@ -171,18 +437,8 @@ fn answer_block(ask: &AskBlock, sent: bool, answer: &AnswerPress, cx: &App) -> D
             .into_any_element(),
         );
     } else if let Some(since) = ask.since {
-        let numbered: Vec<(usize, &AskChoice)> = ask.choices.iter().enumerate().collect();
-        for row in numbered.chunks(ANSWERS_PER_ROW) {
-            let buttons = row
-                .iter()
-                .map(|(index, choice)| answer_button(*index, choice, since, answer, cx));
-            rows.push(
-                div()
-                    .flex()
-                    .gap(px(6.0))
-                    .children(buttons)
-                    .into_any_element(),
-            );
+        for (index, choice) in ask.choices.iter().enumerate() {
+            rows.push(answer_button(index, choice, since, answer, cx));
         }
     }
     div()
@@ -232,27 +488,51 @@ fn go_to_pane_button(press: SharedPress, cx: &App) -> AnyElement {
 }
 
 /// The card's title and body, taking `press` when a click on them goes to the
-/// toast's pane.
-fn head_block(toast: &AppToast, press: Option<SharedPress>, cx: &App) -> AnyElement {
+/// toast's pane; the body cut to `body_lines` lines, ending in `…`, when
+/// given.
+fn head_block(
+    toast: &AppToast,
+    body_lines: Option<usize>,
+    press: Option<SharedPress>,
+    cx: &App,
+) -> AnyElement {
     let t = theme(cx);
     let head = div()
         .flex()
         .flex_col()
         .gap(px(4.0))
-        .child(
-            crate::ellipsis::truncating(
-                &format!("toast-title-{}", toast.key.1),
-                gpui::StyledText::new(toast.title.clone()),
-            )
-            .pr(px(16.0))
-            .text_color(gpui::rgb(t.text)),
-        )
+        // The title as an invisible copy that sizes its box and a drawn copy
+        // laid over it. A `truncating` title collapsed to a bare `…`: gpui
+        // keeps one text layout per element, and taffy's layout cache can
+        // replay the title's full-width layout after a narrower measure
+        // (from a sibling's intrinsic pass) replaced it. The absolutely
+        // placed copy is measured once, at the box's final width. The
+        // margin, not a padding, keeps it clear of ×: an absolute child
+        // spans its box's padding.
         .child(
             div()
+                .relative()
+                .min_w(px(0.0))
                 .overflow_hidden()
-                .text_ellipsis()
-                .line_clamp(2)
+                .whitespace_nowrap()
+                .mr(px(16.0))
+                .text_color(gpui::rgb(t.text))
+                .driver_id(|| format!("toast-title-{}", toast.key.1))
+                .children(crate::ellipsis::ellipsized(
+                    &format!("toast-title-{}", toast.key.1),
+                    toast.title.clone().into(),
+                    gpui::StyledText::new(toast.title.clone()),
+                )),
+        )
+        // The body (a question) wraps and shows whole; the card's height
+        // measures it. On a card cut to the work area it ends at the lines
+        // that fit, so the rows under it stay on the card.
+        .child(
+            div()
                 .text_color(gpui::rgb(t.text_2))
+                .when_some(body_lines, |body, lines| {
+                    body.overflow_hidden().text_ellipsis().line_clamp(lines)
+                })
                 .child(toast.body.clone()),
         );
     match press {
@@ -266,8 +546,15 @@ fn head_block(toast: &AppToast, press: Option<SharedPress>, cx: &App) -> AnyElem
 }
 
 /// `toast`'s card, filling its parent; `sent` when an answer is out for its
-/// session.
-pub fn toast_card(toast: &AppToast, sent: bool, presses: ToastPresses, cx: &App) -> Div {
+/// session; its body cut to `body_lines` lines when given (see
+/// [`CardLayout::clamped`]).
+pub fn toast_card(
+    toast: &AppToast,
+    sent: bool,
+    body_lines: Option<usize>,
+    presses: ToastPresses,
+    cx: &App,
+) -> Div {
     let t = theme(cx);
     let accent = match toast.kind {
         AppToastKind::NeedsYou { .. } => t.asking,
@@ -299,9 +586,15 @@ pub fn toast_card(toast: &AppToast, sent: bool, presses: ToastPresses, cx: &App)
             (*presses.dismiss)(event, window, cx);
             cx.stop_propagation();
         });
+    // An ask with no command and no answer rows (no choices, or no wait
+    // stamp to answer against) draws no block, and takes no gap above
+    // `Go to pane`, as `card_layout` counts it.
     let answers = toast
         .ask
         .as_ref()
+        .filter(|ask| {
+            ask.command.is_some() || (!ask.choices.is_empty() && (sent || ask.since.is_some()))
+        })
         .map(|ask| answer_block(ask, sent, &presses.answer, cx));
     let words = div()
         .flex()
@@ -310,7 +603,7 @@ pub fn toast_card(toast: &AppToast, sent: bool, presses: ToastPresses, cx: &App)
         .min_w_0()
         .gap(px(4.0))
         .p(px(10.0))
-        .child(head_block(toast, head_press, cx))
+        .child(head_block(toast, body_lines, head_press, cx))
         .child(
             div()
                 .mt_auto()
@@ -460,7 +753,12 @@ impl Render for ToastView {
             },
             dismiss: dismiss_press(dismiss_root, dismiss_key),
         };
-        let card = toast_card(&self.toast, self.sent, presses, cx);
+        // The window is as tall as the card was placed: when that cut it to
+        // the work area, the body is cut to the lines that fit.
+        let placed = window.viewport_size().height / px(1.0) + PLACED_SLACK;
+        let layout = card_layout(&self.toast, self.sent, &CardText::new(cx), placed);
+        let body_lines = layout.clamped.then_some(layout.body_lines);
+        let card = toast_card(&self.toast, self.sent, body_lines, presses, cx);
         div()
             .id("toast-window")
             .size_full()
@@ -485,7 +783,7 @@ mod tests {
 
     use protocol::PromptChoice;
 
-    use super::{card_height, releases_hover};
+    use super::{TextMeasure, TextRole, card_height, card_layout, count, releases_hover};
     use crate::dashboard_rows::{AskBlock, AskChoice};
     use crate::target::HostKey;
     use crate::toast_stack::{AppToast, AppToastKind, key_of};
@@ -537,41 +835,215 @@ mod tests {
         )
     }
 
-    /// A toast waiting on `choices` answers, with a command when `command`.
-    fn asking(choices: u16, command: bool) -> AppToast {
-        let choice = |index| AskChoice {
-            label: format!("choice {index}"),
-            hint: None,
-            choice: PromptChoice::Option { index },
-        };
+    /// A toast waiting on an answer per label, with a command when `command`,
+    /// its buttons up (a wait stamp).
+    fn asking(labels: &[&str], command: bool) -> AppToast {
+        asking_described(labels, command, None)
+    }
+
+    /// As [`asking`], each answer described by `description` when given.
+    fn asking_described(labels: &[&str], command: bool, description: Option<&str>) -> AppToast {
+        let choices = labels
+            .iter()
+            .zip(0..)
+            .map(|(label, index)| AskChoice {
+                label: (*label).to_owned(),
+                hint: Some("1".to_owned()),
+                choice: PromptChoice::Option { index },
+                description: description.map(str::to_owned),
+            })
+            .collect();
         toast().waiting_on(
             Some(AskBlock {
                 session_id: "s1".to_owned(),
                 label: "Permission ·".to_owned(),
                 text: "a prompt".to_owned(),
                 command: command.then(|| "gh pr merge".to_owned()),
-                since: None,
-                choices: (0..choices).map(choice).collect(),
+                since: Some(chrono::Utc::now()),
+                choices,
             }),
             None,
         )
     }
 
+    /// As [`asking`], with no wait stamp: no buttons are drawn.
+    fn unstamped(labels: &[&str], command: bool) -> AppToast {
+        let mut toast = asking(labels, command);
+        if let Some(ask) = toast.ask.as_mut() {
+            ask.since = None;
+        }
+        toast
+    }
+
+    /// A measure where a text starting `long` wraps to three lines, one
+    /// starting `many` to twenty, and any other fits one, every line `line`
+    /// px tall, at UI text size offset `offset`.
+    struct Fake {
+        line: f32,
+        offset: i8,
+    }
+
+    /// The measure most cases use: 20 px lines at offset 0.
+    const FAKE: Fake = Fake {
+        line: 20.0,
+        offset: 0,
+    };
+
+    impl TextMeasure for Fake {
+        fn lines(&self, text: &str, _: TextRole) -> usize {
+            if text.starts_with("long") {
+                3
+            } else if text.starts_with("many") {
+                20
+            } else {
+                1
+            }
+        }
+
+        fn line_height(&self, _: TextRole) -> f32 {
+            self.line
+        }
+
+        fn offset(&self) -> i8 {
+            self.offset
+        }
+    }
+
     #[test]
     fn card_height_follows_what_the_card_draws() {
+        // At 20 px a line: the frame and padding 22, the title 20, its gap 4,
+        // a body of at least two lines 40, the gap above the rows 4, then
+        // each row (a one-line button 30, a three-line one 70, the command
+        // 28, a described one-line button 50) with 6 between rows.
+        let mut long_body = toast();
+        long_body.body = "long body".to_owned();
         let cases = [
-            (toast(), 116.0, "no ask"),
-            (asking(0, false), 116.0, "no choices"),
-            (asking(2, false), 152.0, "one row of choices"),
-            (asking(1, false), 152.0, "one choice"),
-            (asking(2, true), 182.0, "choices and a command"),
-            (asking(0, true), 146.0, "a command and no choices"),
-            (asking(3, false), 186.0, "a second row of choices"),
-            (asking(3, true), 216.0, "a second row and a command"),
-            (account(), 88.0, "an account toast draws no Go to pane row"),
+            (
+                toast(),
+                120.0,
+                "no ask: the body's two lines and Go to pane",
+            ),
+            (
+                long_body,
+                140.0,
+                "a body that wraps to three lines shows them all",
+            ),
+            (asking(&[], false), 120.0, "no choices"),
+            (asking(&["a"], false), 156.0, "one choice"),
+            (asking(&["a", "b"], false), 192.0, "a row per choice"),
+            (asking(&["a", "b", "c"], false), 228.0, "three rows"),
+            (
+                asking(&["long a", "b"], false),
+                232.0,
+                "a wrapped answer grows its row",
+            ),
+            (asking(&["a", "b"], true), 226.0, "choices and a command"),
+            (asking(&[], true), 154.0, "a command and no choices"),
+            (account(), 90.0, "an account toast draws no Go to pane row"),
+            (
+                asking_described(&["a"], false, Some("what a does")),
+                176.0,
+                "a description draws under its label and grows its row",
+            ),
+            (
+                unstamped(&["a", "b", "c"], false),
+                120.0,
+                "no wait stamp: no buttons, no rows",
+            ),
+            (
+                unstamped(&["a", "b"], true),
+                154.0,
+                "no wait stamp: the command alone",
+            ),
         ];
         for (toast, height, why) in cases {
-            assert!((card_height(&toast) - height).abs() < f32::EPSILON, "{why}");
+            let drawn = card_height(&toast, false, &FAKE, 1000.0);
+            assert!((drawn - height).abs() < f32::EPSILON, "{why}: {drawn}");
         }
+        let capped = card_height(&asking(&["a", "b", "c"], false), false, &FAKE, 200.0);
+        assert!(
+            (capped - 200.0).abs() < f32::EPSILON,
+            "a card taller than the work area is cut to it: {capped}"
+        );
+    }
+
+    #[test]
+    fn card_height_once_sent_counts_one_sent_row() {
+        let cases = [
+            (
+                asking(&["long a", "long b", "c"], false),
+                156.0,
+                "one Sent row in the answers' place",
+            ),
+            (
+                asking(&["a", "b"], true),
+                190.0,
+                "the command stays above the Sent row",
+            ),
+            (asking(&[], false), 120.0, "no choices: no Sent row"),
+            (
+                unstamped(&["a", "b"], false),
+                156.0,
+                "sent with choices draws Sent, stamp or none",
+            ),
+        ];
+        for (toast, height, why) in cases {
+            let drawn = card_height(&toast, true, &FAKE, 1000.0);
+            assert!((drawn - height).abs() < f32::EPSILON, "{why}: {drawn}");
+        }
+    }
+
+    #[test]
+    fn card_height_clamps_the_body_so_the_answers_fit() {
+        // The frame 22, the title 20 and its gap 4, the gap above the rows 4,
+        // three answers and Go to pane at 30 each with 6 between: 188 px
+        // before the body, so 112 px are left under a 300 px cap: 5 lines.
+        let mut toast = asking(&["a", "b", "c"], false);
+        toast.body = "many lines".to_owned();
+        let layout = card_layout(&toast, false, &FAKE, 300.0);
+        assert!(
+            (layout.height - 300.0).abs() < f32::EPSILON,
+            "the card fills the cap: {layout:?}"
+        );
+        assert!(layout.clamped, "the body is cut: {layout:?}");
+        assert_eq!(layout.body_lines, 5, "the lines that fit: {layout:?}");
+        assert!(layout.body_lines < 20, "fewer than measured: {layout:?}");
+        assert!(
+            (layout.fixed - 188.0).abs() < f32::EPSILON,
+            "the rows are all counted: {layout:?}"
+        );
+        assert!(
+            layout.fixed + count(layout.body_lines) * 20.0 <= 300.0,
+            "the rows fit under the cut body: {layout:?}"
+        );
+        let whole = card_layout(&toast, false, &FAKE, 1000.0);
+        assert!(!whole.clamped, "room for it all: {whole:?}");
+        assert_eq!(whole.body_lines, 20, "{whole:?}");
+    }
+
+    #[test]
+    fn card_height_least_button_follows_the_text_size_offset() {
+        // At 10 px a line: the frame 22, the title 10 and its gap 4, the
+        // body's two lines 20, the gap above the rows 4: 60; then a one-line
+        // answer and Go to pane, 20 px of text and padding each, held to the
+        // least height, with 6 between.
+        let small = Fake {
+            line: 10.0,
+            offset: -4,
+        };
+        let drawn = card_height(&asking(&["a"], false), false, &small, 1000.0);
+        assert!(
+            (drawn - 114.0).abs() < f32::EPSILON,
+            "24 px rows at offset -4: {drawn}"
+        );
+        let at_zero = Fake {
+            line: 10.0,
+            offset: 0,
+        };
+        let drawn = card_height(&asking(&["a"], false), false, &at_zero, 1000.0);
+        assert!(
+            (drawn - 122.0).abs() < f32::EPSILON,
+            "28 px rows at offset 0: {drawn}"
+        );
     }
 }

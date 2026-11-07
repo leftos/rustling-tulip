@@ -1224,6 +1224,7 @@ mod tests {
                     question: "Pick a colour".to_owned(),
                     header: "Colour".to_owned(),
                     options: options.iter().map(|&option| option.to_owned()).collect(),
+                    option_descriptions: Vec::new(),
                     multi_select,
                 }],
             }

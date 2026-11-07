@@ -1335,6 +1335,42 @@ fn a_choice_button_sends_answer_prompt(cx: &mut TestAppContext) {
     assert!(request_id.is_some(), "the answer carries a request id");
 }
 
+/// Whether resting the mouse on `selector` draws a tooltip reading `text`
+/// against the mouse there. gpui puts a tooltip's corner a pixel from the
+/// mouse, so one drawn for an earlier control elsewhere does not count.
+fn tooltip_on(h: &mut Harness<'_>, selector: &str, text: &str) -> bool {
+    let at = h.center(selector);
+    h.hover(at, Modifiers::none());
+    h.advance(std::time::Duration::from_millis(600));
+    let tip = h.bounds(&format!("tooltip={text}"));
+    let slack = px(2.0);
+    tip.origin.x >= px(0.0)
+        && at.x >= tip.left() - slack
+        && at.x <= tip.right() + slack
+        && at.y >= tip.top() - slack
+        && at.y <= tip.bottom() + slack
+}
+
+#[gpui::test]
+fn hovering_an_ask_choice_shows_its_description(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let described = json!({
+        "kind": "question",
+        "questions": [{
+            "question": "Which branch?", "header": "", "options": ["main", "dev"],
+            "option_descriptions": ["The release branch.", ""], "multi_select": false,
+        }],
+    });
+    let fixture = on_dashboard(vec![waiting_on("q1", minutes_ago(3), described)]);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+
+    assert!(
+        tooltip_on(&mut h, "dash-ask-choice-q1-1", "The release branch."),
+        "the first choice's description shows on hover"
+    );
+}
+
 #[gpui::test]
 fn a_permission_shows_allow_deny_and_go_to_pane(cx: &mut TestAppContext) {
     let dir = TestDir::new();

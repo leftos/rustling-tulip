@@ -436,21 +436,34 @@ fn questions(input: Option<&Value>) -> Vec<PendingQuestion> {
 
 /// One question, with what the prompt left out filled in.
 fn question(item: &Value) -> PendingQuestion {
+    // Each labelled option with its description, an empty one where it has
+    // none, so the two lists stay in step.
+    let (options, option_descriptions) = item
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| {
+                    let label = option.get("label").and_then(Value::as_str)?;
+                    let description = option
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    Some((
+                        truncate(label, DETAIL_MAX_CHARS),
+                        truncate(description, MESSAGE_MAX_CHARS),
+                    ))
+                })
+                .take(MAX_OPTIONS)
+                .unzip()
+        })
+        .unwrap_or_default();
     PendingQuestion {
         question: truncate(&text(item, "question"), MESSAGE_MAX_CHARS),
         header: truncate(&text(item, "header"), DETAIL_MAX_CHARS),
-        options: item
-            .get("options")
-            .and_then(Value::as_array)
-            .map(|options| {
-                options
-                    .iter()
-                    .filter_map(|option| option.get("label").and_then(Value::as_str))
-                    .take(MAX_OPTIONS)
-                    .map(|label| truncate(label, DETAIL_MAX_CHARS))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        options,
+        option_descriptions,
         multi_select: item
             .get("multiSelect")
             .and_then(Value::as_bool)
@@ -818,16 +831,49 @@ mod tests {
                         question: "Do you prefer tea or coffee?".to_owned(),
                         header: "Drink".to_owned(),
                         options: vec!["Tea".to_owned(), "Coffee".to_owned()],
+                        option_descriptions: vec![
+                            "You prefer tea.".to_owned(),
+                            "You prefer coffee.".to_owned()
+                        ],
                         multi_select: true,
                     },
                     PendingQuestion {
                         question: "Which editor?".to_owned(),
                         header: String::new(),
                         options: vec!["vim".to_owned()],
+                        option_descriptions: vec![String::new()],
                         multi_select: false,
                     },
                 ],
             })
+        );
+    }
+
+    #[test]
+    fn a_question_keeps_each_options_description_in_step_with_its_label() {
+        let body = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{
+                "question": "Which branch?",
+                "options": [
+                    {"label": "main", "description": "The release branch."},
+                    {"label": "dev"}
+                ]
+            }]},
+        });
+        assert_eq!(
+            pending_of(&body),
+            PendingUpdate::Set(PendingInput::Question {
+                questions: vec![PendingQuestion {
+                    question: "Which branch?".to_owned(),
+                    header: String::new(),
+                    options: vec!["main".to_owned(), "dev".to_owned()],
+                    option_descriptions: vec!["The release branch.".to_owned(), String::new()],
+                    multi_select: false,
+                }],
+            }),
+            "an option with no description holds its place with an empty one"
         );
     }
 
@@ -875,6 +921,7 @@ mod tests {
                     question: "Tea or coffee?".to_owned(),
                     header: String::new(),
                     options: Vec::new(),
+                    option_descriptions: Vec::new(),
                     multi_select: false,
                 }],
             })
