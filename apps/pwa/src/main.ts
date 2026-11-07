@@ -1,3 +1,4 @@
+import { mountHomeView } from "./home-view";
 import { SW_SCOPE, SW_URL } from "./paths";
 import { mountPairingView } from "./pairing-view";
 import { browserScannerEnv, createCodeScanner } from "./scanner";
@@ -67,10 +68,16 @@ const connection = createConnection({
 });
 
 // The pairing screen fills the page's section from the pairing model and the
-// camera; every other notice stays on the console.
+// camera; Home fills its own once the phone is paired and connected; every
+// other notice stays on the console.
 const pairingSection = document.getElementById("pairing");
 if (pairingSection !== null) {
   mountPairingView(pairingSection, connection, createCodeScanner(browserScannerEnv()));
+}
+const intro = document.getElementById("intro");
+const homeSection = document.getElementById("home");
+if (homeSection !== null) {
+  mountHomeView(homeSection, connection, intro);
 }
 connection.subscribe((notice) => {
   if (notice.kind === "pairing") {

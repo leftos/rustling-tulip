@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- The phone app's Home lists your sessions grouped as on the desktop, with a Needs you tray to answer prompts in one tap, and Stop and Resume on each session.
 - The phone app pairs itself: tap Ask to pair, approve the phone on your computer, then scan the code it shows or type it; the phone stays paired across launches.
 - Ctrl+Shift+P opens a jump palette: type to find any open pane, tab, session, repo or workspace, and Enter goes straight there.
 - A Ctrl+clicked file fetched from another host shows its size, progress and a progress bar in its toast, with Cancel until the download is done.

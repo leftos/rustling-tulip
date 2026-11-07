@@ -119,3 +119,147 @@ p {
   font-size: 1.25rem;
   letter-spacing: 0.2em;
 }
+
+/* A class that sets `display` would otherwise win over the hidden attribute,
+   which is how the pairing screen's own `display` rules used to leak past it. */
+[hidden] {
+  display: none !important;
+}
+
+/* Home: the Needs you tray pinned over the groups, one group per container. */
+.home-bar {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  color: #1e1e2e;
+  background: #f38ba8;
+}
+
+.home-tray {
+  position: sticky;
+  top: 0;
+  top: env(safe-area-inset-top, 0px);
+  z-index: 1;
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding-bottom: 8px;
+  background: #1e1e2e;
+}
+
+.home-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #313244;
+}
+
+.home-card-label {
+  font-weight: 600;
+}
+
+.home-card-detail,
+.home-card-position,
+.home-card-sending,
+.home-row-status {
+  color: #a6adc8;
+}
+
+.home-card-error {
+  color: #f38ba8;
+}
+
+.home-card-answers,
+.home-card-moves {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.home-choice,
+.home-card-open,
+.home-card-previous,
+.home-card-next,
+.home-row-stop,
+.home-row-resume {
+  min-height: 44px;
+  box-sizing: border-box;
+  border: 1px solid #45475a;
+  border-radius: 12px;
+  padding: 0 16px;
+  color: #cdd6f4;
+  background: #313244;
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+.home-choice {
+  border: 0;
+  color: #1e1e2e;
+  background: #89b4fa;
+}
+
+.home-card-previous:disabled,
+.home-card-next:disabled,
+.home-card-open:disabled,
+.home-choice:disabled,
+.home-row-label:disabled,
+.home-row-stop:disabled,
+.home-row-resume:disabled {
+  opacity: 0.5;
+}
+
+.home-hint {
+  display: inline-block;
+  min-width: 1.5em;
+  margin-right: 8px;
+  border-radius: 6px;
+  color: #cdd6f4;
+  background: #45475a;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.home-group {
+  margin: 0 0 16px;
+}
+
+.home-group-name {
+  margin: 0 0 4px;
+  color: #a6adc8;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.home-row {
+  border-bottom: 1px solid #313244;
+}
+
+.home-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+}
+
+.home-row-error {
+  margin: 0 0 8px;
+  color: #f38ba8;
+  font-size: 0.9rem;
+}
+
+.home-row-label {
+  flex: 1;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  color: #cdd6f4;
+  background: none;
+  font-family: inherit;
+  font-size: 1rem;
+  text-align: left;
+}

@@ -224,6 +224,20 @@ afterEach(() => {
 
 // --- the send path ----------------------------------------------------------
 
+test("paired_is_true_only_on_a_ready_connection_that_presented_a_token", async () => {
+  const ready = await reachReady();
+  expect(ready.connection.paired()).toBe(true);
+
+  const unpaired = await reachUnpairedReady();
+  expect(lastStatus(unpaired.notices)).toBe("ready");
+  expect(unpaired.connection.paired()).toBe(false);
+
+  for (const [state, reach] of NOT_READY) {
+    const reached = await reach();
+    expect(reached.connection.paired(), state).toBe(false);
+  }
+});
+
 test("send_while_ready_writes_the_frame_and_answers_true", async () => {
   const reached = await reachReady();
   expect(lastStatus(reached.notices)).toBe("ready");

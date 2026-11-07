@@ -89,6 +89,12 @@ export interface Connection {
   forget(): void;
   /** The pairing model now; each change is also a `pairing` notice. */
   pairingState(): PairingState;
+  /**
+   * Whether the connection is ready and presented a device token. False
+   * everywhere else, and on the pairing channel, which a phone that
+   * presented none lands on.
+   */
+  paired(): boolean;
 }
 
 /**
@@ -399,6 +405,10 @@ export function createConnection(deps: ConnectionDeps): Connection {
     }
   }
 
+  function paired(): boolean {
+    return state.name === "ready" && state.unpaired !== true;
+  }
+
   return {
     start,
     stop,
@@ -409,6 +419,7 @@ export function createConnection(deps: ConnectionDeps): Connection {
     send,
     forget,
     pairingState: () => pairing,
+    paired,
   };
 }
 
