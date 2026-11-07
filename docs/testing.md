@@ -48,7 +48,9 @@ The native client has three test tiers, and the driver MCP server has a live spe
 
 The driver MCP server's other specs (`tools/rt-driver-mcp/tests/server.rs`) run in the normal nextest run. Its live spec, `driver_mcp_launch_ping_screenshot_stop`, is `#[ignore]`d: it launches a real driven client and needs the daemon, tracer and driver client built in test-release. `tools/rt-driver-mcp/live-check.ps1` builds them and runs the ignored specs, so run it as one gate job with `--slot heavy`, since it builds: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/<name>.log --timeout 3600 --slot heavy -- pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1`.
 
-The phone app's unit tests (`apps/pwa`) run with `pnpm --dir apps/pwa test` (vitest, after `pnpm --dir apps/pwa install`), outside the Rust suite and the test map: `tools/test-map.json` ignores `apps/pwa/**`, and `.\rt.ps1 test` does not run them. The prek hooks lint and format-check that folder through `tools/pwa-hook.ps1`.
+The phone app (`apps/pwa`) has its own checks, and the full suite runs them: `.\rt.ps1 test` runs `pnpm --dir apps/pwa install --frozen-lockfile`, then `pnpm --dir apps/pwa typecheck`, then `pnpm --dir apps/pwa test` (vitest), after the Rust suites, and fails on the first failing step. A run given a test filter (`.\rt.ps1 test <filter>`) runs only what the filter names and skips the phone app's checks, saying so; a full or reached run without pnpm fails before any suite starts.
+
+A reached run runs the same checks when a selected row in `tools/test-map.json` carries `"pwa": true`: the `apps/pwa/**` row is that flag alone, and the `crates/protocol/**` and `tools/protocol-ts/**` rows carry it beside their filter because a protocol change regenerates `apps/pwa/src/protocol.ts`. `-PrintOnly` prints `reached: phone app checks` for such a selection. The prek hooks lint and format-check the folder through `tools/pwa-hook.ps1`.
 
 ## Driving the daemon's CLI from a script
 

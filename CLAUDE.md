@@ -62,9 +62,9 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 setup            # install/check Windows build prerequisites via winget (Git, Node.js, pnpm, Rust, C++ Build Tools), plus cargo-sweep and cargo-nextest
 .\rt.ps1 stop             # kill any running daemon and tracers; remove the stale handshake
 .\rt.ps1 restart          # build daemon + tracer, stop the daemon (sessions survive in their tracers), run the native client
-.\rt.ps1 test             # cargo nextest run --workspace --cargo-profile test-release, then the driver specs (-p rustling-tulip-native --features driver); fails pointing at `setup` without cargo-nextest
-.\rt.ps1 test -Reached    # run only the tests the change reaches: a changed file's row in tools/test-map.json, else the full suite (-Base <ref> sets the diff base: branch.<name>.base, else main's merge-base with HEAD)
-.\rt.ps1 test -Reached -PrintOnly   # print the selection ("full suite: <file> is central" / "is unmapped", "reached: <filter>", "reached (features driver): <filter>", or "no tests reached") and run nothing
+.\rt.ps1 test             # cargo nextest run --workspace --cargo-profile test-release, then the driver specs (-p rustling-tulip-native --features driver), then the phone app's checks (pnpm install --frozen-lockfile, typecheck and vitest in apps/pwa); fails pointing at `setup` without cargo-nextest or pnpm
+.\rt.ps1 test -Reached    # run only the tests the change reaches: a changed file's row in tools/test-map.json (a row flagged `pwa` adds the phone app's checks), else the full suite (-Base <ref> sets the diff base: branch.<name>.base, else main's merge-base with HEAD)
+.\rt.ps1 test -Reached -PrintOnly   # print the selection ("full suite: <file> is central" / "is unmapped", "reached: <filter>", "reached (features driver): <filter>", "reached: phone app checks", or "no tests reached") and run nothing
 .\rt.ps1 test -Validate   # check tools/test-map.json ("test map ok: <n> rows; <m> native source and test files covered")
 .\rt.ps1 clippy           # the agent seam check (tools/check-agent-names.ps1) first, then the strict lint pass (-D warnings)
 .\rt.ps1 fmt              # cargo fmt --all
@@ -110,7 +110,7 @@ cargo nextest run -p rustling-tulip-native --cargo-profile test-release --featur
 # e2e_live.rs, e2e_recover.rs, e2e_remote.rs, e2e_ssh.rs, e2e_multi_host.rs and smoke_window.rs are #[ignore]d here; run them through rt.ps1 native-e2e / native-smoke
 ```
 
-The repo is in `test mode: stable`: every landed change's last gate runs the full suite (`cargo nextest run --workspace --cargo-profile test-release`, then the driver specs with `-p rustling-tulip-native --features driver`; `.\rt.ps1 test` runs both). The **test map**, `tools/test-map.json` (keys `central`, `ignore`, `rows` of source paths to nextest filtersets), still drives `.\rt.ps1 test -Reached` for a quick run while iterating.
+The repo is in `test mode: stable`: every landed change's last gate runs the full suite (`cargo nextest run --workspace --cargo-profile test-release`, then the driver specs with `-p rustling-tulip-native --features driver`, then the phone app's checks in `apps/pwa`; `.\rt.ps1 test` runs all three). The **test map**, `tools/test-map.json` (keys `central`, `ignore`, `rows` of source paths to nextest filtersets), still drives `.\rt.ps1 test -Reached` for a quick run while iterating.
 
 The release step is cutting a versioned release from the Linear release pipeline's `vNext`, only after a green full suite (procedure: `docs/release.md`); `v0.1.0-alpha` was the first.
 

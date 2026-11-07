@@ -31,11 +31,14 @@
                  running compatible daemon even from an older build.
       test       Run the workspace's tests with cargo-nextest
                  (`cargo nextest run --cargo-profile test-release`), then
-                 the driver specs with `--features driver`.
+                 the driver specs with `--features driver`, then the phone
+                 app's checks (pnpm install --frozen-lockfile, typecheck and
+                 vitest in apps/pwa).
                  -Reached runs only the tests the change since -Base
                  reaches, mapped through tools/test-map.json (a central or
-                 unmapped file runs the full suite); -PrintOnly prints the
-                 selection without running it; -Validate checks the map.
+                 unmapped file runs the full suite; a row flagged `pwa` adds
+                 the phone app's checks); -PrintOnly prints the selection
+                 without running it; -Validate checks the map.
       clippy     Run the agent-name seam check (tools/check-agent-names.ps1),
                  then the strict workspace clippy pass
                  (`--all-targets --all-features -- -D warnings`).
@@ -896,6 +899,13 @@ function Assert-Nextest {
     Test-Tool 'cargo-nextest' 'Tests run with cargo-nextest; run `.\rt.ps1 setup` to install it.'
 }
 
+# The phone app's checks need pnpm. A filtered run (`$Rest`) names exact tests and leaves the checks
+# out, so it needs no pnpm.
+function Assert-PwaTooling {
+    if ($Rest) { return }
+    Test-Tool 'pnpm' 'The phone app''s checks need pnpm; run `.\rt.ps1 setup` to install it.'
+}
+
 function Invoke-Test {
     Assert-Nextest
     if ($Validate) {
@@ -912,8 +922,14 @@ function Invoke-Test {
         Test-TestMap
         return
     }
-    if ($Reached) { Invoke-ReachedTest; return }
+    if ($Reached) {
+        # -PrintOnly runs nothing, so it needs no tool check.
+        if (-not $PrintOnly) { Assert-PwaTooling }
+        Invoke-ReachedTest
+        return
+    }
     if ($PrintOnly) { Write-Host 'full suite'; return }
+    Assert-PwaTooling
     Invoke-FullSuite
 }
 
@@ -931,8 +947,18 @@ function Invoke-FullSuite {
     Invoke-FeatureTest -Name test-driver -Package 'rustling-tulip-native' -Features 'driver' `
         -Filter 'test(/^driver::/) | test(/^ui_driver_registry::/)' -Extra @('--no-tests', 'warn')
     $driverExit = $LASTEXITCODE
+    # The phone app's checks come last, and all three steps run even when an earlier suite failed.
+    # A test filter names exact tests, so a filtered run leaves the phone app's checks out.
+    $pwaExit = 0
+    if ($Rest) {
+        Write-Host 'phone app checks skipped: a test filter was given' -ForegroundColor DarkGray
+    } else {
+        Invoke-PwaTest
+        $pwaExit = $LASTEXITCODE
+    }
     if ($workspaceExit -ne 0) { throw "cargo nextest run failed (exit $workspaceExit)" }
     if ($driverExit -ne 0) { throw "cargo nextest run --features driver failed (exit $driverExit)" }
+    if ($pwaExit -ne 0) { throw "phone app checks failed (exit $pwaExit)" }
 }
 
 # One nextest call for the tests of one package that compile only with a Cargo feature on, which a
@@ -945,6 +971,23 @@ function Invoke-FeatureTest([string]$Name, [string]$Package, [string]$Features, 
     ) + $Extra + @('-E', $Filter)
     if ($Rest) { $nextestArgs += $Rest }
     Invoke-Gated -Slot heavy -Name $Name -Command $nextestArgs
+}
+
+# The phone app's checks, in the order a fresh checkout needs them: install, typecheck, then vitest.
+# A failed step stops the rest and leaves its exit in $LASTEXITCODE for the caller, which checks
+# pnpm first (Assert-PwaTooling).
+function Invoke-PwaTest {
+    $pwaDir = Join-Path $ScriptDir 'apps/pwa'
+    $steps = @(
+        @{ Name = 'pwa-install'; Args = @('install', '--frozen-lockfile'); Label = 'pnpm install (apps/pwa)' }
+        @{ Name = 'pwa-typecheck'; Args = @('typecheck'); Label = 'pnpm typecheck (apps/pwa)' }
+        @{ Name = 'pwa-test'; Args = @('test'); Label = 'pnpm test (apps/pwa)' }
+    )
+    foreach ($step in $steps) {
+        Write-Host "==> $($step.Label)..." -ForegroundColor Cyan
+        Invoke-Gated -Slot light -Name $step.Name -Command (@('pnpm', '--dir', $pwaDir) + $step.Args)
+        if ($LASTEXITCODE -ne 0) { return }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1013,12 +1056,14 @@ function Join-Filter([string[]]$Filters) {
 }
 
 # Adds a row's filter to the plain set, or, for a row with `features`, to that
-# package and feature set's own call (-p <package> --features <features>).
+# package and feature set's own call (-p <package> --features <features>). A row
+# with no filter (the `pwa` one) adds none.
 function Add-RowFilter(
     [object]$Row,
     [System.Collections.Generic.List[string]]$Plain,
     [System.Collections.Specialized.OrderedDictionary]$Featured
 ) {
+    if (-not $Row.filter) { return }
     if (-not $Row.features) {
         if (-not $Plain.Contains($Row.filter)) { $Plain.Add($Row.filter) }
         return
@@ -1036,10 +1081,12 @@ function Add-RowFilter(
 # Maps changed files to one selection: Kind 'full' (a central or unmapped file),
 # 'none' (only ignored files) or 'filter' (the matching rows' filters: Filter for
 # the plain rows, $null when none, and one FeatureRuns entry per package and
-# feature set the rows with `features` name).
+# feature set the rows with `features` name). Pwa is set when a selected row
+# carries `pwa`: the phone app's checks run for that selection.
 function Resolve-TestSelection([string[]]$Files, [object]$Map) {
     $filters = [System.Collections.Generic.List[string]]::new()
     $featured = [System.Collections.Specialized.OrderedDictionary]::new()
+    $pwa = $false
     foreach ($file in $Files) {
         if (Test-GlobMatch $file $Map.central) {
             return [pscustomobject]@{ Kind = 'full'; Reason = "full suite: $file is central" }
@@ -1049,9 +1096,12 @@ function Resolve-TestSelection([string[]]$Files, [object]$Map) {
         if ($rows.Count -eq 0) {
             return [pscustomobject]@{ Kind = 'full'; Reason = "full suite: $file is unmapped" }
         }
-        foreach ($row in $rows) { Add-RowFilter -Row $row -Plain $filters -Featured $featured }
+        foreach ($row in $rows) {
+            if ($row.pwa) { $pwa = $true }
+            Add-RowFilter -Row $row -Plain $filters -Featured $featured
+        }
     }
-    if ($filters.Count -eq 0 -and $featured.Count -eq 0) {
+    if ($filters.Count -eq 0 -and $featured.Count -eq 0 -and -not $pwa) {
         return [pscustomobject]@{ Kind = 'none'; Reason = 'no tests reached' }
     }
     $runs = @($featured.Values | ForEach-Object {
@@ -1061,7 +1111,10 @@ function Resolve-TestSelection([string[]]$Files, [object]$Map) {
     $lines = @()
     if ($joined) { $lines += "reached: $joined" }
     $lines += @($runs | ForEach-Object { "reached (features $($_.Features)): $($_.Filter)" })
-    return [pscustomobject]@{ Kind = 'filter'; Reason = ($lines -join "`n"); Filter = $joined; FeatureRuns = $runs }
+    if ($pwa) { $lines += 'reached: phone app checks' }
+    return [pscustomobject]@{
+        Kind = 'filter'; Reason = ($lines -join "`n"); Filter = $joined; FeatureRuns = $runs; Pwa = $pwa
+    }
 }
 
 function Invoke-ReachedTest {
@@ -1087,6 +1140,14 @@ function Invoke-ReachedTest {
         Invoke-FeatureTest -Name $name -Package $run.Package -Features $run.Features -Filter $run.Filter -Extra @('--no-tests', 'warn')
         Test-CargoExitOk "cargo nextest run (reached, features $($run.Features))"
     }
+    if ($selection.Pwa) {
+        if ($Rest) {
+            Write-Host 'phone app checks skipped: a test filter was given' -ForegroundColor DarkGray
+        } else {
+            Invoke-PwaTest
+            Test-CargoExitOk 'phone app checks'
+        }
+    }
 }
 
 # Fails when a native source or test file has no row and is not central, when a
@@ -1103,6 +1164,11 @@ function Test-TestMap {
         $rel = [IO.Path]::GetRelativePath($ScriptDir, $item.FullName) -replace '\\', '/'
         $covered = (Test-GlobMatch $rel $map.central) -or @($map.rows | Where-Object { Test-GlobMatch $rel $_.paths }).Count -gt 0
         if (-not $covered) { $problems.Add("no row and not central: $rel") }
+    }
+    foreach ($row in $map.rows) {
+        if (-not $row.filter -and -not $row.pwa) {
+            $problems.Add("no filter and no pwa flag: $($row.paths -join ', ')")
+        }
     }
     Test-MapFilterName $map $problems
     if ($problems.Count -gt 0) {
@@ -1142,6 +1208,8 @@ function Test-MapFilterName([object]$Map, [System.Collections.Generic.List[strin
     }
     $reuse = @('--binaries-metadata', $binariesPath, '--cargo-metadata', $metadataPath, '--run-ignored', 'all')
     foreach ($row in $Map.rows) {
+        # A `pwa` row with no filter runs the phone app's checks, not nextest.
+        if (-not $row.filter) { continue }
         # A row with `features` lists its package built with them, as its reached call runs it.
         $source = if ($row.features) {
             @('--manifest-path', $ManifestPath, '-p', $row.package, '--cargo-profile', 'test-release',
@@ -1403,9 +1471,12 @@ Commands:
   test [-Reached [-Base <ref>]] [-PrintOnly] [-Validate]
              `cargo nextest run --cargo-profile test-release` across the
              workspace, then the driver specs with `-p rustling-tulip-native
-             --features driver`. -Reached: only the tests the change since <ref>
-             reaches (tools/test-map.json; a central or unmapped file
-             runs everything). -PrintOnly: print the selection, run
+             --features driver`, then the phone app's checks (`pnpm --dir
+             apps/pwa install --frozen-lockfile`, `typecheck` and `test`).
+             -Reached: only the tests the change since <ref> reaches
+             (tools/test-map.json; a central or unmapped file runs
+             everything, and a row flagged `pwa` adds the phone app's
+             checks). -PrintOnly: print the selection, run
              nothing. -Validate: check the test map.
   clippy     tools/check-agent-names.ps1, then
              `cargo clippy --all-targets --all-features -- -D warnings`.

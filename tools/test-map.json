@@ -24,8 +24,7 @@
   "ignore": [
     "**/*.md",
     "docs/**",
-    ".claude/**",
-    "apps/pwa/**"
+    ".claude/**"
   ],
   "rows": [
     {
@@ -70,13 +69,28 @@
       "paths": [
         "crates/protocol/**"
       ],
-      "filter": "rdeps(protocol) | package(protocol-ts)"
+      "filter": "rdeps(protocol) | package(protocol-ts)",
+      "pwa": true
     },
     {
       "paths": [
         "tools/protocol-ts/**"
       ],
-      "filter": "package(protocol-ts)"
+      "filter": "package(protocol-ts)",
+      "pwa": true
+    },
+    {
+      "paths": [
+        "apps/pwa/src/protocol.ts"
+      ],
+      "filter": "package(protocol-ts)",
+      "pwa": true
+    },
+    {
+      "paths": [
+        "apps/pwa/**"
+      ],
+      "pwa": true
     },
     {
       "paths": [
