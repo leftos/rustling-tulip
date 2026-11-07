@@ -723,6 +723,11 @@ impl RootView {
             self.open_no_repos_dialog(entry, window, cx);
             return true;
         }
+        // A jump's sidebar selection opens only the toolbar's dialog, and that
+        // opening uses it up.
+        let preselected = matches!(entry, SpawnEntry::Toolbar)
+            .then(|| self.preselected_target.clone())
+            .flatten();
         let (aim, preselect, lock, prefill) = match entry {
             SpawnEntry::Toolbar => (None, None, None, None),
             SpawnEntry::Pane { aim, preselect } => (Some(aim), preselect, None, None),
@@ -742,12 +747,17 @@ impl RootView {
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
             spawn_defaults: self.sidebar.ui_state().spawn,
             lock,
+            preselected,
         };
+        let uses_preselection = inputs.preselected.is_some();
         let now = (self.now)();
         let Some((mut form, mut messages)) = SpawnForm::open(inputs, &mut self.branch_cache, now)
         else {
             return false;
         };
+        if uses_preselection {
+            self.preselected_target = None;
+        }
         if let Some(prefill) = &prefill {
             messages.extend(form.apply_prefill(prefill, &self.branch_cache, now));
         }

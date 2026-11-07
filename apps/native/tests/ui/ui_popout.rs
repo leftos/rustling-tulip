@@ -738,6 +738,38 @@ fn dock_back_from_the_card_closes_the_window(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_pane_jump_to_a_popped_pane_brings_its_window_forward(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.tabs.push(tab("t2", &pane("p2", Some("s2"))));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    pop_out(&mut h, "t2", "p2");
+    let mut popout = h.popout_window();
+    popout.update(|window, _| window.blur());
+    h.cx.update(|window, _| window.activate_window());
+    assert!(!is_active(&mut popout), "the main window is in front");
+    let before = h.root(|root, _| (root.active_tab_id().map(str::to_owned), root.focused_pane()));
+
+    let action = h
+        .root(|root, _| {
+            root.quick_jump_entries().into_iter().find(|entry| {
+                entry.kind.tag() == "[PANE]" && format!("{:?}", entry.action).contains("\"p2\"")
+            })
+        })
+        .map(|entry| entry.action)
+        .expect("a [PANE] entry for the popped pane");
+    h.root_update(move |root, window, cx| root.jump_to(action, window, cx));
+
+    assert!(is_active(&mut popout), "the pop-out window is raised");
+    assert_eq!(
+        h.root(|root, _| (root.active_tab_id().map(str::to_owned), root.focused_pane())),
+        before,
+        "the main window keeps its tab and focus"
+    );
+}
+
+#[gpui::test]
 fn focus_window_raises_the_open_popout(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));

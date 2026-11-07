@@ -1071,7 +1071,7 @@ impl RootView {
     }
 
     /// Shows `tab_id` as a click on its pill does.
-    fn show_tab(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_tab(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.activate(tab_id);
         self.after_tabs_change(window, cx);
     }
@@ -1227,7 +1227,7 @@ impl PillLook {
 
 /// A tab's name; a diff tab's is marked Δ, and a viewer tab's is its file's
 /// name.
-fn pill_label(tab: &TabEntry) -> String {
+pub(crate) fn pill_label(tab: &TabEntry) -> String {
     match &tab.content {
         TabContent::Diff { .. } => format!("Δ {}", tab.name),
         TabContent::Viewer { path } => display_name(path).to_owned(),

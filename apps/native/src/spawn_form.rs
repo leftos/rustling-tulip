@@ -1044,6 +1044,9 @@ pub(crate) struct FormInputs<'a> {
     pub spawn_defaults: SpawnDefaults,
     /// The target the dialog is held on, and the worktree it is pinned to.
     pub lock: Option<Lock>,
+    /// The repo or workspace a jump selected in the sidebar, which the
+    /// dialog opens on ahead of the focused session's ([`initial_target`]).
+    pub preselected: Option<Target>,
 }
 
 /// A dialog's opening state: target, pinned worktree, share confirm, whether
@@ -1053,12 +1056,19 @@ type OpeningLock = (Target, Option<ExistingOption>, bool, bool, Option<String>);
 /// How a dialog opens, or `None` when a locked target left its host's
 /// registry or there is nothing to spawn into.
 fn opening_lock(
+    preselected: Option<&Target>,
     focused: Option<(&HostKey, &SessionSnapshot)>,
     hosts: &[HostInputs],
     lock: Option<Lock>,
 ) -> Option<OpeningLock> {
     let Some(lock) = lock else {
-        return Some((initial_target(focused, hosts)?, None, false, false, None));
+        return Some((
+            initial_target(preselected, focused, hosts)?,
+            None,
+            false,
+            false,
+            None,
+        ));
     };
     if let Some(target) = lock.target() {
         let (repos, workspaces) = online_host_in(hosts, target.host())
@@ -1070,7 +1080,7 @@ fn opening_lock(
     match lock.place {
         LockPlace::Target(target) => Some((target, lock.pin, lock.share_confirmed, true, None)),
         LockPlace::Tab(tab) => Some((
-            initial_target(focused, hosts)?,
+            initial_target(None, focused, hosts)?,
             None,
             false,
             false,
@@ -1092,8 +1102,12 @@ impl SpawnForm {
             .focused
             .as_ref()
             .map(|(host, session)| (host, *session));
-        let (target, pin, share_confirmed, locked, tab_lock) =
-            opening_lock(focused, &inputs.hosts, inputs.lock)?;
+        let (target, pin, share_confirmed, locked, tab_lock) = opening_lock(
+            inputs.preselected.as_ref(),
+            focused,
+            &inputs.hosts,
+            inputs.lock,
+        )?;
         let open_in = if inputs.tabs.current.is_some() {
             OpenChoice::CurrentTab
         } else {
@@ -3534,13 +3548,25 @@ impl SpawnForm {
     }
 }
 
-/// The dialog's first target: the focused session's repo or workspace on
-/// the focused pane's own host, else This PC's first workspace, else its
-/// first repo, else the first target of the other hosts in order.
+/// The dialog's first target: the `preselected` target while its host is
+/// online and still registers it, else the focused session's repo or
+/// workspace on the focused pane's own host, else This PC's first
+/// workspace, else its first repo, else the first target of the other hosts
+/// in order.
 pub(crate) fn initial_target(
+    preselected: Option<&Target>,
     focused: Option<(&HostKey, &SessionSnapshot)>,
     hosts: &[HostInputs],
 ) -> Option<Target> {
+    let registered = preselected.filter(|target| {
+        online_host_in(hosts, target.host()).is_some_and(|inputs| match target {
+            Target::Repo { id, .. } => inputs.repos.iter().any(|r| &r.id == id),
+            Target::Workspace { id, .. } => inputs.workspaces.iter().any(|w| &w.id == id),
+        })
+    });
+    if let Some(target) = registered {
+        return Some(target.clone());
+    }
     let from_session = focused.and_then(|(host, session)| {
         let inputs = online_host_in(hosts, host)?;
         if let Some(id) = session
@@ -3860,6 +3886,7 @@ mod tests {
                     tabs: self.tabs.clone(),
                     spawn_defaults: self.spawn_defaults,
                     lock: self.lock.clone(),
+                    preselected: None,
                 },
                 cache,
                 Instant::now(),
@@ -3923,12 +3950,12 @@ mod tests {
         let hosts = [this_pc(repos, workspaces)];
         let focused = session_in(Some("r2"), None);
         assert_eq!(
-            initial_target(Some((&HostKey::Local, &focused)), &hosts),
+            initial_target(None, Some((&HostKey::Local, &focused)), &hosts),
             Some(Target::repo(&HostKey::Local, "r2"))
         );
         let in_workspace = session_in(Some("r1"), Some("w1"));
         assert_eq!(
-            initial_target(Some((&HostKey::Local, &in_workspace)), &hosts),
+            initial_target(None, Some((&HostKey::Local, &in_workspace)), &hosts),
             Some(Target::workspace(&HostKey::Local, "w1")),
             "a workspace session preselects its workspace"
         );
@@ -3941,6 +3968,7 @@ mod tests {
         let stranger = session_in(Some("gone"), None);
         assert_eq!(
             initial_target(
+                None,
                 Some((&HostKey::Local, &stranger)),
                 &[this_pc(repos.clone(), workspaces)]
             ),
@@ -3948,13 +3976,81 @@ mod tests {
             "an unregistered repo falls back"
         );
         assert_eq!(
-            initial_target(None, &[this_pc(repos, Vec::new())]),
+            initial_target(None, None, &[this_pc(repos, Vec::new())]),
             Some(Target::repo(&HostKey::Local, "r1"))
         );
         assert_eq!(
-            initial_target(None, &[this_pc(Vec::new(), Vec::new())]),
+            initial_target(None, None, &[this_pc(Vec::new(), Vec::new())]),
             None
         );
+    }
+
+    #[test]
+    fn a_preselected_target_wins_over_the_focused_session() {
+        let hosts = [
+            this_pc(vec![repo("r1"), repo("r2")], vec![workspace("w1", &["r1"])]),
+            box_inputs(&["r9"], agent_registry::descriptors(), BTreeMap::new()),
+        ];
+        let focused = session_in(Some("r1"), None);
+        let focused = Some((&HostKey::Local, &focused));
+        for preselected in [
+            Target::repo(&HostKey::Local, "r2"),
+            Target::workspace(&HostKey::Local, "w1"),
+            Target::repo(&box_host(), "r9"),
+        ] {
+            assert_eq!(
+                initial_target(Some(&preselected), focused, &hosts),
+                Some(preselected.clone())
+            );
+        }
+        assert_eq!(
+            initial_target(None, focused, &hosts),
+            Some(Target::repo(&HostKey::Local, "r1")),
+            "with no preselection, the focused session's repo"
+        );
+    }
+
+    #[test]
+    fn an_offline_or_unregistered_preselection_falls_back() {
+        let mut offline = box_inputs(&["r9"], agent_registry::descriptors(), BTreeMap::new());
+        offline.offline = true;
+        let hosts = [this_pc(vec![repo("r1")], Vec::new()), offline];
+        let focused = session_in(Some("r1"), None);
+        let focused = Some((&HostKey::Local, &focused));
+        let today = Some(Target::repo(&HostKey::Local, "r1"));
+        for preselected in [
+            Target::repo(&box_host(), "r9"),
+            Target::repo(&HostKey::Local, "gone"),
+            Target::workspace(&HostKey::Local, "gone"),
+        ] {
+            assert_eq!(
+                initial_target(Some(&preselected), focused, &hosts),
+                today,
+                "{preselected:?} falls back to today's order"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lock_ignores_the_preselection() {
+        let hosts = [this_pc(vec![repo("r1"), repo("r2")], Vec::new())];
+        let preselected = Target::repo(&HostKey::Local, "r2");
+        let pinned = Lock::for_target(Target::repo(&HostKey::Local, "r1"));
+        let opened = opening_lock(Some(&preselected), None, &hosts, Some(pinned));
+        assert_eq!(
+            opened.map(|(target, ..)| target),
+            Some(Target::repo(&HostKey::Local, "r1")),
+            "a target lock wins"
+        );
+        let tab = Lock::for_tab("t1".to_owned());
+        let opened = opening_lock(Some(&preselected), None, &hosts, Some(tab));
+        assert_eq!(
+            opened.map(|(target, ..)| target),
+            Some(Target::repo(&HostKey::Local, "r1")),
+            "a tab lock opens on today's order"
+        );
+        let opened = opening_lock(Some(&preselected), None, &hosts, None);
+        assert_eq!(opened.map(|(target, ..)| target), Some(preselected));
     }
 
     /// The remote host the multi-host cases connect beside This PC.
@@ -3988,12 +4084,12 @@ mod tests {
         ];
         let focused = session_in(Some("r1"), None);
         assert_eq!(
-            initial_target(Some((&box_host(), &focused)), &hosts),
+            initial_target(None, Some((&box_host(), &focused)), &hosts),
             Some(Target::repo(&box_host(), "r1")),
             "the remote pane's repo, on the remote host, though This PC holds the same id"
         );
         assert_eq!(
-            initial_target(Some((&HostKey::Local, &focused)), &hosts),
+            initial_target(None, Some((&HostKey::Local, &focused)), &hosts),
             Some(Target::repo(&HostKey::Local, "r1"))
         );
         let only_remote = [
@@ -4001,7 +4097,7 @@ mod tests {
             box_inputs(&["r9"], agent_registry::descriptors(), BTreeMap::new()),
         ];
         assert_eq!(
-            initial_target(None, &only_remote),
+            initial_target(None, None, &only_remote),
             Some(Target::repo(&box_host(), "r9")),
             "with no repo on This PC, the first target of another host"
         );
@@ -4572,6 +4668,7 @@ mod tests {
                 tabs: TabChoices::default(),
                 spawn_defaults: SpawnDefaults::default(),
                 lock: None,
+                preselected: None,
             },
             &mut BranchCache::default(),
             start,
@@ -6170,6 +6267,7 @@ mod tests {
                     tabs: TabChoices::default(),
                     spawn_defaults: SpawnDefaults::default(),
                     lock: unknown.lock.clone(),
+                    preselected: None,
                 },
                 &mut BranchCache::default(),
                 Instant::now(),

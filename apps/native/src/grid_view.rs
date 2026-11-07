@@ -479,6 +479,8 @@ impl RootView {
                 self.sidebar.mark_seen_on(&session.host, &session.id);
             }
             self.tabs.set_focused(&tab_id, pane_id);
+            self.focus_history.record(&tab_id, Some(pane_id));
+            self.preselected_target = None;
             // In a popped tab's own window, the pane shows its session while
             // that window is active, as a pane pop-out's terminal does.
             if self.is_tab_popped(&tab_id) && !self.is_main_window(window) {
@@ -1223,6 +1225,8 @@ impl RootView {
         cx: &Context<Self>,
     ) {
         self.tabs.set_focused(tab_id, pane_id);
+        self.focus_history.record(tab_id, Some(pane_id));
+        self.preselected_target = None;
         self.remember_focused_session();
         self.focus_pane_view(pane_id, window, cx);
     }

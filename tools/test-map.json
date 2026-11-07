@@ -529,7 +529,7 @@
       "paths": [
         "apps/native/src/fuzzy.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^(fuzzy|spawn_form)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_spawn_combobox|ui_spawn_dialog|ui_spawn_hosts)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(fuzzy|quick_jump|spawn_form)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_spawn_combobox|ui_spawn_dialog|ui_spawn_hosts)::/))"
     },
     {
       "paths": [
@@ -746,6 +746,12 @@
         "apps/native/src/preset_wizard_view.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^preset_launch::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_preset_wizard)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_host_routing::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/quick_jump.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^quick_jump::/))"
     },
     {
       "paths": [

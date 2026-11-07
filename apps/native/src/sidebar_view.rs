@@ -165,6 +165,7 @@ impl RootView {
     /// Folds or unfolds `host`'s header and saves it.
     fn toggle_host(&mut self, host: &HostKey, cx: &mut Context<Self>) {
         self.sidebar.toggle_host(host);
+        self.preselected_target = None;
         self.prune_container_row_focus();
         self.save_ui();
         cx.notify();
@@ -186,7 +187,8 @@ impl RootView {
             .min_h(px(0.0))
             .px(px(BODY_INSET_X))
             .py(px(BODY_INSET_Y))
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            .track_scroll(&self.sidebar_scroll);
         // With no repo or workspace, the note leads and the folder and shell
         // sessions still list under it; "No sessions" is for a registry
         // with nothing to list.
@@ -203,6 +205,15 @@ impl RootView {
                 .collect();
             self.sidebar.active_filter_empty(&listed)
         };
+        if self.sidebar_reveal.is_some() {
+            let notes = BodyNotes {
+                no_repos,
+                filter_empty,
+            };
+            let host_note = |host: &HostKey| self.shows_host_no_repos_note(host);
+            let children = body_children(notes, &containers, &groups, &host_note);
+            self.schedule_sidebar_reveal(&children, window, cx);
+        }
         // While host groups show, This PC's note sits under its header
         // instead ([`Self::sidebar_rows`]).
         let body = body
@@ -315,37 +326,58 @@ impl RootView {
                 .map(|suggestion| suggestion.suggested_name.clone());
             container_rows(container, add_workspace.as_deref(), &rows, window, cx)
         };
-        if groups.is_empty() {
-            return containers
-                .iter()
-                .map(|container| row_of(container, cx))
-                .collect();
-        }
-        let mut shown = Vec::new();
-        for (index, group) in groups.iter().enumerate() {
-            let state = self.host_header_state(&group.host);
-            shown.push(host_header(group, state, index == 0, cx));
-            if !group.collapsed {
-                if group.host == HostKey::Local && self.no_repos_yet() {
-                    shown.push(
-                        no_repos_note(
-                            AddRepoGate::for_caps(self.capabilities_of(&HostKey::Local)),
-                            self.conn().target(),
-                            cx,
-                        )
-                        .into_any_element(),
-                    );
-                }
-                shown.extend(self.host_no_repos_note(&group.host, cx));
-                shown.extend(
-                    group
-                        .containers
-                        .iter()
-                        .map(|container| row_of(container, cx)),
-                );
+        let host_note = |host: &HostKey| self.shows_host_no_repos_note(host);
+        body_rows(self.no_repos_yet(), containers, groups, &host_note)
+            .into_iter()
+            .filter_map(|child| match child {
+                BodyChild::Container(container) => Some(row_of(container, cx)),
+                BodyChild::HostHeader(index) => groups.get(index).map(|group| {
+                    let state = self.host_header_state(&group.host);
+                    host_header(group, state, index == 0, cx)
+                }),
+                BodyChild::LocalNoRepos => Some(
+                    no_repos_note(
+                        AddRepoGate::for_caps(self.capabilities_of(&HostKey::Local)),
+                        self.conn().target(),
+                        cx,
+                    )
+                    .into_any_element(),
+                ),
+                BodyChild::HostNoRepos(host) => self.host_no_repos_note(host, cx),
+                BodyChild::Note => None,
+            })
+            .collect()
+    }
+
+    /// Scrolls the container row a jump revealed into view once this frame
+    /// has laid it out: when the row is not already whole in view, the top
+    /// of its group (where the row sits) goes to the body's top.
+    /// `children` are the body's children ([`body_children`]).
+    fn schedule_sidebar_reveal(
+        &mut self,
+        children: &[BodyChild<'_>],
+        window: &Window,
+        cx: &Context<Self>,
+    ) {
+        let Some(key) = self.sidebar_reveal.take() else {
+            return;
+        };
+        let Some((index, container)) = row_child_index(children, &key) else {
+            return;
+        };
+        let row = row_height(crate::fonts::ui_text_size(cx), container.summary.is_some());
+        let handle = self.sidebar_scroll.clone();
+        window.on_next_frame(move |window, _| {
+            let Some(item) = handle.bounds_for_item(index) else {
+                return;
+            };
+            let view = handle.bounds();
+            let top = item.top() + handle.offset().y;
+            if top < view.top() || top + row > view.bottom() {
+                handle.scroll_to_top_of_item(index);
+                window.refresh();
             }
-        }
-        shown
+        });
     }
 
     /// The spawns under the header, in one row: Session, Shell (unless host
@@ -524,13 +556,18 @@ impl RootView {
     /// The muted line an online remote host's group shows once its registry
     /// has arrived and holds no repo or workspace; This PC's empty registry
     /// has the note with the Add repo button instead.
+    fn shows_host_no_repos_note(&self, host: &HostKey) -> bool {
+        *host != HostKey::Local
+            && !self.is_remote_offline(host)
+            && self.sidebar.repos_loaded_of(host)
+            && self.sidebar.repos_of(host).is_empty()
+            && self.sidebar.workspaces_of(host).is_empty()
+            && self.conn_of(host).is_some()
+    }
+
+    /// [`Self::shows_host_no_repos_note`]'s note.
     fn host_no_repos_note(&self, host: &HostKey, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if *host == HostKey::Local
-            || self.is_remote_offline(host)
-            || !self.sidebar.repos_loaded_of(host)
-            || !self.sidebar.repos_of(host).is_empty()
-            || !self.sidebar.workspaces_of(host).is_empty()
-        {
+        if !self.shows_host_no_repos_note(host) {
             return None;
         }
         let target = self.conn_of(host)?.target();
@@ -1238,6 +1275,100 @@ fn divider(active: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
     drag_handle("sidebar-divider", true, active, &t)
         .driver_id(|| "sidebar-divider".to_owned())
         .on_mouse_down(MouseButton::Left, cx.listener(RootView::start_drag))
+}
+
+/// One direct child of the sidebar body, in the order the body draws them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyChild<'a> {
+    /// The lead no-repos note, the Active filter's note or "No sessions".
+    Note,
+    /// The header of host group `index`.
+    HostHeader(usize),
+    /// This PC's no-repos note under its header.
+    LocalNoRepos,
+    /// A remote host's no-repos note under its header.
+    HostNoRepos(&'a HostKey),
+    /// A container's group: its row, then its banners and leaves.
+    Container(&'a Container),
+}
+
+/// The notes that lead the sidebar body.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BodyNotes {
+    /// The registry is in and holds no repo or workspace.
+    pub no_repos: bool,
+    /// The Active filter left no repo or workspace row.
+    pub filter_empty: bool,
+}
+
+/// The sidebar body's children in drawing order: the lead notes, then
+/// [`body_rows`], or "No sessions" when there is no row.
+pub(crate) fn body_children<'a>(
+    notes: BodyNotes,
+    containers: &'a [Container],
+    groups: &'a [HostGroup],
+    host_note: &dyn Fn(&HostKey) -> bool,
+) -> Vec<BodyChild<'a>> {
+    let mut children = Vec::new();
+    if notes.no_repos && groups.is_empty() {
+        children.push(BodyChild::Note);
+    }
+    if notes.filter_empty {
+        children.push(BodyChild::Note);
+    }
+    if containers.is_empty() && groups.is_empty() {
+        if !notes.no_repos && !notes.filter_empty {
+            children.push(BodyChild::Note);
+        }
+        return children;
+    }
+    children.extend(body_rows(notes.no_repos, containers, groups, host_note));
+    children
+}
+
+/// The body's rows ([`RootView::sidebar_rows`] draws one element each):
+/// each of `containers`, or, while host groups show, each host's header
+/// followed (unless folded) by This PC's no-repos note when `no_repos`, a
+/// remote host's note when `host_note` says it shows, and its containers.
+pub(crate) fn body_rows<'a>(
+    no_repos: bool,
+    containers: &'a [Container],
+    groups: &'a [HostGroup],
+    host_note: &dyn Fn(&HostKey) -> bool,
+) -> Vec<BodyChild<'a>> {
+    if groups.is_empty() {
+        return containers.iter().map(BodyChild::Container).collect();
+    }
+    let mut rows = Vec::new();
+    for (index, group) in groups.iter().enumerate() {
+        rows.push(BodyChild::HostHeader(index));
+        if group.collapsed {
+            continue;
+        }
+        if group.host == HostKey::Local && no_repos {
+            rows.push(BodyChild::LocalNoRepos);
+        }
+        if host_note(&group.host) {
+            rows.push(BodyChild::HostNoRepos(&group.host));
+        }
+        rows.extend(group.containers.iter().map(BodyChild::Container));
+    }
+    rows
+}
+
+/// Where container `key`'s group sits among the body's `children`, and the
+/// container; `None` when the body does not draw it.
+pub(crate) fn row_child_index<'a>(
+    children: &[BodyChild<'a>],
+    key: &str,
+) -> Option<(usize, &'a Container)> {
+    children
+        .iter()
+        .enumerate()
+        .find_map(|(index, child)| match child {
+            BodyChild::Container(container) if container.key == key => Some((index, *container)),
+            _ => None,
+        })
 }
 
 /// A container row, then (unless it is collapsed) the folder banner of a DIR
@@ -3056,11 +3187,16 @@ impl RootView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ADD_HOST_REPO_TIP, AddRepoGate, chip_texts, seen_idle};
+    use super::{
+        ADD_HOST_REPO_TIP, AddRepoGate, BodyChild, BodyNotes, body_children, body_rows, chip_texts,
+        row_child_index, seen_idle,
+    };
     use crate::grid_view::ADD_REPO_TIP;
     use crate::remote_mode::Capabilities;
+    use crate::sidebar::{Container, ContainerKind, HostGroup};
     use crate::sidebar::{Leaf, LeafState};
     use crate::tabs::TabPill;
+    use crate::target::HostKey;
     use crate::target::Target;
     use protocol::{AgentId, SessionChip, SessionMode, SessionStatus};
 
@@ -3142,5 +3278,101 @@ mod tests {
             ["unbound", "orphan"],
             "an Anthropic leaf has one chip less to fit"
         );
+    }
+
+    fn repo_container(host: &HostKey, id: &str) -> Container {
+        Container {
+            key: format!("repo:{id}"),
+            id: id.to_owned(),
+            kind: ContainerKind::Repo,
+            name: id.to_owned(),
+            summary: None,
+            hover: None,
+            path: None,
+            leaves: Vec::new(),
+            attention: false,
+            collapsed: false,
+            host: host.clone(),
+        }
+    }
+
+    fn group(host: &HostKey, collapsed: bool, ids: &[&str]) -> HostGroup {
+        HostGroup {
+            host: host.clone(),
+            label: format!("{host:?}"),
+            collapsed,
+            containers: ids.iter().map(|id| repo_container(host, id)).collect(),
+        }
+    }
+
+    #[test]
+    fn row_child_index_matches_the_rows_sidebar_rows_builds() {
+        let boxed = HostKey::Remote("box".to_owned());
+        let lab = HostKey::Remote("lab".to_owned());
+        let groups = [
+            group(&HostKey::Local, false, &["a"]),
+            group(&boxed, true, &["b"]),
+            group(&lab, false, &["c", "d"]),
+        ];
+        let notes = BodyNotes {
+            no_repos: true,
+            filter_empty: true,
+        };
+        let host_note = |host: &HostKey| *host == lab;
+        let children = body_children(notes, &[], &groups, &host_note);
+        assert_eq!(
+            children,
+            [
+                BodyChild::Note,
+                BodyChild::HostHeader(0),
+                BodyChild::LocalNoRepos,
+                BodyChild::Container(&groups[0].containers[0]),
+                BodyChild::HostHeader(1),
+                BodyChild::HostHeader(2),
+                BodyChild::HostNoRepos(&lab),
+                BodyChild::Container(&groups[2].containers[0]),
+                BodyChild::Container(&groups[2].containers[1]),
+            ],
+            "the filter note leads; a folded host draws only its header"
+        );
+        assert_eq!(
+            children[1..],
+            body_rows(true, &[], &groups, &host_note)[..],
+            "the rows sidebar_rows draws follow the lead notes"
+        );
+        assert_eq!(
+            row_child_index(&children, "repo:d").map(|(i, _)| i),
+            Some(8)
+        );
+        assert_eq!(
+            row_child_index(&children, "repo:b"),
+            None,
+            "under a folded host"
+        );
+
+        let flat = [
+            repo_container(&HostKey::Local, "a"),
+            repo_container(&HostKey::Local, "b"),
+        ];
+        let notes = BodyNotes {
+            no_repos: true,
+            filter_empty: false,
+        };
+        let children = body_children(notes, &flat, &[], &|_| false);
+        assert_eq!(children.len(), 3);
+        assert_eq!(
+            row_child_index(&children, "repo:b").map(|(i, _)| i),
+            Some(2)
+        );
+        let none = body_children(
+            BodyNotes {
+                no_repos: false,
+                filter_empty: false,
+            },
+            &[],
+            &[],
+            &|_| false,
+        );
+        assert_eq!(none, [BodyChild::Note], "No sessions");
     }
 }

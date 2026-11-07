@@ -108,6 +108,7 @@ mod preset_launch;
 mod preset_prompts;
 pub(crate) mod preset_wizard;
 mod preset_wizard_view;
+mod quick_jump;
 mod quit;
 mod quit_view;
 mod recover;
@@ -922,6 +923,17 @@ pub struct RootView {
     sidebar_focus: FocusHandle,
     /// The container row the sidebar's keyboard acts on, when any.
     row_focus: Option<String>,
+    /// The repo or workspace a jump selected in the sidebar: the next
+    /// toolbar New Session opens on it.
+    preselected_target: Option<Target>,
+    /// The sidebar body's scroll, which a jump moves to its row.
+    sidebar_scroll: gpui::ScrollHandle,
+    /// The container row a jump revealed, scrolled into view once the
+    /// sidebar has laid it out.
+    sidebar_reveal: Option<String>,
+    /// The tabs and panes that took focus, most recent first, for the jump
+    /// palette's order.
+    focus_history: quick_jump::FocusHistory,
     /// Where the focused container row was last painted, by its key: a
     /// key that opens its menu anchors it there.
     focused_row_bounds: Option<(String, Bounds<Pixels>)>,
@@ -1549,6 +1561,10 @@ impl RootView {
             root_focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
+            preselected_target: None,
+            sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar_reveal: None,
+            focus_history: quick_jump::FocusHistory::default(),
             focused_row_bounds: None,
             hovered_container: None,
             rail_tip: activity_bar::RailTipSuppression::default(),
@@ -2539,6 +2555,7 @@ impl RootView {
     pub(crate) fn set_sidebar_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         if self.sidebar.set_sidebar_view(view) {
             self.row_focus = None;
+            self.preselected_target = None;
             self.save_ui();
         }
         cx.notify();
@@ -2549,6 +2566,7 @@ impl RootView {
     pub(crate) fn set_repo_filter(&mut self, filter: RepoFilter, cx: &mut Context<Self>) {
         if self.sidebar.set_repo_filter(filter) {
             self.row_focus = None;
+            self.preselected_target = None;
             self.save_ui();
         }
         cx.notify();
@@ -3122,7 +3140,11 @@ impl RootView {
 
     /// Focuses a container row, so the sidebar's keys fold it and the ring
     /// follows it.
+    /// Moving the focus to another row drops the preselected target.
     pub fn focus_container_row(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.row_focus.as_deref() != Some(key) {
+            self.preselected_target = None;
+        }
         self.row_focus = Some(key.to_owned());
         self.sidebar_focus.focus(window);
         cx.notify();
@@ -3328,6 +3350,230 @@ impl RootView {
         }
     }
 
+    /// Drops the preselected target once its repo or workspace leaves its
+    /// host's registry.
+    fn prune_preselected_target(&mut self) {
+        let registered = match &self.preselected_target {
+            None => return,
+            Some(Target::Repo { host, id }) => {
+                self.sidebar.repos_of(host).iter().any(|r| &r.id == id)
+            }
+            Some(Target::Workspace { host, id }) => {
+                self.sidebar.workspaces_of(host).iter().any(|w| &w.id == id)
+            }
+        };
+        if !registered {
+            self.preselected_target = None;
+        }
+    }
+
+    /// Records the active tab and its focused pane as the latest focus,
+    /// dropping the records of closed tabs.
+    fn record_active_focus(&mut self) {
+        let live: HashSet<&str> = self.tabs.tabs().iter().map(|t| t.id.as_str()).collect();
+        self.focus_history.prune(&live);
+        if let Some(tab_id) = self.tabs.active_id() {
+            let pane_id = self.tabs.focused_pane(tab_id);
+            self.focus_history.record(tab_id, pane_id.as_deref());
+        }
+    }
+
+    /// The jump palette's entries in their empty-query order
+    /// ([`quick_jump::build_entries`]).
+    #[must_use]
+    pub fn quick_jump_entries(&self) -> Vec<quick_jump::Entry> {
+        let local_name = self.host_name(&HostKey::Local);
+        let inputs = quick_jump::JumpInputs {
+            panes: self.jump_panes(),
+            tabs: self
+                .tabs
+                .tabs()
+                .iter()
+                .map(|tab| quick_jump::TabInput {
+                    id: tab.id.clone(),
+                    label: crate::tab_bar::pill_label(tab),
+                    host_name: local_name.clone(),
+                })
+                .collect(),
+            sessions: self.jump_sessions(),
+            containers: self
+                .sidebar
+                .containers()
+                .into_iter()
+                .map(|c| quick_jump::ContainerInput {
+                    host_name: self.host_name(&c.host),
+                    host: c.host,
+                    key: c.key,
+                    id: c.id,
+                    kind: c.kind,
+                    name: c.name,
+                })
+                .collect(),
+        };
+        quick_jump::build_entries(&inputs, &self.focus_history)
+    }
+
+    /// The label `host`'s session `id` shows in the sidebar; its id when
+    /// the host does not list it.
+    fn jump_label(&self, host: &HostKey, id: &str) -> String {
+        self.sidebar.session_on(host, id).map_or_else(
+            || id.to_owned(),
+            |s| crate::sidebar::display_label(s, self.sidebar.label_agents(host)),
+        )
+    }
+
+    /// Every pane of every tab, with its session's label.
+    fn jump_panes(&self) -> Vec<quick_jump::PaneInput> {
+        self.tabs
+            .bindings()
+            .into_iter()
+            .map(|b| quick_jump::PaneInput {
+                label: b
+                    .session_id
+                    .as_deref()
+                    .map(|id| self.jump_label(&b.host, id))
+                    .unwrap_or_default(),
+                host_name: self.host_name(&b.host),
+                tab_id: b.tab_id,
+                pane_id: b.pane_id,
+                host: b.host,
+                session_id: b.session_id,
+            })
+            .collect()
+    }
+
+    /// Every host's sessions in sidebar order, with their labels.
+    fn jump_sessions(&self) -> Vec<quick_jump::SessionInput> {
+        self.sidebar
+            .sessions_by_host()
+            .into_iter()
+            .flat_map(|(host, sessions)| {
+                sessions.iter().map(move |s| quick_jump::SessionInput {
+                    label: crate::sidebar::display_label(s, self.sidebar.label_agents(&host)),
+                    host_name: self.host_name(&host),
+                    host: host.clone(),
+                    id: s.id.clone(),
+                    can_attach: can_attach(s),
+                })
+            })
+            .collect()
+    }
+
+    /// Performs a jump palette entry's Enter.
+    pub fn jump_to(
+        &mut self,
+        action: quick_jump::JumpAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            quick_jump::JumpAction::FocusPane {
+                tab_id, pane_id, ..
+            } => self.jump_to_pane(&tab_id, &pane_id, window, cx),
+            quick_jump::JumpAction::ShowTab { tab_id } => self.show_tab(&tab_id, window, cx),
+            quick_jump::JumpAction::ShowSession { host, id } => {
+                self.select_session_on(&host, &id, window, cx);
+            }
+            quick_jump::JumpAction::SelectContainer {
+                host,
+                key,
+                kind,
+                id,
+            } => {
+                self.jump_to_container(&host, &key, kind, &id, window, cx);
+            }
+        }
+    }
+
+    /// Shows `tab_id` with exactly pane `pane_id` focused; the window of a
+    /// popped pane or a popped tab comes to the front instead.
+    fn jump_to_pane(
+        &mut self,
+        tab_id: &str,
+        pane_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tabs.tab(tab_id).is_none() {
+            return;
+        }
+        if let Some(key) = self.popouts.popped_key(pane_id).cloned() {
+            self.focus_history.record(tab_id, Some(pane_id));
+            self.activate_popout(&key, cx);
+            cx.notify();
+            return;
+        }
+        if self.is_tab_popped(tab_id) {
+            self.tabs.set_focused(tab_id, pane_id);
+            self.focus_history.record(tab_id, Some(pane_id));
+            self.update_pane_roles(cx);
+            self.activate_popout(
+                &PopoutKey::Tab {
+                    tab_id: tab_id.to_owned(),
+                },
+                cx,
+            );
+        } else {
+            self.tabs.focus_pane(tab_id, pane_id);
+            self.after_tabs_change(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Reveals container `key`'s row, gives it the sidebar's keyboard focus,
+    /// scrolls it into view and, for a repo or workspace, makes it the
+    /// preselected target.
+    fn jump_to_container(
+        &mut self,
+        host: &HostKey,
+        key: &str,
+        kind: ContainerKind,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_container_row(host, key, window, cx);
+        self.focus_container_row(key, window, cx);
+        self.preselected_target = match kind {
+            ContainerKind::Repo => Some(Target::repo(host, id)),
+            ContainerKind::Workspace => Some(Target::workspace(host, id)),
+            _ => None,
+        };
+        self.sidebar_reveal = Some(key.to_owned());
+        cx.notify();
+    }
+
+    /// Makes container `key`'s row drawn, each change only when the row
+    /// needs it and as the matching click makes it: the sessions panel
+    /// shown, the repos view, `host`'s header unfolded, the All filter.
+    fn reveal_container_row(
+        &mut self,
+        host: &HostKey,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar.is_collapsed() || self.shown_activity() != Activity::Sessions {
+            self.show_sessions_panel(window, cx);
+        }
+        if self.sidebar.sidebar_view() != SidebarView::Repos {
+            self.set_sidebar_view(SidebarView::Repos, cx);
+        }
+        let folded = self
+            .sidebar
+            .host_groups()
+            .iter()
+            .any(|group| group.host == *host && group.collapsed);
+        if folded && self.sidebar.expand_host(host) {
+            self.save_ui();
+        }
+        if self.sidebar.repo_filter() == RepoFilter::Active
+            && !self.sidebar_containers().iter().any(|c| c.key == key)
+        {
+            self.set_repo_filter(RepoFilter::All, cx);
+        }
+    }
+
     /// A session click (a sidebar leaf, a Needs You row): clears the Select
     /// launched marks and shows the session; see [`Self::show_session`].
     fn select_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -3346,6 +3592,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.launched_highlight.clear();
+        self.preselected_target = None;
         self.show_session_on(host, id, window, cx);
     }
 
@@ -3735,6 +3982,7 @@ impl RootView {
     /// Dashboard is watched while it is the active tab.
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_focused_session();
+        self.record_active_focus();
         self.activate_pending_diff_tab();
         self.reconcile_viewer_tabs(cx);
         self.activate_pending_viewer_tab();
@@ -4320,6 +4568,7 @@ impl RootView {
             self.sidebar.mark_seen_on(&session.host, &session.id);
         }
         self.prune_container_row_focus();
+        self.prune_preselected_target();
         self.forget_remembered_session(msg);
         if before.is_some_and(|before| self.needs_you_list() != before) {
             self.arm_needs_you_repaint(cx);
@@ -4830,6 +5079,7 @@ impl RootView {
         self.refresh_recover();
         self.drop_stale_session_ui(window, cx);
         self.prune_container_row_focus();
+        self.prune_preselected_target();
         cx.notify();
     }
 
@@ -5227,6 +5477,9 @@ impl RootView {
                     .collect();
                 let delta = if ks.key == "down" { 1 } else { -1 };
                 if let Some(next) = crate::sidebar::move_row_focus(&keys, Some(&key), delta) {
+                    if next != key {
+                        self.preselected_target = None;
+                    }
                     self.row_focus = Some(next);
                     cx.notify();
                 }

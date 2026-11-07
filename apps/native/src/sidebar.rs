@@ -2070,6 +2070,18 @@ impl SidebarModel {
         self.toggle_container(&host_fold_key(host));
     }
 
+    /// Unfolds container `key`, leaving an open one open; returns whether
+    /// it was folded.
+    pub fn expand_container(&mut self, key: &str) -> bool {
+        self.ui.collapsed_containers.remove(key)
+    }
+
+    /// Unfolds `host`'s header ([`Self::expand_container`]); returns
+    /// whether it was folded.
+    pub fn expand_host(&mut self, host: &HostKey) -> bool {
+        self.expand_container(&host_fold_key(host))
+    }
+
     /// The repos view's rows grouped under a header per host, or none while
     /// This PC is the only host configured (no saved host, switched on or
     /// off). Hosts go This PC first, then the saved hosts in saved order,
@@ -5241,6 +5253,26 @@ pub(crate) mod tests {
         assert!(model.ui_state().collapsed_containers.contains("repo:r1"));
         model.toggle_container("repo:r1");
         assert!(model.containers().first().is_some_and(|c| !c.collapsed));
+    }
+
+    #[test]
+    fn expand_container_opens_a_folded_row_and_leaves_an_open_one_open() {
+        let mut model = model_with(vec![in_repo("a", "r1")]);
+        model.toggle_container("repo:r1");
+        assert!(model.expand_container("repo:r1"), "it was folded");
+        assert!(model.containers().first().is_some_and(|c| !c.collapsed));
+        assert!(!model.expand_container("repo:r1"), "it was open");
+        assert!(model.containers().first().is_some_and(|c| !c.collapsed));
+        let host = crate::target::HostKey::Remote("box".to_owned());
+        model.toggle_host(&host);
+        assert!(model.expand_host(&host));
+        assert!(!model.expand_host(&host));
+        assert!(
+            !model
+                .ui_state()
+                .collapsed_containers
+                .contains(&host_fold_key(&host))
+        );
     }
 
     #[test]
