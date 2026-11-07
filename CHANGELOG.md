@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - Ctrl+Shift+P opens a jump palette: type to find any open pane, tab, session, repo or workspace, and Enter goes straight there.
+- A Ctrl+clicked file fetched from another host shows its size, progress and a progress bar in its toast, with Cancel until the download is done.
 
 ### Fixed
 

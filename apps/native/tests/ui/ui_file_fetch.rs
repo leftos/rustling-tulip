@@ -663,7 +663,17 @@ fn every_reading_missing_shows_one_toast(cx: &mut TestAppContext) {
         )],
         "one toast names the last reading's error"
     );
-    assert_eq!(titled(&mut h, &format!("Fetching notes.md from {HOST}")), 1);
+    assert_eq!(
+        toasts(&mut h).len(),
+        1,
+        "only the error shows: {:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(
+        titled(&mut h, &format!("Fetching notes.md from {HOST}")),
+        0,
+        "the failed fetch's toast is gone"
+    );
     assert!(h.opened().is_empty(), "nothing opens");
     assert!(names_in(&root).is_empty(), "nothing is written");
 }

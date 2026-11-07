@@ -702,7 +702,15 @@ pub struct FetchEntry {
 /// What a fetch brings over.
 #[derive(Debug)]
 enum EntryKind {
-    File,
+    /// A file, with the progress text its toast last showed and whether the
+    /// user closed that toast.
+    File {
+        /// The progress text the file's toast last showed.
+        shown: String,
+        /// The user closed the progress toast, which stays closed for the
+        /// rest of the fetch.
+        progress_dismissed: bool,
+    },
     /// A folder, streamed as an archive and unpacked as it arrives.
     Folder {
         /// The files and bytes the host announced, once it started.
@@ -742,7 +750,10 @@ impl FetchEntry {
             bytes_received: 0,
             resolved_path: None,
             writer: None,
-            kind: EntryKind::File,
+            kind: EntryKind::File {
+                shown: String::new(),
+                progress_dismissed: false,
+            },
             finishing: false,
             group: None,
             popup: false,
@@ -849,7 +860,7 @@ impl FetchEntry {
     #[must_use]
     pub fn bytes_received(&self) -> u64 {
         match &self.kind {
-            EntryKind::File => self.bytes_received,
+            EntryKind::File { .. } => self.bytes_received,
             EntryKind::Folder { unpacked, .. } => unpacked.load(Ordering::Relaxed),
         }
     }
@@ -866,27 +877,30 @@ impl FetchEntry {
         self
     }
 
-    /// The user closed a folder's progress toast: it shows no more progress
-    /// for this fetch. A file's fetch has no progress toast to close.
+    /// The user closed a fetch's progress toast: it shows no more progress
+    /// for this fetch.
     pub fn dismiss_progress(&mut self) {
-        if let EntryKind::Folder {
-            progress_dismissed, ..
-        } = &mut self.kind
-        {
-            *progress_dismissed = true;
+        match &mut self.kind {
+            EntryKind::File {
+                progress_dismissed, ..
+            }
+            | EntryKind::Folder {
+                progress_dismissed, ..
+            } => *progress_dismissed = true,
         }
     }
 
-    /// Whether the user closed this folder's progress toast.
+    /// Whether the user closed this fetch's progress toast.
     #[must_use]
     pub fn progress_dismissed(&self) -> bool {
-        matches!(
-            self.kind,
-            EntryKind::Folder {
-                progress_dismissed: true,
-                ..
+        match &self.kind {
+            EntryKind::File {
+                progress_dismissed, ..
             }
-        )
+            | EntryKind::Folder {
+                progress_dismissed, ..
+            } => *progress_dismissed,
+        }
     }
 
     /// Whether this fetch brings over a folder.
@@ -899,7 +913,7 @@ impl FetchEntry {
     #[must_use]
     pub(crate) fn announced(&self) -> Option<Announced> {
         match &self.kind {
-            EntryKind::File => None,
+            EntryKind::File { .. } => None,
             EntryKind::Folder { announced, .. } => *announced,
         }
     }
@@ -908,7 +922,7 @@ impl FetchEntry {
     #[must_use]
     pub fn unpacked_counter(&self) -> Option<Arc<AtomicU64>> {
         match &self.kind {
-            EntryKind::File => None,
+            EntryKind::File { .. } => None,
             EntryKind::Folder { unpacked, .. } => Some(Arc::clone(unpacked)),
         }
     }
@@ -926,16 +940,17 @@ impl FetchEntry {
         }
     }
 
-    /// Records `text` as the folder's shown progress; `true` when it
-    /// differs from the last one shown.
+    /// Records `text` as the fetch's shown progress; `true` when it differs
+    /// from the last one shown.
     pub fn note_progress(&mut self, text: &str) -> bool {
-        match &mut self.kind {
-            EntryKind::Folder { shown, .. } if shown != text => {
-                text.clone_into(shown);
-                true
-            }
-            _ => false,
+        let shown = match &mut self.kind {
+            EntryKind::File { shown, .. } | EntryKind::Folder { shown, .. } => shown,
+        };
+        if *shown == text {
+            return false;
         }
+        text.clone_into(shown);
+        true
     }
 
     /// The host's canonical path of the file, as the daemon sent it.
@@ -1077,10 +1092,11 @@ impl FetchRegistry {
         }
     }
 
-    /// The toast keyed `key` was closed: when it is a folder fetch's
-    /// progress, that fetch shows no more of it.
-    pub fn dismiss_progress(&mut self, key: &str) {
-        if let Some(entry) = self.entries.get_mut(key) {
+    /// A fetch's toast was closed: `id` is its entry id, which the caller
+    /// resolves from the toast key through [`Self::id_for_toast`], so a
+    /// file's and a folder's fetch alike show no more progress.
+    pub fn dismiss_progress(&mut self, id: &str) {
+        if let Some(entry) = self.entries.get_mut(id) {
             entry.dismiss_progress();
         }
     }
@@ -1222,6 +1238,41 @@ impl FetchRegistry {
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut FetchEntry> {
         self.entries.get_mut(id)
+    }
+
+    /// The id of the fetch the toast keyed `key` follows: a fetch keyed by
+    /// its own id, else a link's fetch whose group's key it is.
+    #[must_use]
+    pub fn id_for_toast(&self, key: &str) -> Option<String> {
+        if self.entries.contains_key(key) {
+            return Some(key.to_owned());
+        }
+        self.entries
+            .iter()
+            .find(|(_, entry)| entry.group().is_some_and(|group| group.key() == key))
+            .map(|(id, _)| id.clone())
+    }
+
+    /// How far the fetch the toast keyed `key` reports has got, for the
+    /// toast's bar: a link's file fetch whose size is known, until it
+    /// finishes. A folder, the Fetch file… dialog's fetch and a page's
+    /// media report no bar.
+    #[must_use]
+    pub fn progress(&self, key: &str) -> Option<f32> {
+        let entry = self.entries.get(&self.id_for_toast(key)?)?;
+        if entry.is_folder()
+            || entry.reports_to_popup()
+            || entry.parent().is_some()
+            || entry.batch().is_some()
+            || entry.is_finishing()
+        {
+            return None;
+        }
+        let size = entry.size()?;
+        Some(crate::fetch_dialog::progress_fraction(
+            entry.bytes_received(),
+            Some(size),
+        ))
     }
 
     /// Ends the fetch `id`, freeing its file for another fetch.
@@ -2105,6 +2156,107 @@ mod tests {
             "a reading the host started is the link's file"
         );
         assert!(registry.get(&id).is_some(), "its failure is reported");
+    }
+
+    #[test]
+    fn a_toast_key_finds_its_fetch() {
+        let mut registry = FetchRegistry::new("t");
+        let id = registry.insert(entry("host", "a.txt")).expect("starts");
+        assert_eq!(
+            registry.id_for_toast(&id),
+            Some(id.clone()),
+            "a fetch keyed by its own id"
+        );
+
+        let group = registry.new_group(requests(&["b.txt"]));
+        let key = group.key().to_owned();
+        let grouped = registry
+            .insert(entry("host", "c.txt").in_group(group))
+            .expect("starts");
+        assert_eq!(
+            registry.id_for_toast(&key),
+            Some(grouped),
+            "a link's toast key finds its reading"
+        );
+        assert_eq!(
+            registry.id_for_toast("no such toast"),
+            None,
+            "an unknown key finds none"
+        );
+    }
+
+    #[test]
+    fn the_bar_fills_a_link_file_fetch_once_its_size_is_known() {
+        let mut registry = FetchRegistry::new("t");
+        let group = registry.new_group(Vec::new());
+        let key = group.key().to_owned();
+        let id = registry
+            .insert(entry("host", "a.txt").in_group(group))
+            .expect("starts");
+        assert_eq!(
+            registry.progress(&key),
+            None,
+            "no bar before the size is known"
+        );
+
+        let started = registry.get_mut(&id).expect("recorded");
+        started.on_started(10, "C:/repo/a.txt".to_owned());
+        started.on_chunk(4);
+        let fraction = registry
+            .progress(&key)
+            .expect("a bar once the size is known");
+        assert!((fraction - 0.4).abs() < 1e-6, "two fifths full: {fraction}");
+
+        registry.get_mut(&id).expect("recorded").mark_finishing();
+        assert_eq!(registry.progress(&key), None, "no bar once it finishes");
+    }
+
+    #[test]
+    fn only_a_link_file_fetch_has_a_toast_bar() {
+        let mut registry = FetchRegistry::new("t");
+        let popup = registry
+            .insert(entry("host", "a.txt").for_popup())
+            .expect("starts");
+        let popup_entry = registry.get_mut(&popup).expect("recorded");
+        popup_entry.on_started(10, "C:/repo/a.txt".to_owned());
+        popup_entry.on_chunk(4);
+        assert_eq!(
+            registry.progress(&popup),
+            None,
+            "a popup's fetch reports in its dialog"
+        );
+
+        let folder = registry
+            .insert(entry("host", "f").for_folder())
+            .expect("starts");
+        registry
+            .get_mut(&folder)
+            .expect("recorded")
+            .on_started(10, "C:/repo/f".to_owned());
+        assert_eq!(
+            registry.progress(&folder),
+            None,
+            "a folder's toast counts files instead"
+        );
+
+        let page = registry.insert(entry("host", "page.html")).expect("starts");
+        let child = registry
+            .insert_child(
+                &page,
+                HostKey::Local,
+                "host".to_owned(),
+                entry("host", "a.png").request().clone(),
+                PathBuf::from("root/a.png"),
+            )
+            .expect("starts");
+        let child_entry = registry.get_mut(&child).expect("recorded");
+        child_entry.on_started(10, "C:/repo/a.png".to_owned());
+        child_entry.on_chunk(4);
+        assert_eq!(
+            registry.progress(&child),
+            None,
+            "a page's media has no toast of its own"
+        );
     }
 
     #[test]

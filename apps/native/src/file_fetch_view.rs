@@ -32,7 +32,7 @@ use crate::target::HostKey;
 pub(crate) const OUTSIDE_FETCH_FOLDER: &str =
     "Only files in the folder for fetched files open here.";
 
-/// The Cancel on a folder fetch's toast.
+/// The Cancel on a file's or folder fetch's toast.
 pub(crate) const FETCH_CANCEL: ToastAction = ToastAction {
     id: "cancel",
     label: "Cancel",
@@ -556,6 +556,52 @@ impl RootView {
         self.push_toast_spec(spec, cx);
     }
 
+    /// Shows the file fetch `id`'s received bytes on its toast, once the
+    /// host said the file's size; with `on_change`, only when the shown
+    /// text changed. Once the user closed that toast it stays closed, and a
+    /// fetch that reports in the Fetch file… dialog, a page's media and a
+    /// folder's fetch show no such toast.
+    fn show_file_progress(&mut self, id: &str, on_change: bool, cx: &mut Context<Self>) {
+        let Some(entry) = self.fetches.get_mut(id) else {
+            return;
+        };
+        if entry.is_folder()
+            || entry.reports_to_popup()
+            || entry.parent().is_some()
+            || entry.batch().is_some()
+            || entry.progress_dismissed()
+        {
+            return;
+        }
+        let Some(size) = entry.size() else {
+            return;
+        };
+        let detail = crate::fetch_dialog::progress_text(
+            entry.bytes_received(),
+            Some(size),
+            entry.host_label(),
+        );
+        if !entry.note_progress(&detail) && on_change {
+            return;
+        }
+        let finishing = entry.is_finishing();
+        let spec = ToastSpec {
+            kind: ToastKind::Info,
+            title: format!("Fetching {} from {}", entry.file_name(), entry.host_label()),
+            detail: Some(detail),
+            key: Some(fetching_toast_key(id, entry.group())),
+            // Only a fetch that can still be cancelled is held open; a
+            // finishing one is timed and expires.
+            sticky: !finishing,
+            actions: if finishing {
+                Vec::new()
+            } else {
+                vec![FETCH_CANCEL]
+            },
+        };
+        self.push_toast_spec(spec, cx);
+    }
+
     /// [`Self::fetch_remote_file`], as one reading of `group`'s link when
     /// given: its "Fetching" toast is the group's, updated in place. A
     /// refusal is a toast.
@@ -628,8 +674,8 @@ impl RootView {
                         &id,
                         self.fetches.get(&id).and_then(FetchEntry::group),
                     )),
-                    sticky: false,
-                    actions: Vec::new(),
+                    sticky: true,
+                    actions: vec![FETCH_CANCEL],
                 },
                 cx,
             );
@@ -967,13 +1013,19 @@ impl RootView {
             tracing::warn!(id, rel = %entry.request().rel_path, "the host cannot send a folder a link names: {error}");
             abort_writer(id, &entry);
             let host = entry.host_key().clone();
+            self.dismiss_toast_key(&fetching_toast_key(id, entry.group()), cx);
             self.push_too_old(&host, entry.file_name(), cx);
             return;
         }
         match self.fetches.next_reading(id) {
             Some((next, group)) => {
                 tracing::info!(id, next = %next.rel_path, "a link's reading is not on the host: {error}");
-                self.start_fetch(next, Some(group), cx);
+                let key = group.key().to_owned();
+                // A refused retry shows its own toast, and the link's
+                // "Fetching" toast, keyed by the group, goes with it.
+                if self.start_fetch(next, Some(group), cx).is_none() {
+                    self.dismiss_toast_key(&key, cx);
+                }
             }
             None => self.end_fetch(id, error, false, window, cx),
         }
@@ -1074,6 +1126,7 @@ impl RootView {
         let (writer, steps) = unbounded();
         entry.set_writer(Writer::File(writer));
         let target = entry.target().to_path_buf();
+        self.show_file_progress(id, false, cx);
         let write = cx.background_executor().spawn(file_fetch::run_writer(
             target,
             id.to_owned(),
@@ -1198,6 +1251,8 @@ impl RootView {
         }
         if entry.is_folder() {
             self.show_folder_progress(id, true, cx);
+        } else {
+            self.show_file_progress(id, true, cx);
         }
     }
 
@@ -1222,6 +1277,8 @@ impl RootView {
             if !was_finishing {
                 Self::tick_finishing_folder(id.to_owned(), cx);
             }
+        } else {
+            self.show_file_progress(id, false, cx);
         }
     }
 
@@ -1378,9 +1435,7 @@ impl RootView {
             self.pump_batch(page_id, window, cx);
             return;
         }
-        if entry.is_folder() {
-            self.dismiss_toast_key(id, cx);
-        }
+        self.dismiss_toast_key(&fetching_toast_key(id, entry.group()), cx);
         let detail = failure_detail(&entry, reason);
         if entry.reports_to_popup() && self.fetch_dialog_follows(id) {
             self.fail_fetch_dialog(detail, window, cx);
@@ -1415,9 +1470,7 @@ impl RootView {
             if entry.parent().is_some() {
                 continue;
             }
-            if entry.is_folder() {
-                self.dismiss_toast_key(&id, cx);
-            }
+            self.dismiss_toast_key(&fetching_toast_key(&id, entry.group()), cx);
             if entry.batch().is_some() {
                 self.push_page_toast(
                     &id,

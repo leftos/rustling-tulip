@@ -244,9 +244,10 @@ impl RootView {
     }
 
     /// Button `action` on toast `id`: a preset job's goes to its registry,
-    /// the installed update's What's new opens its changelog, a folder
-    /// fetch's Cancel stops it, a fetched file's Fetch whole folder fetches
-    /// its folder, and a fetched folder's Reveal shows it in Explorer.
+    /// the installed update's What's new opens its changelog, a file's or
+    /// folder fetch's Cancel stops it, a fetched file's Fetch whole folder
+    /// fetches its folder, and a fetched folder's Reveal shows it in
+    /// Explorer.
     fn press_toast_action(
         &mut self,
         id: u64,
@@ -274,14 +275,14 @@ impl RootView {
             } else {
                 self.open_in_main_window(cx, Self::whats_new_installed);
             }
-        } else if action == crate::file_fetch_view::FETCH_CANCEL.id
-            && self
-                .fetches
-                .get(&key)
-                .is_some_and(crate::file_fetch::FetchEntry::is_folder)
-        {
-            // A finishing fetch is not cancelled, and its toast stays.
-            if self.cancel_fetch(&key) {
+        } else if action == crate::file_fetch_view::FETCH_CANCEL.id {
+            // A finishing fetch is not cancelled, and its toast stays; a
+            // key no fetch holds any more only dismisses its toast.
+            let cancelled = match self.fetches.id_for_toast(&key) {
+                Some(id) => self.cancel_fetch(&id),
+                None => true,
+            };
+            if cancelled {
                 self.dismiss_toast_key(&key, cx);
             }
         } else if action == crate::file_fetch_view::FETCH_WHOLE_FOLDER.id {
@@ -291,8 +292,8 @@ impl RootView {
         }
     }
 
-    /// The × on toast `id`; a preset job's or a folder fetch's progress
-    /// toast stays closed.
+    /// The × on toast `id`; a preset job's or a fetch's progress toast
+    /// stays closed.
     fn dismiss_toast(&mut self, id: u64, cx: &mut Context<Self>) {
         let key = self
             .notices
@@ -302,7 +303,9 @@ impl RootView {
             .and_then(|toast| toast.key.clone());
         if let Some(key) = key {
             self.preset_launches.dismiss(&key);
-            self.fetches.dismiss_progress(&key);
+            if let Some(fetch) = self.fetches.id_for_toast(&key) {
+                self.fetches.dismiss_progress(&fetch);
+            }
         }
         if self.notices.dismiss(id) {
             self.forget_closed_jobs();
@@ -674,10 +677,11 @@ impl RootView {
         let cards: Vec<AnyElement> = toasts
             .into_iter()
             .map(|toast| {
-                let progress = toast
-                    .key
-                    .as_deref()
-                    .and_then(|key| self.preset_launches.progress(key));
+                let progress = toast.key.as_deref().and_then(|key| {
+                    self.preset_launches
+                        .progress(key)
+                        .or_else(|| self.fetches.progress(key))
+                });
                 toast_card(toast, progress, cx)
             })
             .collect();

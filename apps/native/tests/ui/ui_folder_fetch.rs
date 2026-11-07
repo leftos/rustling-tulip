@@ -20,7 +20,9 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonMessage, PathKind, SessionSnapshot};
-use rustling_tulip_native::{Connection, NetEvent, ToastKind, ToastSpec, toast_action_selector};
+use rustling_tulip_native::{
+    Connection, NetEvent, ToastAction, ToastKind, ToastSpec, toast_action_selector,
+};
 use serde_json::json;
 use support::{
     Fixture, Harness, Opened, REMOTE, TestDir, pane, remote_pane, repo, saved_remote, seed_ui,
@@ -108,6 +110,17 @@ fn linked<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, PathBu
 /// folders.
 fn linked_old<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, PathBuf) {
     linked_with(cx, dir, session("s1").worktree("r1").build(), &[])
+}
+
+/// [`linked_old`] a session in `C:/wt/x/sub`, so a relative link reads
+/// there first, then under the worktree.
+fn linked_old_sub<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, PathBuf) {
+    linked_with(
+        cx,
+        dir,
+        session("s1").shell("C:/wt/x/sub").worktree("r1").build(),
+        &[],
+    )
 }
 
 /// Writes `text` to `s1`'s pane `p2` and Ctrl+clicks column `col` of its
@@ -498,6 +511,236 @@ fn a_file_link_updates_that_toast_in_place(cx: &mut TestAppContext) {
         Some(early),
         "the file fetch updates the early toast in place"
     );
+}
+
+#[gpui::test]
+fn a_file_link_toast_shows_done_of_size_and_a_bar_as_it_streams(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+    let title = format!("Fetching notes.txt from {HOST}");
+
+    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
+    let stat_id = one_stat(&mut h, "docs/notes.txt");
+    let early = toast_titled(&mut h, &title).expect("the early toast shows");
+    assert_eq!(
+        toasts(&mut h),
+        [(title.clone(), None)],
+        "no detail before the size is known"
+    );
+    assert_eq!(
+        h.bounds(&format!("toast-progress-{early}")).size.width,
+        gpui::px(0.0),
+        "no bar before the size is known"
+    );
+
+    stat(&mut h, &stat_id, PathKind::File);
+    let id = one_file_fetch(&mut h, "docs/notes.txt");
+    h.host(&saved_remote()).send(file_started(&id, 100));
+    let toast = toast_titled(&mut h, &title).expect("the toast shows the size");
+    assert_eq!(
+        toasts(&mut h),
+        [(title.clone(), Some("0 B of 100 B".to_owned()))],
+        "the toast counts the bytes once the size is known"
+    );
+    assert!(
+        h.bounds(&format!("toast-progress-{toast}")).size.width > gpui::px(0.0),
+        "the bar is drawn under the detail"
+    );
+    let empty = h.bounds(&format!("toast-progress-fill-{toast}")).size.width;
+
+    h.host(&saved_remote()).send(file_chunk(&id, 0, &[0u8; 25]));
+    assert_eq!(
+        toasts(&mut h),
+        [(title.clone(), Some("25 B of 100 B".to_owned()))],
+        "the detail moves with the bytes"
+    );
+    let filled = h.bounds(&format!("toast-progress-fill-{toast}")).size.width;
+    assert!(
+        filled > empty,
+        "the fill widens from {empty:?} to {filled:?}"
+    );
+
+    h.host(&saved_remote()).send(file_chunk(&id, 1, &[0u8; 75]));
+    h.host(&saved_remote())
+        .send(DaemonMessage::FileFetchDone { id });
+    settle_until(&mut h, "the file's done toast", |h| {
+        shows(h, "Fetched notes.txt")
+    });
+}
+
+#[gpui::test]
+fn cancel_on_a_file_link_toast_sends_cancel_and_removes_the_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked_old_sub(cx, &dir);
+    let title = format!("Fetching notes.md from {HOST}");
+
+    click_link(&mut h, "wrote docs/notes.md", 9);
+    let id = one_file_fetch(&mut h, "sub/docs/notes.md");
+    let toast = toast_titled(&mut h, &title).expect("the link's toast shows");
+    h.click_on(&toast_action_selector(toast, "cancel"));
+    h.cx.run_until_parked();
+
+    let sent = fetch_messages(&mut h);
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::CancelFetch { id: cancelled }] if *cancelled == id),
+        "the host is told to stop: {sent:?}"
+    );
+    assert_eq!(toast_titled(&mut h, &title), None, "the toast is gone");
+    assert!(
+        toasts(&mut h).is_empty(),
+        "no other toast shows: {:?}",
+        toasts(&mut h)
+    );
+
+    h.host(&saved_remote()).send(DaemonMessage::FileFetchError {
+        id,
+        error: "gone".to_owned(),
+    });
+    assert!(
+        fetch_messages(&mut h).is_empty(),
+        "the cancelled link's other readings are not fetched"
+    );
+}
+
+#[gpui::test]
+fn a_refused_retry_leaves_no_fetching_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked_old_sub(cx, &dir);
+    let title = format!("Fetching notes.md from {HOST}");
+
+    click_link(&mut h, "wrote docs/notes.md", 9);
+    let first = one_file_fetch(&mut h, "sub/docs/notes.md");
+    h.host(&saved_remote()).send(DaemonMessage::FileFetchError {
+        id: first,
+        error: "missing".to_owned(),
+    });
+    one_file_fetch(&mut h, "docs/notes.md");
+
+    click_again(&mut h, 9);
+    let second = one_file_fetch(&mut h, "sub/docs/notes.md");
+    h.host(&saved_remote()).send(DaemonMessage::FileFetchError {
+        id: second,
+        error: "missing".to_owned(),
+    });
+
+    assert_eq!(
+        titled(&mut h, "Already fetching notes.md"),
+        1,
+        "the second click's next reading is refused: {:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(
+        titled(&mut h, &title),
+        1,
+        "only the fetch in flight keeps its toast: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn cancel_on_a_toast_with_no_fetch_dismisses_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+    // A link's progress toast whose fetch already ended: no entry holds its
+    // key any more.
+    let spec = ToastSpec {
+        kind: ToastKind::Info,
+        title: format!("Fetching notes.txt from {HOST}"),
+        detail: Some("0 B of 8 B".to_owned()),
+        key: Some("fetch-group-gone-1".to_owned()),
+        sticky: true,
+        actions: vec![ToastAction {
+            id: "cancel",
+            label: "Cancel",
+            danger: false,
+        }],
+    };
+    let toast = h.root_update(|root, _, cx| root.push_toast_spec(spec, cx));
+
+    h.click_on(&toast_action_selector(toast, "cancel"));
+    h.cx.run_until_parked();
+
+    assert!(
+        h.root(|root, _| root.toasts().iter().all(|shown| shown.id != toast)),
+        "the toast goes: {:?}",
+        toasts(&mut h)
+    );
+    assert!(
+        fetch_messages(&mut h).is_empty(),
+        "a key that holds no fetch cancels nothing"
+    );
+}
+
+#[gpui::test]
+fn a_finishing_file_toast_drops_cancel(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked_old(cx, &dir);
+    let title = format!("Fetching notes.txt from {HOST}");
+
+    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
+    let id = one_file_fetch(&mut h, "docs/notes.txt");
+    h.host(&saved_remote()).send(file_started(&id, 8));
+    assert_eq!(
+        actions_of(&mut h, &title),
+        ["cancel"],
+        "the streaming toast offers Cancel"
+    );
+
+    h.host(&saved_remote())
+        .send(file_chunk(&id, 0, b"notes.tx"));
+    assert_eq!(
+        toasts(&mut h),
+        [(title.clone(), Some("8 B of 8 B".to_owned()))],
+        "the toast counts the bytes so far"
+    );
+
+    h.host(&saved_remote())
+        .send(DaemonMessage::FileFetchDone { id });
+    assert!(
+        actions_of(&mut h, &title).is_empty(),
+        "once Done went to the writer the toast offers no Cancel"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        [(title, Some("8 B of 8 B".to_owned()))],
+        "the toast keeps its detail as it finishes"
+    );
+}
+
+#[gpui::test]
+fn closing_a_file_link_toast_keeps_it_closed_until_the_fetch_ends(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+    let title = format!("Fetching notes.txt from {HOST}");
+
+    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
+    let stat_id = one_stat(&mut h, "docs/notes.txt");
+    stat(&mut h, &stat_id, PathKind::File);
+    let id = one_file_fetch(&mut h, "docs/notes.txt");
+    h.host(&saved_remote()).send(file_started(&id, 8));
+    assert_eq!(
+        toasts(&mut h),
+        [(title.clone(), Some("0 B of 8 B".to_owned()))],
+        "the toast shows the size before the bytes"
+    );
+    let toast = toast_titled(&mut h, &title).expect("the file's toast shows");
+    h.click_on(&format!("toast-close-{toast}"));
+    h.cx.run_until_parked();
+    assert_eq!(toast_titled(&mut h, &title), None, "the × closes the toast");
+
+    h.host(&saved_remote())
+        .send(file_chunk(&id, 0, b"notes.tx"));
+    assert_eq!(
+        toast_titled(&mut h, &title),
+        None,
+        "a chunk does not bring the toast back"
+    );
+
+    h.host(&saved_remote())
+        .send(DaemonMessage::FileFetchDone { id });
+    settle_until(&mut h, "the file's done toast", |h| {
+        shows(h, "Fetched notes.txt")
+    });
 }
 
 #[gpui::test]
@@ -971,6 +1214,24 @@ fn stream_file(h: &mut Harness<'_>, id: &str, data: &[u8]) {
         data_b64: base64::engine::general_purpose::STANDARD.encode(data),
     });
     host.send(DaemonMessage::FileFetchDone { id: id.to_owned() });
+}
+
+/// The host's `FileFetchStarted` for the fetch `id` of a `size`-byte file.
+fn file_started(id: &str, size: u64) -> DaemonMessage {
+    DaemonMessage::FileFetchStarted {
+        id: id.to_owned(),
+        resolved_path: r"\\?\C:\wt\x\docs\notes.txt".to_owned(),
+        size,
+    }
+}
+
+/// The host's `FileChunk` `seq` of `data` for the fetch `id`.
+fn file_chunk(id: &str, seq: u64, data: &[u8]) -> DaemonMessage {
+    DaemonMessage::FileChunk {
+        id: id.to_owned(),
+        seq,
+        data_b64: base64::engine::general_purpose::STANDARD.encode(data),
+    }
 }
 
 /// Clicks the file link `text` at `col` on a host that sends folders,
