@@ -263,3 +263,258 @@ p {
   font-size: 1rem;
   text-align: left;
 }
+
+/* The session screen: a full-height column with the chat scrolling between the
+   header and the composer, the docks above the composer, and the prompt sheet
+   over all of it. The composer is sticky at the column's foot, and the viewport
+   meta's `interactive-widget=resizes-content` shrinks the column when the
+   on-screen keyboard opens, so the box stays above it. */
+body[data-route="session"] #home {
+  display: none !important;
+}
+
+.session {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-sizing: border-box;
+  padding-top: max(8px, env(safe-area-inset-top));
+  padding-right: max(12px, env(safe-area-inset-right));
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  padding-left: max(12px, env(safe-area-inset-left));
+  background: #1e1e2e;
+}
+
+.session-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+}
+
+.session-back {
+  min-height: 44px;
+  padding: 0 8px;
+  border: 0;
+  color: #89b4fa;
+  background: none;
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+.session-title {
+  margin: 0;
+  overflow: hidden;
+  font-size: 1rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-ended,
+.session-notice {
+  margin: 0;
+  color: #a6adc8;
+}
+
+.session-chat {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.session-hidden,
+.session-muted {
+  margin: 0;
+  color: #a6adc8;
+  font-size: 0.9rem;
+}
+
+.session-hidden {
+  text-align: center;
+}
+
+.session-row {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.session-user {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: #313244;
+}
+
+.session-pending,
+.session-live {
+  opacity: 0.7;
+}
+
+.session-tool {
+  display: grid;
+  gap: 4px;
+}
+
+.session-tool-head,
+.session-key,
+.session-send,
+.session-keys-button,
+.session-quick-button,
+.session-quick-reply,
+.session-sheet-button,
+.session-sheet-key,
+.session-sheet-hide {
+  min-height: 44px;
+  box-sizing: border-box;
+  border: 1px solid #45475a;
+  border-radius: 12px;
+  padding: 0 14px;
+  color: #cdd6f4;
+  background: #313244;
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+.session-tool-head {
+  font-size: 0.9rem;
+  text-align: left;
+}
+
+.session-key {
+  min-width: 44px;
+}
+
+.session-send {
+  border: 0;
+  color: #1e1e2e;
+  background: #89b4fa;
+}
+
+.session-send:disabled {
+  opacity: 0.5;
+}
+
+.session-tool-detail {
+  margin: 0;
+  padding: 0 12px;
+  color: #a6adc8;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.session-keys,
+.session-actions,
+.session-quick-items,
+.session-dock,
+.session-sheet-buttons,
+.session-sheet-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.session-dock {
+  padding: 8px;
+  border-radius: 12px;
+  background: #181825;
+}
+
+.session-quick-group {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+}
+
+.session-quick-title {
+  margin: 0;
+  color: #a6adc8;
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.session-composer {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.session-draft,
+.session-sheet-text {
+  min-height: 44px;
+  max-height: 8em;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border: 1px solid #45475a;
+  border-radius: 12px;
+  color: #cdd6f4;
+  background: #313244;
+  font-family: inherit;
+  font-size: 1rem;
+  resize: none;
+}
+
+.session-error,
+.session-sheet-error {
+  margin: 0;
+  color: #f38ba8;
+  font-size: 0.9rem;
+}
+
+.session-sheet {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 70%;
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: 16px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  border-radius: 16px 16px 0 0;
+  background: #313244;
+  box-shadow: 0 -8px 24px #11111b;
+}
+
+.session-sheet-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.session-sheet-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+
+.session-sheet-number {
+  min-width: 1.5em;
+  border-radius: 6px;
+  color: #cdd6f4;
+  background: #45475a;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.session-sheet-button.session-selected {
+  border-color: #89b4fa;
+}
+
+.session-sheet-hide {
+  align-self: flex-end;
+}

@@ -27,6 +27,11 @@ export interface HomeModel {
   readonly orders: ReadonlyMap<string, readonly string[]>;
   /** The user's manual container order, workspaces and repos mixed. */
   readonly containerOrder: readonly ContainerRef[];
+  /**
+   * Whether the daemon's first `sessions` message has arrived, so the list is
+   * the whole truth about which sessions exist.
+   */
+  readonly loaded: boolean;
 }
 
 /** The model before any message: what `reset` returns. */
@@ -36,6 +41,7 @@ export const INITIAL_HOME: HomeModel = {
   sessions: [],
   orders: new Map(),
   containerOrder: [],
+  loaded: false,
 };
 
 /**
@@ -58,7 +64,7 @@ export function homeStep(model: HomeModel, message: DaemonMessage): HomeModel {
     case "workspaces":
       return { ...model, workspaces: message.workspaces };
     case "sessions":
-      return { ...model, sessions: [...message.sessions] };
+      return { ...model, sessions: [...message.sessions], loaded: true };
     case "session_updated":
       return { ...model, sessions: withSession(model.sessions, message.session) };
     case "session_removed": {

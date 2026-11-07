@@ -154,6 +154,22 @@ export function syncSheet(state: SheetState, screen: ChatScreen | null): SheetSt
 }
 
 /**
+ * The state a fresh connection starts from: nothing is out and no refusal
+ * stands, so an answer the old connection never carried cannot block the next.
+ */
+export function reset(state: SheetState): SheetState {
+  return { ...state, pending: null, error: null };
+}
+
+/**
+ * The state after the connection dropped an answer before it left: nothing is
+ * out any more, and the sheet keeps `text` for the prompt it answered.
+ */
+export function unsent(state: SheetState, promptId: string, text: string): SheetState {
+  return { ...state, pending: null, error: { promptId, text } };
+}
+
+/**
  * The answer `action` sends with `text` in the sheet's box: null for a text
  * action while the text is blank, since the daemon takes no empty answer.
  */

@@ -95,6 +95,8 @@ export interface Connection {
    * presented none lands on.
    */
   paired(): boolean;
+  /** The state the connection is in right now. */
+  status(): ConnectionStateName;
 }
 
 /**
@@ -420,6 +422,7 @@ export function createConnection(deps: ConnectionDeps): Connection {
     forget,
     pairingState: () => pairing,
     paired,
+    status: () => state.name,
   };
 }
 

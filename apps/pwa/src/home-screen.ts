@@ -301,7 +301,7 @@ function resumeOffered(session: SessionSnapshot): boolean {
 }
 
 /** The name a row shows, as the tray's card shows it: the user label when it has one. */
-function displayLabel(session: SessionSnapshot): string {
+export function displayLabel(session: SessionSnapshot): string {
   const own = session.user_label?.trim() ?? "";
   return own === "" ? session.label : own;
 }

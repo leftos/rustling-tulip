@@ -133,6 +133,19 @@ export function tick(state: ComposerModel, now: number): ComposerModel {
 }
 
 /**
+ * The model after the connection dropped a send before it left: the send is
+ * out no more, the draft stays, and `text` says why. Pure; another send's
+ * request id returns the model itself.
+ */
+export function unsent(state: ComposerModel, requestId: string, text: string): ComposerModel {
+  const sending = state.sending;
+  if (sending === null || sending.requestId !== requestId) {
+    return state;
+  }
+  return { ...state, sending: null, error: text };
+}
+
+/**
  * The model a new connection starts from (the screen calls it on every
  * ready): nothing is out, so neither the send nor its settled record nor the
  * refusal can be answered any more; the draft stays.

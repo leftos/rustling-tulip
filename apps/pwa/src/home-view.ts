@@ -29,12 +29,16 @@ import type { Connection } from "./socket";
  * paints the [`HomeScreen`] the model makes when it differs from the last one
  * drawn, and wires the tray's answers and moves and the rows' Stop, Resume and
  * tap to the action functions. It holds no logic beyond that; the texts all
- * come from the model.
+ * come from the model. A row's tap and the tray's Open hand their session to
+ * `onOpen`, which navigates the page, and every change of the model is handed
+ * to `onModel`, so a session's screen reads the one Home model.
  */
 export function mountHomeView(
   container: HTMLElement,
   connection: Connection,
   intro: HTMLElement | null,
+  onOpen: (sessionId: string) => void,
+  onModel: (model: HomeModel) => void,
 ): () => void {
   let model: HomeModel = resetModel();
   let actions: HomeActions = resetActions();
@@ -56,6 +60,7 @@ export function mountHomeView(
   }
 
   function update(): void {
+    onModel(model);
     const state: HomeState = {
       status,
       paired: connection.paired(),
@@ -258,7 +263,7 @@ export function mountHomeView(
 
   function openSession(sessionId: string): void {
     actions = tappedElsewhere(actions);
-    console.info("pwa: open session", sessionId);
+    onOpen(sessionId);
     update();
   }
 
