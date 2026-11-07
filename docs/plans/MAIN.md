@@ -59,12 +59,9 @@
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge · release vNext
-  - [ ] RT-365 PW.3: Pair the PWA with a device token · release vNext
-  - [ ] RT-366 PW.5: Phone session screen: live rows, composer, Quick and Keys, prompt sheet · release vNext
   - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext
   - [ ] RT-368 PW.7: Home Screen badge with the Needs you count · release vNext
   - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
-  - [ ] RT-104 PW.4: Phone Home: grouped list and Needs you tray; answer prompts, stop and resume · release vNext
 - [ ] RT-1126 Precache the phone app's hashed assets so its first offline open is complete
 
 ## Wave 5 — Attention feed on the desktop
@@ -115,7 +112,9 @@
 - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
 - [ ] RT-106 PW.12: Phone files: viewer with Share and Save, worktree tree, send photos and files into a session
 - [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies
-- [ ] RT-108 PW.9: Phone terminal: xterm.js with collie's key bar
+- [/] RT-108 PW.9: Phone terminal: xterm.js with collie's key bar · release vNext
+  - [ ] RT-1150 PW.9c: Draw the phone terminal with xterm.js behind a seam · release vNext
+  - [ ] RT-1151 PW.9d: Put the phone terminal behind the session screen's Terminal toggle · release vNext
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-142 Phone: tap a Linear identifier to see its card
 - [ ] RT-588 Key the chat pane's answer cache by its text, not its length
@@ -136,7 +135,7 @@
   - [ ] RT-1083 Move to the start or end of the text with Ctrl+Home/End (Cmd+Up/Down on macOS) in multi-line text boxes
   - [ ] RT-1084 Send from the Chat message box with Cmd+Enter on macOS
   - [ ] RT-1085 Send the preset wizard's inline prompt with Ctrl+Enter
-- [ ] RT-1088 Let an agent smoke-test the Chat view against a real Claude session it drives, screenshots and fixes
+- [ ] RT-1088 Let an agent try to break the desktop Chat view and the phone session screen against a real Claude session · release vNext
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
@@ -354,6 +353,7 @@
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit
 - [ ] RT-661 Plan file-type previewers for the in-app viewer: images, PDF, tables and more
+- [ ] RT-1137 Design a push relay so native phone apps get alerts from any user's daemon
 
 ## Backlog
 
@@ -525,8 +525,6 @@
 - [ ] RT-1046 Stop four agent-api icon conformance tests leaking past nextest's leak timeout
 - [ ] RT-1052 Show seconds in a Gates row's time and usual under ten minutes
 - [ ] RT-1056 Get colour query replies (OSC 10/11) through ConPTY to programs on Windows hosts
-- [ ] RT-1059 Keep a long folder path clear of Browse in the Open a shell dialog · release vNext
-- [ ] RT-1060 Close the new-session dialog on Escape after Escape closed its Target list · release vNext
 - [ ] RT-1063 Keep a statusline ending in %, \$ or # under Claude's box from reading as the shell's prompt · release vNext
 - [ ] RT-1067 Remove the stray dot at the bottom-left of a plain Nushell pane · release vNext
 - [ ] RT-1125 Type into a shell with the send verb once its hand-started agent has ended
@@ -536,7 +534,7 @@
 - [ ] RT-1131 Make Finished toasts and every status marker use the agent-up rule, and cache it per session
 - [ ] RT-1132 Treat an all-folder workspace like a folder in the spawn dialog and launch last, and stop fetching folder members
 - [ ] RT-1133 Tag registered folders DIR in the compact Dashboard and drop Source Control's stale pinned host
-- [ ] RT-1134 Keep the Add repo banner on renamed shells by marking the login session as its own kind · release vNext
+- [ ] RT-1138 Honour a hide while the phone app forgets a refused token
 
 ## Design files
 
@@ -555,7 +553,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-365, RT-366, RT-367, RT-368, RT-369, RT-881, RT-1126, Wave 4 — Mobile app (iPhone PWA over Tailscale)
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-367, RT-368, RT-369, RT-881, RT-1126, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
