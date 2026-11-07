@@ -40,11 +40,13 @@ import {
   type ComposerView,
   type DockKind,
   type DockView,
+  type KeyBarView,
   type SessionScreen,
   type SheetButtonView,
   type SheetView,
 } from "./session-screen";
 import type { Connection } from "./socket";
+import { mountTerminal, type TerminalView } from "./terminal-view";
 
 /** What a session screen is mounted over. */
 export interface SessionViewOptions {
@@ -73,12 +75,24 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   let sheet: SheetState = NO_SHEET;
   let dock: DockKind | null = null;
   let status: ConnectionStateName = connection.status();
+  /** The header's Terminal toggle: on, the terminal replaces the chat. */
+  let terminalOn = false;
+  /** The terminal's Ctrl is armed for the next key; re-read after every input. */
+  let ctrlArmed = false;
+  /** The mounted terminal, while the terminal is shown; null otherwise. */
+  let terminalView: TerminalView | null = null;
+  /**
+   * The chat mirror refused this session once: the terminal stays the main
+   * view while the chat reloads after a reconnect or a hide.
+   */
+  let mirrorRefused = false;
   /** `Offline: not sent` for a dropped Key or Quick tap, until a send lands. */
   let offline: string | null = null;
   let drawn: SessionScreen | null = null;
   let drawnRows: readonly ChatRow[] | null = null;
   let drawnHidden: string | null = null;
   let drawnKeys: readonly KeyTrayEntry[] | undefined;
+  let drawnKeyBar: KeyBarView | null | undefined;
   let drawnComposer: ComposerView | null | undefined;
   let drawnDock: DockView | null | undefined;
   let drawnSheetButtons: readonly SheetButtonView[] | undefined;
@@ -93,13 +107,20 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   const back = element("button", "session-back");
   back.type = "button";
   const title = element("h2", "session-title");
+  const toggle = button("session-toggle", "", () => {
+    terminalOn = !terminalOn;
+    dock = null;
+    update();
+  });
   const header = element("div", "session-header");
-  header.append(back, title);
+  header.append(back, title, toggle);
 
   const ended = element("p", "session-ended");
   const chatEl = element("div", "session-chat");
   const notice = element("p", "session-notice");
+  const terminalEl = element("div", "terminal-pane");
   const keysEl = element("div", "session-keys");
+  const keyBarEl = element("div", "session-keybar");
   const dockEl = element("div", "session-dock");
 
   const draft = document.createElement("textarea");
@@ -137,7 +158,18 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   const sheetEl = element("div", "session-sheet");
   sheetEl.append(sheetTitle, sheetButtons, sheetBox, sheetKeys, sheetError, sheetHide);
 
-  container.append(header, ended, chatEl, notice, keysEl, dockEl, composerEl, sheetEl);
+  container.append(
+    header,
+    ended,
+    chatEl,
+    notice,
+    terminalEl,
+    keysEl,
+    keyBarEl,
+    dockEl,
+    composerEl,
+    sheetEl,
+  );
 
   /** Sends one message and answers whether the connection took it. */
   function sendNow(message: ClientMessage | null): boolean {
@@ -146,6 +178,9 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
 
   function update(): void {
     syncTimer();
+    if (chat.phase === "refused") {
+      mirrorRefused = true;
+    }
     const look = sessionLook(readHome(), sessionId);
     const screen = sessionScreen({
       title: look.title,
@@ -156,6 +191,9 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       sheet,
       dock,
       offline,
+      terminal: terminalOn,
+      ctrlArmed,
+      mirrorRefused,
     });
     if (drawn !== null && sameScreen(drawn, screen)) {
       return;
@@ -170,15 +208,23 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     back.textContent = screen.back;
     title.textContent = screen.title;
     title.hidden = screen.title === "";
+    toggle.hidden = screen.toggle === null;
+    toggle.textContent = screen.toggle ?? "";
     showText(ended, screen.endText);
     showText(notice, screen.notice);
-    chatEl.hidden = screen.endText !== null;
+    chatEl.hidden = screen.endText !== null || screen.terminal;
+    terminalEl.hidden = !screen.terminal;
     composerEl.hidden = screen.composer === null;
     keysEl.hidden = screen.keys.length === 0;
+    keyBarEl.hidden = screen.keyBar === null;
     dockEl.hidden = screen.dock === null;
     if (drawnKeys === undefined || !samePart(drawnKeys, screen.keys)) {
       drawnKeys = screen.keys;
       paintKeys(screen.keys);
+    }
+    if (drawnKeyBar === undefined || !samePart(drawnKeyBar, screen.keyBar)) {
+      drawnKeyBar = screen.keyBar;
+      paintKeyBar(screen.keyBar);
     }
     if (drawnComposer === undefined || !samePart(drawnComposer, screen.composer)) {
       drawnComposer = screen.composer;
@@ -194,6 +240,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       drawnHidden = screen.hiddenLine;
       paintChat(screen);
     }
+    syncTerminal(screen);
   }
 
   /** Rebuilds the chat rows, keeping the newest row in view only when it was. */
@@ -271,6 +318,63 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     );
   }
 
+  /** Rebuilds the key bar under the terminal: the Keys tray, Ctrl and the Quick dock's button. */
+  function paintKeyBar(view: KeyBarView | null): void {
+    if (view === null) {
+      keyBarEl.replaceChildren();
+      return;
+    }
+    const keys = view.keys.map((entry) =>
+      button("session-key", entry.label, () => terminalInput(() => terminalView?.pane.key(entry))),
+    );
+    const ctrl = button("session-key session-ctrl", view.ctrl, () => {
+      ctrlArmed = terminalView?.pane.toggleCtrl() ?? false;
+      update();
+    });
+    if (view.ctrlArmed) {
+      ctrl.classList.add("session-selected");
+    }
+    const quick = button("session-key session-keybar-quick", view.quick, () => {
+      dock = dock === "quick" ? null : "quick";
+      update();
+    });
+    for (const node of [...keys, ctrl, quick]) {
+      keepTerminalFocus(node);
+    }
+    keyBarEl.replaceChildren(...keys, ctrl, quick);
+  }
+
+  /**
+   * Mounts the terminal once the pane is shown, and unmounts it once it is
+   * not: every shown stretch mounts a fresh pane, so a toggle off and on again
+   * attaches again.
+   */
+  function syncTerminal(screen: SessionScreen): void {
+    if (!screen.terminal) {
+      if (terminalView !== null) {
+        terminalView.destroy();
+        terminalView = null;
+        terminalEl.replaceChildren();
+        ctrlArmed = false;
+      }
+      return;
+    }
+    if (terminalView !== null) {
+      return;
+    }
+    terminalView = mountTerminal({
+      sessionId,
+      connection,
+      container: terminalEl,
+      newRequestId,
+      reason: terminalOn ? "toggle" : "attach",
+      onInput: () => {
+        ctrlArmed = terminalView?.pane.ctrlArmed() ?? false;
+        update();
+      },
+    });
+  }
+
   function paintComposer(view: ComposerView | null): void {
     if (view === null) {
       return;
@@ -306,9 +410,22 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     name.textContent = group.title;
     const row = element("div", "session-quick-items");
     for (const text of group.items) {
-      row.append(
-        button("session-quick-reply", text, () => sendInput(quickMessage(sessionId, text))),
-      );
+      const reply = button("session-quick-reply", text, () => {
+        const view = terminalView;
+        if (view === null) {
+          sendInput(quickMessage(sessionId, text));
+        } else {
+          terminalInput(() => view.pane.quick(text));
+        }
+      });
+      // In terminal mode the tap keeps xterm's focus and the soft keyboard; in
+      // chat mode it behaves as any button.
+      reply.addEventListener("pointerdown", (event) => {
+        if (terminalView !== null) {
+          event.preventDefault();
+        }
+      });
+      row.append(reply);
     }
     section.append(name, row);
     return section;
@@ -396,6 +513,21 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   /** A Key or Quick tap: a dropped one shows the offline line until a send lands. */
   function sendInput(message: ClientMessage): void {
     offline = connection.send(message) ? null : OFFLINE_NOT_SENT;
+    update();
+  }
+
+  /**
+   * A key bar or terminal-dock input, typed into the pane; the Ctrl state it
+   * may have consumed is re-read afterwards. Nothing happens while no
+   * terminal is mounted.
+   */
+  function terminalInput(act: () => void): void {
+    if (terminalView === null) {
+      return;
+    }
+    offline = connection.status() === "ready" ? null : OFFLINE_NOT_SENT;
+    act();
+    ctrlArmed = terminalView.pane.ctrlArmed();
     update();
   }
 
@@ -489,6 +621,8 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     // Off the page first: nothing this view wired can fire again.
     container.replaceChildren();
     container.hidden = true;
+    terminalView?.destroy();
+    terminalView = null;
     unsubscribe();
     if (timer !== undefined) {
       window.clearInterval(timer);
@@ -501,6 +635,16 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
 function showText(node: HTMLElement, text: string | null): void {
   node.hidden = text === null;
   node.textContent = text ?? "";
+}
+
+/**
+ * Keeps a tap on `node` from taking the focus off xterm's hidden textarea,
+ * which would close the phone's soft keyboard.
+ */
+function keepTerminalFocus(node: HTMLElement): void {
+  node.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+  });
 }
 
 function button(className: string, label: string, onClick: () => void): HTMLButtonElement {

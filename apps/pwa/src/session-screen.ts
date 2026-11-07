@@ -35,6 +35,13 @@ export const SEND = "Send";
 export const KEYS = "Keys";
 export const QUICK = "Quick";
 
+/** The header toggle's labels: it shows the chat's screen as `Terminal`, the terminal's as `Chat`. */
+export const TERMINAL = "Terminal";
+export const CHAT = "Chat";
+
+/** The key bar's Ctrl button. */
+export const CTRL = "Ctrl";
+
 /** The box's placeholder, which names no agent: the session's agent is its own. */
 export const MESSAGE_PLACEHOLDER = "Message";
 
@@ -69,6 +76,14 @@ export interface ComposerView {
   readonly quick: string;
   /** The daemon's refusal of the last send, verbatim; null when it refused none. */
   readonly error: string | null;
+}
+
+/** The bar under the terminal: the Keys tray, the Ctrl button and the Quick dock's button. */
+export interface KeyBarView {
+  readonly keys: readonly KeyTrayEntry[];
+  readonly ctrl: string;
+  readonly ctrlArmed: boolean;
+  readonly quick: string;
 }
 
 /** Which dock the composer has open. */
@@ -110,6 +125,12 @@ export interface SessionScreen {
   readonly title: string;
   /** The whole screen's text when the session is gone; null otherwise. */
   readonly endText: string | null;
+  /** Whether the terminal pane is shown: the toggle is on, or the chat was refused. */
+  readonly terminal: boolean;
+  /** The header toggle's label; null when there is nothing to toggle. */
+  readonly toggle: string | null;
+  /** The key bar under the terminal; null when the terminal is not shown. */
+  readonly keyBar: KeyBarView | null;
   /** `{n} earlier messages`; null when the display cap dropped none. */
   readonly hiddenLine: string | null;
   readonly rows: readonly ChatRow[];
@@ -137,6 +158,12 @@ export interface SessionScreenInput {
   readonly dock: DockKind | null;
   /** `Offline: not sent` for a dropped Key or Quick tap; null otherwise. */
   readonly offline: string | null;
+  /** The user's Terminal toggle is on, so the terminal replaces the chat. */
+  readonly terminal: boolean;
+  /** The terminal's Ctrl is armed for the next key. */
+  readonly ctrlArmed: boolean;
+  /** The chat mirror refused this session once while the screen was mounted. */
+  readonly mirrorRefused: boolean;
 }
 
 /** What the screen knows of its session from Home's model. */
@@ -186,6 +213,9 @@ export function sessionScreen(input: SessionScreenInput): SessionScreen {
       back: BACK,
       title: input.title,
       endText: ENDED_TEXT,
+      terminal: false,
+      toggle: null,
+      keyBar: null,
       hiddenLine: null,
       rows: [],
       notice: null,
@@ -197,18 +227,43 @@ export function sessionScreen(input: SessionScreenInput): SessionScreen {
   }
   const chat = input.chat;
   const notice = chat.phase === "refused" ? chat.notice : null;
-  const refused = notice !== null;
+  // A refusal seen once keeps the terminal as the main view while the chat
+  // reloads after a reconnect or a hide.
+  const refused = input.mirrorRefused || chat.phase === "refused";
+  const terminal = input.terminal || refused;
+  const toggle = refused ? null : input.terminal ? CHAT : TERMINAL;
+  if (terminal) {
+    return {
+      back: BACK,
+      title: input.title,
+      endText: null,
+      terminal: true,
+      toggle,
+      keyBar: keyBarView(input.ctrlArmed),
+      hiddenLine: null,
+      rows: [],
+      // No composer draws the offline line here, so it sits above the terminal.
+      notice: notice ?? input.offline,
+      keys: [],
+      composer: null,
+      dock: dockView(input.dock === "quick" ? "quick" : null, input.isAgent),
+      sheet: null,
+    };
+  }
   return {
     back: BACK,
     title: input.title,
     endText: null,
+    terminal: false,
+    toggle,
+    keyBar: null,
     hiddenLine: chat.hidden > 0 ? `${chat.hidden} earlier messages` : null,
     rows: chat.entries.map(rowFor),
     notice,
-    keys: refused ? KEY_TRAY : [],
-    composer: refused ? null : composerView(input.composer, input.offline),
-    dock: refused ? null : dockView(input.dock, input.isAgent),
-    sheet: refused ? null : sheetView(input.sheet, chat.screen),
+    keys: [],
+    composer: composerView(input.composer, input.offline),
+    dock: dockView(input.dock, input.isAgent),
+    sheet: sheetView(input.sheet, chat.screen),
   };
 }
 
@@ -345,6 +400,11 @@ function composerView(state: ComposerModel, offline: string | null): ComposerVie
     quick: QUICK,
     error: state.error ?? offline,
   };
+}
+
+/** The key bar under the terminal, with `ctrlArmed` on its Ctrl button. */
+function keyBarView(ctrlArmed: boolean): KeyBarView {
+  return { keys: KEY_TRAY, ctrl: CTRL, ctrlArmed, quick: QUICK };
 }
 
 /** The dock `kind` opens, with the entries it holds; null when none is open. */

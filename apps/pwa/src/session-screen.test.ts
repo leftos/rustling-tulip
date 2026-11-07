@@ -82,6 +82,9 @@ interface Overrides {
   readonly sheet?: SheetState;
   readonly dock?: DockKind | null;
   readonly offline?: string | null;
+  readonly terminal?: boolean;
+  readonly ctrlArmed?: boolean;
+  readonly mirrorRefused?: boolean;
 }
 
 /** The screen over the brief's defaults. */
@@ -95,6 +98,9 @@ function screen(overrides: Overrides = {}): SessionScreen {
     sheet: overrides.sheet ?? NO_SHEET,
     dock: overrides.dock ?? null,
     offline: overrides.offline ?? null,
+    terminal: overrides.terminal ?? false,
+    ctrlArmed: overrides.ctrlArmed ?? false,
+    mirrorRefused: overrides.mirrorRefused ?? false,
   });
 }
 
@@ -199,7 +205,7 @@ test("older rows left out show how many", () => {
   expect(view.hiddenLine).toBe("3 earlier messages");
 });
 
-test("a refused chat shows its notice and the Keys, and no composer", () => {
+test("a refused chat shows its notice and the terminal with the key bar, and no toggle", () => {
   const chat: ChatState = {
     ...INITIAL_CHAT,
     sessionId: "s1",
@@ -208,8 +214,57 @@ test("a refused chat shows its notice and the Keys, and no composer", () => {
   };
   const view = screen({ chat });
   expect(view.notice).toBe("This session's chat is not mirrored.");
+  expect(view.terminal).toBe(true);
+  expect(view.toggle).toBeNull();
+  expect(view.keyBar?.keys).toEqual(KEY_TRAY);
+  expect(view.keys).toEqual([]);
   expect(view.composer).toBeNull();
-  expect(view.keys).toHaveLength(KEY_TRAY.length);
+});
+
+test("a refused chat stays on the terminal while it reloads", () => {
+  const chat: ChatState = { ...INITIAL_CHAT, sessionId: "s1", phase: "loading" };
+  const view = screen({ chat, mirrorRefused: true });
+  expect(view.terminal).toBe(true);
+  expect(view.toggle).toBeNull();
+  expect(view.composer).toBeNull();
+  expect(view.notice).toBeNull();
+});
+
+test("a dropped key bar tap shows Offline: not sent above the terminal", () => {
+  const view = screen({ terminal: true, offline: "Offline: not sent" });
+  expect(view.terminal).toBe(true);
+  expect(view.notice).toBe("Offline: not sent");
+});
+
+test("the chat screen shows the Terminal toggle and no key bar", () => {
+  const view = screen();
+  expect(view.terminal).toBe(false);
+  expect(view.toggle).toBe("Terminal");
+  expect(view.keyBar).toBeNull();
+  expect(view.composer).not.toBeNull();
+});
+
+test("the toggle on shows the terminal and the Chat toggle, and no rows, composer or sheet", () => {
+  const view = screen({ terminal: true, chat: loaded([USER, ANSWER], 0, ASKING) });
+  expect(view.terminal).toBe(true);
+  expect(view.toggle).toBe("Chat");
+  expect(view.keyBar).toEqual({ keys: KEY_TRAY, ctrl: "Ctrl", ctrlArmed: false, quick: "Quick" });
+  expect(view.rows).toEqual([]);
+  expect(view.composer).toBeNull();
+  expect(view.sheet).toBeNull();
+});
+
+test("an armed Ctrl shows in the key bar", () => {
+  expect(screen({ terminal: true, ctrlArmed: true }).keyBar?.ctrlArmed).toBe(true);
+  expect(screen({ terminal: true }).keyBar?.ctrlArmed).toBe(false);
+});
+
+test("in terminal mode only the Quick dock opens", () => {
+  const quick = screen({ terminal: true, dock: "quick", isAgent: true });
+  expect(quick.dock?.kind).toBe("quick");
+  expect(quick.dock?.groups).toEqual(quickRepliesFor(true));
+
+  expect(screen({ terminal: true, dock: "keys" }).dock).toBeNull();
 });
 
 test("an ended session shows its text, and no composer or sheet", () => {
@@ -218,6 +273,13 @@ test("an ended session shows its text, and no composer or sheet", () => {
   expect(view.rows).toEqual([]);
   expect(view.composer).toBeNull();
   expect(view.sheet).toBeNull();
+});
+
+test("an ended session shows no terminal, toggle or key bar even with the toggle on", () => {
+  const view = screen({ ended: true, terminal: true });
+  expect(view.terminal).toBe(false);
+  expect(view.toggle).toBeNull();
+  expect(view.keyBar).toBeNull();
 });
 
 test("Send is disabled while the box is blank or a send is out", () => {

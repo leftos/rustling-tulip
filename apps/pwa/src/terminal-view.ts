@@ -16,6 +16,8 @@ export interface TerminalViewOptions {
   readonly newRequestId: NewRequestId;
   /** Why the terminal opened: the session screen's attach, or the Terminal toggle. */
   readonly reason: "attach" | "toggle";
+  /** Runs after every input xterm reports, so the screen re-reads the Ctrl state. */
+  readonly onInput: () => void;
 }
 
 /** A mounted terminal: its controller, and the teardown that removes it. */
@@ -33,7 +35,7 @@ export interface TerminalView {
  * advances its load.
  */
 export function mountTerminal(options: TerminalViewOptions): TerminalView {
-  const { sessionId, connection, container, newRequestId, reason } = options;
+  const { sessionId, connection, container, newRequestId, reason, onInput } = options;
   const term = new Terminal({
     fontFamily: "ui-monospace, Menlo, Consolas, monospace",
     fontSize: 13,
@@ -65,7 +67,10 @@ export function mountTerminal(options: TerminalViewOptions): TerminalView {
   });
   pane.open(term.cols, term.rows, reason);
 
-  const data = term.onData((text) => pane.typed(text));
+  const data = term.onData((text) => {
+    pane.typed(text);
+    onInput();
+  });
   const unsubscribe = connection.subscribe((notice) => pane.notice(notice));
   const observer = new ResizeObserver(() => {
     fit.fit();

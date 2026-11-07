@@ -307,6 +307,17 @@ body[data-route="session"] #home {
   font-size: 1rem;
 }
 
+.session-toggle {
+  min-height: 44px;
+  margin-left: auto;
+  padding: 0 8px;
+  border: 0;
+  color: #89b4fa;
+  background: none;
+  font-family: inherit;
+  font-size: 1rem;
+}
+
 .session-title {
   margin: 0;
   overflow: hidden;
@@ -401,6 +412,10 @@ body[data-route="session"] #home {
   min-width: 44px;
 }
 
+.session-key.session-selected {
+  border-color: #89b4fa;
+}
+
 .session-send {
   border: 0;
   color: #1e1e2e;
@@ -421,6 +436,7 @@ body[data-route="session"] #home {
 }
 
 .session-keys,
+.session-keybar,
 .session-actions,
 .session-quick-items,
 .session-dock,
