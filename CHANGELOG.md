@@ -16,6 +16,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Pasting an image into a Claude pane on Windows works: with an image on the clipboard, Ctrl+V sends Claude its own image-paste key.
 - A right-click in a terminal pastes this computer's clipboard, even in a session on another host; Shift+right-click still reaches programs that use the mouse.
 - A Nushell pane's command dots sit on each prompt's own row, so no stray dot is left after `clear`, and Copy command, Re-run and the prompt jumps work there.
 - The Connections dialog shows each host's details whole, wrapping between them instead of squeezing "4 sessions" into a column one letter wide, and a failed tailnet scan's error sits on its own lines under its heading.

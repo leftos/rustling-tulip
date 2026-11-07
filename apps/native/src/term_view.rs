@@ -21,7 +21,7 @@ use gpui::{
     Window, WindowId, anchored, canvas, deferred, div, fill, font, outline, point, prelude::*, px,
     size,
 };
-use protocol::{AgentDescriptor, ClientMessage, SessionMode, SessionSnapshot};
+use protocol::{AgentDescriptor, ClientMessage, ImagePaste, SessionMode, SessionSnapshot};
 
 use crate::Clock;
 use crate::driver_id::DriverId as _;
@@ -60,6 +60,8 @@ pub struct TerminalPane {
     focus: FocusHandle,
     /// Where everything the terminal sends goes: its session's host.
     tx: HostSender,
+    /// Its session's host is not This PC.
+    remote: bool,
     /// The time the scrollback load's timeouts and retries count from.
     now: Clock,
     attachment: Attachment,
@@ -506,14 +508,16 @@ impl TerminalPane {
     }
 
     /// The terminal now shows a session of another host: what it sends goes
-    /// to `tx` from now on.
-    pub(crate) fn set_sender(&mut self, tx: HostSender) {
+    /// to `tx` from now on; `remote` when that host is not This PC.
+    pub(crate) fn set_sender(&mut self, tx: HostSender, remote: bool) {
         self.tx = tx;
+        self.remote = remote;
     }
 
     pub fn new(
         pane_id: String,
         tx: HostSender,
+        remote: bool,
         now: Clock,
         font: FontSettings,
         cx: &mut Context<Self>,
@@ -523,6 +527,7 @@ impl TerminalPane {
             term: Terminal::new(GridSize { cols: 80, rows: 24 }, CursorShape::Block),
             focus: cx.focus_handle(),
             tx,
+            remote,
             now,
             attachment: Attachment::default(),
             session: None,
@@ -1422,11 +1427,20 @@ impl TerminalPane {
     fn paste(&mut self, cx: &mut Context<Self>) {
         self.note_input();
         let text = cx.read_from_clipboard().and_then(|item| item.text());
-        let bracketed = self.term.bracketed_paste();
-        let bytes = term_input::paste_input(text.as_deref(), bracketed);
         let pasted = text.as_deref().filter(|text| !text.is_empty());
+        if pasted.is_none() && self.remote && self.session.is_some_and(|s| s.agent_up) {
+            // The agent would read its own host's clipboard, not this one's.
+            // A remote shell still gets `^V`.
+            return;
+        }
+        let bracketed = self.term.bracketed_paste();
+        let image_paste = self
+            .session
+            .map_or(ImagePaste::CtrlV, |session| session.image_paste);
+        let bytes = term_input::paste_input(text.as_deref(), bracketed, image_paste);
         // A paste no session took is not logged: nothing saw it. A clipboard
-        // with no text sends `^V` and logs nothing, since nothing was pasted.
+        // with no text sends the agent's image-paste key and logs nothing,
+        // since nothing was pasted.
         let Some(text) = pasted else {
             self.send_input(&bytes);
             return;

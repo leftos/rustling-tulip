@@ -7,8 +7,8 @@ use crate::{
 };
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, Choice, ChoiceStyle, FieldKind,
-    FieldOverride, FieldRule, OptionField, OptionValue, SessionMember, SessionStatus, ShiftEnter,
-    SpawnPlacement, TitleRules,
+    FieldOverride, FieldRule, ImagePaste, OptionField, OptionValue, SessionMember, SessionStatus,
+    ShiftEnter, SpawnPlacement, TitleRules,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -45,6 +45,7 @@ pub static DESCRIPTOR: LazyLock<AgentDescriptor> = LazyLock::new(|| AgentDescrip
     tag: "test".to_string(),
     accent: AccentToken::Default,
     shift_enter: ShiftEnter::Lf,
+    image_paste: ImagePaste::CtrlV,
     caps: AgentCaps {
         headless: false,
         resume: false,

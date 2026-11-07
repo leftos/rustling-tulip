@@ -317,10 +317,11 @@ impl RootView {
             let rebound =
                 before.is_some() && before == binding.session_id && slot.host == binding.host;
             let rehosted = slot.host != binding.host;
+            let remote = binding.host != HostKey::Local;
             slot.view.update(cx, |pane, _| {
                 pane.release();
                 if rehosted {
-                    pane.set_sender(sender);
+                    pane.set_sender(sender, remote);
                 }
             });
             slot.attached = false;
@@ -345,9 +346,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> PaneSlot {
         let tx = self.hosts.sender(host);
+        let remote = *host != HostKey::Local;
         let now = self.now.clone();
         let font = self.sidebar.ui_state().terminal_font.clone();
-        let view = cx.new(|cx| TerminalPane::new(pane_id.to_owned(), tx, now, font, cx));
+        let view = cx.new(|cx| TerminalPane::new(pane_id.to_owned(), tx, remote, now, font, cx));
         let focus_in = Self::follow_focus_in(pane_id, &view, window, cx);
         // The window given here is the one the slot was made in; an event
         // acts for the window that draws the terminal when it fires.
@@ -953,11 +955,12 @@ impl RootView {
         };
         let new_id = popouts::session_slot_id(&new.host, &new.id);
         let sender = (slot.host != new.host).then(|| self.hosts.sender(&new.host));
+        let remote = new.host != HostKey::Local;
         slot.view.update(cx, |pane, cx| {
             pane.release();
             pane.set_pane_id(new_id.clone());
             if let Some(sender) = sender {
-                pane.set_sender(sender);
+                pane.set_sender(sender, remote);
             }
             cx.notify();
         });

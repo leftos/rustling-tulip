@@ -170,6 +170,8 @@ export interface AgentDescriptor {
   tag: string;
   accent: AccentToken;
   shift_enter: ShiftEnter;
+  /** What a paste with no text on the clipboard sends, so the agent pastes its host's clipboard image. */
+  image_paste?: ImagePaste;
   caps: AgentCaps;
   /** What a trusted launch passes, for the spawn dialog's note. */
   trust_note: string | null;
@@ -301,6 +303,13 @@ export type ShiftEnter =
   | "backslash_cr"
   /** A line feed. */
   | "lf";
+
+/** The key an agent binds to pasting an image from its host's clipboard. */
+export type ImagePaste =
+  /** Ctrl+V (`0x16`). */
+  | "ctrl_v"
+  /** Alt+V (`ESC v`). */
+  | "alt_v";
 
 /** What an agent can do beyond an interactive spawn. */
 export interface AgentCaps {

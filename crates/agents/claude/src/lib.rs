@@ -38,8 +38,8 @@ use options::{ClaudeProvider, PermissionMode};
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, CharRange, ChatAnswerKind,
     ChatEntry, ChatPrompt, ChatScreen, ChipRule, Choice, ChoiceStyle, FieldKind, FieldOverride,
-    FieldRule, OptionField, OptionValue, SessionMember, SessionStatus, ShiftEnter, SpawnPlacement,
-    TitleRules,
+    FieldRule, ImagePaste, OptionField, OptionValue, SessionMember, SessionStatus, ShiftEnter,
+    SpawnPlacement, TitleRules,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -93,6 +93,12 @@ fn claude_descriptor() -> AgentDescriptor {
         tag: "claude".to_string(),
         accent: AccentToken::Claude,
         shift_enter: ShiftEnter::BackslashCr,
+        // Claude Code binds chat:imagePaste to Alt+V on Windows, Ctrl+V elsewhere.
+        image_paste: if cfg!(windows) {
+            ImagePaste::AltV
+        } else {
+            ImagePaste::CtrlV
+        },
         caps: AgentCaps {
             headless: true,
             resume: true,
@@ -786,6 +792,16 @@ mod tests {
         }
         .expect("the title rule is a regex");
         regex::Regex::new(pattern).expect("the title rule compiles")
+    }
+
+    #[test]
+    fn image_paste_is_the_key_claude_binds_on_this_host() {
+        // Claude Code binds chat:imagePaste to alt+v on Windows, ctrl+v elsewhere
+        // (code.claude.com/docs/en/keybindings); a bare ^V on Windows pastes nothing.
+        #[cfg(windows)]
+        assert_eq!(claude_descriptor().image_paste, ImagePaste::AltV);
+        #[cfg(not(windows))]
+        assert_eq!(claude_descriptor().image_paste, ImagePaste::CtrlV);
     }
 
     #[test]

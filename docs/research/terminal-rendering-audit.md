@@ -90,7 +90,7 @@ Summary: 4 fix-needed rendering differences (ligatures, dropped zero-width glyph
 
   GPUI's Windows `ClipboardItem::text()` returns `None` when the item has only image entries (`gpui-0.2.2/src/platform.rs:1553-1565`; the Windows reader maps PNG/JFIF/GIF/SVG formats to images). So no text, no bytes, and the keystroke is consumed — the agent never sees ^V.
 - **xterm/Tauri**: Ctrl+V is deliberately passed through to the browser paste event (`Terminal.tsx:944-946`, `term.attachCustomKeyEventHandler` → return false), and with an image-only clipboard the paste handler finds `chosen.length === 0` and injects nothing. Tauri therefore also sends nothing, but the owner's stated acceptance is that native falls back to ^V.
-- **Verdict**: **fix needed**. On a clipboard with no text, send `0x16` (^V) to the child instead of consuming the key.
+- **Verdict**: **fix needed**. On a clipboard with no text, send the agent's image-paste key to the child instead of consuming the key: ^V (`0x16`) does not attach an image in Claude Code on Windows, which binds `chat:imagePaste` to Alt+V (`ESC v`) there and to Ctrl+V elsewhere (RT-1163). The agent's descriptor names the key (`AgentDescriptor.image_paste`); a shell gets `0x16`.
 
 ### C2 — Ctrl+C clears the selection after copying
 - **Repro**: drag-select terminal text, press Ctrl+C, then look at the selection.
@@ -182,8 +182,8 @@ Summary: 4 fix-needed rendering differences (ligatures, dropped zero-width glyph
 
 ## 6. The owner's two checks
 
-### O1 — Ctrl+V with an image-only clipboard must reach the agent as ^V
-- See C1. **Fix needed**: `paste()` returns without sending anything when `ClipboardItem::text()` is `None`, and `on_key` has already stopped propagation, so the child gets neither a paste nor `0x16`.
+### O1 — Ctrl+V with an image-only clipboard must reach the agent as its image-paste key
+- See C1. **Fix needed**: `paste()` returns without sending anything when `ClipboardItem::text()` is `None`, and `on_key` has already stopped propagation, so the child gets neither a paste nor its image-paste key. That key is the one the agent binds, not always ^V: Claude Code on Windows takes Alt+V (`ESC v`).
 
 ### O2 — A Windows mouse-move event whose position is unchanged must not produce hover or motion reports
 - **Repro**: with a program requesting any-motion reporting (`\e[?1003h`), post the same mouse position twice; with a link under the cursor and Ctrl held, post the same position twice.

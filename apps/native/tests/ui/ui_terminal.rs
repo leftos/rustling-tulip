@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use gpui::{Modifiers, MouseButton, Point, TestAppContext, point, px, size};
-use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection};
+use protocol::{ClientMessage, DaemonMessage, ImagePaste, SessionSnapshot, SplitDirection};
 use rustling_tulip_native::fonts::FontSettings;
 use rustling_tulip_native::ui_theme::UiTheme;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
@@ -368,6 +368,81 @@ fn ctrl_v_pastes_and_brackets_when_the_child_asks(cx: &mut TestAppContext) {
     h.set_clipboard("x\r\ny\x1b[201~z");
     h.keys("ctrl-v");
     assert_eq!(h.sent_input("s1"), b"\x1b[200~x\ryz\x1b[201~");
+}
+
+#[gpui::test]
+fn a_paste_with_no_text_sends_the_agents_image_paste_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut descriptor = agent_api::test_agent::DESCRIPTOR.clone();
+    descriptor.image_paste = ImagePaste::AltV;
+    let s = session("img")
+        .agent("test-agent")
+        .program_name(&descriptor.tag)
+        .build();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(s.clone()));
+    h.send(DaemonMessage::Agents {
+        agents: vec![descriptor],
+    });
+    h.send(DaemonMessage::SessionUpdated {
+        session: s.clone(),
+        request_id: None,
+    });
+    h.answer_scrollback(&s.id, b"");
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
+    h.set_clipboard("");
+    h.keys("ctrl-v");
+    assert_eq!(
+        h.sent_input(&s.id),
+        b"\x1bv",
+        "an empty clipboard sends the agent's image-paste key"
+    );
+}
+
+#[gpui::test]
+fn a_paste_with_no_text_sends_nothing_to_a_remote_session(cx: &mut TestAppContext) {
+    {
+        let dir = TestDir::new();
+        let shell = session("b1").shell("D:/x").build();
+        let mut h = support::remote_in_pane(cx, &dir, &serde_json::json!({}), &[], shell);
+        h.set_clipboard("");
+        h.keys("ctrl-v");
+        assert_eq!(
+            h.host(&support::saved_remote()).sent_input("b1"),
+            [0x16],
+            "a remote shell still gets ^V"
+        );
+    }
+    let dir = TestDir::new();
+    let descriptor = agent_api::test_agent::DESCRIPTOR.clone();
+    let s = session("b1")
+        .agent("test-agent")
+        .program_name(&descriptor.tag)
+        .build();
+    let mut h = support::remote_in_pane(cx, &dir, &serde_json::json!({}), &[], s.clone());
+    let mut host = h.host(&support::saved_remote());
+    host.send(DaemonMessage::Agents {
+        agents: vec![descriptor],
+    });
+    host.send(DaemonMessage::SessionUpdated {
+        session: s,
+        request_id: None,
+    });
+    host.sent();
+    h.set_clipboard("");
+    h.keys("ctrl-v");
+    assert!(
+        h.host(&support::saved_remote()).sent_input("b1").is_empty(),
+        "the agent would paste its own host's clipboard"
+    );
+    h.set_clipboard("hi");
+    h.keys("ctrl-v");
+    assert_eq!(
+        h.host(&support::saved_remote()).sent_input("b1"),
+        b"hi",
+        "text still pastes to a remote session"
+    );
 }
 
 #[gpui::test]

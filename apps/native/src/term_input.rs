@@ -3,7 +3,9 @@
 
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::Keystroke;
-use protocol::{AgentDescriptor, SessionMode, SessionSnapshot, SessionStatus, ShiftEnter};
+use protocol::{
+    AgentDescriptor, ImagePaste, SessionMode, SessionSnapshot, SessionStatus, ShiftEnter,
+};
 
 use crate::keys;
 use crate::sidebar::{agent_up, runtime_label};
@@ -29,16 +31,24 @@ pub struct SessionContext {
     /// What Shift+Enter sends while the session's agent is up; a shell's
     /// prompt takes `\` + CR.
     pub shift_enter: ShiftEnter,
+    /// What a paste with no text on the clipboard sends while the session's
+    /// agent is up; a shell's prompt takes `^V`.
+    pub image_paste: ImagePaste,
+    /// The session's agent is up, by a descriptor of the host's agents; a
+    /// shell, or an agent not running yet, is not.
+    pub agent_up: bool,
 }
 
 impl SessionContext {
     pub fn of(session: &SessionSnapshot, agents: &[AgentDescriptor]) -> Self {
         let runtime = runtime_label(session, agents);
+        let up = agent_up(session, runtime.as_deref(), agents);
         Self {
             mode: session.mode,
             status: session.status,
-            shift_enter: agent_up(session, runtime.as_deref(), agents)
-                .map_or(ShiftEnter::BackslashCr, |descriptor| descriptor.shift_enter),
+            shift_enter: up.map_or(ShiftEnter::BackslashCr, |descriptor| descriptor.shift_enter),
+            image_paste: up.map_or(ImagePaste::CtrlV, |descriptor| descriptor.image_paste),
+            agent_up: up.is_some(),
         }
     }
 
@@ -186,15 +196,17 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
-/// The bytes a paste sends. With no text on the clipboard, an image-only
-/// clipboard reads as no text on Windows, so the paste goes out as a plain
-/// `^V` (0x16) and the program decides what to do with it — an agent's own
-/// image paste reads the bitmap itself. Text pastes exactly as
-/// [`paste_bytes`] sends it.
-pub fn paste_input(text: Option<&str>, bracketed: bool) -> Vec<u8> {
+/// The bytes a paste sends. An image-only clipboard reads as no text, so a
+/// paste with no text sends the agent's image-paste key, `image_paste`
+/// (Alt+V as `ESC v`, else `^V`), and the agent pastes its host's clipboard
+/// image. Text pastes exactly as [`paste_bytes`] sends it.
+pub fn paste_input(text: Option<&str>, bracketed: bool, image_paste: ImagePaste) -> Vec<u8> {
     match text {
         Some(text) if !text.is_empty() => paste_bytes(text, bracketed),
-        _ => vec![0x16],
+        _ => match image_paste {
+            ImagePaste::AltV => b"\x1bv".to_vec(),
+            ImagePaste::CtrlV | ImagePaste::Unknown => vec![0x16],
+        },
     }
 }
 
@@ -207,7 +219,8 @@ mod tests {
     use alacritty_terminal::vte::ansi::CursorShape;
     use gpui::{Keystroke, Modifiers};
     use protocol::{
-        AgentDescriptor, AgentId, SessionMode, SessionSnapshot, SessionStatus, ShiftEnter,
+        AgentDescriptor, AgentId, ImagePaste, SessionMode, SessionSnapshot, SessionStatus,
+        ShiftEnter,
     };
 
     use super::{CopyKeys, KeyAction, SessionContext, key_action, paste_bytes, paste_input};
@@ -217,6 +230,8 @@ mod tests {
             mode,
             status: SessionStatus::Idle,
             shift_enter: ShiftEnter::BackslashCr,
+            image_paste: ImagePaste::CtrlV,
+            agent_up: mode == SessionMode::Interactive,
         }
     }
 
@@ -578,18 +593,25 @@ mod tests {
     }
 
     #[test]
-    fn paste_without_text_sends_ctrl_v() {
-        assert_eq!(paste_input(None, false), vec![0x16]);
-        assert_eq!(paste_input(None, true), vec![0x16]);
-        assert_eq!(paste_input(Some(""), false), vec![0x16]);
-        assert_eq!(paste_input(Some(""), true), vec![0x16]);
+    fn paste_without_text_sends_the_agents_image_paste_key() {
+        assert_eq!(paste_input(None, true, ImagePaste::AltV), b"\x1bv".to_vec());
+        assert_eq!(
+            paste_input(Some(""), false, ImagePaste::AltV),
+            b"\x1bv".to_vec()
+        );
+        assert_eq!(paste_input(None, false, ImagePaste::CtrlV), vec![0x16]);
+        assert_eq!(paste_input(None, false, ImagePaste::Unknown), vec![0x16]);
+        assert_eq!(
+            paste_input(Some("hi"), true, ImagePaste::AltV),
+            paste_bytes("hi", true)
+        );
     }
 
     #[test]
     fn paste_with_text_matches_paste_bytes() {
         for bracketed in [false, true] {
             assert_eq!(
-                paste_input(Some("hi"), bracketed),
+                paste_input(Some("hi"), bracketed, ImagePaste::CtrlV),
                 paste_bytes("hi", bracketed)
             );
         }
@@ -603,6 +625,8 @@ mod tests {
                 mode: SessionMode::PlainShell,
                 status: SessionStatus::Stopped,
                 shift_enter: ShiftEnter::BackslashCr,
+                image_paste: ImagePaste::CtrlV,
+                agent_up: false,
             }
         );
     }

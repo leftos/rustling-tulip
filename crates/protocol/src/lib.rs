@@ -150,6 +150,9 @@ pub struct AgentDescriptor {
     pub tag: String,
     pub accent: AccentToken,
     pub shift_enter: ShiftEnter,
+    /// What a paste with no text on the clipboard sends, so the agent pastes its host's clipboard image.
+    #[serde(default)]
+    pub image_paste: ImagePaste,
     pub caps: AgentCaps,
     /// What a trusted launch passes, for the spawn dialog's note.
     pub trust_note: Option<String>,
@@ -305,6 +308,19 @@ pub enum ShiftEnter {
     BackslashCr,
     /// A line feed.
     Lf,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The key an agent binds to pasting an image from its host's clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImagePaste {
+    /// Ctrl+V (`0x16`).
+    #[default]
+    CtrlV,
+    /// Alt+V (`ESC v`).
+    AltV,
     #[serde(other)]
     Unknown,
 }
@@ -13368,6 +13384,7 @@ mod tests {
             tag: "claude".to_owned(),
             accent: AccentToken::Claude,
             shift_enter: ShiftEnter::BackslashCr,
+            image_paste: ImagePaste::CtrlV,
             caps: AgentCaps {
                 headless: true,
                 resume: true,
@@ -13450,6 +13467,28 @@ mod tests {
         let json = serde_json::to_string(&descriptor).expect("encode");
         let back: AgentDescriptor = serde_json::from_str(&json).expect("decode");
         assert_eq!(back, descriptor);
+    }
+
+    #[test]
+    fn descriptor_image_paste_defaults_round_trips_and_absorbs_unknowns() {
+        let mut json = serde_json::to_value(sample_descriptor()).expect("encode");
+        json.as_object_mut()
+            .expect("an object")
+            .remove("image_paste");
+        let back: AgentDescriptor = serde_json::from_value(json).expect("decode");
+        assert_eq!(back.image_paste, ImagePaste::CtrlV);
+
+        let descriptor = AgentDescriptor {
+            image_paste: ImagePaste::AltV,
+            ..sample_descriptor()
+        };
+        let json = serde_json::to_string(&descriptor).expect("encode");
+        assert!(json.contains(r#""image_paste":"alt_v""#), "{json}");
+        let back: AgentDescriptor = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, descriptor);
+
+        let unknown: ImagePaste = serde_json::from_str(r#""ctrl_shift_v""#).expect("decode");
+        assert_eq!(unknown, ImagePaste::Unknown);
     }
 
     #[test]
