@@ -45,7 +45,7 @@ use crate::session_actions::{
     overlay_actions, pane_shows_exit, plan, rename_message, session_rows, worktree_to_reveal,
 };
 use crate::shell_dialog::standalone_shell_request;
-use crate::sidebar::{Container, ContainerKind, can_attach};
+use crate::sidebar::{Container, ContainerKind, can_attach, session_view_key};
 use crate::spawn_form::{Lock, Prefill, TabChoices, Target, current_tab_open_in};
 use crate::spawn_view::SpawnEntry;
 use crate::tabs::{
@@ -2597,6 +2597,19 @@ impl RootView {
                 let old = SessionRef::new(host.clone(), original.clone());
                 let new = SessionRef::new(host.clone(), copy.session.id.clone());
                 self.rekey_session_popout(&old, &new, cx);
+            }
+        }
+        // A restart's copy has a new session id, so the daemon's rebind of
+        // the original's panes reads the view this copy is remembered by:
+        // the original's own, so a pane on its chat comes back on it.
+        if let Some(original) = &placed.restart_of {
+            let host = session_view_key(&original.host);
+            let view = self.sidebar.session_view(&host, &original.id);
+            if self
+                .sidebar
+                .remember_session_view(&host, &copy.session.id, view)
+            {
+                self.save_ui();
             }
         }
         for msg in placed.messages {

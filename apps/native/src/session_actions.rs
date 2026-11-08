@@ -323,6 +323,9 @@ pub(crate) struct Placed {
     /// The host the session-level messages among `messages` go to (the
     /// original's discard); see [`crate::tabs::destination`].
     pub(crate) session_host: HostKey,
+    /// For a restart, the session it reruns, whose remembered view its copy
+    /// takes; `None` for a copy into a new tab or a tab.
+    pub(crate) restart_of: Option<SessionRef>,
 }
 
 pub(crate) fn action_state(session: &SessionSnapshot) -> ActionState {
@@ -998,6 +1001,7 @@ impl Duplicates {
             messages: vec![placement.message(copy.host, &copy.session.id, None)],
             focus,
             session_host: copy.host.clone(),
+            restart_of: None,
         })
     }
 }
@@ -1041,6 +1045,7 @@ fn restart_placement(
         cleanup: Vec::new(),
     });
     let session_host = original.host;
+    let restart_of = Some(SessionRef::new(session_host.clone(), original.id.clone()));
     let original = original.id;
     let focus = if in_popout {
         PlacedFocus::Popout { original }
@@ -1056,6 +1061,7 @@ fn restart_placement(
         messages,
         focus,
         session_host,
+        restart_of,
     }
 }
 

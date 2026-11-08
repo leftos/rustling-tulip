@@ -959,6 +959,56 @@ fn a_new_session_opens_on_its_terminal(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn restart_keeps_the_pane_on_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir);
+    h.click_on(TO_CHAT);
+    let loaded = load_request(&h.sent()).expect("the toggle asks for the chat");
+    h.send(reply(Some(&loaded), vec![user("u1")]));
+    h.sent();
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").exited(0).build(),
+        request_id: None,
+    });
+    h.sent();
+    h.click_on("exited-restart-p1");
+    let restart = h
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::DuplicateSession {
+                session_id,
+                request_id,
+                ..
+            } if session_id == "s1" => request_id,
+            _ => None,
+        })
+        .expect("a restart of s1 with a request id");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1b").build(),
+        request_id: Some(restart),
+    });
+    h.sent();
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p1", Some("s1b"))),
+    });
+    let sent = h.sent();
+    assert!(
+        h.root(|root, _| root.pane_shows_chat("p1")),
+        "the restarted session's pane opens on its chat"
+    );
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::LoadChat { session_id, .. } if session_id == "s1b"
+        )),
+        "the copy's chat is asked for: {sent:?}"
+    );
+}
+
+#[gpui::test]
 fn a_popped_out_pane_keeps_its_view(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached_in_a_repo(cx, &dir);
