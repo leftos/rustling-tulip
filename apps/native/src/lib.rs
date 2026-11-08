@@ -1397,7 +1397,7 @@ impl RootView {
             } else {
                 folder_picker::system_save_picker(window)
             },
-            autostart: Arc::new(remote_access::SystemAutostart),
+            autostart: remote_access::autostart_for(offscreen::requested()),
             tokens,
             // The cloaked smoke window neither checks nor takes the last
             // update's result, which belongs to the user's own client.

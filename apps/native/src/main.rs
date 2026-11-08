@@ -149,8 +149,11 @@ fn main() {
     install_panic_hook();
     // Bring the login launch up to date: an entry already naming this install's
     // daemon is rewritten in its current `--detach` form. An entry naming any
-    // other path, or none at all, is left alone.
-    daemon_client::autostart::refresh_registration();
+    // other path, or none at all, is left alone. The cloaked smoke window
+    // leaves the user's own login entry alone.
+    if !offscreen::requested() {
+        daemon_client::autostart::refresh_registration();
+    }
     let (args, updated_from) = take_updated_from(std::env::args().skip(1));
     if let Some(version) = updated_from {
         tracing::info!(%version, "started by an update from this version");

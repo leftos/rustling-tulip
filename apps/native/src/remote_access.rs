@@ -4,6 +4,8 @@
 //! login launch.
 
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use protocol::{ClientMessage, RemoteState};
 
@@ -142,7 +144,8 @@ pub fn autostart_read_failure_line(error: &str) -> String {
 }
 
 /// Whether this PC starts the daemon when the user logs in, and the switch
-/// for it. The client runs with [`SystemAutostart`]; specs use a recorder.
+/// for it. The client runs with [`SystemAutostart`], or with
+/// [`MemoryAutostart`] under a cloaked window; specs use a recorder.
 pub trait Autostart {
     /// Whether the login launch is registered.
     ///
@@ -172,13 +175,50 @@ impl Autostart for SystemAutostart {
     }
 }
 
+/// The login launch kept in memory: a cloaked window, which every driven run
+/// and the smoke tier opens, never reads or writes the owner's login entry.
+#[derive(Debug, Default)]
+pub struct MemoryAutostart {
+    enabled: AtomicBool,
+}
+
+impl Autostart for MemoryAutostart {
+    fn get(&self) -> Result<bool, String> {
+        Ok(self.enabled.load(Ordering::Relaxed))
+    }
+
+    fn set(&self, enabled: bool) -> Result<(), String> {
+        self.enabled.store(enabled, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// Whether a run with `offscreen` set (a cloaked window) holds the login
+/// launch in memory instead of reading this PC's own entries.
+#[must_use]
+pub(crate) fn autostart_is_memory(offscreen: bool) -> bool {
+    offscreen
+}
+
+/// The login launch a run with `offscreen` set (a cloaked window) uses: the
+/// in-memory stand-in, which leaves the owner's entries alone, else this
+/// PC's.
+#[must_use]
+pub(crate) fn autostart_for(offscreen: bool) -> Arc<dyn Autostart> {
+    if autostart_is_memory(offscreen) {
+        Arc::new(MemoryAutostart::default())
+    } else {
+        Arc::new(SystemAutostart)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use protocol::{ClientMessage, RemoteState};
 
     use super::{
-        PortError, RemoteStatusView, address, apply_port_message, cert_line, controls_enabled,
-        parse_port, state_line,
+        Autostart, MemoryAutostart, PortError, RemoteStatusView, address, apply_port_message,
+        autostart_for, autostart_is_memory, cert_line, controls_enabled, parse_port, state_line,
     };
 
     const DAY: u64 = 86_400;
@@ -358,5 +398,33 @@ mod tests {
         assert!(!controls_enabled(None));
         let off = status(false, 8787, RemoteState::Off);
         assert!(controls_enabled(Some(&off)));
+    }
+
+    #[test]
+    fn autostart_is_memory_is_true_only_for_a_cloaked_run() {
+        assert!(
+            autostart_is_memory(true),
+            "a cloaked run holds it in memory"
+        );
+        assert!(
+            !autostart_is_memory(false),
+            "a windowed run reads this PC's entry"
+        );
+    }
+
+    #[test]
+    fn a_memory_autostart_starts_unticked_and_holds_each_set() {
+        let autostart = MemoryAutostart::default();
+
+        assert_eq!(autostart.get(), Ok(false), "it starts unticked");
+        assert_eq!(autostart.set(true), Ok(()));
+        assert_eq!(autostart.get(), Ok(true), "the tick is held");
+        assert_eq!(autostart.set(false), Ok(()));
+        assert_eq!(autostart.get(), Ok(false), "the untick is held");
+    }
+
+    #[test]
+    fn autostart_for_a_cloaked_run_reads_unticked() {
+        assert_eq!(autostart_for(true).get(), Ok(false));
     }
 }

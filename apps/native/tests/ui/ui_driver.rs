@@ -5,6 +5,7 @@
 use crate::support;
 
 use gpui::{Modifiers, TestAppContext};
+use protocol::ClientMessage;
 use rustling_tulip_native::driver::handlers::{handle, wait_read};
 use rustling_tulip_native::driver::protocol::{ErrorCode, Failure, Outcome, Reply, Request};
 use rustling_tulip_native::driver::wait::parse_predicate;
@@ -28,6 +29,16 @@ fn two_tabs() -> Fixture {
         ],
         ..Fixture::default()
     }
+}
+
+/// The folder and name of every `AddRepo` in `sent`.
+fn added(sent: &[ClientMessage]) -> Vec<(String, Option<String>)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::AddRepo { path, name } => Some((path.clone(), name.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `two_repos`, `s1`'s scrollback answered, its pane clicked so it holds
@@ -464,7 +475,7 @@ fn driver_action_unknown_name_lists_actions(cx: &mut TestAppContext) {
         failed.hint.as_deref(),
         Some(
             "actions: open_settings, new_shell, open_spawn, toggle_sidebar, select_tab, \
-             focus_pane, show_activity, set_hover"
+             focus_pane, show_activity, set_hover, add_repo"
         )
     );
 }
@@ -507,6 +518,90 @@ fn driver_action_select_tab_unknown_id_is_not_found(cx: &mut TestAppContext) {
         result(&mut h, "state", json!({}))["active_tab"],
         json!("t1")
     );
+}
+
+/// The failure of a refused `add_repo` of `path`, once nothing was sent and
+/// no last repo folder was saved.
+fn refused_add(h: &mut Harness<'_>, dir: &TestDir, path: &str) -> String {
+    let failed = failure(
+        h,
+        "action",
+        json!({"name": "add_repo", "args": {"path": path}}),
+    );
+    assert_eq!(failed.code, ErrorCode::BadParams, "{failed:?}");
+    assert!(
+        added(&h.sent()).is_empty(),
+        "a refused add_repo sends nothing"
+    );
+    let saved = std::fs::read_to_string(dir.path().join("native-ui.json")).unwrap_or_default();
+    let saved: Value = serde_json::from_str(&saved).unwrap_or(Value::Null);
+    assert_eq!(
+        saved["last_repo_dir"],
+        Value::Null,
+        "a refused path saves no last repo folder"
+    );
+    failed.message
+}
+
+#[gpui::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a spec fails with the message of the precondition it lost"
+)]
+fn driver_action_add_repo_sends_add_repo_for_the_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    h.sent();
+    let folder = dir.path().join("added-repo");
+    std::fs::create_dir_all(&folder).expect("create the folder to add");
+    let path = folder.to_string_lossy().into_owned();
+    let parent = folder
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned());
+
+    let done = result(
+        &mut h,
+        "action",
+        json!({"name": "add_repo", "args": {"path": path}}),
+    );
+
+    assert_eq!(done, json!({"action": "add_repo"}));
+    assert_eq!(
+        added(&h.sent()),
+        vec![(path, Some("added-repo".to_owned()))],
+        "the folder is registered as the picker's answer would register it"
+    );
+    let saved =
+        std::fs::read_to_string(dir.path().join("native-ui.json")).expect("the ui file is written");
+    let saved: Value = serde_json::from_str(&saved).expect("native-ui.json parses");
+    assert_eq!(
+        saved["last_repo_dir"],
+        json!(parent),
+        "the folder's parent becomes the next pick's folder"
+    );
+}
+
+#[gpui::test]
+fn driver_action_add_repo_with_a_relative_path_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    h.sent();
+
+    let message = refused_add(&mut h, &dir, "repos/new");
+
+    assert_eq!(message, "repos/new: not an absolute path on This PC");
+}
+
+#[gpui::test]
+fn driver_action_add_repo_with_a_missing_folder_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    h.sent();
+    let missing = dir.path().join("missing").to_string_lossy().into_owned();
+
+    let message = refused_add(&mut h, &dir, &missing);
+
+    assert_eq!(message, format!("{missing}: no such folder"));
 }
 
 #[gpui::test]

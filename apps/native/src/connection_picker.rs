@@ -17,7 +17,7 @@ use crate::ssh::DEFAULT_REMOTE_COMMAND;
 use crate::target::{DEFAULT_TAILNET_PORT, HostNameError, SshHost, SshHostError, Target};
 
 /// The label of the row that connects to this PC's own daemon.
-const THIS_PC: &str = "This PC";
+pub(crate) const THIS_PC: &str = "This PC";
 
 /// How a saved host is reached: `"tailnet"` (the default when a record has
 /// no `kind`) or `"ssh"` in `native-ui.json`. An unknown kind fails the

@@ -4,10 +4,13 @@
 //! key it dispatches reaches the view's own handlers, which update
 //! it, so the view must not be borrowed while they run.
 
+use std::path::{Path, PathBuf};
+
 use gpui::{App, Bounds, ClipboardItem, Context, Entity, Keystroke, Modifiers, Pixels, Window};
 use serde_json::{Value, json};
 
 use crate::RootView;
+use crate::connection_picker::THIS_PC;
 use crate::driver::pointer;
 use crate::driver::protocol::{
     ActionParams, ClickParams, DragParams, ErrorCode, FindParams, KeyParams, MoveParams,
@@ -31,7 +34,7 @@ const PASTE_KEYSTROKE: &str = "secondary-v";
 
 /// The actions `action` knows, as an unknown one's hint lists them.
 const ACTIONS_HINT: &str = "actions: open_settings, new_shell, open_spawn, toggle_sidebar, \
-                            select_tab, focus_pane, show_activity, set_hover";
+                            select_tab, focus_pane, show_activity, set_hover, add_repo";
 
 /// Answers `request` against `root` and `window`, the window it draws in.
 pub fn handle(
@@ -496,6 +499,7 @@ enum Action {
     FocusPane(String),
     ShowActivity(Activity),
     SetHover(Option<bool>),
+    AddRepo(String),
 }
 
 impl Action {
@@ -513,6 +517,7 @@ impl Action {
                 .and_then(|name| activity(&name))
                 .map(Self::ShowActivity),
             "set_hover" => hover_arg(args).map(Self::SetHover),
+            "add_repo" => repo_folder_arg(args).map(Self::AddRepo),
             other => Err(ParamError {
                 message: format!("unknown action: {other}"),
                 hint: Some(ACTIONS_HINT.to_owned()),
@@ -530,6 +535,28 @@ fn string_arg(args: Option<&Value>, action: &str, key: &str) -> Result<String, P
             message: format!(r#"{action} takes args {{"{key}": <string>}}"#),
             hint: None,
         })
+}
+
+/// The folder argument of `add_repo`: an absolute path on this PC that
+/// exists and is a folder, which is all the folder picker could answer.
+fn repo_folder_arg(args: Option<&Value>) -> Result<String, ParamError> {
+    let path = string_arg(args, "add_repo", "path")?;
+    let refused = if Path::new(&path).is_absolute() {
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => None,
+            Ok(_) => Some("not a folder".to_owned()),
+            Err(_) => Some("no such folder".to_owned()),
+        }
+    } else {
+        Some(format!("not an absolute path on {THIS_PC}"))
+    };
+    match refused {
+        Some(reason) => Err(ParamError {
+            message: format!("{path}: {reason}"),
+            hint: None,
+        }),
+        None => Ok(path),
+    }
 }
 
 /// The rail panel `name` names.
@@ -652,6 +679,7 @@ impl RootView {
                 self.change_activity(|sidebar| sidebar.show_activity(item), window, cx);
             }
             Action::SetHover(hovered) => self.set_window_hover_override(hovered, cx),
+            Action::AddRepo(path) => self.finish_add_repo(Some(PathBuf::from(path))),
         }
         cx.notify();
         Ok(())

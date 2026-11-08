@@ -664,7 +664,7 @@ impl RootView {
 
     /// The picker's answer: the folder beside it is remembered and the
     /// folder registered.
-    fn finish_add_repo(&mut self, picked: Option<PathBuf>) {
+    pub(crate) fn finish_add_repo(&mut self, picked: Option<PathBuf>) {
         let Some(add) = RepoAdd::from_pick(picked) else {
             return;
         };

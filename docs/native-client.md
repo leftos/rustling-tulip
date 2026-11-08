@@ -1219,6 +1219,8 @@ A driven run is a launch with `RUSTLING_TULIP_DRIVER=1`. The gate (`apps/native/
 
 A cloaked run shows none of the app's own toast windows, except a driven run that also sets `RUSTLING_TULIP_DRIVER_TOASTS=1` (`driver_gate::driver_toasts_wanted`, read at each toast): its toasts show on the desktop it runs on, for the live toast check. Any other value keeps them unshown, and it never refuses a run.
 
+A cloaked run (`offscreen::requested()`, which every driven run and the smoke tier set) never reads or writes the owner's login entry (`HKCU\...\Run\rustling-tulip-daemon`): `RootView::new` gets an in-memory `Autostart` (`remote_access::autostart_for`, `MemoryAutostart`) that starts unticked, and a driven run skips the startup `refresh_registration()` in `main`.
+
 Any other value of `RUSTLING_TULIP_DRIVER`, or any condition unmet, refuses the run: it logs `driver run refused: <reason>` to stderr only and exits with code 4 (`offscreen::DRIVER_REFUSED_EXIT`).
 
 Once the window is open, a driven run listens on the named pipe `rt-driver-<pid>` (`apps/native/src/driver/pipe.rs`). Its DACL grants only the current user's SID, it refuses remote clients, and a name already held is fatal (exit 4), never retried under another name.
@@ -1233,7 +1235,7 @@ An error reply names a code (`unknown_method`, `bad_params`, `not_found`, `not_v
 
 | Method | Params | Result | Errors |
 |---|---|---|---|
-| `action` | `name`, `args?` | `{"action": name}` | `bad_params` for an unknown name (the hint lists the names); `refused` for `open_spawn` while another dialog is open; `not_found` for an unknown tab or pane id |
+| `action` | `name`, `args?`; `add_repo` takes `path`, a local folder added as a repo exactly as the folder picker's answer would be, after the host path checks | `{"action": name}` | `bad_params` for an unknown name (the hint lists the names) or an `add_repo` path the host checks reject (nothing is sent; the message says why); `refused` for `open_spawn` while another dialog is open; `not_found` for an unknown tab or pane id |
 | `click` | a target (`x`, `y` or `element`), `button?`: `left` (default) or `right`, `count?`: 1 (default) or 2 | `{"at": {"x", "y"}}` in logical px | target errors as below; `bad_params` for a `count` other than 1 or 2 or an unknown `button` |
 | `drag` | `from`, `to`: each a target object, `steps?`: 2..=64 (default 8) | `{"from", "to"}`, each a point | target errors as below, prefixed `from:` or `to:`; `bad_params` for `steps` outside 2..=64. Every step moves more than 3 px when the distance allows |
 | `find` | `prefix?` | the registry's names starting with `prefix`, sorted, each `{"name", "bounds", "visible"}` | none |
@@ -1252,7 +1254,7 @@ The pointer methods (`click`, `drag`, `move`, `wheel`; `apps/native/src/driver/p
 
 Posted input cannot carry modifiers, since gpui reads them from `GetKeyState`: any pointer request with `modifiers` is `refused` ("posted pointer input cannot carry modifiers; press a chord with key, or use action"). A posted move is followed by `WM_MOUSELEAVE`, so hover-only UI needs `action` `set_hover`. Posted pointer input reaches only a real window, so the in-process UI specs cover the refusals only, and the driven smoke specs prove the rest on the real exe.
 
-`action` names are `open_settings`, `new_shell`, `open_spawn`, `toggle_sidebar`, `select_tab` (`{"id"}`), `focus_pane` (`{"id"}`), `show_activity` (`{"name"}`: `sessions`, `needs_you`, `source_control` or `gates`, which shows the sessions panel while This PC has no gate state) and `set_hover` (`{"value"}`: `true`, `false` or `null`).
+`action` names are `open_settings`, `new_shell`, `open_spawn`, `toggle_sidebar`, `select_tab` (`{"id"}`), `focus_pane` (`{"id"}`), `show_activity` (`{"name"}`: `sessions`, `needs_you`, `source_control` or `gates`, which shows the sessions panel while This PC has no gate state) `set_hover` (`{"value"}`: `true`, `false` or `null`) and `add_repo` (`{"path"}`: an existing folder on This PC, added as the folder picker would add it).
 
 A `wait_for` predicate (`until`) is one of `{"state": "<dotted path>", "equals": <json>}`, `{"state": path, "exists": bool}`, `{"pane_text": {"pane", "contains"}}` and `{"element": "<registry name>", "visible": bool}`. A numeric path segment indexes an array, and `exists` means non-null. `pane_text.contains` matches against the same joined `text` that `pane_text` replies, so a match survives a soft wrap. The loop runs in the endpoint between frames (`apps/native/src/driver/wait.rs`), so it never blocks the UI thread, and it is answered only over the pipe.
 
