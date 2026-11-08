@@ -141,6 +141,7 @@ impl LiveDaemon {
             repo_root: repo_root(),
             bin_dir: target_bin_dir(),
             extra_env: extra.to_vec(),
+            daemon_only_env: Vec::new(),
             shell: TestShell::Cmd,
         };
         let inner = IsolatedDaemon::start(spec).unwrap_or_else(|err| panic!("{err}"));

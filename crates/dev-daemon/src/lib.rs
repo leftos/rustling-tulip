@@ -44,14 +44,51 @@ pub enum TestShell {
 /// folder; `repo_root` holds the `tools/e2e` fakes the daemon runs;
 /// `bin_dir` holds `rustling-tulipd` and the tracer it copies; `extra_env`
 /// is set on the daemon after the isolation variables, so a row can
-/// override one; `shell` is the shell its sessions get, as [`TestShell`] says.
+/// override one; `daemon_only_env` is set on the daemon's process after
+/// `extra_env` and is never in [`IsolatedDaemon::envs`], so no client or
+/// fixture that copies those gets it; `shell` is the shell its sessions get,
+/// as [`TestShell`] says.
 pub struct DaemonSpec {
     pub name: String,
     pub scratch_root: PathBuf,
     pub repo_root: PathBuf,
     pub bin_dir: PathBuf,
     pub extra_env: Vec<(&'static str, OsString)>,
+    pub daemon_only_env: Vec<(&'static str, OsString)>,
     pub shell: TestShell,
+}
+
+/// A spec's environments: `shared` is what [`IsolatedDaemon::envs`] returns,
+/// for other processes to copy; `daemon` is what the daemon's process is
+/// spawned with, `shared` and then the spec's `daemon_only_env`.
+pub struct SpawnEnvs {
+    pub shared: Vec<(&'static str, OsString)>,
+    pub daemon: Vec<(&'static str, OsString)>,
+}
+
+/// Builds `spec`'s environments; nothing is checked or made on disk.
+///
+/// # Errors
+///
+/// Fails when a registered agent has no fake CLI, or the stubs' folder
+/// cannot be put on `PATH`.
+pub fn spawn_envs(spec: &DaemonSpec) -> Result<SpawnEnvs, LaunchError> {
+    let shared = env::isolated_envs(spec)?;
+    let mut daemon = shared.clone();
+    daemon.extend(spec.daemon_only_env.iter().cloned());
+    Ok(SpawnEnvs { shared, daemon })
+}
+
+/// The home variable of the registered agent whose program override is
+/// `program_env_var`, as its fake CLI names it; `None` when no agent has
+/// that override or its fake names no home.
+#[must_use]
+pub fn agent_home_var(program_env_var: &str) -> Option<&'static str> {
+    agent_registry::all()
+        .iter()
+        .find(|plugin| plugin.program_env_var() == program_env_var)
+        .and_then(|plugin| plugin.fake_cli())
+        .and_then(|fake| fake.home_env)
 }
 
 /// The variables an isolated daemon must not inherit from its parent, so a
@@ -130,6 +167,8 @@ pub struct IsolatedDaemon {
     daemon: PathBuf,
     child: Child,
     envs: Vec<(&'static str, OsString)>,
+    /// `envs`, then the spec's daemon-only rows: what the daemon runs with.
+    spawn_envs: Vec<(&'static str, OsString)>,
     removed_envs: &'static [&'static str],
     handshake: DaemonHandshake,
     keep_root: bool,
@@ -141,8 +180,12 @@ impl IsolatedDaemon {
     /// the folders, starts the daemon from `spec.bin_dir` and waits for its
     /// handshake and `/health`.
     pub fn start(spec: DaemonSpec) -> Result<Self, LaunchError> {
-        let envs = env::isolated_envs(&spec)?;
-        check_isolated(|name| env::env_value(&envs, name))?;
+        let SpawnEnvs { shared, daemon } = spawn_envs(&spec)?;
+        for envs in [&shared, &daemon] {
+            check_isolated(|name| env::env_value(envs, name))?;
+            env::check_agent_homes(envs)?;
+        }
+        let (envs, spawn_envs) = (shared, daemon);
         check_scratch_root(&spec.scratch_root)?;
         let daemon = spec
             .bin_dir
@@ -152,12 +195,14 @@ impl IsolatedDaemon {
         }
         env::make_scratch_dirs(&spec.scratch_root)?;
         let removed = removed_envs(&spec);
-        let child = process::spawn_daemon(&daemon, &envs, removed).map_err(LaunchError::Spawn)?;
+        let child =
+            process::spawn_daemon(&daemon, &spawn_envs, removed).map_err(LaunchError::Spawn)?;
         let mut isolated = Self {
             root: spec.scratch_root,
             daemon,
             child,
             envs,
+            spawn_envs,
             removed_envs: removed,
             handshake: DaemonHandshake {
                 protocol_version: 0,
@@ -176,8 +221,8 @@ impl IsolatedDaemon {
     /// Starts a new daemon on the same directories and environment, after
     /// [`Self::kill`], and waits for its handshake and `/health`.
     pub fn respawn(&mut self) -> Result<(), LaunchError> {
-        self.child =
-            process::spawn_daemon(&self.daemon, &self.envs, self.removed_envs).map_err(|err| {
+        self.child = process::spawn_daemon(&self.daemon, &self.spawn_envs, self.removed_envs)
+            .map_err(|err| {
                 self.keep_root = true;
                 LaunchError::Spawn(err)
             })?;
@@ -279,7 +324,7 @@ impl IsolatedDaemon {
     }
 
     /// The variables that isolate a process to this daemon, to set on a
-    /// child with `Command::envs`.
+    /// child with `Command::envs`; never the spec's daemon-only rows.
     #[must_use]
     pub fn envs(&self) -> &[(&'static str, OsString)] {
         &self.envs
@@ -375,6 +420,7 @@ mod tests {
             repo_root: repo_root(),
             bin_dir: repo_root().join("target").join("no-such-profile"),
             extra_env: Vec::new(),
+            daemon_only_env: Vec::new(),
             shell: TestShell::Cmd,
         }
     }
@@ -396,6 +442,58 @@ mod tests {
         assert!(
             !scratch.exists(),
             "the refused launch created {}",
+            scratch.display()
+        );
+    }
+
+    /// The first registered agent with a home variable: the variable its
+    /// fake CLI names.
+    fn a_home_variable() -> &'static str {
+        agent_registry::all()
+            .iter()
+            .find_map(|plugin| plugin.fake_cli().and_then(|fake| fake.home_env))
+            .expect("a registered agent's fake CLI names a home variable")
+    }
+
+    /// A row pointing an agent's home at the user's own folder is refused
+    /// before any folder is made.
+    #[test]
+    fn launch_refuses_an_agent_home_outside_tmp() {
+        let scratch = repo_root()
+            .join(".tmp")
+            .join("dev-daemon-unit")
+            .join(format!("agent-home-refused-{}", std::process::id()));
+        let home = a_home_variable();
+        let mut spec = spec(scratch.clone());
+        spec.extra_env = vec![(home, OsString::from(r"C:\Users\x\.claude"))];
+        match IsolatedDaemon::start(spec) {
+            Err(LaunchError::NotIsolated { variable, .. }) => assert_eq!(variable, home),
+            Err(other) => panic!("expected NotIsolated naming {home}, got {other}"),
+            Ok(_) => panic!("a daemon started with {home} outside .tmp"),
+        }
+        assert!(
+            !scratch.exists(),
+            "the refused launch created {}",
+            scratch.display()
+        );
+    }
+
+    /// The home each agent gets by default passes: the start goes on to look
+    /// for the daemon exe, which this spec's bin dir does not hold.
+    #[test]
+    fn the_default_agent_home_passes() {
+        let scratch = repo_root()
+            .join(".tmp")
+            .join("dev-daemon-unit")
+            .join(format!("agent-home-default-{}", std::process::id()));
+        match IsolatedDaemon::start(spec(scratch.clone())) {
+            Err(LaunchError::MissingDaemon { .. }) => {}
+            Err(other) => panic!("expected MissingDaemon, got {other}"),
+            Ok(_) => panic!("a daemon started from {}", scratch.display()),
+        }
+        assert!(
+            !scratch.exists(),
+            "the start made {} before finding the daemon",
             scratch.display()
         );
     }

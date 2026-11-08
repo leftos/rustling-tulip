@@ -4,11 +4,15 @@
 //! stdout carries only JSON-RPC frames; logs go to stderr and to
 //! `<repo root>/.tmp/driver/rt-driver-mcp-<pid>.log`. When stdin closes,
 //! every live session is stopped before the server exits.
+//!
+//! `rt-driver-mcp set-token` instead stores the one line on stdin as the
+//! driver token (`token.rs`) and exits.
 
 mod launch;
 mod pipe;
 mod rpc;
 mod session;
+mod token;
 mod tools;
 
 use std::ffi::OsString;
@@ -31,7 +35,17 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
-    let repo_root = repo_root_arg(std::env::args_os().skip(1))?;
+    let mut args = std::env::args_os().skip(1).peekable();
+    if args.peek().is_some_and(|arg| arg == "set-token") {
+        if let Some(extra) = args.nth(1) {
+            bail!(
+                "set-token takes no arguments, not {}; it reads the token from stdin",
+                extra.display()
+            );
+        }
+        return set_token();
+    }
+    let repo_root = repo_root_arg(args)?;
     init_logging(&repo_root);
     tracing::info!(version = %rpc::server_version(), repo_root = %repo_root.display(), "rt-driver-mcp started");
     let mut server = rpc::Server::new(repo_root);
@@ -39,6 +53,16 @@ fn run() -> Result<()> {
     server.stop_all();
     tracing::info!("stdin closed; every session stopped");
     served
+}
+
+/// `set-token`: stores the one line on stdin as the driver token, and prints
+/// only that it did. The owner runs it through
+/// `tools/rt-driver-mcp/set-driver-token.ps1`.
+fn set_token() -> Result<()> {
+    token::set_token(&mut std::io::stdin().lock(), &token::CredentialManager)
+        .map_err(anyhow::Error::msg)?;
+    writeln!(std::io::stdout(), "driver token stored").context("writing stdout")?;
+    Ok(())
 }
 
 /// Answers each stdin line until stdin closes.
@@ -67,7 +91,7 @@ fn repo_root_arg(mut args: impl Iterator<Item = OsString>) -> Result<PathBuf> {
     while let Some(arg) = args.next() {
         if arg != "--repo-root" {
             bail!(
-                "unknown argument {}; usage: rt-driver-mcp [--repo-root <path>]",
+                "unknown argument {}; usage: rt-driver-mcp [--repo-root <path>] | rt-driver-mcp set-token",
                 arg.display()
             );
         }

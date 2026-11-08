@@ -4,6 +4,7 @@
 
 use std::ffi::OsString;
 use std::fs::File;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -13,7 +14,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::pipe::{PipeClient, Transport as _};
-use crate::session::{Session, log_tail, native_log};
+use crate::session::{ScratchRepo, Session, log_tail, native_log};
+use crate::token;
 
 /// What a missing driver build is told to run.
 pub const BUILD_HINT: &str = "build the driven client first: cargo build -p rustling-tulip-native --features driver \
@@ -35,9 +37,14 @@ const DRIVER_ENV: &str = "RUSTLING_TULIP_DRIVER";
 /// Set, the client's window opens cloaked and never activates.
 const OFFSCREEN_ENV: &str = "RUSTLING_TULIP_OFFSCREEN_WINDOW";
 
+/// The file a real Claude's home is seeded with, so its first start skips
+/// onboarding.
+pub const SEED_FILE: &str = ".claude.json";
+
 /// What to launch: `scratch` is the session's own folder under the repo's
 /// `.tmp/driver/`; `env` is set on the isolated daemon after its isolation
-/// variables, so a row can point an agent or the tailnet at a real CLI.
+/// variables, so a row can point an agent or the tailnet at a real CLI;
+/// `daemon_only_env` is set on the daemon alone, never on the client.
 pub struct LaunchSpec {
     pub session: String,
     pub repo_root: PathBuf,
@@ -45,6 +52,7 @@ pub struct LaunchSpec {
     pub scratch: PathBuf,
     pub shell: TestShell,
     pub env: Vec<(&'static str, OsString)>,
+    pub daemon_only_env: Vec<(&'static str, OsString)>,
 }
 
 /// A driven client's discovery file, as the endpoint writes it.
@@ -60,19 +68,17 @@ pub struct Discovery {
 /// started, and carries the client's `native.log` tail when there is one.
 pub fn launch(spec: &LaunchSpec) -> Result<Session, String> {
     check_build(&spec.build_dir)?;
+    // Dropped on any failure below, which removes it again.
+    let scratch_repo = ScratchRepo::create(&spec.repo_root, &spec.session)?;
     let bin = spec.scratch.join("bin");
     shadow_copy(&spec.build_dir, &bin).map_err(|err| format!("shadow-copying the build: {err}"))?;
-    let daemon_spec = DaemonSpec {
-        name: spec.session.clone(),
-        scratch_root: spec.scratch.clone(),
-        repo_root: spec.repo_root.clone(),
-        bin_dir: bin.clone(),
-        extra_env: spec.env.clone(),
-        shell: spec.shell,
-    };
+    let daemon_spec = daemon_spec(spec, &bin);
     let removed = dev_daemon::removed_envs(&daemon_spec);
     let daemon = IsolatedDaemon::start(daemon_spec)
         .map_err(|err| format!("starting the isolated daemon: {err}"))?;
+    if token::uses_real_agent(&spec.env) {
+        seed_real_agent_home(&daemon)?;
+    }
     let log = native_log(&daemon.config_dir());
     let fail = |step: &str, err: &str| {
         format!(
@@ -92,17 +98,79 @@ pub fn launch(spec: &LaunchSpec) -> Result<Session, String> {
                 client,
                 PipeClient::new(String::new()),
                 daemon,
+                spec.repo_root.clone(),
+                scratch_repo,
             ));
             return Err(message);
         }
     };
-    let mut session = Session::new(spec.session.clone(), client, PipeClient::new(pipe), daemon);
+    let mut session = Session::new(
+        spec.session.clone(),
+        client,
+        PipeClient::new(pipe),
+        daemon,
+        spec.repo_root.clone(),
+        scratch_repo,
+    );
     if let Err(err) = session.pipe().call("ping", json!({})) {
         let message = fail("pinging the driver endpoint", &err.to_string());
         drop(session);
         return Err(message);
     }
     Ok(session)
+}
+
+/// The isolated daemon `spec` runs, from the copies in `bin`.
+fn daemon_spec(spec: &LaunchSpec, bin: &Path) -> DaemonSpec {
+    DaemonSpec {
+        name: spec.session.clone(),
+        scratch_root: spec.scratch.clone(),
+        repo_root: spec.repo_root.clone(),
+        bin_dir: bin.to_path_buf(),
+        extra_env: spec.env.clone(),
+        daemon_only_env: spec.daemon_only_env.clone(),
+        shell: spec.shell,
+    }
+}
+
+/// Seeds the home of the agent [`token::REAL_AGENT_ENV`] points at a real
+/// CLI, found as the value of its fake's home variable in `daemon`'s
+/// environment.
+fn seed_real_agent_home(daemon: &IsolatedDaemon) -> Result<(), String> {
+    let home = dev_daemon::agent_home_var(token::REAL_AGENT_ENV).and_then(|home_env| {
+        daemon
+            .envs()
+            .iter()
+            .rev()
+            .find(|(name, _)| *name == home_env)
+            .map(|(_, value)| PathBuf::from(value))
+    });
+    let Some(home) = home else {
+        return Err(format!(
+            "seeding the agent home: no registered agent's fake names a home for {}",
+            token::REAL_AGENT_ENV
+        ));
+    };
+    seed_onboarding(&home)
+}
+
+/// Writes `<home>/.claude.json` holding only `hasCompletedOnboarding` and
+/// `theme`, so the first start skips onboarding; a file already there is
+/// left as it is.
+fn seed_onboarding(home: &Path) -> Result<(), String> {
+    let path = home.join(SEED_FILE);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path);
+    let mut file = match file {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(err) => return Err(format!("seeding {}: {err}", path.display())),
+    };
+    let seed = json!({"hasCompletedOnboarding": true, "theme": "dark"});
+    file.write_all(seed.to_string().as_bytes())
+        .map_err(|err| format!("seeding {}: {err}", path.display()))
 }
 
 /// The exe file name of `stem` on this platform.
@@ -148,13 +216,27 @@ fn spawn_client(
     let stderr_path = scratch.join("client-stderr.log");
     let stderr = File::create(&stderr_path)
         .map_err(|err| format!("creating {}: {err}", stderr_path.display()))?;
+    client_command(daemon.envs(), bin, scratch, removed, Stdio::from(stderr))
+        .spawn()
+        .map_err(|err| format!("spawning the client: {err}"))
+}
+
+/// The copied client's command: `envs` (the daemon's [`IsolatedDaemon::envs`],
+/// never its daemon-only rows) and the driver switched on, run in `scratch`.
+fn client_command(
+    envs: &[(&'static str, OsString)],
+    bin: &Path,
+    scratch: &Path,
+    removed: &[&'static str],
+    stderr: Stdio,
+) -> Command {
     let mut command = Command::new(bin.join(exe("rustling-tulip-native")));
     // The client hands its environment on to any daemon it starts itself.
     for name in removed {
         command.env_remove(*name);
     }
     command
-        .envs(daemon.envs().iter().map(|(key, value)| (*key, value)))
+        .envs(envs.iter().map(|(key, value)| (*key, value)))
         .env(DRIVER_ENV, "1")
         .env(OFFSCREEN_ENV, "1")
         .current_dir(scratch)
@@ -163,8 +245,6 @@ fn spawn_client(
         .stderr(stderr);
     dev_daemon::no_console(&mut command);
     command
-        .spawn()
-        .map_err(|err| format!("spawning the client: {err}"))
 }
 
 /// Waits for the discovery file of `client`, matched by pid and creation
@@ -244,9 +324,100 @@ fn creation_time(_child: &Child) -> Result<u64, String> {
     reason = "a spec fails with the message of the step it lost"
 )]
 mod tests {
-    use std::path::PathBuf;
+    use std::ffi::{OsStr, OsString};
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
 
-    use super::{BUILD_HINT, Discovery, LaunchSpec, TestShell, find_discovery, launch};
+    use serde_json::json;
+
+    use super::{
+        BUILD_HINT, Discovery, LaunchSpec, SEED_FILE, TestShell, client_command, daemon_spec,
+        find_discovery, launch, seed_onboarding,
+    };
+    use crate::token::TOKEN_ENV;
+
+    /// The workspace root, two levels above this package.
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("tools/rt-driver-mcp sits two levels under the repo root")
+            .to_path_buf()
+    }
+
+    /// The token goes into the daemon's spawn environment only: neither
+    /// `IsolatedDaemon::envs`, which the client copies, nor the client's
+    /// command carries it.
+    #[test]
+    fn the_client_never_gets_the_driver_token() {
+        const SENTINEL: &str = "sentinel-driver-token-0d5e";
+        let root = repo_root();
+        let scratch = root
+            .join(".tmp")
+            .join("driver")
+            .join(format!("unit-token-{}", std::process::id()));
+        let spec = LaunchSpec {
+            session: "unit".to_owned(),
+            repo_root: root.clone(),
+            build_dir: root.join("no-such-build"),
+            scratch: scratch.clone(),
+            shell: TestShell::Cmd,
+            env: Vec::new(),
+            daemon_only_env: vec![(TOKEN_ENV, OsString::from(SENTINEL))],
+        };
+        let bin = scratch.join("bin");
+        let envs = dev_daemon::spawn_envs(&daemon_spec(&spec, &bin))
+            .expect("the spec's environment builds");
+        let carries = |rows: &[(&'static str, OsString)]| {
+            rows.iter()
+                .any(|(_, value)| value.to_str() == Some(SENTINEL))
+        };
+        assert!(
+            carries(&envs.daemon),
+            "the daemon is spawned with the token"
+        );
+        assert!(
+            !carries(&envs.shared),
+            "the environment IsolatedDaemon::envs returns carries the token"
+        );
+
+        let command = client_command(&envs.shared, &bin, &scratch, &[], Stdio::null());
+        let leaked = command.get_envs().any(|(name, value)| {
+            name == OsStr::new(TOKEN_ENV) || value == Some(OsStr::new(SENTINEL))
+        });
+        assert!(!leaked, "the client's command carries the token");
+        assert!(
+            !scratch.exists(),
+            "building the environments made {}",
+            scratch.display()
+        );
+    }
+
+    #[test]
+    fn the_seed_writes_only_its_keys_and_never_overwrites() {
+        let fresh = fixture("seed-fresh");
+        let existing = fixture("seed-existing");
+        let mine = r#"{"theme":"light","numStartups":3}"#;
+        std::fs::write(existing.join(SEED_FILE), mine).expect("writes the existing file");
+
+        let seeded = seed_onboarding(&fresh);
+        let kept = seed_onboarding(&existing);
+        let written = std::fs::read(fresh.join(SEED_FILE));
+        let after = std::fs::read_to_string(existing.join(SEED_FILE));
+        let _ = std::fs::remove_dir_all(&fresh);
+        let _ = std::fs::remove_dir_all(&existing);
+
+        seeded.expect("a fresh home is seeded");
+        kept.expect("an existing file is left alone, not an error");
+        let written: serde_json::Value =
+            serde_json::from_slice(&written.expect("the seed wrote its file"))
+                .expect("the seed is JSON");
+        assert_eq!(
+            written,
+            json!({"hasCompletedOnboarding": true, "theme": "dark"})
+        );
+        assert_eq!(after.expect("the existing file is still there"), mine);
+    }
 
     /// A folder of the test's own under the temp dir, made empty.
     fn fixture(name: &str) -> PathBuf {
@@ -293,6 +464,7 @@ mod tests {
             scratch: scratch.clone(),
             shell: TestShell::Cmd,
             env: Vec::new(),
+            daemon_only_env: Vec::new(),
         };
         std::fs::create_dir_all(&spec.build_dir).expect("makes the empty build folder");
 

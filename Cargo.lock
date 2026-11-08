@@ -6065,11 +6065,13 @@ dependencies = [
  "base64 0.22.1",
  "daemon-client",
  "dev-daemon",
+ "keyring-core",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
  "windows 0.61.3",
+ "windows-native-keyring-store",
 ]
 
 [[package]]

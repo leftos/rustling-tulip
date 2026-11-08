@@ -13,18 +13,18 @@ use serde_json::{Map, Value, json};
 use crate::launch::{LaunchSpec, launch};
 use crate::pipe::{CallError, Transport};
 use crate::session::{Session, Sessions};
+use crate::token::{self, CredentialManager, TokenStore};
 
 /// What every session argument tells the agent.
 const SESSION_DOC: &str =
     "The session name `launch` returned; pass it on every call (there is no default session).";
 
 /// The variables `launch`'s `env` may set: the agent and tailnet CLIs and the
-/// phone app's folder. No isolation folder is settable. The one folder on the
-/// list, `RUSTLING_TULIP_TAILNET_DIR`, must sit under `.tmp` like the
-/// isolation folders.
+/// phone app's folder. No isolation folder and no agent home is settable. The
+/// one folder on the list, `RUSTLING_TULIP_TAILNET_DIR`, must sit under `.tmp`
+/// like the isolation folders.
 const ALLOWED_ENV: &[&str] = &[
     "RUSTLING_TULIP_CLAUDE",
-    "CLAUDE_CONFIG_DIR",
     "RUSTLING_TULIP_TAILSCALE",
     "RUSTLING_TULIP_PWA_DIR",
     "RUSTLING_TULIP_TAILNET_DIR",
@@ -67,13 +67,13 @@ pub fn list() -> Value {
     json!([
         tool(
             "launch",
-            "Launch an isolated daemon and a cloaked, driven native client from a shadow copy of a driver build, under <repo_root>/.tmp/driver/. Returns {session, pid, pipe, scratch}.",
+            "Launch an isolated daemon and a cloaked, driven native client from a shadow copy of a driver build, under <repo_root>/.tmp/driver/. Returns {session, pid, pipe, scratch, scratch_repo}: scratch_repo is an empty folder outside the checkout, <parent of repo_root>/.tmp/rt-driver/<session>-<server pid>/repo, removed at stop, for action add_repo (a path inside the checkout is refused). An env that sets RUSTLING_TULIP_CLAUDE logs the real CLI in with the driver token the server holds.",
             &json!({
                 "session": {"type": "string", "description": "A new session name: letters, digits, '-' and '_'."},
                 "build_dir": {"type": "string", "description": "The folder holding the driver build; default <repo_root>/target/test-release."},
                 "repo_root": {"type": "string", "description": "The checkout to run from; default the server's --repo-root."},
                 "shell": {"type": "string", "enum": ["cmd", "default"], "description": "The isolated daemon's shell: cmd (default) for a fixed prompt and echo, or default to leave it to the Default shell setting with shell integration on."},
-                "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Variables set on the isolated daemon and the client after the isolation ones, for a run against a real Claude or the phone app; only RUSTLING_TULIP_CLAUDE, CLAUDE_CONFIG_DIR, RUSTLING_TULIP_TAILSCALE, RUSTLING_TULIP_PWA_DIR and RUSTLING_TULIP_TAILNET_DIR are accepted. The config, binaries and worktrees folders stay isolated under .tmp whatever is set."},
+                "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Variables set on the isolated daemon and the client after the isolation ones, for a run against a real Claude or the phone app; only RUSTLING_TULIP_CLAUDE, RUSTLING_TULIP_TAILSCALE, RUSTLING_TULIP_PWA_DIR and RUSTLING_TULIP_TAILNET_DIR are accepted. The config, binaries and worktrees folders and each agent's home stay isolated under .tmp whatever is set."},
             }),
             &["session"],
             [false, false, false],
@@ -151,14 +151,27 @@ fn tool(
 pub struct Tools {
     repo_root: PathBuf,
     sessions: Sessions,
+    tokens: Box<dyn TokenStore>,
 }
 
 impl Tools {
+    /// The tools, reading the driver token from Credential Manager.
     #[must_use]
     pub fn new(repo_root: PathBuf) -> Self {
         Self {
             repo_root,
             sessions: Sessions::default(),
+            tokens: Box::new(CredentialManager),
+        }
+    }
+
+    /// The tools, reading the driver token from `tokens`.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_tokens(repo_root: PathBuf, tokens: Box<dyn TokenStore>) -> Self {
+        Self {
+            tokens,
+            ..Self::new(repo_root)
         }
     }
 
@@ -204,6 +217,7 @@ impl Tools {
                 self.sessions.listing()
             ));
         }
+        let daemon_only_env = token::daemon_only_env(&env, self.tokens.as_ref())?;
         let repo_root = match optional_string(args, "repo_root")? {
             Some(root) => PathBuf::from(root),
             None => self.repo_root.clone(),
@@ -223,6 +237,7 @@ impl Tools {
             scratch,
             shell,
             env,
+            daemon_only_env,
         })?;
         let summary = launched.summary();
         tracing::info!(%summary, "launched");
@@ -248,7 +263,12 @@ impl Tools {
         let session = self.session(args)?;
         let method = string_arg(args, "method").map_err(|err| session.with_feed(&err))?;
         let params = args.get("params").cloned().unwrap_or_else(|| json!({}));
-        Ok(match session.pipe().call(method, params) {
+        let step = Step {
+            method: method.to_owned(),
+            params,
+        };
+        refuse_add_repo_in_checkout(std::slice::from_ref(&step), session.repo_root())?;
+        Ok(match session.pipe().call(method, step.params) {
             Ok(result) => ToolResult::text(result.to_string()),
             Err(err) => ToolResult::error(session.with_feed(&call_error(method, &err))),
         })
@@ -258,6 +278,7 @@ impl Tools {
         check_args(args, &["session", "steps"], &["session", "steps"])?;
         let session = self.session(args)?;
         let steps = parse_steps(args).map_err(|err| session.with_feed(&err))?;
+        refuse_add_repo_in_checkout(&steps, session.repo_root())?;
         let outcome = run_batch(session.pipe(), &steps);
         let passed = outcome["passed"] == json!(true);
         let mut result = ToolResult::text(outcome.to_string());
@@ -433,6 +454,41 @@ fn parse_steps(args: &Map<String, Value>) -> Result<Vec<Step>, String> {
         .collect()
 }
 
+/// Refuses, before any step reaches the pipe, an `action add_repo` step
+/// whose `args.path` lies inside the checkout `repo_root`: the driven agent
+/// works in the scratch repo `launch` made outside it.
+fn refuse_add_repo_in_checkout(steps: &[Step], repo_root: &Path) -> Result<(), String> {
+    for step in steps {
+        if step.method != "action" || step.params["name"] != json!("add_repo") {
+            continue;
+        }
+        let Some(path) = step.params["args"]["path"].as_str() else {
+            continue;
+        };
+        if inside(Path::new(path), repo_root) {
+            return Err(format!(
+                "add_repo: {path} is inside the checkout; use the scratch_repo launch returned"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `path` is `root` or under it, both canonicalized, ignoring case
+/// on Windows. A path that cannot be resolved is left to the endpoint, which
+/// refuses a folder that does not exist.
+fn inside(path: &Path, root: &Path) -> bool {
+    let (Ok(path), Ok(root)) = (std::fs::canonicalize(path), std::fs::canonicalize(root)) else {
+        return false;
+    };
+    if cfg!(windows) {
+        let folded = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
+        folded(&path).starts_with(folded(&root))
+    } else {
+        path.starts_with(&root)
+    }
+}
+
 /// Runs `steps` in order and stops at the first error:
 /// `{passed, steps: [{method, result} | {method, error}], failedAt}`.
 pub fn run_batch(transport: &mut dyn Transport, steps: &[Step]) -> Value {
@@ -471,12 +527,97 @@ mod tests {
     )]
 
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use serde_json::{Map, Value, json};
 
-    use super::{Step, Tools, launch_env, list, run_batch};
+    use super::{Step, Tools, launch_env, list, refuse_add_repo_in_checkout, run_batch};
     use crate::pipe::{CallError, Transport};
+    use crate::token::MemoryStore;
+
+    /// The workspace root, two levels above this package.
+    fn checkout() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("tools/rt-driver-mcp sits two levels under the repo root")
+            .to_path_buf()
+    }
+
+    /// An `action add_repo` step for `path`.
+    fn add_repo(path: &str) -> Step {
+        Step {
+            method: "action".to_owned(),
+            params: json!({"name": "add_repo", "args": {"path": path}}),
+        }
+    }
+
+    #[test]
+    fn a_real_claude_launch_without_a_token_is_refused() {
+        let mut tools = Tools::with_tokens(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            Box::new(MemoryStore::default()),
+        );
+        let args = json!({"session": "a", "env": {"RUSTLING_TULIP_CLAUDE": "C:\\x\\claude.exe"}});
+        let refused = tools
+            .call("launch", args.as_object().expect("an object of arguments"))
+            .expect("the launch tool exists")
+            .into_value();
+        assert_eq!(refused["isError"], json!(true), "{refused}");
+        assert_eq!(
+            refused["content"][0]["text"],
+            json!(
+                "no driver token stored: run tools/rt-driver-mcp/set-driver-token.ps1 once \
+                 (it asks for the token from claude setup-token)"
+            ),
+            "{refused}"
+        );
+    }
+
+    /// `call` checks its one step, and `batch` all of its steps, before
+    /// anything reaches the pipe; the comparison ignores case on Windows.
+    #[test]
+    fn add_repo_inside_the_checkout_is_refused() {
+        let root = checkout();
+        let mut inside = root.join("tools").display().to_string();
+        if cfg!(windows) {
+            inside = inside.to_uppercase();
+        }
+        let expected = format!(
+            "add_repo: {inside} is inside the checkout; use the scratch_repo launch returned"
+        );
+
+        assert_eq!(
+            refuse_add_repo_in_checkout(&[add_repo(&inside)], &root),
+            Err(expected.clone()),
+            "call"
+        );
+        assert_eq!(
+            refuse_add_repo_in_checkout(&[step("ping"), add_repo(&inside)], &root),
+            Err(expected),
+            "batch"
+        );
+    }
+
+    #[test]
+    fn add_repo_outside_the_checkout_passes_through() {
+        let root = checkout();
+        let outside = std::env::temp_dir();
+        let outside = outside.to_str().expect("a UTF-8 temp dir");
+        assert_eq!(
+            refuse_add_repo_in_checkout(&[add_repo(outside)], &root),
+            Ok(())
+        );
+        let other_action = Step {
+            method: "action".to_owned(),
+            params: json!({"name": "focus_pane", "args": {"path": root.display().to_string()}}),
+        };
+        assert_eq!(
+            refuse_add_repo_in_checkout(&[step("ping"), other_action], &root),
+            Ok(()),
+            "only add_repo is checked"
+        );
+    }
 
     /// Answers each method from a script and records the calls.
     struct Scripted {
@@ -589,7 +730,6 @@ mod tests {
             .join("tailnet");
         let tailnet = tailnet.to_str().expect("a UTF-8 path");
         let env = json!({
-            "CLAUDE_CONFIG_DIR": "C:\\tmp\\claude",
             "RUSTLING_TULIP_TAILNET_DIR": tailnet,
             "RUSTLING_TULIP_CLAUDE": "C:\\tmp\\claude.exe",
             "RUSTLING_TULIP_PWA_DIR": "C:\\tmp\\pwa",
@@ -620,8 +760,20 @@ mod tests {
         let refused = launch_env(&args).expect_err("an isolation variable is not settable");
         assert_eq!(
             refused,
-            "env may only set RUSTLING_TULIP_CLAUDE, CLAUDE_CONFIG_DIR, RUSTLING_TULIP_TAILSCALE, \
+            "env may only set RUSTLING_TULIP_CLAUDE, RUSTLING_TULIP_TAILSCALE, \
              RUSTLING_TULIP_PWA_DIR or RUSTLING_TULIP_TAILNET_DIR, not \"RUSTLING_TULIP_CONFIG_DIR\""
+        );
+    }
+
+    /// The agent's config folder stays the isolated daemon's own scratch home.
+    #[test]
+    fn launch_env_refuses_claude_config_dir() {
+        let args = env_args(json!({"CLAUDE_CONFIG_DIR": "C:\\Users\\x\\.claude"}));
+        let refused = launch_env(&args).expect_err("the agent's home is not settable");
+        assert_eq!(
+            refused,
+            "env may only set RUSTLING_TULIP_CLAUDE, RUSTLING_TULIP_TAILSCALE, \
+             RUSTLING_TULIP_PWA_DIR or RUSTLING_TULIP_TAILNET_DIR, not \"CLAUDE_CONFIG_DIR\""
         );
     }
 
@@ -637,9 +789,12 @@ mod tests {
 
     #[test]
     fn launch_env_refuses_an_empty_value() {
-        let args = env_args(json!({"CLAUDE_CONFIG_DIR": ""}));
+        let args = env_args(json!({"RUSTLING_TULIP_PWA_DIR": ""}));
         let refused = launch_env(&args).expect_err("an empty value is refused");
-        assert_eq!(refused, "env value for CLAUDE_CONFIG_DIR must not be empty");
+        assert_eq!(
+            refused,
+            "env value for RUSTLING_TULIP_PWA_DIR must not be empty"
+        );
     }
 
     #[test]

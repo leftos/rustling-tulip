@@ -15,4 +15,7 @@ crates/daemon/Cargo.toml:agent-claude # the daemon's dev-dependency for its test
 crates/daemon/src/summarizer/providers.rs # the summarizer's provider table names each provider it calls over HTTP
 crates/daemon/src/server/test_support.rs # test-only module (declared under #[cfg(test)] in server.rs) driving the Claude plugin
 tools/test-map.json:\.claude/ # Claude Code's own config folder, ignored by the test map
-tools/rt-driver-mcp/src/tools.rs:RUSTLING_TULIP_CLAUDE|CLAUDE_CONFIG_DIR # the dev-only driver tool's launch env allowlist names the Claude plugin's override and home variables for a real-Claude run
+tools/rt-driver-mcp/src/tools.rs:RUSTLING_TULIP_CLAUDE # the dev-only driver tool's launch env allowlist names the Claude plugin's override variable for a real-Claude run
+tools/rt-driver-mcp/src/token.rs # the dev-only driver tool's driver token is a `claude setup-token` token, set as Claude Code's CLAUDE_CODE_OAUTH_TOKEN when a launch sets RUSTLING_TULIP_CLAUDE
+tools/rt-driver-mcp/src/launch.rs:Claude's home|\.claude\.json # the dev-only driver tool seeds a real Claude's home with Claude Code's .claude.json to skip onboarding
+tools/rt-driver-mcp/set-driver-token.ps1 # the owner's setup script for the dev-only driver token, which `claude setup-token` prints

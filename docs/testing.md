@@ -64,7 +64,7 @@ Measuring an elevated daemon against an ordinary one on a builder needs the real
 
 The CLI verbs send no `Resize`, so reproducing a fault at a given width needs a small client that sends `hello`, then `resize` with `claim: true`.
 
-Keep scratch repos outside the checkout: a scratch folder under this repo makes Claude ask about the repo's `.mcp.json` server (`rt-driver`) before the first prompt.
+Keep scratch repos outside the checkout, and in a driven run use the `scratch_repo` folder `launch` returns: a scratch folder under this repo makes Claude ask about the repo's `.mcp.json` server (`rt-driver`) before the first prompt.
 
 A session's `scrollback.bin` holds the raw ConPTY output and can be replayed into any emulator, which makes it the first stop for a garbled-terminal report.
 

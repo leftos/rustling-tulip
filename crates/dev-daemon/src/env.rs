@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use agent_api::{AgentPlugin, FakeCli};
+use daemon_client::isolation::check_isolated;
 use protocol::AgentId;
 
 use crate::{DaemonSpec, LaunchError, TestShell};
@@ -125,6 +126,24 @@ pub(crate) fn env_value(envs: &[(&'static str, OsString)], name: &str) -> Option
         .map(|(_, value)| value.clone())
 }
 
+/// Refuses `envs` when the final value of any registered agent's home
+/// variable is not an absolute path under a `.tmp` folder, by the check the
+/// isolation folders get, naming that variable. A row of `extra_env` cannot
+/// point an agent at the user's own home.
+pub(crate) fn check_agent_homes(envs: &[(&'static str, OsString)]) -> Result<(), LaunchError> {
+    for plugin in agent_registry::all() {
+        let Some(home_env) = fake_cli(*plugin)?.home_env else {
+            continue;
+        };
+        let value = env_value(envs, home_env);
+        check_isolated(|_| value.clone()).map_err(|err| LaunchError::NotIsolated {
+            variable: home_env,
+            reason: err.reason,
+        })?;
+    }
+    Ok(())
+}
+
 /// The scratch folders an elevated daemon checks as protected folders (its
 /// config and binaries overrides), so an elevated run creates them protected.
 const PROTECTED_SCRATCH_DIRS: [&str; 2] = ["config", "binaries"];
@@ -236,6 +255,7 @@ mod tests {
             repo_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             bin_dir: PathBuf::from("no-such-profile"),
             extra_env: Vec::new(),
+            daemon_only_env: Vec::new(),
             shell: TestShell::Cmd,
         }
     }
