@@ -12,14 +12,14 @@ function resize(message: ClientMessage | null): { cols: number; rows: number; cl
   return { cols: message.cols, rows: message.rows, claim: message.claim === true };
 }
 
-test("size_attach_sends_an_unclaimed_resize", () => {
+test("size_attach_claims_the_size", () => {
   const attached = resizeFor(sessionSize("s1"), 80, 24, "attach", T0);
   expect(attached.message).toEqual({
     type: "resize",
     session_id: "s1",
     cols: 80,
     rows: 24,
-    claim: false,
+    claim: true,
   });
   expect(attached.state).toEqual({ sessionId: "s1", cols: 80, rows: 24, typedAt: null });
 });
@@ -36,12 +36,12 @@ test("size_a_reconnect_is_unclaimed_and_the_first_input_after_it_claims", () => 
   expect(resize(first.message)).toEqual({ cols: 80, rows: 24, claim: true });
 });
 
-test("size_the_terminal_toggle_is_unclaimed", () => {
+test("size_the_terminal_toggle_claims_the_size", () => {
   const attached = resizeFor(sessionSize("s1"), 80, 24, "attach", T0).state;
   const typed = noteInput(attached, T0 + 1_000).state;
 
   const toggle = resizeFor(typed, 40, 20, "toggle", T0 + 1_100);
-  expect(resize(toggle.message)).toEqual({ cols: 40, rows: 20, claim: false });
+  expect(resize(toggle.message)).toEqual({ cols: 40, rows: 20, claim: true });
   expect(toggle.state.typedAt).toBe(T0 + 1_000);
 });
 

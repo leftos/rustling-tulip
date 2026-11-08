@@ -55,7 +55,7 @@ export interface TerminalPaneDeps {
 }
 
 export interface TerminalPane {
-  /** Attach the session and send the pane's first size, unclaimed (`reason` "attach" or "toggle"). */
+  /** Attach the session and send the pane's first size, claimed (`reason` "attach" or "toggle"). */
   open(cols: number, rows: number, reason: "attach" | "toggle"): void;
   /** One connection notice: daemon messages fold into the load; a `ready` after a drop re-attaches. */
   notice(notice: ConnectionNotice): void;

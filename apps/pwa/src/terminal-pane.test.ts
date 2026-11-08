@@ -141,12 +141,12 @@ function loaded(): Harness {
   return h;
 }
 
-test("pane_open_asks_for_the_scrollback_then_sends_an_unclaimed_size", () => {
+test("pane_open_asks_for_the_scrollback_then_claims_the_size", () => {
   const h = harness();
   h.pane.open(80, 24, "attach");
   expect(h.fresh()).toEqual([
     { type: "load_scrollback", session_id: "s1", request_id: "r1" },
-    resize(80, 24, false),
+    resize(80, 24, true),
   ]);
   expect(h.log).toEqual([]);
 

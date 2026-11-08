@@ -9,11 +9,11 @@ export const INPUT_WINDOW = 5_000;
 
 /** Why a size is being sent. */
 export type SizeReason =
-  /** The terminal opened on the session: unclaimed, so it applies only to a session nobody has sized. */
+  /** The terminal opened on the session: claimed, as opening it is the user asking to read it here. */
   | "attach"
   /** The connection came back: unclaimed, and the first input after it claims the size back. */
   | "reconnect"
-  /** The Terminal toggle opened the pane: unclaimed. */
+  /** The Terminal toggle opened the pane: claimed, as opening it is the user asking to read it here. */
   | "toggle"
   /** A session's scrollback finished loading and the grid may have changed: unclaimed. */
   | "load"
@@ -47,13 +47,14 @@ export interface SizeTransition {
 }
 
 /**
- * The `Resize` for a measure of `cols` by `rows` taken at `now`. A user's own
- * pane resize claims the session; an attach, a reconnect, the end of a load
- * and the Terminal toggle never do, so they cannot take the size from a
- * client that owns it; any other measure claims only while the user typed
- * within the last 5 s. An attach and a reconnect start the typing clock over,
- * so the first input after one claims. A size that is not positive is no
- * measure at all: nothing is sent and nothing is stored.
+ * The `Resize` for a measure of `cols` by `rows` taken at `now`. An attach, a
+ * Terminal toggle and a user's own pane resize claim the session, since each
+ * is the user asking to read it here; a reconnect and the end of a load never
+ * do, so they cannot take the size from a client that owns it; any other
+ * measure claims only while the user typed within the last 5 s. An attach and
+ * a reconnect start the typing clock over, so the first input after one
+ * claims. A size that is not positive is no measure at all: nothing is sent
+ * and nothing is stored.
  */
 export function resizeFor(
   state: SizeState,
@@ -107,12 +108,12 @@ export function noteInput(state: SizeState, now: number): SizeTransition {
 function claims(reason: SizeReason, state: SizeState, now: number): boolean {
   switch (reason) {
     case "attach":
+    case "pane-resize":
+    case "toggle":
+      return true;
     case "reconnect":
     case "load":
-    case "toggle":
       return false;
-    case "pane-resize":
-      return true;
     case "measure":
       return typedWithin(state, now);
   }
