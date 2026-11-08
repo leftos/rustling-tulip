@@ -136,14 +136,10 @@
   - [ ] RT-1084 Send from the Chat message box with Cmd+Enter on macOS
   - [ ] RT-1085 Send the preset wizard's inline prompt with Ctrl+Enter
 - [ ] RT-1196 Polish found by RT-1088's smoke run of desktop Chat and the phone · release vNext
-  - [ ] RT-1213 Name a pasted prompt's turn in Summary and leave Interrupted out of the turns · release vNext
-  - [ ] RT-1214 Keep a pane on Chat across a Restart · release vNext
-- [ ] RT-1200 Let desktop Chat interrupt a running turn · release vNext
-- [ ] RT-1202 Show the plan's text in the Chat plan card · release vNext
-- [ ] RT-1207 Shape and order right-to-left text in desktop Chat · release vNext
-- [ ] RT-1218 Refresh desktop Chat without switching the view away and back · release vNext
 - [ ] RT-1232 Show the Chat plan card as soon as the status turns waiting, and plan text on the phone
 - [ ] RT-1233 Offer the rest of a tool result Chat cut
+- [ ] RT-1240 Offer a text box on Chat cards and toasts for a prompt's type-your-own answer · release vNext
+  - [/] RT-1241 Offer a text box on Chat cards for a prompt's type-your-own answer · release vNext
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
@@ -262,6 +258,7 @@
 - [ ] RT-1069 Fix RT-277 and RT-725's link to the missing docs/plans/reboot-resume.md
 - [ ] RT-1173 Re-read docs/spikes/chat-mirror-tui.md against the screen rules' changes since 2026-10-30
 - [ ] RT-1224 Re-read docs/daemon-cli.md against its named files' changes since 2026-11-06
+- [ ] RT-1248 Say how to raise log levels for a driven run
 
 ## Build tooling
 
@@ -307,7 +304,8 @@
   - [ ] RT-812 Check that a window minimised in front of the driven client never hands it the foreground
 - [ ] RT-840 Sign the installer's uninstaller too
 - [ ] RT-861 Forget a driver id's bounds in UI specs once it stops being drawn
-- [ ] RT-1220 Give a driven run's real Claude its own config folder instead of the owner's ~/.claude · release vNext
+- [ ] RT-1236 Strip the owner's other Claude variables from a driven run's children
+- [ ] RT-1244 Refuse a driven run's add_repo under any checkout or agent instruction file
 
 ## macOS
 
@@ -325,6 +323,7 @@
 - [ ] RT-1035 macOS updates: tell a standard user in /Applications what can work, not to move the app
 - [ ] RT-1036 macOS toasts: hold app toasts back during Focus and over a full-screen app
 - [ ] RT-1118 Fix the macOS smoke test's capture_live_login call so the Mac workspace clippy passes
+- [ ] RT-1243 Draw the toast's typed-answer box on macOS
 
 ## Agent CLIs
 
@@ -411,6 +410,7 @@
 - [ ] RT-435 Send the tracer's Exited only after the child's last output
 - [ ] RT-436 Send no Stopped attention for a session discarded before its exit
 - [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user
+- [ ] RT-1207 Shape and order right-to-left text in desktop Chat
 - [ ] RT-457 Close a running native client before the installer replaces it
 - [ ] RT-458 Pass a direct-spawned Claude session's initial prompt as its positional prompt, not -p
 - [ ] RT-459 Launch a .cmd agent shim whose path holds a space
@@ -568,6 +568,15 @@
 - [ ] RT-1229 Resend the device list when a loopback connection's state events lag
 - [ ] RT-1230 Tell a session's own name from a subagent's when the screen has no title yet
 - [ ] RT-1231 Clear a pending Chat send whose transcript text does not match it
+- [ ] RT-1234 Show a long plan uncut in the Chat plan card
+- [ ] RT-1235 Count a transcript record as a prompt only when it makes a prompt entry
+- [ ] RT-1237 Keep a pane's view across every restart route and on every attached client
+- [ ] RT-1238 Drop the Markdown heading marker from a filled plan card's title
+- [ ] RT-1239 Give each new plan prompt its own prompt id when its box has scrolled off
+- [ ] RT-1246 Clear desktop Chat's one-Esc hold when the turn stops or the send was lost
+- [ ] RT-1247 Make the daemon's default log filter name its real target
+- [ ] RT-1249 Open a palette shell where the palette was opened, not behind a pop-out
+- [ ] RT-1250 Keep a Chat card box's text across card changes and keys that answer without it
 
 ## Design files
 
