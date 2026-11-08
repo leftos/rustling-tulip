@@ -64,9 +64,6 @@
   - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
 - [ ] RT-1126 Precache the phone app's hashed assets so its first offline open is complete
 - [ ] RT-1152 Spike GPUI on iOS: the session list in the simulator, text input and Return · release vNext+1
-- [ ] RT-1208 Show the connection state on the phone's session screen · release vNext
-- [ ] RT-1209 Update the phone's device row when Remote access switches off · release vNext
-- [ ] RT-1210 Keep the phone's header and a usable composer above the keyboard · release vNext
 
 ## Wave 5 — Attention feed on the desktop
 
@@ -139,24 +136,14 @@
   - [ ] RT-1084 Send from the Chat message box with Cmd+Enter on macOS
   - [ ] RT-1085 Send the preset wizard's inline prompt with Ctrl+Enter
 - [ ] RT-1196 Polish found by RT-1088's smoke run of desktop Chat and the phone · release vNext
-  - [ ] RT-1201 Draw a queued prompt below the turn it waits on in desktop Chat · release vNext
-  - [ ] RT-1211 Drop the finish-setting-up line in the installed phone app · release vNext
-  - [ ] RT-1212 Say No sessions on an empty phone Home · release vNext
   - [ ] RT-1213 Name a pasted prompt's turn in Summary and leave Interrupted out of the turns · release vNext
   - [ ] RT-1214 Keep a pane on Chat across a Restart · release vNext
-  - [ ] RT-1219 Name a tool once in its Chat row · release vNext
-- [ ] RT-1197 Hide Claude Code's pasted_content wrapper in a pasted prompt's bubble · release vNext
-- [ ] RT-1198 Keep single line breaks in a reply in desktop Chat · release vNext
-- [ ] RT-1199 Keep desktop Chat's live row free of breaks at chunk boundaries · release vNext
 - [ ] RT-1200 Let desktop Chat interrupt a running turn · release vNext
 - [ ] RT-1202 Show the plan's text in the Chat plan card · release vNext
-- [ ] RT-1203 Read and answer the Edit permission prompt that follows plan approval · release vNext
-- [ ] RT-1204 Clear stale characters on Claude's prompt row in the terminal · release vNext
-- [ ] RT-1205 Show the first reply after /compact once · release vNext
-- [ ] RT-1206 Say how much of a tool's output Chat cut, and offer the rest · release vNext
 - [ ] RT-1207 Shape and order right-to-left text in desktop Chat · release vNext
 - [ ] RT-1218 Refresh desktop Chat without switching the view away and back · release vNext
-- [ ] RT-1221 Render Markdown on the phone's session screen · release vNext
+- [ ] RT-1232 Show the Chat plan card as soon as the status turns waiting, and plan text on the phone
+- [ ] RT-1233 Offer the rest of a tool result Chat cut
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
@@ -320,9 +307,6 @@
   - [ ] RT-812 Check that a window minimised in front of the driven client never hands it the foreground
 - [ ] RT-840 Sign the installer's uninstaller too
 - [ ] RT-861 Forget a driver id's bounds in UI specs once it stops being drawn
-- [ ] RT-1215 Keep a driven client's Settings off the owner's login entry · release vNext
-- [ ] RT-1216 Let a driven client add a local repo without the folder picker · release vNext
-- [ ] RT-1217 Make the simulator helper reset idb and swipe slowly · release vNext
 - [ ] RT-1220 Give a driven run's real Claude its own config folder instead of the owner's ~/.claude · release vNext
 
 ## macOS
@@ -577,6 +561,13 @@
 - [ ] RT-1193 Keep alacritty_terminal's types inside term.rs and screen.rs
 - [ ] RT-1194 Try the daemon's screen on libghostty-vt behind a feature and measure it
 - [ ] RT-1223 Wake a parked accounts driver when a client connects as another leaves
+- [ ] RT-1225 Count keys typed into the phone's terminal as refused sends while offline
+- [ ] RT-1226 End a turn's live answers in Chat when its prompt line had no prompt id
+- [ ] RT-1227 Order live and confirmed Chat rows the same on an append and on a reload
+- [ ] RT-1228 Keep unchanged chat rows' DOM on the phone while a reply streams
+- [ ] RT-1229 Resend the device list when a loopback connection's state events lag
+- [ ] RT-1230 Tell a session's own name from a subagent's when the screen has no title yet
+- [ ] RT-1231 Clear a pending Chat send whose transcript text does not match it
 
 ## Design files
 
