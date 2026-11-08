@@ -455,10 +455,14 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
 }
 
 /// A question wrapped over `rows` (from its title to its first option),
-/// each row trimmed and the blank ones left out, joined by spaces.
+/// each row trimmed, its `│` gutter (a long question's left bar) and the
+/// space after it taken off, and the blank ones left out, joined by spaces.
 fn question_text(rows: &[String]) -> String {
     rows.iter()
-        .map(|row| row.trim())
+        .map(|row| {
+            let text = row.trim();
+            text.strip_prefix('│').map_or(text, str::trim_start)
+        })
         .filter(|row| !row.is_empty())
         .collect::<Vec<_>>()
         .join(" ")

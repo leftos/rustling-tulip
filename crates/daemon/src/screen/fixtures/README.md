@@ -10,6 +10,8 @@ The spike captures (`v03-ready.txt`, `c11-turn1-end.txt`, `p98-compacted.txt` an
 
 `v2318-subagent-running-w40.txt` is the panel's running-subagent row at 40 columns, as Claude Code 2.1.318 draws it with no description: `  ◯ general-purpose 2m 7s · ↓ 66.5k`.
 
+`v2319-ask-long-question-w120.txt` is a question over 80 characters at 120 columns, as Claude Code 2.1.319 draws it: a `│` gutter on each of the question's rows. A question fixture under 80 characters has no gutter, so a change to question reading needs this one too.
+
 `v152-heads-up-collapsed.txt` is the one capture made by hand: `v152-learn-more.txt` with the expanded title and bullet rows taken out and the key row replaced by the collapsed notice's `1: Learn more   2: Knew this already   0: Dismiss`, since no capture of the collapsed notice exists.
 
 The `claude--*` files are the `web/src/fixtures/panes/` panes from collie, https://github.com/leftos/collie at commit 82c6bba7, SGR-coloured text under the MIT licence (see `LICENSE-collie` beside them).

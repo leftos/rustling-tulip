@@ -1,0 +1,28 @@
+
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   X:\dev\rustling-tulip.wt\rt-1251-toast-answer\.tmp\rt1251\work
+
+
+❯ ASK:wrapped
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ RT-1245
+
+│ Where should RT-1245 (Open a remote host's default shell in one step) go? Today Open shell runs on whichever host the
+│ focused pane is on, so a remote shell means focusing one of that host's panes first. The fix adds an entry that names
+│ the host (likely on the sidebar's host section and in the jump palette), client-only, with no daemon change. The open
+│ release, vNext, also holds RT-1241 and RT-1242 (the typed-answer boxes), RT-1218's last measurement and your iPhone
+│ check.
+
+❯ 1. vNext (Recommended)
+     Into the open release, beside the typed-answer boxes; a small client-only change that fits what is already in
+     flight there.
+  2. vNext+1
+     The release after, so the open one closes on what it already holds.
+  3. Backlog
+     No release yet; picked up when one has room.
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

@@ -68,6 +68,12 @@ Keep scratch repos outside the checkout, and in a driven run use the `scratch_re
 
 A session's `scrollback.bin` holds the raw ConPTY output and can be replayed into any emulator, which makes it the first stop for a garbled-terminal report.
 
+A real Claude TUI can run with no driver token against a loopback mock of the API: set `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, an isolated `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and seed that folder's `.claude.json` with `hasCompletedOnboarding` and the project's `hasTrustDialogAccepted`. The mock makes the TUI ask exact questions, with no login and no model spend.
+
+`AnswerPrompt` with `allow` on a question probes `dialog_for` without typing anything: the reply is "does not fit" when the dialog passed and "no longer up" when it did not, so one dialog can be probed at every grid size.
+
+Such a rig's `cargo build` goes through the gate without `--local`: a routed build brings `target/debug/*.exe` back to this PC. `--local` fits the rig's own run, which drives this PC's processes.
+
 ## Looking at a UI change
 
 To look at a UI change, run `.\rt.ps1 native-shot <view>`: it writes a PNG of the real client window over a scripted fake daemon (`apps/native/examples/shot.rs`) to `.tmp\shots\` and prints its path (it draws Nord, the default theme; the UI specs pin Contrast in the harness). Read the PNG, and show the user before and after shots for any visual choice.

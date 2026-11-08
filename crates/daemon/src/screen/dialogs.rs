@@ -428,6 +428,19 @@ mod tests {
         nightly cleanup task wipes the X: drive, where your repos live. The \"reply only \
         done\" instruction could hide that.";
 
+    const LONG_QUESTION: &str = "Where should RT-1245 (Open a remote host's default shell in one step) go? Today Open \
+        shell runs on whichever host the focused pane is on, so a remote shell means focusing \
+        one of that host's panes first. The fix adds an entry that names the host (likely on \
+        the sidebar's host section and in the jump palette), client-only, with no daemon \
+        change. The open release, vNext, also holds RT-1241 and RT-1242 (the typed-answer \
+        boxes), RT-1218's last measurement and your iPhone check.";
+
+    #[test]
+    fn a_long_question_reads_without_its_gutter() {
+        let prompt = prompt_of(include_str!("fixtures/v2319-ask-long-question-w120.txt"));
+        assert_eq!(prompt.subject, LONG_QUESTION);
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -782,6 +795,22 @@ mod tests {
                     Some(1),
                     None,
                     &COLOUR_TABS,
+                ),
+            ),
+            (
+                "v2319-ask-long-question-w120",
+                include_str!("fixtures/v2319-ask-long-question-w120.txt"),
+                question(
+                    LONG_QUESTION,
+                    &[
+                        (1, "vNext (Recommended)"),
+                        (2, "vNext+1"),
+                        (3, "Backlog"),
+                        (4, "Type something"),
+                    ],
+                    Some(1),
+                    None,
+                    &[("RT-1245", false, true)],
                 ),
             ),
             (

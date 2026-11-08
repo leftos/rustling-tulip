@@ -216,7 +216,8 @@ fn asks(prompt: &ChatPrompt, question: &PendingQuestion) -> bool {
         .map(String::as_str)
         .map(words)
         .collect();
-    words(&prompt.subject) == words(&question.question) && labels.starts_with(&wanted)
+    without_whitespace(&prompt.subject) == without_whitespace(&question.question)
+        && labels.starts_with(&wanted)
 }
 
 /// Whether `prompt`'s subject or body shows `summary`, or its subject is
@@ -279,6 +280,12 @@ fn has_drive(path: &str) -> bool {
 /// so a line the screen wrapped compares equal to the hook's text.
 fn words(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `text` with all whitespace removed: a token longer than a row is
+/// hard-wrapped on screen, so joining the rows puts a space inside it.
+fn without_whitespace(text: &str) -> String {
+    text.split_whitespace().collect()
 }
 
 /// The chat answer that gives `choice` to `prompt`: a question's option by
@@ -1149,6 +1156,17 @@ mod tests {
         /// An Edit's permission dialog for `calc.py`: 1 Yes, 2 accept edits,
         /// 3 No.
         const EDIT_PERMISSION: &str = include_str!("../screen/fixtures/c52-edit-perm.txt");
+        /// A question long enough that the screen draws it with a gutter.
+        const LONG_QUESTION: &str =
+            include_str!("../screen/fixtures/v2319-ask-long-question-w120.txt");
+
+        const ASKED_AT_LENGTH: &str = "Where should RT-1245 (Open a remote host's default shell in one step) go? \
+            Today Open shell runs on whichever host the focused pane is on, so a remote shell \
+            means focusing one of that host's panes first. The fix adds an entry that names \
+            the host (likely on the sidebar's host section and in the jump palette), \
+            client-only, with no daemon change. The open release, vNext, also holds RT-1241 \
+            and RT-1242 (the typed-answer boxes), RT-1218's last measurement and your iPhone \
+            check.";
 
         const GONE: &str = "the prompt is no longer up";
         const NOT_THIS: &str = "that answer does not fit the prompt on screen";
@@ -1336,6 +1354,24 @@ mod tests {
                     options: options.iter().map(|&option| option.to_owned()).collect(),
                     option_descriptions: Vec::new(),
                     multi_select,
+                }],
+            }
+        }
+
+        /// A pending question the hook reported as `asked`, with the long
+        /// fixture's options.
+        fn asked_at_length(asked: &str) -> PendingInput {
+            PendingInput::Question {
+                questions: vec![PendingQuestion {
+                    question: asked.to_owned(),
+                    header: "RT-1245".to_owned(),
+                    options: vec![
+                        "vNext (Recommended)".to_owned(),
+                        "vNext+1".to_owned(),
+                        "Backlog".to_owned(),
+                    ],
+                    option_descriptions: Vec::new(),
+                    multi_select: false,
                 }],
             }
         }
@@ -1730,6 +1766,29 @@ mod tests {
             w.answer(PromptChoice::Option { index: 0 }).await;
             w.refused(CHAT_REFUSED, GONE, "the dialog shows other options")
                 .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_answers_a_question_the_screen_draws_in_a_gutter() {
+            let mut w = waiting(
+                "dash-answer-gutter",
+                LONG_QUESTION,
+                asked_at_length(ASKED_AT_LENGTH),
+            );
+            w.answer(PromptChoice::Option { index: 0 }).await;
+            w.types_and_ends(b"1", "the first option's digit").await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_answers_a_question_with_a_token_wrapped_across_rows() {
+            let asked = ASKED_AT_LENGTH.replace("one step", "onestep");
+            let mut w = waiting(
+                "dash-answer-hard-wrap",
+                LONG_QUESTION,
+                asked_at_length(&asked),
+            );
+            w.answer(PromptChoice::Option { index: 0 }).await;
+            w.types_and_ends(b"1", "the first option's digit").await;
         }
 
         const DOWN: &[u8] = b"\x1b[B";
