@@ -659,9 +659,239 @@ pub(crate) fn window_address(window: &gpui::Window) -> Option<usize> {
     }
 }
 
+/// When a toast gives its keys back.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GiveBack {
+    /// While the toast is up: a send, Esc, an answer press, or the toast
+    /// about to close.
+    Live,
+    /// As the toast's view is released, the last resort; `ours` is whether
+    /// the foreground window now belongs to this process.
+    Released { ours: bool },
+}
+
+/// The window to make the foreground window again when a toast gives its
+/// keys back: the one `remembered` from before the toast took them, only
+/// while the toast at `toast` still is the foreground window (`foreground`),
+/// and never the toast itself or a null handle. A toast that lost the
+/// foreground to the user's own click leaves it where the user put it. At
+/// release the toast's window may be gone already, so then a null
+/// foreground or one of this process's windows takes it back too; another
+/// app's never does.
+#[cfg(any(windows, test))]
+pub(crate) fn foreground_to_restore(
+    toast: usize,
+    remembered: Option<usize>,
+    foreground: Option<usize>,
+    when: GiveBack,
+) -> Option<usize> {
+    let toast_has_it = foreground == Some(toast);
+    let may = match when {
+        GiveBack::Live => toast_has_it,
+        GiveBack::Released { ours } => {
+            toast_has_it || foreground.is_none_or(|window| window == 0) || ours
+        }
+    };
+    remembered.filter(|&before| may && before != toast && before != 0)
+}
+
+/// What a toast records once it asked for the foreground: its window's
+/// handle `address` and the window `before` it, to give back, only when
+/// the request was `taken`. A refused take holds no keys, so a later click
+/// asks again.
+#[cfg(any(windows, test))]
+pub(crate) fn recorded_keys(
+    address: usize,
+    taken: bool,
+    before: Option<usize>,
+) -> Option<(usize, Option<usize>)> {
+    taken.then_some((address, before))
+}
+
+/// `WS_EX_NOACTIVATE` as the extended style's `isize`.
+#[cfg(windows)]
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "WS_EX_NOACTIVATE is 0x08000000, which fits an isize"
+)]
+const NOACTIVATE: isize = windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE.0 as isize;
+
+/// Makes the toast whose handle is `address` the foreground window, so its
+/// text box takes keys: clears the toast's `WS_EX_NOACTIVATE` and calls
+/// `SetForegroundWindow` on it. A process may set the foreground window when
+/// it received the last input event, which the click into the box is.
+/// Returns whether the toast took the foreground, and the window that was
+/// foreground before, to give back with [`give_back_foreground`]. A refused
+/// request gives the toast its `WS_EX_NOACTIVATE` back.
+#[cfg(windows)]
+pub(crate) fn take_foreground(address: usize) -> (bool, Option<usize>) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetForegroundWindow, GetWindowLongPtrW, SetForegroundWindow, SetWindowLongPtrW,
+    };
+
+    let hwnd = hwnd_at(address);
+    // SAFETY: reads the foreground window, and reads and writes the extended
+    // style of this live toast window before asking for the foreground; a
+    // refused request leaves the toast as it was, apart from the style.
+    let (before, taken) = unsafe {
+        let before = GetForegroundWindow();
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !NOACTIVATE);
+        (before, SetForegroundWindow(hwnd).as_bool())
+    };
+    if !taken {
+        tracing::warn!("the toast window was refused the foreground");
+        if !crate::offscreen::never_activate(hwnd) {
+            tracing::debug!("the toast window did not take WS_EX_NOACTIVATE back");
+        }
+    }
+    let before = (!before.is_invalid()).then(|| before.0.expose_provenance());
+    (taken, before.filter(|&before| before != address))
+}
+
+/// Whether the window whose handle is `address` belongs to this process.
+#[cfg(windows)]
+fn is_ours(address: usize) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    let mut process = 0_u32;
+    // SAFETY: writes only the local out parameter; Windows returns 0 for the
+    // handle of a window that has closed.
+    let thread = unsafe { GetWindowThreadProcessId(hwnd_at(address), Some(&raw mut process)) };
+    thread != 0 && process == std::process::id()
+}
+
+/// Gives the toast whose handle is `address` its `WS_EX_NOACTIVATE` back
+/// and makes the `remembered` window the foreground again where
+/// [`foreground_to_restore`] says so for `released` (the view's release,
+/// else a toast still up).
+#[cfg(windows)]
+pub(crate) fn give_back_foreground(address: usize, remembered: Option<usize>, released: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+
+    let hwnd = hwnd_at(address);
+    // SAFETY: reads which window is foreground; no handle is dereferenced.
+    let now = unsafe { GetForegroundWindow() };
+    let foreground = (!now.is_invalid()).then(|| now.0.expose_provenance());
+    if !crate::offscreen::never_activate(hwnd) {
+        // A toast that has closed by now has no style to take.
+        tracing::debug!("the toast window did not take WS_EX_NOACTIVATE back");
+    }
+    let when = if released {
+        GiveBack::Released {
+            ours: foreground.is_some_and(is_ours),
+        }
+    } else {
+        GiveBack::Live
+    };
+    if let Some(before) = foreground_to_restore(address, remembered, foreground, when) {
+        // SAFETY: Windows rejects the handle of a window that has closed.
+        let given = unsafe { SetForegroundWindow(hwnd_at(before)) }.as_bool();
+        if !given {
+            tracing::debug!("the window the toast took the keys from was refused the foreground");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PhysicalRect, to_physical};
+    use super::{GiveBack, PhysicalRect, foreground_to_restore, recorded_keys, to_physical};
+
+    #[test]
+    fn a_toast_gives_the_foreground_back_only_while_it_holds_it() {
+        let (toast, before, other) = (10, 20, 30);
+        let cases = [
+            (
+                (Some(before), Some(toast)),
+                Some(before),
+                "the toast still has it",
+            ),
+            (
+                (Some(before), Some(other)),
+                None,
+                "the user moved on to another window",
+            ),
+            ((Some(before), None), None, "no window is foreground"),
+            ((None, Some(toast)), None, "nothing was remembered"),
+            (
+                (Some(toast), Some(toast)),
+                None,
+                "the toast was foreground before",
+            ),
+            ((Some(0), Some(toast)), None, "a null handle"),
+        ];
+        for ((remembered, foreground), wanted, why) in cases {
+            assert_eq!(
+                foreground_to_restore(toast, remembered, foreground, GiveBack::Live),
+                wanted,
+                "{why}"
+            );
+        }
+    }
+
+    #[test]
+    fn restores_when_the_foreground_is_this_process() {
+        let (toast, before, main) = (10, 20, 40);
+        let ours = GiveBack::Released { ours: true };
+        let theirs = GiveBack::Released { ours: false };
+        let cases = [
+            (Some(main), ours, "one of this process's windows"),
+            (None, theirs, "no window is foreground"),
+            (Some(0), theirs, "a null foreground"),
+            (Some(toast), theirs, "the toast still has it"),
+        ];
+        for (foreground, when, why) in cases {
+            assert_eq!(
+                foreground_to_restore(toast, Some(before), foreground, when),
+                Some(before),
+                "{why}"
+            );
+        }
+        for remembered in [Some(toast), Some(0), None] {
+            assert_eq!(
+                foreground_to_restore(toast, remembered, None, ours),
+                None,
+                "nothing to restore from {remembered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn never_restores_over_another_app() {
+        let (toast, before, other) = (10, 20, 30);
+        assert_eq!(
+            foreground_to_restore(
+                toast,
+                Some(before),
+                Some(other),
+                GiveBack::Released { ours: false }
+            ),
+            None,
+            "at release"
+        );
+        assert_eq!(
+            foreground_to_restore(toast, Some(before), Some(other), GiveBack::Live),
+            None,
+            "while the toast is up"
+        );
+        assert_eq!(
+            foreground_to_restore(toast, Some(before), None, GiveBack::Live),
+            None,
+            "a live give-back never restores over a null foreground"
+        );
+    }
+
+    #[test]
+    fn a_refused_take_records_no_keys() {
+        let (toast, before) = (10, Some(20));
+        assert_eq!(recorded_keys(toast, false, before), None, "refused");
+        assert_eq!(
+            recorded_keys(toast, true, before),
+            Some((toast, before)),
+            "taken"
+        );
+    }
 
     #[cfg(windows)]
     #[test]

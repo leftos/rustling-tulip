@@ -7,15 +7,16 @@ use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, IntoElement, MouseMoveEvent, Render, WeakEntity,
-    Window, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, Entity, Focusable as _, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Render, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use protocol::PromptChoice;
 
-use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
-use crate::dashboard_rows::{AskBlock, AskChoice, GO_TO_PANE};
+use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
+use crate::dashboard_rows::{AskBlock, AskBox, AskChoice, GO_TO_PANE};
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px};
+use crate::text_input::{TextInput, TextInputEvent};
 use crate::toast_stack::{AppToast, AppToastKind, SessionKey, WIDTH};
 use crate::ui_theme::theme;
 use crate::{RootView, UI_TEXT_SIZE};
@@ -282,6 +283,9 @@ pub fn card_layout(
                 }
                 rows.push(button(&texts));
             }
+            if drawn_box(ask).is_some() {
+                rows.push(typed_row_height(measure));
+            }
         }
     }
     if toast.kind != AppToastKind::Account {
@@ -312,6 +316,30 @@ pub fn card_layout(
         clamped: true,
         fixed,
     }
+}
+
+/// The text box row's height, in logical px: a one-line compact button's.
+fn typed_row_height(measure: &dyn TextMeasure) -> f32 {
+    let least = fonts::ui_px_at(measure.offset(), BUTTON_LEAST) / px(1.0);
+    let plain = TextRole::Answer {
+        bold: false,
+        hinted: false,
+    };
+    (BUTTON_FRAME + measure.line_height(plain)).max(least)
+}
+
+/// The text box `ask` draws under its choices. On macOS none is drawn: a
+/// toast there is a panel that never becomes key (RT-1243).
+#[cfg(windows)]
+fn drawn_box(ask: &AskBlock) -> Option<&AskBox> {
+    ask.typed_box()
+}
+
+/// The text box `ask` draws under its choices. On macOS none is drawn: a
+/// toast there is a panel that never becomes key (RT-1243).
+#[cfg(not(windows))]
+fn drawn_box(_ask: &AskBlock) -> Option<&AskBox> {
+    None
 }
 
 /// `choice`'s description, when it has one to draw.
@@ -348,6 +376,21 @@ pub struct ToastPresses {
     pub go: SharedPress,
     /// ×'s press.
     pub dismiss: SharedPress,
+    /// The text box under the answers, when the toast holds one.
+    pub typed: Option<TypedRow>,
+}
+
+/// A mouse-down on the card's text box.
+type BoxPress = Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
+
+/// The card's text box: the input it draws and what its controls do.
+pub struct TypedRow {
+    /// The single-line input the box draws.
+    pub input: Entity<TextInput>,
+    /// The send button's press.
+    pub send: SharedPress,
+    /// A mouse-down in the box, which gives the toast the keys.
+    pub take_keys: BoxPress,
 }
 
 /// The answer button at `index`, primary when it is the first.
@@ -367,7 +410,7 @@ fn answer_button(
         outlined_button
     };
     let answer = Rc::clone(answer);
-    let picked = choice.choice;
+    let picked = choice.choice.clone();
     // The description draws under the label, inside the button: a tooltip
     // is drawn inside the toast's window, which is only as tall as its
     // card, so a long one would be cut.
@@ -411,13 +454,61 @@ fn answer_button(
                 .child(hint),
         )
     })
-    .on_click(move |_, _, cx| answer(since, picked, cx))
+    .on_click(move |_, _, cx| answer(since, picked.clone(), cx))
     .into_any_element()
 }
 
-/// `ask`'s command box, its choices one to a row, or, once an answer is
-/// `sent`, a disabled `Sent` in their place.
-fn answer_block(ask: &AskBlock, sent: bool, answer: &AnswerPress, cx: &App) -> Div {
+/// The text box `typed` under the answers, drawn with `row`'s input and
+/// presses: the box, and its send button beside it.
+fn typed_row(typed: &AskBox, row: &TypedRow, cx: &App) -> AnyElement {
+    let t = theme(cx);
+    let offset = fonts::ui_text_size(cx);
+    let shift = fonts::ui_weight_shift(cx);
+    let height = typed_row_height(&CardText::new(cx));
+    let take = Rc::clone(&row.take_keys);
+    let field = field_frame(false, Layer::Base, &t)
+        .driver_id(|| "toast-typed-box".to_owned())
+        .flex_1()
+        .min_w(px(0.0))
+        .h_full()
+        .text_size(fonts::ui_px_at(offset, BUTTON_TEXT))
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            take(event, window, cx);
+        })
+        .child(row.input.clone());
+    let send = Rc::clone(&row.send);
+    let button = outlined_button(
+        offset,
+        shift,
+        "toast-typed-send",
+        ButtonSize::Compact,
+        true,
+        Layer::Base,
+        &t,
+    )
+    .flex_none()
+    .child(typed.send_label.clone())
+    .on_click(move |event, window, cx| (*send)(event, window, cx));
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(height))
+        .child(field)
+        .child(button)
+        .into_any_element()
+}
+
+/// `ask`'s command box, its choices one to a row and its text box under
+/// them, or, once an answer is `sent`, a disabled `Sent` in their place.
+fn answer_block(
+    ask: &AskBlock,
+    sent: bool,
+    answer: &AnswerPress,
+    typed: Option<&TypedRow>,
+    cx: &App,
+) -> Div {
     let t = theme(cx);
     let offset = fonts::ui_text_size(cx);
     let shift = fonts::ui_weight_shift(cx);
@@ -439,6 +530,9 @@ fn answer_block(ask: &AskBlock, sent: bool, answer: &AnswerPress, cx: &App) -> D
     } else if let Some(since) = ask.since {
         for (index, choice) in ask.choices.iter().enumerate() {
             rows.push(answer_button(index, choice, since, answer, cx));
+        }
+        if let (Some(typed), Some(row)) = (drawn_box(ask), typed) {
+            rows.push(typed_row(typed, row, cx));
         }
     }
     div()
@@ -595,7 +689,7 @@ pub fn toast_card(
         .filter(|ask| {
             ask.command.is_some() || (!ask.choices.is_empty() && (sent || ask.since.is_some()))
         })
-        .map(|ask| answer_block(ask, sent, &presses.answer, cx));
+        .map(|ask| answer_block(ask, sent, &presses.answer, presses.typed.as_ref(), cx));
     let words = div()
         .flex()
         .flex_col()
@@ -656,6 +750,16 @@ pub(crate) struct ToastView {
     /// Whether the window reported the pointer at its last move over the
     /// toast. Only such a window can report it leaving.
     window_saw_pointer: bool,
+    /// The text box's input, made once the toast first draws a box and kept
+    /// while it lives, so a refused answer's text is there when the box
+    /// comes back.
+    typed: Option<Entity<TextInput>>,
+    /// The input's Enter and Esc, and the release that gives the keys back
+    /// when the toast closes.
+    typed_subscriptions: Vec<Subscription>,
+    /// While the toast holds the keys, its window's handle and the window
+    /// that was foreground before, to give back.
+    keys: Option<(usize, Option<usize>)>,
 }
 
 /// Whether a redraw ends the rest on a toast: the pointer was `hovering`,
@@ -675,13 +779,154 @@ impl ToastView {
             sent: false,
             hovering: false,
             window_saw_pointer: false,
+            typed: None,
+            typed_subscriptions: Vec::new(),
+            keys: None,
         }
+    }
+
+    /// The text box's input when the toast draws a box: made on the first
+    /// such draw, its placeholder kept to the box's.
+    fn ensure_typed(&mut self, cx: &mut Context<Self>) -> Option<Entity<TextInput>> {
+        let placeholder = self
+            .toast
+            .ask
+            .as_ref()
+            .and_then(drawn_box)
+            .map(|typed| typed.placeholder.clone())?;
+        if let Some(input) = &self.typed {
+            input.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+            return Some(input.clone());
+        }
+        let input = cx.new(|cx| TextInput::new("", placeholder, cx));
+        self.typed_subscriptions.push(cx.subscribe(
+            &input,
+            |this, _, event: &TextInputEvent, cx| match event {
+                TextInputEvent::Submit => this.send_typed(cx),
+                TextInputEvent::Cancel => this.give_back_keys(cx),
+            },
+        ));
+        self.typed_subscriptions
+            .push(cx.on_release(ToastView::give_back_keys_at_release));
+        self.typed = Some(input.clone());
+        Some(input)
+    }
+
+    /// Sends the text box's text as the box's typed answer, as an answer
+    /// button sends its choice; a blank box, or an answer already out,
+    /// sends nothing. The send runs once this update ends, as the root view
+    /// redraws this toast when it records the answer.
+    fn send_typed(&mut self, cx: &mut Context<Self>) {
+        if self.sent {
+            return;
+        }
+        let Some(ask) = self.toast.ask.as_ref() else {
+            return;
+        };
+        let (Some(since), Some(typed), Some(input)) = (ask.since, drawn_box(ask), &self.typed)
+        else {
+            return;
+        };
+        let Some(choice) = typed.answer.choice(input.read(cx).text()) else {
+            return;
+        };
+        let root = self.root.clone();
+        let session_id = self.toast.key.1.clone();
+        cx.defer(move |cx| {
+            let answered = root.update(cx, |root, cx| {
+                root.answer_from_dashboard(&session_id, since, choice, cx);
+            });
+            if let Err(err) = answered {
+                tracing::debug!("toast answered after the root view went: {err:#}");
+            }
+        });
+        self.give_back_keys(cx);
+    }
+
+    /// A mouse-down in the text box: the box takes the keyboard, and on
+    /// Windows the toast becomes the foreground window so keys reach it.
+    /// The foreground change runs on a later turn of the loop, outside the
+    /// window's own input handling, which the activation it brings re-enters.
+    fn take_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = &self.typed {
+            input.read(cx).focus_handle(cx).focus(window);
+        }
+        #[cfg(windows)]
+        {
+            if self.keys.is_some() {
+                return;
+            }
+            let key = self.toast.key.clone();
+            let Some(address) = self
+                .root
+                .upgrade()
+                .and_then(|root| root.read(cx).toast_window_address(&key))
+            else {
+                return;
+            };
+            cx.spawn(async move |this, cx| {
+                let (taken, before) = crate::toast_window::take_foreground(address);
+                let Some(keys) = crate::toast_window::recorded_keys(address, taken, before) else {
+                    return;
+                };
+                if this.update(cx, |this, _| this.keys = Some(keys)).is_err() {
+                    tracing::warn!("the toast closed while it took the foreground");
+                    crate::toast_window::give_back_foreground(address, before, false);
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Takes the toast's hold of the keys, when it has one: its window's
+    /// handle and the window that was foreground before, for the caller to
+    /// give back.
+    pub(crate) fn release_keys(&mut self) -> Option<(usize, Option<usize>)> {
+        self.keys.take()
+    }
+
+    /// Gives the keys back, when the toast holds them: its
+    /// `WS_EX_NOACTIVATE` back on, and the window that was foreground
+    /// before made foreground again while the toast still is (see
+    /// [`crate::toast_window::foreground_to_restore`]), on a later turn of
+    /// the loop.
+    fn give_back_keys(&mut self, cx: &mut App) {
+        self.give_back_keys_when(false, cx);
+    }
+
+    /// The last resort, as the view is released: gives the keys back as
+    /// [`ToastView::give_back_keys`] does, but with the toast's window
+    /// perhaps gone, the window that was foreground before is also made
+    /// foreground again over a null foreground or one of this process's
+    /// windows, never another app's.
+    fn give_back_keys_at_release(&mut self, cx: &mut App) {
+        self.give_back_keys_when(true, cx);
+    }
+
+    /// Gives the keys back, `released` when the view is.
+    fn give_back_keys_when(&mut self, released: bool, cx: &mut App) {
+        let Some((address, before)) = self.release_keys() else {
+            return;
+        };
+        #[cfg(windows)]
+        cx.spawn(async move |_| {
+            crate::toast_window::give_back_foreground(address, before, released);
+        })
+        .detach();
+        #[cfg(not(windows))]
+        let _ = (address, before, released, cx);
     }
 
     /// Shows `toast` as the stack now holds it, `sent` when an answer is out
     /// for its session. The root view is not read while drawing: it is
-    /// mid-update when a toast window opens.
+    /// mid-update when a toast window opens. A different prompt empties the
+    /// text box; the same one redrawn keeps its text.
     pub(crate) fn show(&mut self, toast: AppToast, sent: bool, cx: &mut Context<Self>) {
+        if another_prompt(self.toast.ask.as_ref(), toast.ask.as_ref())
+            && let Some(input) = &self.typed
+        {
+            input.update(cx, |input, cx| input.set_text("", cx));
+        }
         self.toast = toast;
         self.sent = sent;
         cx.notify();
@@ -719,6 +964,28 @@ impl ToastView {
     }
 }
 
+/// Whether the toast's ask went from the `drawn` prompt to another one: its
+/// label, text, command, choices or box differ. The stamp is not compared,
+/// so a new prompt under the same stamp counts.
+fn another_prompt(drawn: Option<&AskBlock>, next: Option<&AskBlock>) -> bool {
+    let (Some(drawn), Some(next)) = (drawn, next) else {
+        return false;
+    };
+    (
+        &drawn.label,
+        &drawn.text,
+        &drawn.command,
+        &drawn.choices,
+        &drawn.typed,
+    ) != (
+        &next.label,
+        &next.text,
+        &next.command,
+        &next.choices,
+        &next.typed,
+    )
+}
+
 /// A press that takes `key`'s toast down through `root`.
 fn dismiss_press(root: WeakEntity<RootView>, key: SessionKey) -> SharedPress {
     Rc::new(move |_, _, cx| {
@@ -736,8 +1003,20 @@ impl Render for ToastView {
         let (go_key, dismiss_key) = (self.toast.key.clone(), self.toast.key.clone());
         let answer_root = self.root.clone();
         let session_id = self.toast.key.1.clone();
+        let typed = self.ensure_typed(cx).map(|input| TypedRow {
+            input,
+            send: Rc::new(cx.listener(|this, _: &ClickEvent, _, cx| this.send_typed(cx))),
+            take_keys: Rc::new(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.take_keys(window, cx);
+            })),
+        });
+        let view = cx.weak_entity();
         let presses = ToastPresses {
+            typed,
             answer: Rc::new(move |since, choice, cx| {
+                // An answer gives the keys back with it, as Send does. Fails
+                // only when the toast has closed, and its keys with it.
+                view.update(cx, |view, cx| view.give_back_keys(cx)).ok();
                 let answered = answer_root.update(cx, |root, cx| {
                     root.answer_from_dashboard(&session_id, since, choice, cx);
                 });
@@ -861,6 +1140,7 @@ mod tests {
                 command: command.then(|| "gh pr merge".to_owned()),
                 since: Some(chrono::Utc::now()),
                 choices,
+                typed: None,
             }),
             None,
         )

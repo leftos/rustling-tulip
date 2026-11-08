@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - Open a shell on any connected computer from the jump palette (Ctrl+Shift+P, "Open shell on …") or from its row in Connections.
+- On Windows, a question or permission toast has a text box for your own answer: type it and press Enter, without opening the session.
 - Paste an image with Ctrl+V, or drop files onto a terminal, into a session on another computer: they are copied there and their paths pasted.
 - Your phone gets a notification when a session needs you or finishes, even with the phone app closed: turn it on from the Notifications button on the phone app's Home.
 - Phone notifications wait while you're at your computer, and a session still waiting on you reaches your phone when you walk away; turn it off with "Hold while I'm at my computer".

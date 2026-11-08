@@ -538,6 +538,103 @@ pub struct AskBlock {
     /// The answer buttons; empty when the prompt cannot be answered from
     /// here, leaving `Go to pane` alone.
     pub choices: Vec<AskChoice>,
+    /// The text box a toast draws under the choices for the prompt's
+    /// type-your-own answer; read it through [`AskBlock::typed_box`].
+    pub typed: Option<AskBox>,
+}
+
+impl AskBlock {
+    /// The text box to draw under the choices: only while they are drawn,
+    /// so a block that offers no buttons offers no box either. This is the
+    /// one place that decides it, as a toast takes a block's buttons away
+    /// after [`ask_block`] made it.
+    #[must_use]
+    pub fn typed_box(&self) -> Option<&AskBox> {
+        self.typed
+            .as_ref()
+            .filter(|_| !self.choices.is_empty() && self.since.is_some())
+    }
+}
+
+/// The text box's placeholder on a question's toast.
+pub const TYPE_SOMETHING_PLACEHOLDER: &str = "Type something";
+/// The send button's label beside a question's box.
+pub const TYPE_SOMETHING_SEND: &str = "Send";
+/// The send button's label beside a permission's box.
+pub const DENY_WITH_TEXT_SEND: &str = "Deny with text";
+/// The agent's name when the session's descriptor is not known.
+const GENERIC_AGENT: &str = "the agent";
+
+/// Which typed answer an ask block's text box sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedAnswer {
+    /// A question's "Type something" option.
+    TypeSomething,
+    /// A permission's denial with a message for the agent.
+    DenyWithText,
+}
+
+impl TypedAnswer {
+    /// The choice that sends `text`; `None` for a blank box, which sends
+    /// nothing.
+    #[must_use]
+    pub fn choice(self, text: &str) -> Option<PromptChoice> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        let text = text.to_owned();
+        Some(match self {
+            Self::TypeSomething => PromptChoice::TypeSomething { text },
+            Self::DenyWithText => PromptChoice::DenyWithText { text },
+        })
+    }
+}
+
+/// A text box under an ask block's choices, with the button that sends it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskBox {
+    /// The box's placeholder: `Type something`, `Tell <agent> what to do
+    /// instead`.
+    pub placeholder: String,
+    /// The send button's label: `Send`, `Deny with text`.
+    pub send_label: String,
+    /// What the box sends.
+    pub answer: TypedAnswer,
+}
+
+impl AskBox {
+    /// A question's box.
+    #[must_use]
+    pub fn type_something() -> Self {
+        Self {
+            placeholder: TYPE_SOMETHING_PLACEHOLDER.to_owned(),
+            send_label: TYPE_SOMETHING_SEND.to_owned(),
+            answer: TypedAnswer::TypeSomething,
+        }
+    }
+
+    /// A permission's box, naming `agent`.
+    fn deny_with_text(agent: &str) -> Self {
+        Self {
+            placeholder: format!("Tell {agent} what to do instead"),
+            send_label: DENY_WITH_TEXT_SEND.to_owned(),
+            answer: TypedAnswer::DenyWithText,
+        }
+    }
+}
+
+/// The name people read for `input`'s session's agent: its descriptor's
+/// label, else `the agent`.
+fn agent_label(input: &RowInput<'_>) -> String {
+    let agent = input.session.agent.as_ref();
+    input
+        .agents
+        .iter()
+        .find(|descriptor| Some(&descriptor.id) == agent)
+        .map_or_else(
+            || GENERIC_AGENT.to_owned(),
+            |descriptor| descriptor.label.clone(),
+        )
 }
 
 /// The ask block of a session waiting on a prompt its hooks reported, else
@@ -548,26 +645,30 @@ pub(crate) fn ask_block(input: &RowInput<'_>) -> Option<AskBlock> {
     if session.status != SessionStatus::AwaitingInput {
         return None;
     }
-    let (label, text, command, choices) = match session.pending_input.as_ref()? {
+    let (label, text, command, choices, typed) = match session.pending_input.as_ref()? {
         PendingInput::Question { questions } => (
             ASK_QUESTION.to_owned(),
             now_text(input),
             None,
             question_choices(questions),
+            Some(AskBox::type_something()),
         ),
         PendingInput::Permission { tool_name, summary } => (
             ASK_PERMISSION.to_owned(),
             permission_text(input, tool_name),
             Some(summary.trim().to_owned()).filter(|command| !command.is_empty()),
             permission_choices(input.prompt),
+            Some(AskBox::deny_with_text(&agent_label(input))),
         ),
         PendingInput::PlanApproval { .. } | PendingInput::Other { .. } | PendingInput::Unknown => (
             format!("{} ·", state_word(input)),
             now_text(input),
             None,
             Vec::new(),
+            None,
         ),
     };
+    // A box rides only with the buttons; `AskBlock::typed_box` decides it.
     let since = session.status_since;
     Some(AskBlock {
         session_id: session.id.clone(),
@@ -576,6 +677,7 @@ pub(crate) fn ask_block(input: &RowInput<'_>) -> Option<AskBlock> {
         command,
         since,
         choices: if since.is_some() { choices } else { Vec::new() },
+        typed,
     })
 }
 
@@ -1229,8 +1331,110 @@ mod tests {
         block
             .choices
             .iter()
-            .map(|choice| (choice.label.as_str(), choice.hint.as_deref(), choice.choice))
+            .map(|choice| {
+                (
+                    choice.label.as_str(),
+                    choice.hint.as_deref(),
+                    choice.choice.clone(),
+                )
+            })
             .collect()
+    }
+
+    /// The block's text box as its placeholder, send label and answer.
+    fn typed(block: &AskBlock) -> Option<(&str, &str, TypedAnswer)> {
+        block.typed_box().map(|typed| {
+            (
+                typed.placeholder.as_str(),
+                typed.send_label.as_str(),
+                typed.answer,
+            )
+        })
+    }
+
+    #[test]
+    fn a_single_choice_questions_block_carries_the_type_something_box() {
+        let session = asking(PendingInput::Question {
+            questions: vec![question("Which branch?", &["main", "dev"], false)],
+        });
+        let block = block_of(&session, None);
+        assert_eq!(
+            typed(&block),
+            Some(("Type something", "Send", TypedAnswer::TypeSomething))
+        );
+        assert_eq!(
+            TypedAnswer::TypeSomething.choice("use mul"),
+            Some(PromptChoice::TypeSomething {
+                text: "use mul".to_owned()
+            })
+        );
+        assert_eq!(
+            TypedAnswer::TypeSomething.choice("  \t "),
+            None,
+            "a blank box sends nothing"
+        );
+    }
+
+    #[test]
+    fn a_permissions_block_carries_the_deny_with_text_box() {
+        let block = block_of(&asking(bash("ls")), None);
+        assert_eq!(
+            typed(&block),
+            Some((
+                "Tell the agent what to do instead",
+                "Deny with text",
+                TypedAnswer::DenyWithText
+            )),
+            "with no descriptor known, the agent is named generically"
+        );
+        assert_eq!(
+            TypedAnswer::DenyWithText.choice("use 6*8"),
+            Some(PromptChoice::DenyWithText {
+                text: "use 6*8".to_owned()
+            })
+        );
+
+        let agents = agent_registry::descriptors();
+        let descriptor = agents.first().expect("a registered agent");
+        let mut session = asking(bash("ls"));
+        session.agent = Some(descriptor.id.clone());
+        let row = row("s1");
+        let mut input = input(&row, &session, None);
+        input.agents = &agents;
+        let block = ask_block(&input).expect("a waiting session has an ask block");
+        let wanted = format!("Tell {} what to do instead", descriptor.label);
+        assert_eq!(
+            typed(&block).map(|(placeholder, ..)| placeholder),
+            Some(wanted.as_str()),
+            "the session's agent by its descriptor's label"
+        );
+    }
+
+    #[test]
+    fn a_plan_approvals_or_a_multi_selects_block_carries_no_box() {
+        let plan = block_of(&asking(PendingInput::PlanApproval { plan: None }), None);
+        assert_eq!(typed(&plan), None, "a plan approval");
+        let multi = asking(PendingInput::Question {
+            questions: vec![question("Which crates?", &["a", "b"], true)],
+        });
+        assert_eq!(typed(&block_of(&multi, None)), None, "a multi-select");
+        let several = asking(PendingInput::Question {
+            questions: vec![
+                question("First?", &["a", "b"], false),
+                question("Second?", &["c"], false),
+            ],
+        });
+        assert_eq!(typed(&block_of(&several, None)), None, "several questions");
+        let mut unstamped = asking(bash("ls"));
+        unstamped.status_since = None;
+        assert_eq!(
+            typed(&block_of(&unstamped, None)),
+            None,
+            "no wait stamp to answer against"
+        );
+        let mut cleared = block_of(&asking(bash("ls")), None);
+        cleared.choices.clear();
+        assert_eq!(typed(&cleared), None, "a block whose buttons were taken");
     }
 
     fn facts(id: &str) -> SessionFacts {

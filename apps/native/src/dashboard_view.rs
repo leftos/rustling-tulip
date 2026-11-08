@@ -869,7 +869,7 @@ fn ask_choice_button(
         outlined_button
     };
     let session = id.to_owned();
-    let answer = choice.choice;
+    let answer = choice.choice.clone();
     make(
         offset,
         shift,
@@ -894,7 +894,7 @@ fn ask_choice_button(
     })
     .when_some(answer_at, |button, since| {
         button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.answer_from_dashboard(&session, since, answer, cx);
+            this.answer_from_dashboard(&session, since, answer.clone(), cx);
         }))
     })
     .into_any_element()

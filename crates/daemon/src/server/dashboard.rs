@@ -94,7 +94,7 @@ async fn answer_waiting(
     choice: PromptChoice,
 ) -> Result<(), TypeRefusal> {
     let (pending, folder) = pending_since(target, since)?;
-    within_options(choice, &pending)?;
+    within_options(&choice, &pending)?;
     let reading = screen_reader(target).current().await;
     let prompt = dialog_for(&reading, &pending, folder.as_deref())?;
     let kind = chat_answer_for(choice, prompt)?;
@@ -102,9 +102,20 @@ async fn answer_waiting(
     chat_answer::answer_identified(target, identity, since, &pending, &kind).await
 }
 
-/// Refuse an option index past the pending question's options.
-fn within_options(choice: PromptChoice, pending: &PendingInput) -> Result<(), TypeRefusal> {
-    let (PromptChoice::Option { index }, PendingInput::Question { questions }) = (choice, pending)
+/// Refuse an option index past the pending question's options, and a typed
+/// answer for another kind of prompt than the one it answers: a type
+/// something for anything but a question, a deny with text for anything but
+/// a permission.
+fn within_options(choice: &PromptChoice, pending: &PendingInput) -> Result<(), TypeRefusal> {
+    match (choice, pending) {
+        (PromptChoice::TypeSomething { .. }, PendingInput::Question { .. })
+        | (PromptChoice::DenyWithText { .. }, PendingInput::Permission { .. }) => return Ok(()),
+        (PromptChoice::TypeSomething { .. } | PromptChoice::DenyWithText { .. }, _) => {
+            return Err(not_this_prompt());
+        }
+        _ => {}
+    }
+    let (&PromptChoice::Option { index }, PendingInput::Question { questions }) = (choice, pending)
     else {
         return Ok(());
     };
@@ -272,7 +283,9 @@ fn words(text: &str) -> String {
 
 /// The chat answer that gives `choice` to `prompt`: a question's option by
 /// its number, a permission's allow-once, don't-ask-again or deny option by
-/// the number the screen reads for it.
+/// the number the screen reads for it, and a typed answer as the chat's own
+/// (a question's type something, a permission's deny with text), whose text
+/// the chat answer path checks.
 ///
 /// # Errors
 ///
@@ -284,6 +297,12 @@ fn chat_answer_for(
     prompt: &ChatPrompt,
 ) -> Result<ChatAnswerKind, TypeRefusal> {
     let number = match (choice, &prompt.kind) {
+        (PromptChoice::TypeSomething { text }, ChatPromptKind::Question) => {
+            return Ok(ChatAnswerKind::TypeSomething { text });
+        }
+        (PromptChoice::DenyWithText { text }, ChatPromptKind::Permission) => {
+            return Ok(ChatAnswerKind::DenyWithText { text });
+        }
         (PromptChoice::Option { index }, ChatPromptKind::Question) => Some(u32::from(index) + 1),
         (PromptChoice::Allow, ChatPromptKind::Permission) => allow_once_option(prompt),
         (PromptChoice::AllowAlways, ChatPromptKind::Permission) => always_allow_option(prompt),
@@ -1710,6 +1729,97 @@ mod tests {
             );
             w.answer(PromptChoice::Option { index: 0 }).await;
             w.refused(CHAT_REFUSED, GONE, "the dialog shows other options")
+                .await;
+        }
+
+        const DOWN: &[u8] = b"\x1b[B";
+        const ENTER: &[u8] = b"\r";
+
+        /// `capture` with `from` replaced by `to` once, which it must hold.
+        fn edited(capture: &str, from: &str, to: &str) -> String {
+            assert!(capture.contains(from), "the capture shows {from:?}");
+            capture.replacen(from, to, 1)
+        }
+
+        /// `capture` with `text` typed in its empty box.
+        fn with_box(capture: &str, text: &str) -> String {
+            let mut typed = 0;
+            let rows: Vec<String> = capture
+                .lines()
+                .map(|row| {
+                    if row.trim_end() == "❯" {
+                        typed += 1;
+                        format!("❯ {text}")
+                    } else {
+                        row.to_owned()
+                    }
+                })
+                .collect();
+            assert_eq!(typed, 1, "the capture shows one empty box");
+            rows.join("\n")
+        }
+
+        #[tokio::test]
+        async fn a_typed_answer_reaches_a_waiting_question() {
+            let mut w = waiting(
+                "dash-answer-typed",
+                ONE_QUESTION,
+                question(&["Red", "Blue"], false),
+            );
+            w.answer(PromptChoice::TypeSomething {
+                text: "use mul".to_owned(),
+            })
+            .await;
+            assert_eq!(w.term.typed().await, DOWN, "Down 1");
+            assert_eq!(w.term.typed().await, DOWN, "Down 2");
+            let on_row = edited(
+                &edited(ONE_QUESTION, "❯ 1. Red", "  1. Red"),
+                "  3. Type something.",
+                "❯ 3. Type something.",
+            );
+            w.term.show(&on_row).await;
+            assert_eq!(w.term.typed().await, b"use mul", "the text, as typed");
+            w.types_and_ends(ENTER, "then Enter").await;
+        }
+
+        #[tokio::test]
+        async fn a_deny_with_text_reaches_a_waiting_permission() {
+            let mut w = waiting("dash-answer-deny-text", PERMISSION, bash_permission());
+            w.answer(PromptChoice::DenyWithText {
+                text: "use 6*8".to_owned(),
+            })
+            .await;
+            assert_eq!(w.term.typed().await, b"4", "the No option's digit");
+            w.term.show(NO_DIALOG).await;
+            assert_eq!(
+                w.term.typed().await,
+                b"\x1b[200~use 6*8\x1b[201~",
+                "the message, once the box is back"
+            );
+            w.term.show(&with_box(NO_DIALOG, "use 6*8")).await;
+            w.types_and_ends(ENTER, "then Enter").await;
+        }
+
+        #[tokio::test]
+        async fn a_typed_answer_to_the_wrong_prompt_kind_is_refused() {
+            let mut w = waiting("dash-answer-typed-perm", PERMISSION, bash_permission());
+            w.answer(PromptChoice::TypeSomething {
+                text: "use mul".to_owned(),
+            })
+            .await;
+            w.refused(INVALID_REQUEST, NOT_THIS, "type something on a permission")
+                .await;
+
+            let mut w = waiting(
+                "dash-answer-deny-text-question",
+                ONE_QUESTION,
+                question(&["Red", "Blue"], false),
+            );
+            w.answer(PromptChoice::DenyWithText {
+                text: "use 6*8".to_owned(),
+            })
+            .await;
+            w.refused(INVALID_REQUEST, NOT_THIS, "deny with text on a question")
                 .await;
         }
 

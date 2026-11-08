@@ -306,8 +306,8 @@ pub use crate::dashboard_compact::{
     COMPACT_EMPTY_TEXT, ChipKind, CompactBlock, CompactChip, CompactRow, Tally,
 };
 pub use crate::dashboard_rows::{
-    AskBlock, AskChoice, Columns as DashboardColumns, DrawerCells, DrawerLine, HeaderFigures,
-    NestedRow, QueueChip, ReleaseFigure, RowCells,
+    AskBlock, AskBox, AskChoice, Columns as DashboardColumns, DrawerCells, DrawerLine,
+    HeaderFigures, NestedRow, QueueChip, ReleaseFigure, RowCells,
 };
 pub use crate::diff_tab::{
     BINARY_TEXT, DiffTabBody, DiffTabHeader, EMPTY_TEXT, FINAL_NEWLINE_NOTE, LINE_ENDINGS_NOTE,
@@ -358,11 +358,11 @@ pub use crate::stash_view::{
 };
 pub use crate::tabs::{TabBadge, TabPill};
 pub use crate::taskbar_badge::{BadgeOverlay, NoTaskbarBadge, TaskbarBadge};
-pub use crate::text_input::bind_keys;
+pub use crate::text_input::{TextInput, bind_keys};
 pub use crate::toast_stack::WIDTH as TOAST_CARD_WIDTH;
 pub use crate::toast_stack::{AppToast, AppToastKind, SessionKey, WorkArea, key_of};
 pub use crate::toast_view::{
-    CardText, TextMeasure, TextRole, ToastPresses, card_height, toast_card,
+    CardText, TextMeasure, TextRole, ToastPresses, TypedRow, card_height, toast_card,
 };
 pub use crate::toast_window::{PhysicalRect, SystemToastPlacer, ToastPlacer};
 pub use crate::undo::{TabSnapshot, UndoEntry};

@@ -18,8 +18,9 @@ use gpui::{
     size,
 };
 use protocol::{
-    AccountEventKind, AgentDescriptor, AlertKind, AttentionReason, DaemonMessage, KeyState,
-    PendingInput, SessionMode, SessionSnapshot, SessionStatus, SummarizerKey, SummarizerSettings,
+    AccountEventKind, AgentDescriptor, AlertKind, AttentionReason, DaemonMessage,
+    FEATURE_TYPED_PROMPT_ANSWERS, KeyState, PendingInput, SessionMode, SessionSnapshot,
+    SessionStatus, SummarizerKey, SummarizerSettings,
 };
 
 use crate::RootView;
@@ -447,6 +448,13 @@ struct ToastWindow {
     /// Whether an answer was out for the session when the window was last
     /// placed: its card is shorter then, so a change places it again.
     sent: bool,
+}
+
+/// Removes the toast window `handle`; one already closed is logged at debug.
+fn remove_toast_window(handle: WindowHandle<ToastView>, cx: &mut App) {
+    if let Err(err) = handle.update(cx, |_, window, _| window.remove_window()) {
+        tracing::debug!("the toast window was already closed: {err:#}");
+    }
 }
 
 /// Where the toasts go right now.
@@ -1281,7 +1289,7 @@ impl RootView {
                 }
                 let now = cx.background_executor().now();
                 let waits = matches!(sound, NotifyKind::NeedsYou) && this.session_waits(&key.1);
-                let wait = waits.then(|| (this.toast_ask(&key.1), this.toast_pending(&key.1)));
+                let wait = waits.then(|| (this.toast_ask(&key), this.toast_pending(&key.1)));
                 let mut toast = AppToast::new(key, kind, title, body, now);
                 if let Some((ask, pending)) = wait {
                     toast = toast.waiting_on(ask, pending);
@@ -1319,10 +1327,13 @@ impl RootView {
             .and_then(|session| session.pending_input.clone())
     }
 
-    /// The ask block of session `id`, read as the Dashboard reads its row.
-    /// A toast offers at most [`MAX_TOAST_CHOICES`]; a prompt with more is
-    /// answered from its pane.
-    fn toast_ask(&self, id: &str) -> Option<AskBlock> {
+    /// The ask block of the session `key` names, read as the Dashboard reads
+    /// its row. A toast offers at most [`MAX_TOAST_CHOICES`]; a prompt with
+    /// more is answered from its pane. Its text box shows only when the
+    /// session's host lists [`FEATURE_TYPED_PROMPT_ANSWERS`], since an older
+    /// daemon refuses a typed answer.
+    fn toast_ask(&self, key: &SessionKey) -> Option<AskBlock> {
+        let (host, id) = (&key.0, key.1.as_str());
         let session = self.sidebar.session(id)?;
         let row = row_of(&self.sidebar, session);
         let mut ask = ask_block(&RowInput {
@@ -1335,6 +1346,12 @@ impl RootView {
         })?;
         if ask.choices.len() > MAX_TOAST_CHOICES {
             ask.choices.clear();
+        }
+        let typed = self
+            .conn_of(host)
+            .is_some_and(|conn| conn.supports(FEATURE_TYPED_PROMPT_ANSWERS));
+        if !typed {
+            ask.typed = None;
         }
         Some(ask)
     }
@@ -1533,19 +1550,46 @@ impl RootView {
         }
     }
 
+    /// The Win32 handle of `key`'s toast window as the placer gave it;
+    /// `None` without a window or a handle (a recording placer gives none),
+    /// so a toast's text box takes the foreground only on a real window.
+    #[cfg(windows)]
+    pub(crate) fn toast_window_address(&self, key: &SessionKey) -> Option<usize> {
+        self.notifications
+            .toasts
+            .windows
+            .get(key)
+            .and_then(|open| open.address)
+    }
+
     /// Closes `key`'s window, if it has one. The close waits for the effects
-    /// to flush, as a press on a toast runs inside its window's update.
+    /// to flush, as a press on a toast runs inside its window's update. A
+    /// toast that holds the keys gives them back first, while it is still
+    /// up, on a later turn of the loop, and closes after.
     fn close_toast_window(&mut self, key: &SessionKey, cx: &mut Context<Self>) {
         let Some(open) = self.notifications.toasts.windows.remove(key) else {
             return;
         };
         cx.defer(move |cx| {
-            if let Err(err) = open
+            let keys = open
                 .handle
-                .update(cx, |_, window, _| window.remove_window())
-            {
-                tracing::debug!("the toast window was already closed: {err:#}");
-            }
+                .update(cx, |view, _, _| view.release_keys())
+                .ok()
+                .flatten();
+            let Some((address, before)) = keys else {
+                remove_toast_window(open.handle, cx);
+                return;
+            };
+            cx.spawn(async move |cx| {
+                #[cfg(windows)]
+                crate::toast_window::give_back_foreground(address, before, false);
+                #[cfg(not(windows))]
+                let _ = (address, before);
+                if let Err(err) = cx.update(|cx| remove_toast_window(open.handle, cx)) {
+                    tracing::debug!("the app quit before the toast window closed: {err:#}");
+                }
+            })
+            .detach();
         });
     }
 
@@ -1679,7 +1723,7 @@ impl RootView {
         }
         let now = cx.background_executor().now();
         for key in moved {
-            let (ask, pending) = (self.toast_ask(&key.1), self.toast_pending(&key.1));
+            let (ask, pending) = (self.toast_ask(&key), self.toast_pending(&key.1));
             let stack = &mut self.notifications.toasts.stack;
             stack.update_ask(&key, ask, pending, now);
         }

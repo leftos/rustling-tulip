@@ -267,6 +267,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_WEB_PUSH,
     protocol::FEATURE_UPLOAD_FILE,
     protocol::FEATURE_CLIENT_PRESENCE,
+    protocol::FEATURE_TYPED_PROMPT_ANSWERS,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every

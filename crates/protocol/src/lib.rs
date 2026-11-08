@@ -103,6 +103,12 @@ pub const FEATURE_UPLOAD_FILE: &str = "upload_file";
 /// only to a daemon that lists it.
 pub const FEATURE_CLIENT_PRESENCE: &str = "client_presence";
 
+/// `Welcome.features` entry: the daemon accepts the typed answers
+/// [`PromptChoice::TypeSomething`] and [`PromptChoice::DenyWithText`] in
+/// [`ClientMessage::AnswerPrompt`]. A client offers a typed answer only when
+/// the connected daemon lists it.
+pub const FEATURE_TYPED_PROMPT_ANSWERS: &str = "typed_prompt_answers";
+
 /// The most file bytes one [`ClientMessage::UploadFile`] carries, checked by
 /// the client before sending and by the daemon.
 pub const UPLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -1433,7 +1439,7 @@ pub enum SegmentActivity {
 }
 
 /// The answer [`ClientMessage::AnswerPrompt`] gives a waiting session.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PromptChoice {
     /// The zero-based position in the question's options.
@@ -1444,6 +1450,12 @@ pub enum PromptChoice {
     AllowAlways,
     /// Deny a permission request.
     Deny,
+    /// Answer a single-choice question with `text` through its "Type
+    /// something" option, as [`ChatAnswerKind::TypeSomething`] does.
+    TypeSomething { text: String },
+    /// Deny a permission request and tell the agent `text` instead, as
+    /// [`ChatAnswerKind::DenyWithText`] does.
+    DenyWithText { text: String },
     /// Forward-compat fallback: a choice the current build does not know;
     /// the daemon refuses it.
     #[serde(other)]
@@ -9420,11 +9432,17 @@ mod tests {
             PromptChoice::Allow,
             PromptChoice::AllowAlways,
             PromptChoice::Deny,
+            PromptChoice::TypeSomething {
+                text: "use mul".to_string(),
+            },
+            PromptChoice::DenyWithText {
+                text: "use 6*8".to_string(),
+            },
         ] {
             let answer = ClientMessage::AnswerPrompt {
                 session_id: "s1".to_string(),
                 since: dashboard_time(7),
-                choice,
+                choice: choice.clone(),
                 request_id: Some("req-5".to_string()),
             };
             let json = serde_json::to_string(&answer).expect("serialize");
@@ -9443,6 +9461,30 @@ mod tests {
             assert_eq!(since, dashboard_time(7));
             assert_eq!(back_choice, choice);
             assert_eq!(request_id, Some("req-5".to_string()));
+        }
+    }
+
+    #[test]
+    fn a_typed_prompt_choice_carries_its_text() {
+        let cases = [
+            (
+                PromptChoice::TypeSomething {
+                    text: "use mul".to_string(),
+                },
+                r#"{"kind":"type_something","text":"use mul"}"#,
+            ),
+            (
+                PromptChoice::DenyWithText {
+                    text: "use 6*8".to_string(),
+                },
+                r#"{"kind":"deny_with_text","text":"use 6*8"}"#,
+            ),
+        ];
+        for (choice, wire) in cases {
+            let json = serde_json::to_string(&choice).expect("serialize");
+            assert_eq!(json, wire);
+            let back: PromptChoice = serde_json::from_str(wire).expect("decodes");
+            assert_eq!(back, choice);
         }
     }
 

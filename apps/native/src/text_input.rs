@@ -288,6 +288,7 @@ impl TextInput {
         self.draws == Draws::Dots
     }
 
+    #[must_use]
     pub fn text(&self) -> &str {
         &self.content
     }

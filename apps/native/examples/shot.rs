@@ -61,8 +61,8 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
-    App, AppContext as _, Application, AsyncApp, Bounds, Context, IntoElement, Keystroke, Render,
-    Window, WindowBounds, WindowHandle, WindowOptions, div, prelude::*, px, size,
+    App, AppContext as _, Application, AsyncApp, Bounds, Context, Entity, IntoElement, Keystroke,
+    Render, Window, WindowBounds, WindowHandle, WindowOptions, div, prelude::*, px, size,
 };
 use protocol::{
     AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab,
@@ -79,12 +79,12 @@ use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::ui_theme::theme;
 use rustling_tulip_native::update::{LastResult, Ready, Updater};
 use rustling_tulip_native::{
-    Activity, AppToast, AppToastKind, AskBlock, AskChoice, Assets, CardText, Clock, Connection,
-    FileFilter, FilePicker, FolderPicker, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand,
-    NetEvent, Notifier, NotifyKind, NotifyState, OpenFailure, Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH,
-    RootDeps, RootView, SavePicker, SystemToastPlacer, TOAST_CARD_WIDTH, ToastKind, ToastPresses,
-    ToastSpec, Transport, ViewerLoad, bind_keys, card_height, key_of, remote_access::Autostart,
-    toast_card,
+    Activity, AppToast, AppToastKind, AskBlock, AskBox, AskChoice, Assets, CardText, Clock,
+    Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS,
+    NetCommand, NetEvent, Notifier, NotifyKind, NotifyState, OpenFailure, Opener, RAIL_ITEM_HEIGHT,
+    RAIL_WIDTH, RootDeps, RootView, SavePicker, SystemToastPlacer, TOAST_CARD_WIDTH, TextInput,
+    ToastKind, ToastPresses, ToastSpec, Transport, TypedRow, ViewerLoad, bind_keys, card_height,
+    key_of, remote_access::Autostart, toast_card,
 };
 use serde_json::{Value, json};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -988,6 +988,7 @@ fn permission_ask() -> AskBlock {
             choice("Allow", protocol::PromptChoice::Allow),
             choice("Deny", protocol::PromptChoice::Deny),
         ],
+        typed: None,
     }
 }
 
@@ -1023,28 +1024,38 @@ fn question_ask() -> AskBlock {
                 "Nothing is tagged; the preview channel gets the build.",
             ),
         ],
+        typed: Some(AskBox::type_something()),
     }
 }
 
-/// A card's controls, doing nothing: nothing presses them in a shot.
-fn idle_presses() -> ToastPresses {
+/// A card's controls, doing nothing: nothing presses them in a shot. With
+/// `typed`, the card draws its text box with that input.
+fn idle_presses(typed: Option<Entity<TextInput>>) -> ToastPresses {
     ToastPresses {
         answer: Rc::new(|_, _, _| {}),
         go: Rc::new(|_, _, _| {}),
         dismiss: Rc::new(|_, _, _| {}),
+        typed: typed.map(|input| TypedRow {
+            input,
+            send: Rc::new(|_, _, _| {}),
+            take_keys: Rc::new(|_, _, _| {}),
+        }),
     }
 }
 
 /// A Needs you card, a Finished card and a Needs you card asking a question
-/// with long answers, as the app's own toasts draw them.
+/// with long answers and its text box, as the app's own toasts draw them.
 struct ToastShot {
     needs_you: AppToast,
     finished: AppToast,
     question: AppToast,
+    /// The question card's text box input, empty, showing its placeholder.
+    typed: Entity<TextInput>,
 }
 
 impl ToastShot {
-    fn new() -> Self {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let typed = cx.new(|cx| TextInput::new("", AskBox::type_something().placeholder, cx));
         let toast = |id: &str, kind, title: &str, body: &str| {
             AppToast::new(
                 key_of(&HostKey::Local, id),
@@ -1071,17 +1082,18 @@ impl ToastShot {
                 "Thistle: Which way should the release go out?",
             )
             .waiting_on(Some(question_ask()), None),
+            typed,
         }
     }
 }
 
 impl Render for ToastShot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let card = |toast: &AppToast, cx: &App| {
+        let card = |toast: &AppToast, typed: Option<Entity<TextInput>>, cx: &App| {
             div()
                 .w(px(TOAST_CARD_WIDTH))
                 .h(px(card_height(toast, false, &CardText::new(cx), f32::MAX)))
-                .child(toast_card(toast, false, None, idle_presses(), cx))
+                .child(toast_card(toast, false, None, idle_presses(typed), cx))
         };
         div()
             .size_full()
@@ -1090,9 +1102,9 @@ impl Render for ToastShot {
             .gap(px(8.0))
             .p(px(16.0))
             .bg(gpui::rgb(theme(cx).surface))
-            .child(card(&self.needs_you, cx))
-            .child(card(&self.finished, cx))
-            .child(card(&self.question, cx))
+            .child(card(&self.needs_you, None, cx))
+            .child(card(&self.finished, None, cx))
+            .child(card(&self.question, Some(self.typed.clone()), cx))
     }
 }
 
@@ -1112,7 +1124,7 @@ fn start_toast_shot(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut 
             },
             move |window, cx| {
                 show_cloaked(window, window_size);
-                cx.new(|_| ToastShot::new())
+                cx.new(ToastShot::new)
             },
         )
         .context("opening the window")?;

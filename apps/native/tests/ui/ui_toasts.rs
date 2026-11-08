@@ -522,8 +522,25 @@ fn asking(pending: Value) -> Fixture {
     fixture
 }
 
-/// The harness with `s2`'s Needs you toast up on `pending`.
+/// The harness with `s2`'s Needs you toast up on `pending`, This PC's daemon
+/// listing typed prompt answers.
 fn raised<'a>(cx: &'a mut TestAppContext, dir: &TestDir, pending: Value) -> Harness<'a> {
+    let fixture = asking(pending);
+    let mut h = opened(cx, dir, &fixture, json!({}));
+    h.reconnect_with_features(&[protocol::FEATURE_TYPED_PROMPT_ANSWERS]);
+    h.load(&fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.send(needs_you("s2"));
+    h
+}
+
+/// [`raised`] on a daemon whose `Welcome` lists no typed prompt answers.
+fn raised_without_typed_answers<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    pending: Value,
+) -> Harness<'a> {
     let mut h = opened(cx, dir, &asking(pending), json!({}));
     h.send(needs_you("s2"));
     h
@@ -567,6 +584,14 @@ fn answers(sent: Vec<ClientMessage>) -> Vec<(String, DateTime<Utc>, PromptChoice
         .collect()
 }
 
+/// The physical px a question's or a permission's text box row adds to its
+/// toast: a one-line compact button's height and the gap above it. On
+/// macOS no box is drawn (RT-1243).
+#[cfg(windows)]
+const BOX_ROW: i32 = 35;
+#[cfg(not(windows))]
+const BOX_ROW: i32 = 0;
+
 fn no_toasts() -> Vec<(String, String)> {
     Vec::new()
 }
@@ -576,7 +601,11 @@ fn a_permission_toast_offers_allow_and_deny(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = raised(cx, &dir, permission());
 
-    assert_eq!(h.toasts_shown()[0].height, 219, "room for the command");
+    assert_eq!(
+        h.toasts_shown()[0].height,
+        219 + BOX_ROW,
+        "room for the command"
+    );
     let mut toast = h.popout_window();
     for part in [
         "toast-command",
@@ -602,7 +631,11 @@ fn a_single_choice_question_offers_its_options(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = raised(cx, &dir, question(&["main", "dev", "next"]));
 
-    assert_eq!(h.toasts_shown()[0].height, 221, "a row per choice");
+    assert_eq!(
+        h.toasts_shown()[0].height,
+        221 + BOX_ROW,
+        "a row per choice"
+    );
     let mut toast = h.popout_window();
     for part in ["toast-answer-0", "toast-answer-1", "toast-answer-2"] {
         assert!(drawn(&mut toast, part), "{part} is drawn");
@@ -843,6 +876,185 @@ fn a_refusal_brings_the_buttons_back(cx: &mut TestAppContext) {
     assert_eq!(answers(h.sent()).len(), 1, "and they answer again");
 }
 
+/// Clicks into `toast`'s text box and types `text`, a space as `space`.
+#[cfg(windows)]
+fn type_in_box(toast: &mut VisualTestContext, text: &str) {
+    press(toast, "toast-typed-box");
+    let keys: Vec<String> = text
+        .chars()
+        .map(|c| {
+            if c == ' ' {
+                "space".to_owned()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    toast.simulate_keystrokes(&keys.join(" "));
+    toast.run_until_parked();
+}
+
+#[cfg(windows)]
+#[gpui::test]
+fn a_question_toast_sends_its_typed_answer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = raised(cx, &dir, question(&["main", "dev", "next"]));
+    let mut toast = h.popout_window();
+    assert!(drawn(&mut toast, "toast-typed-box"), "the box is drawn");
+    assert!(drawn(&mut toast, "toast-typed-send"), "its send button too");
+
+    type_in_box(&mut toast, "use mul");
+    toast.simulate_keystrokes("enter");
+    toast.run_until_parked();
+
+    let sent = answers(h.sent());
+    assert_eq!(sent.len(), 1, "one answer: {sent:?}");
+    assert_eq!(sent[0].0, "s2", "to the session's host");
+    assert_eq!(sent[0].1, stamp(1), "chosen against the snapshot's stamp");
+    assert_eq!(
+        sent[0].2,
+        PromptChoice::TypeSomething {
+            text: "use mul".to_owned()
+        }
+    );
+    assert!(drawn(&mut toast, "toast-sent"), "`Sent` as for any answer");
+}
+
+#[gpui::test]
+fn a_host_without_typed_answers_gets_no_toast_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = raised_without_typed_answers(cx, &dir, question(&["main", "dev", "next"]));
+    let mut toast = h.popout_window();
+    assert!(drawn(&mut toast, "toast-answer-0"), "the options are drawn");
+    assert!(!drawn(&mut toast, "toast-typed-box"), "but no box");
+    assert!(
+        !drawn(&mut toast, "toast-typed-send"),
+        "nor its send button"
+    );
+}
+
+#[cfg(windows)]
+#[gpui::test]
+fn a_permission_toast_sends_deny_with_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = raised(cx, &dir, permission());
+    let mut toast = h.popout_window();
+
+    type_in_box(&mut toast, "not on main");
+    press(&mut toast, "toast-typed-send");
+
+    let sent = answers(h.sent());
+    assert_eq!(sent.len(), 1, "one answer: {sent:?}");
+    assert_eq!(sent[0].0, "s2");
+    assert_eq!(
+        sent[0].2,
+        PromptChoice::DenyWithText {
+            text: "not on main".to_owned()
+        }
+    );
+}
+
+#[cfg(windows)]
+#[gpui::test]
+fn a_blank_toast_box_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = raised(cx, &dir, question(&["main", "dev", "next"]));
+    let mut toast = h.popout_window();
+
+    type_in_box(&mut toast, "  ");
+    toast.simulate_keystrokes("enter");
+    toast.run_until_parked();
+    press(&mut toast, "toast-typed-send");
+
+    assert!(answers(h.sent()).is_empty(), "a blank box sends nothing");
+    assert!(drawn(&mut toast, "toast-answer-0"), "the buttons stay up");
+    assert!(drawn(&mut toast, "toast-typed-box"), "and the box");
+}
+
+#[cfg(windows)]
+#[gpui::test]
+fn a_refused_typed_answer_keeps_its_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = raised(cx, &dir, permission());
+    let mut toast = h.popout_window();
+    type_in_box(&mut toast, "not on main");
+    toast.simulate_keystrokes("enter");
+    toast.run_until_parked();
+    let id = answers(h.sent())
+        .pop()
+        .and_then(|(_, _, _, request_id)| request_id)
+        .expect("the answer carries a request id");
+    assert!(drawn(&mut toast, "toast-sent"));
+
+    h.send(DaemonMessage::Error {
+        message: "the prompt changed since".to_owned(),
+        request_id: Some(id),
+        code: None,
+    });
+
+    assert!(drawn(&mut toast, "toast-answer-0"), "the buttons are back");
+    assert!(drawn(&mut toast, "toast-typed-box"), "and the box");
+    press(&mut toast, "toast-typed-send");
+    let sent = answers(h.sent());
+    assert_eq!(sent.len(), 1, "it answers again: {sent:?}");
+    assert_eq!(
+        sent[0].2,
+        PromptChoice::DenyWithText {
+            text: "not on main".to_owned()
+        },
+        "with the text it kept"
+    );
+}
+
+#[cfg(windows)]
+#[gpui::test]
+fn a_new_prompt_under_the_same_stamp_clears_the_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = raised(cx, &dir, question(&["main", "dev", "next"]));
+    let mut toast = h.popout_window();
+    type_in_box(&mut toast, "use mul");
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: waiting("s2", stamp(1), question(&["red", "blue"])),
+        request_id: None,
+    });
+
+    assert!(
+        drawn(&mut toast, "toast-typed-box"),
+        "the box is still drawn"
+    );
+    press(&mut toast, "toast-typed-send");
+    assert!(
+        answers(h.sent()).is_empty(),
+        "the box was emptied, so Send sends nothing"
+    );
+}
+
+#[cfg(windows)]
+#[gpui::test]
+fn the_same_prompt_redrawn_keeps_the_box_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = raised(cx, &dir, question(&["main", "dev", "next"]));
+    let mut toast = h.popout_window();
+    type_in_box(&mut toast, "use mul");
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: waiting("s2", stamp(1), question(&["main", "dev", "next"])),
+        request_id: None,
+    });
+
+    press(&mut toast, "toast-typed-send");
+    let sent = answers(h.sent());
+    assert_eq!(sent.len(), 1, "one answer: {sent:?}");
+    assert_eq!(
+        sent[0].2,
+        PromptChoice::TypeSomething {
+            text: "use mul".to_owned()
+        },
+        "with the text it kept"
+    );
+}
+
 #[gpui::test]
 fn a_session_leaving_awaiting_input_closes_its_toast(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -1004,7 +1216,7 @@ fn a_new_prompt_under_the_same_stamp_replaces_the_ask(cx: &mut TestAppContext) {
     assert_eq!(h.sounds().len(), sounds, "a new prompt plays no sound");
     assert_eq!(
         h.toasts_restacked().last().map(|rect| rect.height),
-        Some(219),
+        Some(219 + BOX_ROW),
         "the card fits the new prompt"
     );
     assert!(

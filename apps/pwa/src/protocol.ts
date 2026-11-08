@@ -128,6 +128,14 @@ export const FEATURE_UPLOAD_FILE = "upload_file";
 export const FEATURE_CLIENT_PRESENCE = "client_presence";
 
 /**
+ * `Welcome.features` entry: the daemon accepts the typed answers
+ * [`PromptChoice::TypeSomething`] and [`PromptChoice::DenyWithText`] in
+ * [`ClientMessage::AnswerPrompt`]. A client offers a typed answer only when
+ * the connected daemon lists it.
+ */
+export const FEATURE_TYPED_PROMPT_ANSWERS = "typed_prompt_answers";
+
+/**
  * The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
  * right after `Welcome` when its `Hello` carried no valid device token: the
  * connection stays open as a pairing connection. The daemon also answers it
@@ -1167,7 +1175,17 @@ export type PromptChoice =
   /** Allow it and do not ask again. */
   | { kind: "allow_always" }
   /** Deny a permission request. */
-  | { kind: "deny" };
+  | { kind: "deny" }
+  /**
+   * Answer a single-choice question with `text` through its "Type
+   * something" option, as [`ChatAnswerKind::TypeSomething`] does.
+   */
+  | { kind: "type_something"; text: string }
+  /**
+   * Deny a permission request and tell the agent `text` instead, as
+   * [`ChatAnswerKind::DenyWithText`] does.
+   */
+  | { kind: "deny_with_text"; text: string };
 
 /** How a session ended, as recorded in its history entry. */
 export type SessionEnd =
