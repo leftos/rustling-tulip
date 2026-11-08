@@ -219,6 +219,10 @@ pub struct TranscriptLineFacts {
     pub prompt_id: Option<String>,
     /// Whether the line is a prompt sent to the agent, which starts a turn.
     pub is_user_prompt: bool,
+    /// Whether the line is the agent's notice that the user interrupted a
+    /// turn: it ends the turn's live answers like a prompt does, but starts
+    /// no turn.
+    pub is_interrupt: bool,
     /// The line's own time, from the transcript record.
     pub timestamp: Option<DateTime<Utc>>,
     /// The ids of the background tasks the line reports ended, the same ids

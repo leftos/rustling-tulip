@@ -1773,10 +1773,10 @@ impl ChatState {
 
     /// Apply one transcript line: each entry it yields replaces the one with
     /// its id or goes at the end, and a new answer takes the place of the
-    /// live message it is the transcript's copy of. A new prompt ends the
-    /// turn before it and the live answers of the prompts before it, and its
-    /// first entry begins a turn. A new turn end ends the live answers of
-    /// its prompt.
+    /// live message it is the transcript's copy of. A new prompt or an
+    /// interrupt notice ends the turn before it and the live answers of the
+    /// prompts before it, and a prompt's first entry begins a turn. A new turn
+    /// end ends the live answers of its prompt.
     fn apply_line(
         &mut self,
         plugin: &dyn AgentPlugin,
@@ -1784,7 +1784,7 @@ impl ChatState {
         facts: &TranscriptLineFacts,
     ) -> Change {
         let mut change = Change::default();
-        if facts.is_user_prompt {
+        if facts.is_user_prompt || facts.is_interrupt {
             if let Some(previous) = self.turn_prompt.take()
                 && facts.prompt_id.as_ref() != Some(&previous)
             {
@@ -2360,6 +2360,36 @@ mod tests {
         let change = ended_unmatched_turn(&mut chat);
         assert_eq!(change.removed, ["live:m1"]);
         assert!(!has_live(&chat.reply().0), "no live row outlives its turn");
+    }
+
+    #[test]
+    fn an_interrupt_ends_the_turns_live_answer_without_starting_a_turn() {
+        let mut chat = ChatState::default();
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        chat.merge_live(live("P1", "m1", 0, "on its way"));
+        assert_eq!(ids(&chat.take_changed_live()), ["live:m1"]);
+        let interrupt = serde_json::json!({
+            "type": "user", "uuid": "i-2", "timestamp": stamp(3),
+            "message": {"role": "user", "content": "[Request interrupted by user]"},
+        })
+        .to_string();
+        let change = apply(&mut chat, &interrupt);
+        assert_eq!(
+            change.removed,
+            ["live:m1"],
+            "the interrupt ends the live answer like a prompt does"
+        );
+        assert!(
+            !has_live(&chat.reply().0),
+            "no live row outlives the interrupt"
+        );
+        assert!(
+            !chat.turn_starts.contains("i-2"),
+            "an interrupt notice starts no turn"
+        );
+        let lines = chat.stretch_lines();
+        let line_ids: Vec<&str> = lines.iter().map(|line| line.id.as_str()).collect();
+        assert_eq!(line_ids, ["u-1"]);
     }
 
     #[test]

@@ -235,11 +235,16 @@ fn later_lead<'a>(window: &[Placed<'a>]) -> &'a str {
     tool.or_else(answer).unwrap_or_default()
 }
 
-/// `lead`'s first line, cut to [`TEXT_MAX_CHARS`], then `(<duration>, <n>
-/// tools)`, leaving out an unknown duration, zero tools, and the brackets
-/// when both are out.
+/// `lead`'s first non-blank line, trimmed and cut to [`TEXT_MAX_CHARS`], then
+/// `(<duration>, <n> tools)`, leaving out an unknown duration, zero tools, and
+/// the brackets when both are out.
 fn template_text(lead: &str, duration: Option<TimeDelta>, tools: usize) -> String {
-    let lead = cut_chars(lead.lines().next().unwrap_or_default(), TEXT_MAX_CHARS);
+    let lead = lead
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or_default();
+    let lead = cut_chars(lead, TEXT_MAX_CHARS);
     let mut stats = Vec::new();
     if let Some(duration) = duration {
         stats.push(duration_text(duration));
@@ -404,6 +409,14 @@ mod tests {
                 .iter()
                 .all(|line| line.source == SummarySource::Template)
         );
+    }
+
+    #[test]
+    fn a_prompt_with_leading_blank_lines_is_named_by_its_first_text_line() {
+        let rows = [prompt("p1", "\n\nfix the build\nmore", Some(0))];
+        let lines = lines_of(&rows);
+        assert_eq!(ids(&lines), ["p1"]);
+        assert_eq!(lines[0].text, "fix the build (<1m)");
     }
 
     #[test]

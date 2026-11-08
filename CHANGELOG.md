@@ -22,6 +22,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - Restarting a session whose pane showed Chat or Summary brings the pane back on that view, not on the terminal.
+- Summary names a turn started by a paste after its text, and no longer lists an interrupt as a turn of its own.
 - A tool result too long for Chat now ends with how many lines or characters were cut, instead of stopping mid-word.
 - A prompt you send while Claude is busy shows below the turn it waits on, on the desktop and the phone, instead of above it.
 - A reply streaming into Chat no longer breaks into stray paragraphs or gains blank lines inside its code blocks.

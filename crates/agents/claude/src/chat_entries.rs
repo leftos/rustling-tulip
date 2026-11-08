@@ -23,9 +23,6 @@ const TOOL_RESULT_CAP: usize = 8192;
 const SUMMARY_MAX_CHARS: usize = 120;
 /// What a cut text ends with.
 const CUT_MARKER: char = '…';
-/// How the text Claude Code writes when the user interrupts starts, for a
-/// denied tool and for Esc mid-turn alike.
-const INTERRUPTED_PREFIX: &str = "[Request interrupted by user";
 /// The prefixes of a notification summary that already reads as a sentence.
 const SENTENCE_PREFIXES: [&str; 2] = ["Agent \"", "Background command \""];
 /// The question a plan approval's receipt answers: the dialog's title.
@@ -55,18 +52,23 @@ pub(crate) fn chat_entries(line: &str, known: Known<'_>) -> Vec<ChatEntry> {
     }
 }
 
-/// The prompt id, the record's time and whether one transcript line is a
-/// prompt sent to Claude: a `user` record carrying text (a string, or a text
-/// block beside any tool results) that is neither meta nor a compact summary.
-/// A line that does not parse has none of them; a `timestamp` that is
-/// missing or not RFC 3339 is no time.
+/// The prompt id, the record's time, whether one transcript line is a prompt
+/// sent to Claude, and whether it is the agent's notice that the user
+/// interrupted a turn: a `user` record carrying text (a string, or a text
+/// block beside any tool results) is a prompt unless it is meta, a compact
+/// summary or an interrupt notice, which is the interrupt fact instead. A line
+/// that does not parse has none of them; a `timestamp` that is missing or not
+/// RFC 3339 is no time.
 pub(crate) fn line_facts(line: &str) -> TranscriptLineFacts {
     let Ok(record) = serde_json::from_str::<Value>(line) else {
         return TranscriptLineFacts::default();
     };
+    let prompt = prompt_text(&record);
+    let is_interrupt = prompt.as_deref().is_some_and(is_interrupt_text);
     TranscriptLineFacts {
         prompt_id: str_at(&record, "promptId").map(str::to_owned),
-        is_user_prompt: is_user_prompt(&record),
+        is_user_prompt: prompt.is_some() && !is_interrupt,
+        is_interrupt,
         timestamp: str_at(&record, "timestamp")
             .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
             .map(|stamp| stamp.with_timezone(&Utc)),
@@ -92,18 +94,31 @@ fn ended_tasks(record: &Value) -> Vec<String> {
         .collect()
 }
 
-fn is_user_prompt(record: &Value) -> bool {
+/// The text a `user` record carries, which is what makes it a prompt: a
+/// string, or an array's text blocks joined. A record that is not a user
+/// record, is meta, is a compact summary, or has no text carries none.
+fn prompt_text(record: &Value) -> Option<String> {
     if str_at(record, "type") != Some("user") || is_meta(record) || flag(record, "isCompactSummary")
     {
-        return false;
+        return None;
     }
-    match record.pointer("/message/content") {
-        Some(Value::String(_)) => true,
-        Some(Value::Array(blocks)) => blocks
+    let content = record.pointer("/message/content")?;
+    let has_text = match content {
+        Value::String(_) => true,
+        Value::Array(blocks) => blocks
             .iter()
             .any(|block| str_at(block, "type") == Some("text")),
         _ => false,
+    };
+    if !has_text {
+        return None;
     }
+    content_text(content)
+}
+
+/// Whether `text` is Claude Code's notice that the user interrupted a turn.
+fn is_interrupt_text(text: &str) -> bool {
+    text.trim_start().starts_with(records::INTERRUPTED_PREFIX)
 }
 
 fn str_at<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -185,7 +200,7 @@ fn bash_output_row(record: &Value, text: &str, known: Known<'_>) -> Option<ChatE
 /// A user's typed text as its entry: an interrupt notice is the system row
 /// "Interrupted", command noise and blank text are nothing.
 fn user_message(uuid: &str, text: &str) -> Option<ChatEntry> {
-    if text.trim_start().starts_with(INTERRUPTED_PREFIX) {
+    if is_interrupt_text(text) {
         return Some(system_row(uuid, "Interrupted".to_owned()));
     }
     if is_command_noise(text) {
@@ -758,6 +773,7 @@ mod tests {
             TranscriptLineFacts {
                 prompt_id: Some("p-1".to_owned()),
                 is_user_prompt: true,
+                is_interrupt: false,
                 timestamp: Utc
                     .with_ymd_and_hms(2026, 9, 27, 10, 0, 1)
                     .single()
@@ -857,6 +873,22 @@ mod tests {
         for record in not_prompts {
             let facts = line_facts(&record.to_string());
             assert!(!facts.is_user_prompt, "{record}");
+        }
+    }
+
+    #[test]
+    fn an_interrupt_notice_is_not_a_prompt() {
+        let interrupts = [
+            json!({"type": "user", "uuid": uid("11"),
+                "message": {"role": "user", "content": "[Request interrupted by user]"}}),
+            json!({"type": "user", "uuid": uid("12"),
+                "message": {"role": "user", "content": [
+                    {"type": "text", "text": "[Request interrupted by user for tool use]"}]}}),
+        ];
+        for record in interrupts {
+            let facts = line_facts(&record.to_string());
+            assert!(!facts.is_user_prompt, "{record}");
+            assert!(facts.is_interrupt, "{record}");
         }
     }
 
