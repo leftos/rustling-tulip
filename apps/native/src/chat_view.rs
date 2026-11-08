@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, TimeDelta, Utc};
 use std::rc::Rc;
 
@@ -68,6 +70,7 @@ const COMPOSER_PLACEHOLDER: &str = "Send a message (Ctrl+Enter)";
 /// How many rows the composer grows between.
 const COMPOSER_MIN_ROWS: usize = 2;
 const COMPOSER_MAX_ROWS: usize = 6;
+
 /// How a label names an agent the client has no descriptor for.
 const GENERIC_AGENT: &str = "the agent";
 
@@ -142,6 +145,9 @@ pub(crate) struct SessionChat {
     work: RunningWork,
     /// The screen's last composer state; none until the chat loaded.
     composer_state: Option<ComposerState>,
+    /// Esc was sent to interrupt the running turn; held until the next
+    /// screen reading so a second press cannot open the agent's Rewind.
+    interrupt_sent: bool,
     /// The cards' busy and "Answered elsewhere" marks.
     cards: CardState,
     /// The chat send in flight.
@@ -224,6 +230,7 @@ impl SessionChat {
         self.cards.on_screen(before.as_deref(), after);
         self.sends.on_composer(&screen.composer);
         self.composer_state = Some(screen.composer.clone());
+        self.interrupt_sent = false;
     }
 
     /// Applies one chat message: a `Chat` that answers this chat's load or
@@ -588,6 +595,19 @@ impl RootView {
     #[must_use]
     pub fn pane_shows_chat(&self, pane_id: &str) -> bool {
         self.pane_view(pane_id) == PaneView::Chat
+    }
+
+    /// The session whose chat the active tab's focused pane shows, when
+    /// that pane shows its chat.
+    pub(crate) fn focused_pane_chat_session(&self) -> Option<String> {
+        let pane_id = self.focused_pane()?;
+        if !self.pane_shows_chat(&pane_id) {
+            return None;
+        }
+        self.panes
+            .get(&pane_id)
+            .and_then(|slot| slot.session())
+            .map(str::to_owned)
     }
 
     /// What pane `pane_id` draws for its session.
@@ -1369,9 +1389,11 @@ impl RootView {
     }
 
     /// A key the chat of session `session_id` reads before its composer:
-    /// it answers the current card, sends the composer's text, or is
-    /// swallowed; Ctrl+Enter does nothing while a send is in flight.
-    /// Returns whether the key was taken.
+    /// it answers the current card, sends the composer's text, interrupts a
+    /// running turn (dropping an armed one-click Stop first), or is
+    /// swallowed; Ctrl+Enter does nothing while a send is in flight, and Esc
+    /// interrupts once per screen reading. Returns whether the key was
+    /// taken.
     pub(crate) fn chat_key(
         &mut self,
         session_id: &str,
@@ -1387,17 +1409,46 @@ impl RootView {
         }
         let text = chat.composer_text(cx);
         let current = chat.stack.current().cloned();
-        match key_action(&chat.stack, chat.card_busy(), key, &text, now) {
+        let working = chat.composer_state.as_ref() == Some(&ComposerState::Working);
+        let held = chat.interrupt_sent;
+        match key_action(&chat.stack, chat.card_busy(), key, &text, working, now) {
             KeyAction::Answer(answer) => {
                 if let Some(prompt) = current {
                     self.answer_card(session_id, &prompt, answer, None, cx);
                 }
             }
             KeyAction::Send => self.send_composer(session_id, cx),
+            KeyAction::Interrupt => {
+                if self.disarm_escape_arms() {
+                    cx.notify();
+                } else if !held {
+                    self.interrupt_turn(session_id);
+                }
+            }
             KeyAction::Swallow => {}
             KeyAction::Pass => return false,
         }
+        cx.stop_propagation();
         true
+    }
+
+    /// Sends Esc to the running turn of session `session_id` through its
+    /// host, and holds Esc until the next screen reading so the agent's
+    /// Rewind never opens on a second press.
+    fn interrupt_turn(&mut self, session_id: &str) {
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return;
+        };
+        chat.interrupt_sent = true;
+        let host = self.chat.host_of(session_id);
+        self.send_to(
+            &host,
+            ClientMessage::SendInput {
+                session_id: session_id.to_owned(),
+                data_b64: B64.encode(b"\x1b"),
+                automatic: false,
+            },
+        );
     }
 
     /// Sends `answer` to `prompt`, the card it was drawn or keyed for, under

@@ -1564,6 +1564,147 @@ fn esc_denies_ctrl_enter_allows_once_and_ctrl_shift_enter_always_allows(cx: &mut
     assert_eq!(answer_kinds(&mut h), [opt(3), opt(1), opt(2)]);
 }
 
+/// The one Esc byte an interrupt sends to a session.
+fn interrupt_byte() -> Vec<u8> {
+    b"\x1b".to_vec()
+}
+
+#[gpui::test]
+fn escape_interrupts_a_running_turn(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    show_screen(&mut h, ComposerState::Working, None);
+    h.sent();
+    h.keys("escape");
+    assert_eq!(
+        h.sent_input("s1"),
+        interrupt_byte(),
+        "Esc in the composer interrupts the turn"
+    );
+}
+
+#[gpui::test]
+fn escape_on_a_focused_chat_pane_interrupts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show_screen(&mut h, ComposerState::Working, None);
+    h.sent();
+    h.keys("escape");
+    assert_eq!(
+        h.sent_input("s1"),
+        interrupt_byte(),
+        "the pane holds the keys with the composer unfocused"
+    );
+}
+
+#[gpui::test]
+fn a_second_escape_waits_for_the_screen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show_screen(&mut h, ComposerState::Working, None);
+    h.sent();
+    h.keys("escape");
+    h.keys("escape");
+    assert_eq!(h.sent_input("s1"), interrupt_byte(), "one Esc per turn");
+    show_screen(&mut h, ComposerState::Working, None);
+    h.keys("escape");
+    assert_eq!(
+        h.sent_input("s1"),
+        interrupt_byte(),
+        "a new screen reading lets the next Esc through"
+    );
+}
+
+#[gpui::test]
+fn escape_while_ready_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    h.sent();
+    h.keys("escape");
+    assert!(h.sent_input("s1").is_empty(), "no turn runs to interrupt");
+}
+
+#[gpui::test]
+fn escape_spent_on_an_armed_stop_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show_screen(&mut h, ComposerState::Working, None);
+    h.sent();
+    h.click_on("pane-stop-p1");
+    assert!(h.in_model("pane-stop-confirm-p1"), "one click arms Stop");
+    h.keys("escape");
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the Esc was spent on the arm"
+    );
+    assert!(!h.in_model("pane-stop-confirm-p1"), "the arm is disarmed");
+}
+
+#[gpui::test]
+fn escape_in_the_composer_disarms_a_stop_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show_screen(&mut h, ComposerState::Working, None);
+    h.sent();
+    h.click_on("chat-composer");
+    h.click_on("pane-stop-p1");
+    assert!(h.in_model("pane-stop-confirm-p1"), "one click arms Stop");
+    h.keys("escape");
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the Esc dropped the armed Stop instead"
+    );
+    assert!(!h.in_model("pane-stop-confirm-p1"), "the arm is disarmed");
+}
+
+#[gpui::test]
+fn escape_that_closes_a_menu_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show_screen(&mut h, ComposerState::Working, None);
+    h.sent();
+    assert_eq!(menu_label(&mut h).as_deref(), Some("Show terminal"));
+    h.keys("escape");
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the Esc closed the pane menu"
+    );
+    assert!(
+        h.root(|root, _| root.session_menu().is_none()),
+        "the menu is gone"
+    );
+}
+
+/// Whether the Source Control panel holds the window's keyboard.
+fn source_control_focused(h: &mut Harness<'_>) -> bool {
+    let root = h.root.clone();
+    h.cx.update(|window, cx| root.read(cx).sidebar_focused(window))
+}
+
+#[gpui::test]
+fn escape_outside_the_chat_pane_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached_in_a_repo(cx, &dir);
+    h.click_on(TO_CHAT);
+    let id = load_request(&h.sent()).expect("the toggle asks for the chat");
+    h.send(reply(Some(&id), vec![]));
+    show_screen(&mut h, ComposerState::Working, None);
+    h.click_on("activity-source-control");
+    h.click_on("sc-panel");
+    assert!(
+        source_control_focused(&mut h),
+        "the Source Control panel took the keyboard"
+    );
+    h.sent();
+    h.keys("escape");
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the keyboard is in the Source Control panel"
+    );
+}
+
 #[gpui::test]
 fn the_composer_sends_with_ctrl_enter_and_keeps_its_text_when_refused(cx: &mut TestAppContext) {
     let dir = TestDir::new();

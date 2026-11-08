@@ -233,6 +233,7 @@ use std::time::{Duration, Instant};
 use crate::appearance::AppearanceChange;
 use crate::appearance_view::AppearanceEditor;
 use crate::changes_view::ChangesUi;
+use crate::chat_cards::CardKey;
 use crate::connection::{DotKind, Footer, RESTART_LABEL};
 use crate::connection_picker::{PeerSource, SshTester, SystemPeers, SystemSsh};
 use crate::connection_picker_view::ConnectionPickerDialog;
@@ -5535,12 +5536,34 @@ impl RootView {
             return;
         }
         if ks.key == "escape" {
-            let armed = self.disarm_escape_arms();
-            if armed {
-                cx.notify();
-            }
+            self.on_escape_key(ks, window, cx);
+            return;
         }
         if self.on_shortcut(ks, window, cx) {
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    /// Esc once the window's own handlers passed on it: an armed one-click
+    /// Stop takes it first, then a menu or another shortcut, then the chat
+    /// of the active tab's focused pane while that pane shows one and holds
+    /// the keyboard.
+    fn on_escape_key(&mut self, ks: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disarm_escape_arms() {
+            cx.notify();
+            return;
+        }
+        if self.on_shortcut(ks, window, cx) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if unmodified(ks)
+            && self.root_focus.is_focused(window)
+            && let Some(session_id) = self.focused_pane_chat_session()
+            && self.chat_key(&session_id, CardKey::Escape, cx)
+        {
             cx.stop_propagation();
             cx.notify();
         }
@@ -5549,7 +5572,7 @@ impl RootView {
     /// Esc's one-click arms: a header Stop, a tab close, a container
     /// removal's armed row and the Detached banner's Stop all. Returns
     /// whether one was dropped.
-    fn disarm_escape_arms(&mut self) -> bool {
+    pub(crate) fn disarm_escape_arms(&mut self) -> bool {
         let tab_close = self.tabs.close_confirm.disarm();
         let remove_armed = self.repo_remove.disarm();
         let detached_stop_all = self.detached_stop_all.disarm();
@@ -5914,6 +5937,12 @@ pub(crate) fn is_quick_jump_key(keystroke: &Keystroke) -> bool {
     let ctrl = m.control && !m.platform;
     let cmd = cfg!(target_os = "macos") && m.platform && !m.control;
     ctrl || cmd
+}
+
+/// Whether `ks` has no modifier held: a bare key press.
+fn unmodified(ks: &Keystroke) -> bool {
+    let m = ks.modifiers;
+    !m.control && !m.alt && !m.shift && !m.platform && !m.function
 }
 
 /// The font-size shortcut `ks` is, if any: Ctrl with `=` (or the `+` Shift

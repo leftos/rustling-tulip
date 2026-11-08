@@ -21,6 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Esc in desktop Chat interrupts a running turn, as it does in the terminal and on the phone.
 - Restarting a session whose pane showed Chat or Summary brings the pane back on that view, not on the terminal.
 - Summary names a turn started by a paste after its text, and no longer lists an interrupt as a turn of its own.
 - Chat's plan card shows the plan's text when Claude's plan is too tall for the terminal to show.

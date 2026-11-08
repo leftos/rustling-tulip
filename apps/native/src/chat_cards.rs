@@ -98,6 +98,8 @@ pub enum KeyAction {
     Answer(ChatAnswerKind),
     /// Sends the composer's text.
     Send,
+    /// Interrupts the running turn.
+    Interrupt,
     /// Taken, doing nothing: never typed.
     Swallow,
     /// Left to the composer.
@@ -106,22 +108,26 @@ pub enum KeyAction {
 
 /// What `key` does with `stack`'s current card (`busy` when it was
 /// submitted and is not yet gone) and `composer` holding that text, at
-/// `now`. Digits answer from an empty composer only after the grace, and
-/// are dropped inside it; Esc denies a permission card; Ctrl+Enter sends
-/// text when no card is up, allows a permission card once from an empty
-/// composer, and leaves text with a card up to the ride-on buttons;
-/// Ctrl+Shift+Enter always allows a permission card.
+/// `now`, `working` when the agent's last screen reading says a turn is
+/// running. Digits answer from an empty composer only after the grace, and
+/// are dropped inside it; Esc denies a permission card, and with no card up
+/// interrupts a running turn; Ctrl+Enter sends text when no card is up,
+/// allows a permission card once from an empty composer, and leaves text
+/// with a card up to the ride-on buttons; Ctrl+Shift+Enter always allows a
+/// permission card.
 #[must_use]
 pub fn key_action(
     stack: &PromptStack,
     busy: bool,
     key: CardKey,
     composer: &str,
+    working: bool,
     now: Instant,
 ) -> KeyAction {
     let empty = composer.trim().is_empty();
     let Some(prompt) = stack.current() else {
         return match key {
+            CardKey::Escape if working => KeyAction::Interrupt,
             CardKey::CtrlEnter if empty => KeyAction::Swallow,
             CardKey::CtrlEnter => KeyAction::Send,
             _ => KeyAction::Pass,
@@ -857,16 +863,16 @@ mod tests {
         let stack = stack(permission("p1"), at);
         let inside = at + DIGIT_GRACE.saturating_sub(Duration::from_millis(1));
         assert_eq!(
-            key_action(&stack, false, CardKey::Digit(1), "", inside),
+            key_action(&stack, false, CardKey::Digit(1), "", false, inside),
             KeyAction::Swallow,
             "a digit inside the grace is dropped, never typed"
         );
         assert_eq!(
-            key_action(&stack, false, CardKey::Digit(1), "", after_grace(at)),
+            key_action(&stack, false, CardKey::Digit(1), "", false, after_grace(at)),
             KeyAction::Answer(ChatAnswerKind::Option { number: 1 })
         );
         assert_eq!(
-            key_action(&stack, false, CardKey::Digit(7), "", after_grace(at)),
+            key_action(&stack, false, CardKey::Digit(7), "", false, after_grace(at)),
             KeyAction::Swallow,
             "an unlisted digit answers nothing and types nothing"
         );
@@ -877,12 +883,19 @@ mod tests {
         let at = Instant::now();
         let stack = stack(permission("p1"), at);
         assert_eq!(
-            key_action(&stack, false, CardKey::Digit(1), "abc", after_grace(at)),
+            key_action(
+                &stack,
+                false,
+                CardKey::Digit(1),
+                "abc",
+                false,
+                after_grace(at)
+            ),
             KeyAction::Pass
         );
         let empty = PromptStack::default();
         assert_eq!(
-            key_action(&empty, false, CardKey::Digit(1), "", after_grace(at)),
+            key_action(&empty, false, CardKey::Digit(1), "", false, after_grace(at)),
             KeyAction::Pass
         );
     }
@@ -898,6 +911,7 @@ mod tests {
                 false,
                 CardKey::Digit(2),
                 "",
+                false,
                 after_grace(at)
             ),
             KeyAction::Answer(ChatAnswerKind::Toggle { number: 2 })
@@ -912,6 +926,7 @@ mod tests {
                 false,
                 CardKey::Digit(0),
                 "",
+                false,
                 after_grace(at)
             ),
             KeyAction::Answer(ChatAnswerKind::Option { number: 0 })
@@ -922,16 +937,67 @@ mod tests {
     fn esc_denies_a_permission_card_only() {
         let at = Instant::now();
         assert_eq!(
-            key_action(&stack(permission("p1"), at), false, CardKey::Escape, "", at),
+            key_action(
+                &stack(permission("p1"), at),
+                false,
+                CardKey::Escape,
+                "",
+                false,
+                at
+            ),
             KeyAction::Answer(ChatAnswerKind::Option { number: 3 })
         );
         let trust = prompt_with(ChatPromptKind::Trust, &[(1, "Yes"), (2, "No")]);
         assert_eq!(
-            key_action(&stack(trust, at), false, CardKey::Escape, "", at),
+            key_action(&stack(trust, at), false, CardKey::Escape, "", false, at),
             KeyAction::Pass
         );
         assert_eq!(
-            key_action(&PromptStack::default(), false, CardKey::Escape, "", at),
+            key_action(
+                &PromptStack::default(),
+                false,
+                CardKey::Escape,
+                "",
+                false,
+                at
+            ),
+            KeyAction::Pass
+        );
+    }
+
+    #[test]
+    fn key_action_esc_interrupts_a_working_turn_with_no_card_up() {
+        let at = Instant::now();
+        let none = PromptStack::default();
+        assert_eq!(
+            key_action(&none, false, CardKey::Escape, "", true, at),
+            KeyAction::Interrupt
+        );
+        assert_eq!(
+            key_action(&none, false, CardKey::Escape, "", false, at),
+            KeyAction::Pass,
+            "a turn that is not running has nothing to interrupt"
+        );
+    }
+
+    #[test]
+    fn key_action_esc_leaves_a_card_alone_while_working() {
+        let at = Instant::now();
+        assert_eq!(
+            key_action(
+                &stack(permission("p1"), at),
+                false,
+                CardKey::Escape,
+                "",
+                true,
+                at
+            ),
+            KeyAction::Answer(ChatAnswerKind::Option { number: 3 }),
+            "a permission card keeps Esc as Deny"
+        );
+        let trust = prompt_with(ChatPromptKind::Trust, &[(1, "Yes"), (2, "No")]);
+        assert_eq!(
+            key_action(&stack(trust, at), false, CardKey::Escape, "", true, at),
             KeyAction::Pass
         );
     }
@@ -941,20 +1007,20 @@ mod tests {
         let at = Instant::now();
         let none = PromptStack::default();
         assert_eq!(
-            key_action(&none, false, CardKey::CtrlEnter, "hi", at),
+            key_action(&none, false, CardKey::CtrlEnter, "hi", false, at),
             KeyAction::Send
         );
         assert_eq!(
-            key_action(&none, false, CardKey::CtrlEnter, " ", at),
+            key_action(&none, false, CardKey::CtrlEnter, " ", false, at),
             KeyAction::Swallow
         );
         let card = stack(permission("p1"), at);
         assert_eq!(
-            key_action(&card, false, CardKey::CtrlEnter, "", at),
+            key_action(&card, false, CardKey::CtrlEnter, "", false, at),
             KeyAction::Answer(ChatAnswerKind::Option { number: 1 })
         );
         assert_eq!(
-            key_action(&card, false, CardKey::CtrlEnter, "hi", at),
+            key_action(&card, false, CardKey::CtrlEnter, "hi", false, at),
             KeyAction::Swallow,
             "with text and a card, the ride-on buttons answer"
         );
@@ -966,7 +1032,7 @@ mod tests {
         let card = stack(permission("p1"), at);
         for text in ["", "some text"] {
             assert_eq!(
-                key_action(&card, false, CardKey::CtrlShiftEnter, text, at),
+                key_action(&card, false, CardKey::CtrlShiftEnter, text, false, at),
                 KeyAction::Answer(ChatAnswerKind::Option { number: 2 })
             );
         }
@@ -976,6 +1042,7 @@ mod tests {
                 false,
                 CardKey::CtrlShiftEnter,
                 "",
+                false,
                 at
             ),
             KeyAction::Pass
@@ -993,7 +1060,7 @@ mod tests {
             CardKey::CtrlShiftEnter,
         ] {
             assert_eq!(
-                key_action(&card, true, key, "", after_grace(at)),
+                key_action(&card, true, key, "", false, after_grace(at)),
                 KeyAction::Swallow
             );
         }
