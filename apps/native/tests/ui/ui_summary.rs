@@ -296,6 +296,38 @@ fn the_pinned_question_sits_on_top(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_digit_typed_into_a_card_box_types_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, chat, summary) = opened(cx, &dir);
+    two_stretches(&mut h, &chat, &summary);
+    let mut question = permission("q-1");
+    question.kind = ChatPromptKind::Question;
+    question.options[1].label = "Type something".to_owned();
+    h.send(DaemonMessage::ChatScreenChanged {
+        session_id: "s1".to_owned(),
+        screen: ChatScreen {
+            composer: ComposerState::Dialog,
+            prompt: Some(question),
+        },
+    });
+    h.advance(std::time::Duration::from_millis(500));
+    h.click_on("chat-card-box");
+    h.sent();
+    h.keys("1");
+    assert_eq!(
+        h.root(|root, cx| root.chat_card_box_text("s1", cx))
+            .as_deref(),
+        Some("1"),
+        "the box takes the digit"
+    );
+    let answered = h
+        .sent()
+        .into_iter()
+        .any(|msg| matches!(msg, ClientMessage::ChatAnswer { .. }));
+    assert!(!answered, "the digit answers nothing");
+}
+
+#[gpui::test]
 fn a_line_expands_into_its_entries(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, chat, summary) = opened(cx, &dir);

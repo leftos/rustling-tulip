@@ -8,14 +8,15 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Instant;
 
-use gpui::{AnyElement, App, ClickEvent, Div, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, ClickEvent, Div, Entity, Window, div, prelude::*, px};
 use protocol::{ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ClientMessage};
 
 use crate::UI_TEXT_SIZE;
-use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
+use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{PromptStack, allow_with_text, deny_with_text, type_something_answer};
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
+use crate::text_input::TextInput;
 use crate::ui_theme::UiTheme;
 
 /// The line a card closed in the terminal or on another device leaves.
@@ -24,19 +25,6 @@ pub const ANSWERED_ELSEWHERE: &str = "Answered elsewhere";
 pub const OPEN_THE_TERMINAL: &str = "Open the terminal to answer this";
 /// What a submitted card says until the screen drops it.
 pub const SENDING: &str = "Sending\u{2026}";
-
-/// The answer composer text rides on that allows, naming the session's
-/// agent as people read it (`agent`).
-#[must_use]
-pub fn ride_yes_label(agent: &str) -> String {
-    format!("Yes, and tell {agent} this")
-}
-
-/// The answer composer text rides on that denies.
-#[must_use]
-pub fn ride_no_label(agent: &str) -> String {
-    format!("No, and tell {agent} this")
-}
 
 /// How many of a session's answer requests are remembered, so a late
 /// refusal of one is known as ours.
@@ -112,9 +100,9 @@ pub enum KeyAction {
 /// running. Digits answer from an empty composer only after the grace, and
 /// are dropped inside it; Esc denies a permission card, and with no card up
 /// interrupts a running turn; Ctrl+Enter sends text when no card is up,
-/// allows a permission card once from an empty composer, and leaves text
-/// with a card up to the ride-on buttons; Ctrl+Shift+Enter always allows a
-/// permission card.
+/// allows a permission card once from an empty composer, and with text and
+/// a card up does nothing; Ctrl+Shift+Enter always allows a permission
+/// card.
 #[must_use]
 pub fn key_action(
     stack: &PromptStack,
@@ -158,19 +146,149 @@ fn option(number: u32) -> ChatAnswerKind {
 pub enum ButtonAnswer {
     /// This answer.
     Fixed(ChatAnswerKind),
-    /// The composer's text as the user's own answer.
+    /// The card box's text as the user's own answer.
     TypedText,
+    /// Allows the permission card, the card box's text alongside.
+    AllowWithText,
+    /// Denies the permission card, the card box's text alongside.
+    DenyWithText,
 }
 
 impl ButtonAnswer {
-    /// The answer a press sends with `composer` holding that text: none for
-    /// a typed-text button while the composer is blank.
+    /// The answer a press on `prompt`'s card sends with its box holding
+    /// `text`: none for a button that takes the box's text while the box
+    /// is blank, or for one the prompt does not take.
     #[must_use]
-    pub fn resolve(&self, composer: &str) -> Option<ChatAnswerKind> {
+    pub fn resolve(&self, prompt: &ChatPrompt, text: &str) -> Option<ChatAnswerKind> {
         match self {
             Self::Fixed(answer) => Some(answer.clone()),
-            Self::TypedText => type_something_answer(composer),
+            Self::TypedText => type_something_answer(text),
+            Self::AllowWithText => allow_with_text(prompt, text),
+            Self::DenyWithText => deny_with_text(prompt, text),
         }
+    }
+
+    /// Whether the press takes the card box's text.
+    #[must_use]
+    pub fn takes_text(&self) -> bool {
+        !matches!(self, Self::Fixed(_))
+    }
+}
+
+/// What `prompt`'s card box says while empty, naming the session's agent
+/// as people read it (`agent`): on a permission card what to tell the agent
+/// instead, else the label of the option that takes typed text; none for a
+/// card without such an option, which draws no box.
+#[must_use]
+pub fn box_placeholder(prompt: &ChatPrompt, agent: &str) -> Option<String> {
+    if prompt.kind == ChatPromptKind::Permission {
+        return Some(format!("Tell {agent} what to do instead"));
+    }
+    card_buttons(prompt, agent)
+        .into_iter()
+        .find(|button| button.answer == ButtonAnswer::TypedText)
+        .map(|button| button.label)
+}
+
+/// The buttons beside a permission card's box: Allow with text when the
+/// prompt takes an amendment, then Deny with text; none for another kind.
+#[must_use]
+pub fn box_buttons(prompt: &ChatPrompt) -> Vec<CardButton> {
+    if prompt.kind != ChatPromptKind::Permission {
+        return Vec::new();
+    }
+    let mut buttons = Vec::with_capacity(2);
+    if prompt.can_amend {
+        buttons.push(CardButton::taking_text(
+            "allow-text",
+            "Allow with text",
+            ButtonAnswer::AllowWithText,
+        ));
+    }
+    buttons.push(CardButton::taking_text(
+        "deny-text",
+        "Deny with text",
+        ButtonAnswer::DenyWithText,
+    ));
+    buttons
+}
+
+/// The number of `prompt`'s option that takes the card box's text, if it
+/// has one.
+#[must_use]
+pub fn typed_option(prompt: &ChatPrompt) -> Option<u32> {
+    card_buttons(prompt, "")
+        .into_iter()
+        .find(|button| button.answer == ButtonAnswer::TypedText)
+        .and_then(|button| button.id.parse().ok())
+}
+
+/// Where a refused answer's text goes back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GiveBack {
+    /// To the box it came from, its card still up.
+    CardBox,
+    /// To the composer, its card gone.
+    Composer,
+}
+
+/// A session's card box bookkeeping: the card the box belongs to, and the
+/// recent answers that took the box's text, by request id with their
+/// prompt ids, so a refusal gives the text back.
+#[derive(Debug, Default)]
+pub struct CardBoxes {
+    owner: Option<String>,
+    taken: VecDeque<(String, String, String)>,
+}
+
+impl CardBoxes {
+    /// The screen now shows the card of `prompt_id`, or none: whether the
+    /// box starts afresh, as it does for a different card. The same card
+    /// shown again keeps its box.
+    pub fn show(&mut self, prompt_id: Option<&str>) -> bool {
+        if self.owner.as_deref() == prompt_id {
+            return false;
+        }
+        self.owner = prompt_id.map(str::to_owned);
+        true
+    }
+
+    /// An answer to `prompt_id` went out under `request_id`, taking `text`
+    /// from the box.
+    pub fn took(&mut self, request_id: String, prompt_id: &str, text: String) {
+        self.taken
+            .push_back((request_id, prompt_id.to_owned(), text));
+        if self.taken.len() > SENT_CAP {
+            self.taken.pop_front();
+        }
+    }
+
+    /// The daemon refused `request_id`: the text that answer took and where
+    /// it goes back, to the box while the box still belongs to its card,
+    /// else to the composer; none for an answer that took no text.
+    pub fn refused(&mut self, request_id: &str) -> Option<(String, GiveBack)> {
+        let at = self
+            .taken
+            .iter()
+            .position(|(sent, _, _)| sent == request_id)?;
+        let (_, prompt_id, text) = self.taken.remove(at)?;
+        let to = if self.owner.as_deref() == Some(prompt_id.as_str()) {
+            GiveBack::CardBox
+        } else {
+            GiveBack::Composer
+        };
+        Some((text, to))
+    }
+}
+
+/// `refused` given back to a box now holding `current`, before it with a
+/// space between.
+#[must_use]
+pub fn restored_box_text(refused: &str, current: &str) -> String {
+    if current.trim().is_empty() {
+        refused.to_owned()
+    } else {
+        format!("{refused} {current}")
     }
 }
 
@@ -195,11 +313,15 @@ impl CardButton {
     }
 
     fn named(id: &str, label: &str, answer: ChatAnswerKind) -> Self {
+        Self::taking_text(id, label, ButtonAnswer::Fixed(answer))
+    }
+
+    fn taking_text(id: &str, label: &str, answer: ButtonAnswer) -> Self {
         Self {
             id: id.to_owned(),
             label: label.to_owned(),
             tip: None,
-            answer: ButtonAnswer::Fixed(answer),
+            answer,
         }
     }
 }
@@ -314,48 +436,6 @@ fn question_buttons(prompt: &ChatPrompt) -> Vec<CardButton> {
         buttons.push(CardButton::named("submit", label, ChatAnswerKind::Submit));
     }
     buttons
-}
-
-/// A button beside the composer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposerAction {
-    /// Sends the composer's text.
-    Send,
-    /// Allows the card, the text riding on the answer.
-    RideYes,
-    /// Denies the card, the text riding on the answer.
-    RideNo,
-}
-
-impl ComposerAction {
-    /// The button's selector.
-    #[must_use]
-    pub fn selector(self) -> &'static str {
-        match self {
-            Self::Send => "chat-send",
-            Self::RideYes => "chat-ride-yes",
-            Self::RideNo => "chat-ride-no",
-        }
-    }
-}
-
-/// The buttons beside a composer holding `text` while `prompt`'s card is
-/// up: Send while no card is; with text and a card, the ride-on answers
-/// the card takes (Yes when it takes an amendment, No on a permission
-/// card); with no text and a card, none.
-#[must_use]
-pub fn composer_actions(prompt: Option<&ChatPrompt>, text: &str) -> Vec<ComposerAction> {
-    let Some(prompt) = prompt else {
-        return vec![ComposerAction::Send];
-    };
-    let mut actions = Vec::with_capacity(2);
-    if allow_with_text(prompt, text).is_some() {
-        actions.push(ComposerAction::RideYes);
-    }
-    if deny_with_text(prompt, text).is_some() {
-        actions.push(ComposerAction::RideNo);
-    }
-    actions
 }
 
 /// What a refusal of one of our answers did.
@@ -551,13 +631,15 @@ const ANSWERED_MARK: &str = "✔";
 
 /// What a card draws: its prompt, the agent its labels name, whether it was
 /// submitted and is still up, the daemon's reason for refusing its last
-/// answer, and how many cards wait behind it.
+/// answer, how many cards wait behind it, and its text box, for a card with
+/// an option that takes typed text.
 pub struct CardView<'a> {
     pub prompt: &'a ChatPrompt,
     pub agent: &'a str,
     pub busy: bool,
     pub refusal: Option<&'a str>,
     pub ghosts: usize,
+    pub text_box: Option<&'a Entity<TextInput>>,
 }
 
 /// What a card calls with the button pressed; the caller resolves and sends
@@ -567,9 +649,13 @@ pub type OnPress = Rc<dyn Fn(&ButtonAnswer, &mut Window, &mut App)>;
 /// The card `view` describes, tagged `chat-card`, with up to two ghost edges
 /// over it for the cards behind. Its buttons are tagged `chat-card-<id>` and
 /// call `on_press`; a busy card's buttons take no click and it reads
-/// "Sending…"; a refusal shows under the buttons (`chat-card-refusal`); a
-/// kind the chat cannot answer says to open the terminal
-/// (`chat-card-terminal`).
+/// "Sending…"; the option that takes typed text has the card's box beside
+/// its button in its row (`chat-card-box`), and a permission card has its
+/// box under its buttons with Allow with text (`chat-card-allow-text`,
+/// when the prompt takes an amendment) and Deny with text
+/// (`chat-card-deny-text`) beside it; a refusal shows under the
+/// buttons (`chat-card-refusal`); a kind the chat cannot answer says to
+/// open the terminal (`chat-card-terminal`).
 pub fn prompt_card(
     offset: i8,
     shift: i8,
@@ -579,6 +665,7 @@ pub fn prompt_card(
 ) -> AnyElement {
     let prompt = view.prompt;
     let buttons = card_buttons(prompt, view.agent);
+    let box_row = box_buttons(prompt);
     let actions = if buttons.is_empty() {
         small(offset, OPEN_THE_TERMINAL, t.muted)
             .driver_id(|| "chat-card-terminal".to_owned())
@@ -604,6 +691,22 @@ pub fn prompt_card(
                     ),
                 )
             })
+            .when_some(
+                view.text_box.filter(|_| !box_row.is_empty()),
+                |actions, input| {
+                    actions.child(
+                        div()
+                            .flex()
+                            .w_full()
+                            .items_center()
+                            .gap(px(CARD_GAP))
+                            .child(box_field(input, t))
+                            .children(box_row.iter().map(|button| {
+                                card_button(offset, shift, button, view, on_press, t)
+                            })),
+                    )
+                },
+            )
             .into_any_element()
     };
     let card = div()
@@ -687,7 +790,8 @@ fn question_tab_row(offset: i8, prompt: &ChatPrompt, t: &UiTheme) -> Option<Div>
 
 /// One button of a card; a selected multi-select option is filled. A
 /// button answering an option is a full-width row, the option's
-/// description (`chat-card-option-desc-<n>`) under its label.
+/// description (`chat-card-option-desc-<n>`) under its label; the option
+/// that takes typed text shares its row with the card's box.
 fn card_button(
     offset: i8,
     shift: i8,
@@ -723,9 +827,12 @@ fn card_button(
     };
     let answer = button.answer.clone();
     let on_press = Rc::clone(on_press);
+    let text_box = view
+        .text_box
+        .filter(|_| button.answer == ButtonAnswer::TypedText);
     let base = match choice {
         Some(option) => base
-            .w_full()
+            .when(text_box.is_none(), Styled::w_full)
             .flex_col()
             .items_start()
             .child(button.label.clone())
@@ -738,13 +845,33 @@ fn card_button(
             }),
         None => base.child(button.label.clone()),
     };
-    base.when_some(button.tip.clone(), |base, tip| {
-        base.tooltip(crate::tooltip(tip))
-    })
-    .when(!busy, move |base| {
-        base.on_click(move |_: &ClickEvent, window, cx| on_press(&answer, window, cx))
-    })
-    .into_any_element()
+    let base = base
+        .when_some(button.tip.clone(), |base, tip| {
+            base.tooltip(crate::tooltip(tip))
+        })
+        .when(!busy, move |base| {
+            base.on_click(move |_: &ClickEvent, window, cx| on_press(&answer, window, cx))
+        });
+    match text_box {
+        Some(input) => div()
+            .flex()
+            .w_full()
+            .items_center()
+            .gap(px(CARD_GAP))
+            .child(base.flex_none())
+            .child(box_field(input, t))
+            .into_any_element(),
+        None => base.into_any_element(),
+    }
+}
+
+/// The card's text box (`chat-card-box`), filling the rest of its row.
+fn box_field(input: &Entity<TextInput>, t: &UiTheme) -> Div {
+    field_frame(false, Layer::Base, t)
+        .driver_id(|| "chat-card-box".to_owned())
+        .flex_1()
+        .min_w(px(0.0))
+        .child(input.clone())
 }
 
 /// The top edge of the `depth`th card behind the current one.
@@ -1022,7 +1149,7 @@ mod tests {
         assert_eq!(
             key_action(&card, false, CardKey::CtrlEnter, "hi", false, at),
             KeyAction::Swallow,
-            "with text and a card, the ride-on buttons answer"
+            "with text and a card, Ctrl+Enter does nothing"
         );
     }
 
@@ -1072,7 +1199,9 @@ mod tests {
             .map(|button| {
                 let answer = match &button.answer {
                     ButtonAnswer::Fixed(answer) => Some(answer.clone()),
-                    ButtonAnswer::TypedText => None,
+                    ButtonAnswer::TypedText
+                    | ButtonAnswer::AllowWithText
+                    | ButtonAnswer::DenyWithText => None,
                 };
                 (button.id.clone(), button.label.clone(), answer)
             })
@@ -1216,39 +1345,112 @@ mod tests {
     }
 
     #[test]
-    fn the_composer_offers_send_or_the_ride_on_answers_the_card_takes() {
-        use super::{ComposerAction, composer_actions};
-        assert_eq!(composer_actions(None, ""), [ComposerAction::Send]);
-        let card = permission("p1");
-        assert_eq!(composer_actions(Some(&card), " "), []);
-        assert_eq!(
-            composer_actions(Some(&card), "careful"),
-            [ComposerAction::RideYes, ComposerAction::RideNo]
-        );
-        let mut fixed = card.clone();
-        fixed.can_amend = false;
-        assert_eq!(
-            composer_actions(Some(&fixed), "no"),
-            [ComposerAction::RideNo]
-        );
-        let mut plan = prompt_with(ChatPromptKind::Plan, &[(1, "a")]);
-        plan.can_amend = false;
-        assert_eq!(composer_actions(Some(&plan), "x"), []);
-    }
-
-    #[test]
     fn a_typed_text_button_answers_only_with_text() {
-        assert_eq!(ButtonAnswer::TypedText.resolve(" "), None);
+        let card = prompt_with(ChatPromptKind::Question, &[(1, "Type something")]);
+        assert_eq!(ButtonAnswer::TypedText.resolve(&card, " "), None);
         assert_eq!(
-            ButtonAnswer::TypedText.resolve("use div"),
+            ButtonAnswer::TypedText.resolve(&card, "use div"),
             Some(ChatAnswerKind::TypeSomething {
                 text: "use div".to_owned()
             })
         );
         assert_eq!(
-            ButtonAnswer::Fixed(ChatAnswerKind::Back).resolve(""),
+            ButtonAnswer::Fixed(ChatAnswerKind::Back).resolve(&card, ""),
             Some(ChatAnswerKind::Back)
         );
+    }
+
+    #[test]
+    fn a_permission_box_allows_when_amendable_and_always_denies_with_text() {
+        use super::{box_buttons, box_placeholder};
+        let card = permission("p1");
+        assert_eq!(
+            box_placeholder(&card, "Claude").as_deref(),
+            Some("Tell Claude what to do instead")
+        );
+        let ids = |prompt: &ChatPrompt| -> Vec<String> {
+            box_buttons(prompt)
+                .into_iter()
+                .map(|button| format!("{}:{}", button.id, button.label))
+                .collect()
+        };
+        assert_eq!(
+            ids(&card),
+            ["allow-text:Allow with text", "deny-text:Deny with text"]
+        );
+        assert_eq!(ButtonAnswer::DenyWithText.resolve(&card, " "), None);
+        assert_eq!(
+            ButtonAnswer::AllowWithText.resolve(&card, "careful"),
+            Some(ChatAnswerKind::AllowWithText {
+                text: "careful".to_owned()
+            })
+        );
+        let mut fixed = card.clone();
+        fixed.can_amend = false;
+        assert_eq!(ids(&fixed), ["deny-text:Deny with text"]);
+        assert_eq!(
+            ButtonAnswer::DenyWithText.resolve(&fixed, "no"),
+            Some(ChatAnswerKind::DenyWithText {
+                text: "no".to_owned()
+            })
+        );
+        let question = prompt_with(ChatPromptKind::Question, &[(1, "a")]);
+        assert_eq!(box_buttons(&question), []);
+    }
+
+    #[test]
+    fn a_card_with_an_option_that_takes_text_has_a_box_named_after_it() {
+        use super::{box_placeholder, typed_option};
+        let question = prompt(
+            "q1",
+            ChatPromptKind::Question,
+            vec![option(1, "sub"), option(2, "Type something")],
+        );
+        assert_eq!(
+            box_placeholder(&question, "Claude").as_deref(),
+            Some("Type something")
+        );
+        assert_eq!(typed_option(&question), Some(2));
+        let plan = prompt_with(ChatPromptKind::Plan, &[(1, "a"), (2, "b"), (3, "c")]);
+        assert_eq!(
+            box_placeholder(&plan, "Claude").as_deref(),
+            Some("Tell Claude what to change")
+        );
+        assert_eq!(typed_option(&plan), Some(3));
+        let review = prompt_with(ChatPromptKind::Review, &[(1, "a"), (2, "b")]);
+        assert_eq!(box_placeholder(&review, "Claude"), None);
+        assert_eq!(typed_option(&review), None);
+    }
+
+    #[test]
+    fn a_box_belongs_to_its_card_and_gets_refused_text_back() {
+        use super::{CardBoxes, GiveBack};
+        let mut boxes = CardBoxes::default();
+        assert!(boxes.show(Some("q1")), "a first card starts a box");
+        assert!(!boxes.show(Some("q1")), "the same card keeps it");
+        boxes.took("r1".to_owned(), "q1", "mul".to_owned());
+        boxes.took("r2".to_owned(), "q1", "div".to_owned());
+        assert_eq!(boxes.refused("r9"), None, "not an answer that took text");
+        assert_eq!(
+            boxes.refused("r1"),
+            Some(("mul".to_owned(), GiveBack::CardBox))
+        );
+        assert_eq!(boxes.refused("r1"), None, "a refusal is taken once");
+        assert!(boxes.show(Some("q2")), "a new card starts afresh");
+        assert_eq!(
+            boxes.refused("r2"),
+            Some(("div".to_owned(), GiveBack::Composer)),
+            "its card gone, the text goes to the composer"
+        );
+        assert!(boxes.show(None));
+        assert!(!boxes.show(None));
+    }
+
+    #[test]
+    fn refused_box_text_goes_back_before_what_was_typed_since() {
+        assert_eq!(super::restored_box_text("mul", ""), "mul");
+        assert_eq!(super::restored_box_text("mul", " "), "mul");
+        assert_eq!(super::restored_box_text("mul", "more"), "mul more");
     }
 
     #[test]

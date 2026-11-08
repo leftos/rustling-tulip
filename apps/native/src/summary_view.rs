@@ -77,9 +77,9 @@ impl RootView {
             .flex_1()
             .min_h(px(0.0))
             .size_full()
-            .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if let Some(key) = card_key(&event.keystroke)
-                    && this.chat_key(&keys_for, key, cx)
+                    && this.chat_pane_key(&keys_for, key, window, cx)
                 {
                     cx.stop_propagation();
                 }

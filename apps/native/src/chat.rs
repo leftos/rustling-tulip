@@ -1231,9 +1231,6 @@ pub struct SendTracker {
     /// The send whose paste the prompt box may still show.
     owner: Option<Owner>,
     settled: Option<Send>,
-    /// The recent card answers that took the composer's text, by request
-    /// id, so a refusal gives the text back even after the card left.
-    taken: VecDeque<(String, String)>,
 }
 
 impl SendTracker {
@@ -1250,14 +1247,6 @@ impl SendTracker {
             entry_arrived: false,
             at: now,
         });
-    }
-
-    /// A card answer under `request_id` took `text` from the composer.
-    pub fn took(&mut self, request_id: String, text: String) {
-        self.taken.push_back((request_id, text));
-        if self.taken.len() > TAKEN_CAP {
-            self.taken.pop_front();
-        }
     }
 
     /// Whether the prompt box's draft may still be the send's own paste:
@@ -1346,8 +1335,7 @@ impl SendTracker {
             self.owner = None;
             return self.settled.take().map(|send| send.text);
         }
-        let taken = self.taken.iter().position(|(sent, _)| sent == request_id)?;
-        self.taken.remove(taken).map(|(_, text)| text)
+        None
     }
 
     fn settle(&mut self) {
@@ -1357,9 +1345,6 @@ impl SendTracker {
 
 /// How long a send stays in flight at most when nothing settles it sooner.
 pub const SEND_BACKSTOP: Duration = Duration::from_secs(10);
-
-/// How many card answers that took composer text are remembered.
-const TAKEN_CAP: usize = 16;
 
 /// The composer's text after a refusal gives `refused` back while it holds
 /// `current`: the refused text alone, or before what was typed since.
@@ -2795,15 +2780,6 @@ mod strip_tests {
         sends.sent("r1".to_owned(), "/compact".to_owned(), at);
         sends.on_composer(&ComposerState::Working);
         assert!(!sends.in_flight(at));
-    }
-
-    #[test]
-    fn an_answer_that_took_text_gives_it_back_when_refused() {
-        let mut sends = super::SendTracker::default();
-        sends.took("r1".to_owned(), "careful".to_owned());
-        assert_eq!(sends.refused("r2"), None);
-        assert_eq!(sends.refused("r1"), Some("careful".to_owned()));
-        assert_eq!(sends.refused("r1"), None);
     }
 
     #[test]

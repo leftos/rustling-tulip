@@ -2915,7 +2915,8 @@ fn permission_screen() -> ChatScreen {
 }
 
 /// The `chat` shot's screen: the second of two questions, its first
-/// answered, its question wrapped and two of its options described.
+/// answered, its question wrapped, two of its options described, and its
+/// "Type something" option with the card's empty box beside it.
 fn question_screen() -> ChatScreen {
     let options = [
         (

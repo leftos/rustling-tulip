@@ -1382,12 +1382,32 @@ fn opt(number: u32) -> ChatAnswerKind {
 
 /// The selectors of the buttons beside the composer.
 fn actions(h: &mut Harness<'_>) -> Vec<&'static str> {
-    h.root(|root, cx| root.chat_composer_actions("s1", cx))
+    h.root(|root, _| root.chat_composer_actions("s1"))
 }
 
 /// The current card's prompt id and whether it is busy.
 fn card(h: &mut Harness<'_>) -> Option<(String, bool)> {
     h.root(|root, _| root.chat_card("s1"))
+}
+
+/// The text in the current card's box; none while the card has no box.
+fn box_text(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, cx| root.chat_card_box_text("s1", cx))
+}
+
+/// A single-select question whose third option takes typed text.
+fn type_something(id: &str) -> ChatPrompt {
+    prompt(
+        id,
+        ChatPromptKind::Question,
+        &[(1, "sub"), (2, "div"), (3, "Type something")],
+    )
+}
+
+fn typed(text: &str) -> ChatAnswerKind {
+    ChatAnswerKind::TypeSomething {
+        text: text.to_owned(),
+    }
 }
 
 #[gpui::test]
@@ -1451,7 +1471,7 @@ fn question_review_plan_trust_and_heads_up_cards_send_their_answers(cx: &mut Tes
     let mut typed = single;
     typed.id = "q5".to_owned();
     show(&mut h, typed);
-    h.click_on("chat-composer");
+    h.click_on("chat-card-box");
     type_text(&mut h, "use mul");
     h.click_on("chat-card-3");
     assert_eq!(
@@ -1548,6 +1568,197 @@ fn digits_type_into_a_non_empty_composer(cx: &mut TestAppContext) {
     type_text(&mut h, "a1");
     assert_eq!(answer_kinds(&mut h), []);
     assert_eq!(composer_text(&mut h).as_deref(), Some("a1"));
+}
+
+#[gpui::test]
+fn a_question_cards_box_sends_its_typed_answer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, type_something("q1"));
+    h.advance(Duration::from_millis(500));
+    h.click_on("chat-card-box");
+    type_text(&mut h, "use 2 lines");
+    assert_eq!(
+        box_text(&mut h).as_deref(),
+        Some("use 2 lines"),
+        "a digit typed into the box types it"
+    );
+    h.keys("enter");
+    assert_eq!(answer_kinds(&mut h), [typed("use 2 lines")]);
+    assert_eq!(
+        box_text(&mut h).as_deref(),
+        Some(""),
+        "the text leaves the box"
+    );
+    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
+}
+
+#[gpui::test]
+fn a_blank_box_option_focuses_the_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, type_something("q1"));
+    h.click_on("chat-card-3");
+    assert_eq!(answer_kinds(&mut h), [], "a blank box sends nothing");
+    type_text(&mut h, "mul");
+    assert_eq!(
+        box_text(&mut h).as_deref(),
+        Some("mul"),
+        "the press gave the box the keyboard"
+    );
+    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
+    h.advance(Duration::from_millis(500));
+    h.click_on("chat-composer");
+    h.keys("3");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [typed("mul")],
+        "the option's digit sends the box's text"
+    );
+}
+
+#[gpui::test]
+fn a_cards_box_holds_its_answer_while_a_send_is_in_flight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "first");
+    h.keys("ctrl-enter");
+    assert_eq!(sends(&mut h).len(), 1);
+    show(&mut h, type_something("q1"));
+    h.advance(Duration::from_millis(500));
+    h.click_on("chat-card-box");
+    type_text(&mut h, "mul");
+    h.keys("enter");
+    assert_eq!(answer_kinds(&mut h), [], "Enter waits for the send");
+    assert_eq!(
+        box_text(&mut h).as_deref(),
+        Some("mul"),
+        "the box keeps its text"
+    );
+    h.click_on("chat-card-3");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [],
+        "the option's button waits for the send"
+    );
+    h.click_on("chat-composer");
+    h.keys("3");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [],
+        "the option's digit waits for the send"
+    );
+    assert_eq!(
+        box_text(&mut h).as_deref(),
+        Some("mul"),
+        "the box still keeps its text"
+    );
+    show_screen(&mut h, ComposerState::Working, Some(type_something("q1")));
+    h.click_on("chat-card-box");
+    h.keys("enter");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [typed("mul")],
+        "the answer goes once the send settled"
+    );
+}
+
+#[gpui::test]
+fn escape_in_a_card_box_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, type_something("q1"));
+    h.click_on("chat-card-box");
+    type_text(&mut h, "mul");
+    h.sent();
+    h.keys("escape");
+    assert!(h.sent().is_empty(), "Esc in the box sends nothing");
+    type_text(&mut h, "x");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("x"),
+        "the composer has the keyboard"
+    );
+    assert_eq!(
+        box_text(&mut h).as_deref(),
+        Some("mul"),
+        "the box keeps its text"
+    );
+}
+
+#[gpui::test]
+fn a_refused_typed_answer_goes_back_to_its_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, type_something("q1"));
+    h.click_on("chat-card-box");
+    type_text(&mut h, "mul");
+    h.keys("enter");
+    let request_id = answers(&mut h)[0].2.clone();
+    type_text(&mut h, "more");
+    refused(&mut h, request_id, "the dialog moved");
+    assert_eq!(
+        box_text(&mut h).as_deref(),
+        Some("mul more"),
+        "the text goes back before what was typed since"
+    );
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some(""),
+        "the composer is left alone"
+    );
+    assert_eq!(
+        h.root(|root, _| root.chat_card_refusal("s1")).as_deref(),
+        Some("the dialog moved")
+    );
+}
+
+#[gpui::test]
+fn a_new_card_starts_with_an_empty_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, type_something("q1"));
+    h.click_on("chat-card-box");
+    type_text(&mut h, "mul");
+    show(&mut h, type_something("q1"));
+    assert_eq!(
+        box_text(&mut h).as_deref(),
+        Some("mul"),
+        "the same card redrawn keeps its box"
+    );
+    show(&mut h, type_something("q2"));
+    assert_eq!(
+        box_text(&mut h).as_deref(),
+        Some(""),
+        "a new card starts empty"
+    );
+}
+
+#[gpui::test]
+fn a_plan_cards_box_sends_its_feedback(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(
+        &mut h,
+        prompt(
+            "pl1",
+            ChatPromptKind::Plan,
+            &[
+                (1, "Yes, auto"),
+                (2, "Yes, manual"),
+                (3, "No, keep planning"),
+            ],
+        ),
+    );
+    assert!(
+        painted(&mut h, "chat-card-box"),
+        "the feedback row has a box"
+    );
+    h.click_on("chat-card-box");
+    type_text(&mut h, "split it");
+    h.keys("enter");
+    assert_eq!(answer_kinds(&mut h), [typed("split it")]);
 }
 
 #[gpui::test]
@@ -1937,7 +2148,7 @@ fn remote_reply(request_id: &str) -> DaemonMessage {
 }
 
 #[gpui::test]
-fn while_a_dialog_is_up_the_composer_offers_the_two_ride_on_answers(cx: &mut TestAppContext) {
+fn while_a_dialog_is_up_the_composer_offers_only_a_disabled_send(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);
     h.click_on("chat-composer");
@@ -1947,38 +2158,87 @@ fn while_a_dialog_is_up_the_composer_offers_the_two_ride_on_answers(cx: &mut Tes
     show(&mut h, permission("p1"));
     assert_eq!(
         actions(&mut h),
-        ["chat-ride-yes", "chat-ride-no"],
-        "Send gives way to the ride-on answers"
+        ["chat-send"],
+        "the composer offers only Send while a card is up"
     );
-    assert!(painted(&mut h, "chat-ride-yes"));
-    assert!(painted(&mut h, "chat-ride-no"));
+    h.sent();
+    h.click_on("chat-send");
     h.keys("ctrl-enter");
-    assert_eq!(
-        answer_kinds(&mut h),
-        [],
-        "Ctrl+Enter leaves the choice to the buttons"
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::ChatSend { .. } | ClientMessage::ChatAnswer { .. }
+        )),
+        "neither Send nor Ctrl+Enter sends the composer's text while a card is up"
     );
-    h.click_on("chat-ride-yes");
-    assert_eq!(
-        answer_kinds(&mut h),
-        [ChatAnswerKind::AllowWithText {
-            text: "careful".to_owned()
-        }]
-    );
-    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
+    assert_eq!(composer_text(&mut h).as_deref(), Some("careful"));
+}
 
+#[gpui::test]
+fn a_permission_cards_box_allows_or_denies_with_its_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "careful");
     let mut fixed = permission("p2");
     fixed.can_amend = false;
-    show(&mut h, fixed);
-    h.click_on("chat-composer");
+    show(&mut h, fixed.clone());
+    assert!(
+        painted(&mut h, "chat-card-box"),
+        "a permission card has a box"
+    );
+    assert!(painted(&mut h, "chat-card-deny-text"));
+    assert!(
+        !painted(&mut h, "chat-card-allow-text"),
+        "no amendment, no Allow with text"
+    );
+    h.click_on("chat-card-deny-text");
+    assert_eq!(answer_kinds(&mut h), [], "a blank box sends nothing");
+    h.click_on("chat-card-box");
     type_text(&mut h, "no");
-    assert_eq!(actions(&mut h), ["chat-ride-no"], "no amendment, no Yes");
-    h.click_on("chat-ride-no");
+    h.keys("escape");
+    assert_eq!(answer_kinds(&mut h), [], "Esc in the box denies nothing");
+    h.click_on("chat-card-box");
+    h.keys("end enter");
     assert_eq!(
         answer_kinds(&mut h),
         [ChatAnswerKind::DenyWithText {
             text: "no".to_owned()
+        }],
+        "Enter in the box denies with its text"
+    );
+
+    fixed.id = "p3".to_owned();
+    show(&mut h, fixed);
+    h.click_on("chat-card-box");
+    type_text(&mut h, "stop");
+    h.click_on("chat-card-deny-text");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [ChatAnswerKind::DenyWithText {
+            text: "stop".to_owned()
         }]
+    );
+
+    show(&mut h, permission("p1"));
+    assert!(painted(&mut h, "chat-card-allow-text"));
+    h.click_on("chat-card-allow-text");
+    assert_eq!(answer_kinds(&mut h), [], "a blank box sends nothing");
+    h.click_on("chat-card-box");
+    type_text(&mut h, "use 3");
+    h.click_on("chat-card-allow-text");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [ChatAnswerKind::AllowWithText {
+            text: "use 3".to_owned()
+        }]
+    );
+    assert_eq!(box_text(&mut h).as_deref(), Some(""));
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("careful"),
+        "the composer keeps its own text"
     );
 }
 
@@ -2144,14 +2404,15 @@ fn the_composer_sits_under_the_running_work_strip(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_refused_ride_on_after_the_dialog_went_gives_the_text_back(cx: &mut TestAppContext) {
+fn a_refused_typed_answer_after_the_dialog_went_goes_to_the_composer(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);
-    h.click_on("chat-composer");
     show(&mut h, permission("p1"));
+    h.click_on("chat-card-box");
     type_text(&mut h, "careful");
-    h.click_on("chat-ride-no");
+    h.click_on("chat-card-deny-text");
     let request_id = answers(&mut h)[0].2.clone();
+    assert_eq!(box_text(&mut h).as_deref(), Some(""));
     assert_eq!(composer_text(&mut h).as_deref(), Some(""));
     show_screen(&mut h, ComposerState::Ready, None);
     refused(
