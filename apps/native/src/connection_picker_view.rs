@@ -1,7 +1,8 @@
 //! The Connections picker on screen: the rows under their This PC, Saved
 //! hosts and On your tailnet headers, each row a two-line entry with its
 //! state chip; a saved host's row adds its Connected switch, Pair and
-//! Reconnect now while they apply, and a Forget button shown on hover or
+//! Reconnect now while they apply, a host whose connection is open adds
+//! Open shell, and a saved host has a Forget button shown on hover or
 //! focus. Below them `+ Add host` opens the inline add form with its
 //! Tailnet | SSH switch (Name and Port; or Host, Remote command and Test
 //! connection). Its rows and rules live in [`crate::connection_picker`]; a
@@ -38,6 +39,7 @@ use crate::ssh::DEFAULT_REMOTE_COMMAND;
 use crate::target::HostKey;
 use crate::target::{DEFAULT_TAILNET_PORT, SshHost, TailnetHost, Target};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::tooltip;
 use crate::ui_theme::{UiTheme, theme};
 
 const TITLE: &str = "Connections";
@@ -66,6 +68,8 @@ enum PickerControl {
     Pair(usize),
     /// The Reconnect now button of the row at this index.
     Reconnect(usize),
+    /// The Open shell button of the row at this index.
+    OpenShell(usize),
     /// `+ Add host`: opens the add form.
     AddHost,
     ModeTailnet,
@@ -94,6 +98,7 @@ impl PickerControl {
             Self::Switch(index) => format!("connections-row-{}-enabled", key(index)),
             Self::Pair(index) => format!("connections-row-{}-pair", key(index)),
             Self::Reconnect(index) => format!("connections-row-{}-reconnect", key(index)),
+            Self::OpenShell(index) => format!("connections-row-{}-shell", key(index)),
             Self::AddHost => "connections-add-host".to_owned(),
             Self::ModeTailnet => "connections-add-mode-tailnet".to_owned(),
             Self::ModeSsh => "connections-add-mode-ssh".to_owned(),
@@ -136,13 +141,19 @@ impl PickerControl {
 
 /// The controls a row draws beside itself, each after the row in Tab
 /// order: a saved host's switch, Pair and Reconnect now while they apply,
-/// and a saved host's Forget.
+/// Open shell while its host is online, and a saved host's Forget.
 #[derive(Debug, Clone, Copy, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent controls the row draws, not a state machine"
+)]
 struct RowControls {
     /// A saved host's switch and Forget.
     saved: bool,
     pair: bool,
     reconnect: bool,
+    /// The host's connection is open, so a shell can open on it.
+    open_shell: bool,
 }
 
 impl RowControls {
@@ -152,6 +163,7 @@ impl RowControls {
             saved: row.kind == RowKind::Saved,
             pair: offers_pair(facts),
             reconnect: offers_reconnect(facts),
+            open_shell: offers_open_shell(facts),
         }
     }
 
@@ -161,11 +173,18 @@ impl RowControls {
             (self.saved, PickerControl::Switch(index)),
             (self.pair, PickerControl::Pair(index)),
             (self.reconnect, PickerControl::Reconnect(index)),
+            (self.open_shell, PickerControl::OpenShell(index)),
             (self.saved, PickerControl::Forget(index)),
         ]
         .into_iter()
         .filter_map(|(shown, control)| shown.then_some(control))
     }
+}
+
+/// Whether the row draws Open shell: the window's connection to its host
+/// is open.
+fn offers_open_shell(facts: &RowFacts) -> bool {
+    facts.live == Some(LiveState::Open)
 }
 
 /// Every control of a picker whose rows draw `rows`, in Tab order: each
@@ -652,6 +671,9 @@ impl RootView {
             PickerControl::Switch(index) => self.toggle_connection_row(index, window, cx),
             PickerControl::Pair(index) => self.pair_connection_row(index, window, cx),
             PickerControl::Reconnect(index) => self.reconnect_connection_row(index),
+            PickerControl::OpenShell(index) => {
+                self.open_shell_connection_row(index, window, cx);
+            }
             PickerControl::AddHost => self.open_add_form(window, cx),
             PickerControl::ModeTailnet => self.set_add_mode(AddMode::Tailnet, window, cx),
             PickerControl::ModeSsh => self.set_add_mode(AddMode::Ssh, window, cx),
@@ -942,6 +964,29 @@ impl RootView {
             );
             self.command_to(&HostKey::of(&row.target), NetCommand::Restart);
         }
+    }
+
+    /// Open shell on the row at `index`: the picker closes and a plain shell
+    /// opens on that host, as a host header's `+ Shell` opens one.
+    fn open_shell_connection_row(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row) = self.picker_row(index) else {
+            return;
+        };
+        let offered = self
+            .connection_picker
+            .as_ref()
+            .is_some_and(|dialog| offers_open_shell(&self.row_facts(dialog, &row)));
+        if !offered {
+            return;
+        }
+        let host = HostKey::of(&row.target);
+        self.close_connection_picker(window, cx);
+        self.quick_shell_on(&host, cx);
     }
 
     /// Add and connect, or a pick of a peer: saves `target`'s host switched
@@ -1344,15 +1389,15 @@ fn host_row(
         }))
 }
 
-/// A saved host's third line under its detail line: Pair and Reconnect
-/// now, while either applies.
+/// A host's third line under its detail line: Pair and Reconnect now,
+/// while either applies, and Open shell while the host is online.
 fn row_actions(
     index: usize,
     controls: RowControls,
     draw: &Draw<'_>,
     cx: &mut Context<RootView>,
 ) -> Option<Div> {
-    if !controls.pair && !controls.reconnect {
+    if !controls.pair && !controls.reconnect && !controls.open_shell {
         return None;
     }
     let pair = controls.pair.then(|| {
@@ -1375,6 +1420,21 @@ fn row_actions(
         )
         .child("Reconnect now")
     });
+    let open_shell = controls.open_shell.then(|| {
+        let name = draw
+            .rows
+            .get(index)
+            .map_or_else(String::new, |row| row.label.clone());
+        control_button(
+            PickerControl::OpenShell(index),
+            ButtonKind::Outlined,
+            ButtonSize::Compact,
+            draw,
+            cx,
+        )
+        .tooltip(tooltip(format!("Open a shell on {name}")))
+        .child("Open shell")
+    });
     Some(
         div()
             .flex()
@@ -1382,7 +1442,8 @@ fn row_actions(
             .gap(px(6.0))
             .mt(px(6.0))
             .children(pair)
-            .children(reconnect),
+            .children(reconnect)
+            .children(open_shell),
     )
 }
 

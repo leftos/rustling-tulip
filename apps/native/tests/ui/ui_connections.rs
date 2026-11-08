@@ -27,7 +27,7 @@ use rustling_tulip_native::connection_picker::{
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
 use rustling_tulip_native::{Connection, NetCommand, NetEvent, RootView};
 use serde_json::{Value, json};
-use support::{Fixture, Harness, PROTOCOL, TestDir};
+use support::{Fixture, Harness, PROTOCOL, TestDir, shell_spawns};
 use tailnet::{PeerStatus, Status, TailnetError};
 
 const HOST: &str = "box.tail1234.ts.net";
@@ -204,6 +204,13 @@ fn open_conn(target: Target) -> Connection {
     conn.on_connecting();
     conn.on_socket_open(8787);
     conn.on_welcome(PROTOCOL, support::daemon_features(), None);
+    conn
+}
+
+/// A connection to `target` still dialling.
+fn dialling(target: Target) -> Connection {
+    let mut conn = Connection::for_target(target);
+    conn.on_connecting();
     conn
 }
 
@@ -514,6 +521,67 @@ fn reconnect_now_restarts_only_that_host(cx: &mut TestAppContext) {
     assert_eq!(restarts, 1, "the host's network thread redials");
     assert!(h.host(&tailnet(DEN)).commands().is_empty());
     assert!(h.commands().is_empty(), "This PC is not restarted");
+}
+
+#[gpui::test]
+fn open_shell_on_a_connections_row_spawns_there(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.tokens().set(HOST, "t1").expect("seed a token");
+    h.host(&tailnet(HOST)).connect();
+    open_picker(&mut h, tailnet_with(&[]));
+    h.sent();
+    h.host(&tailnet(HOST)).sent();
+
+    h.click_on(&format!("connections-row-{HOST}-shell"));
+
+    assert!(!is_open(&mut h), "the picker closes");
+    assert_eq!(
+        shell_spawns(&h.host(&tailnet(HOST)).sent()),
+        [None],
+        "the host runs one plain shell, with no folder"
+    );
+    assert_eq!(
+        shell_spawns(&h.sent()),
+        Vec::<Option<String>>::new(),
+        "This PC is sent none"
+    );
+}
+
+#[gpui::test]
+fn an_offline_row_offers_no_open_shell(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.tokens().set(HOST, "t1").expect("seed a token");
+    h.host(&tailnet(HOST))
+        .event(NetEvent::State(dialling(tailnet(HOST))));
+    open_picker(&mut h, tailnet_with(&[]));
+    assert!(
+        !drawn(&mut h, &format!("connections-row-{HOST}-shell")),
+        "a connecting host offers no shell"
+    );
+
+    h.host(&tailnet(HOST))
+        .event(NetEvent::State(closed(tailnet(HOST))));
+    assert!(
+        !drawn(&mut h, &format!("connections-row-{HOST}-shell")),
+        "a dropped host offers no shell"
+    );
+
+    h.host(&tailnet(HOST))
+        .event(NetEvent::State(not_approved(tailnet(HOST), true)));
+    assert!(
+        !drawn(&mut h, &format!("connections-row-{HOST}-shell")),
+        "a not-approved host offers no shell"
+    );
 }
 
 #[gpui::test]
@@ -1514,7 +1582,14 @@ fn tabbing_to_forget_reveals_it(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &Fixture::default());
     open_picker(&mut h, tailnet_with(&[]));
 
-    assert_eq!(tab_walk(&mut h, 2), [row(HOST), switch(HOST)]);
+    assert_eq!(
+        tab_walk(&mut h, 3),
+        [
+            "connections-row-This PC-shell".to_owned(),
+            row(HOST),
+            switch(HOST),
+        ]
+    );
     assert!(
         !forget_shown(&mut h, HOST),
         "the row's or its switch's focus keeps it hidden"
@@ -1660,8 +1735,9 @@ fn tab_ring_order_with_the_form_closed(cx: &mut TestAppContext) {
     assert_eq!(focus(&mut h), Some(row("This PC")));
 
     assert_eq!(
-        tab_walk(&mut h, 7),
+        tab_walk(&mut h, 8),
         [
+            "connections-row-This PC-shell".to_owned(),
             row(HOST),
             switch(HOST),
             format!("connections-forget-{HOST}"),
@@ -1686,8 +1762,9 @@ fn tab_ring_walks_a_held_hosts_pair_and_reconnect_after_its_row(cx: &mut TestApp
     open_picker(&mut h, tailnet_with(&[]));
 
     assert_eq!(
-        tab_walk(&mut h, 5),
+        tab_walk(&mut h, 6),
         [
+            "connections-row-This PC-shell".to_owned(),
             row(HOST),
             switch(HOST),
             format!("connections-row-{HOST}-pair"),
@@ -1710,13 +1787,14 @@ fn tab_ring_order_with_the_form_open(cx: &mut TestAppContext) {
     assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
 
     assert_eq!(
-        tab_walk(&mut h, 11),
+        tab_walk(&mut h, 12),
         [
             "connections-port".to_owned(),
             "connections-add-cancel".to_owned(),
             "connections-add-submit".to_owned(),
             "connections-close".to_owned(),
             row("This PC"),
+            "connections-row-This PC-shell".to_owned(),
             row(HOST),
             switch(HOST),
             format!("connections-forget-{HOST}"),

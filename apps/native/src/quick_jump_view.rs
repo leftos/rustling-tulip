@@ -11,7 +11,7 @@ use gpui::{
 use crate::buttons::{Layer, field_frame};
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_text_size};
-use crate::quick_jump::{Entry, JumpAction, QuickJump};
+use crate::quick_jump::{Entry, EntryKind, JumpAction, QuickJump};
 use crate::session_menu::popover_frame;
 use crate::spawn_view::{DISABLED_OPACITY, SEGMENT_RADIUS, labelled_text};
 use crate::target::HostKey;
@@ -294,7 +294,9 @@ impl RootView {
             .filtered()
             .enumerate()
             .map(|(at, entry)| {
-                let elsewhere = (entry.secondary != here).then(|| entry.secondary.clone());
+                // A shell entry's name already names its host.
+                let elsewhere = (entry.kind != EntryKind::Shell && entry.secondary != here)
+                    .then(|| entry.secondary.clone());
                 quick_jump_row(at, entry, highlight == Some(at), elsewhere, cx)
             })
             .collect();

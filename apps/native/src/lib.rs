@@ -3433,6 +3433,17 @@ impl RootView {
     #[must_use]
     pub fn quick_jump_entries(&self) -> Vec<quick_jump::Entry> {
         let local_name = self.host_name(&HostKey::Local);
+        let hosts = self
+            .connected_hosts()
+            .into_iter()
+            .map(|host| quick_jump::HostInput {
+                name: self.host_name(&host),
+                online: self
+                    .conn_of(&host)
+                    .is_some_and(crate::connection::Connection::is_open),
+                host,
+            })
+            .collect();
         let inputs = quick_jump::JumpInputs {
             panes: self.jump_panes(),
             tabs: self
@@ -3460,6 +3471,7 @@ impl RootView {
                     name: c.name,
                 })
                 .collect(),
+            hosts,
         };
         quick_jump::build_entries(&inputs, &self.focus_history)
     }
@@ -3533,6 +3545,7 @@ impl RootView {
             } => {
                 self.jump_to_container(&host, &key, kind, &id, window, cx);
             }
+            quick_jump::JumpAction::OpenShell { host } => self.quick_shell_on(&host, cx),
         }
     }
 

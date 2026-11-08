@@ -20,6 +20,8 @@ pub enum EntryKind {
     PlainRepo,
     Workspace,
     Dir,
+    /// A host the palette opens a shell on.
+    Shell,
 }
 
 impl EntryKind {
@@ -33,6 +35,7 @@ impl EntryKind {
             Self::Repo => "[REPO]",
             Self::PlainRepo | Self::Dir => "[DIR]",
             Self::Workspace => "[WS]",
+            Self::Shell => "[SHELL]",
         }
     }
 
@@ -73,6 +76,8 @@ pub enum JumpAction {
         kind: ContainerKind,
         id: String,
     },
+    /// Opens a plain shell on `host`.
+    OpenShell { host: HostKey },
 }
 
 /// One palette row.
@@ -165,6 +170,16 @@ pub struct ContainerInput {
     pub host_name: String,
 }
 
+/// A host the palette offers a shell on, in host order.
+#[derive(Debug, Clone)]
+pub struct HostInput {
+    pub host: HostKey,
+    /// The name its sidebar header draws.
+    pub name: String,
+    /// Whether its connection is open, the header's Online.
+    pub online: bool,
+}
+
 /// Everything the palette lists, as plain data.
 #[derive(Debug, Clone, Default)]
 pub struct JumpInputs {
@@ -172,13 +187,15 @@ pub struct JumpInputs {
     pub tabs: Vec<TabInput>,
     pub sessions: Vec<SessionInput>,
     pub containers: Vec<ContainerInput>,
+    pub hosts: Vec<HostInput>,
 }
 
 /// The palette's entries in their empty-query order: panes and tabs by last
 /// focus (each record's pane, then its tab), then the never-focused tabs in
 /// tab-bar order each followed by its panes, then the sessions no pane shows,
-/// then the repo, workspace and folder containers. Empty panes, headless
-/// sessions and records of closed tabs are left out.
+/// then the repo, workspace and folder containers, then one shell entry per
+/// online host. Empty panes, headless sessions and records of closed tabs are
+/// left out.
 #[must_use]
 pub fn build_entries(inputs: &JumpInputs, history: &FocusHistory) -> Vec<Entry> {
     let panes: Vec<&PaneInput> = inputs
@@ -216,7 +233,26 @@ pub fn build_entries(inputs: &JumpInputs, history: &FocusHistory) -> Vec<Entry> 
     }
     entries.extend(session_entries(&inputs.sessions, &panes));
     entries.extend(inputs.containers.iter().filter_map(container_entry));
+    entries.extend(
+        inputs
+            .hosts
+            .iter()
+            .filter(|host| host.online)
+            .map(host_entry),
+    );
     entries
+}
+
+/// The `[SHELL]` entry of an online host: a plain shell on it.
+fn host_entry(host: &HostInput) -> Entry {
+    Entry {
+        kind: EntryKind::Shell,
+        primary: format!("Open shell on {}", host.name),
+        secondary: host.name.clone(),
+        action: JumpAction::OpenShell {
+            host: host.host.clone(),
+        },
+    }
 }
 
 fn pane_entry(pane: &PaneInput) -> Entry {
@@ -309,7 +345,9 @@ impl QuickJump {
     }
 
     /// Narrows the list to the entries `query` matches, best first and in
-    /// the empty-query order on ties, and highlights the best.
+    /// the empty-query order on ties, and highlights the best. A shell entry
+    /// is listed only on a plain substring of its name, which the fuzzy
+    /// matcher would otherwise supply for almost any query.
     pub fn set_query(&mut self, query: &str) {
         query.clone_into(&mut self.query);
         let candidates: Vec<Candidate<'_>> = self
@@ -320,9 +358,18 @@ impl QuickJump {
                 secondary: Some(&entry.secondary),
             })
             .collect();
+        let needle = query.trim().to_lowercase();
+        let entries = &self.entries;
         self.filtered = fuzzy::ranked(query, &candidates)
             .into_iter()
             .map(|(_, index)| index)
+            .filter(|&index| {
+                entries.get(index).is_some_and(|entry| {
+                    entry.kind != EntryKind::Shell
+                        || needle.is_empty()
+                        || entry.primary.to_lowercase().contains(&needle)
+                })
+            })
             .collect();
         self.highlight = 0;
     }
@@ -417,6 +464,14 @@ mod tests {
         }
     }
 
+    fn host(host: HostKey, name: &str, online: bool) -> HostInput {
+        HostInput {
+            host,
+            name: name.to_owned(),
+            online,
+        }
+    }
+
     fn names(entries: &[Entry]) -> Vec<String> {
         entries
             .iter()
@@ -444,6 +499,7 @@ mod tests {
                 session(HostKey::Local, "s4", "delta", true),
             ],
             containers: vec![container(ContainerKind::Repo, "r1", "yaat", "This PC")],
+            hosts: Vec::new(),
         }
     }
 
@@ -514,6 +570,7 @@ mod tests {
                 session(remote("box"), "s2", "beta elsewhere", true),
             ],
             containers: Vec::new(),
+            hosts: Vec::new(),
         };
         let entries = build_entries(&inputs, &FocusHistory::default());
         assert_eq!(
@@ -539,6 +596,76 @@ mod tests {
         };
         let entries = build_entries(&inputs, &FocusHistory::default());
         assert_eq!(names(&entries), ["[WS] ws", "[REPO] repo", "[DIR] dir"]);
+    }
+
+    #[test]
+    fn an_online_host_is_offered_as_a_shell() {
+        let inputs = JumpInputs {
+            containers: vec![container(ContainerKind::Repo, "r1", "yaat", "This PC")],
+            hosts: vec![
+                host(HostKey::Local, "This PC", true),
+                host(remote("box"), "box", true),
+                host(remote("lab"), "lab", false),
+            ],
+            ..JumpInputs::default()
+        };
+        let entries = build_entries(&inputs, &FocusHistory::default());
+        assert_eq!(
+            names(&entries),
+            [
+                "[REPO] yaat",
+                "[SHELL] Open shell on This PC",
+                "[SHELL] Open shell on box",
+            ],
+            "the shell entries rank after the others, and an offline host is offered none"
+        );
+        assert_eq!(
+            entries[2].action,
+            JumpAction::OpenShell {
+                host: remote("box")
+            }
+        );
+    }
+
+    /// This PC and one online remote, each with a shell entry.
+    fn two_hosts() -> JumpInputs {
+        JumpInputs {
+            hosts: vec![
+                host(HostKey::Local, "This PC", true),
+                host(remote("box"), "box", true),
+            ],
+            ..JumpInputs::default()
+        }
+    }
+
+    #[test]
+    fn a_shell_entry_ignores_a_scattered_match() {
+        let mut jump = QuickJump::new(build_entries(&two_hosts(), &FocusHistory::default()));
+        jump.set_query("not");
+        assert_eq!(
+            filtered_names(&jump),
+            Vec::<String>::new(),
+            "a scattered match does not offer a shell"
+        );
+        jump.set_query("open shell");
+        assert_eq!(
+            filtered_names(&jump),
+            ["[SHELL] Open shell on This PC", "[SHELL] Open shell on box"],
+            "a plain substring still reads"
+        );
+    }
+
+    #[test]
+    fn a_shell_entry_matches_its_host_name() {
+        let mut jump = QuickJump::new(build_entries(&two_hosts(), &FocusHistory::default()));
+        jump.set_query("box");
+        assert_eq!(filtered_names(&jump), ["[SHELL] Open shell on box"]);
+        jump.set_query("SHELL");
+        assert_eq!(
+            filtered_names(&jump),
+            ["[SHELL] Open shell on This PC", "[SHELL] Open shell on box"],
+            "the match ignores case"
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use protocol::{DaemonMessage, SplitDirection};
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{OpenOutcome, PopoutKey};
 use serde_json::json;
-use support::{Fixture, Harness, TestDir, pane, repo, seed_ui, session, split, tab};
+use support::{Fixture, Harness, TestDir, pane, repo, seed_ui, session, shell_spawns, split, tab};
 
 /// The tailnet host the folded-host spec saves beside This PC.
 const REMOTE: &str = "box.tail1234.ts.net";
@@ -73,6 +73,11 @@ fn spawn_target(h: &mut Harness<'_>) -> Option<String> {
             .into_iter()
             .find(|selector| selector.starts_with("spawn-target-"))
     })
+}
+
+/// The saved host [`REMOTE`] as launch dials it.
+fn saved_remote() -> Target {
+    Target::tailnet(REMOTE, Some(8787))
 }
 
 /// `s1` in repo `r1`, alone in pane `p1` of tab `t1`; This PC also lists
@@ -349,6 +354,41 @@ fn a_folded_host_unfolds_for_a_jump(cx: &mut TestAppContext) {
     assert_eq!(
         h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
         Some(remote_key)
+    );
+}
+
+#[gpui::test]
+fn the_palette_opens_a_shell_on_a_remote_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(session("a1").in_repo("r1").build()),
+    );
+    let mut host = h.host(&saved_remote());
+    host.connect();
+    h.sent();
+    focus_terminal(&mut h, "p1");
+
+    h.keys("ctrl-shift-p");
+    type_text(&mut h, "shell");
+    highlight_row(&mut h, "[SHELL] Open shell on box");
+    h.keys("enter");
+
+    assert!(!open(&mut h), "the palette closes");
+    assert_eq!(
+        shell_spawns(&h.host(&saved_remote()).sent()),
+        [None],
+        "the remote host runs one plain shell, with no folder"
+    );
+    assert_eq!(
+        shell_spawns(&h.sent()),
+        Vec::<Option<String>>::new(),
+        "This PC is sent none"
     );
 }
 

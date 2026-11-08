@@ -5,10 +5,10 @@
 use crate::support;
 
 use gpui::{Pixels, Point, TestAppContext, point, px};
-use protocol::{ClientMessage, ContainerRef, DaemonMessage, SpawnTarget};
+use protocol::{ClientMessage, ContainerRef, DaemonMessage};
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetEvent, RootView};
-use support::{Fixture, Harness, PROTOCOL, TestDir, repo, session};
+use support::{Fixture, Harness, PROTOCOL, TestDir, repo, session, shell_spawns};
 
 /// The tailnet host the specs save beside This PC.
 const REMOTE: &str = "box.tail1234.ts.net";
@@ -87,19 +87,6 @@ fn dropped(target: Target) -> Connection {
     conn.on_welcome(PROTOCOL, Vec::new(), None);
     let _ = conn.on_closed("socket closed".to_owned());
     conn
-}
-
-/// The plain-shell spawns among `sent`, by the folder each names.
-fn shell_spawns(sent: Vec<ClientMessage>) -> Vec<Option<String>> {
-    sent.into_iter()
-        .filter_map(|msg| match msg {
-            ClientMessage::SpawnSession(request) => match request.target {
-                SpawnTarget::Standalone { cwd, .. } => Some(cwd),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
 }
 
 /// The container orders among `sent`.
@@ -228,12 +215,12 @@ fn plus_shell_on_a_remote_header_spawns_there_with_no_folder(cx: &mut TestAppCon
     h.click_on(&format!("host-shell-{REMOTE}"));
 
     assert_eq!(
-        shell_spawns(h.host(&saved_remote()).sent()),
+        shell_spawns(&h.host(&saved_remote()).sent()),
         [None],
         "one plain shell goes to the remote host, with no folder"
     );
     assert_eq!(
-        shell_spawns(h.sent()),
+        shell_spawns(&h.sent()),
         Vec::<Option<String>>::new(),
         "This PC is sent none"
     );
@@ -250,11 +237,11 @@ fn plus_shell_is_disabled_on_an_offline_host(cx: &mut TestAppContext) {
     h.click_on(&format!("host-shell-{REMOTE}"));
 
     assert_eq!(
-        shell_spawns(h.host(&saved_remote()).sent()),
+        shell_spawns(&h.host(&saved_remote()).sent()),
         Vec::<Option<String>>::new(),
         "an offline host's + Shell sends nothing"
     );
-    assert_eq!(shell_spawns(h.sent()), Vec::<Option<String>>::new());
+    assert_eq!(shell_spawns(&h.sent()), Vec::<Option<String>>::new());
     assert!(
         drawn(&mut h, &format!("host-header-{REMOTE}")),
         "the offline host keeps its header"

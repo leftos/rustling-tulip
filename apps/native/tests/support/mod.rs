@@ -20,8 +20,9 @@ use gpui::{
     TouchPhase, VisualTestContext, Window, WindowId, point, px,
 };
 use protocol::{
-    ClientMessage, DaemonMessage, GridNode, KeyState, RepoEntry, SessionSnapshot, SplitDirection,
-    SummarizerKey, SummarizerKeySource, SummarizerSettings, TabEntry, WorkspaceEntry,
+    ClientMessage, DaemonMessage, GridNode, KeyState, RepoEntry, SessionSnapshot, SpawnTarget,
+    SplitDirection, SummarizerKey, SummarizerKeySource, SummarizerSettings, TabEntry,
+    WorkspaceEntry,
 };
 use rustling_tulip_native::{
     Activity, BadgeOverlay, Clip, ClipSource, Clock, Connection, ContainerKind, FileFilter,
@@ -2580,6 +2581,19 @@ impl<'h, 'a> HostHandle<'h, 'a> {
 /// A `ForgetHostSessions` the client sent: the host it names, the session
 /// ids it forgets and whether it forgets every pane of that host.
 pub type Forget = (String, Vec<String>, bool);
+
+/// The plain-shell spawns among `sent`, by the folder each names.
+pub fn shell_spawns(sent: &[ClientMessage]) -> Vec<Option<String>> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SpawnSession(request) => match &request.target {
+                SpawnTarget::Standalone { cwd, .. } => Some(cwd.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
 
 /// The `ForgetHostSessions` messages among `sent`, in order.
 pub fn forgets(sent: &[ClientMessage]) -> Vec<Forget> {
