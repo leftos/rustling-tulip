@@ -178,7 +178,7 @@ fn bash_output_row(record: &Value, text: &str, known: Known<'_>) -> Option<ChatE
     if output.is_empty() {
         return None;
     }
-    let output = cap(&output.join("\n"), TOOL_RESULT_CAP);
+    let output = cap_output(&output.join("\n"), TOOL_RESULT_CAP);
     Some(system_row(&id, format!("{command}\n{output}")))
 }
 
@@ -277,7 +277,7 @@ fn tool_result_entries(record: &Value, block: &Value, known: Known<'_>) -> Vec<C
         summary,
         input,
         result: Some(ToolOutcome {
-            text: cap(&text, TOOL_RESULT_CAP),
+            text: cap_output(&text, TOOL_RESULT_CAP),
             is_error,
         }),
         parent_id,
@@ -666,17 +666,61 @@ fn strip_sgr(text: &str) -> String {
     out
 }
 
+/// `text` split at the last char boundary at or below `limit`: the prefix
+/// kept and the rest dropped.
+fn split_at_limit(text: &str, limit: usize) -> (&str, &str) {
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.split_at(end)
+}
+
 /// `text` cut to at most `limit` bytes on a char boundary, with
 /// [`CUT_MARKER`] after the kept part when anything was cut.
 fn cap(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_owned();
     }
-    let mut end = limit;
-    while !text.is_char_boundary(end) {
-        end -= 1;
+    let (kept, _) = split_at_limit(text, limit);
+    format!("{kept}{CUT_MARKER}")
+}
+
+/// `text` without one trailing `\r\n` or `\n`.
+fn without_trailing_newline(text: &str) -> &str {
+    text.strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(text)
+}
+
+/// `text` cut to at most `limit` bytes on a char boundary like [`cap`], then
+/// a line saying how much the cut dropped: the lines left out, the partly
+/// kept one counting as one, or the characters when the text is one line.
+fn cap_output(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
     }
-    format!("{}{CUT_MARKER}", &text[..end])
+    let (kept, dropped) = split_at_limit(text, limit);
+    let cut = if without_trailing_newline(text).contains('\n') {
+        let rest = if kept.ends_with('\n') {
+            dropped
+        } else {
+            dropped.strip_prefix('\n').unwrap_or(dropped)
+        };
+        let lines = rest.lines().count();
+        let noun = if lines == 1 { "line" } else { "lines" };
+        format!("{CUT_MARKER} {lines} more {noun}")
+    } else {
+        let chars = without_trailing_newline(dropped).chars().count();
+        let noun = if chars == 1 {
+            "character"
+        } else {
+            "characters"
+        };
+        format!("{CUT_MARKER} {chars} more {noun}")
+    };
+    let separator = if kept.ends_with('\n') { "" } else { "\n" };
+    format!("{kept}{separator}{cut}")
 }
 
 /// `text` cut to at most `max` characters, the last being [`CUT_MARKER`]
@@ -692,7 +736,10 @@ fn cap_chars(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, chat_entries, line_facts, tool_kind};
+    use super::{
+        CUT_MARKER, TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, cap_output, chat_entries, line_facts,
+        split_at_limit, tool_kind,
+    };
     use agent_api::TranscriptLineFacts;
     use chrono::{TimeDelta, TimeZone as _, Utc};
     use protocol::{ChatEntry, ToolKind, ToolOutcome};
@@ -1419,9 +1466,25 @@ mod tests {
             .strip_suffix('…')
             .unwrap_or_else(|| unreachable!("marker"));
         assert!(full_input.starts_with(kept));
+        let full = fixture("caps")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find_map(|record| {
+                record
+                    .pointer("/message/content/0/content")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+        let Some(full) = full else {
+            unreachable!("the caps fixture holds a result text");
+        };
+        let kept = "日".repeat(TOOL_RESULT_CAP / 3);
         assert_eq!(
             result.text,
-            format!("{}…", "日".repeat(TOOL_RESULT_CAP / 3))
+            format!(
+                "{kept}\n{CUT_MARKER} {} more characters",
+                full.chars().count() - kept.chars().count()
+            )
         );
         assert!(matches!(&chat[1], ChatEntry::Answer { text, .. } if text.len() == 20000));
         assert!(matches!(&chat[2], ChatEntry::User { text, .. } if text.len() == 20000));
@@ -1493,6 +1556,92 @@ mod tests {
         assert_eq!(cap("abc", 2), "ab…");
         assert_eq!(cap("aé", 2), "a…");
         assert_eq!(cap("", 0), "");
+    }
+
+    /// The kept prefix and the dropped rest of `text` at the result cap.
+    fn cut(text: &str) -> (&str, &str) {
+        split_at_limit(text, TOOL_RESULT_CAP)
+    }
+
+    #[test]
+    fn a_cut_result_says_how_many_lines_it_dropped() {
+        let text: String = (1..=300)
+            .map(|n| format!("row {n}: the quick brown fox jumps over the lazy dog\n"))
+            .collect::<Vec<String>>()
+            .concat();
+        let (kept, dropped) = cut(&text);
+        assert!(!kept.ends_with('\n'), "the cut lands inside a line");
+        let dropped = dropped.lines().count();
+        assert_eq!(
+            cap_output(&text, TOOL_RESULT_CAP),
+            format!("{kept}\n{CUT_MARKER} {dropped} more lines")
+        );
+    }
+
+    #[test]
+    fn a_cut_single_line_result_says_how_many_characters_it_dropped() {
+        let text = "é".repeat(5000);
+        let (kept, dropped) = cut(&text);
+        let dropped = dropped.chars().count();
+        assert_eq!(
+            cap_output(&text, TOOL_RESULT_CAP),
+            format!("{kept}\n{CUT_MARKER} {dropped} more characters")
+        );
+    }
+
+    #[test]
+    fn a_cut_before_a_newline_drops_no_extra_line() {
+        let text = format!("{}\nbbb", "a".repeat(TOOL_RESULT_CAP));
+        let (kept, dropped) = cut(&text);
+        assert_eq!(dropped, "\nbbb", "the cut lands just before the newline");
+        assert_eq!(
+            cap_output(&text, TOOL_RESULT_CAP),
+            format!("{kept}\n{CUT_MARKER} 1 more line")
+        );
+    }
+
+    #[test]
+    fn a_trailing_newline_does_not_make_a_second_line() {
+        let text = format!("{}\n", "x".repeat(9000));
+        let (kept, _) = cut(&text);
+        assert_eq!(
+            cap_output(&text, TOOL_RESULT_CAP),
+            format!(
+                "{kept}\n{CUT_MARKER} {} more characters",
+                9000 - TOOL_RESULT_CAP
+            )
+        );
+    }
+
+    #[test]
+    fn a_cut_after_a_newline_adds_no_blank_line() {
+        let text = format!("{}\n{}", "a".repeat(TOOL_RESULT_CAP - 1), "b".repeat(1000));
+        let (kept, _) = cut(&text);
+        assert!(kept.ends_with('\n'), "the cut lands just after a newline");
+        assert_eq!(
+            cap_output(&text, TOOL_RESULT_CAP),
+            format!("{kept}{CUT_MARKER} 1 more line")
+        );
+    }
+
+    #[test]
+    fn one_more_line_is_singular() {
+        let text = format!("\n{}", "a".repeat(9000));
+        let kept = format!("\n{}", "a".repeat(TOOL_RESULT_CAP - 1));
+        assert_eq!(
+            cap_output(&text, TOOL_RESULT_CAP),
+            format!("{kept}\n{CUT_MARKER} 1 more line")
+        );
+    }
+
+    #[test]
+    fn one_more_character_is_singular() {
+        let text = "a".repeat(TOOL_RESULT_CAP + 1);
+        let kept = "a".repeat(TOOL_RESULT_CAP);
+        assert_eq!(
+            cap_output(&text, TOOL_RESULT_CAP),
+            format!("{kept}\n{CUT_MARKER} 1 more character")
+        );
     }
 
     #[test]
