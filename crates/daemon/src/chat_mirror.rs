@@ -28,8 +28,8 @@ use std::time::Duration;
 use agent_api::{AgentPlugin, LiveLine, ScreenWork, TranscriptLineFacts};
 use chrono::{DateTime, Utc};
 use protocol::{
-    AgentId, ChatEntry, ChatPrompt, ChatScreen, ComposerState, DaemonMessage, StretchLine,
-    SummarySource,
+    AgentId, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState, DaemonMessage,
+    PendingInput, SessionStatus, StretchLine, SummarySource,
 };
 use sha2::{Digest as _, Sha256};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -40,7 +40,7 @@ use crate::background_work::BackgroundWork;
 use crate::chat_work::chat_work;
 use crate::hook_status::LiveLines;
 use crate::screen::{Screen, SharedScreen, dialogs};
-use crate::session::{SessionEvent, SessionRegistry};
+use crate::session::{SessionEvent, SessionRecord, SessionRegistry};
 use crate::summarizer::prompt::Trigger;
 use crate::summarizer::service::{Outcome, Request, Summarizer};
 use crate::summary_lines::{self, TimedEntry};
@@ -291,6 +291,7 @@ impl ChatMirror {
             if mirror.conversation != conversation {
                 self.switch(session_id, mirror, conversation);
             }
+            mirror.take_plan(session_id, found.plan.clone());
             if let Some(screen) = grid.as_deref() {
                 if let Some(reading) = dialogs::read(&found.agent, screen) {
                     mirror.observe(session_id, reading);
@@ -687,8 +688,9 @@ impl ChatMirror {
         }
     }
 
-    /// `session_id`'s record changed: a mirrored session takes the work the
-    /// record now holds, and its loaders hear of a changed strip.
+    /// `session_id`'s record changed: a mirrored session takes the work and the
+    /// plan approval the record now holds, and its loaders hear of a changed
+    /// strip or card.
     fn follow_work(&self, session_id: &str) {
         if !lock(&self.inner.sessions).contains_key(session_id) {
             return;
@@ -696,10 +698,14 @@ impl ChatMirror {
         let Some(record) = self.inner.registry.get(session_id) else {
             return;
         };
-        let work = lock(&record).work.clone();
+        let (work, plan) = {
+            let record = lock(&record);
+            (record.work.clone(), pending_plan(&record))
+        };
         let mut sessions = lock(&self.inner.sessions);
         if let Some(mirror) = sessions.get_mut(session_id) {
             mirror.take_work(session_id, work);
+            mirror.take_plan(session_id, plan);
         }
     }
 
@@ -721,6 +727,7 @@ impl ChatMirror {
                 self.switch(session_id, mirror, conversation);
             }
             mirror.take_work(session_id, found.work);
+            mirror.take_plan(session_id, found.plan);
         }
     }
 
@@ -1112,6 +1119,17 @@ fn input_digest(input: &str) -> String {
     out
 }
 
+/// The plan `record` is waiting for approval on, as its hook's plan text, while
+/// the session waits for an answer; `None` while it waits on anything else.
+fn pending_plan(record: &SessionRecord) -> Option<String> {
+    match (&record.status, &record.pending_input) {
+        (SessionStatus::AwaitingInput, Some(PendingInput::PlanApproval { plan: Some(text) })) => {
+            Some(text.clone())
+        }
+        _ => None,
+    }
+}
+
 /// What a session's record says about its chat, read under the record's lock
 /// and used after it is released.
 struct Found {
@@ -1121,6 +1139,7 @@ struct Found {
     extra_env: Vec<(String, String)>,
     screen: Option<SharedScreen>,
     work: BackgroundWork,
+    plan: Option<String>,
 }
 
 impl Found {
@@ -1139,6 +1158,7 @@ impl Found {
                 .unwrap_or_default(),
             screen: record.screen.clone(),
             work: record.work.clone(),
+            plan: pending_plan(&record),
         })
     }
 
@@ -1195,6 +1215,8 @@ struct SessionMirror {
     /// The work the session's record holds, as its agent's last `Stop`
     /// listed it.
     work: BackgroundWork,
+    /// The plan the session's record waits for approval on, from its hook.
+    pending_plan: Option<String>,
     /// The ids of the tasks whose task notification the session's
     /// transcripts hold, kept across a conversation switch since task ids
     /// are unique across conversations.
@@ -1233,6 +1255,7 @@ impl SessionMirror {
             screen: ScreenState::default(),
             live_task,
             work: BackgroundWork::default(),
+            pending_plan: None,
             ended_tasks: HashSet::new(),
             screen_work: None,
             work_shown: DaemonMessage::ChatWork {
@@ -1281,6 +1304,22 @@ impl SessionMirror {
         if self.work != work {
             self.work = work;
             self.update_work(session_id);
+        }
+    }
+
+    /// Take `plan` as the plan the record waits for approval on, filling a plan
+    /// prompt with no body of its own and telling the loaders of a changed
+    /// card.
+    fn take_plan(&mut self, session_id: &str, plan: Option<String>) {
+        if self.pending_plan == plan {
+            return;
+        }
+        self.pending_plan = plan;
+        if self.screen.refill(self.pending_plan.as_deref()) {
+            self.tell(&DaemonMessage::ChatScreenChanged {
+                session_id: session_id.to_owned(),
+                screen: self.screen.shown.clone(),
+            });
         }
     }
 
@@ -1507,7 +1546,7 @@ impl SessionMirror {
     /// Take `reading` as the screen, telling the loaders when it changed
     /// more than its cursor.
     fn observe(&mut self, session_id: &str, reading: ChatScreen) {
-        if self.screen.observe(reading) {
+        if self.screen.observe(reading, self.pending_plan.as_deref()) {
             self.tell(&DaemonMessage::ChatScreenChanged {
                 session_id: session_id.to_owned(),
                 screen: self.screen.shown.clone(),
@@ -1591,6 +1630,8 @@ impl Drop for ChatLoadGuard {
 
 /// The screen a session's chat shows, and the id of the prompt on it.
 struct ScreenState {
+    /// The last reading as the agent's plugin read it, before the plan fill.
+    reading: ChatScreen,
     shown: ChatScreen,
     /// What makes the prompt on screen the same prompt, while one is.
     identity: Option<u64>,
@@ -1600,6 +1641,10 @@ struct ScreenState {
 impl Default for ScreenState {
     fn default() -> Self {
         Self {
+            reading: ChatScreen {
+                composer: ComposerState::Unknown,
+                prompt: None,
+            },
             shown: ChatScreen {
                 composer: ComposerState::Unknown,
                 prompt: None,
@@ -1612,9 +1657,9 @@ impl Default for ScreenState {
 
 impl ScreenState {
     /// Take `reading` as the screen, giving its prompt the id the same prompt
-    /// had (a new one for a new prompt); whether it changed more than the
-    /// prompt's cursor.
-    fn observe(&mut self, mut reading: ChatScreen) -> bool {
+    /// had (a new one for a new prompt), and show it with `plan` filled in;
+    /// whether what the loaders see changed more than the prompt's cursor.
+    fn observe(&mut self, mut reading: ChatScreen, plan: Option<&str>) -> bool {
         match reading.prompt.as_mut() {
             Some(prompt) => {
                 let identity = dialogs::prompt_identity(prompt);
@@ -1626,10 +1671,49 @@ impl ScreenState {
             }
             None => self.identity = None,
         }
-        let changed = !same_but_cursor(&reading, &self.shown);
-        self.shown = reading;
+        let changed = self.show_filled(&reading, plan);
+        self.reading = reading;
         changed
     }
+
+    /// Show the last reading again with `plan` filled in; whether what the
+    /// loaders see changed more than the prompt's cursor.
+    fn refill(&mut self, plan: Option<&str>) -> bool {
+        let reading = self.reading.clone();
+        self.show_filled(&reading, plan)
+    }
+
+    /// Show `reading` with `plan` filled in; whether what the loaders see
+    /// changed more than the prompt's cursor.
+    fn show_filled(&mut self, reading: &ChatScreen, plan: Option<&str>) -> bool {
+        let shown = filled(reading, plan);
+        let changed = !same_but_cursor(&shown, &self.shown);
+        self.shown = shown;
+        changed
+    }
+}
+
+/// `reading` with `plan` drawn in: a plan prompt whose own body is empty takes
+/// the plan text as its body and, with no subject of its own, the plan's first
+/// non-blank line as its subject. Every other reading is shown as it is.
+fn filled(reading: &ChatScreen, plan: Option<&str>) -> ChatScreen {
+    let mut screen = reading.clone();
+    let Some(plan) = plan else {
+        return screen;
+    };
+    let Some(prompt) = screen.prompt.as_mut() else {
+        return screen;
+    };
+    if prompt.kind != ChatPromptKind::Plan || !prompt.body.is_empty() {
+        return screen;
+    }
+    plan.clone_into(&mut prompt.body);
+    if prompt.subject.trim().is_empty()
+        && let Some(line) = plan.lines().map(str::trim).find(|line| !line.is_empty())
+    {
+        line.clone_into(&mut prompt.subject);
+    }
+    screen
 }
 
 fn same_but_cursor(a: &ChatScreen, b: &ChatScreen) -> bool {

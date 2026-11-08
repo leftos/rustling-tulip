@@ -192,8 +192,9 @@ mod tests {
     use crate::screen::fixture_screen::screen_from;
     use crate::summarizer::service::test_support::{FAKE_NOTIFICATION, FakeCaller};
     use protocol::{
-        ChatEntry, ChatPromptKind, ChatScreen, ClientMessage, DaemonMessage, SessionMode,
-        SpawnConfig, SpawnTarget, StretchLine, SummarizerSettings, SummarySource,
+        ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, DaemonMessage,
+        PendingInput, SessionMode, SessionStatus, SpawnConfig, SpawnTarget, StretchLine,
+        SummarizerSettings, SummarySource,
     };
     use std::collections::HashSet;
     use std::io::Write as _;
@@ -208,6 +209,14 @@ mod tests {
 
     const QUESTION: &str = include_str!("../screen/fixtures/c31-ask-q1.txt");
     const PERMISSION: &str = include_str!("../screen/fixtures/c23-perm-bash.txt");
+    /// The plan dialog with both `╌` rules scrolled off, which the plugin reads
+    /// as a plan prompt with an empty subject and body.
+    const PLAN_SCROLLED: &str = include_str!("../screen/fixtures/v51-plan-dialog-scrolled.txt");
+    /// The plan dialog with its box drawn, whose body is the plan's own text.
+    const PLAN_DIALOG: &str = include_str!("../screen/fixtures/v51-plan-dialog.txt");
+    /// The plan text a test's hook carries.
+    const PLAN_TEXT: &str =
+        "Add div to calc.py\n\n1. Add a plain div to calc.py.\n2. Test division by zero.";
 
     /// A hub with one client connected, so tails read, holding Claude session
     /// `s1` in a scratch project folder whose Claude home is in the scratch
@@ -1049,6 +1058,153 @@ mod tests {
             drain(&mut a_rx).is_empty(),
             "the cursor's move sent nothing"
         );
+    }
+
+    /// The unfilled prompt the screen `text` shows, as the default agent's
+    /// plugin reads it.
+    fn read_prompt(text: &str) -> Option<ChatPrompt> {
+        let agent = agent_registry::default_agent();
+        crate::screen::dialogs::read(&agent, &screen_from(text)).and_then(|screen| screen.prompt)
+    }
+
+    /// Leave `s1`'s record waiting for approval on `plan`, its screen `text`.
+    fn plan_waiting(fx: &Fixture, text: &str, plan: Option<&str>) {
+        fx.hub.sessions.update("s1", |record| {
+            record.screen = Some(Arc::new(Mutex::new(screen_from(text))));
+            record.status = SessionStatus::AwaitingInput;
+            record.pending_input = Some(PendingInput::PlanApproval {
+                plan: plan.map(str::to_owned),
+            });
+        });
+    }
+
+    #[tokio::test]
+    async fn a_plan_card_takes_the_hooks_text_before_the_screen() {
+        let unfilled = read_prompt(PLAN_SCROLLED).expect("the plan dialog is read");
+        assert_eq!(unfilled.kind, ChatPromptKind::Plan);
+        assert_eq!(unfilled.subject, "", "both `╌` rules are off screen");
+        assert_eq!(unfilled.body, "", "the plugin has no plan text of its own");
+
+        let fx = Fixture::new("plan-card-first", None);
+        plan_waiting(&fx, PLAN_SCROLLED, Some(PLAN_TEXT));
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let (_, _, screen, _) = next_chat(&mut a_rx).await;
+        let prompt = screen.prompt.expect("the plan is read");
+        assert_eq!(prompt.kind, ChatPromptKind::Plan);
+        assert_eq!(prompt.body, PLAN_TEXT);
+        assert_eq!(prompt.subject, "Add div to calc.py");
+    }
+
+    #[tokio::test]
+    async fn a_plan_card_takes_the_hooks_text_after_the_screen() {
+        let fx = Fixture::new("plan-card-late", None);
+        fx.hub.sessions.update("s1", |record| {
+            record.screen = Some(Arc::new(Mutex::new(screen_from(PLAN_SCROLLED))));
+        });
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let (_, _, screen, _) = next_chat(&mut a_rx).await;
+        assert_eq!(screen.prompt.expect("the plan is read").body, "");
+
+        plan_waiting(&fx, PLAN_SCROLLED, Some(PLAN_TEXT));
+        match next_message(&mut a_rx).await {
+            DaemonMessage::ChatScreenChanged { screen, .. } => {
+                let prompt = screen.prompt.expect("the plan is still on screen");
+                assert_eq!(prompt.body, PLAN_TEXT);
+                assert_eq!(prompt.subject, "Add div to calc.py");
+            }
+            other => panic!("expected a ChatScreenChanged, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plan_card_leaves_no_fill_behind_and_takes_the_next_text() {
+        let fx = Fixture::new("plan-card-cleared", None);
+        plan_waiting(&fx, PLAN_SCROLLED, Some(PLAN_TEXT));
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let (_, _, screen, _) = next_chat(&mut a_rx).await;
+        assert_eq!(screen.prompt.expect("the plan is read").body, PLAN_TEXT);
+
+        fx.hub
+            .sessions
+            .update("s1", |record| record.pending_input = None);
+        match next_message(&mut a_rx).await {
+            DaemonMessage::ChatScreenChanged { screen, .. } => {
+                let prompt = screen.prompt.expect("the plan is still on screen");
+                assert_eq!(prompt.body, "", "an answered prompt leaves no fill behind");
+                assert_eq!(prompt.subject, "");
+            }
+            other => panic!("expected a ChatScreenChanged, got {other:?}"),
+        }
+
+        fx.hub.sessions.update("s1", |record| {
+            record.pending_input = Some(PendingInput::PlanApproval {
+                plan: Some("Rename div to divide".to_owned()),
+            });
+        });
+        match next_message(&mut a_rx).await {
+            DaemonMessage::ChatScreenChanged { screen, .. } => {
+                let prompt = screen.prompt.expect("the plan is still on screen");
+                assert_eq!(
+                    prompt.body, "Rename div to divide",
+                    "the new text, never the old"
+                );
+                assert_eq!(prompt.subject, "Rename div to divide");
+            }
+            other => panic!("expected a ChatScreenChanged, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plan_card_keeps_the_screens_own_text() {
+        let unfilled = read_prompt(PLAN_DIALOG).expect("the plan dialog is read");
+        assert!(!unfilled.body.is_empty(), "the box is drawn");
+        assert_eq!(unfilled.subject, "Add div to calc.py");
+
+        let fx = Fixture::new("plan-card-own", None);
+        plan_waiting(&fx, PLAN_DIALOG, Some("A different plan entirely"));
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let (_, _, screen, _) = next_chat(&mut a_rx).await;
+        let prompt = screen.prompt.expect("the plan is read");
+        assert_eq!(prompt.body, unfilled.body, "the screen's own text is shown");
+        assert_eq!(prompt.subject, unfilled.subject);
+    }
+
+    #[tokio::test]
+    async fn a_plan_card_keeps_its_id_and_identity_through_the_fill() {
+        let unfilled = read_prompt(PLAN_SCROLLED).expect("the plan dialog is read");
+        let fx = Fixture::new("plan-card-id", None);
+        fx.hub.sessions.update("s1", |record| {
+            record.screen = Some(Arc::new(Mutex::new(screen_from(PLAN_SCROLLED))));
+        });
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let (_, _, screen, _) = next_chat(&mut a_rx).await;
+        let before = screen.prompt.expect("the plan is read");
+        assert_eq!(
+            fx.hub
+                .chat_mirror
+                .current_prompt("s1")
+                .expect("a prompt is up"),
+            (
+                before.id.clone(),
+                crate::screen::dialogs::prompt_identity(&unfilled)
+            ),
+            "the identity is the unfilled reading's"
+        );
+
+        plan_waiting(&fx, PLAN_SCROLLED, Some(PLAN_TEXT));
+        match next_message(&mut a_rx).await {
+            DaemonMessage::ChatScreenChanged { screen, .. } => {
+                let prompt = screen.prompt.expect("the plan is read");
+                assert_eq!(prompt.id, before.id, "the fill does not re-mint the id");
+                assert_eq!(prompt.body, PLAN_TEXT);
+            }
+            other => panic!("expected a ChatScreenChanged, got {other:?}"),
+        }
     }
 
     #[tokio::test]
