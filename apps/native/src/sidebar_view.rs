@@ -2874,7 +2874,7 @@ fn label_head(offset: i8, shift: i8, leaf: &Leaf, key: &str, t: &UiTheme) -> Vec
             StyledText::new(leaf.label.clone()),
         )
         .flex_1()
-        .text_size(ui_px_at(offset, 13.0))
+        .text_size(ui_px_at(offset, 11.0))
         .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::MEDIUM))
         .text_color(gpui::rgb(if seen_idle { t.text_2 } else { t.text }))
         .into_any_element(),
