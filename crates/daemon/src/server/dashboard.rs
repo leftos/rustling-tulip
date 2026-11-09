@@ -6,6 +6,7 @@ use super::Hub;
 use super::chat::{refuse, send_target};
 use super::connection::ConnCtx;
 use crate::chat_answer::{self, NOT_THIS_DIALOG, PROMPT_GONE};
+use crate::chat_mirror::{shows_the_end_of, without_whitespace};
 use crate::file_tail::session_folders;
 use crate::inject::{TypeRefusal, TypeTarget, screen_reader};
 use crate::screen::dialogs::prompt_identity;
@@ -250,12 +251,10 @@ fn asks(prompt: &ChatPrompt, question: &PendingQuestion) -> bool {
 /// question; a dialog whose bar scrolled off holds only the rows the grid
 /// still shows, which are the question's end.
 fn asks_the_question(prompt: &ChatPrompt, asked: &str) -> bool {
-    let shown = without_whitespace(&prompt.subject);
-    let asked = without_whitespace(asked);
     if prompt.questions.is_empty() {
-        !shown.is_empty() && asked.ends_with(shown.as_str())
+        shows_the_end_of(&prompt.subject, asked)
     } else {
-        shown == asked
+        without_whitespace(&prompt.subject) == without_whitespace(asked)
     }
 }
 
@@ -319,12 +318,6 @@ fn has_drive(path: &str) -> bool {
 /// so a line the screen wrapped compares equal to the hook's text.
 fn words(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// `text` with all whitespace removed: a token longer than a row is
-/// hard-wrapped on screen, so joining the rows puts a space inside it.
-fn without_whitespace(text: &str) -> String {
-    text.split_whitespace().collect()
 }
 
 /// The chat answer that gives `choice` to `prompt`: a question's option by
