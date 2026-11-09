@@ -274,9 +274,6 @@ pub(crate) struct SpawnExtras {
     /// The recovered selection's options, which the hook agent's hook plan
     /// and resume command take in place of the plain shell's own.
     pub(crate) hook_options: OptionValues,
-    /// Whether the recovered run was trusted, which the hook agent's hook
-    /// plan takes in place of the plain shell's own flag.
-    pub(crate) hook_trusted: bool,
     /// The abandoned sessions the new session replaces, oldest first (see
     /// [`protocol::SessionSnapshot::resumed_from`]).
     pub(crate) resumed_from: Vec<String>,
@@ -316,6 +313,9 @@ where
     // so a refused spawn writes nothing to the credential store and checks
     // nothing out.
     check_plain_shell_options(&req)?;
+    // An older client's trusted flag becomes the agent's bypass choice, and the flag is then
+    // derived from the options, so a newer client's bypass choice sets it too.
+    crate::trusted_fold::fold_request(&mut req);
     let (agent, backend, options) = request_agent(&req)?;
     // The validated options carry every field's default, so the stored
     // config replays what the session ran with.
@@ -337,7 +337,7 @@ where
         target,
         mode,
         initial_prompt,
-        dangerously_skip_permissions,
+        dangerously_skip_permissions: _,
         agent: _,
         extra_env,
         secret_env_keys: _,
@@ -460,7 +460,6 @@ where
     let session_id = new_id();
     let label = label.unwrap_or(default_label);
     let cfg = SpawnArgs {
-        dangerously_skip_permissions,
         agent,
         backend,
         options,
@@ -600,7 +599,6 @@ pub(super) fn expected_output_subscribers(mode: SessionMode) -> usize {
 
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
 struct SpawnArgs {
-    dangerously_skip_permissions: bool,
     /// The agent this spawn runs; a plain shell's is the default agent.
     agent: AgentId,
     /// `agent`'s plugin, as [`agent_registry::plugin`] found it.
@@ -633,7 +631,6 @@ impl SpawnArgs {
     /// Build the borrowed [`SpawnContext`] view plugins consume.
     fn common(&self) -> SpawnContext<'_> {
         SpawnContext {
-            dangerously_skip_permissions: self.dangerously_skip_permissions,
             has_prompt_injector: self.prompt_injector.is_some(),
             conversation_id: None,
             resume_conversation: self.resume_conversation.as_deref(),
@@ -765,7 +762,6 @@ fn interactive_record(
         work: crate::background_work::BackgroundWork::default(),
         hook_agent: None,
         hook_options: OptionValues::new(),
-        hook_trusted: false,
         resumed_from: new.resumed_from,
     };
     push_recent_action(&mut record, "session started".to_string());
@@ -789,9 +785,6 @@ struct NewPlainShell {
     hook_agent: Option<AgentId>,
     /// The recovered selection's options those hook events are mapped with.
     hook_options: OptionValues,
-    /// Whether the recovered run was trusted, which those hook events are
-    /// mapped with.
-    hook_trusted: bool,
     /// The abandoned sessions the new session replaces.
     resumed_from: Vec<String>,
 }
@@ -859,7 +852,6 @@ fn plain_shell_record(
         work: crate::background_work::BackgroundWork::default(),
         hook_agent: new.hook_agent,
         hook_options: new.hook_options,
-        hook_trusted: new.hook_trusted,
         resumed_from: new.resumed_from,
     };
     push_recent_action(
@@ -1034,15 +1026,15 @@ fn shell_agent_note(
     Some(AgentNote {
         agent: cfg.agent.clone(),
         options: cfg.options.clone(),
-        trusted: cfg.dangerously_skip_permissions,
+        legacy_trusted: false,
         conversation_id: conversation_id.map(str::to_owned),
         extra_dirs: note_extra_dirs(cfg, members),
     })
 }
 
 /// The note for a recovered plain shell that types its hook agent's resume
-/// command (`resume_typed`): the hook agent with the recovered options and
-/// trust, and the resumed conversation. A shell with no hook agent, no
+/// command (`resume_typed`): the hook agent with the recovered options, and
+/// the resumed conversation. A shell with no hook agent, no
 /// conversation to resume or no resume command typed gets none.
 fn shell_resume_agent_note(
     cfg: &SpawnArgs,
@@ -1057,7 +1049,7 @@ fn shell_resume_agent_note(
     resume_typed.then(|| AgentNote {
         agent: agent.clone(),
         options: cfg.extras.hook_options.clone(),
-        trusted: cfg.extras.hook_trusted,
+        legacy_trusted: false,
         conversation_id: Some(conversation.clone()),
         extra_dirs: note_extra_dirs(cfg, members),
     })
@@ -1173,13 +1165,7 @@ async fn spawn_interactive_session(
     // The argv names the hook files, so they are written before the argv is
     // built. A plugin without hooks plans none; a failure leaves this spawn on
     // the heuristic.
-    let hook_settings = write_hook_settings(
-        hub,
-        &session_id,
-        &agent,
-        &cfg.options,
-        cfg.dangerously_skip_permissions,
-    );
+    let hook_settings = write_hook_settings(hub, &session_id, &agent, &cfg.options);
     let common = SpawnContext {
         conversation_id: conversation_id.as_deref(),
         resume_conversation: resume_conversation.as_deref(),
@@ -1609,7 +1595,6 @@ async fn spawn_plain_shell_session(
             busy_excluded,
             hook_agent: cfg.extras.hook_agent.clone(),
             hook_options: cfg.extras.hook_options.clone(),
-            hook_trusted: cfg.extras.hook_trusted,
             resumed_from: cfg.extras.resumed_from.clone(),
         },
         Some(Arc::clone(&pty)),
@@ -1683,7 +1668,6 @@ async fn spawn_plain_shell_session(
         meta.status_seq = snap.status_seq;
         meta.hook_agent.clone_from(&cfg.extras.hook_agent);
         meta.hook_options.clone_from(&cfg.extras.hook_options);
-        meta.hook_trusted = cfg.extras.hook_trusted;
         meta.resumed_from.clone_from(&cfg.extras.resumed_from);
         write_meta_then_sync(hub, &meta);
     }
@@ -1829,7 +1813,6 @@ pub(crate) async fn spawn_command_session(
             busy_excluded: false,
             hook_agent: None,
             hook_options: OptionValues::new(),
-            hook_trusted: false,
             resumed_from: Vec::new(),
         },
         Some(Arc::clone(&pty)),
@@ -1965,7 +1948,7 @@ fn prepare_shell_resume(
     family: Option<ShellFamily>,
 ) -> anyhow::Result<ShellResume> {
     let options = &cfg.extras.hook_options;
-    let hook_settings = write_hook_files(hub, session_id, plugin, options, cfg.extras.hook_trusted);
+    let hook_settings = write_hook_files(hub, session_id, plugin, options);
     let files = hook_settings.as_ref().map_or(&[][..], HookSettings::files);
     let command = match plugin.shell_resume(options, conversation_id, files) {
         Ok(None) => {
@@ -2104,7 +2087,6 @@ impl HeadlessRecord<'_> {
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: None,
             hook_options: OptionValues::new(),
-            hook_trusted: false,
             resumed_from: self.cfg.extras.resumed_from.clone(),
         }
     }
@@ -2730,7 +2712,6 @@ mod tests {
     /// The spawn arguments of a test agent spawn with its default options.
     fn test_agent_spawn_args() -> SpawnArgs {
         SpawnArgs {
-            dangerously_skip_permissions: false,
             agent: agent_api::test_agent::DESCRIPTOR.id.clone(),
             backend: Box::leak(Box::new(agent_api::test_agent::TestAgent::new(
                 ConversationPlan::None,
@@ -3090,7 +3071,6 @@ mod tests {
         );
         let stored_config = protocol::SpawnConfig::from_request(&request);
         let cfg = SpawnArgs {
-            dangerously_skip_permissions: false,
             agent: agent_registry::default_agent(),
             backend: claude_backend(),
             options: claude_options(),
@@ -3167,7 +3147,6 @@ mod tests {
             )
             .expect("store the command");
         let cfg = SpawnArgs {
-            dangerously_skip_permissions: false,
             agent: agent_registry::default_agent(),
             backend: claude_backend(),
             options: claude_options(),
@@ -3230,7 +3209,6 @@ mod tests {
     /// conversation `abc-123`.
     fn shell_resume_spawn_args() -> SpawnArgs {
         SpawnArgs {
-            dangerously_skip_permissions: false,
             agent: agent_registry::default_agent(),
             backend: claude_backend(),
             options: claude_options(),
@@ -3243,7 +3221,6 @@ mod tests {
                 hook_agent: Some(agent_registry::default_agent()),
                 resume_conversation: Some("abc-123".to_owned()),
                 hook_options: claude_options(),
-                hook_trusted: false,
                 resumed_from: Vec::new(),
             },
         }
@@ -3303,14 +3280,22 @@ mod tests {
         agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered")
     }
 
-    /// Claude's spawn arguments with secret-bearing env rows, trusted, with
-    /// one standalone extra folder.
+    /// `options` with Claude's bypass choice set.
+    fn with_bypass(mut options: OptionValues) -> OptionValues {
+        options.insert(
+            "permission_mode".to_owned(),
+            protocol::OptionValue::Text("bypass_permissions".to_owned()),
+        );
+        options
+    }
+
+    /// Claude's spawn arguments with secret-bearing env rows, in bypass mode,
+    /// with one standalone extra folder.
     fn note_spawn_args() -> SpawnArgs {
         SpawnArgs {
-            dangerously_skip_permissions: true,
             agent: agent_registry::default_agent(),
             backend: claude_backend(),
-            options: claude_options(),
+            options: with_bypass(claude_options()),
             env: agent_api::EnvPlan {
                 set: vec![(
                     "EXAMPLE_API_KEY".to_owned(),
@@ -3352,8 +3337,13 @@ mod tests {
             .expect("a shell-hosted agent gets a note");
 
         assert_eq!(note.agent, agent_registry::default_agent());
-        assert_eq!(note.options, claude_options());
-        assert!(note.trusted);
+        assert_eq!(note.options, with_bypass(claude_options()));
+        assert_eq!(
+            note.options.get("permission_mode"),
+            Some(&protocol::OptionValue::Text(
+                "bypass_permissions".to_owned()
+            ))
+        );
         assert_eq!(note.conversation_id.as_deref(), Some("conv-1"));
         assert_eq!(note.extra_dirs, [r"D:\yaat-server", r"D:\extra"]);
         let json = serde_json::to_string(&note).expect("encode the note");
@@ -3399,18 +3389,16 @@ mod tests {
         ])
     }
 
-    /// A recovered plain shell's spawn arguments: its own options empty and
-    /// untrusted, resuming `abc-123` with `hook_agent` on the recovered
-    /// options and trust, with secret-bearing env rows.
+    /// A recovered plain shell's spawn arguments: its own options empty,
+    /// resuming `abc-123` with `hook_agent` on the recovered options in bypass
+    /// mode, with secret-bearing env rows.
     fn shell_resume_note_args(hook_agent: Option<AgentId>) -> SpawnArgs {
         SpawnArgs {
-            dangerously_skip_permissions: false,
             options: OptionValues::new(),
             extras: SpawnExtras {
                 hook_agent,
                 resume_conversation: Some("abc-123".to_owned()),
-                hook_options: recovered_options(),
-                hook_trusted: true,
+                hook_options: with_bypass(recovered_options()),
                 resumed_from: Vec::new(),
             },
             ..note_spawn_args()
@@ -3426,8 +3414,14 @@ mod tests {
             .expect("a shell resuming its hook agent gets a note");
 
         assert_eq!(note.agent, agent_registry::default_agent());
-        assert_eq!(note.options, recovered_options());
-        assert!(note.trusted, "the recovered trust, not the shell's own");
+        assert_eq!(note.options, with_bypass(recovered_options()));
+        assert_eq!(
+            note.options.get("permission_mode"),
+            Some(&protocol::OptionValue::Text(
+                "bypass_permissions".to_owned()
+            )),
+            "the recovered bypass choice, not the shell's own options"
+        );
         assert_eq!(note.conversation_id.as_deref(), Some("abc-123"));
         assert_eq!(note.extra_dirs, [r"D:\yaat-server", r"D:\extra"]);
         let json = serde_json::to_string(&note).expect("encode the note");
@@ -3490,7 +3484,6 @@ mod tests {
             session_id,
             &agent_registry::default_agent(),
             &claude_options(),
-            false,
         )
         .expect("this hub resolves a cached tracer");
         assert!(file.exists(), "the writer wrote the settings file");
@@ -3518,7 +3511,6 @@ mod tests {
             session_id,
             &agent_registry::default_agent(),
             &claude_options(),
-            false,
         )
         .expect("writes the marker file");
         assert!(file.exists(), "the marker is there before the second spawn");
@@ -3636,12 +3628,11 @@ mod tests {
         fn hook_plan(
             &self,
             _opts: &serde_json::Value,
-            trusted: bool,
             shim: &agent_api::HookShim<'_>,
         ) -> agent_api::HookPlan {
             agent_registry::plugin(&agent_registry::default_agent())
                 .expect("Claude is registered")
-                .hook_plan(&claude_options(), trusted, shim)
+                .hook_plan(&claude_options(), shim)
                 .expect("Claude's default options decode")
         }
 
@@ -3752,12 +3743,11 @@ mod tests {
         fn hook_plan(
             &self,
             _opts: &serde_json::Value,
-            trusted: bool,
             shim: &agent_api::HookShim<'_>,
         ) -> agent_api::HookPlan {
             agent_registry::plugin(&agent_registry::default_agent())
                 .expect("Claude is registered")
-                .hook_plan(&claude_options(), trusted, shim)
+                .hook_plan(&claude_options(), shim)
                 .expect("Claude's default options decode")
         }
 
@@ -4041,14 +4031,12 @@ mod tests {
         fn hook_plan(
             &self,
             opts: &serde_json::Value,
-            trusted: bool,
             _shim: &agent_api::HookShim<'_>,
         ) -> agent_api::HookPlan {
             agent_api::HookPlan {
                 files: vec![agent_api::HookFile {
                     name: "echo.json".to_owned(),
-                    contents: serde_json::json!({ "options": opts, "trusted": trusted })
-                        .to_string(),
+                    contents: serde_json::json!({ "options": opts }).to_string(),
                 }],
                 args: Vec::new(),
             }
@@ -4069,14 +4057,12 @@ mod tests {
         }
     }
 
-    /// A recovered shell's spawn arguments whose own options are empty and
-    /// untrusted, resuming with `hook_options` and `hook_trusted`.
-    fn echo_resume_spawn_args(hook_options: OptionValues, hook_trusted: bool) -> SpawnArgs {
+    /// A recovered shell's spawn arguments whose own options are empty,
+    /// resuming with `hook_options`.
+    fn echo_resume_spawn_args(hook_options: OptionValues) -> SpawnArgs {
         let mut cfg = shell_resume_spawn_args();
         cfg.options = OptionValues::new();
-        cfg.dangerously_skip_permissions = false;
         cfg.extras.hook_options = hook_options;
-        cfg.extras.hook_trusted = hook_trusted;
         cfg
     }
 
@@ -4099,7 +4085,7 @@ mod tests {
         let resume = prepare_shell_resume(
             &hub,
             "s1",
-            &echo_resume_spawn_args(recovered, false),
+            &echo_resume_spawn_args(recovered),
             &EchoOptions,
             "abc-123",
             Some(ShellFamily::PowerShell),
@@ -4119,25 +4105,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_resume_hook_plan_gets_the_recovered_trust() {
+    async fn shell_resume_hook_plan_gets_the_recovered_bypass_choice() {
         let (hub, _scratch) = hook_test_hub("shell-resume-recovered-trust");
-        for trusted in [true, false] {
-            let session_id = format!("s-{trusted}");
-            let resume = prepare_shell_resume(
-                &hub,
-                &session_id,
-                &echo_resume_spawn_args(OptionValues::new(), trusted),
-                &EchoOptions,
-                "abc-123",
-                Some(ShellFamily::PowerShell),
-            )
-            .expect("the plugin answers a command");
-            assert_eq!(
-                echoed_hook_file(&resume)["trusted"],
-                serde_json::Value::Bool(trusted),
-                "the plain shell is untrusted; the hook plan gets the recovered run's trust"
-            );
-        }
+        let options = with_bypass(OptionValues::new());
+        let resume = prepare_shell_resume(
+            &hub,
+            "s1",
+            &echo_resume_spawn_args(options.clone()),
+            &EchoOptions,
+            "abc-123",
+            Some(ShellFamily::PowerShell),
+        )
+        .expect("the plugin answers a command");
+        assert_eq!(
+            echoed_hook_file(&resume)["options"],
+            serde_json::to_value(&options).expect("encode the options"),
+            "the hook plan gets the recovered run's options, its bypass choice included"
+        );
     }
 
     #[tokio::test]
@@ -4923,7 +4907,6 @@ mod tests {
                 busy_excluded: false,
                 hook_agent: None,
                 hook_options: OptionValues::new(),
-                hook_trusted: false,
                 resumed_from: lineage.clone(),
             },
             None,
@@ -5011,7 +4994,6 @@ mod tests {
                 busy_excluded: false,
                 hook_agent: None,
                 hook_options: OptionValues::new(),
-                hook_trusted: false,
                 resumed_from: Vec::new(),
             },
             None,
@@ -5069,7 +5051,6 @@ mod tests {
                 busy_excluded: true,
                 hook_agent: None,
                 hook_options: OptionValues::new(),
-                hook_trusted: false,
                 resumed_from: Vec::new(),
             },
             None,

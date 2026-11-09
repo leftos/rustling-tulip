@@ -47,6 +47,33 @@ pub fn check<A: Agent>(agent: &A) {
     check_summarizer(agent);
     check_accounts(agent);
     check_icon(descriptor);
+    check_bypass(descriptor);
+}
+
+/// The descriptor's bypass choice, when it names one, is a choice its schema offers and accepts.
+///
+/// # Panics
+///
+/// Panics naming the field and value when no choice field offers them, so the calling test fails.
+fn check_bypass(descriptor: &AgentDescriptor) {
+    let Some(bypass) = &descriptor.bypass else {
+        return;
+    };
+    let offered = descriptor.fields.iter().any(|field| {
+        field.id == bypass.field
+            && matches!(&field.kind, FieldKind::Choice { choices, .. }
+                if choices.iter().any(|choice| choice.value == bypass.value))
+    });
+    let values = OptionValues::from([(
+        bypass.field.clone(),
+        OptionValue::Text(bypass.value.clone()),
+    )]);
+    assert!(
+        offered && validate(descriptor, &values).is_ok(),
+        "the descriptor's bypass names `{}`=`{}`, which no choice field offers",
+        bypass.field,
+        bypass.value
+    );
 }
 
 /// An account service, when the agent offers one, is offered through the
@@ -364,21 +391,16 @@ fn check_chat<A: Agent>(agent: &A) {
     }
 }
 
-/// A recovery with nothing recorded yields option values, trusted or not,
-/// and the adapter reports the agent's own import revision.
+/// A recovery with nothing recorded yields option values, and the adapter
+/// reports the agent's own import revision.
 #[expect(
     clippy::panic,
     reason = "a conformance failure must fail the calling test"
 )]
 fn check_recovery_and_import<A: Agent>(agent: &A) {
-    for trusted in [false, true] {
-        let run = RecoveredRun {
-            recorded: None,
-            trusted,
-        };
-        if let Err(err) = AgentPlugin::recovery_options(agent, &run) {
-            panic!("a recovery with nothing recorded (trusted {trusted}) fails: {err}");
-        }
+    let run = RecoveredRun { recorded: None };
+    if let Err(err) = AgentPlugin::recovery_options(agent, &run) {
+        panic!("a recovery with nothing recorded fails: {err}");
     }
     assert_eq!(
         AgentPlugin::import_rev(agent),

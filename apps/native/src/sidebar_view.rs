@@ -3268,7 +3268,6 @@ mod tests {
             unseen: false,
             background: false,
             state: LeafState::Orphan,
-            trusted: false,
             tooltip: "s1".to_owned(),
         }
     }

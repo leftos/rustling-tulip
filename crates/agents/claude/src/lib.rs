@@ -36,10 +36,10 @@ use agent_api::{
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
-    AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, CharRange, ChatAnswerKind,
-    ChatEntry, ChatPrompt, ChatScreen, ChipRule, Choice, ChoiceStyle, FieldKind, FieldOverride,
-    FieldRule, ImagePaste, OptionField, OptionValue, SessionMember, SessionStatus, ShiftEnter,
-    SpawnPlacement, TitleRules,
+    AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, BypassChoice, CharRange,
+    ChatAnswerKind, ChatEntry, ChatPrompt, ChatScreen, ChipRule, Choice, ChoiceStyle, FieldKind,
+    FieldOverride, FieldRule, ImagePaste, OptionField, OptionValue, SessionMember, SessionStatus,
+    ShiftEnter, SpawnPlacement, TitleRules,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -69,7 +69,7 @@ const SHELL_EXPANDED: &[char] = &[
 #[serde(default)]
 pub struct ClaudeOptions {
     /// Claude's `--permission-mode <value>`; `None` passes none, leaving the
-    /// CLI's default. Ignored (and the flag omitted) on a trusted spawn.
+    /// CLI's default. Bypass permissions runs without permission prompts.
     pub permission_mode: Option<PermissionMode>,
     /// The endpoint the CLI talks to.
     pub provider: ClaudeProvider,
@@ -106,7 +106,10 @@ fn claude_descriptor() -> AgentDescriptor {
             shell_resume: true,
             user_hooks: true,
         },
-        trust_note: Some("Trusted launch passes --dangerously-skip-permissions.".to_string()),
+        bypass: Some(BypassChoice {
+            field: "permission_mode".to_string(),
+            value: "bypass_permissions".to_string(),
+        }),
         texts: AgentTexts {
             shell_resume_label: "Shell running claude --resume".to_string(),
             no_conversation: "no conversation found".to_string(),
@@ -175,7 +178,7 @@ fn choices(pairs: &[(&str, &str)]) -> Vec<Choice> {
 fn permission_mode_field() -> OptionField {
     OptionField {
         spawn: SpawnPlacement::Advanced,
-        locked_when_trusted: true,
+        locked_when_trusted: false,
         ..main_field(
             "permission_mode",
             "Permission mode",
@@ -293,15 +296,14 @@ impl Agent for ClaudePlugin {
         &["claude", "node"]
     }
 
-    /// The recorded options, else the default ones. `run.trusted` is not
-    /// read: a trusted recovery carries `--dangerously-skip-permissions` on
-    /// its request, and the recorded permission mode stays as it was.
+    /// The recorded options, else the default ones; the recorded permission
+    /// mode stays as it was.
     fn recovery_options(&self, run: &RecoveredRun<'_>) -> ClaudeOptions {
         run.recorded_as().unwrap_or_default()
     }
 
-    /// Revision 3 keeps the run's options and trust on the history entry
-    /// itself, so older imports are read again from their tracer logs.
+    /// Revision 3 keeps the run's options on the history entry itself, so
+    /// older imports are read again from their tracer logs.
     fn import_rev(&self) -> u32 {
         import::IMPORT_REV
     }
@@ -406,7 +408,7 @@ impl Agent for ClaudePlugin {
             args.push("--append-system-prompt".to_string());
             args.push(prelude);
         }
-        extend_common(&mut args, common, opts);
+        extend_common(&mut args, opts);
         // The injected hooks ride on the plan's args (`--settings <path>` for
         // Claude), ahead of the resume branch so a resumed conversation carries
         // them too, and ahead of `--session-id` so both interactive forms keep
@@ -438,7 +440,7 @@ impl Agent for ClaudePlugin {
     fn headless_args(
         &self,
         opts: &ClaudeOptions,
-        common: &SpawnContext<'_>,
+        _common: &SpawnContext<'_>,
         members: &[SessionMember],
         prompt: &str,
     ) -> Option<Vec<String>> {
@@ -456,7 +458,7 @@ impl Agent for ClaudePlugin {
             args.push("--append-system-prompt".to_string());
             args.push(prelude);
         }
-        extend_common(&mut args, common, opts);
+        extend_common(&mut args, opts);
         args.push("-p".to_string());
         args.push(prompt.to_string());
         Some(args)
@@ -472,7 +474,7 @@ impl Agent for ClaudePlugin {
         }
     }
 
-    fn hook_plan(&self, _opts: &ClaudeOptions, _trusted: bool, shim: &HookShim<'_>) -> HookPlan {
+    fn hook_plan(&self, _opts: &ClaudeOptions, shim: &HookShim<'_>) -> HookPlan {
         hooks::hook_plan(shim)
     }
 
@@ -504,9 +506,8 @@ impl Agent for ClaudePlugin {
         &self,
         body: &serde_json::Value,
         spawn: Option<&ClaudeOptions>,
-        trusted: bool,
     ) -> Option<HookReport> {
-        hooks::map_hook_event(body, spawn, trusted)
+        hooks::map_hook_event(body, spawn)
     }
 
     fn map_live_line(&self, body: &serde_json::Value) -> Option<LiveLine> {
@@ -695,12 +696,10 @@ pub fn default_model(provider: ClaudeProvider) -> Option<&'static str> {
     }
 }
 
-/// Append claude's `--model`, `--permission-mode`, and
-/// `--dangerously-skip-permissions` args. A spawn that names no model on a
-/// provider with a default model (see [`default_model`]) passes
-/// that one. The claude CLI rejects `--permission-mode` together with
-/// `--dangerously-skip-permissions`, so the latter wins when both are set.
-fn extend_common(args: &mut Vec<String>, common: &SpawnContext<'_>, opts: &ClaudeOptions) {
+/// Append claude's `--model` and `--permission-mode` args. A spawn that names
+/// no model on a provider with a default model (see [`default_model`]) passes
+/// that one. Bypass permissions passes `--permission-mode bypassPermissions`.
+fn extend_common(args: &mut Vec<String>, opts: &ClaudeOptions) {
     if let Some(model) = opts
         .model
         .as_deref()
@@ -709,9 +708,7 @@ fn extend_common(args: &mut Vec<String>, common: &SpawnContext<'_>, opts: &Claud
         args.push("--model".to_string());
         args.push(model.to_string());
     }
-    if common.dangerously_skip_permissions {
-        args.push("--dangerously-skip-permissions".to_string());
-    } else if let Some(mode) = opts.permission_mode {
+    if let Some(mode) = opts.permission_mode {
         args.push("--permission-mode".to_string());
         args.push(mode.as_cli_arg().to_string());
     }
@@ -872,9 +869,8 @@ mod tests {
         }
     }
 
-    fn common(skip: bool, has_injector: bool) -> SpawnContext<'static> {
+    fn common(has_injector: bool) -> SpawnContext<'static> {
         SpawnContext {
-            dangerously_skip_permissions: skip,
             has_prompt_injector: has_injector,
             conversation_id: None,
             resume_conversation: None,
@@ -1013,8 +1009,8 @@ mod tests {
         }
     }
 
-    fn recovered(recorded: Option<&OptionValues>, trusted: bool) -> ClaudeOptions {
-        ClaudePlugin.recovery_options(&RecoveredRun { recorded, trusted })
+    fn recovered(recorded: Option<&OptionValues>) -> ClaudeOptions {
+        ClaudePlugin.recovery_options(&RecoveredRun { recorded })
     }
 
     fn claude_values(provider: &str, mode: OptionValue, model: OptionValue) -> OptionValues {
@@ -1036,7 +1032,7 @@ mod tests {
             OptionValue::Text("deepseek-pro".to_string()),
         );
         assert_eq!(
-            recovered(Some(&recorded), false),
+            recovered(Some(&recorded)),
             ClaudeOptions {
                 permission_mode: Some(PermissionMode::Plan),
                 provider: ClaudeProvider::Deepseek,
@@ -1047,8 +1043,7 @@ mod tests {
 
     #[test]
     fn recovery_without_a_record_is_the_default_options() {
-        assert_eq!(recovered(None, false), ClaudeOptions::default());
-        assert_eq!(recovered(None, true), ClaudeOptions::default());
+        assert_eq!(recovered(None), ClaudeOptions::default());
     }
 
     /// A hand-started agent's shell has no spawn options, so the daemon maps
@@ -1061,17 +1056,21 @@ mod tests {
     }
 
     #[test]
-    fn recovery_trusted_leaves_the_recorded_permission_mode() {
-        let recorded = claude_values(
-            "anthropic",
-            OptionValue::Text("accept_edits".to_string()),
-            OptionValue::Null,
+    fn the_bypass_choice_is_bypass_permissions() {
+        assert_eq!(
+            ClaudePlugin.descriptor().bypass,
+            Some(BypassChoice {
+                field: "permission_mode".to_string(),
+                value: "bypass_permissions".to_string(),
+            })
         );
-        let trusted = recovered(Some(&recorded), true);
-        assert_eq!(trusted, recovered(Some(&recorded), false));
-        assert_eq!(trusted.permission_mode, Some(PermissionMode::AcceptEdits));
-        let unset = claude_values("anthropic", OptionValue::Null, OptionValue::Null);
-        assert_eq!(recovered(Some(&unset), true).permission_mode, None);
+        let decoded: ClaudeOptions =
+            serde_json::from_value(serde_json::json!({"permission_mode": "bypass_permissions"}))
+                .expect("the bypass choice decodes");
+        assert_eq!(
+            decoded.permission_mode,
+            Some(PermissionMode::BypassPermissions)
+        );
     }
 
     fn on_provider(provider: ClaudeProvider) -> ClaudeOptions {
@@ -1163,15 +1162,14 @@ mod tests {
             session_id: SESSION_ID,
             config_dir: std::path::Path::new("X:/rt"),
         };
-        let hook_args =
-            Agent::hook_plan(&ClaudePlugin, &ClaudeOptions::default(), false, &shim).args;
+        let hook_args = Agent::hook_plan(&ClaudePlugin, &ClaudeOptions::default(), &shim).args;
         let mut emitted = Vec::new();
-        for skip in [false, true] {
-            let opts = options(Some(PermissionMode::Plan), Some("opus"));
+        for mode in [PermissionMode::Plan, PermissionMode::BypassPermissions] {
+            let opts = options(Some(mode), Some("opus"));
             let fresh = SpawnContext {
                 add_dirs: &extra,
                 hook_args: &hook_args,
-                ..with_session_id(skip, false)
+                ..with_session_id(false)
             };
             emitted.extend(flags(&interactive(&opts, &fresh, &m, Some("hello"))));
             let resumed = SpawnContext {
@@ -1188,7 +1186,6 @@ mod tests {
             "--session-id",
             "--model",
             "--permission-mode",
-            "--dangerously-skip-permissions",
             "--add-dir",
             "--append-system-prompt",
             "-p",
@@ -1212,10 +1209,10 @@ mod tests {
     #[test]
     fn resume_replaces_session_id_and_drops_the_prompt() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
-        let opts = options(None, None);
+        let opts = options(Some(PermissionMode::BypassPermissions), None);
         let common = SpawnContext {
             resume_conversation: Some(RESUME_ID),
-            ..with_session_id(true, false)
+            ..with_session_id(false)
         };
         let args = interactive(&opts, &common, &m, Some("hello"));
         assert!(!args.contains(&"--session-id".to_string()), "{args:?}");
@@ -1227,7 +1224,12 @@ mod tests {
         assert_eq!(tail[0], "--append-system-prompt");
         assert_eq!(
             tail[2..],
-            ["--dangerously-skip-permissions", "--resume", RESUME_ID]
+            [
+                "--permission-mode",
+                "bypassPermissions",
+                "--resume",
+                RESUME_ID
+            ]
         );
     }
 
@@ -1239,7 +1241,7 @@ mod tests {
         let common = SpawnContext {
             add_dirs: &extra,
             resume_conversation: Some(RESUME_ID),
-            ..common(false, false)
+            ..common(false)
         };
         let args = interactive(&opts, &common, &m, None);
         assert_eq!(
@@ -1257,10 +1259,10 @@ mod tests {
 
     const SESSION_ID: &str = "0b6f4c7e-1111-4222-8333-944455556666";
 
-    fn with_session_id(skip: bool, has_injector: bool) -> SpawnContext<'static> {
+    fn with_session_id(has_injector: bool) -> SpawnContext<'static> {
         SpawnContext {
             conversation_id: Some(SESSION_ID),
-            ..common(skip, has_injector)
+            ..common(has_injector)
         }
     }
 
@@ -1268,7 +1270,7 @@ mod tests {
     fn interactive_args_include_session_id() {
         let m = members(&["X:/dev/a"]);
         let opts = options(None, Some("opus"));
-        let args = interactive(&opts, &with_session_id(false, false), &m, None);
+        let args = interactive(&opts, &with_session_id(false), &m, None);
         assert_eq!(args, vec!["--model", "opus", "--session-id", SESSION_ID]);
     }
 
@@ -1276,11 +1278,11 @@ mod tests {
     fn interactive_args_with_prompt_include_session_id() {
         let m = members(&["X:/dev/a"]);
         let opts = options(None, None);
-        let args = interactive(&opts, &with_session_id(false, false), &m, Some("hello"));
+        let args = interactive(&opts, &with_session_id(false), &m, Some("hello"));
         assert_eq!(args, vec!["--session-id", SESSION_ID, "-p", "hello"]);
 
         // With an injector the prompt stays off the argv; the id does not.
-        let injected = interactive(&opts, &with_session_id(false, true), &m, Some("hello"));
+        let injected = interactive(&opts, &with_session_id(true), &m, Some("hello"));
         assert_eq!(injected, vec!["--session-id", SESSION_ID]);
     }
 
@@ -1294,7 +1296,7 @@ mod tests {
         let hook_args = ["--settings".to_string(), HOOK_SETTINGS.to_string()];
         let common = SpawnContext {
             hook_args: &hook_args,
-            ..with_session_id(false, false)
+            ..with_session_id(false)
         };
         let args = interactive(&opts, &common, &m, None);
         assert_eq!(
@@ -1313,18 +1315,19 @@ mod tests {
     #[test]
     fn resume_args_pass_the_hook_settings_file() {
         let m = members(&["X:/dev/a"]);
-        let opts = options(None, None);
+        let opts = options(Some(PermissionMode::BypassPermissions), None);
         let hook_args = ["--settings".to_string(), HOOK_SETTINGS.to_string()];
         let common = SpawnContext {
             hook_args: &hook_args,
             resume_conversation: Some(RESUME_ID),
-            ..with_session_id(true, false)
+            ..with_session_id(false)
         };
         let args = interactive(&opts, &common, &m, Some("hello"));
         assert_eq!(
             args,
             vec![
-                "--dangerously-skip-permissions",
+                "--permission-mode",
+                "bypassPermissions",
                 "--settings",
                 HOOK_SETTINGS,
                 "--resume",
@@ -1340,7 +1343,7 @@ mod tests {
         let hook_args = ["--settings".to_string(), HOOK_SETTINGS.to_string()];
         let common = SpawnContext {
             hook_args: &hook_args,
-            ..common(false, false)
+            ..common(false)
         };
         let args = headless(&opts, &common, &m, "hello");
         assert!(!args.contains(&"--settings".to_string()), "{args:?}");
@@ -1351,7 +1354,7 @@ mod tests {
     fn headless_args_have_no_session_id() {
         let m = members(&["X:/dev/a"]);
         let opts = options(None, None);
-        let args = headless(&opts, &with_session_id(false, false), &m, "hello");
+        let args = headless(&opts, &with_session_id(false), &m, "hello");
         assert!(!args.contains(&"--session-id".to_string()), "{args:?}");
         assert!(!args.contains(&SESSION_ID.to_string()), "{args:?}");
     }
@@ -1363,14 +1366,14 @@ mod tests {
             provider: ClaudeProvider::Deepseek,
             ..options(None, None)
         };
-        let interactive_args = interactive(&opts, &common(false, false), &m, None);
+        let interactive_args = interactive(&opts, &common(false), &m, None);
         assert!(
             interactive_args
                 .windows(2)
                 .any(|w| *w == ["--model", "deepseek-flash"]),
             "{interactive_args:?}"
         );
-        let headless_args = headless(&opts, &common(false, false), &m, "hi");
+        let headless_args = headless(&opts, &common(false), &m, "hi");
         assert!(
             headless_args
                 .windows(2)
@@ -1381,9 +1384,9 @@ mod tests {
             model: Some("deepseek-pro".to_string()),
             ..opts
         };
-        let chosen = interactive(&chosen_opts, &common(false, false), &m, None);
+        let chosen = interactive(&chosen_opts, &common(false), &m, None);
         assert_eq!(chosen, vec!["--model", "deepseek-pro"]);
-        let anthropic = interactive(&options(None, None), &common(false, false), &m, None);
+        let anthropic = interactive(&options(None, None), &common(false), &m, None);
         assert!(!anthropic.contains(&"--model".to_string()), "{anthropic:?}");
     }
 
@@ -1391,7 +1394,7 @@ mod tests {
     fn interactive_single_repo_with_model() {
         let m = members(&["X:/dev/a"]);
         let opts = options(Some(PermissionMode::AcceptEdits), Some("opus"));
-        let args = interactive(&opts, &common(false, false), &m, Some("hello"));
+        let args = interactive(&opts, &common(false), &m, Some("hello"));
         assert_eq!(
             args,
             vec![
@@ -1406,19 +1409,26 @@ mod tests {
     }
 
     #[test]
-    fn interactive_skip_perms_overrides_permission_mode() {
+    fn interactive_bypass_mode_passes_bypass_permissions() {
         let m = members(&["X:/dev/a"]);
-        let opts = options(Some(PermissionMode::Plan), None);
-        let args = interactive(&opts, &common(true, false), &m, Some("hi"));
-        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(!args.contains(&"--permission-mode".to_string()));
+        let opts = options(Some(PermissionMode::BypassPermissions), None);
+        let args = interactive(&opts, &common(false), &m, Some("hi"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--permission-mode" && pair[1] == "bypassPermissions"),
+            "{args:?}"
+        );
+        assert!(
+            !args.contains(&"--dangerously-skip-permissions".to_string()),
+            "{args:?}"
+        );
     }
 
     #[test]
     fn interactive_workspace_emits_add_dir_and_prelude() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
         let opts = options(None, None);
-        let args = interactive(&opts, &common(false, false), &m, None);
+        let args = interactive(&opts, &common(false), &m, None);
         // --add-dir for the second member only (first is cwd).
         assert!(args.windows(2).any(|w| w == ["--add-dir", "X:/dev/b"]));
         // Workspace prelude emitted via --append-system-prompt.
@@ -1434,7 +1444,7 @@ mod tests {
     fn interactive_with_injector_omits_prompt_flag() {
         let m = members(&["X:/dev/a"]);
         let opts = options(None, None);
-        let args = interactive(&opts, &common(false, true), &m, Some("would-be-prompt"));
+        let args = interactive(&opts, &common(true), &m, Some("would-be-prompt"));
         assert!(!args.contains(&"-p".to_string()));
         assert!(!args.iter().any(|a| a == "would-be-prompt"));
     }
@@ -1443,7 +1453,7 @@ mod tests {
     fn headless_args_include_print_and_stream_json() {
         let m = members(&["X:/dev/a"]);
         let opts = options(None, Some("sonnet"));
-        let args = headless(&opts, &common(false, false), &m, "hello world");
+        let args = headless(&opts, &common(false), &m, "hello world");
         assert!(args.starts_with(&[
             "--print".to_string(),
             "--output-format".to_string(),
@@ -1458,7 +1468,7 @@ mod tests {
     fn headless_workspace_emits_add_dir_and_prelude() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
         let opts = options(None, None);
-        let args = headless(&opts, &common(false, false), &m, "go");
+        let args = headless(&opts, &common(false), &m, "go");
         assert!(args.windows(2).any(|w| w == ["--add-dir", "X:/dev/b"]));
         assert!(args.iter().any(|a| a == "--append-system-prompt"));
     }

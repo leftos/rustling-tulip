@@ -161,7 +161,8 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
-    const NOTE: &str = r#"{"agent":"test-agent","options":{},"trusted":true,"conversation_id":null,"extra_dirs":["D:\\b c"]}"#;
+    const NOTE: &str =
+        r#"{"agent":"test-agent","options":{},"conversation_id":null,"extra_dirs":["D:\\b c"]}"#;
 
     fn cli(args: &[&str]) -> Cli {
         let argv = ["rt-tracer", "--session-id", "s1", "--cwd", "D:\\a"];

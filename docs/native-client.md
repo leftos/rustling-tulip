@@ -41,7 +41,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   A repo or workspace whose stored spawn config has launched before draws a two-line 46 px row.
 
-  The name line sits over a muted last-launch summary (`container-<key>-summary`) of the agent's descriptor label, run mode and target, then each field set away from its default in the descriptor's order (a choice's label, a typed value, a toggle's label), then `trusted`, then `N env`, absent parts omitted (`Claude · Interactive · new worktree from main · Accept edits · opus · 2 env`). The row's tooltip is `Last launch: <summary>`, and a never-launched row stays 30 px.
+  The name line sits over a muted last-launch summary (`container-<key>-summary`) of the agent's descriptor label, run mode and target, then each field set away from its default in the descriptor's order (a choice's label, a typed value, a toggle's label), then `N env`, absent parts omitted (`Claude · Interactive · new worktree from main · Accept edits · opus · 2 env`). The row's tooltip is `Last launch: <summary>`, and a never-launched row stays 30 px.
 
   A click focuses the container row and folds it; while the sidebar holds keyboard focus the focused row draws the 2 px `ACCENT` ring (`container-<key>-focus`), Up and Down move that focus among the visible container rows, Enter and Space fold, and Esc clears it and returns the keyboard to the terminal.
 
@@ -53,7 +53,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   A double-click on the row replays into the current tab too: its first click still folds or unfolds the row, and its second replays instead of folding again. Two launch gestures for one container within 500 ms count as one, so a double-click or a repeated ▶ launches once.
 
-  With no stored config, both open the spawn dialog locked to the container; a trusted config opens the dialog prefilled, after the `Review trusted launch` warning toast, unless "Trusted launch by default" is on, when it spawns at once with neither toast nor dialog; a worktree config waits for the daemon's fresh `SuggestBranchName`, replaying with that name (a reply is matched by its `request_id`, and a timeout raises `Couldn't pick a branch name for launch-last`), while an in-place config replays at once.
+  With no stored config, both open the spawn dialog locked to the container; a config in Bypass permissions mode replays like any other, with neither toast nor dialog; a worktree config waits for the daemon's fresh `SuggestBranchName`, replaying with that name (a reply is matched by its `request_id`, and a timeout raises `Couldn't pick a branch name for launch-last`), while an in-place config replays at once.
 
   A stored config that is headless (`SessionMode::Headless`) is never replayed: the row gesture (double-click or ▶) launches nothing, opens no dialog and raises a Warning toast `Headless runs aren't supported in this client` with no detail, and `Launch last again ▸` is dimmed with that text as its tip, its click doing nothing.
 
@@ -438,7 +438,7 @@ Inside a group the line follows the displayed order and the drop moves the dragg
 
 ## Settings
 
-The Settings modal's tab list reads General, Notifications, Dashboard, Spawn defaults, Worktrees, Remote access, Appearance and App title, then a non-selectable `Agents` group row and one tab per agent the daemon lists, in the daemon's order, each labelled with the descriptor's label (selector `settings-tab-{tag}`). The group row is a label only: no page, click, hover or keyboard stop. With no agents listed (disconnected) there is no `Agents` row and no agent tab.
+The Settings modal's tab list reads General, Notifications, Dashboard, Worktrees, Remote access, Appearance and App title, then a non-selectable `Agents` group row and one tab per agent the daemon lists, in the daemon's order, each labelled with the descriptor's label (selector `settings-tab-{tag}`). The group row is a label only: no page, click, hover or keyboard stop. With no agents listed (disconnected) there is no `Agents` row and no agent tab.
 
 Remote access (Tailscale) is absent from the list while the client's target is a remote host, and Settings falls back to General.
 
@@ -488,7 +488,11 @@ Approve and Deny presses that arrive before the pending-devices list are held (`
 
 `Start the daemon when I log in` registers the HKCU Run value (a LaunchAgent on macOS) through `daemon_client::autostart`, behind the `Autostart` seam in `remote_access.rs` (`RootDeps.autostart`). The switch is a pending edit applied by OK or Apply; a write that fails keeps Settings open with `Could not change start on login: {reason}.` under the switch and the change still pending, and Cancel leaves the login launch as it was. The switch is inert while the login launch could not be read. The page's controls are inert until the first `RemoteStatus` arrives, and a new connection forgets it.
 
-Spawn defaults holds "Trusted launch by default" (hint: "When enabled, new agent sessions skip their approval prompts."), the only Settings value saved in `native-ui.json`'s `spawn.trusted`. The same object holds `spawn.last_trusted`, the Trusted choice of the last Spawn from a dialog the user filled in for an agent (not a prefilled one: duplicate, Edit first or launch-last review; not a Shell spawn); the New session dialog opens Trusted on it, falling back to `spawn.trusted` while it is absent.
+Running an agent with its permission prompts bypassed is its Bypass choice on its own page (`AgentDescriptor.bypass`; Claude's Permission mode "Bypass permissions"), saved on the daemon like any agent setting and opening every spawn dialog on it.
+
+A Trusted launch default an older release saved in `native-ui.json` (`spawn.trusted`, or `spawn.last_trusted` when present) moves there: when a host's agents and their Settings values arrive while that saved choice was trusted, `move_trusted_default` (`settings_view.rs`) sends each agent's bypass choice to that host with `SetAgentSettings`.
+
+The move logs `settings: moving the saved trusted-launch default into the agents' bypass choice` (field `host`), and records the host in `spawn.trusted_moved` (`@local` for This PC), so each host takes it once. A host whose agents name no bypass choice (an older daemon) is not recorded, and is tried again on its next connect. Any change this client sends to a host's agent Settings records that host too, so the old default never lands on top of what the user chose there.
 
 An agent page's first section, titled with the descriptor's label (Claude's reads "Claude"), draws one row per descriptor field marked `settings: true`, in descriptor order, with the descriptor's choice labels (Claude: "Permission mode", then "Provider").
 
@@ -498,11 +502,9 @@ Those rows read the connected daemon's `AgentSettings` for the page's agent and 
 
 A change logs `settings: setting an agent option` (fields `agent` and `key`) in `native.log`; a press whose control no longer matches its field logs at debug `settings: pressed control does not match its field; ignored`, and a text apply with no value logs `settings: the text field takes no value now; nothing sent`.
 
-Selectors are `settings-{tag}-{field}-{choice}` for a choice (the field id's `_` becomes `-`: `settings-claude-permission-mode-{cli-default|default|accept-edits|bypass-permissions|plan}`, `settings-claude-provider-{anthropic|deepseek}`), `settings-{tag}-{field}` for a toggle, a text input and the unknown-kind note, and `settings-{tag}-{field}-locked` for the locked note.
+Selectors are `settings-{tag}-{field}-{choice}` for a choice (the field id's `_` becomes `-`: `settings-claude-permission-mode-{cli-default|default|accept-edits|bypass-permissions|plan}`, `settings-claude-provider-{anthropic|deepseek}`), and `settings-{tag}-{field}` for a toggle, a text input and the unknown-kind note.
 
 A page whose agent a connected daemon no longer lists gives way to General and its drafts are dropped; a dropped connection keeps the page and its drafts until the next `Welcome`, which closes Settings.
-
-While trusted launch is on, only Claude's Permission mode row locks: it is disabled, shows the stored value and carries the note "Ignored while trusted launch is on. The chosen value is kept for when you turn trusted launch off."; Provider stays editable. The launch rows below stay reachable in the Tab ring.
 
 Each agent page ends with a "Launch command" section with a Program field (placeholder the agent's tag) and an Extra arguments field. Drafts and pending applies are per agent, and `SetAgentCommand` names the page's agent; an apply logs `settings: applying an agent's launch command` (field `agent`). OK or Apply sends both, trimmed, as `SetAgentCommand`; both empty clears the command.
 
@@ -630,7 +632,7 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
 
   The rail is 52 px on `SUNKEN` with 36 px tiles and a 2 px coral active bar; the tab bar 38 px on `SURFACE`, the active tab on `GROUND`; the footer 28 px on `SUNKEN`. Panes are cards with an 8 px radius, 6 px apart inside 6 px of padding (`PANE_GUTTER`; the sidebar and source-control handles keep `DIVIDER_WIDTH`), the terminal inset by the 1 px border with square inner corners.
 
-  A pane header is one 36 px row (`RAISED` when focused, else `SURFACE`, a 3 px accent line on its left edge) holding the title, then the runtime chip, one filled chip per entry of the snapshot's `agent_chips`, `repo:branch`, `+N` (further workspace members, listed with their worktree paths in its tooltip), and a trusted chip, then 26 px buttons.
+  A pane header is one 36 px row (`RAISED` when focused, else `SURFACE`, a 3 px accent line on its left edge) holding the title, then the runtime chip, one filled chip per entry of the snapshot's `agent_chips`, `repo:branch`, and `+N` (further workspace members, listed with their worktree paths in its tooltip), then 26 px buttons.
 
   A Claude session routed to DeepSeek shows a `DeepSeek` agent chip (element `pane-chip-<pane>-provider`; the text and the hover tip, "Runs on DeepSeek", come from the daemon), and a plain shell or an Anthropic session shows none. When it runs short, the `repo:branch` chip truncates first, then the title, and the buttons never move until the header is too narrow for them.
 
@@ -660,7 +662,7 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
 
   A Resume of an abandoned session keeps the old session's name and accent, and the new session takes the old one's place in the sidebar.
 
-  Shift on a Duplicate ▸ choice asks the daemon for the source's stored spawn config (`GetSpawnConfig`) and opens the spawn dialog on its reply, locked on the source's repo or workspace, prefilled after the Spawn defaults so the source's runtime, run mode, trusted flag, its own agent's options, model, env rows, base and worktree toggle win, with Open in set to the clicked target.
+  Shift on a Duplicate ▸ choice asks the daemon for the source's stored spawn config (`GetSpawnConfig`) and opens the spawn dialog on its reply, locked on the source's repo or workspace, prefilled after the agent's Settings values so the source's runtime, run mode, its own agent's options (Bypass permissions among them), model, env rows, base and worktree toggle win, with Open in set to the clicked target.
 
   The branch follows the daemon's duplicate rule (a worktree source gets a fresh suggestion, an in-place one keeps its branch), Advanced opens only for settings the source set, and a prefilled worktree toggle never saves the repo's worktree default.
 
@@ -674,15 +676,13 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
 
   A Choice whose default is no value gets a first choice `CLI default`, and a Text or Model field with no default shows the placeholder `CLI default`. Selectors are `spawn-opt-<field>-<choice>` (`spawn-opt-permission-mode-plan`, `spawn-opt-provider-deepseek`, `spawn-opt-permission-mode-cli-default`), `spawn-opt-<field>` for a toggle or input, and `spawn-opt-model-sonnet` for a chip.
 
-  A field locked on a trusted launch carries the note `Ignored while trusted launch is on. The chosen value is kept for when you turn trusted launch off.` and is disabled, showing its kept value (a text or model one is read-only).
-
-  The Trusted launch checkbox's detail line is the agent's `trust_note` (Claude: `Trusted launch passes --dangerously-skip-permissions.`), and none shows for an agent without one. The warning reads `Approval prompts are bypassed for this session.` and is not shown while "Trusted launch by default" is on. The worktree checkbox note reads `Unchecked: run the agent in the repo's main directory`.
+  The dialog has no Trusted launch checkbox: Claude's Permission mode "Bypass permissions" is the one way to skip the prompts, and the request's deprecated `dangerously_skip_permissions` is set exactly when the chosen agent's options hold its descriptor's bypass choice. The worktree checkbox note reads `Unchecked: run the agent in the repo's main directory`.
 
   A field's initial value is the first that exists of: the agent's Settings value (`DaemonMessage::AgentSettings`), the target's last spawn of that agent, a Shift-duplicate source's value, then the user's edits. After a target switch the fields the user set keep their values and every other field follows the new target's last spawn.
 
   Values are kept per agent across Runtime switches. Duplicating a plain shell changes no agent's values, and a source naming an agent the daemon does not list falls back to the first listed agent with its Settings values.
 
-  Advanced opens on its own when an Advanced field starts off its default (from Settings, the last spawn or a duplicate source) or env rows are prefilled, and keeps following target switches until the user opens or closes it. On the wire `SpawnRequest.agent.options` is sparse (only values off the field default), a trusted launch omits locked fields, and a plain shell sends `agent: None`.
+  Advanced opens on its own when an Advanced field starts off its default (from Settings, the last spawn or a duplicate source) or env rows are prefilled, and keeps following target switches until the user opens or closes it. On the wire `SpawnRequest.agent.options` is sparse (only values off the field default), and a plain shell sends `agent: None`.
 - **Spawn dialog env rows** (`spawn_form.rs`, `spawn_view.rs`): each row has a Secret toggle, ticked while the key matches `protocol::env_rows::is_secret_key` until the user touches it; a ticked row's key goes in `SpawnRequest.secret_env_keys`.
 
   A ticked row shows the note "Saved in Windows Credential Manager; only a reference is kept." and masks its value while typed (`TextInput::set_masked`: dots drawn in place of the text, copy disabled), with a Show / Hide button. An un-ticked row whose key still matches the pattern shows "Still saved securely: the name looks like a secret.", since the daemon seals it anyway.
@@ -696,7 +696,7 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
   Spawn, branch listing, fetch, branch-name suggestion, preview, existing-worktree listing and the worktree-default save all go to the target's host, and a reply from another host is ignored. The env-name list (`ListEnvNames`) is still This PC's. Moving the target to another host switches the agent list and options to that host's (only fields the user has not touched), removes `${secret:…}` env rows (plain rows stay, since a sealed secret lives on the host that sealed it) and shows "Secret rows were removed: they are sealed on {host}." in the env section until the next edit there, `{host}` being the host the target left. A registry refresh that moves the target redraws the env and option fields at once, a host whose agents arrive after the dialog opened offers them (an untouched agent choice takes the first one, as a target change does), and the worktree preview is keyed by host as well as repo, branch and base.
 
   The container menu's Spawn session, Launch edit, launch-last (▶ or double-click) and Shift-duplicate on a remote repo or workspace open the dialog on that host. With repos on a remote host only, + Session and the no-tab spawn choices are enabled and the dialog opens as a form.
-- **No headless runs** (`spawn_form.rs`, `grid_view.rs`, `session_actions.rs`): the spawn dialog has no Mode row or Prompt field (Tab goes Branch, Random, Base branch, Trusted launch) and the client sends only `SpawnRequest.mode` Interactive or PlainShell, with `initial_prompt` null.
+- **No headless runs** (`spawn_form.rs`, `grid_view.rs`, `session_actions.rs`): the spawn dialog has no Mode row or Prompt field (Tab goes Branch, Random, Base branch, then Advanced) and the client sends only `SpawnRequest.mode` Interactive or PlainShell, with `initial_prompt` null.
 
   A headless session that exists anyway (spawned by another client) keeps its sidebar leaf and an inert tab pill; a pane bound to one shows the muted line `Headless session — not shown in this client` (no stats bar or action log) and keeps it once stopped, with no exited overlay; the note holds the pane's focus, so a click focuses the pane and app shortcuts such as Ctrl+N still work. The daemon's headless path and the protocol are unchanged.
 - **Session labels, chips and endings**: every label goes through `display_label`, with the full label in a tooltip. A session's terminal title names it once the agent's title glyph is stripped (the descriptor's title rules), and a title that is only the agent's placeholder falls through to the session label, then the runtime tag, then the id.
@@ -711,7 +711,7 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
 
   While the agent is up (the label is the descriptor's own tag) the icon is the descriptor's `icon`, SVG markup the plugin ships and the client draws in its own colours, or the generic `›_` glyph for a descriptor without one. Since a remote host's daemon sends that markup, the client draws it only when it passes `runtime_icon::icon_is_safe` (at most 8192 bytes, one root `<svg>`, no `<image>`, `<feImage>`, `<foreignObject>` or `<script>` in any case or prefix, every `href` and `url()` exactly `#` and an id of letters, digits, `_`, `-`, `.` or `:`, no `@import`); a refused icon wears the generic glyph and logs one warn per agent. The plugin conformance check (`agent_api::conformance`) refuses the same icons, so the two rule sets change together. Otherwise the label picks a shell family's brand icon, matched without case or `.exe`: `pwsh` blue, `powershell` navy, `cmd` a dark box, and `bash`, `zsh`, `sh` and `wsl` one green `$` square; any other program gets the generic glyph in the theme's `subtle`. These colours are fixed and do not follow the theme.
 
-  An interactive Claude session reads the shell (`pwsh`, whatever `RUSTLING_TULIP_SHELL` resolves to) once Claude exits and `claude` again on its next start, and its icon follows; a plain shell with no known program shows no icon. The spawn dialog's Runtime options carry the same icon before their names, the plain shell the generic glyph. The pane header's trusted chip is an outlined 20 px square holding a shield in `text_2`, its tooltip unchanged.
+  An interactive Claude session reads the shell (`pwsh`, whatever `RUSTLING_TULIP_SHELL` resolves to) once Claude exits and `claude` again on its next start, and its icon follows; a plain shell with no known program shows no icon. The spawn dialog's Runtime options carry the same icon before their names, the plain shell the generic glyph.
 - **Leaf density**: sidebar leaves draw Comfortable (the default: a label line over a subline holding the branch, a workspace's `repo:branch · repo:branch`, or a shell's folder with home as `~`, the tab pills at its end or on a chip row below when they don't fit) or Compact (one 26 px line, the subline in the tooltip), set in Settings → General → Sidebar and saved as `general.leaf_density`.
 - **Sessions under repos**: the row after Leaf density in Settings → General → Sidebar (`settings-sessions-under-repos-every|busy|none`), saved as `general.sessions_under_repos` (`"every"`, `"busy"`, `"none"`; a missing key or an unknown value loads as `"every"`, the default). Every session draws every leaf under a repo or workspace row.
 
@@ -1115,7 +1115,7 @@ Dock back is the close of every kind: a pane returns to its grid, a tab's pill l
 
 The main window keeps the popped content's place as a card, which is not a terminal and holds no keyboard. A popped pane's grid slot draws a card with the session's label, "Popped out to its own window", Focus window and Dock back; a popped tab draws the same card over its body while it is the active tab, and its pill shows a muted ↗ ("Popped out"). Focus window raises the pop-out and focuses its terminal or diff.
 
-A pane pop-out's toolbar has the status glyph, the label, the tab it came from, the member, runtime and trusted chips, a two-step Stop and Dock back.
+A pane pop-out's toolbar has the status glyph, the label, the tab it came from, the member and runtime chips, a two-step Stop and Dock back.
 
 A tab pop-out has its own toolbar (the tab's name, Dock back) and no tab strip; it draws the tab's whole grid, with splits, divider drags, pane drops and menus working inside it, or a diff tab's own view, which moves over without a refetch. In it Pop out on a pane is dimmed, and empty panes have New session… and Shell here dimmed "Spawn from the main window". A session pop-out has Stop and Close window.
 

@@ -204,8 +204,6 @@ pub struct Leaf {
     /// The session is idle with its turn's background work still running.
     pub background: bool,
     pub state: LeafState,
-    /// Launched with approval prompts bypassed.
-    pub trusted: bool,
     /// The label's hover text.
     pub tooltip: String,
 }
@@ -298,12 +296,7 @@ impl Leaf {
     #[must_use]
     pub fn runtime_tag(&self) -> Option<(String, String)> {
         let runtime = self.runtime.as_ref()?;
-        let tip = if self.trusted {
-            format!("Running {runtime}; approval prompts were bypassed")
-        } else {
-            format!("Running {runtime}")
-        };
-        Some((runtime.clone(), tip))
+        Some((runtime.clone(), format!("Running {runtime}")))
     }
 
     /// The hover text at `density`: Compact adds the subline it does not
@@ -514,7 +507,8 @@ pub struct UiState {
     /// Which OS notifications fire.
     #[serde(default)]
     pub notifications: NotificationSettings,
-    /// The Settings modal's Spawn defaults tab.
+    /// The Trusted launch default older releases saved, until each host's
+    /// agent Settings took it.
     #[serde(default)]
     pub spawn: SpawnDefaults,
     /// The tailnet and SSH hosts the user added, in the order they were
@@ -951,25 +945,41 @@ fn json_type(value: &serde_json::Value) -> &'static str {
     }
 }
 
-/// What the spawn dialog pre-fills from the client's Spawn defaults: only
-/// whether new agent sessions launch trusted. The agents' own option
-/// defaults are the daemon's agent settings.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The Trusted launch choice older releases saved, read so each host's
+/// agent Settings take it as the agent's bypass choice; written back while
+/// it is owed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SpawnDefaults {
-    /// New agent sessions bypass approval prompts.
+    /// The Settings default: new agent sessions launched trusted.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub trusted: bool,
-    /// The Trusted launch choice of the last dialog the user filled in and
-    /// submitted; a fresh dialog opens with it. `None` until the first such
-    /// submit, and the dialog then opens with `trusted`.
+    /// The Trusted launch choice of the last dialog the user submitted,
+    /// which won over `trusted`; `None` when none was saved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_trusted: Option<bool>,
+    /// The hosts whose agent Settings already took the bypass choice, by
+    /// [`trusted_move_key`].
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub trusted_moved: BTreeSet<String>,
 }
 
 impl SpawnDefaults {
-    /// Whether a fresh spawn dialog opens with trusted launch on.
-    pub fn opening_trusted(self) -> bool {
+    /// Whether the saved choice launched trusted, so each host's agent
+    /// Settings are owed the bypass choice.
+    #[must_use]
+    pub fn bypass_owed(&self) -> bool {
         self.last_trusted.unwrap_or(self.trusted)
+    }
+}
+
+/// The name [`SpawnDefaults::trusted_moved`] records `host` under: This PC
+/// is `@local`, another host its key.
+#[must_use]
+pub(crate) fn trusted_move_key(host: &HostKey) -> String {
+    match host {
+        HostKey::Local => "@local".to_owned(),
+        HostKey::Remote(key) => key.clone(),
     }
 }
 
@@ -2453,19 +2463,10 @@ impl SidebarModel {
         true
     }
 
-    /// Whether a spawn dialog opens with trusted launch on.
-    pub fn set_spawn_trusted(&mut self, on: bool) {
-        self.ui.spawn.trusted = on;
-    }
-
-    /// Records the Trusted launch choice of a submitted dialog; returns
-    /// whether it changed.
-    pub fn set_spawn_last_trusted(&mut self, on: bool) -> bool {
-        if self.ui.spawn.last_trusted == Some(on) {
-            return false;
-        }
-        self.ui.spawn.last_trusted = Some(on);
-        true
+    /// Records that `host`'s agent Settings took the saved Trusted launch
+    /// choice; returns whether it was not recorded yet.
+    pub fn mark_trusted_moved(&mut self, host: &HostKey) -> bool {
+        self.ui.spawn.trusted_moved.insert(trusted_move_key(host))
     }
 
     /// Records the main window's place; returns whether it changed.
@@ -3118,15 +3119,14 @@ fn leaf(
         unseen: unseen.contains(&s.id),
         background: s.background,
         state: LeafState::of(s),
-        trusted: s.elevated_authority,
         tooltip: leaf_tooltip(s, label_agents),
     }
 }
 
 /// One line naming a container's last launch: the agent and run mode, the
 /// target, each field the launch set away from its default in the agent's
-/// order (a choice's label, a typed value, a toggle's label), `trusted`, and
-/// the env rows it carried. Parts that are absent are left out; no config,
+/// order (a choice's label, a typed value, a toggle's label), and the env
+/// rows it carried. Parts that are absent are left out; no config,
 /// no line.
 #[must_use]
 pub fn launch_summary(config: Option<&SpawnConfig>, agents: &[AgentDescriptor]) -> Option<String> {
@@ -3166,10 +3166,7 @@ pub fn launch_summary(config: Option<&SpawnConfig>, agents: &[AgentDescriptor]) 
         && let Some(descriptor) = descriptor_for(agents, &selection.agent)
     {
         let options = AgentOptions::new(descriptor.clone(), Some(&selection.options));
-        parts.extend(options.summary_fields(config.dangerously_skip_permissions));
-    }
-    if config.dangerously_skip_permissions {
-        parts.push("trusted".to_owned());
+        parts.extend(options.summary_fields());
     }
     if !config.extra_env.is_empty() {
         parts.push(format!("{} env", config.extra_env.len()));
@@ -5867,6 +5864,7 @@ pub(crate) mod tests {
             spawn: SpawnDefaults {
                 trusted: true,
                 last_trusted: None,
+                trusted_moved: BTreeSet::new(),
             },
             saved_hosts: Vec::new(),
             host_session_counts: BTreeMap::new(),
@@ -6096,6 +6094,7 @@ pub(crate) mod tests {
             spawn: SpawnDefaults {
                 trusted: true,
                 last_trusted: None,
+                trusted_moved: BTreeSet::new(),
             },
             ..UiState::default()
         }
@@ -6847,109 +6846,68 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn spawn_defaults_round_trip_and_default_off() {
+    fn spawn_defaults_from_released_files_still_load() {
         let dir = TestDir::new("spawn-defaults");
-        let defaults = SpawnDefaults {
-            trusted: true,
-            last_trusted: None,
+        let load = |text: &str| {
+            std::fs::write(dir.0.join(UI_FILE), text).expect("write");
+            load_ui_state(&dir.0).spawn
         };
-        let state = UiState {
-            spawn: defaults,
-            ..UiState::default()
-        };
-        save_ui_state(&dir.0, &state).expect("save");
-        assert_eq!(load_ui_state(&dir.0).spawn, defaults, "round trips");
+        let v0_5_1 = load(r#"{ "sidebar_collapsed": true, "spawn": { "trusted": true } }"#);
+        assert!(v0_5_1.trusted, "the v0.5.1-alpha default loads");
+        assert!(v0_5_1.bypass_owed(), "a trusted default is owed");
 
-        std::fs::write(
-            dir.0.join(UI_FILE),
+        let v0_7_0 = load(r#"{ "spawn": { "trusted": true, "last_trusted": false } }"#);
+        assert_eq!(
+            v0_7_0.last_trusted,
+            Some(false),
+            "the v0.7.0 last choice loads"
+        );
+        assert!(!v0_7_0.bypass_owed(), "an untrusted last choice wins");
+
+        let last = load(r#"{ "spawn": { "last_trusted": true } }"#);
+        assert!(last.bypass_owed(), "a trusted last choice is owed");
+
+        let retired = load(
             r#"{ "spawn": { "trusted": true, "permission_mode": "plan", "claude_provider": "deepseek" } }"#,
-        )
-        .expect("write");
-        assert_eq!(
-            load_ui_state(&dir.0).spawn,
-            defaults,
-            "the retired Claude keys load ignored"
         );
+        assert_eq!(retired, v0_5_1, "the retired Claude keys load ignored");
 
-        let off = SpawnDefaults::default();
-        assert!(!off.trusted);
-
-        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
-        assert_eq!(
-            load_ui_state(&dir.0).spawn,
-            off,
-            "a file saved before the tab existed loads the defaults"
-        );
-    }
-
-    #[test]
-    fn spawn_defaults_setters_write_each_field() {
-        let mut model = SidebarModel::new(UiState::default());
-        model.set_spawn_trusted(true);
-        assert_eq!(
-            model.ui_state().spawn,
-            SpawnDefaults {
-                trusted: true,
-                last_trusted: None
-            }
-        );
-        assert!(
-            model.set_spawn_last_trusted(false),
-            "the first choice is a change"
-        );
-        assert!(
-            !model.set_spawn_last_trusted(false),
-            "the same choice is not"
-        );
-        assert_eq!(
-            model.ui_state().spawn,
-            SpawnDefaults {
-                trusted: true,
-                last_trusted: Some(false)
-            },
-            "the last choice leaves the Settings default alone"
-        );
-    }
-
-    #[test]
-    fn spawn_last_trusted_is_absent_from_a_released_file_and_round_trips() {
-        let dir = TestDir::new("spawn-last-trusted");
-        std::fs::write(
-            dir.0.join(UI_FILE),
-            r#"{ "sidebar_collapsed": true, "spawn": { "trusted": true } }"#,
-        )
-        .expect("write");
-        let loaded = load_ui_state(&dir.0).spawn;
-        assert_eq!(
-            loaded.last_trusted, None,
-            "a v0.5.1-alpha file has no last choice"
-        );
-        assert!(
-            loaded.opening_trusted(),
-            "so a dialog opens with the Settings default"
-        );
-
-        let chosen = SpawnDefaults {
-            trusted: true,
-            last_trusted: Some(false),
-        };
-        let state = UiState {
-            spawn: chosen,
-            ..UiState::default()
-        };
-        save_ui_state(&dir.0, &state).expect("save");
-        let loaded = load_ui_state(&dir.0).spawn;
-        assert_eq!(loaded, chosen, "round trips");
-        assert!(
-            !loaded.opening_trusted(),
-            "the last choice wins over the default"
-        );
+        let none = load(r#"{ "sidebar_collapsed": true }"#);
+        assert_eq!(none, SpawnDefaults::default(), "a file without the key");
+        assert!(!none.bypass_owed());
 
         save_ui_state(&dir.0, &UiState::default()).expect("save");
         let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
         assert!(
-            !text.contains("last_trusted"),
-            "no choice yet writes no key: {text}"
+            !text.contains("\"trusted"),
+            "a default save writes no trusted key: {text}"
+        );
+
+        let moved = SpawnDefaults {
+            trusted: true,
+            last_trusted: None,
+            trusted_moved: BTreeSet::from(["@local".to_owned()]),
+        };
+        let state = UiState {
+            spawn: moved.clone(),
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(load_ui_state(&dir.0).spawn, moved, "round trips");
+    }
+
+    #[test]
+    fn mark_trusted_moved_records_each_host_once() {
+        let mut model = SidebarModel::new(UiState::default());
+        assert!(model.mark_trusted_moved(&HostKey::Local));
+        assert!(model.mark_trusted_moved(&HostKey::Remote("ssh:box".to_owned())));
+        assert!(
+            !model.mark_trusted_moved(&HostKey::Local),
+            "a second call records nothing"
+        );
+        assert_eq!(
+            model.ui_state().spawn.trusted_moved,
+            BTreeSet::from(["@local".to_owned(), "ssh:box".to_owned()])
         );
     }
 
@@ -8818,7 +8776,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn launch_summary_says_trusted_instead_of_the_authority() {
+    fn launch_summary_names_bypass_permissions_and_no_trusted_word() {
         let mut config = spawn_config(
             single_target("feat/x", Some("main"), false),
             SessionMode::Interactive,
@@ -8827,13 +8785,13 @@ pub(crate) mod tests {
             "claude",
             &[(
                 "permission_mode",
-                OptionValue::Text("accept_edits".to_owned()),
+                OptionValue::Text("bypass_permissions".to_owned()),
             )],
         ));
         config.dangerously_skip_permissions = true;
         assert_eq!(
             launch_summary(Some(&config), &[claude_descriptor()]).as_deref(),
-            Some("Claude · Interactive · feat/x · trusted")
+            Some("Claude · Interactive · feat/x · Bypass permissions")
         );
     }
 

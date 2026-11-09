@@ -400,10 +400,6 @@ pub struct SessionRecord {
     /// maps its hook events with. Empty for every other session. Written to
     /// the sidecar once at spawn and never changed after.
     pub hook_options: protocol::OptionValues,
-    /// Whether the run a shell hosting a recovered agent resumes was trusted,
-    /// which its hook events are mapped with. False for every other session.
-    /// Written to the sidecar once at spawn and never changed after.
-    pub hook_trusted: bool,
     /// The abandoned sessions this one replaced in place, oldest first (see
     /// [`protocol::SessionSnapshot::resumed_from`]). Written to the sidecar once
     /// at spawn and never changed after.
@@ -591,10 +587,6 @@ impl SessionRecord {
                     | protocol::SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
                     protocol::SpawnTarget::Standalone { .. } => false,
                 });
-        let elevated_authority = self
-            .spawn_config
-            .as_ref()
-            .is_some_and(|cfg| cfg.dangerously_skip_permissions);
         // A promoted shell reports the agent it runs, as an interactive
         // session; the record itself stays a plain shell.
         let promoted = self.promoted_shell();
@@ -645,7 +637,6 @@ impl SessionRecord {
             program_name: self.program_name.clone(),
             current_cwd: self.current_cwd.clone(),
             appearance: self.appearance.clone(),
-            elevated_authority,
             has_per_session_worktree,
             is_inactive: self.is_inactive,
             worktree_paths: self.worktree_paths.clone(),
@@ -1952,7 +1943,6 @@ impl SessionRegistry {
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
-            hook_trusted: meta.hook_trusted,
             resumed_from: meta.resumed_from.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
@@ -2041,7 +2031,6 @@ impl SessionRegistry {
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
-            hook_trusted: meta.hook_trusted,
             resumed_from: meta.resumed_from.clone(),
         };
         push_recent_action(
@@ -2107,7 +2096,6 @@ impl SessionRegistry {
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
-            hook_trusted: meta.hook_trusted,
             resumed_from: meta.resumed_from.clone(),
         };
         push_recent_action(
@@ -2201,7 +2189,6 @@ mod tests {
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
-            hook_trusted: false,
             resumed_from: Vec::new(),
         }
     }
@@ -3520,9 +3507,9 @@ mod tests {
     }
 
     /// A recovered shell reloaded from its sidecar, through every insert a
-    /// restart uses, keeps the options and trust its hooks map with.
+    /// restart uses, keeps the options its hooks map with.
     #[tokio::test]
-    async fn a_reloaded_shell_sidecar_keeps_its_hook_options_and_trust() {
+    async fn a_reloaded_shell_sidecar_keeps_its_hook_options() {
         use crate::history::test_support::{fake_pty, scratch_dirs};
         let dirs = scratch_dirs("reloaded-shell-hook-options");
         let mut meta = standalone_meta();
@@ -3532,13 +3519,12 @@ mod tests {
             "mode".to_owned(),
             protocol::OptionValue::Text("fast".to_owned()),
         )]);
-        meta.hook_trusted = true;
         let hook_options_of = |registry: &SessionRegistry| {
             let arc = registry.get("s1").expect("the inserted session");
             let record = lock(&arc);
-            (record.hook_options.clone(), record.hook_trusted)
+            record.hook_options.clone()
         };
-        let expected = (meta.hook_options.clone(), true);
+        let expected = meta.hook_options.clone();
 
         let orphan = SessionRegistry::new(dirs.clone());
         orphan.insert_orphan(&meta);

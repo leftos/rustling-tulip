@@ -995,26 +995,6 @@ fn inline_button_does_not_focus_the_leaf(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn trusted_runtime_tag_tooltip(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let fixture = Fixture {
-        sessions: vec![session("s1").trusted().build(), session("s2").build()],
-        tabs: vec![tab("t1", &pane("p1", None))],
-        ..Fixture::default()
-    };
-    let mut h = Harness::with(cx, &dir, &fixture);
-
-    assert_eq!(
-        tags(&mut h, "s1"),
-        [tag(
-            "claude",
-            "Running claude; approval prompts were bypassed"
-        )]
-    );
-    assert_eq!(tags(&mut h, "s2"), [tag("claude", "Running claude")]);
-}
-
-#[gpui::test]
 fn leaf_tooltip_lists_title_and_cwd(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = listed(

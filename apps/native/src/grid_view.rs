@@ -20,7 +20,7 @@ use protocol::{
 };
 
 use crate::appearance::{self, PaneFrame, Resolved, Source};
-use crate::assets::{SHIELD_ICON, SIDEBAR_MORE_ICON};
+use crate::assets::SIDEBAR_MORE_ICON;
 use crate::chat::PaneView;
 use crate::chat_view::{AGENT_DOWN_TIP, COMPACT_TIP, compact_toggle, offers_chat, view_segment};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
@@ -81,7 +81,6 @@ const CHIP_TEXT_SIZE: f32 = 11.0;
 const BRANCH_CHIP_SHRINK: f32 = 1000.0;
 const HEADER_BUTTON_SIZE: f32 = 26.0;
 const HEADER_BUTTON_RADIUS: f32 = 6.0;
-const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
 /// The accent line down a pane header's left edge, below its top corner.
 const ACCENT_LINE_WIDTH: f32 = 3.0;
 
@@ -2014,7 +2013,7 @@ impl RootView {
     }
 
     /// The session's status glyph, name and chips (runtime, repo:branch
-    /// with a count of further members, trusted), its Pop out, its Stop or
+    /// with a count of further members), its Pop out, its Stop or
     /// exit code, split right and down (Shift: left and up), move and
     /// close. When the header in `target`'s window is too narrow for those
     /// buttons beside a readable name, everything from Pop out to the
@@ -2874,7 +2873,6 @@ pub enum HeaderChipKind {
     Branch,
     /// `+N`: the further members of a workspace session.
     More,
-    Trusted,
     /// The provider endpoint an agent session is routed to.
     Provider,
     /// The remote host the session runs on; This PC's sessions have none.
@@ -2888,7 +2886,6 @@ impl HeaderChipKind {
             Self::Runtime => "runtime",
             Self::Branch => "branch",
             Self::More => "more",
-            Self::Trusted => "trusted",
             Self::Provider => "provider",
             Self::Host => "host",
         }
@@ -2972,13 +2969,6 @@ fn header_parts(
         )
     }));
     chips.extend(member_chips(&session.members));
-    if session.elevated_authority {
-        chips.push(HeaderChip::new(
-            HeaderChipKind::Trusted,
-            "trusted",
-            TRUSTED_TIP,
-        ));
-    }
     PaneHeaderParts {
         status: session.status,
         mode: session.mode,
@@ -3134,8 +3124,7 @@ fn header_title(
 }
 
 /// A 20 px Geist Mono chip: the runtime a 20 px square holding its icon,
-/// repo:branch with its repo name bright, trusted an outlined square holding
-/// a shield, the rest filled.
+/// repo:branch with its repo name bright, the rest filled.
 fn header_chip(
     pane_id: &str,
     chip: &HeaderChip,
@@ -3182,19 +3171,6 @@ fn header_chip(
             None => chip_text(&name, base, text),
         },
         HeaderChipKind::Branch => branch_chip(&name, base, text, &t),
-        HeaderChipKind::Trusted => base
-            .bg(gpui::rgba(t.transparent))
-            .border_color(gpui::rgb(t.line_strong))
-            .w(ui_px(cx, CHIP_HEIGHT))
-            .px(px(0.0))
-            .justify_center()
-            .child(
-                svg()
-                    .path(SHIELD_ICON)
-                    .size(ui_px(cx, 12.0))
-                    .flex_none()
-                    .text_color(gpui::rgb(t.text_2)),
-            ),
         HeaderChipKind::More | HeaderChipKind::Provider | HeaderChipKind::Host => {
             chip_text(&name, base, text)
         }
@@ -3940,7 +3916,6 @@ fn chip_width(chip: &HeaderChip, cx: &App) -> f32 {
     let square = ui_px(cx, CHIP_HEIGHT) / px(1.0);
     match chip.kind {
         HeaderChipKind::Runtime if chip.icon.is_some() => square,
-        HeaderChipKind::Trusted => square,
         _ => {
             let text = text_width(
                 cx,

@@ -243,7 +243,6 @@ fn pane_close_esc_returns_the_keyboard_to_the_pane(cx: &mut TestAppContext) {
     assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard");
 }
 
-const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
 const DEEPSEEK_TIP: &str = "Claude Code routed to DeepSeek";
 const UNKNOWN_PROVIDER_TIP: &str = "Claude Code routed to a provider this client does not know";
 /// A pane header's height, in logical pixels.
@@ -326,11 +325,10 @@ fn side_by_side(s1: SessionSnapshot, s2: SessionSnapshot) -> Fixture {
 }
 
 #[gpui::test]
-fn pane_header_shows_runtime_and_trusted_chips(cx: &mut TestAppContext) {
+fn pane_header_shows_the_runtime_chip_and_no_trusted_chip(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = side_by_side(
         session("s1")
-            .trusted()
             .status("awaiting_input")
             .label("repo · main")
             .cwd("D:/src/repo")
@@ -343,28 +341,18 @@ fn pane_header_shows_runtime_and_trusted_chips(cx: &mut TestAppContext) {
     assert_eq!(header.status_tip, "status: awaiting input");
     assert_eq!(header.title, "repo · main");
     assert_eq!(header.title_tip, "repo · main\nCwd: D:/src/repo");
-    assert_eq!(
-        header.chips,
-        [
-            runtime("claude"),
-            chip(HeaderChipKind::Trusted, "trusted", TRUSTED_TIP),
-        ]
-    );
+    assert_eq!(header.chips, [runtime("claude")]);
 
     let header = header_of(&mut h, "p2");
-    assert_eq!(header.chips, [runtime("claude")], "untrusted: no chip");
+    assert_eq!(header.chips, [runtime("claude")]);
 
-    for selector in [
-        "pane-chip-p1-runtime",
-        "pane-chip-p1-trusted",
-        "pane-chip-p2-runtime",
-    ] {
+    for selector in ["pane-chip-p1-runtime", "pane-chip-p2-runtime"] {
         assert!(
             (height_of(&mut h, selector) - CHIP_HEIGHT).abs() < 0.5,
             "{selector} is a {CHIP_HEIGHT} px chip"
         );
     }
-    assert!(never_painted(&mut h, "pane-chip-p2-trusted"));
+    assert!(never_painted(&mut h, "pane-chip-p1-trusted"));
 }
 
 #[gpui::test]

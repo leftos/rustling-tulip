@@ -182,8 +182,6 @@ pub struct AgentDescriptor {
     #[serde(default)]
     pub image_paste: ImagePaste,
     pub caps: AgentCaps,
-    /// What a trusted launch passes, for the spawn dialog's note.
-    pub trust_note: Option<String>,
     pub texts: AgentTexts,
     pub fields: Vec<OptionField>,
     pub chips: Vec<ChipRule>,
@@ -194,6 +192,85 @@ pub struct AgentDescriptor {
     /// The runtime icon: SVG markup drawn in its own colours; none draws the generic shell glyph.
     #[serde(default)]
     pub icon: Option<String>,
+    /// The choice that runs the agent with its permission prompts bypassed; a saved or received
+    /// `dangerously_skip_permissions: true` becomes it. `None` when the agent has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bypass: Option<BypassChoice>,
+}
+
+impl AgentDescriptor {
+    /// Whether `options` hold the agent's bypass choice.
+    ///
+    /// Args:
+    ///     options: The agent's option values.
+    ///
+    /// Returns:
+    ///     True when the descriptor names a bypass choice and `options` hold it; false otherwise.
+    #[must_use]
+    pub fn bypasses(&self, options: &OptionValues) -> bool {
+        self.bypass.as_ref().is_some_and(|bypass| {
+            matches!(options.get(&bypass.field), Some(OptionValue::Text(value)) if *value == bypass.value)
+        })
+    }
+
+    /// Set the agent's bypass choice in `options`.
+    ///
+    /// Args:
+    ///     options: The agent's option values, changed in place.
+    ///
+    /// Returns:
+    ///     True when it changed the value; false when `options` already held the choice or the
+    ///     agent has none.
+    pub fn set_bypass(&self, options: &mut OptionValues) -> bool {
+        let Some(bypass) = &self.bypass else {
+            return false;
+        };
+        if self.bypasses(options) {
+            return false;
+        }
+        options.insert(
+            bypass.field.clone(),
+            OptionValue::Text(bypass.value.clone()),
+        );
+        true
+    }
+}
+
+/// Fold the deprecated trusted flag into the agent's bypass choice.
+///
+/// A true flag sets the descriptor's bypass choice in the agent's options; the flag then becomes
+/// whether the options hold that choice. A plain shell, a missing descriptor or one for another
+/// agent, or a descriptor with no bypass choice ends with the flag false and the options untouched.
+///
+/// Args:
+///     flag: The saved or received `dangerously_skip_permissions`, rewritten in place.
+///     mode: The spawn's mode.
+///     agent: The spawn's agent and options.
+///     descriptor: The descriptor of the agent's plugin, when the host has it.
+///
+/// Returns:
+///     True when the flag or the options changed.
+pub fn fold_trusted(
+    flag: &mut bool,
+    mode: SessionMode,
+    agent: Option<&mut AgentSelection>,
+    descriptor: Option<&AgentDescriptor>,
+) -> bool {
+    let before = *flag;
+    let mut options_changed = false;
+    let bypasses = match (agent, descriptor) {
+        (Some(selection), Some(descriptor))
+            if mode != SessionMode::PlainShell && descriptor.id == selection.agent =>
+        {
+            if before {
+                options_changed = descriptor.set_bypass(&mut selection.options);
+            }
+            descriptor.bypasses(&selection.options)
+        }
+        _ => false,
+    };
+    *flag = bypasses;
+    options_changed || before != bypasses
 }
 
 /// What an agent paints into its terminal title besides a name: a leading
@@ -390,6 +467,8 @@ pub struct OptionField {
     /// On the agent's Settings page; its value is the spawn dialog's default.
     pub settings: bool,
     pub spawn: SpawnPlacement,
+    /// Deprecated: always false; older clients require it.
+    #[serde(default)]
     pub locked_when_trusted: bool,
     pub when: Vec<FieldRule>,
 }
@@ -421,6 +500,15 @@ pub struct Choice {
     /// The [`OptionValue::Text`] the choice stores.
     pub value: String,
     pub label: String,
+}
+
+/// The choice of one of an agent's fields that runs it with its permission prompts bypassed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BypassChoice {
+    /// The [`OptionField::id`] of a choice field.
+    pub field: String,
+    /// The [`Choice::value`] that bypasses the prompts.
+    pub value: String,
 }
 
 /// How a [`FieldKind::Choice`] field is drawn.
@@ -889,11 +977,6 @@ pub struct SessionSnapshot {
     /// owning repo/workspace, then the app default.
     #[serde(default)]
     pub appearance: AppearanceOverrides,
-    /// True when the session was launched with approvals/permission prompts
-    /// bypassed (a trusted launch). Clients use this to keep elevated authority visible after the
-    /// spawn dialog closes.
-    #[serde(default)]
-    pub elevated_authority: bool,
     /// True when the session was spawned with `use_worktree = true`, i.e.
     /// the daemon created (or reused) a per-session git worktree under
     /// `<repo>.wt/<branch>`. Drives the close-context-menu's "delete
@@ -1572,11 +1655,6 @@ pub struct HistoryEntry {
     /// log. `None` for a recorded entry: its options are its `spawn_config`'s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<OptionValues>,
-    /// True when an imported session ran with permission prompts skipped,
-    /// read from its tracer log. A recorded entry leaves it false: its
-    /// `spawn_config` carries the flag.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub trusted: bool,
 }
 
 /// One workspace member bound to a specific worktree directory that already
@@ -1698,7 +1776,9 @@ pub struct SpawnRequest {
     pub target: SpawnTarget,
     pub mode: SessionMode,
     pub initial_prompt: Option<String>,
-    /// A trusted launch: the agent runs with its permission prompts skipped.
+    /// Deprecated: true exactly when `agent`'s options hold its descriptor's bypass choice
+    /// ([`fold_trusted`]); kept on the wire for peers that read or send it.
+    #[serde(default)]
     pub dangerously_skip_permissions: bool,
     /// The agent to run and its options; `None` exactly for a plain shell.
     pub agent: Option<AgentSelection>,
@@ -1760,6 +1840,9 @@ pub struct SpawnRequest {
 pub struct SpawnConfig {
     pub target: SpawnTarget,
     pub mode: SessionMode,
+    /// Deprecated: true exactly when `agent`'s options hold its descriptor's bypass choice
+    /// ([`fold_trusted`]); kept on the wire for peers that read or send it.
+    #[serde(default)]
     pub dangerously_skip_permissions: bool,
     /// See [`SpawnRequest::agent`].
     pub agent: Option<AgentSelection>,
@@ -1769,6 +1852,24 @@ pub struct SpawnConfig {
     /// was built, so a stored or echoed config carries no secret values.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
+}
+
+impl SpawnRequest {
+    /// Fold this request's deprecated trusted flag into its agent's bypass choice ([`fold_trusted`]).
+    ///
+    /// Args:
+    ///     descriptor: The descriptor of the request's agent, when the host has it.
+    ///
+    /// Returns:
+    ///     True when the flag or the options changed.
+    pub fn fold_trusted(&mut self, descriptor: Option<&AgentDescriptor>) -> bool {
+        fold_trusted(
+            &mut self.dangerously_skip_permissions,
+            self.mode,
+            self.agent.as_mut(),
+            descriptor,
+        )
+    }
 }
 
 impl SpawnTarget {
@@ -1821,6 +1922,22 @@ impl SpawnTarget {
 }
 
 impl SpawnConfig {
+    /// Fold this config's deprecated trusted flag into its agent's bypass choice ([`fold_trusted`]).
+    ///
+    /// Args:
+    ///     descriptor: The descriptor of the config's agent, when the host has it.
+    ///
+    /// Returns:
+    ///     True when the flag or the options changed.
+    pub fn fold_trusted(&mut self, descriptor: Option<&AgentDescriptor>) -> bool {
+        fold_trusted(
+            &mut self.dangerously_skip_permissions,
+            self.mode,
+            self.agent.as_mut(),
+            descriptor,
+        )
+    }
+
     /// Capture the spawn-time config from a [`SpawnRequest`], dropping the
     /// fields a duplicate doesn't want to inherit.
     #[must_use]
@@ -2631,8 +2748,6 @@ pub struct PresetEntry {
     /// [`RepoEntry::default_use_worktree`] at launch time.
     #[serde(default)]
     pub default_use_worktree: Option<bool>,
-    #[serde(default)]
-    pub dangerously_skip_permissions: bool,
     /// The agent the preset's sessions run and its options; `None` runs the
     /// daemon's default agent with its default options.
     #[serde(default)]
@@ -9874,7 +9989,6 @@ mod tests {
             branch_template: "bug/{date}/{index}".to_string(),
             session_label_template: Some("bug-{index}: {slug}".to_string()),
             default_use_worktree: Some(true),
-            dangerously_skip_permissions: true,
             agent: Some(AgentSelection {
                 agent: claude_id(),
                 options: OptionValues::new(),
@@ -10163,7 +10277,6 @@ mod tests {
         let preset: PresetEntry = serde_json::from_str(minimal).expect("parse minimal preset");
         assert_eq!(preset.id, "smoke");
         assert_eq!(preset.stagger_ms, 3000);
-        assert!(!preset.dangerously_skip_permissions);
         assert_eq!(preset.variables, Vec::<PresetVariable>::new());
         assert_eq!(preset.context_footer_lines, Vec::<FooterLine>::new());
         assert_eq!(preset.default_use_worktree, None);
@@ -13748,7 +13861,7 @@ mod tests {
                 shell_resume: true,
                 user_hooks: false,
             },
-            trust_note: Some("Trusted launch skips prompts.".to_owned()),
+            bypass: None,
             texts: AgentTexts {
                 shell_resume_label: "Shell running claude --resume".to_owned(),
                 no_conversation: "no conversation found".to_owned(),
@@ -13804,6 +13917,146 @@ mod tests {
             },
             icon: None,
         }
+    }
+
+    /// The sample descriptor with a permission-mode choice field and a bypass choice naming it.
+    fn bypass_descriptor() -> AgentDescriptor {
+        AgentDescriptor {
+            fields: vec![OptionField {
+                id: "permission_mode".to_owned(),
+                label: "Permission mode".to_owned(),
+                help: None,
+                kind: FieldKind::Choice {
+                    choices: ["default", "plan", "bypass_permissions"]
+                        .map(|value| Choice {
+                            value: value.to_owned(),
+                            label: value.to_owned(),
+                        })
+                        .to_vec(),
+                    style: ChoiceStyle::Dropdown,
+                },
+                default: OptionValue::Null,
+                settings: true,
+                spawn: SpawnPlacement::Main,
+                locked_when_trusted: false,
+                when: Vec::new(),
+            }],
+            bypass: Some(BypassChoice {
+                field: "permission_mode".to_owned(),
+                value: "bypass_permissions".to_owned(),
+            }),
+            ..sample_descriptor()
+        }
+    }
+
+    #[test]
+    fn fold_trusted_follows_the_saved_flag() {
+        let descriptor = bypass_descriptor();
+        let bypass = option_values(&[("permission_mode", text("bypass_permissions"))]);
+        let plan = option_values(&[("permission_mode", text("plan"))]);
+        let selection = |options: &OptionValues| AgentSelection {
+            agent: claude_id(),
+            options: options.clone(),
+        };
+
+        for (start, returns) in [
+            (OptionValues::new(), true),
+            (plan.clone(), true),
+            (bypass.clone(), false),
+        ] {
+            let mut flag = true;
+            let mut sel = selection(&start);
+            let changed = fold_trusted(
+                &mut flag,
+                SessionMode::Interactive,
+                Some(&mut sel),
+                Some(&descriptor),
+            );
+            assert_eq!(changed, returns, "{start:?}");
+            assert!(flag, "{start:?}");
+            assert_eq!(sel.options, bypass, "{start:?}");
+        }
+
+        let mut flag = false;
+        let mut sel = selection(&plan);
+        assert!(!fold_trusted(
+            &mut flag,
+            SessionMode::Interactive,
+            Some(&mut sel),
+            Some(&descriptor)
+        ));
+        assert!(!flag);
+        assert_eq!(sel.options, plan);
+
+        let mut flag = false;
+        let mut sel = selection(&bypass);
+        assert!(fold_trusted(
+            &mut flag,
+            SessionMode::Headless,
+            Some(&mut sel),
+            Some(&descriptor)
+        ));
+        assert!(flag);
+        assert_eq!(sel.options, bypass);
+
+        let mut flag = true;
+        let mut sel = selection(&plan);
+        assert!(fold_trusted(
+            &mut flag,
+            SessionMode::PlainShell,
+            Some(&mut sel),
+            Some(&descriptor)
+        ));
+        assert!(!flag);
+        assert_eq!(sel.options, plan);
+
+        let no_bypass = AgentDescriptor {
+            bypass: None,
+            ..bypass_descriptor()
+        };
+        for described in [None, Some(&no_bypass)] {
+            let mut flag = true;
+            let mut sel = selection(&OptionValues::new());
+            assert!(fold_trusted(
+                &mut flag,
+                SessionMode::Interactive,
+                Some(&mut sel),
+                described
+            ));
+            assert!(!flag);
+        }
+    }
+
+    #[test]
+    fn a_spawn_request_without_the_trusted_flag_decodes_as_false() {
+        let req: SpawnRequest = serde_json::from_str(
+            r#"{"label":null,"target":{"kind":"standalone","cwd":"D:\\x"},"mode":"plain_shell",
+                "initial_prompt":null}"#,
+        )
+        .expect("a request without the flag decodes");
+        assert!(!req.dangerously_skip_permissions);
+        let config: SpawnConfig = serde_json::from_str(
+            r#"{"target":{"kind":"standalone","cwd":"D:\\x"},"mode":"interactive","agent":null}"#,
+        )
+        .expect("a config without the flag decodes");
+        assert!(!config.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn descriptor_bypass_round_trips_and_is_absent_when_none() {
+        let json = serde_json::to_value(sample_descriptor()).expect("encode");
+        assert!(json.get("bypass").is_none(), "{json}");
+        let back: AgentDescriptor = serde_json::from_value(json).expect("decode");
+        assert_eq!(back.bypass, None);
+
+        let descriptor = bypass_descriptor();
+        let json = serde_json::to_value(&descriptor).expect("encode");
+        assert_eq!(
+            json["bypass"],
+            serde_json::json!({"field": "permission_mode", "value": "bypass_permissions"})
+        );
+        let back: AgentDescriptor = serde_json::from_value(json).expect("decode");
+        assert_eq!(back, descriptor);
     }
 
     #[test]
@@ -14062,10 +14315,10 @@ mod tests {
     }
 
     #[test]
-    fn history_entry_round_trips_import_options_and_trust() {
+    fn history_entry_round_trips_import_options_and_ignores_trusted() {
         let json = format!(
             r#"{IMPORTED_ENTRY_PREFIX},"end_time_known":true,"import_rev":3,
-                "options":{{"model":"deepseek-flash","provider":"deepseek"}},"trusted":true}}"#
+                "options":{{"model":"deepseek-flash","provider":"deepseek"}}}}"#
         );
         let entry: HistoryEntry = assert_round_trip(&json);
         assert_eq!(
@@ -14075,13 +14328,17 @@ mod tests {
                 ("provider", text("deepseek")),
             ]))
         );
-        assert!(entry.trusted);
         assert_eq!(entry.agent, None);
+
+        let trusted = format!(r#"{IMPORTED_ENTRY_PREFIX},"trusted":true}}"#);
+        let decoded: HistoryEntry =
+            serde_json::from_str(&trusted).expect("an older entry's flag still decodes");
+        let encoded = serde_json::to_value(&decoded).expect("encode");
+        assert!(encoded.get("trusted").is_none(), "{encoded}");
 
         let bare: HistoryEntry =
             serde_json::from_str(&format!("{IMPORTED_ENTRY_PREFIX}}}")).expect("decode");
         assert_eq!(bare.options, None);
-        assert!(!bare.trusted);
         let encoded = serde_json::to_value(&bare).expect("encode");
         assert!(encoded.get("options").is_none(), "{encoded}");
         assert!(encoded.get("trusted").is_none(), "{encoded}");

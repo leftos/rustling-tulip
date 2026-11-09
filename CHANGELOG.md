@@ -23,6 +23,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A question too tall for its pane can be answered from a toast or the Dashboard instead of being refused, and its Chat card shows the whole question.
 - The Connections dialog's rows and headings no longer run together when the Add host form leaves them little room; the list scrolls instead.
 
+### Changed
+
+- The Trusted checkbox is gone: choose Bypass permissions instead, and Launch last relaunches it without asking you to confirm; saved trusted launches carry over.
+
 ## v0.11.1-alpha
 
 ### Fixed

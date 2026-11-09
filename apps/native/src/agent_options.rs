@@ -64,13 +64,29 @@ pub(crate) struct FieldView {
     /// [`SpawnPlacement::Main`] or [`SpawnPlacement::Advanced`].
     pub placement: SpawnPlacement,
     pub editor: FieldEditor,
-    /// The value the field shows: the one the spawn runs with, or for a
-    /// field a trusted launch locks, the one kept for an untrusted launch.
+    /// The value the field shows: the one the spawn runs with.
     pub value: OptionValue,
-    /// Whether the field cannot be changed: a field locked on a trusted
-    /// launch while the launch is trusted, or a kind this client does not
+    /// Whether the field cannot be changed: a kind this client does not
     /// know.
     pub disabled: bool,
+}
+
+/// The Settings value each of `agents` that names a bypass choice takes to
+/// launch with its permission prompts bypassed: the agent, the field and
+/// the value, in `agents`' order.
+#[must_use]
+pub(crate) fn trusted_moves(agents: &[AgentDescriptor]) -> Vec<(AgentId, String, OptionValue)> {
+    agents
+        .iter()
+        .filter_map(|descriptor| {
+            let bypass = descriptor.bypass.as_ref()?;
+            Some((
+                descriptor.id.clone(),
+                bypass.field.clone(),
+                OptionValue::Text(bypass.value.clone()),
+            ))
+        })
+        .collect()
 }
 
 /// The descriptor `agents` lists for `id`, when it lists one.
@@ -148,16 +164,15 @@ impl AgentOptions {
     }
 
     /// Every field's value as a spawn runs it: the value set, read as its
-    /// field reads it, else the default; on a trusted launch a locked field
-    /// holds its default.
-    fn resolved(&self, trusted: bool) -> OptionValues {
+    /// field reads it, else the default.
+    fn resolved(&self) -> OptionValues {
         self.descriptor
             .fields
             .iter()
             .map(|field| {
                 let value = match self.values.get(&field.id) {
-                    Some(value) if !(trusted && field.locked_when_trusted) => read(field, value),
-                    _ => field.default.clone(),
+                    Some(value) => read(field, value),
+                    None => field.default.clone(),
                 };
                 (field.id.clone(), value)
             })
@@ -165,48 +180,44 @@ impl AgentOptions {
     }
 
     /// The fields the spawn dialog draws: the Main and Advanced fields no
-    /// `when` rule hides, in the descriptor's order. A field a trusted
-    /// launch locks shows the value it keeps for an untrusted one.
+    /// `when` rule hides, in the descriptor's order.
     #[must_use]
-    pub(crate) fn fields(&self, trusted: bool) -> Vec<FieldView> {
-        let resolved = self.resolved(trusted);
-        let kept = self.resolved(false);
+    pub(crate) fn fields(&self) -> Vec<FieldView> {
+        let resolved = self.resolved();
         self.descriptor
             .fields
             .iter()
             .filter(|field| matches!(field.spawn, SpawnPlacement::Main | SpawnPlacement::Advanced))
             .filter(|field| !is_hidden(field, &resolved))
-            .map(|field| field_view(field, &resolved, &kept, trusted))
+            .map(|field| field_view(field, &resolved))
             .collect()
     }
 
     /// The fields the agent's Settings page draws: those marked for
     /// Settings, whatever their spawn placement, that no `when` rule hides,
-    /// in the descriptor's order. A field a trusted launch locks is disabled
-    /// while `trusted` and shows the value it keeps for an untrusted launch.
+    /// in the descriptor's order.
     #[must_use]
-    pub(crate) fn settings_fields(&self, trusted: bool) -> Vec<FieldView> {
-        self.settings_views(trusted, false)
+    pub(crate) fn settings_fields(&self) -> Vec<FieldView> {
+        self.settings_views(false)
     }
 
     /// Every field marked for Settings, in the descriptor's order, those a
     /// `when` rule hides now included: the page's full order of fields.
     #[must_use]
-    pub(crate) fn every_settings_field(&self, trusted: bool) -> Vec<FieldView> {
-        self.settings_views(trusted, true)
+    pub(crate) fn every_settings_field(&self) -> Vec<FieldView> {
+        self.settings_views(true)
     }
 
     /// The fields marked for Settings, without those a `when` rule hides
     /// unless `hidden_too`.
-    fn settings_views(&self, trusted: bool, hidden_too: bool) -> Vec<FieldView> {
-        let resolved = self.resolved(trusted);
-        let kept = self.resolved(false);
+    fn settings_views(&self, hidden_too: bool) -> Vec<FieldView> {
+        let resolved = self.resolved();
         self.descriptor
             .fields
             .iter()
             .filter(|field| field.settings)
             .filter(|field| hidden_too || !is_hidden(field, &resolved))
-            .map(|field| field_view(field, &resolved, &kept, trusted))
+            .map(|field| field_view(field, &resolved))
             .collect()
     }
 
@@ -219,19 +230,18 @@ impl AgentOptions {
             .iter()
             .filter(|field| field.spawn == SpawnPlacement::Advanced)
             .any(|field| {
-                self.fields(false)
+                self.fields()
                     .iter()
                     .any(|view| view.id == field.id && view.value != field.default)
             })
     }
 
     /// The values a spawn sends: only the fields whose value differs from
-    /// the field's default, without the fields a `when` rule hides and,
-    /// on a trusted launch, the fields it locks. The daemon fills the rest
-    /// with their defaults.
+    /// the field's default, without the fields a `when` rule hides. The
+    /// daemon fills the rest with their defaults.
     #[must_use]
-    pub(crate) fn wire_values(&self, trusted: bool) -> OptionValues {
-        let resolved = self.resolved(trusted);
+    pub(crate) fn wire_values(&self) -> OptionValues {
+        let resolved = self.resolved();
         self.descriptor
             .fields
             .iter()
@@ -248,11 +258,10 @@ impl AgentOptions {
     /// The launch summary's parts for the fields set away from their
     /// defaults, in the descriptor's order: a choice field its choice's
     /// label, a text or model field its value, a toggle that is on its own
-    /// label. A kind this build does not know adds nothing, and a trusted
-    /// launch locks its fields back to their defaults.
+    /// label. A kind this build does not know adds nothing.
     #[must_use]
-    pub(crate) fn summary_fields(&self, trusted: bool) -> Vec<String> {
-        let resolved = self.resolved(trusted);
+    pub(crate) fn summary_fields(&self) -> Vec<String> {
+        let resolved = self.resolved();
         self.descriptor
             .fields
             .iter()
@@ -368,26 +377,19 @@ pub(crate) fn test_selection(
     }
 }
 
-/// `field` as a page draws it, with the fields holding `resolved` and
-/// `kept` for an untrusted launch.
-fn field_view(
-    field: &OptionField,
-    resolved: &OptionValues,
-    kept: &OptionValues,
-    trusted: bool,
-) -> FieldView {
+/// `field` as a page draws it, with the fields holding `resolved`.
+fn field_view(field: &OptionField, resolved: &OptionValues) -> FieldView {
     FieldView {
         id: field.id.clone(),
         label: field.label.clone(),
         help: field.help.clone(),
         placement: field.spawn,
         editor: editor(field, resolved),
-        value: kept
+        value: resolved
             .get(&field.id)
             .cloned()
             .unwrap_or_else(|| field.default.clone()),
-        disabled: matches!(field.kind, FieldKind::Unknown)
-            || (trusted && field.locked_when_trusted),
+        disabled: matches!(field.kind, FieldKind::Unknown),
     }
 }
 
@@ -548,6 +550,20 @@ mod tests {
         OptionValue::Text(value.to_owned())
     }
 
+    #[test]
+    fn trusted_moves_set_each_bypass_choice() {
+        assert_eq!(
+            trusted_moves(&[claude(), test_agent()]),
+            [(
+                AgentId("claude".to_owned()),
+                "permission_mode".to_owned(),
+                text("bypass_permissions"),
+            )],
+            "the test agent names no bypass choice"
+        );
+        assert_eq!(trusted_moves(&[test_agent()]), []);
+    }
+
     fn values(pairs: &[(&str, OptionValue)]) -> OptionValues {
         pairs
             .iter()
@@ -563,7 +579,7 @@ mod tests {
     }
 
     fn value_of(options: &AgentOptions, id: &str) -> OptionValue {
-        field(&options.fields(false), id).value.clone()
+        field(&options.fields(), id).value.clone()
     }
 
     fn strings(items: &[&str]) -> Vec<String> {
@@ -584,7 +600,7 @@ mod tests {
             "a field the Settings do not name holds its default"
         );
         assert_eq!(
-            options.wire_values(false),
+            options.wire_values(),
             values(&[("mode", text("slow"))]),
             "a Settings value that differs from the field default is sent"
         );
@@ -598,7 +614,7 @@ mod tests {
             assert_eq!(value_of(&options, "sandbox"), OptionValue::Bool(false));
             assert_eq!(value_of(&options, "profile"), OptionValue::Null);
             assert_eq!(
-                options.wire_values(false),
+                options.wire_values(),
                 OptionValues::new(),
                 "nothing differs from the field defaults"
             );
@@ -608,7 +624,7 @@ mod tests {
     #[test]
     fn a_when_rule_overrides_placeholder_and_suggestions() {
         let mut options = AgentOptions::new(claude(), None);
-        let model = |options: &AgentOptions| field(&options.fields(false), "model").editor.clone();
+        let model = |options: &AgentOptions| field(&options.fields(), "model").editor.clone();
         assert_eq!(
             model(&options),
             FieldEditor::Model {
@@ -632,66 +648,35 @@ mod tests {
     fn a_hidden_field_is_dropped_from_the_wire_values() {
         let mut options = AgentOptions::new(test_agent(), None);
         options.set("profile", text("work"));
-        assert_eq!(
-            options.wire_values(false),
-            values(&[("profile", text("work"))])
-        );
+        assert_eq!(options.wire_values(), values(&[("profile", text("work"))]));
         options.set("sandbox", OptionValue::Bool(true));
         assert!(
-            options
-                .fields(false)
-                .iter()
-                .all(|field| field.id != "profile"),
+            options.fields().iter().all(|field| field.id != "profile"),
             "the sandbox rule hides profile"
         );
         assert_eq!(
-            options.wire_values(false),
+            options.wire_values(),
             values(&[("sandbox", OptionValue::Bool(true))]),
             "a hidden field's value is not sent"
         );
     }
 
     #[test]
-    fn a_trusted_launch_locks_and_omits_locked_fields() {
+    fn a_model_is_sent_trimmed_and_a_blank_one_is_not_sent() {
         let mut options = AgentOptions::new(claude(), None);
         options.set("permission_mode", text("plan"));
         options.set("model", text("  opus "));
-        let open = options.fields(false);
+        let open = options.fields();
         assert!(!field(&open, "permission_mode").disabled);
         assert_eq!(
-            options.wire_values(false),
+            options.wire_values(),
             values(&[("model", text("opus")), ("permission_mode", text("plan"))]),
             "a model is sent trimmed"
         );
 
-        let trusted = options.fields(true);
-        assert!(
-            field(&trusted, "permission_mode").disabled,
-            "a trusted launch locks the permission mode"
-        );
-        assert_eq!(
-            field(&trusted, "permission_mode").value,
-            text("plan"),
-            "a locked field shows the value it keeps"
-        );
-        assert!(
-            !field(&trusted, "model").disabled,
-            "a field not locked when trusted stays open"
-        );
-        assert_eq!(
-            options.wire_values(true),
-            values(&[("model", text("opus"))]),
-            "the locked field is not sent"
-        );
-        assert_eq!(
-            value_of(&options, "permission_mode"),
-            text("plan"),
-            "an untrusted launch keeps the value the lock set aside"
-        );
-
         options.set("model", text("   "));
         assert_eq!(
-            options.wire_values(false),
+            options.wire_values(),
             values(&[("permission_mode", text("plan"))]),
             "a blank model is no value, the field default"
         );
@@ -700,7 +685,7 @@ mod tests {
     #[test]
     fn a_choice_with_a_null_default_offers_no_value_first() {
         let options = AgentOptions::new(claude(), None);
-        let fields = options.fields(false);
+        let fields = options.fields();
         let mode = field(&fields, "permission_mode");
         let FieldEditor::Choice { choices, .. } = &mode.editor else {
             panic!("permission_mode is a choice: {mode:?}");
@@ -796,13 +781,13 @@ mod tests {
     fn wire_values_pass_agent_api_validate() {
         for descriptor in [test_agent(), claude()] {
             for stored in samples(&descriptor) {
-                for trusted in [false, true] {
+                {
                     let mut options = AgentOptions::new(descriptor.clone(), None);
                     options.seed(&stored);
-                    let wire = options.wire_values(trusted);
+                    let wire = options.wire_values();
                     if let Err(err) = agent_api::validate(&descriptor, &wire) {
                         panic!(
-                            "{} refused {wire:?}, seeded {stored:?}, trusted {trusted}: {err}",
+                            "{} refused {wire:?}, seeded {stored:?}: {err}",
                             descriptor.id.0
                         );
                     }
@@ -831,12 +816,12 @@ mod tests {
         let mut options = AgentOptions::new(descriptor.clone(), None);
         options.seed(&values(&[("future", text("  as stored "))]));
 
-        let fields = options.fields(false);
+        let fields = options.fields();
         let future = field(&fields, "future");
         assert!(future.disabled, "this client cannot edit it");
         assert_eq!(future.editor, FieldEditor::Unknown);
         assert_eq!(future.value, text("  as stored "));
-        let wire = options.wire_values(false);
+        let wire = options.wire_values();
         assert_eq!(
             wire,
             values(&[("future", text("  as stored "))]),
@@ -872,7 +857,7 @@ mod tests {
             text("anthropic"),
             "the stored spawn ran on the default, not the Settings value"
         );
-        assert_eq!(options.wire_values(false), OptionValues::new());
+        assert_eq!(options.wire_values(), OptionValues::new());
     }
 
     #[test]
@@ -889,10 +874,7 @@ mod tests {
             text("anthropic"),
             "the duplicate source ran on the default provider"
         );
-        assert_eq!(
-            options.wire_values(false),
-            values(&[("model", text("opus"))])
-        );
+        assert_eq!(options.wire_values(), values(&[("model", text("opus"))]));
     }
 
     fn ids(fields: &[FieldView]) -> Vec<String> {
@@ -909,7 +891,7 @@ mod tests {
         }
         let options = AgentOptions::new(descriptor, None);
         assert_eq!(
-            ids(&options.settings_fields(false)),
+            ids(&options.settings_fields()),
             strings(&["mode", "sandbox", "profile"]),
             "every Settings field, whatever its spawn placement, in the descriptor's order"
         );
@@ -919,12 +901,12 @@ mod tests {
     fn settings_fields_skips_spawn_only_fields() {
         let options = AgentOptions::new(claude(), None);
         assert_eq!(
-            ids(&options.settings_fields(false)),
+            ids(&options.settings_fields()),
             strings(&["permission_mode", "provider"]),
             "Claude's model is a spawn-only field"
         );
         assert!(
-            ids(&options.fields(false)).contains(&"model".to_owned()),
+            ids(&options.fields()).contains(&"model".to_owned()),
             "the spawn dialog still draws the model"
         );
     }
@@ -936,32 +918,9 @@ mod tests {
             Some(&values(&[("sandbox", OptionValue::Bool(true))])),
         );
         assert_eq!(
-            ids(&options.settings_fields(false)),
+            ids(&options.settings_fields()),
             strings(&["mode", "sandbox"]),
             "the sandbox rule hides profile"
-        );
-    }
-
-    #[test]
-    fn settings_fields_locks_only_locked_when_trusted_fields() {
-        let options = AgentOptions::new(
-            claude(),
-            Some(&values(&[("permission_mode", text("plan"))])),
-        );
-        let open = options.settings_fields(false);
-        assert!(open.iter().all(|field| !field.disabled), "{open:?}");
-
-        let trusted = options.settings_fields(true);
-        let mode = field(&trusted, "permission_mode");
-        assert!(mode.disabled, "a trusted launch locks the permission mode");
-        assert_eq!(
-            mode.value,
-            text("plan"),
-            "a locked field shows the value it keeps"
-        );
-        assert!(
-            !field(&trusted, "provider").disabled,
-            "the provider is not locked when trusted"
         );
     }
 
@@ -1033,7 +992,7 @@ mod tests {
             text("fast"),
             "the field default, not the Settings value"
         );
-        assert_eq!(options.wire_values(false), OptionValues::new());
+        assert_eq!(options.wire_values(), OptionValues::new());
 
         options.seed(&values(&[("mode", OptionValue::Null)]));
         assert_eq!(

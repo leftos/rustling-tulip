@@ -642,11 +642,6 @@ impl SessionBuilder {
         self.set("label", json!(label))
     }
 
-    /// Launched with approval prompts bypassed.
-    pub fn trusted(self) -> Self {
-        self.set("elevated_authority", json!(true))
-    }
-
     /// Showing `chips`, as the daemon evaluates them from the session's
     /// agent options.
     pub fn agent_chips(self, chips: Value) -> Self {
@@ -2489,6 +2484,22 @@ impl<'h, 'a> HostHandle<'h, 'a> {
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),
         });
+        self.send(DaemonMessage::AgentSettings {
+            settings: BTreeMap::new(),
+        });
+    }
+
+    /// [`Self::connect_keeping_sent`], its daemon listing `agents` in place
+    /// of the registry's (an older daemon's descriptors, say).
+    pub fn connect_listing(&mut self, agents: Vec<protocol::AgentDescriptor>) {
+        let target = self.target.clone();
+        self.event(NetEvent::State(connected_to(
+            target,
+            8787,
+            daemon_features(),
+        )));
+        self.send(welcome(PROTOCOL));
+        self.send(DaemonMessage::Agents { agents });
         self.send(DaemonMessage::AgentSettings {
             settings: BTreeMap::new(),
         });

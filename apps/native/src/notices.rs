@@ -1112,14 +1112,11 @@ mod tests {
 
     #[test]
     fn spawn_refusal_names_the_reason() {
-        let notice = spawn_refusal(
-            "Couldn't review the trusted launch",
-            "another dialog is open",
-        );
+        let notice = spawn_refusal("Couldn't duplicate the session", "another dialog is open");
         assert_eq!(
             notice,
             ActionFailedNotice {
-                title: "Couldn't review the trusted launch".to_owned(),
+                title: "Couldn't duplicate the session".to_owned(),
                 detail: "Couldn't open the spawn dialog: another dialog is open".to_owned(),
                 hint: None,
             }

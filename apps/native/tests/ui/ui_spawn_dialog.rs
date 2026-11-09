@@ -14,8 +14,8 @@ use crate::support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{
-    ClientMessage, DaemonMessage, EnvName, EnvScope, RootWorktreeStatus, SessionMode, SpawnConfig,
-    SpawnRequest, SpawnTarget, SuggestTarget, WorktreeInfo, WorktreeReusePolicy,
+    ClientMessage, DaemonMessage, EnvName, EnvScope, RootWorktreeStatus, SpawnRequest, SpawnTarget,
+    SuggestTarget, WorktreeInfo, WorktreeReusePolicy,
 };
 use rustling_tulip_native::RootView;
 use support::{Fixture, Harness, TestDir, repo, session};
@@ -625,40 +625,41 @@ fn dialog_closes_on_reconnect(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn dialog_opens_with_saved_spawn_defaults(cx: &mut TestAppContext) {
+fn a_saved_trusted_default_opens_the_dialog_on_bypass_permissions(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    std::fs::write(
-        dir.path().join("native-ui.json"),
-        serde_json::json!({
-            "spawn": { "trusted": true }
-        })
-        .to_string(),
-    )
-    .expect("seed native-ui.json");
+    seed_ui(&dir, &serde_json::json!({ "spawn": { "trusted": true } }));
     let mut h = Harness::with(cx, &dir, &fixture());
     h.send(DaemonMessage::AgentSettings {
         settings: serde_json::from_value(
-            serde_json::json!({ "claude": { "permission_mode": "plan" } }),
+            serde_json::json!({ "claude": { "permission_mode": "bypass_permissions" } }),
         )
         .expect("agent settings"),
     });
     open(&mut h);
     let chosen = selected(&mut h);
     assert!(
-        chosen.contains(&"spawn-skip-perms".to_owned()),
-        "trusted launch pre-filled: {chosen:?}"
+        chosen.contains(&"spawn-opt-permission-mode-bypass-permissions".to_owned()),
+        "the agent's Settings value pre-filled: {chosen:?}"
     );
     assert!(
-        chosen.contains(&"spawn-opt-permission-mode-plan".to_owned()),
-        "the agent's Settings value pre-filled: {chosen:?}"
+        !chosen.contains(&"spawn-skip-perms".to_owned()),
+        "no Trusted checkbox: {chosen:?}"
     );
 
     suggest(&mut h, "r1", "wt/brave-fox");
     h.click_on("spawn-submit");
     let request = the_spawn(&h.sent());
+    let options = &request.agent.as_ref().expect("an agent spawn").options;
+    assert_eq!(
+        options.get("permission_mode"),
+        Some(&protocol::OptionValue::Text(
+            "bypass_permissions".to_owned()
+        )),
+        "the bypass choice reaches the daemon"
+    );
     assert!(
         request.dangerously_skip_permissions,
-        "the saved trusted default reaches the daemon"
+        "with the flag older daemons read"
     );
 }
 
@@ -667,139 +668,9 @@ fn seed_ui(dir: &TestDir, ui: &serde_json::Value) {
     std::fs::write(dir.path().join("native-ui.json"), ui.to_string()).expect("seed native-ui.json");
 }
 
-/// `native-ui.json`'s `spawn` object as it stands on disk.
-fn saved_spawn(dir: &TestDir) -> serde_json::Value {
-    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("native-ui.json");
-    let file: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
-    file["spawn"].clone()
-}
-
 /// Whether the element tagged `selector` has been painted on screen.
 fn painted(h: &mut Harness<'_>, selector: &str) -> bool {
     h.bounds(selector).origin.x >= px(0.0)
-}
-
-fn ticked(h: &mut Harness<'_>, selector: &str) -> bool {
-    selected(h).contains(&selector.to_owned())
-}
-
-#[gpui::test]
-fn the_last_trusted_choice_seeds_the_next_dialog_over_the_default(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    seed_ui(&dir, &serde_json::json!({ "spawn": { "trusted": true } }));
-    let mut h = Harness::with(cx, &dir, &fixture());
-    open(&mut h);
-    assert!(
-        ticked(&mut h, "spawn-skip-perms"),
-        "the default ticks Trusted"
-    );
-
-    h.click_on("spawn-skip-perms");
-    suggest(&mut h, "r1", "wt/brave-fox");
-    h.click_on("spawn-submit");
-    assert!(
-        !the_spawn(&h.sent()).dangerously_skip_permissions,
-        "the unticked choice reaches the daemon"
-    );
-    let spawn = saved_spawn(&dir);
-    assert_eq!(
-        spawn["last_trusted"],
-        serde_json::json!(false),
-        "the choice is saved: {spawn}"
-    );
-    assert_eq!(
-        spawn["trusted"],
-        serde_json::json!(true),
-        "the Settings default stays: {spawn}"
-    );
-
-    open(&mut h);
-    assert!(
-        !ticked(&mut h, "spawn-skip-perms"),
-        "a fresh dialog opens with the last choice, not the default"
-    );
-}
-
-/// A stored trusted, in-place launch of `r1`.
-fn trusted_config() -> SpawnConfig {
-    SpawnConfig {
-        target: SpawnTarget::Single {
-            repo_id: "r1".to_owned(),
-            branch_name: "feat/x".to_owned(),
-            base_branch: Some("main".to_owned()),
-            use_worktree: false,
-            checkout_strategy: None,
-            worktree_reuse: WorktreeReusePolicy::default(),
-            existing_worktree: None,
-        },
-        mode: SessionMode::Interactive,
-        dangerously_skip_permissions: true,
-        agent: Some(
-            serde_json::from_value(serde_json::json!({ "agent": "claude", "options": {} }))
-                .expect("agent selection"),
-        ),
-        extra_env: Vec::new(),
-    }
-}
-
-#[gpui::test]
-fn a_prefilled_dialog_leaves_the_last_trusted_choice_alone(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    seed_ui(
-        &dir,
-        &serde_json::json!({ "spawn": { "trusted": false, "last_trusted": false } }),
-    );
-    let mut fixture = fixture();
-    fixture.repos[1].last_spawn_config = Some(trusted_config());
-    let mut h = Harness::with(cx, &dir, &fixture);
-    let row = h.center("container-repo:r1");
-    h.double_click(row);
-    assert!(is_open(&mut h), "the trusted launch opens its review");
-    assert!(ticked(&mut h, "spawn-skip-perms"), "prefilled trusted");
-
-    h.click_on("spawn-submit");
-    assert!(
-        the_spawn(&h.sent()).dangerously_skip_permissions,
-        "the prefilled choice reaches the daemon"
-    );
-    let spawn = saved_spawn(&dir);
-    assert_eq!(
-        spawn["last_trusted"],
-        serde_json::json!(false),
-        "a prefilled submit does not move the last choice: {spawn}"
-    );
-}
-
-#[gpui::test]
-fn the_trusted_warning_is_hidden_when_trusted_is_the_default(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    seed_ui(&dir, &serde_json::json!({ "spawn": { "trusted": true } }));
-    let mut h = Harness::with(cx, &dir, &fixture());
-    open(&mut h);
-    assert!(
-        ticked(&mut h, "spawn-skip-perms"),
-        "the default ticks Trusted"
-    );
-    assert!(
-        !painted(&mut h, "spawn-trusted-launch-warning"),
-        "the Settings default already granted trust"
-    );
-}
-
-#[gpui::test]
-fn the_trusted_warning_shows_when_trusted_is_not_the_default(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &fixture());
-    open(&mut h);
-    assert!(
-        !painted(&mut h, "spawn-trusted-launch-warning"),
-        "unticked: no warning"
-    );
-    h.click_on("spawn-skip-perms");
-    assert!(
-        painted(&mut h, "spawn-trusted-launch-warning"),
-        "ticking Trusted over an off default warns"
-    );
 }
 
 #[gpui::test]
@@ -808,7 +679,7 @@ fn tab_cycles_controls(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &fixture());
     open(&mut h);
     let mut seen = vec![focus(&mut h).expect("a focus")];
-    for _ in 0..5 {
+    for _ in 0..4 {
         h.keys("tab");
         seen.push(focus(&mut h).expect("a focus"));
     }
@@ -818,7 +689,6 @@ fn tab_cycles_controls(cx: &mut TestAppContext) {
             "spawn-branch",
             "spawn-branch-random",
             "spawn-base-branch",
-            "spawn-skip-perms",
             "spawn-advanced",
             "spawn-cancel"
         ],

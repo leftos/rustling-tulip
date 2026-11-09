@@ -175,12 +175,13 @@ impl AppState {
         // producing a different per-project memory key than running it by hand.
         let migrated = migrate_paths_in_place(&mut inner);
         let sanitized = sanitize_loaded_layouts(&mut inner);
+        let folded = fold_trusted_configs(&mut inner);
         let state = Self {
             dirs: dirs.clone(),
             inner: Mutex::new(inner),
             state_file_corrupt,
         };
-        if migrated || state_file_corrupt || sanitized {
+        if migrated || state_file_corrupt || sanitized || folded {
             // Best-effort: put the simplified paths, whatever a corrupt file
             // still yielded, and any tab list put right, on disk right away. A
             // start that never writes again then finds the file it should
@@ -769,6 +770,26 @@ fn seal_secret_rows_in_place(state: &mut PersistedState, file: &Path) -> bool {
     changed
 }
 
+/// Fold the trusted flag of every persisted `last_spawn_config` (repos and workspaces) into its
+/// agent's bypass choice, returning whether any config changed.
+fn fold_trusted_configs(state: &mut PersistedState) -> bool {
+    let mut changed = false;
+    for config in state
+        .repos
+        .iter_mut()
+        .filter_map(|repo| repo.last_spawn_config.as_mut())
+        .chain(
+            state
+                .workspaces
+                .iter_mut()
+                .filter_map(|workspace| workspace.last_spawn_config.as_mut()),
+        )
+    {
+        changed |= crate::trusted_fold::fold_config(config);
+    }
+    changed
+}
+
 /// Brings every tab list read from disk into a shape the daemon can serve:
 /// repeated tab and pane ids are dropped and out-of-range split ratios are
 /// clamped, each with a logged reason. Returns `true` if anything changed.
@@ -1099,7 +1120,15 @@ mod tests {
         );
         assert_eq!(
             selection.options.get("trusted"),
-            Some(&protocol::OptionValue::Bool(true))
+            Some(&protocol::OptionValue::Bool(true)),
+            "an option the descriptor does not know is kept as it was"
+        );
+        assert_eq!(
+            selection.options.get("permission_mode"),
+            Some(&protocol::OptionValue::Text(
+                "bypass_permissions".to_owned()
+            )),
+            "the saved trusted flag loads as the bypass choice"
         );
         assert!(
             matches!(
@@ -1150,6 +1179,21 @@ mod tests {
             .as_ref()
             .expect("the workspace keeps its last spawn config");
         assert_eq!(spawn.mode, protocol::SessionMode::Headless);
+        assert!(spawn.dangerously_skip_permissions);
+        assert_eq!(
+            spawn.agent.as_ref().map(|selection| &selection.options),
+            Some(&protocol::OptionValues::from([
+                (
+                    "model".to_owned(),
+                    protocol::OptionValue::Text("sonnet".to_owned())
+                ),
+                (
+                    "permission_mode".to_owned(),
+                    protocol::OptionValue::Text("bypass_permissions".to_owned())
+                ),
+            ])),
+            "the headless config's trusted flag loads as the bypass choice"
+        );
         assert!(
             matches!(
                 &spawn.target,
@@ -1287,6 +1331,12 @@ mod tests {
         assert_v0_5_1_workspace(&persisted.workspaces[0]);
         assert_v0_5_1_layout(&persisted);
         assert_v0_5_1_host_settings(&persisted);
+        let rewritten =
+            std::fs::read_to_string(&dirs.state_file).expect("read the rewritten state.json");
+        assert!(
+            rewritten.contains("\"bypass_permissions\""),
+            "the folded bypass choice is written back: {rewritten}"
+        );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

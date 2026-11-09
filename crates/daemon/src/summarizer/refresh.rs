@@ -382,7 +382,7 @@ mod tests {
         let event: serde_json::Value = serde_json::from_str(body).expect("parse hook body");
         let report = agent_registry::plugin(&agent_registry::default_agent())
             .expect("Claude is registered")
-            .map_hook_event(&event, None, false)
+            .map_hook_event(&event, None)
             .expect("the body maps to a report");
         crate::hook_status::apply_signal(hub, "s1", Some(event_time), &report, "Test");
     }

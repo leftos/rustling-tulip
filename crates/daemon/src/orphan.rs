@@ -42,11 +42,6 @@ fn default_sidecar_version() -> u32 {
     CURRENT_SIDECAR_VERSION
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "the sidecar is a flat serde record of a session's independent flags; folding them \
-              into enums would change the file format for every writer and reader"
-)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrphanMeta {
     /// Schema version of this sidecar. Defaults to `CURRENT_SIDECAR_VERSION`
@@ -212,11 +207,6 @@ pub struct OrphanMeta {
     /// other session and for sidecars written before this field existed.
     #[serde(default)]
     pub hook_options: protocol::OptionValues,
-    /// Whether the run a recovered shell resumes in `hook_agent` was trusted,
-    /// which its hook events are mapped with, set at spawn. False for every
-    /// other session and for sidecars written before this field existed.
-    #[serde(default)]
-    pub hook_trusted: bool,
     /// The abandoned sessions this one replaced in place, oldest first (see
     /// [`protocol::SessionSnapshot::resumed_from`]), set at spawn. Absent when
     /// empty.
@@ -383,9 +373,12 @@ fn load_meta_from_bytes(bytes: &[u8]) -> anyhow::Result<OrphanMeta> {
     migrate_sidecar(value)
 }
 
-/// Migration seam for sidecar shape changes. Today every accepted on-disk
-/// version maps 1:1 to `OrphanMeta` (the only shape we know). When a future
-/// version introduces an actual migration, branch on `on_disk_version` here.
+/// Migration seam for sidecar shape changes. Every accepted on-disk version
+/// maps 1:1 to `OrphanMeta` (the only shape we know), with the trust older
+/// releases saved folded into the bypass choice: the spawn config's trusted
+/// flag into its agent's options, and `hook_trusted` into `hook_options` for
+/// the `hook_agent`. When a future version introduces an actual migration,
+/// branch on `on_disk_version` here.
 fn migrate_sidecar(value: serde_json::Value) -> anyhow::Result<OrphanMeta> {
     let on_disk = value
         .get("on_disk_version")
@@ -396,8 +389,19 @@ fn migrate_sidecar(value: serde_json::Value) -> anyhow::Result<OrphanMeta> {
             "sidecar from future daemon version: on_disk_version={on_disk}, max known={MAX_KNOWN_SIDECAR_VERSION}"
         ));
     }
-    serde_json::from_value::<OrphanMeta>(value)
-        .map_err(|_| anyhow!("the migrated meta does not have the sidecar's shape"))
+    let hook_trusted = value
+        .get("hook_trusted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut meta = serde_json::from_value::<OrphanMeta>(value)
+        .map_err(|_| anyhow!("the migrated meta does not have the sidecar's shape"))?;
+    if let Some(config) = meta.spawn_config.as_mut() {
+        crate::trusted_fold::fold_config(config);
+    }
+    if let Some(agent) = &meta.hook_agent {
+        crate::trusted_fold::fold_options(agent, hook_trusted, &mut meta.hook_options);
+    }
+    Ok(meta)
 }
 
 /// Remove the meta sidecar for a session that has stopped or errored. Leaves
@@ -705,7 +709,6 @@ pub fn meta_from_record(
         // A recovered shell's spawn sets these on the meta this returns.
         hook_agent: None,
         hook_options: protocol::OptionValues::new(),
-        hook_trusted: false,
         resumed_from: Vec::new(),
         ended_during_host_shutdown: false,
     })
@@ -1098,7 +1101,6 @@ mod tests {
             shell_label: None,
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
-            hook_trusted: false,
             resumed_from: Vec::new(),
             ended_during_host_shutdown: true,
         };
@@ -1350,10 +1352,12 @@ mod tests {
         assert!(!old_meta.agent_in_shell);
     }
 
-    /// A recovered shell's hook options and trust survive the sidecar; a
-    /// sidecar without the fields loads as empty options, untrusted.
+    /// A recovered shell's hook options survive the sidecar; one written
+    /// before the update folds its `hook_trusted` and its spawn config's
+    /// trusted flag into the bypass choice; a sidecar without the fields
+    /// loads as empty options.
     #[test]
-    fn hook_options_and_trust_round_trip_through_the_sidecar() {
+    fn a_sidecar_from_before_the_update_folds_its_trust_into_the_options() {
         let dirs = scratch_dirs("hook-options-round-trip");
         let mut meta = s1_meta(None);
         meta.mode = SessionMode::PlainShell;
@@ -1362,11 +1366,46 @@ mod tests {
             "mode".to_owned(),
             protocol::OptionValue::Text("fast".to_owned()),
         )]);
-        meta.hook_trusted = true;
         write_meta(&dirs, &meta).expect("write meta");
         let loaded = load_meta(&dirs, "s1").expect("load meta");
         assert_eq!(loaded.hook_options, meta.hook_options);
-        assert!(loaded.hook_trusted, "the trust reached the sidecar");
+
+        let bypass = protocol::OptionValues::from([(
+            "permission_mode".to_owned(),
+            protocol::OptionValue::Text("bypass_permissions".to_owned()),
+        )]);
+        let mut trusted = s1_meta(None);
+        trusted.mode = SessionMode::PlainShell;
+        trusted.hook_agent = Some(AgentId("claude".to_owned()));
+        trusted.spawn_config = Some(protocol::SpawnConfig {
+            target: protocol::SpawnTarget::Standalone {
+                cwd: None,
+                add_dirs: Vec::new(),
+            },
+            mode: SessionMode::Interactive,
+            dangerously_skip_permissions: true,
+            agent: Some(protocol::AgentSelection {
+                agent: AgentId("claude".to_owned()),
+                options: protocol::OptionValues::new(),
+            }),
+            extra_env: Vec::new(),
+        });
+        let mut value = serde_json::to_value(&trusted).expect("serialize the meta");
+        value["hook_trusted"] = serde_json::Value::Bool(true);
+        let bytes = serde_json::to_vec(&value).expect("serialize the sidecar");
+        let folded = load_meta_from_bytes(&bytes).expect("parse the trusted sidecar");
+        assert_eq!(
+            folded.hook_options, bypass,
+            "hook_trusted loads as the bypass choice"
+        );
+        assert_eq!(
+            folded
+                .spawn_config
+                .and_then(|config| config.agent)
+                .map(|selection| selection.options),
+            Some(bypass),
+            "the spawn config's trusted flag loads as the bypass choice"
+        );
 
         let old = br#"{
             "on_disk_version": 2,
@@ -1381,7 +1420,6 @@ mod tests {
         }"#;
         let old_meta = load_meta_from_bytes(old).expect("parse old meta");
         assert!(old_meta.hook_options.is_empty());
-        assert!(!old_meta.hook_trusted);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

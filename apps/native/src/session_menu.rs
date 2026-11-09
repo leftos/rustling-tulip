@@ -2314,7 +2314,7 @@ impl RootView {
 
     /// The spawn config a Shift-duplicate asked for arrived: the dialog
     /// opens held on the config's repo or workspace, else the source's,
-    /// filled from it over the Spawn defaults. When the dialog cannot open
+    /// filled from it over the agent's Settings values. When the dialog cannot open
     /// (the repo left, another dialog is open), a notice says why. A reply
     /// no Shift-duplicate waits for is dropped.
     pub(crate) fn on_spawn_config(

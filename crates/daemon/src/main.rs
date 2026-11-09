@@ -76,6 +76,7 @@ mod termstate;
 mod tracer_client;
 mod tracer_log;
 mod transcript_tail;
+mod trusted_fold;
 mod typing_lane;
 mod user_env;
 mod view_drive;

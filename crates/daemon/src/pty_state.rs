@@ -2429,7 +2429,6 @@ mod hysteresis_tests {
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
-            hook_trusted: false,
             resumed_from: Vec::new(),
         }
     }
@@ -5670,7 +5669,7 @@ mod hysteresis_tests {
         fn hook(&self, time: u128, body: &serde_json::Value) {
             let report = agent_registry::plugin(&agent_registry::default_agent())
                 .expect("Claude is registered")
-                .map_hook_event(body, None, false)
+                .map_hook_event(body, None)
                 .expect("the payload maps to a report");
             self.set_record(|record| {
                 crate::hook_status::apply_to_record(record, Some(time), &report);

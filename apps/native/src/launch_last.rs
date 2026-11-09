@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use protocol::{RepoEntry, SpawnConfig, SpawnRequest, SpawnTarget, SuggestTarget, WorkspaceEntry};
 
-use crate::spawn_form::OpenChoice;
 use crate::spawns::OpenIn;
 use crate::target::HostKey;
 
@@ -52,17 +51,6 @@ impl Placement {
         match self {
             Self::CurrentTab | Self::NewTab => OpenIn::NewTab,
             Self::Tab(id) => OpenIn::Tab(id.clone()),
-        }
-    }
-
-    /// The spawn dialog's Open-in choice this placement names, so a trusted
-    /// launch opens the dialog with the same tab preselected.
-    #[must_use]
-    pub(crate) fn open_choice(&self) -> OpenChoice {
-        match self {
-            Self::CurrentTab => OpenChoice::CurrentTab,
-            Self::NewTab => OpenChoice::NewTab,
-            Self::Tab(id) => OpenChoice::Tab(id.clone()),
         }
     }
 }

@@ -186,8 +186,7 @@ pub fn deliver(
         if let Some(line) = plugin.map_live_line(body) {
             (Some(line), None)
         } else {
-            let (options, trusted) = hook_options_and_trust(&record);
-            (None, plugin.map_hook_event(body, options, trusted))
+            (None, plugin.map_hook_event(body, hook_options(&record)))
         }
     };
     if let Some(line) = line {
@@ -520,20 +519,20 @@ impl Default for PendingHooks {
     }
 }
 
-/// The options and trust `record`'s hook events are mapped with. A shell
-/// hosting a recovered agent (a hook agent, no agent in its spawn config)
-/// maps with the selection its recovery stored, its options always present,
-/// even empty; every other record with the options and trust its spawn
-/// recorded (none for a record without a spawn config).
-fn hook_options_and_trust(record: &SessionRecord) -> (Option<&protocol::OptionValues>, bool) {
-    let spawn = record.spawn_config.as_ref();
-    let spawn_selection = spawn.and_then(|spawn| spawn.agent.as_ref());
+/// The options `record`'s hook events are mapped with. A shell hosting a
+/// recovered agent (a hook agent, no agent in its spawn config) maps with the
+/// selection its recovery stored, its options always present, even empty;
+/// every other record with the options its spawn recorded (none for a record
+/// without a spawn config).
+fn hook_options(record: &SessionRecord) -> Option<&protocol::OptionValues> {
+    let spawn_selection = record
+        .spawn_config
+        .as_ref()
+        .and_then(|spawn| spawn.agent.as_ref());
     if record.hook_agent.is_some() && spawn_selection.is_none() {
-        return (Some(&record.hook_options), record.hook_trusted);
+        return Some(&record.hook_options);
     }
-    let options = spawn_selection.map(|selection| &selection.options);
-    let trusted = spawn.is_some_and(|spawn| spawn.dangerously_skip_permissions);
-    (options, trusted)
+    spawn_selection.map(|selection| &selection.options)
 }
 
 impl PendingHooks {
@@ -548,16 +547,15 @@ impl PendingHooks {
     }
 
     /// The report `record`'s hook plugin maps `body` to, with the options
-    /// and trust [`hook_options_and_trust`] gives it. A plain shell maps
-    /// with its hook agent, so one without a hook agent maps nothing.
+    /// [`hook_options`] gives it. A plain shell maps with its hook agent, so
+    /// one without a hook agent maps nothing.
     pub(crate) fn map_for_record(
         &self,
         record: &SessionRecord,
         body: &serde_json::Value,
     ) -> Option<HookReport> {
         let plugin = self.plugin_for(record)?;
-        let (options, trusted) = hook_options_and_trust(record);
-        plugin.map_hook_event(body, options, trusted)
+        plugin.map_hook_event(body, hook_options(record))
     }
 
     /// The plugin that reads `record`'s hook events: its hook agent's. A
@@ -816,7 +814,7 @@ mod tests {
     fn report(body: &Value) -> HookReport {
         agent_registry::plugin(&agent_registry::default_agent())
             .expect("Claude is registered")
-            .map_hook_event(body, None, false)
+            .map_hook_event(body, None)
             .expect("the payload maps to a report")
     }
 
@@ -1776,7 +1774,7 @@ mod tests {
         assert!(
             agent_registry::plugin(&agent_registry::default_agent())
                 .expect("Claude is registered")
-                .map_hook_event(&body, None, false)
+                .map_hook_event(&body, None)
                 .is_none(),
             "only the test agent maps this body"
         );
@@ -1791,7 +1789,7 @@ mod tests {
         assert_eq!(time, Some(5));
         assert_eq!(
             message.as_deref(),
-            Some("none trusted=false"),
+            Some("none"),
             "the record's plugin mapped the held body"
         );
         assert_eq!(hub.pending_hooks.held_times("s1"), [], "the drain took it");
@@ -1806,13 +1804,13 @@ mod tests {
         let (status, time, message) = insert(&hub, record);
         assert_eq!(status, SessionStatus::Working);
         assert_eq!(time, Some(5));
-        assert_eq!(message.as_deref(), Some("none trusted=false"));
+        assert_eq!(message.as_deref(), Some("none"));
     }
 
     /// A shell hosting a recovered agent maps its hook events with the
-    /// options and trust the recovery stored, not with its own spawn config.
+    /// options the recovery stored, not with its own spawn config.
     #[tokio::test]
-    async fn a_recovered_shell_maps_hooks_with_its_recovered_options_and_trust() {
+    async fn a_recovered_shell_maps_hooks_with_its_recovered_options() {
         let (hub, _scratch) = test_agent_hub("early-shell-recovered-options");
         hold(&hub, "s1", 5, test_session_start("working"), 64);
         let mut record = crate::history::test_support::record("s1", SessionMode::PlainShell);
@@ -1824,10 +1822,9 @@ mod tests {
             ),
             ("sandbox".to_owned(), protocol::OptionValue::Bool(false)),
         ]);
-        record.hook_trusted = true;
         let (status, _time, message) = insert(&hub, record);
         assert_eq!(status, SessionStatus::Working);
-        assert_eq!(message.as_deref(), Some("fast trusted=true"));
+        assert_eq!(message.as_deref(), Some("fast"));
     }
 
     /// A recovered selection with no options still maps with its options,
@@ -1836,9 +1833,8 @@ mod tests {
     fn a_recovered_shell_with_empty_options_maps_them_as_some_empty() {
         let mut record = crate::history::test_support::record("s1", SessionMode::PlainShell);
         record.hook_agent = Some(agent_registry::default_agent());
-        record.hook_trusted = true;
         let empty = protocol::OptionValues::new();
-        assert_eq!(hook_options_and_trust(&record), (Some(&empty), true));
+        assert_eq!(hook_options(&record), Some(&empty));
     }
 
     #[tokio::test]

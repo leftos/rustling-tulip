@@ -10,9 +10,7 @@
     "branch_template": "tmp/preset-test/{index}",
     "session_label_template": "smoke {index}",
     "default_use_worktree": true,
-    "dangerously_skip_permissions": true,
-    "model": null,
-    "permission_mode": null,
+    "agent": { "agent": "claude", "options": { "permission_mode": "bypass_permissions" } },
     "tab_grouping": {
       "kind": "new_tab",
       "layout": "balanced_horizontal",

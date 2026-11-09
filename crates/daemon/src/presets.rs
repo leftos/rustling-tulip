@@ -298,6 +298,14 @@ async fn list_workspace_presets(hub: &Hub, workspace_id: &str) -> anyhow::Result
     Ok(all)
 }
 
+/// The fields of a preset entry that older releases wrote and the entry no longer has.
+#[derive(serde::Deserialize)]
+struct LegacyPreset {
+    /// The Trusted flag, which loads as the agent's bypass choice.
+    #[serde(default)]
+    dangerously_skip_permissions: bool,
+}
+
 async fn load_repo_presets(repo_path: &Path, repo_id: &str) -> anyhow::Result<Vec<PresetEntry>> {
     let path = repo_path.join(".rustling-tulip").join("presets.json");
     if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
@@ -306,14 +314,27 @@ async fn load_repo_presets(repo_path: &Path, repo_id: &str) -> anyhow::Result<Ve
     let bytes = tokio::fs::read(&path)
         .await
         .with_context(|| format!("reading {}", path.display()))?;
-    let mut entries: Vec<PresetEntry> = serde_json::from_slice(&bytes).map_err(|err| {
+    let parse_error = |err: serde_json::Error| {
         anyhow::anyhow!(
             "parsing {}: {}",
             path.display(),
             crate::logging::json_error_at(&err)
         )
-    })?;
-    for entry in &mut entries {
+    };
+    let mut entries: Vec<PresetEntry> = serde_json::from_slice(&bytes).map_err(parse_error)?;
+    // Older releases wrote a `dangerously_skip_permissions` flag the entry no longer has; read it
+    // with its old type, so a value that is not a bool still fails, and fold it into the agent's
+    // bypass choice.
+    let legacy: Vec<LegacyPreset> = serde_json::from_slice(&bytes).map_err(parse_error)?;
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let trusted = legacy
+            .get(index)
+            .is_some_and(|legacy| legacy.dangerously_skip_permissions);
+        if trusted {
+            let mut selection = preset_selection(entry);
+            crate::trusted_fold::fold_options(&selection.agent, true, &mut selection.options);
+            entry.agent = Some(selection);
+        }
         if let TabGroupingConfig::NewTab {
             max_panes_per_tab: Some(0),
             ..
@@ -1676,7 +1697,8 @@ async fn spawn_one(
         target: spawn_target,
         mode: SessionMode::Interactive,
         initial_prompt: None,
-        dangerously_skip_permissions: plan.preset.dangerously_skip_permissions,
+        // The spawn intake derives the flag from the options' bypass choice.
+        dangerously_skip_permissions: false,
         agent: Some(preset_selection(&plan.preset)),
         extra_env: Vec::new(),
         secret_env_keys: Vec::new(),
@@ -2416,6 +2438,110 @@ mod tests {
             } => assert!(max_panes_per_tab.is_none()),
             protocol::TabGroupingConfig::None => panic!("expected new_tab grouping"),
         }
+        assert_eq!(
+            smoke
+                .agent
+                .as_ref()
+                .and_then(|selection| selection.options.get("permission_mode")),
+            Some(&protocol::OptionValue::Text(
+                "bypass_permissions".to_owned()
+            )),
+            "the smoke preset runs in bypass mode"
+        );
+    }
+
+    /// One preset in the shape `.rustling-tulip/presets.json` took in v0.5.1-alpha, with
+    /// `fields` merged over its required keys.
+    fn v0_5_1_preset(id: &str, fields: serde_json::Value) -> serde_json::Value {
+        let mut preset = serde_json::json!({
+            "id": id,
+            "name": id,
+            "prompt_sources": [{"kind": "inline"}],
+            "prompt_template": "{prompt}",
+            "branch_template": "tmp/{index}",
+            "tab_grouping": {"kind": "none"},
+            "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
+        });
+        if let (Some(preset), serde_json::Value::Object(fields)) = (preset.as_object_mut(), fields)
+        {
+            preset.extend(fields);
+        }
+        preset
+    }
+
+    #[tokio::test]
+    async fn a_preset_file_from_v0_5_1_alpha_with_the_trusted_flag_loads_in_bypass_mode() {
+        let scratch = ScratchDir::new();
+        let folder = scratch.path().join(".rustling-tulip");
+        std::fs::create_dir_all(&folder).expect("create the preset folder");
+        let presets = serde_json::json!([
+            v0_5_1_preset(
+                "smoke",
+                serde_json::json!({
+                    "dangerously_skip_permissions": true,
+                    "model": null,
+                    "permission_mode": null
+                })
+            ),
+            v0_5_1_preset(
+                "planned",
+                serde_json::json!({
+                    "dangerously_skip_permissions": true,
+                    "agent": {"agent": "claude", "options": {"permission_mode": "plan"}}
+                })
+            ),
+            v0_5_1_preset("plain", serde_json::json!({})),
+        ]);
+        let json = serde_json::to_vec(&presets).expect("serialize the presets");
+        std::fs::write(folder.join("presets.json"), json).expect("write presets.json");
+
+        let entries = load_repo_presets(scratch.path(), "repo-1")
+            .await
+            .expect("the v0.5.1 presets load");
+
+        let bypass = protocol::OptionValue::Text("bypass_permissions".to_owned());
+        assert_eq!(
+            entries[0].agent,
+            Some(AgentSelection {
+                agent: AgentId("claude".to_owned()),
+                options: OptionValues::from([("permission_mode".to_owned(), bypass.clone())]),
+            }),
+            "the old smoke shape runs the default agent in bypass mode"
+        );
+        assert_eq!(
+            entries[1]
+                .agent
+                .as_ref()
+                .and_then(|selection| selection.options.get("permission_mode")),
+            Some(&bypass),
+            "the trusted flag wins over a stored mode"
+        );
+        assert_eq!(
+            entries[2].agent, None,
+            "a preset without the flag is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preset_whose_trusted_flag_is_not_a_bool_fails_to_parse() {
+        let scratch = ScratchDir::new();
+        let folder = scratch.path().join(".rustling-tulip");
+        std::fs::create_dir_all(&folder).expect("create the preset folder");
+        let presets = serde_json::json!([v0_5_1_preset(
+            "quoted",
+            serde_json::json!({"dangerously_skip_permissions": "true"})
+        )]);
+        let json = serde_json::to_vec(&presets).expect("serialize the presets");
+        std::fs::write(folder.join("presets.json"), json).expect("write presets.json");
+
+        let err = load_repo_presets(scratch.path(), "repo-1")
+            .await
+            .expect_err("a string flag is refused as older releases refused it");
+        let text = err.to_string();
+        assert!(
+            text.contains("parsing") && text.contains("line 1 column"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -3039,7 +3165,6 @@ mod tests {
                 branch_template: "branch-{index}".to_string(),
                 session_label_template: Some("session {index}".to_string()),
                 default_use_worktree: Some(false),
-                dangerously_skip_permissions: false,
                 agent: None,
                 tab_grouping: TabGroupingConfig::None,
                 injector: InjectorTemplate {

@@ -86,8 +86,6 @@ const RANDOM_TIP: &str = "Generate a random worktree branch name";
 const SUGGESTING: &str = "Picking a name no existing branch uses…";
 const FETCH_FAILED: &str = "Couldn't reach the remote — comparing against the last fetched refs.";
 const CURRENT_TAB_DISABLED: &str = "The current tab cannot host terminal panes";
-/// The trusted-launch warning's text under its title.
-const TRUSTED_WARNING: &str = "Approval prompts are bypassed for this session.";
 const NO_ENV: &str = "No extra env vars.";
 const ENV_VALUE_PLACEHOLDER: &str = "value";
 const REMOVE_ENV_TIP: &str = "Remove env var";
@@ -128,7 +126,7 @@ pub(crate) enum SpawnEntry {
         preselect: Option<String>,
     },
     /// A Shift-duplicate: held on the source's repo or workspace when it
-    /// has one, and filled from `prefill` over the Spawn defaults.
+    /// has one, and filled from `prefill` over the agent's Settings values.
     Duplicate {
         lock: Option<Lock>,
         prefill: Box<Prefill>,
@@ -173,10 +171,6 @@ pub(crate) struct SpawnDialog {
     target_list_bounds: Option<Bounds<Pixels>>,
     /// Where the open branch, base or env name list is scrolled to.
     list_scroll: ScrollHandle,
-    /// The dialog opened filled from a stored config (a duplicate, a
-    /// launch-last review), so its submit is not the user's own Trusted
-    /// choice.
-    prefilled: bool,
 }
 
 /// The spawn dialog while open: its form, or the state it opens in while no
@@ -355,7 +349,6 @@ impl RootView {
             Control::OpenIn(form.open_in().clone()),
         ];
         chosen.extend(form.chosen_options());
-        chosen.extend(form.trusted().then_some(Control::Trusted));
         let worktree = form.git_choices_shown() && form.use_worktree();
         chosen.extend(worktree.then_some(Control::UseWorktree));
         chosen.extend(worktree.then_some(Control::Mode(form.mode())));
@@ -438,13 +431,6 @@ impl RootView {
             .iter()
             .find(|input| input.field == field)
             .map(|input| input.input.read(cx).text().to_owned())
-    }
-
-    /// The trusted-launch row's detail, the chosen agent's trust note,
-    /// while the dialog is open.
-    #[must_use]
-    pub fn spawn_dialog_trust_note(&self) -> Option<String> {
-        self.form_dialog()?.form.trusted_detail().map(str::to_owned)
     }
 
     /// The key and value fields of every env row, while the dialog is open.
@@ -746,7 +732,6 @@ impl RootView {
                 .as_ref()
                 .map(|(host, session)| (host.clone(), session)),
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
-            spawn_defaults: self.sidebar.ui_state().spawn,
             lock,
             preselected,
         };
@@ -791,7 +776,6 @@ impl RootView {
             target_scroll: ScrollHandle::new(),
             target_list_bounds: None,
             list_scroll: ScrollHandle::new(),
-            prefilled: prefill.is_some(),
         })));
         self.sync_env_inputs(window, cx);
         self.sync_option_inputs(window, cx);
@@ -1325,7 +1309,6 @@ impl RootView {
                     Some(SpawnModal::Form(dialog)) => dialog.aim.take(),
                     _ => None,
                 };
-                self.remember_trusted_choice();
                 let open_in = match aim {
                     Some(aim) => aim.open_in(submission.open_in),
                     None => submission.open_in,
@@ -1333,22 +1316,6 @@ impl RootView {
                 self.close_spawn_dialog(window, cx);
                 self.spawn_on(&host, submission.request, open_in, cx);
             }
-        }
-    }
-
-    /// Saves the Trusted launch choice of a dialog the user filled in, which
-    /// the next fresh dialog opens with; a prefilled dialog or a plain shell
-    /// (no Trusted control) leaves it alone.
-    fn remember_trusted_choice(&mut self) {
-        let Some(SpawnModal::Form(dialog)) = &self.spawn_dialog else {
-            return;
-        };
-        if dialog.prefilled || !dialog.form.trusted_shown() {
-            return;
-        }
-        let trusted = dialog.form.trusted();
-        if self.sidebar.set_spawn_last_trusted(trusted) {
-            self.save_ui();
         }
     }
 
@@ -1382,7 +1349,7 @@ impl RootView {
             let Some((value, placeholder)) = text_field(field) else {
                 continue;
             };
-            // A field a trusted launch locks takes no typing.
+            // A field of a kind this client does not know takes no typing.
             let read_only = field.disabled;
             option
                 .input
@@ -1713,9 +1680,7 @@ impl RootView {
                 cx,
             ))
             .child(open_in_field(form, &focus, cx));
-        let run = divided(&t)
-            .children(trusted_rows(form, &focus, cx))
-            .child(advanced_section(dialog, &focus, cx));
+        let run = divided(&t).child(advanced_section(dialog, &focus, cx));
         let body = div()
             .id("spawn-body")
             .debug_selector(|| "spawn-body".to_owned())
@@ -2863,38 +2828,6 @@ fn checkbox(
         .flex()
         .child(reveal_when_focused(row, control, focused, cx))
         .into_any_element()
-}
-
-fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Vec<AnyElement> {
-    let t = theme(cx);
-    if !form.trusted_shown() {
-        return Vec::new();
-    }
-    let label = check_label(
-        "Trusted launch",
-        form.trusted_detail()
-            .map(|detail| note(crate::fonts::ui_text_size(cx), detail.to_owned(), &t)),
-    );
-    let mut rows = vec![checkbox(
-        &Control::Trusted,
-        form.trusted(),
-        focus,
-        label,
-        cx,
-    )];
-    if form.trusted_warning_shown() {
-        let warning = warning_box(&t)
-            .driver_id(|| "spawn-trusted-launch-warning".to_owned())
-            .gap(px(2.0))
-            .child(
-                div()
-                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
-                    .child("Trusted launch"),
-            )
-            .child(TRUSTED_WARNING);
-        rows.push(warning.into_any_element());
-    }
-    rows
 }
 
 fn worktree_checkbox(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> AnyElement {

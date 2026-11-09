@@ -270,7 +270,7 @@ use crate::sidebar::{
     save_ui_state,
 };
 use crate::source_control::ScModel;
-use crate::spawn_form::{BranchCache, Lock, Prefill, Target};
+use crate::spawn_form::{BranchCache, Lock, Target};
 use crate::spawn_view::{SpawnEntry, SpawnModal};
 use crate::spawns::PendingSpawns;
 use crate::stash_view::StashUi;
@@ -389,11 +389,6 @@ const UI_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const AUTO_GRID_RESIZE_DEBOUNCE: Duration = Duration::from_millis(250);
 /// The toast a session appearance change the daemon refused raises.
 const APPEARANCE_FAILED_TITLE: &str = "Couldn't change the appearance";
-/// The toast a launch-last replay of a trusted config raises before the
-/// spawn dialog opens.
-const TRUSTED_LAUNCH_TITLE: &str = "Review trusted launch";
-/// The notice a trusted launch shows when its dialog cannot open.
-const TRUSTED_LAUNCH_FAILED_TITLE: &str = "Couldn't review the trusted launch";
 /// The toast a launch-last branch wait raises when the daemon stays silent.
 const LAUNCH_LAST_TIMEOUT_TITLE: &str = "Couldn't pick a branch name for launch-last";
 const LAUNCH_LAST_TIMEOUT_DETAIL: &str =
@@ -3309,28 +3304,10 @@ impl RootView {
             self.push_toast(ToastKind::Warning, HEADLESS_UNSUPPORTED_TIP, None, cx);
             return;
         }
-        let Some(target) = Target::from_spawn(&host, &config.target) else {
-            return;
-        };
-        let placement = self.launch_last_placement(placement);
-        // With trusted launch the Settings default, trust is already granted
-        // and the replay needs no review.
-        if config.dangerously_skip_permissions && !self.sidebar.ui_state().spawn.trusted {
-            let prefill = Prefill {
-                config: Some(config),
-                open_in: Some(placement.open_choice()),
-            };
-            if self.open_prefilled_dialog(
-                Some(Lock::for_target(target)),
-                prefill,
-                TRUSTED_LAUNCH_FAILED_TITLE,
-                window,
-                cx,
-            ) {
-                self.push_toast(ToastKind::Warning, TRUSTED_LAUNCH_TITLE, None, cx);
-            }
+        if Target::from_spawn(&host, &config.target).is_none() {
             return;
         }
+        let placement = self.launch_last_placement(placement);
         if let Some(target) = launch_last::suggestion_target(&config, self.sidebar.repos_of(&host))
         {
             let (generation, request_id) =

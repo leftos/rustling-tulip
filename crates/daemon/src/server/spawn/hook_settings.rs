@@ -151,7 +151,6 @@ pub(super) fn write_hook_settings(
     session_id: &str,
     agent: &AgentId,
     options: &OptionValues,
-    trusted: bool,
 ) -> Option<HookSettings> {
     let Some(plugin) = agent_registry::plugin(agent) else {
         warn!(
@@ -161,7 +160,7 @@ pub(super) fn write_hook_settings(
         );
         return None;
     };
-    write_hook_files(hub, session_id, plugin, options, trusted)
+    write_hook_files(hub, session_id, plugin, options)
 }
 
 /// [`write_hook_settings`] with `plugin`'s hook plan.
@@ -170,7 +169,6 @@ pub(super) fn write_hook_files(
     session_id: &str,
     plugin: &dyn AgentPlugin,
     options: &OptionValues,
-    trusted: bool,
 ) -> Option<HookSettings> {
     let tracer_exe = match tracer_client::cached_tracer_exe(&hub.dirs) {
         Ok(path) => path,
@@ -188,7 +186,7 @@ pub(super) fn write_hook_files(
         session_id,
         config_dir: &hub.dirs.config,
     };
-    let plan = match plugin.hook_plan(options, trusted, &shim) {
+    let plan = match plugin.hook_plan(options, &shim) {
         Ok(plan) => plan,
         Err(err) => {
             warn!(
@@ -466,7 +464,6 @@ mod tests {
                 "no-tracer",
                 &agent_registry::default_agent(),
                 &claude_options(),
-                false
             )
             .is_none(),
             "hooks are off when the cached tracer cannot be resolved"
@@ -491,7 +488,6 @@ mod tests {
             "claude-session",
             &agent_registry::default_agent(),
             &claude_options(),
-            false,
         )
         .expect("a cached tracer resolves");
         assert!(settings.created_dir, "the session dir did not exist before");
@@ -541,7 +537,6 @@ mod tests {
             "pre-made",
             &agent_registry::default_agent(),
             &claude_options(),
-            false,
         )
         .expect("writes");
         assert!(!settings.created_dir, "the dir was already there");

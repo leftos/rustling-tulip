@@ -15,10 +15,6 @@ use crate::spawn_view::{
 };
 use crate::ui_theme::theme;
 
-/// The note under a field a trusted launch locks, in the spawn dialog and on
-/// an agent's Settings page.
-pub(crate) const LOCKED: &str = "Ignored while trusted launch is on. The chosen value is kept for when you turn trusted launch off.";
-
 /// The row of a field whose kind this client does not know, in the spawn
 /// dialog and on an agent's Settings page.
 pub(crate) const UPDATE_CLIENT: &str = "Update the client to change this";
@@ -46,7 +42,6 @@ fn row(
     focus: &Control,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
-    let locked = view.disabled && view.editor != FieldEditor::Unknown;
     let body = match &view.editor {
         FieldEditor::Toggle => return toggle_row(view, focus, cx),
         FieldEditor::Choice { choices, style } => {
@@ -92,7 +87,6 @@ fn row(
             .clone()
             .map(|text| note(crate::fonts::ui_text_size(cx), text, &theme(cx))),
     )
-    .children(locked.then(|| muted(LOCKED, &theme(cx))))
     .into_any_element()
 }
 

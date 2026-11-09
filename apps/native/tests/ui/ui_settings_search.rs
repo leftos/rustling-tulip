@@ -685,7 +685,6 @@ fn every_ring_stop_on_every_tab_has_a_catalogue_entry(cx: &mut TestAppContext) {
         "settings-tab-general",
         "settings-tab-notifications",
         "settings-tab-dashboard",
-        "settings-tab-spawn-defaults",
         "settings-tab-worktrees",
         "settings-tab-remote-access",
         "settings-tab-appearance",

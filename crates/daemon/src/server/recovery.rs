@@ -921,7 +921,6 @@ where
         hook_agent: plan.hook_agent,
         resume_conversation: plan.resume_conversation,
         hook_options: plan.hook_options,
-        hook_trusted: plan.hook_trusted,
         resumed_from: replacing_extras(hub, &item.history_id).resumed_from,
     };
     let new_id = spawn(plan.request, busy_excluded, extras)

@@ -205,8 +205,6 @@ export interface AgentDescriptor {
   /** What a paste with no text on the clipboard sends, so the agent pastes its host's clipboard image. */
   image_paste?: ImagePaste;
   caps: AgentCaps;
-  /** What a trusted launch passes, for the spawn dialog's note. */
-  trust_note: string | null;
   texts: AgentTexts;
   fields: OptionField[];
   chips: ChipRule[];
@@ -217,6 +215,11 @@ export interface AgentDescriptor {
   title?: TitleRules;
   /** The runtime icon: SVG markup drawn in its own colours; none draws the generic shell glyph. */
   icon?: string | null;
+  /**
+   * The choice that runs the agent with its permission prompts bypassed; a saved or received
+   * `dangerously_skip_permissions: true` becomes it. `None` when the agent has none.
+   */
+  bypass?: BypassChoice | null;
 }
 
 /**
@@ -374,7 +377,8 @@ export interface OptionField {
   /** On the agent's Settings page; its value is the spawn dialog's default. */
   settings: boolean;
   spawn: SpawnPlacement;
-  locked_when_trusted: boolean;
+  /** Deprecated: always false; older clients require it. */
+  locked_when_trusted?: boolean;
   when: FieldRule[];
 }
 
@@ -390,6 +394,14 @@ export interface Choice {
   /** The [`OptionValue::Text`] the choice stores. */
   value: string;
   label: string;
+}
+
+/** The choice of one of an agent's fields that runs it with its permission prompts bypassed. */
+export interface BypassChoice {
+  /** The [`OptionField::id`] of a choice field. */
+  field: string;
+  /** The [`Choice::value`] that bypasses the prompts. */
+  value: string;
 }
 
 /** How a [`FieldKind::Choice`] field is drawn. */
@@ -727,12 +739,6 @@ export interface SessionSnapshot {
    * owning repo/workspace, then the app default.
    */
   appearance?: AppearanceOverrides;
-  /**
-   * True when the session was launched with approvals/permission prompts
-   * bypassed (a trusted launch). Clients use this to keep elevated authority visible after the
-   * spawn dialog closes.
-   */
-  elevated_authority?: boolean;
   /**
    * True when the session was spawned with `use_worktree = true`, i.e.
    * the daemon created (or reused) a per-session git worktree under
@@ -1283,12 +1289,6 @@ export interface HistoryEntry {
    * log. `None` for a recorded entry: its options are its `spawn_config`'s.
    */
   options?: OptionValues | null;
-  /**
-   * True when an imported session ran with permission prompts skipped,
-   * read from its tracer log. A recorded entry leaves it false: its
-   * `spawn_config` carries the flag.
-   */
-  trusted?: boolean;
 }
 
 /**
@@ -1401,8 +1401,11 @@ export interface SpawnRequest {
   target: SpawnTarget;
   mode: SessionMode;
   initial_prompt: string | null;
-  /** A trusted launch: the agent runs with its permission prompts skipped. */
-  dangerously_skip_permissions: boolean;
+  /**
+   * Deprecated: true exactly when `agent`'s options hold its descriptor's bypass choice
+   * ([`fold_trusted`]); kept on the wire for peers that read or send it.
+   */
+  dangerously_skip_permissions?: boolean;
   /** The agent to run and its options; `None` exactly for a plain shell. */
   agent: AgentSelection | null;
   /**
@@ -1469,7 +1472,11 @@ export interface SpawnRequest {
 export interface SpawnConfig {
   target: SpawnTarget;
   mode: SessionMode;
-  dangerously_skip_permissions: boolean;
+  /**
+   * Deprecated: true exactly when `agent`'s options hold its descriptor's bypass choice
+   * ([`fold_trusted`]); kept on the wire for peers that read or send it.
+   */
+  dangerously_skip_permissions?: boolean;
   /** See [`SpawnRequest::agent`]. */
   agent: AgentSelection | null;
   /**
@@ -2065,7 +2072,6 @@ export interface PresetEntry {
    * [`RepoEntry::default_use_worktree`] at launch time.
    */
   default_use_worktree?: boolean | null;
-  dangerously_skip_permissions?: boolean;
   /**
    * The agent the preset's sessions run and its options; `None` runs the
    * daemon's default agent with its default options.
