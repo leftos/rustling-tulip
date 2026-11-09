@@ -741,6 +741,86 @@ mod tests {
         );
     }
 
+    /// In a pane narrower than a question's footer, the footer wraps across
+    /// two rows; the dialog is still up, and its `❯ 1.` row is not an idle box.
+    #[test]
+    fn a_question_whose_footer_wrapped_still_reads_as_a_dialog() {
+        let rules = rules_for(&agent_registry::default_agent());
+        for (name, capture) in [
+            (
+                "w48",
+                include_str!("fixtures/claude--question-footer-wrapped-w48.txt"),
+            ),
+            (
+                "w40",
+                include_str!("fixtures/claude--question-footer-wrapped-w40.txt"),
+            ),
+        ] {
+            let reading = rules.read(&screen_from(capture));
+            assert_eq!(
+                reading.verdict,
+                Verdict::State(ScreenState::AwaitingInput),
+                "{name}: rule {:?}",
+                reading.rule
+            );
+        }
+    }
+
+    /// Tab and Down take the hint off a permission dialog's footer. Under a
+    /// named session's second rule the idle box would otherwise win.
+    #[test]
+    fn a_permission_dialog_without_its_hint_still_reads_as_a_dialog() {
+        let rules = rules_for(&agent_registry::default_agent());
+        let named = include_str!("fixtures/v2319-edit-perm-session-rule.txt")
+            .replace(" Esc to cancel · Tab to amend", " Esc to cancel");
+        assert!(!named.contains("Tab to amend"), "the hint must be gone");
+        for (name, capture) in [
+            ("v23", include_str!("fixtures/v23-amend-open.txt")),
+            ("v24", include_str!("fixtures/v24-amend-typed.txt")),
+            ("named session", named.as_str()),
+        ] {
+            let reading = rules.read(&screen_from(capture));
+            assert_eq!(
+                reading.rule.as_deref(),
+                Some("dialog_permission"),
+                "{name}: verdict {:?}",
+                reading.verdict
+            );
+            assert_eq!(
+                reading.verdict,
+                Verdict::State(ScreenState::AwaitingInput),
+                "{name}"
+            );
+        }
+    }
+
+    /// A select list whose Esc does anything but cancel is not a question
+    /// that needs the owner: ultrareview's dialogs and `/remote-control`.
+    #[test]
+    fn a_select_footer_with_another_esc_action_is_not_a_question() {
+        let rules = rules_for(&agent_registry::default_agent());
+        let capture = include_str!("fixtures/v2319-ask-long-question-w120.txt");
+        let footer = "Enter to select · ↑/↓ to navigate · Esc to cancel";
+        assert!(capture.contains(footer), "the capture draws the footer");
+        for other in [
+            "Enter to select · Esc to go back",
+            "Enter to select · Esc to continue",
+        ] {
+            let reading = rules.read(&screen_from(&capture.replace(footer, other)));
+            assert_ne!(
+                reading.rule.as_deref(),
+                Some("dialog_question"),
+                "{other}: must not read as a question"
+            );
+            assert_ne!(
+                reading.verdict,
+                Verdict::State(ScreenState::AwaitingInput),
+                "{other}: rule {:?}",
+                reading.rule
+            );
+        }
+    }
+
     #[test]
     fn explain_lists_every_rule_with_the_winner_marked() {
         let screen = screen_from(include_str!("fixtures/v21-perm-bash.txt"));

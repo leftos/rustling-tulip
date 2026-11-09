@@ -6,8 +6,8 @@
 //! each group only once the screen reads as the step before expects.
 //!
 //! An answer is not an owner key: it bumps no owner epoch. Once the screen
-//! shows the answered prompt gone it clears the record's pending prompt the
-//! way an owner key does, but only a pending prompt of the kind it answered.
+//! shows the answered prompt gone it clears the record's pending prompt, but
+//! only a pending prompt of the kind it answered.
 //! "No, and tell the agent this" denies with the recipe, then sends the text
 //! as a chat send does, under the same turn.
 
@@ -505,9 +505,8 @@ impl Answerer<'_> {
     }
 
     /// The first time the prompt is seen gone, clear the record's pending
-    /// prompt as an owner key would, when it is of the answered prompt's
-    /// kind and is still the one pending before the first key, or came while
-    /// none was.
+    /// prompt, when it is of the answered prompt's kind and is still the one
+    /// pending before the first key, or came while none was.
     fn clear_once(&mut self) {
         if self.cleared {
             return;

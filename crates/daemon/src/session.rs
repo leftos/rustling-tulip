@@ -1251,17 +1251,11 @@ impl SessionRegistry {
         self.update_inner(id, None, f)
     }
 
-    /// The owner answered session `id`'s pending prompt: a hook-driven record
-    /// leaves `AwaitingInput` at once, with no settle window, and drops its
-    /// pending input. The test and the clear share one registry update, so a
-    /// hook event cannot slip between them; a session without hooks is left
-    /// alone.
-    pub fn clear_answered_prompt(&self, id: &str) {
-        self.clear_answered_prompt_if(id, |_| true);
-    }
-
-    /// [`Self::clear_answered_prompt`], only while `still` holds for the
-    /// record, tested under the same lock.
+    /// Session `id`'s pending prompt was answered: while `still` holds for the
+    /// record, a hook-driven record leaves `AwaitingInput` at once, with no
+    /// settle window, and drops its pending input. The tests and the clear
+    /// share one registry update, so a hook event cannot slip between them; a
+    /// session without hooks is left alone.
     pub fn clear_answered_prompt_if<F>(&self, id: &str, still: F)
     where
         F: FnOnce(&SessionRecord) -> bool,

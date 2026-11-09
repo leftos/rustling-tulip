@@ -112,7 +112,10 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             name: "dialog_permission".to_string(),
             priority: 980,
             region: ScreenRegion::BottomNonEmpty { rows: 24 },
-            matcher: LineMatcher::Contains("Esc to cancel · Tab to amend".to_string()),
+            // Tab and Down take the hint off the footer while the dialog stays up.
+            matcher: LineMatcher::Regex(
+                r"^\s*Esc to cancel(?:\s*·\s*Tab to amend.*)?\s*$".to_string(),
+            ),
             not: Vec::new(),
             verdict: ScreenVerdict::AwaitingInput,
         },
@@ -120,8 +123,12 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             name: "dialog_question".to_string(),
             priority: 980,
             region: ScreenRegion::BottomNonEmpty { rows: 24 },
-            matcher: LineMatcher::Regex(r"Enter to select ·.*Esc to cancel".to_string()),
-            not: Vec::new(),
+            // A narrow pane wraps the footer, cutting off its `Esc to cancel`.
+            matcher: LineMatcher::Regex(r"^\s*Enter to select ·".to_string()),
+            // An Esc that does anything but cancel: a list, not a question.
+            not: vec![LineMatcher::Regex(
+                r"^\s*Enter to select ·.*Esc to\s+(?:[^c\s]|c[^a\s])".to_string(),
+            )],
             verdict: ScreenVerdict::AwaitingInput,
         },
         ScreenRule {

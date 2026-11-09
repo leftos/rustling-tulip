@@ -155,15 +155,6 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                     let guard = crate::sync::lock(&rec);
                     (guard.pty.clone(), guard.input_notifier.clone())
                 };
-                // The owner's key answers a pending hook prompt; the bytes are
-                // forwarded outside the record lock.
-                //
-                // Bytes the terminal sent on its own (replies to the child's
-                // queries, wheel reports) are not the owner answering, so they
-                // leave the prompt and its pending input alone.
-                if !automatic {
-                    hub.sessions.clear_answered_prompt(&session_id);
-                }
                 if let Some(pty) = pty {
                     if let Some(tx) = notifier {
                         let _ = tx.send(bytes.len());
@@ -2235,46 +2226,54 @@ mod tests {
         );
     }
 
-    /// The owner's key leaves a hook-reported prompt at once, with no settle
-    /// window.
+    /// A press in the pane or an arrow key reaches the program and leaves its
+    /// dialog up, so the session still needs the owner: only the agent's hook
+    /// or the screen ends the prompt.
     #[tokio::test]
-    async fn owner_input_clears_a_pending_hook_prompt() {
+    async fn owner_input_leaves_a_hook_prompt_up() {
         use crate::history::test_support::{fake_pty, insert_live, record};
-        let (hub, _scratch) = test_hub("owner-input-clears");
-        let (pty, _exit_tx) = fake_pty();
-        insert_live(
-            &hub.sessions,
-            &hub.dirs,
-            record("s1", SessionMode::Interactive),
-            &pty,
-        );
-        hub.sessions.update("s1", |rec| {
-            rec.hook_driven = true;
-            rec.status = SessionStatus::AwaitingInput;
-            rec.pending_input = Some(protocol::PendingInput::Other {
-                message: "approve?".to_owned(),
+        // The bytes of a left press, its release, and Down, each sent as the
+        // client sends them for an owner's gesture.
+        for bytes in [
+            &b"\x1b[<0;40;20M"[..],
+            &b"\x1b[<0;40;20m"[..],
+            &b"\x1b[B"[..],
+        ] {
+            let (hub, _scratch) = test_hub("owner-input-keeps-prompt");
+            let (pty, _exit_tx) = fake_pty();
+            insert_live(
+                &hub.sessions,
+                &hub.dirs,
+                record("s1", SessionMode::Interactive),
+                &pty,
+            );
+            hub.sessions.update("s1", |rec| {
+                rec.hook_driven = true;
+                rec.status = SessionStatus::AwaitingInput;
+                rec.pending_input = Some(protocol::PendingInput::Other {
+                    message: "approve?".to_owned(),
+                });
             });
-        });
-        let data_b64 = base64::engine::general_purpose::STANDARD.encode(b"y");
-        dispatch_silently(
-            &hub,
-            ClientMessage::SendInput {
-                session_id: "s1".to_owned(),
-                data_b64,
-                automatic: false,
-            },
-        )
-        .await;
-        let snapshot = snapshot_of(&hub, "s1");
-        assert_eq!(
-            snapshot.status,
-            SessionStatus::Idle,
-            "the owner's key leaves the prompt at once"
-        );
-        assert_eq!(
-            snapshot.pending_input, None,
-            "the pending prompt is cleared"
-        );
+            dispatch_silently(
+                &hub,
+                ClientMessage::SendInput {
+                    session_id: "s1".to_owned(),
+                    data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    automatic: false,
+                },
+            )
+            .await;
+            let snapshot = snapshot_of(&hub, "s1");
+            assert_eq!(
+                snapshot.status,
+                SessionStatus::AwaitingInput,
+                "{bytes:?} must leave the session awaiting input"
+            );
+            assert!(
+                snapshot.pending_input.is_some(),
+                "{bytes:?} must leave the pending prompt in place"
+            );
+        }
     }
 
     /// An owner key bumps the typing lane's owner epoch; the terminal's own

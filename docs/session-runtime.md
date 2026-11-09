@@ -44,7 +44,7 @@ A screen-derived change publishes at once when it enters `AwaitingInput` from a 
 
 The frame that publishes `Idle` carries its own `background` reading in the same write, so no broadcast reads `Idle` with no flag while the screen shows background work (a compact over a background shell included).
 
-Every screen write is refused when a hook event, the owner's key or an exit moved the record (status, hook stamp or hook-driven flag) since the read. After any such foreign write, and when the watcher starts, the screen is left unread for 700 ms. A reading from the title alone, an overlay or a screen no rule matches never writes.
+Every screen write is refused when a hook event, a chat answer or an exit moved the record (status, hook stamp or hook-driven flag) since the read. After any such foreign write, and when the watcher starts, the screen is left unread for 700 ms. A reading from the title alone, an overlay or a screen no rule matches never writes.
 
 The screen reads only the view in force. While the plugin's view reading says another agent (a subagent) is in view, the watcher writes neither the status nor the `background` flag: every screen verdict becomes `Keep` (rule `agent_in_view`), except that a dialog's `AwaitingInput` still publishes, since either agent's dialog needs the user. The view reading is taken on every agent-mode screen read. A rule showing the session's own name (Claude draws it as the last row under a named session's permission dialog) is the main view, not a subagent's: `read_view` in `screen/dialogs.rs` drops an `agent_in_view` equal to the terminal title with its leading glyph stripped (`Screen::title`, `agent_title_text` in `osc_title.rs`), and the plugin's reader skips a trailing rule with only blank rows below it so the dialog above stays readable. A held `Stop` still lands on its first settled frame; one still held at `TURN_END_CEILING` while a subagent's view is up keeps its hold and writes no `Idle` until the main view is back.
 
@@ -94,7 +94,7 @@ The screen clears only a flag it set itself, so a hook-set flag survives a foote
 
 A `Notification` `idle_prompt` does not leave `AwaitingInput` while a hook-reported prompt is pending.
 
-Claude Code fires `Notification` type `permission_prompt` about 6.4 s after every dialog, a question's too, so it says nothing more about the prompt. `/compact` fires `SessionStart` with source `compact` and no `Stop`.
+Claude Code fires `Notification` type `permission_prompt` about 12 s after every dialog, a question's too, and raises a prompt again from `Idle`, so it says nothing more about the prompt. `/compact` fires `SessionStart` with source `compact` and no `Stop`.
 
 ### Status decision log
 
@@ -126,7 +126,13 @@ The running-work strip (`ChatWork`) and the summary view (`Summary`, `SummaryApp
 
 The status watcher also returns the terminal to the main conversation for every Claude session when an agent is in view and a Heads up notice is up, an AskUserQuestion closes, or the box holds the notice's own draft (`view_drive.rs`; design in `docs/architecture.md` "Chat mirror"). It types its keys straight into the PTY, never as owner input: one key per settled read, at most 12 keys and 10 s per drive, no key while a dialog is up. A draft in the agent's box is stashed with ctrl+s only when no stash is held (the stash is one slot), restored in the agent's view afterwards or returned to main's box, and clients hear of it through `DaemonMessage::SessionNotice` on the session-event stream. Every multi-key writer to a PTY (this view switch, the spawn injector, a chat send) takes the session's typing lane (`typing_lane.rs`), and the watcher skips its view return while another writer holds it; the user's own keys never take the lane.
 
-An owner key sent to a hook-driven session with a pending prompt clears `AwaitingInput` and `pending_input` at once (a `SendInput` marked `automatic`, the client's query replies, wheel and pointer-motion reports, never does), and a status watcher write (a screen read or the shell classifier) that moves a session off `AwaitingInput` clears `pending_input` in the same update.
+Owner input alone never writes the status: a key, a click or a wheel report sent with `SendInput` leaves `AwaitingInput` and `pending_input` as they are, so the tab badge, taskbar count and Needs You row stay until the agent ends the prompt. A key that answers a question moves the status at the hook's `PostToolUse`, Esc ends it through the screen's `idle_prompt_box`, and a key that does not answer (Down) leaves it.
+
+A permission dialog whose footer lost its hint (` Esc to cancel` alone) reads `dialog_permission`, in main's view and in a named session. A question dialog in a pane under 49 columns reads `dialog_question` although its footer wrapped; `Enter to select · Esc to go back` and `Enter to select · Esc to continue` are not questions.
+
+A subagent's hooks leave a pending prompt alone and its view writes no status, so the screen ends an answered subagent dialog: `AwaitingInput` ends on the first settled reading in that view showing no dialog, once the view itself reads no dialog. A dialog seen during the foreign-write hold counts, and a clear refused by a hook landing at that moment is tried again at the next reading. Peeking at a subagent while main's question is pending keeps Needs You, since the view moved and that dialog may still be up.
+
+A status watcher write (a screen read or the shell classifier) that moves a session off `AwaitingInput` clears `pending_input` in the same update.
 
 Token and cost figures exist only for headless runs, where they come from the CLI's stream-json (`crates/agents/claude/src/lib.rs`, `parse_headless_line`, applied by `crates/daemon/src/headless.rs`), so an interactive session's snapshot carries none. Headless mode (`claude --print --output-format stream-json`) uses `crates/daemon/src/headless.rs` for structured events.
 

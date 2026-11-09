@@ -416,7 +416,7 @@ fn notification(body: &Value) -> Option<Signal> {
         return Some(signal(Some(SessionStatus::Idle), PendingUpdate::Clear));
     }
     if kind == "permission_prompt" {
-        // Claude fires this about 6 s after every dialog, a question's and a
+        // Claude fires this about 12 s after every dialog, a question's and a
         // plan's too, so the bare wording names a permission the prompt may
         // never have asked for; one that names its tool still says something.
         // Both clients draw their own neutral line for an empty message.

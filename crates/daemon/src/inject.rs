@@ -695,7 +695,7 @@ impl TypeRefusal {
 /// agent is in view, paste the text, and press Enter once the box shows it,
 /// adding the chat's pending entry for it just before. Holds the session's
 /// typing lane throughout, and gives it back one settled reading after the
-/// Enter. A send is not an owner key: it clears no pending prompt.
+/// Enter. A send clears no pending prompt.
 ///
 /// # Errors
 ///

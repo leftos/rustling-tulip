@@ -1,0 +1,20 @@
+
+
+❯ ASK please
+────────────────────────────────────────
+ ☐ Colour
+
+Which colour should the probe use?
+
+❯ 1. Red
+     The first choice, a warm colour
+  2. Green
+     The second choice, a cool colour
+  3. Blue
+     The third choice, a cool colour
+  4. Type something.
+────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc
+to cancel

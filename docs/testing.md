@@ -72,6 +72,15 @@ A session's `scrollback.bin` holds the raw ConPTY output and can be replayed int
 
 A real Claude TUI can run with no driver token against a loopback mock of the API: set `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, an isolated `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and seed that folder's `.claude.json` with `hasCompletedOnboarding` and the project's `hasTrustDialogAccepted`. The mock makes the TUI ask exact questions, with no login and no model spend. A fresh Claude home also shows an external-imports dialog and an auto-mode prompt before the first prompt: seed `hasClaudeMdExternalIncludesWarningShown` in `.claude.json` against the first. Set `RUSTLING_TULIP_TRACER_PIPE_PREFIX` too, so the rig's tracers do not share pipe names with a running daemon's.
 
+More a real-Claude rig needs:
+
+- `ANTHROPIC_*` variables do not pass the daemon's env keep-list into the session, so set them in the isolated home's `settings.json` `env`.
+- In plan mode the request's last message has role `system`, so a mock must look for the last `user` message.
+- A mock's `ExitPlanMode` with no plan shows a stub dialog no rule reads.
+- A session folder under this repo sees `.mcp.json`, so the CLI shows the `rt-driver` MCP dialog first.
+- Startup dialogs change with the session's mode, so check the screen before sending scripted keys.
+- `permissions.defaultMode: "default"` in `settings.json` is needed for a mock's tool to raise a permission prompt.
+
 Sending `/compact` to a session from Git Bash needs `MSYS_NO_PATHCONV=1`, or the shell rewrites the leading `/` into a Windows path.
 
 On a daemon that is not serving the tailnet listener, the debug line `no push is sent kind=Finished` shows the real trigger's decision for each Finished.
