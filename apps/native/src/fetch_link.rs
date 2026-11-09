@@ -3,7 +3,7 @@
 //! in the order to try them. Host paths are compared as text, since the host
 //! may run another OS than this PC.
 
-use protocol::{RepoEntry, SessionMember, SessionSnapshot};
+use protocol::{RepoEntry, SessionFolder, SessionMember, SessionSnapshot};
 
 use crate::file_fetch::FetchRequest;
 use crate::links::TerminalLinkCandidate;
@@ -16,6 +16,16 @@ pub struct Root {
     pub repo_name: String,
     /// The folder as the host reports it.
     pub path: String,
+}
+
+impl From<&SessionFolder> for Root {
+    fn from(folder: &SessionFolder) -> Self {
+        Self {
+            repo_id: folder.repo_id.clone(),
+            repo_name: folder.repo_name.clone(),
+            path: folder.path.clone(),
+        }
+    }
 }
 
 /// The folders a session's link paths may lie in: its members' worktrees in
@@ -98,25 +108,30 @@ pub(crate) fn strip_root(root_path: &str, text: &str) -> RootStrip {
 }
 
 /// The fetches from `host` to try for a link's `candidates` (longest
-/// first): each
-/// candidate in turn, against each of `roots`. A relative candidate is read
-/// against `cwd` first, then against each root; `.` and `..` are resolved as
-/// text, and a path outside every root gives no reading.
+/// first): each candidate in turn, read with `places` and matched against
+/// each of `roots`. A relative candidate is joined to `cwd` and to each of
+/// `join_roots`, never to a root it may not start from; `.` and `..` are
+/// resolved as text, and a path outside every root gives no reading.
 #[must_use]
 pub fn readings(
     host: &HostKey,
     candidates: &[TerminalLinkCandidate],
     cwd: Option<&str>,
     roots: &[Root],
+    join_roots: &[Root],
 ) -> Vec<FetchRequest> {
     let parsed: Vec<(&Root, HostPath)> = roots
+        .iter()
+        .filter_map(|root| HostPath::parse(&root.path).map(|path| (root, path)))
+        .collect();
+    let joining: Vec<(&Root, HostPath)> = join_roots
         .iter()
         .filter_map(|root| HostPath::parse(&root.path).map(|path| (root, path)))
         .collect();
     let cwd = cwd.and_then(HostPath::parse);
     let mut found: Vec<FetchRequest> = Vec::new();
     for candidate in candidates {
-        for place in places(&candidate.path, cwd.as_ref(), &parsed) {
+        for place in places(&candidate.path, cwd.as_ref(), &joining) {
             for (root, root_path) in &parsed {
                 let Some(rel) = root_path.relative_or_root(&place) else {
                     continue;
@@ -155,6 +170,27 @@ fn places(path: &str, cwd: Option<&HostPath>, roots: &[(&Root, HostPath)]) -> Ve
         .chain(roots.iter().map(|(_, root)| root))
         .filter_map(|base| base.join(path))
         .collect()
+}
+
+/// Whether the link may lie outside `roots`: the first place of some
+/// candidate is held by none of them. A link inside every root it names
+/// needs no question to the host.
+#[must_use]
+pub(crate) fn link_leaves_roots(
+    candidates: &[TerminalLinkCandidate],
+    cwd: Option<&str>,
+    roots: &[Root],
+) -> bool {
+    let parsed: Vec<(&Root, HostPath)> = roots
+        .iter()
+        .filter_map(|root| HostPath::parse(&root.path).map(|path| (root, path)))
+        .collect();
+    let cwd = cwd.and_then(HostPath::parse);
+    candidates.iter().any(|candidate| {
+        places(&candidate.path, cwd.as_ref(), &parsed)
+            .first()
+            .is_some_and(|place| !parsed.iter().any(|(_, root)| root.holds(place)))
+    })
 }
 
 /// An absolute host path as text: what it starts from (`C:`, `//` for a
@@ -271,7 +307,8 @@ pub fn session_readings(
     repos: &[RepoEntry],
 ) -> Vec<FetchRequest> {
     let cwd = session.current_cwd.as_deref();
-    readings(host, candidates, cwd, &roots(&session.members, cwd, repos))
+    let roots = roots(&session.members, cwd, repos);
+    readings(host, candidates, cwd, &roots, &roots)
 }
 
 #[cfg(test)]
@@ -283,10 +320,24 @@ mod tests {
     use protocol::{RepoEntry, SessionMember};
     use serde_json::json;
 
-    use super::{Root, RootStrip, readings, root_holding, roots, strip_root};
+    use super::{
+        Root, RootStrip, link_leaves_roots, readings as all_readings, root_holding, roots,
+        strip_root,
+    };
     use crate::file_fetch::FetchRequest;
     use crate::links::TerminalLinkCandidate;
     use crate::target::HostKey;
+
+    /// [`all_readings`] with one list joining and matching, as a session's
+    /// own folders do.
+    fn readings(
+        host: &HostKey,
+        candidates: &[TerminalLinkCandidate],
+        cwd: Option<&str>,
+        roots: &[Root],
+    ) -> Vec<FetchRequest> {
+        all_readings(host, candidates, cwd, roots, roots)
+    }
 
     fn candidate(path: &str, line: Option<u32>, column: Option<u32>) -> TerminalLinkCandidate {
         TerminalLinkCandidate {
@@ -480,6 +531,24 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_path_joins_only_the_given_roots() {
+        let x = root("r1", "C:/wt/x");
+        let main = root("r1", "C:/repo");
+        let found = all_readings(
+            &HostKey::Local,
+            &[plain("src/gone.rs")],
+            Some("D:/logs"),
+            &[x.clone(), main],
+            std::slice::from_ref(&x),
+        );
+        assert_eq!(
+            places(&found),
+            [place("r1", "C:/wt/x", "src/gone.rs")],
+            "the cwd is outside both, so only the joining root is read"
+        );
+    }
+
+    #[test]
     fn dot_and_parent_segments_are_normalised_and_an_escape_yields_no_reading() {
         let x = root("r1", "C:/wt/x");
         let all = [x.clone()];
@@ -562,6 +631,47 @@ mod tests {
             roots(&members, cwd, &repos),
             [root("ra", "C:/wt/a"), root("rb", "C:/wt/b")],
             "a session with members reads against them, blanks left out"
+        );
+    }
+
+    #[test]
+    fn a_link_inside_the_roots_stays() {
+        let x = root("r1", "C:/wt/x");
+        let y = root("r2", "C:/wt/y");
+        assert!(
+            !link_leaves_roots(
+                &[plain(r"C:\wt\y\docs\a.rs"), plain("b.md")],
+                Some("C:/wt/x/sub"),
+                &[x, y],
+            ),
+            "an absolute path in a root and a name under the cwd's root stay"
+        );
+    }
+
+    #[test]
+    fn an_absolute_path_outside_the_roots_leaves() {
+        let x = root("r1", "C:/wt/x");
+        assert!(link_leaves_roots(
+            &[plain(r"C:\wt\s\r1\docs\a.rs")],
+            None,
+            std::slice::from_ref(&x),
+        ));
+    }
+
+    #[test]
+    fn a_relative_path_from_a_cwd_outside_the_roots_leaves() {
+        let x = root("r1", "C:/wt/x");
+        assert!(
+            link_leaves_roots(&[plain("a.rs")], Some("C:/wt/s"), std::slice::from_ref(&x)),
+            "the cwd's reading comes first and no root holds it"
+        );
+    }
+
+    #[test]
+    fn a_path_with_no_cwd_and_no_roots_does_not_leave() {
+        assert!(
+            !link_leaves_roots(&[plain("a.rs")], None, &[]),
+            "a relative path with no cwd reads no place at all"
         );
     }
 

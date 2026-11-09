@@ -55,6 +55,12 @@ pub const FEATURE_DETAILED_LOGGING: &str = "detailed_logging";
 /// when the connected daemon lists it.
 pub const FEATURE_FOLDER_FETCH: &str = "folder_fetch";
 
+/// `Welcome.features` entry: the daemon lists the folders a session's link
+/// paths may lie in ([`ClientMessage::ListSessionFolders`]) and serves
+/// `FetchFile`, `FetchFolder` and `StatPath` from every git worktree of a
+/// registered repo. A client asks only when the connected daemon lists it.
+pub const FEATURE_SESSION_FOLDERS: &str = "session_folders";
+
 /// `Welcome.features` entry: the daemon keeps a default shell for plain-shell
 /// sessions and for the shell that hosts an interactive agent
 /// ([`ClientMessage::SetDefaultShell`], [`DaemonMessage::DefaultShell`]) and
@@ -2685,6 +2691,18 @@ pub struct EnvName {
     pub scopes: Vec<EnvScope>,
 }
 
+/// One folder a session's link paths may lie in, as
+/// [`DaemonMessage::SessionFolders`] lists it. A hint: the daemon's check at
+/// fetch time is the boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionFolder {
+    /// The registered repo to name when fetching from this folder.
+    pub repo_id: String,
+    pub repo_name: String,
+    /// The folder, in git's or the registry's spelling.
+    pub path: String,
+}
+
 /// What a [`ClientMessage::StatPath`] path names, as [`DaemonMessage::PathStat`]
 /// reports it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -4431,7 +4449,10 @@ pub enum ClientMessage {
     },
     /// Download a file from the repo root (or one of its session worktrees).
     /// `path` is relative to that root; the daemon refuses `..`, absolute
-    /// paths and anything resolving outside the root. The daemon answers
+    /// paths and anything resolving outside the root. A `worktree_path` must
+    /// be the registered path, a folder `git worktree list` names for the
+    /// repo, or a folder under the worktrees root; the daemon checks it on
+    /// each request and uses its own spelling of it. The daemon answers
     /// with [`DaemonMessage::FileFetchStarted`], then
     /// [`DaemonMessage::FileChunk`]s, then [`DaemonMessage::FileFetchDone`],
     /// or [`DaemonMessage::FileFetchError`] at any point.
@@ -4448,7 +4469,10 @@ pub enum ClientMessage {
     /// and `""` or `"."` names the root itself; the daemon refuses `..`,
     /// absolute or prefixed paths, anything resolving outside the root, a
     /// `worktree_path` that is the worktrees root itself, and a target that
-    /// is not a folder. It walks the folder following no link: links,
+    /// is not a folder. A `worktree_path` must be the registered path, a
+    /// folder `git worktree list` names for the repo, or a folder under the
+    /// worktrees root; the daemon checks it on each request and uses its own
+    /// spelling of it. It walks the folder following no link: links,
     /// entries that are neither files nor folders, names that are not
     /// Unicode, `.git` and the ignored folders (`node_modules`, `target`,
     /// `.venv`, caches, at any depth) are left out. A folder over 20 000
@@ -4479,6 +4503,15 @@ pub enum ClientMessage {
         #[serde(default)]
         worktree_path: Option<String>,
         path: String,
+    },
+    /// List the folders this session's link paths may lie in: the daemon
+    /// answers with [`DaemonMessage::SessionFolders`]. A hint for choosing
+    /// which `repo_id` and `worktree_path` to fetch with: the check at fetch
+    /// time is the boundary, and a client may ask about any session.
+    ListSessionFolders {
+        /// Client-assigned request id, echoed on the answer.
+        id: String,
+        session_id: String,
     },
     /// Stop the [`ClientMessage::FetchFile`] or [`ClientMessage::FetchFolder`]
     /// transfer with this id. Once the daemon sees the cancel it queues
@@ -6252,6 +6285,18 @@ pub enum DaemonMessage {
         id: String,
         kind: PathKind,
         size: u64,
+    },
+    /// The answer to [`ClientMessage::ListSessionFolders`]: a workspace's
+    /// member worktrees, registered paths and git worktrees, in member order,
+    /// or for a shell the repo holding its working directory. A hint: the
+    /// check at fetch time is the boundary. `error` carries an unknown
+    /// session, or the reason a repo's worktrees could not be read, with the
+    /// folders that did read.
+    SessionFolders {
+        id: String,
+        folders: Vec<SessionFolder>,
+        #[serde(default)]
+        error: Option<String>,
     },
     /// The answer to [`ClientMessage::UploadFile`]: the file is saved at
     /// `path`, the absolute host path as display text.
@@ -14205,6 +14250,51 @@ mod tests {
                 other => panic!("unexpected variant: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn list_session_folders_and_session_folders_round_trip() {
+        let msg = ClientMessage::ListSessionFolders {
+            id: "l1".to_string(),
+            session_id: "s1".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"list_session_folders""#), "{json}");
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::ListSessionFolders { id, session_id } => {
+                assert_eq!((id.as_str(), session_id.as_str()), ("l1", "s1"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let folder = SessionFolder {
+            repo_id: "r1".to_string(),
+            repo_name: "repo".to_string(),
+            path: "X:/dev/repo.wt/a/repo".to_string(),
+        };
+        let answer = DaemonMessage::SessionFolders {
+            id: "l1".to_string(),
+            folders: vec![folder.clone()],
+            error: Some("git failed".to_string()),
+        };
+        let json = serde_json::to_string(&answer).expect("serialize");
+        assert!(json.contains(r#""type":"session_folders""#), "{json}");
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::SessionFolders { id, folders, error } => {
+                assert_eq!(id, "l1");
+                assert_eq!(folders, [folder]);
+                assert_eq!(error.as_deref(), Some("git failed"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let without_error: DaemonMessage =
+            serde_json::from_str(r#"{"type":"session_folders","id":"l1","folders":[]}"#)
+                .expect("a missing error decodes as none");
+        assert!(matches!(
+            without_error,
+            DaemonMessage::SessionFolders { error: None, .. }
+        ));
     }
 
     #[test]

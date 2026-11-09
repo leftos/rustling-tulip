@@ -10,7 +10,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use futures::channel::mpsc::unbounded;
 use gpui::{Context, Window};
-use protocol::{ClientMessage, DaemonMessage, PathKind};
+use protocol::{ClientMessage, DaemonMessage, PathKind, SessionFolder};
 
 use crate::RootView;
 use crate::fetch_link;
@@ -241,7 +241,9 @@ impl RootView {
     /// A Ctrl+click on a path link in a pane of remote host `host`: fetches
     /// the first of the link's readings under the repos and worktrees of
     /// `session` as that host lists it, trying them one at a time; the copy
-    /// opens in the viewer when `prefer_viewer` (Ctrl+Shift+click).
+    /// opens in the viewer when `prefer_viewer` (Ctrl+Shift+click). A link
+    /// that may lie outside those folders is first asked of the host, which
+    /// lists every folder `git worktree list` names for them.
     pub(crate) fn fetch_path_link(
         &mut self,
         link: &TerminalLink,
@@ -250,8 +252,10 @@ impl RootView {
         prefer_viewer: bool,
         cx: &mut Context<Self>,
     ) {
-        let mut readings = session
-            .and_then(|id| self.sidebar.sessions_of(host).iter().find(|s| s.id == id))
+        let found =
+            session.and_then(|id| self.sidebar.sessions_of(host).iter().find(|s| s.id == id));
+        let cwd = found.and_then(|session| session.current_cwd.clone());
+        let mut readings = found
             .map(|session| {
                 fetch_link::session_readings(
                     host,
@@ -261,6 +265,36 @@ impl RootView {
                 )
             })
             .unwrap_or_default();
+        let own_roots = found
+            .map(|session| {
+                fetch_link::roots(
+                    &session.members,
+                    cwd.as_deref(),
+                    self.sidebar.repos_of(host),
+                )
+            })
+            .unwrap_or_default();
+        let asks = found.is_some_and(|_| {
+            self.conn_of(host)
+                .is_some_and(|conn| conn.supports(protocol::FEATURE_SESSION_FOLDERS))
+        });
+        let leaves =
+            asks && fetch_link::link_leaves_roots(&link.candidates, cwd.as_deref(), &own_roots);
+        if leaves && let Some(session) = session {
+            self.ask_folders(
+                file_fetch::PendingAsk {
+                    host: host.clone(),
+                    candidates: link.candidates.clone(),
+                    target: link.target.clone(),
+                    cwd,
+                    own_roots,
+                    prefer_viewer,
+                },
+                session,
+                cx,
+            );
+            return;
+        }
         if readings.is_empty() {
             tracing::warn!(
                 target = %link.target,
@@ -278,6 +312,46 @@ impl RootView {
         for reading in &mut readings {
             reading.prefer_viewer = prefer_viewer;
         }
+        self.start_link_readings(readings, host, cx);
+    }
+
+    /// Records a link's ask `ask` under a new id, asks `host` for its
+    /// session's folders, and shows the fetch's toast keyed by the ask; its
+    /// reply is [`Self::on_session_folders`]'s.
+    fn ask_folders(&mut self, ask: file_fetch::PendingAsk, session: &str, cx: &mut Context<Self>) {
+        let name = file_fetch::file_name(&ask.target).to_owned();
+        let host = ask.host.clone();
+        let id = self.fetches.begin_folder_ask(ask);
+        self.send_to(
+            &host,
+            ClientMessage::ListSessionFolders {
+                id: id.clone(),
+                session_id: session.to_owned(),
+            },
+        );
+        let title = format!("Fetching {name} from {}", self.host_label_of(&host));
+        self.push_toast_spec(
+            ToastSpec {
+                kind: ToastKind::Info,
+                title,
+                detail: None,
+                key: Some(id),
+                sticky: false,
+                actions: Vec::new(),
+            },
+            cx,
+        );
+    }
+
+    /// Fetches the link whose `readings` these are, on `host`: a host that
+    /// sends folders is asked about the first reading, and an older one
+    /// fetches it as a file or is told the folder it names is beyond it.
+    fn start_link_readings(
+        &mut self,
+        readings: Vec<FetchRequest>,
+        host: &HostKey,
+        cx: &mut Context<Self>,
+    ) {
         if self.host_sends_folders(host) {
             let Some((id, first)) = self.fetches.begin_stat(host.clone(), readings) else {
                 return;
@@ -311,6 +385,57 @@ impl RootView {
             tracing::info!(host = ?host, "the host cannot send the folder a link names");
             self.push_too_old(host, &root, cx);
         }
+    }
+
+    /// The host's answer to a link's ask for its session's folders: the
+    /// link's readings over every folder it lists, fetched as the direct
+    /// route would. Returns whether `id` was an ask still waiting; a reply
+    /// that arrives after the connection closed finds none.
+    fn on_session_folders(
+        &mut self,
+        id: &str,
+        folders: &[SessionFolder],
+        error: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(ask) = self.fetches.take_folder_ask(id) else {
+            return false;
+        };
+        self.dismiss_toast_key(id, cx);
+        let roots: Vec<fetch_link::Root> = folders.iter().map(fetch_link::Root::from).collect();
+        let mut readings = fetch_link::readings(
+            &ask.host,
+            &ask.candidates,
+            ask.cwd.as_deref(),
+            &roots,
+            &ask.own_roots,
+        );
+        if readings.is_empty() {
+            let label = self.host_label_of(&ask.host);
+            let detail = file_fetch::outside_detail(
+                folders,
+                error,
+                &label,
+                &file_fetch::display_host_path(&ask.target),
+            );
+            tracing::warn!(
+                target = %ask.target,
+                listing_error = error.unwrap_or("none"),
+                "no folder the host lists holds the terminal path link"
+            );
+            self.push_toast(
+                ToastKind::Warning,
+                &failed_title(file_fetch::file_name(&ask.target)),
+                Some(detail),
+                cx,
+            );
+            return true;
+        }
+        for reading in &mut readings {
+            reading.prefer_viewer = ask.prefer_viewer;
+        }
+        self.start_link_readings(readings, &ask.host, cx);
+        true
     }
 
     /// `host` as fetch toasts name it ([`file_fetch::host_label`]); "The
@@ -1084,6 +1209,9 @@ impl RootView {
                 self.on_folder_fetch_started(id, resolved_path, announced, window, cx);
             }
             DaemonMessage::PathStat { id, kind, .. } => return self.on_path_stat(id, *kind, cx),
+            DaemonMessage::SessionFolders { id, folders, error } => {
+                return self.on_session_folders(id, folders, error.as_deref(), cx);
+            }
             _ => return false,
         }
         true
@@ -1462,7 +1590,9 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.fetches.drop_stats_of(host);
+        for id in self.fetches.drop_stats_of(host) {
+            self.dismiss_toast_key(&id, cx);
+        }
         for (id, entry) in self.fetches.take_unfinished(host) {
             let reason = format!("The connection to {} closed.", entry.host_label());
             tracing::warn!(%id, rel = %entry.request().rel_path, "fetching a file failed: {reason}");

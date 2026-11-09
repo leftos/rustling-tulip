@@ -261,6 +261,7 @@ const DAEMON_FEATURES: &[&str] = &[
     FEATURE_SCREEN_DUMP,
     protocol::FEATURE_FILE_TAIL,
     protocol::FEATURE_FOLDER_FETCH,
+    protocol::FEATURE_SESSION_FOLDERS,
     protocol::FEATURE_DETAILED_LOGGING,
     protocol::FEATURE_DEFAULT_SHELL,
     protocol::FEATURE_AGENT_USER_HOOKS,

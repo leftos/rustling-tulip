@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use gpui::{Modifiers, TestAppContext};
-use protocol::{ClientMessage, DaemonMessage, SessionSnapshot};
+use protocol::{ClientMessage, DaemonMessage, PathKind, SessionFolder, SessionSnapshot};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
@@ -697,6 +697,452 @@ fn a_path_outside_every_root_toasts_without_sending(cx: &mut TestAppContext) {
         )]
     );
     assert!(h.opened().is_empty(), "nothing opens");
+}
+
+/// The session folder naming `path` in the repo `repo`.
+fn session_folder(repo: &str, path: &str) -> SessionFolder {
+    SessionFolder {
+        repo_id: repo.to_owned(),
+        repo_name: repo.to_owned(),
+        path: path.to_owned(),
+    }
+}
+
+/// A host listing `features` beside the fake daemon's own, its session `s` in
+/// pane `p2` beside This PC's `a1`; returns the harness and the download
+/// root.
+fn asking_with<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    s: SessionSnapshot,
+    features: &[&str],
+) -> (Harness<'a>, PathBuf) {
+    let ui = serde_json::json!({});
+    let mut h = support::remote_in_pane_with_features(cx, dir, &ui, &["r1"], s, features);
+    let root = dir.path().join("remote-files");
+    let set = root.clone();
+    h.root_update(move |view, _, _| view.set_remote_files_root(set));
+    h.sent();
+    (h, root)
+}
+
+/// [`asking_with`] a host that sends folders and lists a session's folders.
+fn asking<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    s: SessionSnapshot,
+) -> (Harness<'a>, PathBuf) {
+    asking_with(
+        cx,
+        dir,
+        s,
+        &[
+            protocol::FEATURE_FOLDER_FETCH,
+            protocol::FEATURE_SESSION_FOLDERS,
+        ],
+    )
+}
+
+/// The `ListSessionFolders` asks in `sent`, as `(id, session)`.
+fn asks_in(sent: &[ClientMessage]) -> Vec<(&str, &str)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ListSessionFolders { id, session_id } => {
+                Some((id.as_str(), session_id.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `StatPath`s in `sent`, as `(worktree, path)`.
+fn stats_in(sent: &[ClientMessage]) -> Vec<(Option<&str>, &str)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::StatPath {
+                worktree_path,
+                path,
+                ..
+            } => Some((worktree_path.as_deref(), path.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_link_inside_own_roots_asks_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = asking(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(asks_in(&sent).is_empty(), "no ask is made: {sent:?}");
+    assert_eq!(
+        stats_in(&sent),
+        [(Some(WORKTREE), "docs/notes.txt")],
+        "the link's own root is read at once"
+    );
+}
+
+#[gpui::test]
+fn a_link_in_a_sibling_worktree_is_fetched_after_asking(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = asking(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, r"see C:\wt\s\r1\docs\notes.md", 6);
+
+    let sent = h.host(&saved_remote()).sent();
+    let asks = asks_in(&sent);
+    assert_eq!(asks.len(), 1, "the host is asked once: {sent:?}");
+    assert_eq!(asks[0].1, "s1", "the ask names the pane's session");
+    assert!(
+        stats_in(&sent).is_empty(),
+        "nothing is read before the host answers"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        [(format!("Fetching notes.md from {HOST}"), None)],
+        "the fetch's toast shows while the host is asked"
+    );
+
+    let id = asks[0].0.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: vec![
+            session_folder("r1", "C:/wt/x"),
+            session_folder("r1", "C:/wt/s/r1"),
+        ],
+        error: None,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        stats_in(&sent),
+        [(Some("C:/wt/s/r1"), "docs/notes.md")],
+        "the sibling worktree the host lists is read"
+    );
+}
+
+#[gpui::test]
+fn a_relative_link_from_a_sibling_cwd_asks_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = asking(
+        cx,
+        &dir,
+        session("s1").shell("C:/wt/s").worktree("r1").build(),
+    );
+
+    click_link(&mut h, "wrote docs/notes.md", 9);
+
+    let sent = h.host(&saved_remote()).sent();
+    let asks = asks_in(&sent);
+    assert_eq!(asks.len(), 1, "the host is asked: {sent:?}");
+    assert!(
+        stats_in(&sent).is_empty(),
+        "nothing is read before the host answers"
+    );
+
+    let id = asks[0].0.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: vec![
+            session_folder("r1", "C:/wt/x"),
+            session_folder("r1", "C:/wt/s"),
+        ],
+        error: None,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        stats_in(&sent),
+        [(Some("C:/wt/s"), "docs/notes.md")],
+        "the cwd's reading is asked about first"
+    );
+}
+
+#[gpui::test]
+fn a_name_after_a_sibling_path_asks_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = asking(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, r"see C:\wt\s\r1\docs\notes.md b.md", 29);
+
+    let sent = h.host(&saved_remote()).sent();
+    let asks = asks_in(&sent);
+    assert_eq!(asks.len(), 1, "the host is asked: {sent:?}");
+
+    let id = asks[0].0.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: vec![session_folder("r1", "C:/wt/s/r1")],
+        error: None,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        stats_in(&sent).first(),
+        Some(&(Some("C:/wt/s/r1"), "docs/b.md")),
+        "the name's joined reading comes first: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_relative_link_is_not_read_against_other_worktrees(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = asking(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, r"see D:\logs\run.log b.md", 20);
+    let sent = h.host(&saved_remote()).sent();
+    let id = asks_in(&sent)[0].0.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: vec![
+            session_folder("r1", "C:/wt/x"),
+            session_folder("r1", "C:/repo"),
+        ],
+        error: None,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    let mut stat = None;
+    for msg in &sent {
+        if let ClientMessage::StatPath {
+            id,
+            worktree_path,
+            path,
+            ..
+        } = msg
+        {
+            stat = Some((id.clone(), worktree_path.clone(), path.clone()));
+        }
+    }
+    let (stat_id, worktree, path) = stat.expect("one StatPath is sent");
+    assert_eq!(
+        worktree.as_deref(),
+        Some("C:/wt/x"),
+        "the name joins the session's own root"
+    );
+    assert_eq!(path, "b.md");
+
+    h.host(&saved_remote()).send(DaemonMessage::PathStat {
+        id: stat_id,
+        kind: PathKind::Missing,
+        size: 0,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    let named: Vec<&str> = sent
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::StatPath { worktree_path, .. }
+            | ClientMessage::FetchFile { worktree_path, .. } => worktree_path.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !named.contains(&"C:/repo"),
+        "no reading names another worktree: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_plain_ctrl_click_after_asking_opens_by_the_gesture(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = asking(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, r"see C:\wt\s\r1\docs\notes.md", 6);
+    let sent = h.host(&saved_remote()).sent();
+    let id = asks_in(&sent)[0].0.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: vec![session_folder("r1", "C:/wt/s/r1")],
+        error: None,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    let mut stat = None;
+    for msg in &sent {
+        if let ClientMessage::StatPath {
+            id,
+            worktree_path,
+            path,
+            ..
+        } = msg
+        {
+            stat = Some((id.clone(), worktree_path.clone(), path.clone()));
+        }
+    }
+    let (stat_id, worktree, path) = stat.expect("one StatPath is sent");
+    assert_eq!(worktree.as_deref(), Some("C:/wt/s/r1"));
+    assert_eq!(path, "docs/notes.md");
+    h.host(&saved_remote()).send(DaemonMessage::PathStat {
+        id: stat_id,
+        kind: PathKind::File,
+        size: 0,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    let mut fetch = None;
+    for msg in &sent {
+        if let ClientMessage::FetchFile {
+            id,
+            worktree_path,
+            path,
+            ..
+        } = msg
+        {
+            fetch = Some((id.clone(), worktree_path.clone(), path.clone()));
+        }
+    }
+    let (fetch_id, worktree, path) = fetch.expect("the file is fetched");
+    assert_eq!(worktree.as_deref(), Some("C:/wt/s/r1"));
+    assert_eq!(path, "docs/notes.md");
+    stream_on(&mut h, &saved_remote(), &fetch_id, b"# Notes", b"\n");
+
+    let saved = root.join(HOST).join("r1").join("docs").join("notes.md");
+    assert_eq!(fs::read(&saved).expect("the file is saved"), b"# Notes\n");
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(saved)],
+        "a plain Ctrl+click opens in the default app, not the viewer"
+    );
+    assert_eq!(
+        titled(&mut h, "Fetched notes.md"),
+        1,
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(
+        toasts(&mut h).len(),
+        1,
+        "the ask's toast gave way to the fetch's: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn an_older_host_keeps_the_not_inside_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = asking_with(
+        cx,
+        &dir,
+        session("s1").worktree("r1").build(),
+        &[protocol::FEATURE_FOLDER_FETCH],
+    );
+
+    click_link(&mut h, r"see C:\wt\s\r1\docs\notes.md", 6);
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(asks_in(&sent).is_empty(), "an older host is not asked");
+    assert!(stats_in(&sent).is_empty(), "nothing is read");
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Couldn't fetch notes.md".to_owned(),
+            Some("Not inside a repo or worktree of this session.".to_owned())
+        )]
+    );
+}
+
+#[gpui::test]
+fn a_link_outside_every_worktree_is_refused_naming_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = asking(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, r"see D:\elsewhere\a.rs", 6);
+    let sent = h.host(&saved_remote()).sent();
+    let id = asks_in(&sent)[0].0.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: vec![session_folder("r1", "C:/wt/x")],
+        error: None,
+    });
+
+    assert!(
+        stats_in(&h.host(&saved_remote()).sent()).is_empty(),
+        "nothing is fetched from outside every folder"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Couldn't fetch a.rs".to_owned(),
+            Some(r"D:\elsewhere\a.rs is outside r1 and its git worktrees.".to_owned())
+        )]
+    );
+}
+
+#[gpui::test]
+fn a_failed_listing_shows_why(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = asking(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, r"see D:\elsewhere\a.rs", 6);
+    let sent = h.host(&saved_remote()).sent();
+    let id = asks_in(&sent)[0].0.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: Vec::new(),
+        error: Some("git worktree list failed".to_owned()),
+    });
+
+    assert!(
+        stats_in(&h.host(&saved_remote()).sent()).is_empty(),
+        "nothing is fetched"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Couldn't fetch a.rs".to_owned(),
+            Some(format!(
+                "Couldn't read the git worktrees on {HOST}: git worktree list failed."
+            ))
+        )]
+    );
+}
+
+#[gpui::test]
+fn a_lost_connection_ends_the_ask(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = asking(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, r"see C:\wt\s\r1\docs\notes.md", 6);
+    let sent = h.host(&saved_remote()).sent();
+    let id = asks_in(&sent)[0].0.to_owned();
+
+    h.host(&saved_remote())
+        .event(NetEvent::State(Connection::for_target(saved_remote())));
+    h.host(&saved_remote()).connect_with_features(&[
+        protocol::FEATURE_FOLDER_FETCH,
+        protocol::FEATURE_SESSION_FOLDERS,
+    ]);
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: vec![session_folder("r1", "C:/wt/s/r1")],
+        error: None,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::StatPath { .. }
+                | ClientMessage::FetchFile { .. }
+                | ClientMessage::FetchFolder { .. }
+        )),
+        "the late reply starts nothing: {sent:?}"
+    );
+    assert_eq!(
+        titled(&mut h, &format!("Fetching notes.md from {HOST}")),
+        0,
+        "the ask's toast goes with the connection: {:?}",
+        toasts(&mut h)
+    );
+    assert!(
+        titled_like(&mut h, "Couldn't").is_empty(),
+        "a reply no ask waits on says nothing: {:?}",
+        toasts(&mut h)
+    );
 }
 
 #[gpui::test]
