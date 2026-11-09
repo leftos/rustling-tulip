@@ -686,6 +686,102 @@ fn accounts_service_snapshot_lists_accounts_in_order() {
     assert_eq!(alice.usage.error.as_deref(), Some("http-429"));
 }
 
+#[cfg(accounts_locks)]
+#[test]
+fn accounts_service_snapshot_sends_model_limits_and_extra_usage() {
+    let dir = scratch("accounts_service_snapshot_sends_model_limits_and_extra_usage");
+    let root = dir.join("accounts");
+    std::fs::create_dir_all(root.join("cache")).expect("the store folders can be made");
+    let accounts = json!({
+        "schemaVersion": 1,
+        "nextNumber": 3,
+        "order": [1, 2],
+        "active": 1,
+        "accounts": {
+            "1": {
+                "email": "alice@example.com",
+                "uuid": "00000000-0000-4000-8000-000000000001",
+                "added": "2026-09-01T10:00:00Z"
+            },
+            "2": {
+                "email": "bob@example.com",
+                "uuid": "00000000-0000-4000-8000-000000000002",
+                "added": "2026-09-02T11:00:00Z"
+            }
+        }
+    });
+    std::fs::write(root.join("accounts.json"), accounts.to_string())
+        .expect("accounts.json can be written");
+    let usage = json!({
+        "schemaVersion": 3,
+        "accounts": {
+            "1": {
+                "email": "alice@example.com",
+                "lastGood": {
+                    "seven_day": {"pct": 10.0},
+                    "scoped": [
+                        {"name": "Fable", "pct": 37.5, "resets_at": "2026-11-12T08:00:00Z"},
+                        {"name": "Opus", "pct": 0.0},
+                        {"pct": 5.0}
+                    ],
+                    "extra_usage": {"enabled": true, "spend_limit_reached": true},
+                    "spend": {"used": 3.5, "limit": 20.0, "pct": 17.5, "currency": "USD"}
+                },
+                "fetchedAt": 1_793_000_000
+            },
+            "2": {
+                "email": "bob@example.com",
+                "lastGood": {"five_hour": {"pct": 1.0}},
+                "fetchedAt": 1_793_000_000
+            }
+        }
+    });
+    std::fs::write(root.join("cache").join("usage.json"), usage.to_string())
+        .expect("usage.json can be written");
+
+    let snapshot = service(root).snapshot().expect("the store reads");
+
+    let row = |number: u32| {
+        snapshot
+            .accounts
+            .iter()
+            .find(|row| row.number == number)
+            .expect("the account is in the snapshot")
+    };
+    let alice = row(1);
+    let limits = &alice.usage.model_limits;
+    assert_eq!(limits.len(), 2, "{limits:?}");
+    assert_eq!(limits[0].model, "Fable");
+    assert!((limits[0].pct - 37.5).abs() < 1e-9);
+    assert_eq!(
+        limits[0].resets_at.map(|at| at.to_rfc3339()),
+        Some("2026-11-12T08:00:00+00:00".to_owned())
+    );
+    assert_eq!(limits[1].model, "Opus");
+    assert!(limits[1].pct.abs() < 1e-9, "{:?}", limits[1].pct);
+    assert_eq!(limits[1].resets_at, None);
+    let extra = alice
+        .usage
+        .extra_usage
+        .as_ref()
+        .expect("the extra-usage block");
+    assert!(extra.enabled);
+    assert!(!extra.user_disabled);
+    assert!(extra.spend_limit_reached);
+    assert!(
+        (extra.limit.expect("the cap") - 20.0).abs() < 1e-9,
+        "{:?}",
+        extra.limit
+    );
+    let bob = row(2);
+    assert!(
+        bob.usage.model_limits.is_empty(),
+        "{:?}",
+        bob.usage.model_limits
+    );
+    assert_eq!(bob.usage.extra_usage, None);
+}
+
 /// A store at `dir/accounts` holding OAuth accounts `numbers` (account `n`
 /// is `user<n>@example.com`), in rotation `order`, with `active` in use and
 /// `rows` as its usage table's rows.
