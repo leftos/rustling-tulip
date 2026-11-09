@@ -180,6 +180,8 @@ fn test_hello() -> ClientMessage {
         auth_token: String::new(),
         client_id: None,
         client_name: None,
+        client_version: None,
+        client_kind: None,
     }
 }
 

@@ -32,11 +32,13 @@ pub enum State {
     Connecting,
     /// The daemon accepted `Hello`, negotiated this protocol version and
     /// listed these features in its `Welcome`, which reported this
-    /// connection's `origin` (`None` from an older daemon).
+    /// connection's `origin` and the daemon's `build_version` (`None` from an
+    /// older daemon).
     Open {
         negotiated: u32,
         features: Vec<String>,
         origin: Option<ConnectionOrigin>,
+        build_version: Option<String>,
     },
     /// The socket closed or could not be opened.
     Closed { reason: String },
@@ -215,9 +217,28 @@ impl Connection {
             negotiated,
             features,
             origin,
+            build_version: None,
         };
         self.attempt = 0;
         self.has_ever_connected = true;
+    }
+
+    /// The connected daemon's build version, as its `Welcome` said;
+    /// `None` from an older daemon and whenever the connection is not open.
+    #[must_use]
+    pub fn build_version(&self) -> Option<&str> {
+        match &self.state {
+            State::Open { build_version, .. } => build_version.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Records the version the connected daemon's `Welcome` named. Does
+    /// nothing off an open connection, and the next `Welcome` replaces it.
+    pub fn set_build_version(&mut self, version: Option<String>) {
+        if let State::Open { build_version, .. } = &mut self.state {
+            *build_version = version;
+        }
     }
 
     /// The daemon rejected the auth token.
@@ -531,7 +552,8 @@ mod tests {
             &State::Open {
                 negotiated: 20,
                 features: Vec::new(),
-                origin: None
+                origin: None,
+                build_version: None
             }
         );
 

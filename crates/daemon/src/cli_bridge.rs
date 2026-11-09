@@ -335,6 +335,8 @@ mod tests {
             auth_token: String::new(),
             client_id: None,
             client_name: Some("bridge test".to_owned()),
+            client_version: None,
+            client_kind: None,
         };
         let json = serde_json::to_string(&hello).expect("serialize the hello");
         assert!(json.contains(r#""auth_token":"""#), "{json}");

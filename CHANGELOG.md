@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- Connections and Settings show the release each host runs, and mark a host on an older release than this app as Behind.
+
 ### Fixed
 
 - A damaged settings file no longer copies its contents, which could include a secret, into the log.

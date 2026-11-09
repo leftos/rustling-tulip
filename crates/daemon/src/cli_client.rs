@@ -188,5 +188,7 @@ fn hello(handshake: &DaemonHandshake, client_name: &str) -> ClientMessage {
         auth_token: handshake.auth_token.clone(),
         client_id: None,
         client_name: Some(client_name.to_owned()),
+        client_version: None,
+        client_kind: None,
     }
 }

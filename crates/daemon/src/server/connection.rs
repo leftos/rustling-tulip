@@ -1702,6 +1702,8 @@ mod tests {
             auth_token: token,
             client_id: Some("test-client".to_owned()),
             client_name: None,
+            client_version: None,
+            client_kind: None,
         };
         ws_send(&mut client, &unsupported).await;
 

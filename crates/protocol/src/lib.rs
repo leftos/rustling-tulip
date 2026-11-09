@@ -12,6 +12,12 @@ pub mod error_codes;
 
 include!(concat!(env!("OUT_DIR"), "/protocol_version.rs"));
 
+/// The version this build reports to the other side of a connection: the
+/// daemon sends it as `Welcome.build_version`, a client as
+/// `Hello.client_version`. Every crate in the workspace shares the version, so
+/// this is the one string both sides of a connection compare.
+pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// `Welcome.features` entry: the daemon keeps a per-agent launch command
 /// ([`ClientMessage::SetAgentCommand`], [`DaemonMessage::AgentCommands`]). A
 /// client offers the launch-command rows only when the connected daemon lists
@@ -3200,6 +3206,21 @@ pub enum ConnectionOrigin {
     Unknown,
 }
 
+/// What kind of program opened a connection, as `Hello.client_kind` reports
+/// it: the desktop client, the phone app, or a kind a later release adds. A
+/// command-line tool sends none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientKind {
+    /// The desktop client.
+    Native,
+    /// The phone app served to the tailnet.
+    Phone,
+    /// Forward-compat fallback: a kind the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
 /// How an account signs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -3927,6 +3948,14 @@ pub enum ClientMessage {
         /// shown in another client's "clone layout" chooser. Optional.
         #[serde(default)]
         client_name: Option<String>,
+        /// The client build's version ([`BUILD_VERSION`]), so the host can
+        /// tell how old the client is. Absent from a client that has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_version: Option<String>,
+        /// What kind of program this is ([`ClientKind`]). Absent from a
+        /// command-line tool and from an older client.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_kind: Option<ClientKind>,
     },
     ListRepos,
     AddRepo {
@@ -5681,6 +5710,10 @@ pub enum DaemonMessage {
         /// daemon.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<ConnectionOrigin>,
+        /// The daemon build's version ([`BUILD_VERSION`]), so a client can
+        /// tell how old the host is. Absent from an older daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build_version: Option<String>,
     },
     /// Reply to [`ClientMessage::ListAccounts`], sent to the requester only:
     /// every account the host knows and the auto-switch state. `auto` is
@@ -8010,6 +8043,7 @@ mod tests {
             features: Vec::new(),
             daemon_id: None,
             origin: None,
+            build_version: None,
         };
         let json = serde_json::to_string(&bare).expect("serializes");
         assert!(!json.contains("daemon_id"), "None is omitted: {json}");
@@ -8020,6 +8054,7 @@ mod tests {
             features: vec![FEATURE_DAEMON_ID.to_owned()],
             daemon_id: Some("3f1c0c1e-8f5b-4d5e-9c1a-2b7d9e0a4c11".to_owned()),
             origin: None,
+            build_version: None,
         };
         let json = serde_json::to_string(&welcome).expect("serializes");
         let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
@@ -8045,6 +8080,7 @@ mod tests {
                 features: Vec::new(),
                 daemon_id: None,
                 origin: Some(origin),
+                build_version: None,
             };
             let json = serde_json::to_string(&welcome).expect("serializes");
             assert!(
@@ -8064,6 +8100,7 @@ mod tests {
             features: Vec::new(),
             daemon_id: None,
             origin: None,
+            build_version: None,
         };
         let json = serde_json::to_string(&bare).expect("serializes");
         assert!(!json.contains("origin"), "None is omitted: {json}");
@@ -8078,6 +8115,69 @@ mod tests {
             matches!(old, DaemonMessage::Welcome { origin: None, .. }),
             "{old:?}"
         );
+    }
+
+    #[test]
+    fn welcome_without_build_version_reads_none() {
+        let old: DaemonMessage =
+            serde_json::from_str(r#"{"type":"welcome","protocol_version":23}"#)
+                .expect("an older daemon's welcome decodes");
+        assert!(
+            matches!(
+                old,
+                DaemonMessage::Welcome {
+                    build_version: None,
+                    ..
+                }
+            ),
+            "{old:?}"
+        );
+    }
+
+    #[test]
+    fn hello_without_client_fields_reads_none() {
+        let old = r#"{"type":"hello","protocol_version":23,"auth_token":"abc"}"#;
+        let parsed: ClientMessage =
+            serde_json::from_str(old).expect("an older client's hello decodes");
+        assert!(
+            matches!(
+                parsed,
+                ClientMessage::Hello {
+                    client_version: None,
+                    client_kind: None,
+                    ..
+                }
+            ),
+            "{parsed:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_client_kind_reads_unknown() {
+        let later = r#"{
+            "type": "hello",
+            "protocol_version": 23,
+            "auth_token": "abc",
+            "client_kind": "toaster"
+        }"#;
+        let parsed: ClientMessage =
+            serde_json::from_str(later).expect("a kind this build does not know still decodes");
+        assert!(
+            matches!(
+                parsed,
+                ClientMessage::Hello {
+                    client_kind: Some(ClientKind::Unknown),
+                    ..
+                }
+            ),
+            "{parsed:?}"
+        );
+    }
+
+    #[test]
+    fn build_version_is_the_workspace_version() {
+        assert_eq!(BUILD_VERSION, env!("CARGO_PKG_VERSION"));
+        assert_ne!(BUILD_VERSION, "", "a build never reports an empty version");
     }
 
     #[test]
@@ -11619,6 +11719,7 @@ mod tests {
             features: vec![FEATURE_AGENT_COMMANDS.to_owned(), "later".to_owned()],
             daemon_id: None,
             origin: None,
+            build_version: None,
         };
         let json = serde_json::to_value(&welcome).expect("encode welcome");
         assert_eq!(
@@ -11641,6 +11742,7 @@ mod tests {
             features: Vec::new(),
             daemon_id: None,
             origin: None,
+            build_version: None,
         };
         let json = serde_json::to_value(&bare).expect("encode bare welcome");
         assert!(

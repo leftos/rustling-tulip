@@ -103,7 +103,7 @@ The views:
 - `settings-dashboard`: Settings on its Dashboard tab with a keyed provider, a stored key, some spend and a Test result.
 - `spawn`: the spawn dialog with its Target list open.
 - `jump`: the jump palette open over the main window with an empty query.
-- `connections`: the host manager with This PC connected, the saved tailnet host "box" showing "Needs pairing" with its `Pair` and `Reconnect now` buttons, and a saved SSH host switched Off.
+- `connections`: the host manager with This PC connected, the saved tailnet host "box" showing "Needs pairing" with its `Pair` and `Reconnect now` buttons, and a saved SSH host switched Off; This PC's row shows its version.
 - `connections-ssh`: its `+ Add host` form switched to SSH after a passing Test connection.
 - `connections-scan-error`: the same host manager over a tailnet scan that failed with a long Tailscale error, drawn on its own lines under "On your tailnet".
 - `menu`: the sessions panel's ⋯ menu open over the repo rows with a toast over the panes.
@@ -118,7 +118,7 @@ The views:
 - `spawn-hosts`: the spawn dialog over those two hosts with its closed Target field.
 - `open-shell`: the Open a shell dialog with a folder path too long for its field, scrolled to the caret at its end.
 - `safe-start`: the modal a start after two crashed ones raises, "Opened with your tabs closed", over the window with no tab drawn.
-- `settings-hosts`: Settings on the Claude page with the host selector showing This PC.
+- `settings-hosts`: Settings on the Claude page with the host selector showing This PC and a remote host on 0.9.0 wearing the Behind tag.
 - `settings-accounts`: Settings on the Accounts tab, scrolled to the auto-switch block and its forecast.
 - `settings-sounds`: Settings on the Notifications tab with the Needs you sound list open.
 - `accounts`: the footer's accounts popover open over scripted accounts. The shots' fake daemon lists `accounts`, so every view shows the accounts chip.

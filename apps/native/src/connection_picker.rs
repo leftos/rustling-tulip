@@ -626,6 +626,19 @@ pub struct RowFacts {
     /// The live session count of the row's host, while the window holds
     /// its connection.
     pub live_sessions: Option<usize>,
+    /// The build version the row's host reported in its `Welcome`, while the
+    /// window holds its connection; `None` from an older host.
+    pub build_version: Option<String>,
+}
+
+/// The version a row shows for its host, and whether the host is older than
+/// this client: `None` for a host that reported no version, or one that does
+/// not parse, which the row then draws with neither.
+#[must_use]
+pub fn version_against(host: Option<&str>, client: &str) -> Option<(String, bool)> {
+    let host = semver::Version::parse(host?).ok()?;
+    let client = semver::Version::parse(client).ok()?;
+    Some((host.to_string(), host < client))
 }
 
 /// Whether the row draws a Pair button: a saved tailnet host the window
@@ -654,19 +667,24 @@ pub struct RowDetail {
     pub line: String,
     /// The chip at the row's trail, when it has one.
     pub state: Option<RowState>,
+    /// Whether the row's host runs an older release than this client.
+    pub behind: bool,
 }
 
 /// The second line and state chip of a row, from what the picker knows.
 #[must_use]
 pub fn row_detail(facts: &RowFacts) -> RowDetail {
+    let version = version_against(facts.build_version.as_deref(), protocol::BUILD_VERSION);
     RowDetail {
-        line: detail_line(facts),
+        line: detail_line(facts, version.as_ref()),
         state: detail_state(facts),
+        behind: version.is_some_and(|(_, behind)| behind),
     }
 }
 
-/// The row's second line: its kind, then what the picker knows about it.
-fn detail_line(facts: &RowFacts) -> String {
+/// The row's second line: its kind, what the picker knows about it, then the
+/// release its host runs.
+fn detail_line(facts: &RowFacts, version: Option<&(String, bool)>) -> String {
     let mut parts: Vec<String> = Vec::new();
     match facts.host {
         RowHost::ThisPc => {
@@ -696,6 +714,9 @@ fn detail_line(facts: &RowFacts) -> String {
             )));
             parts.push("connecting saves it".to_owned());
         }
+    }
+    if let Some((version, _)) = version {
+        parts.push(format!("v{version}"));
     }
     parts.join(" · ")
 }
@@ -1025,7 +1046,7 @@ mod tests {
     use super::{
         AddButton, AddMode, ConnectionPicker, HostKind, LiveState, PeerSource, Row, RowFacts,
         RowHost, RowKind, RowState, SCAN_PENDING, SSH_TESTING, SavedHost, Section, SshTest,
-        offers_pair, offers_reconnect, row_detail, typed_ssh_target, typed_target,
+        offers_pair, offers_reconnect, row_detail, typed_ssh_target, typed_target, version_against,
     };
     use crate::target::{DEFAULT_TAILNET_PORT, Target};
     use tailnet::{PeerStatus, Status, TailnetError};
@@ -1531,7 +1552,39 @@ mod tests {
             has_token: true,
             sessions_last_time: None,
             live_sessions: None,
+            build_version: None,
         }
+    }
+
+    #[test]
+    fn behind_compares_the_host_with_the_client() {
+        let against = |host| version_against(host, "0.11.0-alpha");
+        assert_eq!(
+            against(Some("0.11.0-alpha")),
+            Some(("0.11.0-alpha".to_owned(), false)),
+            "a host on the client's release is not behind"
+        );
+        assert_eq!(
+            against(Some("0.10.0")),
+            Some(("0.10.0".to_owned(), true)),
+            "an older release is behind"
+        );
+        assert_eq!(
+            against(Some("0.11.0")),
+            Some(("0.11.0".to_owned(), false)),
+            "a newer release is not behind"
+        );
+        assert_eq!(
+            version_against(Some("0.11.0-alpha"), "0.11.0"),
+            Some(("0.11.0-alpha".to_owned(), true)),
+            "a release below its own release's pre-release ordering"
+        );
+        assert_eq!(against(None), None, "a host that sends no version");
+        assert_eq!(
+            against(Some("nightly")),
+            None,
+            "a version that does not parse"
+        );
     }
 
     #[test]

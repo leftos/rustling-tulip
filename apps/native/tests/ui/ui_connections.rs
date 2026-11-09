@@ -429,6 +429,34 @@ fn every_held_host_shows_its_own_state_chip(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_host_on_an_older_release_shows_its_version_and_behind(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.host(&tailnet(HOST)).connect_with_version("0.9.0");
+
+    open_picker(&mut h, tailnet_with(&[]));
+
+    let detail = detail(&mut h, HOST).expect("the saved host's row");
+    assert_eq!(
+        detail.line, "Tailnet · port 8787 · v0.9.0",
+        "the row names the release its host runs"
+    );
+    assert_eq!(
+        detail.state,
+        Some(RowState::Connected),
+        "the Behind tag sits beside the state chip, not in its place"
+    );
+    assert!(
+        drawn(&mut h, &format!("connections-behind-{HOST}")),
+        "a host older than this client wears the Behind tag"
+    );
+}
+
+#[gpui::test]
 fn a_disabled_host_shows_off(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     seed_ui(

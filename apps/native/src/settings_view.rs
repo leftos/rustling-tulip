@@ -14,8 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, FocusHandle,
     Focusable as _, FontWeight, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    ScrollHandle, SharedString, Stateful, Subscription, Window, canvas, div, point, prelude::*, px,
-    svg,
+    ScrollHandle, SharedString, Stateful, StyledText, Subscription, Window, canvas, div, point,
+    prelude::*, px, svg,
 };
 use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, ClientMessage, DaemonMessage,
@@ -1363,6 +1363,14 @@ impl RootView {
                 (host, open)
             })
             .collect()
+    }
+
+    /// The version `host`'s daemon reported in its `Welcome`, and whether it
+    /// is older than this client: `None` for a host that reported none, or
+    /// one that does not parse.
+    fn settings_host_version(&self, host: &HostKey) -> Option<(String, bool)> {
+        let version = self.conn_of(host)?.build_version()?;
+        crate::connection_picker::version_against(Some(version), protocol::BUILD_VERSION)
     }
 
     /// A click on the selector's row for `host`: the agent pages show
@@ -5316,8 +5324,13 @@ impl RootView {
             .map(|(host, open)| {
                 let shown = host == self.settings_host;
                 let dim = !shown && !open;
-                let selector = format!("settings-host-{}", host.wire().unwrap_or("local"));
+                let key = host.wire().unwrap_or("local").to_owned();
+                let selector = format!("settings-host-{key}");
                 let label = crate::sidebar::host_label(&host);
+                let version = self.settings_host_version(&host);
+                let label_key = key.clone();
+                let version_key = key.clone();
+                let behind_key = key;
                 let text = match (shown, open) {
                     (true, _) => t.text,
                     (false, true) => t.text_2,
@@ -5344,7 +5357,34 @@ impl RootView {
                                 this.choose_settings_host(host.clone(), window, cx);
                             }))
                     })
-                    .child(label)
+                    .child(
+                        crate::ellipsis::truncating(
+                            &format!("settings-host-label-{label_key}"),
+                            StyledText::new(label),
+                        )
+                        .flex_1(),
+                    )
+                    .children(version.as_ref().map(|(version, _)| {
+                        div()
+                            .driver_id(move || format!("settings-host-version-{version_key}"))
+                            .flex_none()
+                            .ml(px(6.0))
+                            .font_family(crate::fonts::DEFAULT_FAMILY)
+                            .font_weight(crate::fonts::mono_weight())
+                            .text_size(crate::fonts::ui_px_at(crate::fonts::ui_text_size(cx), 10.5))
+                            .text_color(gpui::rgb(t.muted))
+                            .child(format!("v{version}"))
+                    }))
+                    .children(version.as_ref().filter(|(_, behind)| *behind).map(|_| {
+                        crate::connection_picker_view::tag(
+                            crate::fonts::ui_text_size(cx),
+                            crate::fonts::ui_weight_shift(cx),
+                            format!("settings-host-behind-{behind_key}"),
+                            "Behind".to_owned(),
+                            &t,
+                        )
+                        .ml(px(6.0))
+                    }))
                     .into_any_element()
             })
             .collect();

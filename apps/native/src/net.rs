@@ -686,6 +686,8 @@ impl Net {
                 .identity
                 .as_ref()
                 .and_then(|id| id.client_name.clone()),
+            client_version: Some(protocol::BUILD_VERSION.to_owned()),
+            client_kind: Some(protocol::ClientKind::Native),
         }
     }
 
@@ -912,11 +914,18 @@ impl Net {
                 protocol_version,
                 features,
                 origin,
+                build_version,
                 ..
             } => {
-                info!(protocol_version, ?origin, "connected to daemon");
+                info!(
+                    protocol_version,
+                    ?origin,
+                    ?build_version,
+                    "connected to daemon"
+                );
                 self.conn
                     .on_welcome(*protocol_version, features.clone(), *origin);
+                self.conn.set_build_version(build_version.clone());
                 self.emit_state();
             }
             DaemonMessage::AuthFailed { reason } => {
@@ -1802,6 +1811,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_hello_carries_the_client_kind_and_version() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build a test runtime");
+        let hello = runtime.block_on(async {
+            let (_commands_tx, commands) = unbounded();
+            let (events, _events_rx) = unbounded();
+            let net = Net::new(
+                commands,
+                events,
+                deps(ensure_silent_server),
+                Target::Local,
+                WELCOME_TIMEOUT,
+            );
+            net.hello("test-token".to_owned())
+        });
+        let ClientMessage::Hello {
+            client_version,
+            client_kind,
+            ..
+        } = &hello
+        else {
+            unreachable!("hello() builds a Hello, got {hello:?}");
+        };
+        assert_eq!(
+            client_version.as_deref(),
+            Some(protocol::BUILD_VERSION),
+            "the host sees this client's version"
+        );
+        assert_eq!(*client_kind, Some(protocol::ClientKind::Native));
+        let json = serde_json::to_string(&hello).expect("the hello serializes");
+        assert!(
+            json.contains(&format!(
+                r#""client_version":"{}""#,
+                protocol::BUILD_VERSION
+            )),
+            "{json}"
+        );
+        assert!(json.contains(r#""client_kind":"native""#), "{json}");
+    }
+
+    #[test]
+    fn a_host_welcome_keeps_its_build_version() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build a test runtime");
+        let version = runtime.block_on(async {
+            let (_commands_tx, commands) = unbounded();
+            let (events, _events_rx) = unbounded();
+            let mut net = Net::new(
+                commands,
+                events,
+                deps(ensure_silent_server),
+                Target::tailnet(TLS_HOST, Some(8787)),
+                WELCOME_TIMEOUT,
+            );
+            net.conn.on_connecting();
+            net.conn.on_socket_open(8787);
+            net.apply(Box::new(DaemonMessage::Welcome {
+                protocol_version: 23,
+                supported_versions: vec![23],
+                features: Vec::new(),
+                daemon_id: None,
+                origin: None,
+                build_version: Some("0.10.0".to_owned()),
+            }));
+            net.conn.build_version().map(str::to_owned)
+        });
+        assert_eq!(version.as_deref(), Some("0.10.0"));
+    }
+
     /// The name the fake TLS daemon's certificate is issued for; it resolves
     /// to loopback, where the daemon listens.
     const TLS_HOST: &str = "localhost";
@@ -1922,6 +2005,7 @@ mod tests {
             features: Vec::new(),
             daemon_id: Some(FAKE_DAEMON_ID.to_owned()),
             origin: None,
+            build_version: None,
         };
         let refusal = DaemonMessage::DevicePairFailed {
             reason: DEVICE_NOT_APPROVED.to_owned(),
@@ -2097,6 +2181,7 @@ mod tests {
             features: Vec::new(),
             daemon_id: Some(FAKE_DAEMON_ID.to_owned()),
             origin: None,
+            build_version: None,
         };
         let served = matches!(answer, Answer::Served) || token == ISSUED_TOKEN;
         let next = if served {
@@ -3425,6 +3510,7 @@ mod tests {
             features: Vec::new(),
             daemon_id: None,
             origin: None,
+            build_version: None,
         }
     }
 

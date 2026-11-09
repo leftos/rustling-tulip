@@ -81,6 +81,7 @@ test("machine_opened_sends_the_hello_with_the_token", () => {
         protocol_version: PROTOCOL_VERSION,
         protocol_versions: [...SUPPORTED_PROTOCOL_VERSIONS],
         auth_token: DEVICE_TOKEN,
+        client_kind: "phone",
       },
     },
     { type: "setTimer", delayMs: WELCOME_TIMEOUT_MS },
@@ -550,6 +551,7 @@ test("connection_cycle_reconnects_after_the_backoff", async () => {
     protocol_version: PROTOCOL_VERSION,
     protocol_versions: [...SUPPORTED_PROTOCOL_VERSIONS],
     auth_token: DEVICE_TOKEN,
+    client_kind: "phone",
   });
 
   first.receive(WELCOME);

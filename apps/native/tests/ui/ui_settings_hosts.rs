@@ -82,6 +82,33 @@ fn the_host_selector_label_is_a_section_label(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_host_on_an_older_release_shows_its_version_and_behind_in_the_selector(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect_with_version("0.9.0");
+    h.keys("ctrl-,");
+
+    let key = remote_key();
+    let wire = key.wire().expect("a remote host has a wire key");
+    let version = format!("settings-host-version-{wire}");
+    let behind = format!("settings-host-behind-{wire}");
+    assert!(
+        h.bounds(&version).size.width > px(0.0),
+        "the selector's row names the release its host runs"
+    );
+    assert!(
+        h.bounds(&behind).size.width > px(0.0),
+        "an older host wears the Behind tag"
+    );
+    assert!(
+        h.bounds("settings-host-behind-local").size.width <= px(0.0),
+        "This PC runs this client's release, so it wears none"
+    );
+}
+
+#[gpui::test]
 fn detailed_logging_rows_are_hidden_while_a_remote_host_is_chosen(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = two_hosts(cx, &dir);

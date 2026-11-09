@@ -2526,6 +2526,17 @@ export type ConnectionOrigin =
   /** Accepted on the tailnet listener. */
   | "remote";
 
+/**
+ * What kind of program opened a connection, as `Hello.client_kind` reports
+ * it: the desktop client, the phone app, or a kind a later release adds. A
+ * command-line tool sends none.
+ */
+export type ClientKind =
+  /** The desktop client. */
+  | "native"
+  /** The phone app served to the tailnet. */
+  | "phone";
+
 /** How an account signs in. */
 export type AccountKind =
   | "oauth"
@@ -3106,8 +3117,14 @@ export type ClientMessage =
    *
    * `client_name`: Human-readable label for this client (e.g. the machine hostname),
    * shown in another client's "clone layout" chooser. Optional.
+   *
+   * `client_version`: The client build's version ([`BUILD_VERSION`]), so the host can
+   * tell how old the client is. Absent from a client that has none.
+   *
+   * `client_kind`: What kind of program this is ([`ClientKind`]). Absent from a
+   * command-line tool and from an older client.
    */
-  | { type: "hello"; protocol_version: number; protocol_versions?: number[]; auth_token: string; client_id?: string | null; client_name?: string | null }
+  | { type: "hello"; protocol_version: number; protocol_versions?: number[]; auth_token: string; client_id?: string | null; client_name?: string | null; client_version?: string | null; client_kind?: ClientKind | null }
   | { type: "list_repos" }
   | { type: "add_repo"; path: string; name: string | null }
   | { type: "remove_repo"; repo_id: string }
@@ -4608,8 +4625,11 @@ export type DaemonMessage =
    * hint for the client's UI (it may disable host-only controls); the
    * daemon's own checks never read it back. Absent from an older
    * daemon.
+   *
+   * `build_version`: The daemon build's version ([`BUILD_VERSION`]), so a client can
+   * tell how old the host is. Absent from an older daemon.
    */
-  | { type: "welcome"; protocol_version: number; supported_versions?: number[]; features?: string[]; daemon_id?: string | null; origin?: ConnectionOrigin | null }
+  | { type: "welcome"; protocol_version: number; supported_versions?: number[]; features?: string[]; daemon_id?: string | null; origin?: ConnectionOrigin | null; build_version?: string | null }
   /**
    * Reply to [`ClientMessage::ListAccounts`], sent to the requester only:
    * every account the host knows and the auto-switch state. `auto` is

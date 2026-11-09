@@ -401,6 +401,9 @@ impl RootView {
             has_token: !dialog.not_paired.contains(&row.label),
             sessions_last_time,
             live_sessions,
+            build_version: conn
+                .and_then(crate::Connection::build_version)
+                .map(str::to_owned),
         }
     }
 
@@ -1328,6 +1331,15 @@ fn host_row(
                 &t,
             )
         }))
+        .when(detail.behind, |chip| {
+            chip.child(tag(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                format!("connections-behind-{}", row.key()),
+                "Behind".to_owned(),
+                &t,
+            ))
+        })
         .when(saved && forget_shown, |chip| chip.opacity(0.0))
         .when(saved && !forget_shown, |chip| {
             chip.group_hover(group.clone(), |style| style.opacity(0.0))
@@ -1574,9 +1586,15 @@ enum DetailPiece {
     },
 }
 
+/// Whether `part` is a release version as a row draws it (`v0.9.0`).
+fn is_version(part: &str) -> bool {
+    part.strip_prefix('v')
+        .is_some_and(|version| semver::Version::parse(version).is_ok())
+}
+
 /// The pieces of `line` ([`RowDetail::line`]) for a row of `host`: a
-/// tailnet port and an SSH remote command in the mono face, a peer's
-/// "Online" after its dot.
+/// tailnet port, an SSH remote command and a release version in the mono
+/// face, a peer's "Online" after its dot.
 fn detail_pieces(host: RowHost, line: &str) -> Vec<DetailPiece> {
     line.split(" · ")
         .enumerate()
@@ -1589,7 +1607,7 @@ fn detail_pieces(host: RowHost, line: &str) -> Vec<DetailPiece> {
                     lead: Some("port"),
                     value: port.to_owned(),
                 }
-            } else if host == RowHost::Ssh && index == 1 {
+            } else if is_version(part) || (host == RowHost::Ssh && index == 1) {
                 DetailPiece::Mono {
                     lead: None,
                     value: part.to_owned(),
@@ -1716,7 +1734,7 @@ fn dotted(selector: String, color: u32, label: String) -> Div {
 }
 
 /// An amber tag reading `label`.
-fn tag(offset: i8, shift: i8, selector: String, label: String, t: &UiTheme) -> Div {
+pub(crate) fn tag(offset: i8, shift: i8, selector: String, label: String, t: &UiTheme) -> Div {
     div()
         .driver_id(move || selector)
         .flex()

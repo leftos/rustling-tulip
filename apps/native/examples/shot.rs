@@ -1849,6 +1849,10 @@ fn tulip_grid(view: View) -> GridNode {
     }
 }
 
+/// The version the shot fixtures' remote host reports: older than this
+/// client's, so its rows show their version and the "Behind" tag.
+const REMOTE_BUILD_VERSION: &str = "0.9.0";
+
 /// What the `multi-host` shot's "box" lists: one repo and its session.
 struct RemoteFixture {
     repos: DaemonMessage,
@@ -2119,6 +2123,7 @@ impl FakeDaemon {
             features.push(protocol::FEATURE_GATE_STATE.to_owned());
         }
         conn.on_welcome(version, features.clone(), None);
+        conn.set_build_version(Some(env!("CARGO_PKG_VERSION").to_owned()));
         self.event(NetEvent::State(conn))?;
         self.event(NetEvent::Handshake(HandshakeInfo {
             port: FAKE_PORT,
@@ -2132,6 +2137,7 @@ impl FakeDaemon {
             features,
             daemon_id: None,
             origin: None,
+            build_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         })?;
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),
@@ -2179,6 +2185,7 @@ impl FakeDaemon {
         conn.on_connecting();
         conn.on_socket_open(8787);
         conn.on_welcome(version, Vec::new(), None);
+        conn.set_build_version(Some(REMOTE_BUILD_VERSION.to_owned()));
         self.event(NetEvent::State(conn))?;
         self.send(DaemonMessage::Welcome {
             protocol_version: version,
@@ -2186,6 +2193,7 @@ impl FakeDaemon {
             features: Vec::new(),
             daemon_id: None,
             origin: None,
+            build_version: Some(REMOTE_BUILD_VERSION.to_owned()),
         })?;
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),

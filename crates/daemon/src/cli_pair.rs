@@ -237,6 +237,8 @@ fn hello(handshake: &DaemonHandshake) -> ClientMessage {
         auth_token: handshake.auth_token.clone(),
         client_id: None,
         client_name: Some(CLIENT_NAME.to_owned()),
+        client_version: None,
+        client_kind: None,
     }
 }
 
@@ -419,6 +421,7 @@ mod tests {
             features: Vec::new(),
             daemon_id: None,
             origin: None,
+            build_version: None,
         });
         assert_eq!(classify(&welcome, false), Step::Mint);
         assert_eq!(

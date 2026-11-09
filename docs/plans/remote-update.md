@@ -39,9 +39,9 @@ The check is the one the client's updater makes: the release's `.sha256`, from t
 
 Each part lands on `feat/remote-update`, and each is a sub-issue of RT-1298.
 
-- [ ] **Versions on the wire.** `Welcome.build_version`, `Hello.client_version` and `client_kind`, a `remote_update` feature string, the host's version and "behind" state in the Connections dialog and Settings > Hosts. Regenerate `apps/pwa/src/protocol.ts`.
+- [x] **Versions on the wire.** `Welcome.build_version`, `Hello.client_version` and `client_kind`, the host's version and "behind" state in the Connections dialog and Settings > Hosts. Regenerate `apps/pwa/src/protocol.ts`.
 - [x] **The shared updater core.** Move finding, downloading and verifying a release out of `apps/native/src/update.rs` into a crate both the client and the daemon link, with no behaviour change.
-- [ ] **A host updates itself on request.** A new client message, the daemon fetching and verifying its own asset and running the swap detached from itself, restarting the daemon afterwards when no client will, and answering with why when it cannot. The host's own app restarts on a countdown with Cancel.
+- [ ] **A host updates itself on request.** A new client message, a `remote_update` feature string listed once a host can honour it, the daemon fetching and verifying its own asset and running the swap detached from itself, restarting the daemon afterwards when no client will, and answering with why when it cannot. The host's own app restarts on a countdown with Cancel.
 - [ ] **Client to host, in the client.** The update action per host, the confirm dialog listing that host's sessions, progress, reconnect, and the result or failure shown to the requester.
 - [ ] **The breaking flag.** A machine-readable note in each release of what it breaks, read by the confirm dialog, and the requester updating itself right after the host. `docs/release.md` says when to set it.
 - [ ] **Host to client.** A per-connection record on the host, an addressed message, "Update connected clients", and the client's countdown with Cancel.

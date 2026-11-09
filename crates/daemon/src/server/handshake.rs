@@ -135,6 +135,8 @@ async fn read_hello<R: Inbound>(
         auth_token,
         client_id,
         client_name,
+        client_version,
+        client_kind,
     }) = parsed
     else {
         return Err(anyhow!("first message must be Hello"));
@@ -157,6 +159,8 @@ async fn read_hello<R: Inbound>(
         scalar = protocol_version,
         ?protocol_versions,
         client_id = client_id.as_deref().unwrap_or("(legacy)"),
+        client_version = client_version.as_deref().unwrap_or("(unknown)"),
+        ?client_kind,
         "handshake negotiated protocol version"
     );
     let _ = out_tx.send(welcome_message(
@@ -304,6 +308,7 @@ fn welcome_message(
         features,
         daemon_id: Some(daemon_id.to_owned()),
         origin: Some(origin),
+        build_version: Some(protocol::BUILD_VERSION.to_owned()),
     }
 }
 
@@ -655,6 +660,19 @@ mod tests {
         assert!(
             !DAEMON_FEATURES.contains(&protocol::FEATURE_ACCOUNT_EVENTS),
             "the account events feature joins only with the accounts feature"
+        );
+    }
+
+    #[test]
+    fn welcome_carries_the_daemon_build_version() {
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { build_version: Some(version), .. }
+                    if version == env!("CARGO_PKG_VERSION")
+            ),
+            "{welcome:?}"
         );
     }
 

@@ -186,6 +186,8 @@ fn connect(daemon: &LiveDaemon, client_id: &str) -> Socket {
             auth_token: handshake.auth_token.clone(),
             client_id: Some(client_id.to_owned()),
             client_name: None,
+            client_version: None,
+            client_kind: None,
         },
     );
     read_until(&mut ws, "\"type\":\"welcome\"");

@@ -73,6 +73,20 @@ pub fn welcome(protocol_version: u32) -> DaemonMessage {
         features: daemon_features(),
         daemon_id: None,
         origin: None,
+        build_version: None,
+    }
+}
+
+/// The fake daemon's `Welcome` on `protocol_version`, reporting its build
+/// version as `build_version`, as a daemon of that release does.
+pub fn welcome_with_version(protocol_version: u32, build_version: &str) -> DaemonMessage {
+    DaemonMessage::Welcome {
+        protocol_version,
+        supported_versions: vec![protocol_version],
+        features: daemon_features(),
+        daemon_id: None,
+        origin: None,
+        build_version: Some(build_version.to_owned()),
     }
 }
 
@@ -85,6 +99,7 @@ pub fn welcome_with_id(protocol_version: u32, daemon_id: &str) -> DaemonMessage 
         features: daemon_features(),
         daemon_id: Some(daemon_id.to_owned()),
         origin: None,
+        build_version: None,
     }
 }
 
@@ -2423,8 +2438,11 @@ impl<'h, 'a> HostHandle<'h, 'a> {
 
     /// Delivers `event` on this host's connection and lets the view settle.
     pub fn event(&mut self, event: NetEvent) {
-        self.wire(|host| host.events.unbounded_send(event))
-            .expect("the root view listens");
+        self.wire(|host| {
+            host.events
+                .unbounded_send(event)
+                .expect("the root view listens");
+        });
         self.harness.cx.run_until_parked();
     }
 
@@ -2473,9 +2491,31 @@ impl<'h, 'a> HostHandle<'h, 'a> {
     /// [`Self::connect_keeping_sent`], the connection welcomed with
     /// `features`.
     pub fn connect_keeping_sent_with(&mut self, features: Vec<String>) {
+        self.connect_keeping_sent_with_welcome(features, None);
+    }
+
+    /// Connects as [`Self::connect`] does, the host's daemon reporting
+    /// `build_version`.
+    pub fn connect_with_version(&mut self, build_version: &str) {
+        self.connect_keeping_sent_with_welcome(daemon_features(), Some(build_version.to_owned()));
+        self.sent();
+    }
+
+    /// [`Self::connect_keeping_sent_with`] on a connection whose daemon
+    /// reported `build_version`, which its `Welcome` carries too.
+    fn connect_keeping_sent_with_welcome(
+        &mut self,
+        features: Vec<String>,
+        build_version: Option<String>,
+    ) {
         let target = self.target.clone();
-        self.event(NetEvent::State(connected_to(target, 8787, features)));
-        self.send(welcome(PROTOCOL));
+        let mut conn = connected_to(target, 8787, features);
+        conn.set_build_version(build_version.clone());
+        self.event(NetEvent::State(conn));
+        self.send(match build_version {
+            Some(version) => welcome_with_version(PROTOCOL, &version),
+            None => welcome(PROTOCOL),
+        });
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),
         });

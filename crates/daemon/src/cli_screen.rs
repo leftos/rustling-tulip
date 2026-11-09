@@ -373,6 +373,7 @@ mod tests {
                 features,
                 daemon_id: None,
                 origin: None,
+                build_version: None,
             })
             .expect("the welcome serializes")
         };

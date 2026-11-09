@@ -1670,6 +1670,8 @@ mod tests {
                 auth_token: "test-token".to_owned(),
                 client_id: None,
                 client_name: None,
+                client_version: None,
+                client_kind: None,
             };
             let text = serde_json::to_string(&hello).expect("serialize the Hello");
             client

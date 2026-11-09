@@ -28,6 +28,7 @@ fn welcome(features: &[&str]) -> DaemonMessage {
         features: features.iter().map(|&feature| feature.to_owned()).collect(),
         daemon_id: None,
         origin: None,
+        build_version: None,
     }
 }
 

@@ -1027,6 +1027,8 @@ pub(super) fn hello(auth_token: &str, client_name: Option<&str>) -> ClientMessag
         auth_token: auth_token.to_owned(),
         client_id: Some("test-client".to_owned()),
         client_name: client_name.map(str::to_owned),
+        client_version: None,
+        client_kind: None,
     }
 }
 

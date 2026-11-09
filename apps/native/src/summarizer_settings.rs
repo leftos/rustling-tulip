@@ -335,6 +335,7 @@ mod tests {
             features: Vec::new(),
             daemon_id: None,
             origin: None,
+            build_version: None,
         };
         assert!(state.fold(&local, &welcome));
         assert!(
