@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A settings file that isn't valid text keeps a copy instead of being overwritten, and a failed reset of your settings is tried again.
 - A tap in the phone's terminal no longer drops a session out of Needs you while its question is still up.
 - Unfocused panes dim alike whether their accent comes from the theme or a chosen colour, and each pane's header carries a fade of its accent.
+- A question too tall for its pane can be answered from a toast or the Dashboard instead of being refused as no longer up.
 - The Connections dialog's rows and headings no longer run together when the Add host form leaves them little room; the list scrolls instead.
 
 ## v0.11.1-alpha
