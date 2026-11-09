@@ -46,7 +46,7 @@ Velopack was considered and not used. It would replace the NSIS installer and ad
    - The macOS unpack runs on the UI thread, so the window pauses for a few seconds.
    - Off Windows there is no cross-process update lock: one client quits right after it starts an update, and two clients updating at once are not excluded.
    - No other path starts the installer.
-7. **Applying the files: `rustling-tulipd apply-update`.** Every install, update or not, extracts its files into `$INSTDIR\.staging\` and then runs the staged daemon's `apply-update --from <staging> --to $INSTDIR [--old-version <v>] [--update] [--relaunch]` (`crates/daemon/src/cli_apply_update.rs`). The steps live in Rust so they can be tested without running an installer.
+7. **Applying the files: `rustling-tulipd apply-update`.** Every install, update or not, extracts its files into `$INSTDIR\.staging\` and then runs the staged daemon's `apply-update --from <staging> --to $INSTDIR [--old-version <v>] [--update] [--relaunch] [--restart-daemon]` (`crates/daemon/src/cli_apply_update.rs`). The steps live in Rust so they can be tested without running an installer.
 
    NSIS passes `--old-version` from the uninstall key's `DisplayVersion` and runs no exe from the install folder to learn it.
 
@@ -57,7 +57,7 @@ Velopack was considered and not used. It would replace the NSIS installer and ad
    - Exits 3 with `<exe> is still running from the install folder (pid <n>); nothing was changed` when any process still runs an exe from `$INSTDIR` (a `bridge` for an SSH client, `--detach`, `pair`, `screen`).
    - Copies each file as `<name>.new`, then renames the old one to `<name>.old` and the new one into place, client last; on any failure it puts every file back (exit 5).
    - Moves the staged `pwa` folder (the phone app) into place by rename before the client, inside the same rollback: staged `pwa` becomes `pwa.new`, the installed `pwa` becomes `pwa.old`, then `pwa.new` becomes `pwa`; a leftover `pwa.old` or `pwa.new` is removed first, and exit 5 puts the old folder back. A staging without `pwa` leaves the installed one alone, and any other staged folder is ignored. After success `pwa.old` is removed; a failure to remove it is reported and never fails the update.
-   - Writes `updates\last-result.json` (`{from, message, ok, to}`) in every outcome, then with `--relaunch` starts the client once with `--updated-from <old version>`, on success and on failure.
+   - Writes `updates\last-result.json` (`{from, message, ok, to}`) in every outcome, then with `--relaunch` starts the client once with `--updated-from <old version>`, on success and on failure. With `--restart-daemon` (the installer's `/RESTARTDAEMON`, which a host's daemon passes when a remote client asked it to update) it relaunches the client the same way when one was running from the install folder at its start, and otherwise, or when that client fails to start, starts the installed daemon with `--detach`; never both. The early refusal while another update holds the update mutex starts nothing.
 
    Exit codes: 0 applied, 1 a bad command line or unresolvable folders, 2 the daemon would not stop, 3 an exe in the install folder is still running, 4 another update holds the mutex, 5 a file failed and every file was put back. `rustling-tulipd --version` prints the daemon's version.
 

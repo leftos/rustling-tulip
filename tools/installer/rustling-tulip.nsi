@@ -133,6 +133,9 @@ Var UpdateMode
 ; 1 when the command line holds /RELAUNCH: `apply-update` starts the client
 ; again when it ends, whatever its outcome.
 Var RelaunchMode
+; 1 when the command line holds /RESTARTDAEMON: `apply-update` starts the
+; installed daemon again when it ends, unless it relaunches the client.
+Var RestartDaemonMode
 
 Function .onInit
   ${GetParameters} $R0
@@ -147,6 +150,11 @@ Function .onInit
     StrCpy $RelaunchMode 1
   ${EndIf}
   ClearErrors
+  ${GetOptions} $R0 "/RESTARTDAEMON" $R1
+  ${IfNot} ${Errors}
+    StrCpy $RestartDaemonMode 1
+  ${EndIf}
+  ClearErrors
 FunctionEnd
 
 ; Puts what is staged in $INSTDIR\.staging in place with the staged daemon's
@@ -154,8 +162,8 @@ FunctionEnd
 ; update mutex, waits for the client to exit, stops the running daemon before
 ; writing anything, refuses while anything still runs from $INSTDIR, swaps
 ; each file in with the client last and the staged `pwa` folder whole, rolls
-; every swap back on a failure, writes last-result.json and, under /RELAUNCH,
-; starts the client again.
+; every swap back on a failure, writes last-result.json and, under /RELAUNCH or
+; /RESTARTDAEMON, starts the client or the installed daemon again.
 ; Leaves its exit code in $0 ("error" when it could not be started) and its
 ; output in $1, then removes the staging folder.
 ;
@@ -176,6 +184,9 @@ Function RtApplyUpdate
   ${EndIf}
   ${If} $RelaunchMode == 1
     StrCpy $2 "$2 --relaunch"
+  ${EndIf}
+  ${If} $RestartDaemonMode == 1
+    StrCpy $2 "$2 --restart-daemon"
   ${EndIf}
   nsExec::ExecToStack $2
   Pop $0

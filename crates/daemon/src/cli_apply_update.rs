@@ -2,13 +2,14 @@
 //!
 //! The installer extracts everything it ships into `<install>\.staging` and
 //! runs the staged daemon as `rustling-tulipd apply-update --from <staging>
-//! --to <install> [--old-version <v>] [--update] [--relaunch]`. This takes the
+//! --to <install> [--old-version <v>] [--update] [--relaunch] [--restart-daemon]`. This takes the
 //! update lock, waits for the client to exit, stops the running daemon before
 //! anything is written, refuses while anything still runs from the install
 //! folder, swaps each file in through `<name>.new` and `<name>.old` and each
 //! folder [`STAGED_DIRS`] names whole by rename (the client last, every swap
 //! rolled back on a failure), records the outcome in `last-result.json` and,
-//! when asked, starts the client again.
+//! when asked, starts the client again, or the installed daemon when no client
+//! was started.
 //!
 //! When `--to` is an `.app` bundle the bundle replaces those files: the
 //! installed app is renamed to `<name>.app.old`, the staged app is renamed into
@@ -32,6 +33,13 @@ use std::time::{Duration, Instant};
 pub const CLIENT_EXE: &str = "rustling-tulip-native.exe";
 #[cfg(not(windows))]
 pub const CLIENT_EXE: &str = "rustling-tulip-native";
+
+/// The daemon's file name in the install folder; it is what `--restart-daemon`
+/// starts.
+#[cfg(windows)]
+pub const DAEMON_EXE: &str = "rustling-tulipd.exe";
+#[cfg(not(windows))]
+pub const DAEMON_EXE: &str = "rustling-tulipd";
 
 /// The folder inside an installed `.app` bundle that holds its executables.
 const BUNDLE_EXECUTABLES: [&str; 2] = ["Contents", "MacOS"];
@@ -106,9 +114,13 @@ pub struct Request {
     pub old_version: Option<String>,
     /// Start the client once the run ends, whatever its outcome.
     pub relaunch: bool,
+    /// Start the installed daemon once the run ends, unless a relaunched client
+    /// starts it.
+    pub restart_daemon: bool,
 }
 
-/// Parse the arguments after `apply-update`.
+/// Parse the arguments after `apply-update`; `--relaunch` and
+/// `--restart-daemon` are the flags that start a program once the run ends.
 ///
 /// # Errors
 ///
@@ -117,7 +129,8 @@ pub struct Request {
 /// bundle staged from something that is not one.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Request> {
     let mut args = args.into_iter();
-    let (mut from, mut to, mut old_version, mut relaunch) = (None, None, None, false);
+    let (mut from, mut to, mut old_version, mut relaunch, mut restart_daemon) =
+        (None, None, None, false, false);
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--from") => from = Some(PathBuf::from(value(&mut args, "--from")?)),
@@ -130,6 +143,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Request
                 old_version = Some(version);
             }
             Some("--relaunch") => relaunch = true,
+            Some("--restart-daemon") => restart_daemon = true,
             // The installer's update mode changes only what it writes to the
             // registry; the files are applied the same way.
             Some("--update") => {}
@@ -146,6 +160,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Request
         to,
         old_version,
         relaunch,
+        restart_daemon,
     })
 }
 
@@ -208,7 +223,9 @@ pub struct Hooks<'a> {
 /// folder, `4` another update holds the lock, `5` a file or a staged folder
 /// could not be swapped (every swap was rolled back). When `to` is an `.app`
 /// bundle, the whole bundle is swapped by rename instead of each entry, and
-/// the old app is put back when that fails.
+/// the old app is put back when that fails. Afterwards it starts the client
+/// again when `--relaunch` asks or `--restart-daemon` saw one running at the
+/// start, and otherwise starts the installed daemon under `--restart-daemon`.
 pub async fn run(
     request: &Request,
     result_file: &Path,
@@ -226,6 +243,9 @@ pub async fn run(
             return LOCKED_CODE;
         }
     };
+    let client_was_running = running_from(&exe_folder(&request.to), hooks.processes)
+        .iter()
+        .any(|process| is_client(process.exe.file_name()));
     let outcome = apply(request, hooks, out).await;
     say(out, &outcome.message);
     if let Err(err) = write_result(result_file, request, &outcome) {
@@ -234,9 +254,7 @@ pub async fn run(
             &format!("could not write {}: {err:#}", result_file.display()),
         );
     }
-    if request.relaunch {
-        relaunch(request, hooks.launcher, out);
-    }
+    restart(request, client_was_running, hooks.launcher, out);
     drop(hold);
     outcome.code
 }
@@ -303,11 +321,7 @@ async fn apply(request: &Request, hooks: &Hooks<'_>, out: &mut impl Write) -> Ou
     if bundle && let Err(message) = check_replaceable(&request.to) {
         return Outcome::failed(SWAP_FAILED_CODE, message);
     }
-    let installed = if bundle {
-        bundle_executables(&request.to)
-    } else {
-        request.to.clone()
-    };
+    let installed = exe_folder(&request.to);
     wait_for_clients(&installed, hooks).await;
     if let Err(reason) = hooks.daemon.stop().await {
         return Outcome::failed(
@@ -622,6 +636,16 @@ fn bundle_executables(to: &Path) -> PathBuf {
         .fold(to.to_path_buf(), |path, part| path.join(part))
 }
 
+/// The folder the processes running from `to` are read in: `to` itself, or
+/// the bundle's executables folder.
+fn exe_folder(to: &Path) -> PathBuf {
+    if is_bundle(to) {
+        bundle_executables(to)
+    } else {
+        to.to_path_buf()
+    }
+}
+
 /// Where `--relaunch` starts the client: in the install folder, or inside the
 /// bundle's executables folder.
 fn client_path(to: &Path) -> PathBuf {
@@ -629,6 +653,16 @@ fn client_path(to: &Path) -> PathBuf {
         bundle_executables(to).join(CLIENT_EXE)
     } else {
         to.join(CLIENT_EXE)
+    }
+}
+
+/// Where `--restart-daemon` starts the daemon: in the install folder, or
+/// inside the bundle's executables folder.
+fn daemon_path(to: &Path) -> PathBuf {
+    if is_bundle(to) {
+        bundle_executables(to).join(DAEMON_EXE)
+    } else {
+        to.join(DAEMON_EXE)
     }
 }
 
@@ -739,8 +773,37 @@ fn write_result(path: &Path, request: &Request, outcome: &Outcome) -> anyhow::Re
     crate::atomic_file::write_atomic(path, &serde_json::to_vec(&record)?)
 }
 
-/// Start the installed client once, telling it which version it replaced.
-fn relaunch(request: &Request, launcher: &dyn Launcher, out: &mut impl Write) {
+/// Start the client again when the run asks for one, and the installed daemon
+/// when it asks for that and no client took the start.
+fn restart(
+    request: &Request,
+    client_was_running: bool,
+    launcher: &dyn Launcher,
+    out: &mut impl Write,
+) {
+    let wanted = request.relaunch || (request.restart_daemon && client_was_running);
+    if wanted && relaunch(request, launcher, out) {
+        return;
+    }
+    if request.restart_daemon {
+        start_daemon(request, launcher, out);
+    }
+}
+
+/// Start the installed daemon detached from this process.
+fn start_daemon(request: &Request, launcher: &dyn Launcher, out: &mut impl Write) {
+    let daemon = daemon_path(&request.to);
+    if let Err(err) = launcher.launch(&daemon, &[OsString::from("--detach")]) {
+        say(
+            out,
+            &format!("could not start {}: {err:#}", daemon.display()),
+        );
+    }
+}
+
+/// Start the installed client once, telling it which version it replaced;
+/// `true` when it started.
+fn relaunch(request: &Request, launcher: &dyn Launcher, out: &mut impl Write) -> bool {
     let client = client_path(&request.to);
     let args: Vec<OsString> = request
         .old_version
@@ -752,7 +815,9 @@ fn relaunch(request: &Request, launcher: &dyn Launcher, out: &mut impl Write) {
             out,
             &format!("could not start {}: {err:#}", client.display()),
         );
+        return false;
     }
+    true
 }
 
 /// This machine's processes, read through sysinfo.
@@ -970,6 +1035,23 @@ mod tests {
         }
     }
 
+    /// Records every launch and fails the client's, so a daemon start after a
+    /// failed relaunch can be told from one that was never asked for.
+    #[derive(Default)]
+    struct FailingClientLaunches(RefCell<Vec<(PathBuf, Vec<OsString>)>>);
+
+    impl Launcher for FailingClientLaunches {
+        fn launch(&self, program: &Path, args: &[OsString]) -> anyhow::Result<()> {
+            self.0
+                .borrow_mut()
+                .push((program.to_path_buf(), args.to_vec()));
+            if program.file_name() == Some(OsStr::new(CLIENT_EXE)) {
+                anyhow::bail!("the client would not start");
+            }
+            Ok(())
+        }
+    }
+
     struct FreeLock;
 
     impl UpdateLock for FreeLock {
@@ -1010,11 +1092,16 @@ mod tests {
         }
 
         fn request(&self, relaunch: bool) -> Request {
+            self.request_with(relaunch, false)
+        }
+
+        fn request_with(&self, relaunch: bool, restart_daemon: bool) -> Request {
             Request {
                 from: self.from.clone(),
                 to: self.to.clone(),
                 old_version: Some("0.1.0".to_string()),
                 relaunch,
+                restart_daemon,
             }
         }
 
@@ -1078,7 +1165,7 @@ mod tests {
     fn hooks<'a>(
         processes: &'a Processes,
         daemon: &'a Daemon,
-        launches: &'a Launches,
+        launches: &'a dyn Launcher,
         lock: &'a dyn UpdateLock,
     ) -> Hooks<'a> {
         Hooks {
@@ -1095,7 +1182,7 @@ mod tests {
         request: &Request,
         processes: &Processes,
         daemon: &Daemon,
-        launches: &Launches,
+        launches: &dyn Launcher,
     ) -> (u8, String) {
         apply_to(&fixture.result, request, processes, daemon, launches).await
     }
@@ -1105,7 +1192,7 @@ mod tests {
         request: &Request,
         processes: &Processes,
         daemon: &Daemon,
-        launches: &Launches,
+        launches: &dyn Launcher,
     ) -> (u8, String) {
         let mut out = Vec::new();
         let code = run(
@@ -1179,11 +1266,16 @@ mod tests {
         }
 
         fn request(&self, relaunch: bool) -> Request {
+            self.request_with(relaunch, false)
+        }
+
+        fn request_with(&self, relaunch: bool, restart_daemon: bool) -> Request {
             Request {
                 from: self.from.clone(),
                 to: self.to.clone(),
                 old_version: Some("0.1.0".to_string()),
                 relaunch,
+                restart_daemon,
             }
         }
 
@@ -1705,6 +1797,29 @@ mod tests {
         assert_eq!(*launches.0.borrow(), vec![(client, args)]);
     }
 
+    #[tokio::test]
+    async fn restart_daemon_relaunches_a_client_running_inside_a_bundle() {
+        let bundle = Bundle::new("apply-update-bundle-restart-daemon");
+        let launches = Launches::default();
+        let client = bundle_executables(&bundle.to).join(CLIENT_EXE);
+
+        let (code, out) = apply_to(
+            &bundle.result,
+            &bundle.request_with(false, true),
+            &Processes(vec![RunningExe {
+                pid: std::process::id().wrapping_add(1),
+                exe: client.clone(),
+            }]),
+            &Daemon::stopping(),
+            &launches,
+        )
+        .await;
+
+        assert_eq!(code, 3, "{out}");
+        let args = ["--updated-from", "0.1.0"].map(OsString::from).to_vec();
+        assert_eq!(*launches.0.borrow(), vec![(client, args)]);
+    }
+
     #[test]
     fn a_bundle_to_needs_a_bundle_from() {
         let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
@@ -1829,6 +1944,87 @@ mod tests {
             *launches.0.borrow(),
             vec![(fixture.to.join(CLIENT_EXE), expected_args)]
         );
+    }
+
+    #[tokio::test]
+    async fn restart_daemon_starts_the_daemon_when_no_client_ran() {
+        let fixture = Fixture::new("apply-update-restart-daemon");
+        let launches = Launches::default();
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request_with(false, true),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &launches,
+        )
+        .await;
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            *launches.0.borrow(),
+            vec![(
+                fixture.to.join(DAEMON_EXE),
+                vec![OsString::from("--detach")]
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_daemon_relaunches_a_client_that_was_running() {
+        let expected_args = ["--updated-from", "0.1.0"].map(OsString::from).to_vec();
+        let fixture = Fixture::new("apply-update-restart-daemon-client");
+        let launches = Launches::default();
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request_with(false, true),
+            &Processes(vec![RunningExe {
+                pid: std::process::id().wrapping_add(1),
+                exe: fixture.to.join(CLIENT_EXE),
+            }]),
+            &Daemon::stopping(),
+            &launches,
+        )
+        .await;
+        assert_eq!(code, 3, "{out}");
+        assert_eq!(
+            *launches.0.borrow(),
+            vec![(fixture.to.join(CLIENT_EXE), expected_args)]
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_daemon_starts_the_daemon_when_the_client_launch_fails() {
+        let expected_args = ["--updated-from", "0.1.0"].map(OsString::from).to_vec();
+        let fixture = Fixture::new("apply-update-restart-daemon-failed-client");
+        let launches = FailingClientLaunches::default();
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request_with(true, true),
+            &Processes(Vec::new()),
+            &Daemon::stopping(),
+            &launches,
+        )
+        .await;
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            *launches.0.borrow(),
+            vec![
+                (fixture.to.join(CLIENT_EXE), expected_args),
+                (
+                    fixture.to.join(DAEMON_EXE),
+                    vec![OsString::from("--detach")]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn restart_daemon_is_parsed() {
+        let parsed = parse(["--from", "a", "--to", "b", "--restart-daemon"].map(OsString::from))
+            .expect("the flags parse");
+        assert!(parsed.restart_daemon);
+        let parsed =
+            parse(["--from", "a", "--to", "b"].map(OsString::from)).expect("the flags parse");
+        assert!(!parsed.restart_daemon);
     }
 
     #[cfg(windows)]
