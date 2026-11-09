@@ -1272,6 +1272,7 @@ fn section_header(
             .child(note)
     });
     div()
+        .flex_none()
         .driver_id(move || selector)
         .flex()
         .when(failed, |header| header.flex_col().gap(px(4.0)))
@@ -1364,6 +1365,7 @@ fn host_row(
         ))
         .children(row_actions(index, controls, draw, cx));
     div()
+        .flex_none()
         .id(ElementId::Name(SharedString::from(selector.clone())))
         .driver_id(move || selector)
         .group(group.clone())

@@ -1723,6 +1723,97 @@ fn with_fifteen_hosts_and_the_form_open_the_panel_stays_inside_the_window(cx: &m
     );
 }
 
+/// The `connections-ssh` shot's own tree in a 984x601 window, with its SSH
+/// form at its tallest after a passed Test connection: every heading and
+/// row the list draws keeps the height it has with the form closed, and no
+/// two consecutive ones overlap.
+#[gpui::test]
+fn the_tallest_ssh_form_keeps_rows_and_headings_apart(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [
+                { "name": "box.tail1234.ts.net", "port": 8787 },
+                { "kind": "ssh", "name": "me@buildbox", "enabled": false },
+            ],
+            "host_session_counts": { "box.tail1234.ts.net": 4 },
+        }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.cx.simulate_resize(gpui::size(px(984.0), px(601.0)));
+    h.root_update(move |root, _, _| root.set_ssh_tester(FakeSsh::answering(Ok(()))));
+    open_picker(&mut h, tailnet_with(&["laptop.tail1234.ts.net"]));
+    h.commands();
+
+    let headings: Vec<String> = ["this-pc", "saved", "tailnet"]
+        .iter()
+        .map(|slug| format!("connections-section-{slug}"))
+        .collect();
+    let ssh = h.root(|root, _| root.connection_picker_ssh_rows());
+    let rows: Vec<String> = h
+        .root(|root, _| root.connection_picker_rows())
+        .into_iter()
+        .map(|(label, _)| {
+            let key = if ssh.contains(&label) {
+                format!("ssh:{label}")
+            } else {
+                label
+            };
+            row(&key)
+        })
+        .collect();
+    let mut selectors = headings.clone();
+    selectors.extend(rows.iter().cloned());
+    let height = |h: &mut Harness<'_>, selector: &str| h.bounds(selector).size.height / px(1.0);
+    let closed: Vec<f32> = selectors.iter().map(|s| height(&mut h, s)).collect();
+
+    h.click_on("connections-add-host");
+    h.click_on("connections-add-mode-ssh");
+    assert!(h.root(|root, _| root.connection_picker_adding_ssh()));
+    assert_eq!(focus(&mut h).as_deref(), Some("connections-ssh-form-host"));
+    type_text(&mut h, "me@devbox");
+    h.keys("enter");
+    assert_eq!(ssh_result(&mut h).as_deref(), Some("Connected: devbox"));
+
+    for (selector, closed_height) in selectors.iter().zip(&closed) {
+        let open = height(&mut h, selector);
+        assert!(
+            (open - closed_height).abs() <= 0.5,
+            "{selector} keeps the {closed_height} px height it has with the form closed, not {open} px"
+        );
+    }
+    for selector in &rows {
+        let open = height(&mut h, selector);
+        assert!(
+            open >= 46.0,
+            "the row at {selector} keeps its 46 px floor, not {open} px"
+        );
+    }
+    let mut drawn: Vec<(String, f32, f32)> = selectors
+        .iter()
+        .map(|selector| {
+            let bounds = h.bounds(selector);
+            (
+                selector.clone(),
+                bounds.top() / px(1.0),
+                bounds.bottom() / px(1.0),
+            )
+        })
+        .collect();
+    drawn.sort_by(|a, b| a.1.total_cmp(&b.1));
+    for pair in drawn.windows(2) {
+        assert!(
+            pair[0].2 <= pair[1].1,
+            "{} ends at {} px, above where {} starts at {} px",
+            pair[0].0,
+            pair[0].2,
+            pair[1].0,
+            pair[1].1
+        );
+    }
+}
+
 #[gpui::test]
 fn tab_ring_order_with_the_form_closed(cx: &mut TestAppContext) {
     let dir = TestDir::new();

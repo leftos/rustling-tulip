@@ -11,6 +11,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - After opening with your tabs closed, a reconnect no longer brings them back, and quitting before that happens no longer skips it next time.
 - A settings file that isn't valid text keeps a copy instead of being overwritten, and a failed reset of your settings is tried again.
 - A tap in the phone's terminal no longer drops a session out of Needs you while its question is still up.
+- The Connections dialog's rows and headings no longer run together when the Add host form leaves them little room; the list scrolls instead.
 
 ## v0.11.1-alpha
 
