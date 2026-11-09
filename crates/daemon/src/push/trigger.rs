@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use protocol::{RemoteState, SessionMode, SessionSnapshot, SessionStatus};
 use reqwest::Url;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep_until};
 
 use super::send::{self, Outcome, PushPolicy};
 use super::state::PushState;
@@ -36,6 +36,11 @@ const LABEL_MOST: usize = 200;
 
 /// The declarative Web Push magic number (`"web_push": 8030`).
 const DECLARATIVE_WEB_PUSH: u16 = 8030;
+
+/// How long a Finished push waits for its session to stay finished: the
+/// default of the desktop's Finished grace (`apps/native/src/notify.rs`
+/// `hold_finished`).
+const FINISHED_GRACE: Duration = Duration::from_secs(5);
 
 /// The first back-off after a push service throttled, failed or could not be
 /// reached; each further one doubles up to [`BACKOFF_MOST`].
@@ -124,6 +129,47 @@ impl Tracker {
         } else {
             None
         }
+    }
+}
+
+/// When each session's Finished push ends its grace (the phone's counterpart
+/// of the desktop's `fold_state` over its held toasts). A hold is only a
+/// deadline: what goes out is read from the registry when it is due.
+#[derive(Debug, Default)]
+struct FinishedHolds {
+    until: HashMap<String, Instant>,
+}
+
+impl FinishedHolds {
+    /// Hold a session's Finished push until `until`.
+    fn hold(&mut self, session_id: &str, until: Instant) {
+        self.until.insert(session_id.to_owned(), until);
+    }
+
+    /// Take in a session's newer copy: one that left `Idle` or shows
+    /// background work drops its hold.
+    fn fold(&mut self, snapshot: &SessionSnapshot) {
+        if snapshot.status != SessionStatus::Idle || snapshot.background {
+            self.until.remove(&snapshot.id);
+        }
+    }
+
+    /// Forget a removed session's hold.
+    fn forget(&mut self, session_id: &str) {
+        self.until.remove(session_id);
+    }
+
+    /// When the next hold ends.
+    fn next_due(&self) -> Option<Instant> {
+        self.until.values().min().copied()
+    }
+
+    /// Take the sessions whose holds have ended by `now`, each once.
+    fn due(&mut self, now: Instant) -> Vec<String> {
+        self.until
+            .extract_if(|_, until| *until <= now)
+            .map(|(session_id, _)| session_id)
+            .collect()
     }
 }
 
@@ -266,10 +312,8 @@ pub(crate) struct Alert<'a> {
 /// What one session event raises.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Step {
-    /// A push to deliver.
+    /// A Needs you push to deliver.
     Alert {
-        /// The change it reports.
-        kind: PushKind,
         /// The session it is about.
         session: Box<SessionSnapshot>,
         /// The Needs you count the badge shows.
@@ -340,6 +384,10 @@ pub(crate) struct Trigger {
     /// delivered to the held subscriptions when the owner leaves, if the
     /// session still needs the user then.
     held: HashSet<String>,
+    /// The Finished pushes waiting out their grace.
+    finishing: FinishedHolds,
+    /// How long a Finished push waits: [`FINISHED_GRACE`], but for a test's.
+    finished_grace: Duration,
 }
 
 impl Trigger {
@@ -352,6 +400,8 @@ impl Trigger {
             backoff: HashMap::new(),
             failures: HashMap::new(),
             held: HashSet::new(),
+            finishing: FinishedHolds::default(),
+            finished_grace: FINISHED_GRACE,
         }
     }
 
@@ -673,9 +723,12 @@ impl Trigger {
     }
 
     /// What one broadcast event raises. A lag re-seeds from the registry and
-    /// raises nothing for the missed window, a removal is forgotten, and an
+    /// raises nothing for the missed window, keeping the Finished holds, which
+    /// read the registry when they end; a removal is forgotten, and an
     /// update is judged against what was seen before it; the count takes the
-    /// event's own snapshot as its session's current state. No I/O.
+    /// event's own snapshot as its session's current state. A Finished raises
+    /// no push here: it is held through its grace, and any update first
+    /// drops a hold its session no longer earns. No I/O.
     pub(crate) fn step(
         &mut self,
         event: Result<SessionEvent, RecvError>,
@@ -692,18 +745,27 @@ impl Trigger {
                 if !needs_you(&snapshot) {
                     self.held.remove(&snapshot.id);
                 }
-                let Some(kind) = self.tracker.observe(&snapshot) else {
-                    return Step::Nothing;
-                };
-                let count = needs_you_count(with_snapshot(sessions.snapshots(), &snapshot).iter());
-                Step::Alert {
-                    kind,
-                    session: snapshot,
-                    count,
+                self.finishing.fold(&snapshot);
+                match self.tracker.observe(&snapshot) {
+                    None => Step::Nothing,
+                    Some(PushKind::Finished) => {
+                        let until = Instant::now() + self.finished_grace;
+                        self.finishing.hold(&snapshot.id, until);
+                        Step::Nothing
+                    }
+                    Some(PushKind::NeedsYou) => {
+                        let count =
+                            needs_you_count(with_snapshot(sessions.snapshots(), &snapshot).iter());
+                        Step::Alert {
+                            session: snapshot,
+                            count,
+                        }
+                    }
                 }
             }
             Ok(SessionEvent::Removed(id)) => {
                 self.held.remove(&id);
+                self.finishing.forget(&id);
                 self.tracker.forget(&id);
                 Step::Nothing
             }
@@ -743,6 +805,11 @@ pub(crate) fn spawn(sources: Sources) -> Option<tokio::task::JoinHandle<()>> {
             return None;
         }
     };
+    Some(run(Trigger::new(client), sources))
+}
+
+/// Start the push task with `trigger`.
+fn run(mut trigger: Trigger, sources: Sources) -> tokio::task::JoinHandle<()> {
     let Sources {
         sessions,
         devices,
@@ -751,8 +818,11 @@ pub(crate) fn spawn(sources: Sources) -> Option<tokio::task::JoinHandle<()>> {
         remote,
         mut shutdown,
     } = sources;
-    let mut trigger = Trigger::new(client);
-    Some(tokio::spawn(async move {
+    tokio::spawn(async move {
+        let stores = Stores {
+            devices: &devices,
+            push: &push,
+        };
         // Subscribe before seeding, so no change after the seed is lost.
         let mut desk = presence.subscribe();
         let mut events = sessions.subscribe();
@@ -761,6 +831,9 @@ pub(crate) fn spawn(sources: Sources) -> Option<tokio::task::JoinHandle<()>> {
             return;
         }
         loop {
+            let next_finished = trigger.finishing.next_due();
+            // In arm order: an event waiting is folded before a hold it may
+            // drop can end.
             tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
@@ -769,25 +842,15 @@ pub(crate) fn spawn(sources: Sources) -> Option<tokio::task::JoinHandle<()>> {
                     }
                 }
                 event = events.recv() => match trigger.step(event, &sessions) {
-                    Step::Alert { kind, session, count } => {
-                        // Read the listener's state and the desk's once, before
-                        // any `.await`, so no watch guard or lock is held
-                        // across one.
-                        let remote_state = remote();
-                        let at_desk = presence.at_desk();
-                        let stores = Stores {
-                            devices: &devices,
-                            push: &push,
+                    Step::Alert { session, count } => {
+                        let alert = Alert {
+                            kind: PushKind::NeedsYou,
+                            session: &session,
+                            count,
+                            at_desk: presence.at_desk(),
+                            only_held: false,
                         };
-                        let answered = trigger
-                            .deliver(
-                                stores,
-                                &remote_state,
-                                Alert { kind, session: &session, count, at_desk, only_held: false },
-                                Utc::now(),
-                            )
-                            .await;
-                        tracing::debug!(answered = answered.len(), "push: a round is done");
+                        deliver_alert(&mut trigger, stores, &remote, alert).await;
                     }
                     Step::Nothing => {}
                     Step::End => return,
@@ -799,12 +862,65 @@ pub(crate) fn spawn(sources: Sources) -> Option<tokio::task::JoinHandle<()>> {
                     // The owner left the desk: what was held now arrives,
                     // to the subscriptions that held it only.
                     if !*desk.borrow_and_update() {
-                        deliver_held(&mut trigger, &sessions, &devices, &push, &remote).await;
+                        deliver_held(&mut trigger, &sessions, stores, &remote).await;
                     }
+                }
+                () = sleep_until(next_finished.unwrap_or_else(Instant::now)), if next_finished.is_some() => {
+                    deliver_finished(&mut trigger, &sessions, stores, &presence, &remote).await;
                 }
             }
         }
-    }))
+    })
+}
+
+/// Deliver `alert` as one round, with the listener's state read just before
+/// it, so no watch guard or lock is held across an `.await`.
+async fn deliver_alert(
+    trigger: &mut Trigger,
+    stores: Stores<'_>,
+    remote: &Arc<dyn Fn() -> RemoteState + Send + Sync>,
+    alert: Alert<'_>,
+) {
+    let remote_state = remote();
+    let answered = trigger
+        .deliver(stores, &remote_state, alert, Utc::now())
+        .await;
+    tracing::debug!(
+        session = %alert.session.id,
+        kind = ?alert.kind,
+        only_held = alert.only_held,
+        answered = answered.len(),
+        "push: a round is done"
+    );
+}
+
+/// Deliver the Finished pushes whose grace has ended, each read from the
+/// registry just before its round: only a session that still exists, reads
+/// `Idle` and shows no background work is sent, with the Needs you count as
+/// it stands then.
+async fn deliver_finished(
+    trigger: &mut Trigger,
+    sessions: &SessionRegistry,
+    stores: Stores<'_>,
+    presence: &Presence,
+    remote: &Arc<dyn Fn() -> RemoteState + Send + Sync>,
+) {
+    for session_id in trigger.finishing.due(Instant::now()) {
+        let snapshots = sessions.snapshots();
+        let Some(session) = snapshots.iter().find(|seen| {
+            seen.id == session_id && seen.status == SessionStatus::Idle && !seen.background
+        }) else {
+            continue;
+        };
+        let alert = Alert {
+            kind: PushKind::Finished,
+            session,
+            count: needs_you_count(&snapshots),
+            at_desk: presence.at_desk(),
+            only_held: false,
+        };
+        deliver_alert(trigger, stores, remote, alert).await;
+    }
 }
 
 /// Deliver the held Needs you pushes once the owner left the desk, to the
@@ -814,38 +930,20 @@ pub(crate) fn spawn(sources: Sources) -> Option<tokio::task::JoinHandle<()>> {
 async fn deliver_held(
     trigger: &mut Trigger,
     sessions: &SessionRegistry,
-    devices: &Mutex<DeviceStore>,
-    push: &Mutex<PushState>,
+    stores: Stores<'_>,
     remote: &Arc<dyn Fn() -> RemoteState + Send + Sync>,
 ) {
     let sessions_due = trigger.held_now(sessions);
     trigger.held.clear();
-    if sessions_due.is_empty() {
-        return;
-    }
-    let remote_state = remote();
     for session in &sessions_due {
-        let count = needs_you_count(with_snapshot(sessions.snapshots(), session).iter());
-        let stores = Stores { devices, push };
-        let answered = trigger
-            .deliver(
-                stores,
-                &remote_state,
-                Alert {
-                    kind: PushKind::NeedsYou,
-                    session,
-                    count,
-                    at_desk: false,
-                    only_held: true,
-                },
-                Utc::now(),
-            )
-            .await;
-        tracing::debug!(
-            session = %session.id,
-            answered = answered.len(),
-            "push: a held Needs you push is delivered"
-        );
+        let alert = Alert {
+            kind: PushKind::NeedsYou,
+            session,
+            count: needs_you_count(with_snapshot(sessions.snapshots(), session).iter()),
+            at_desk: false,
+            only_held: true,
+        };
+        deliver_alert(trigger, stores, remote, alert).await;
     }
 }
 
@@ -869,8 +967,9 @@ mod tests {
     use tokio::time::Instant;
 
     use super::{
-        Alert, BACKOFF_FIRST, BACKOFF_MOST, Delivery, PushKind, Sources, Step, Stores, Tracker,
-        Trigger, label, needs_you_count, origin, payload, spawn,
+        Alert, BACKOFF_FIRST, BACKOFF_MOST, Delivery, FINISHED_GRACE, FinishedHolds, PushKind,
+        Sources, Step, Stores, Tracker, Trigger, deliver_finished, label, needs_you_count, origin,
+        payload, run, spawn,
     };
     use crate::devices::DeviceStore;
     use crate::paths::Dirs;
@@ -1642,10 +1741,122 @@ mod tests {
         assert_eq!(
             trigger.step(event, &sessions),
             Step::Alert {
-                kind: PushKind::NeedsYou,
                 session: Box::new(asking),
                 count: 1,
             }
+        );
+    }
+
+    #[test]
+    fn event_step_holds_a_finished_turn_through_its_grace() {
+        let setup = setup("step-finished-grace");
+        let sessions = registry(&setup);
+        let mut trigger = trigger();
+        trigger.tracker.seed([&status("working")]);
+        let (_, idle) = update("idle");
+        assert_eq!(
+            trigger.step(idle, &sessions),
+            Step::Nothing,
+            "Finished raised the moment the session read idle"
+        );
+    }
+
+    /// A trigger holding `s1`'s Finished, raised by a step over `sessions`.
+    fn holding_finished(sessions: &SessionRegistry) -> Trigger {
+        let mut trigger = trigger();
+        trigger.tracker.seed([&status("working")]);
+        let (_, idle) = update("idle");
+        assert_eq!(trigger.step(idle, sessions), Step::Nothing);
+        trigger
+    }
+
+    /// An instant past the grace of any hold taken before this call.
+    fn past_the_grace() -> Instant {
+        Instant::now() + FINISHED_GRACE
+    }
+
+    #[test]
+    fn a_held_finished_is_due_after_its_grace() {
+        let start = Instant::now();
+        let until = start + FINISHED_GRACE;
+        let mut holds = FinishedHolds::default();
+        holds.hold("s1", until);
+
+        assert_eq!(holds.next_due(), Some(until));
+        assert!(
+            holds.due(until - Duration::from_millis(1)).is_empty(),
+            "due inside its grace"
+        );
+        assert_eq!(holds.due(until), vec!["s1".to_owned()]);
+        assert!(holds.due(until).is_empty(), "sent once");
+        assert_eq!(holds.next_due(), None);
+
+        let setup = setup("due-after-grace");
+        let sessions = registry(&setup);
+        let mut trigger = holding_finished(&sessions);
+        assert_eq!(
+            trigger.finishing.due(past_the_grace()),
+            vec!["s1".to_owned()],
+            "the step holds what it did not raise"
+        );
+    }
+
+    #[test]
+    fn a_held_finished_is_dropped_when_the_session_works_again() {
+        let setup = setup("due-works-again");
+        let sessions = registry(&setup);
+        let mut trigger = holding_finished(&sessions);
+
+        let (_, working) = update("working");
+        assert_eq!(trigger.step(working, &sessions), Step::Nothing);
+
+        assert_eq!(
+            trigger.finishing.due(past_the_grace()),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_held_finished_is_dropped_when_background_work_starts() {
+        let setup = setup("due-background");
+        let sessions = registry(&setup);
+        let mut trigger = holding_finished(&sessions);
+
+        let holding = snapshot(&serde_json::json!({ "status": "idle", "background": true }));
+        let event = Ok(SessionEvent::Updated(Box::new(holding), None));
+        assert_eq!(trigger.step(event, &sessions), Step::Nothing);
+
+        assert_eq!(
+            trigger.finishing.due(past_the_grace()),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_lag_keeps_a_finished_that_is_still_idle() {
+        let setup = setup("due-lag");
+        let sessions = registry(&setup);
+        let mut trigger = holding_finished(&sessions);
+
+        assert_eq!(
+            trigger.step(Err(RecvError::Lagged(1)), &sessions),
+            Step::Nothing
+        );
+
+        assert_eq!(trigger.finishing.due(past_the_grace()).len(), 1);
+    }
+
+    #[test]
+    fn a_removed_sessions_held_finished_is_forgotten() {
+        let setup = setup("due-removed");
+        let sessions = registry(&setup);
+        let mut trigger = holding_finished(&sessions);
+
+        let removed = Ok(SessionEvent::Removed("s1".to_owned()));
+        assert_eq!(trigger.step(removed, &sessions), Step::Nothing);
+        assert_eq!(
+            trigger.finishing.due(past_the_grace()),
+            Vec::<String>::new()
         );
     }
 
@@ -1665,7 +1876,6 @@ mod tests {
         assert_eq!(
             trigger.step(event, &sessions),
             Step::Alert {
-                kind: PushKind::NeedsYou,
                 session: Box::new(asking),
                 count: 1,
             }
@@ -1755,6 +1965,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_due_finished_is_not_sent_when_the_session_works_again_by_delivery() {
+        let (setup, _device, _url, fake, _server) = one_device("due-at-delivery", 201).await;
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        let presence = Presence::default();
+        let remote: Arc<dyn Fn() -> RemoteState + Send + Sync> = Arc::new(serving);
+        let mut trigger = trigger();
+
+        trigger.finishing.hold("s1", Instant::now());
+        deliver_finished(&mut trigger, &sessions, setup.stores(), &presence, &remote).await;
+        assert_eq!(fake.posts(), 0, "the registry says the session works");
+
+        sessions.update("s1", |record| record.status = SessionStatus::Idle);
+        trigger.finishing.hold("s1", Instant::now());
+        deliver_finished(&mut trigger, &sessions, setup.stores(), &presence, &remote).await;
+        assert_eq!(fake.posts(), 1, "the registry says the session is idle");
+    }
+
+    /// The push task with no Finished grace: its pushes go on a real socket,
+    /// which a paused clock would not wait for.
+    fn run_with_no_grace(sources: Sources) -> tokio::task::JoinHandle<()> {
+        let mut trigger = trigger();
+        trigger.finished_grace = Duration::ZERO;
+        run(trigger, sources)
+    }
+
+    #[tokio::test]
     async fn the_task_pushes_needs_you_and_finished() {
         let setup = setup("task-pushes");
         let device = setup.pair(1);
@@ -1763,8 +2001,7 @@ mod tests {
         let sessions = registry(&setup);
         let presence = Arc::new(Presence::default());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let handle = spawn(sources(&setup, &sessions, &presence, shutdown_rx))
-            .expect("the push task starts");
+        let handle = run_with_no_grace(sources(&setup, &sessions, &presence, shutdown_rx));
         // Let the task subscribe and seed before the changes it must see.
         tokio::task::yield_now().await;
 
@@ -1809,8 +2046,7 @@ mod tests {
         sessions.insert(idle_record("s1"));
         sessions.update("s1", |record| record.status = SessionStatus::AwaitingInput);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let handle = spawn(sources(&setup, &sessions, &presence, shutdown_rx))
-            .expect("the push task starts");
+        let handle = run_with_no_grace(sources(&setup, &sessions, &presence, shutdown_rx));
         // The task seeds with the session already asking; that raises nothing.
         tokio::task::yield_now().await;
 

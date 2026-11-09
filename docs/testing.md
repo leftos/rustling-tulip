@@ -66,9 +66,13 @@ The CLI verbs send no `Resize`, so reproducing a fault at a given width needs a 
 
 Keep scratch repos outside the checkout, and in a driven run use the `scratch_repo` folder `launch` returns: a scratch folder under this repo makes Claude ask about the repo's `.mcp.json` server (`rt-driver`) before the first prompt.
 
-A session's `scrollback.bin` holds the raw ConPTY output and can be replayed into any emulator, which makes it the first stop for a garbled-terminal report.
+A session's `scrollback.bin` holds the raw ConPTY output and can be replayed into any emulator, which makes it the first stop for a garbled-terminal report. ConPTY writes no sync marks into it, so split it into frames on `ESC[?25h`. It is a ring whose offsets move while the session runs, so copy it first and read the copy.
 
-A real Claude TUI can run with no driver token against a loopback mock of the API: set `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, an isolated `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and seed that folder's `.claude.json` with `hasCompletedOnboarding` and the project's `hasTrustDialogAccepted`. The mock makes the TUI ask exact questions, with no login and no model spend.
+A real Claude TUI can run with no driver token against a loopback mock of the API: set `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, an isolated `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and seed that folder's `.claude.json` with `hasCompletedOnboarding` and the project's `hasTrustDialogAccepted`. The mock makes the TUI ask exact questions, with no login and no model spend. A fresh Claude home also shows an external-imports dialog and an auto-mode prompt before the first prompt: seed `hasClaudeMdExternalIncludesWarningShown` in `.claude.json` against the first. Set `RUSTLING_TULIP_TRACER_PIPE_PREFIX` too, so the rig's tracers do not share pipe names with a running daemon's.
+
+Sending `/compact` to a session from Git Bash needs `MSYS_NO_PATHCONV=1`, or the shell rewrites the leading `/` into a Windows path.
+
+On a daemon that is not serving the tailnet listener, the debug line `no push is sent kind=Finished` shows the real trigger's decision for each Finished.
 
 `AnswerPrompt` with `allow` on a question probes `dialog_for` without typing anything: the reply is "does not fit" when the dialog passed and "no longer up" when it did not, so one dialog can be probed at every grid size.
 
