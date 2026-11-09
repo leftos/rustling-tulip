@@ -148,7 +148,7 @@ impl DeviceStore {
             },
             Err(err) => {
                 tracing::warn!(
-                    ?err,
+                    at = %crate::logging::json_error_at(&err),
                     path = %path.display(),
                     "devices.json is corrupt; no device token will verify and the file is left as it is"
                 );
@@ -822,6 +822,37 @@ mod tests {
             .expect("request a pairing");
         let code = book.approve(&request.id, asked).expect("approve it");
         (request.id, code)
+    }
+
+    #[test]
+    fn a_damaged_devices_file_logs_its_position_not_its_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let scratch = Scratch::new("damaged-position");
+        std::fs::write(scratch.path(), br#"{"devices":"sk-live-123"}"#)
+            .expect("seed a damaged devices.json");
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let store = scratch.store();
+            assert!(
+                store.is_corrupt(),
+                "a damaged devices.json reads as unusable"
+            );
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
+        );
     }
 
     /// The v0.5.1-alpha `devices.json` shape: two approved devices, the second

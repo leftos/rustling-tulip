@@ -153,12 +153,12 @@ impl AppState {
                     // file the next save writes, rather than overwriting them.
                     match keep_corrupt_state(&dirs.state_file, &bytes, Utc::now()) {
                         Ok(kept) => tracing::warn!(
-                            ?err,
+                            at = %crate::logging::json_error_at(&err),
                             kept = %kept.display(),
                             "state.json corrupt; kept its bytes and salvaging what still reads"
                         ),
                         Err(keep_err) => tracing::error!(
-                            ?err,
+                            at = %crate::logging::json_error_at(&err),
                             error = ?keep_err,
                             "state.json corrupt and could not be kept; salvaging what still reads"
                         ),
@@ -864,6 +864,34 @@ mod tests {
             .collect();
         copies.sort();
         copies
+    }
+
+    #[test]
+    fn a_damaged_state_file_logs_its_position_not_its_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let dirs = scratch_dirs("damaged-state-position");
+        std::fs::write(&dirs.state_file, br#"{"repos":"sk-live-123"}"#)
+            .expect("seed a damaged state.json");
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            AppState::load_or_default(&dirs)
+                .expect("a damaged state.json still salvages what reads");
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
+        );
     }
 
     #[test]

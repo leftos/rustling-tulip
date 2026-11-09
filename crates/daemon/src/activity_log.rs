@@ -313,7 +313,7 @@ pub fn read_daemon_record(dir: &Path) -> DaemonRecord {
     match serde_json::from_slice(&bytes) {
         Ok(record) => record,
         Err(err) => {
-            warn!(?err, path = %path.display(), "an unreadable activity daemon record reads as none");
+            warn!(at = %crate::logging::json_error_at(&err), path = %path.display(), "an unreadable activity daemon record reads as none");
             DaemonRecord::default()
         }
     }
@@ -358,6 +358,33 @@ mod tests {
     /// A fixed clock reading `offset` seconds after a base instant.
     fn at(offset: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000 + offset, 0).expect("a fixed time")
+    }
+
+    #[test]
+    fn a_damaged_daemon_record_logs_its_position_not_its_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let dir = scratch_dir("damaged-position");
+        std::fs::write(daemon_path(&dir), br#""sk-live-123""#)
+            .expect("seed a damaged activity daemon record");
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = read_daemon_record(&dir);
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
+        );
     }
 
     #[test]

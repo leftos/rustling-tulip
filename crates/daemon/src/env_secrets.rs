@@ -568,9 +568,13 @@ impl fmt::Debug for IndexEntry {
 
 fn read_index(path: &Path) -> anyhow::Result<Vec<IndexEntry>> {
     match std::fs::read(path) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
-        }
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|err| {
+            anyhow::anyhow!(
+                "parsing {}: {}",
+                path.display(),
+                crate::logging::json_error_at(&err)
+            )
+        }),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
     }
@@ -764,6 +768,27 @@ mod tests {
     /// The value saved under `id`, from a store that is within reach.
     fn opens(id: &str) -> Option<Secret> {
         open(id).expect("Credential Manager is within reach")
+    }
+
+    #[test]
+    fn a_damaged_secret_index_errors_with_its_position_not_its_values() {
+        let dir =
+            std::env::temp_dir().join(format!("rt-secret-index-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the index folder");
+        let path = dir.join("secrets-index.json");
+        std::fs::write(&path, br#""sk-live-123""#).expect("seed a damaged secret index");
+        let err = read_index(&path).expect_err("a damaged secret index is an error");
+        let shown = format!("{err:?}");
+        assert!(
+            !shown.contains("sk-live-123"),
+            "the error names where the file stops parsing, not the value: {shown}"
+        );
+        assert!(
+            shown.contains("line 1 column"),
+            "the error names the position: {shown}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

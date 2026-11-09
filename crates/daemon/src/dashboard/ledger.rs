@@ -328,7 +328,7 @@ fn read(path: &Path, now: DateTime<Utc>) -> (Days, bool) {
             Err(err) => {
                 warn!(
                     path = %path.display(),
-                    %err,
+                    at = %crate::logging::json_error_at(&err),
                     "dashboard: the day ledger does not parse; it is moved aside and starts empty"
                 );
                 (Days::default(), move_aside(path, now))
@@ -558,6 +558,33 @@ mod tests {
         assert!(
             !reopened.days.days.contains_key(&too_old),
             "a day older than 30 days is dropped"
+        );
+    }
+
+    #[test]
+    fn a_damaged_day_ledger_logs_its_position_not_its_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let scratch = ScratchDir::new("day-ledger-damaged-position");
+        let path = scratch.path().join("day-ledger.json");
+        std::fs::write(&path, br#""sk-live-123""#).expect("seed a damaged ledger");
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = read(&path, noon("2026-10-28"));
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
         );
     }
 

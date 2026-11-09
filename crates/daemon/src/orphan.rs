@@ -299,7 +299,7 @@ fn scan_sidecars(dirs: &Dirs) -> anyhow::Result<(Vec<OrphanMeta>, Vec<PathBuf>)>
         //     next upgrade can still recover that session.
         match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Err(err) => {
-                warn!(?err, path = %path.display(), "quarantining corrupt meta.json (not valid JSON)");
+                warn!(at = %crate::logging::json_error_at(&err), path = %path.display(), "quarantining corrupt meta.json (not valid JSON)");
                 quarantine_meta(&path);
                 skipped.push(path);
             }
@@ -396,7 +396,8 @@ fn migrate_sidecar(value: serde_json::Value) -> anyhow::Result<OrphanMeta> {
             "sidecar from future daemon version: on_disk_version={on_disk}, max known={MAX_KNOWN_SIDECAR_VERSION}"
         ));
     }
-    serde_json::from_value::<OrphanMeta>(value).context("deserializing migrated meta")
+    serde_json::from_value::<OrphanMeta>(value)
+        .map_err(|_| anyhow!("the migrated meta does not have the sidecar's shape"))
 }
 
 /// Remove the meta sidecar for a session that has stopped or errored. Leaves
@@ -451,7 +452,7 @@ pub fn load_summary(dirs: &Dirs, session_id: &str) -> Option<protocol::SessionSu
     match serde_json::from_slice(&bytes) {
         Ok(summary) => Some(summary),
         Err(err) => {
-            warn!(%err, path = %path.display(), "the session summary does not decode; its ring starts empty");
+            warn!(at = %crate::logging::json_error_at(&err), path = %path.display(), "the session summary does not decode; its ring starts empty");
             None
         }
     }
@@ -845,6 +846,52 @@ mod tests {
             binaries_dir: root.join("binaries"),
             bin_templates: None,
         }
+    }
+
+    #[test]
+    fn a_damaged_summary_logs_its_position_not_its_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let dirs = scratch_dirs("damaged-summary-position");
+        let path = crate::paths::session_summary_file(&dirs, "s-damaged");
+        std::fs::create_dir_all(path.parent().expect("the summary sits in a session folder"))
+            .expect("create the session folder");
+        std::fs::write(&path, br#""sk-live-123""#).expect("seed a damaged summary.json");
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(
+                load_summary(&dirs, "s-damaged").is_none(),
+                "a summary that does not decode reads as none"
+            );
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
+        );
+    }
+
+    #[test]
+    fn a_misshapen_sidecar_errors_without_its_values() {
+        let err = migrate_sidecar(serde_json::json!({
+            "on_disk_version": CURRENT_SIDECAR_VERSION,
+            "pid": "sk-live-123",
+        }))
+        .expect_err("a misshapen sidecar is an error");
+        let shown = format!("{err:?}");
+        assert!(
+            !shown.contains("sk-live-123"),
+            "the error does not quote the value: {shown}"
+        );
     }
 
     /// A sidecar naming no program matches on its agent's liveness tokens;

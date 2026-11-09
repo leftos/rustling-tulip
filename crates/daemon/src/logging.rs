@@ -7,6 +7,12 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Registry;
 use tracing_subscriber::reload;
 
+/// Where a saved file stops parsing. `serde_json`'s own message quotes the
+/// offending value, which can be a secret, so it never reaches a log.
+pub fn json_error_at(err: &serde_json::Error) -> String {
+    format!("line {} column {}", err.line(), err.column())
+}
+
 /// The filter a daemon logs with unless the Detailed logging switch is on:
 /// everything at info, plus the daemon crate's own debug lines, which
 /// `daemon.log` has always carried.
@@ -92,17 +98,17 @@ pub fn set_detailed(enabled: bool) -> Outcome {
     clippy::expect_used,
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tracing_subscriber::layer::SubscriberExt;
 
     /// Captures what a subscriber writes, so a test can assert which lines a
     /// filter lets through.
     #[derive(Clone, Default)]
-    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    pub(crate) struct Capture(pub(crate) std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
     impl Capture {
-        fn text(&self) -> String {
+        pub(crate) fn text(&self) -> String {
             let bytes = self.0.lock().expect("the log buffer is not poisoned");
             String::from_utf8_lossy(&bytes).into_owned()
         }

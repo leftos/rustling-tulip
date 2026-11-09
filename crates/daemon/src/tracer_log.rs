@@ -192,7 +192,10 @@ fn parse_agent_note(json: &str) -> Option<AgentNote> {
     {
         Ok(note) => Some(note),
         Err(err) => {
-            warn!(%err, "ignoring an unreadable agent note in a tracer log");
+            warn!(
+                at = %crate::logging::json_error_at(&err),
+                "ignoring an unreadable agent note in a tracer log"
+            );
             None
         }
     }
@@ -325,10 +328,38 @@ fn parse_unicode_escape(chars: &mut Chars<'_>) -> Option<char> {
 )]
 mod tests {
     use super::{
-        TracerLogEnd, TracerLogSummary, parse_debug_str_list, parse_tracer_log, session_end_times,
+        TracerLogEnd, TracerLogSummary, parse_agent_note, parse_debug_str_list, parse_tracer_log,
+        session_end_times,
     };
     use chrono::{DateTime, Utc};
     use protocol::{AgentId, OptionValue, OptionValues};
+
+    #[test]
+    fn a_damaged_agent_note_logs_its_position_not_its_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(
+                parse_agent_note(r#"{"options":"sk-live-123"}"#).is_none(),
+                "an unreadable note is dropped"
+            );
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
+        );
+    }
 
     fn ts(stamp: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(stamp)

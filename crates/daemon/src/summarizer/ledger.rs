@@ -84,7 +84,11 @@ fn read(path: &Path) -> Option<Record> {
         Ok(bytes) => match serde_json::from_slice(&bytes) {
             Ok(record) => Some(record),
             Err(err) => {
-                warn!(path = %path.display(), %err, "summarizer: the spend ledger does not parse; counting today as nothing spent");
+                warn!(
+                    path = %path.display(),
+                    at = %crate::logging::json_error_at(&err),
+                    "summarizer: the spend ledger does not parse; counting today as nothing spent"
+                );
                 None
             }
         },
@@ -124,6 +128,36 @@ mod tests {
     fn save(ledger: &Ledger) {
         let bytes = ledger.to_bytes().expect("the record serializes");
         crate::atomic_file::write_atomic(ledger.path(), &bytes).expect("the ledger writes");
+    }
+
+    #[test]
+    fn a_damaged_spend_ledger_logs_its_position_not_its_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let scratch = ScratchDir::new("summ-ledger-damaged-position");
+        let path = scratch.path().join("summarizer-spend.json");
+        std::fs::write(&path, br#""sk-live-123""#).expect("seed a damaged spend ledger");
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(
+                read(&path).is_none(),
+                "a damaged spend ledger counts today as nothing spent"
+            );
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
+        );
     }
 
     #[test]

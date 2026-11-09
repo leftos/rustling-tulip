@@ -419,7 +419,13 @@ pub fn record_session_end(
 
 fn read_entry(path: &std::path::Path) -> anyhow::Result<HistoryEntry> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+    serde_json::from_slice(&bytes).map_err(|err| {
+        anyhow::anyhow!(
+            "parsing {}: {}",
+            path.display(),
+            crate::logging::json_error_at(&err)
+        )
+    })
 }
 
 /// What one pass over the history dir saw.
@@ -2052,6 +2058,26 @@ mod tests {
 
     fn entry(id: &str, end: SessionEnd, ended_at: DateTime<Utc>) -> HistoryEntry {
         entry_from_record(&record(id, SessionMode::Interactive), end, ended_at)
+    }
+
+    #[test]
+    fn a_damaged_history_entry_errors_with_its_position_not_its_values() {
+        let dir = std::env::temp_dir().join(format!("rt-history-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the history folder");
+        let path = dir.join("entry.json");
+        std::fs::write(&path, br#""sk-live-123""#).expect("seed a damaged history entry");
+        let err = read_entry(&path).expect_err("a damaged history entry is an error");
+        let shown = format!("{err:?}");
+        assert!(
+            !shown.contains("sk-live-123"),
+            "the error names where the file stops parsing, not the value: {shown}"
+        );
+        assert!(
+            shown.contains("line 1 column"),
+            "the error names the position: {shown}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A sidecar that names no agent ends as an entry that names none.

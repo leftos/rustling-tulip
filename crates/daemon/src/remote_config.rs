@@ -60,7 +60,7 @@ pub fn load(dirs: &Dirs) -> RemoteConfig {
         Ok(cfg) => cfg,
         Err(err) => {
             tracing::warn!(
-                ?err,
+                at = %crate::logging::json_error_at(&err),
                 "remote.json corrupt; ignoring (remote access disabled)"
             );
             RemoteConfig::default()
@@ -102,6 +102,38 @@ mod tests {
             binaries_dir: root.join("binaries"),
             bin_templates: None,
         }
+    }
+
+    #[test]
+    fn a_damaged_remote_config_logs_its_position_not_its_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let dirs = scratch_dirs("damaged-position");
+        std::fs::write(&dirs.remote_config_file, br#"{"port":"sk-live-123"}"#)
+            .expect("seed a damaged remote.json");
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let cfg = load(&dirs);
+            assert!(
+                !cfg.enabled,
+                "a damaged remote.json means remote access is off"
+            );
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]

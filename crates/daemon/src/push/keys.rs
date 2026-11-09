@@ -41,8 +41,13 @@ pub(crate) fn load_or_create(dir: &Path) -> anyhow::Result<VapidKey> {
 }
 
 fn decode(bytes: &[u8], path: &Path) -> anyhow::Result<VapidKey> {
-    let file: VapidFile =
-        serde_json::from_slice(bytes).with_context(|| format!("decoding {}", path.display()))?;
+    let file: VapidFile = serde_json::from_slice(bytes).map_err(|err| {
+        anyhow!(
+            "decoding {}: {}",
+            path.display(),
+            crate::logging::json_error_at(&err)
+        )
+    })?;
     let raw = URL_SAFE_NO_PAD
         .decode(file.private_key.as_bytes())
         .with_context(|| format!("decoding {}", path.display()))?;
@@ -76,7 +81,7 @@ fn create(path: &Path) -> anyhow::Result<VapidKey> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{KEY_FILE, load_or_create};
+    use super::{KEY_FILE, decode, load_or_create};
 
     /// A scratch push folder, removed on drop.
     struct Scratch {
@@ -105,6 +110,22 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn a_damaged_vapid_file_errors_with_its_position_not_its_values() {
+        let err = decode(br#""sk-live-123""#, Path::new("vapid.json"))
+            .err()
+            .expect("a damaged vapid.json is an error");
+        let shown = format!("{err:?}");
+        assert!(
+            !shown.contains("sk-live-123"),
+            "the error names where the file stops parsing, not the value: {shown}"
+        );
+        assert!(
+            shown.contains("line 1 column"),
+            "the error names the position: {shown}"
+        );
     }
 
     #[test]

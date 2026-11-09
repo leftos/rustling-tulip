@@ -244,13 +244,17 @@ fn is_group_dir(dir: &Path) -> bool {
 /// unreadable marker is logged and reads as absent.
 fn read_group_marker(group_dir: &Path) -> Option<GroupMarker> {
     let marker = marker_path(group_dir)?;
-    let parsed = std::fs::read_to_string(&marker)
-        .map_err(anyhow::Error::from)
-        .and_then(|text| serde_json::from_str::<GroupMarker>(&text).map_err(anyhow::Error::from));
-    match parsed {
-        Ok(m) => Some(m),
+    let text = match std::fs::read_to_string(&marker) {
+        Ok(text) => text,
         Err(err) => {
             warn!(?err, marker = %marker.display(), "unreadable group marker; labelling by folder name");
+            return None;
+        }
+    };
+    match serde_json::from_str::<GroupMarker>(&text) {
+        Ok(m) => Some(m),
+        Err(err) => {
+            warn!(at = %crate::logging::json_error_at(&err), marker = %marker.display(), "unreadable group marker; labelling by folder name");
             None
         }
     }
@@ -1001,6 +1005,37 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn a_damaged_group_marker_logs_its_position_not_its_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let scratch = Scratch::new();
+        let group_dir = scratch.path().join("group");
+        let marker = scratch.path().join(format!("group{GROUP_MARKER_SUFFIX}"));
+        std::fs::write(&marker, br#""sk-live-123""#).expect("seed a damaged group marker");
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(
+                read_group_marker(&group_dir).is_none(),
+                "a damaged marker reads as absent"
+            );
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
+        );
     }
 
     fn test_dirs(tmp: &std::path::Path) -> crate::paths::Dirs {

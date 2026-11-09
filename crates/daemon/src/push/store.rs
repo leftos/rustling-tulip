@@ -109,7 +109,7 @@ impl SubscriptionStore {
             },
             Err(err) => {
                 tracing::warn!(
-                    ?err,
+                    at = %crate::logging::json_error_at(&err),
                     path = %path.display(),
                     "subscriptions.json is corrupt; no device has a push subscription and the file is left as it is"
                 );
@@ -298,6 +298,37 @@ mod tests {
 
     fn ids(store: &SubscriptionStore) -> Vec<String> {
         store.iter().map(|(id, _)| id.to_owned()).collect()
+    }
+
+    #[test]
+    fn damaged_subscriptions_log_their_position_not_their_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let scratch = Scratch::new("damaged-position");
+        std::fs::write(scratch.file(), br#"{"devices":"sk-live-123"}"#)
+            .expect("seed a damaged subscriptions.json");
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let store = scratch.store();
+            assert!(
+                store.is_corrupt(),
+                "a damaged subscriptions.json reads as unusable"
+            );
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
+        );
     }
 
     #[test]

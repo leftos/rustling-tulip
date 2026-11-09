@@ -55,7 +55,11 @@ fn load(dirs: &Dirs, agent: &str, now: DateTime<Utc>) -> anyhow::Result<Vec<Entr
     let entries: Vec<Entry> = match serde_json::from_slice(&bytes) {
         Ok(entries) => entries,
         Err(err) => {
-            warn!(?err, path = %path.display(), "unparseable contested store; reading it as empty");
+            warn!(
+                at = %crate::logging::json_error_at(&err),
+                path = %path.display(),
+                "unparseable contested store; reading it as empty"
+            );
             Vec::new()
         }
     };
@@ -108,6 +112,40 @@ mod tests {
 
     fn ids(list: &[&str]) -> HashSet<String> {
         list.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_damaged_contested_store_logs_its_position_not_its_values() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let dirs = scratch_dirs("damaged-contested-position");
+        std::fs::create_dir_all(dirs.contested_dir()).expect("create the contested folder");
+        std::fs::write(
+            dirs.contested_dir().join("agent-a.json"),
+            br#""sk-live-123""#,
+        )
+        .expect("seed a damaged contested store");
+        let capture = crate::logging::tests::Capture::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(
+                read(&dirs, "agent-a", Utc::now()).is_empty(),
+                "a damaged contested store reads as empty"
+            );
+        });
+        let text = capture.text();
+        assert!(
+            !text.contains("sk-live-123"),
+            "the log names where the file stops parsing, not the value: {text}"
+        );
+        assert!(
+            text.contains("line 1 column"),
+            "the log names the position: {text}"
+        );
     }
 
     #[test]

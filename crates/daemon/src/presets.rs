@@ -306,8 +306,13 @@ async fn load_repo_presets(repo_path: &Path, repo_id: &str) -> anyhow::Result<Ve
     let bytes = tokio::fs::read(&path)
         .await
         .with_context(|| format!("reading {}", path.display()))?;
-    let mut entries: Vec<PresetEntry> =
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
+    let mut entries: Vec<PresetEntry> = serde_json::from_slice(&bytes).map_err(|err| {
+        anyhow::anyhow!(
+            "parsing {}: {}",
+            path.display(),
+            crate::logging::json_error_at(&err)
+        )
+    })?;
     for entry in &mut entries {
         if let TabGroupingConfig::NewTab {
             max_panes_per_tab: Some(0),
@@ -1809,6 +1814,31 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, watch};
+
+    #[tokio::test]
+    async fn a_damaged_presets_file_errors_with_its_position_not_its_values() {
+        let repo = std::env::temp_dir().join(format!("rt-presets-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join(".rustling-tulip")).expect("create the preset folder");
+        std::fs::write(
+            repo.join(".rustling-tulip").join("presets.json"),
+            br#""sk-live-123""#,
+        )
+        .expect("seed a damaged presets.json");
+        let err = load_repo_presets(&repo, "repo-1")
+            .await
+            .expect_err("a damaged presets.json is an error");
+        let shown = format!("{err:?}");
+        assert!(
+            !shown.contains("sk-live-123"),
+            "the error names where the file stops parsing, not the value: {shown}"
+        );
+        assert!(
+            shown.contains("line 1 column"),
+            "the error names the position: {shown}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 
     #[test]
     fn parse_prompts_bullets() {

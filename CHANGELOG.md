@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- A damaged settings file no longer copies its contents, which could include a secret, into the log.
+
 ## v0.11.0-alpha
 
 ### Highlights
