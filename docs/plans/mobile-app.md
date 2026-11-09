@@ -5,7 +5,9 @@ A phone client for the daemon, for the owner's own use: check on sessions, answe
 ## Rulings
 
 - **A PWA on the iPhone.** The phone app is a web app the daemon serves, installed with Safari's Share, Add to Home Screen. The owner's primary phone is an iPhone. Android Chrome runs the same pages, but nothing is built or checked for it.
-- **Native apps follow, as GPUI apps, once a spike confirms GPUI mobile is ready.** Native iPhone and Android apps come after the PWA, which is how the phone side iterates fast now. They are to be GPUI apps that share the desktop client's Rust (its models, chat rules and terminal) rather than a separate stack, decided after a spike on Zed's experimental iOS backend (RT-1152); the Expo / React Native route in [native-mobile-path.md](../research/2026-11-07-native-mobile-path.md) did not weigh GPUI and is set aside.
+- **The phone app becomes a GPUI app that shares the desktop client's Rust.** It is the desktop in another form factor, with all the same innards (its models, chat rules and terminal), rather than a separate stack. The spike on Zed's experimental iOS backend says go for iPhone and wait on Android ([gpui-ios-spike.md](../research/2026-11-08-gpui-ios-spike.md)); the phases are RT-1266's.
+
+  The PWA keeps its fixes meanwhile, and [the phone and desktop audit](../research/2026-11-08-phone-desktop-audit.md) lists where it differs from the desktop. The Expo / React Native route in [native-mobile-path.md](../research/2026-11-07-native-mobile-path.md) did not weigh GPUI and is set aside.
 
   Its conventions: logic in pure reducers with no DOM, thin views, platform features (storage, push, QR scanning, badge, visibility) behind injected seams, the socket on the standard `WebSocket` surface, wire types only from the generator, and the stored pairing record `{host, port, token}` rather than the page's origin.
 
