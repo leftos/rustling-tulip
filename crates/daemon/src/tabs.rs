@@ -1114,6 +1114,21 @@ pub fn split_tab_pane(
     Ok(new_pane_id)
 }
 
+/// [`split_pane`] on `tab`'s grid where the user asked for the split by hand:
+/// the split is the arrangement, so the tab is touched and keeps its sizes
+/// instead of being rebuilt from its picked layout. Returns the new pane's id.
+pub fn split_tab_pane_by_hand(
+    tab: &mut TabEntry,
+    target: &str,
+    direction: SplitDirection,
+    place: SplitPlace,
+    new_pane: GridNode,
+) -> anyhow::Result<String> {
+    let new_pane_id = split_pane(grid_or_err_mut(tab)?, target, direction, place, new_pane)?;
+    touch(tab);
+    Ok(new_pane_id)
+}
+
 /// [`close_pane`] on `tab`'s grid, then rebuild the surviving panes' layout
 /// when the tab is untouched since picked. Returns `Ok(true)` when the close
 /// emptied the tab (caller removes it).

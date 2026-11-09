@@ -230,6 +230,7 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             pane_id,
             direction,
             place,
+            touch,
             new_session_id,
             host,
             request_id,
@@ -237,7 +238,11 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             let updated = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 let tab = crate::tabs::find_tab_mut(tabs, &tab_id)?;
                 let new_pane = crate::tabs::new_pane(new_session_id, host);
-                crate::tabs::split_tab_pane(tab, &pane_id, direction, place, new_pane)?;
+                if touch {
+                    crate::tabs::split_tab_pane_by_hand(tab, &pane_id, direction, place, new_pane)?;
+                } else {
+                    crate::tabs::split_tab_pane(tab, &pane_id, direction, place, new_pane)?;
+                }
                 Ok::<_, anyhow::Error>(tab.clone())
             });
             match updated {
@@ -1052,6 +1057,7 @@ mod tests {
                 pane_id: "p1".to_string(),
                 direction: protocol::SplitDirection::Horizontal,
                 place: protocol::SplitPlace::Second,
+                touch: false,
                 new_session_id: None,
                 host: None,
                 request_id: Some("s1".to_string()),
@@ -1797,6 +1803,30 @@ mod tests {
             )
             .await;
             assert_eq!(only_tab(&hub, "c1").picked_layout, None);
+        }
+
+        #[tokio::test]
+        async fn a_split_that_sets_touch_splits_its_own_pane_and_ends_the_pick() {
+            let (hub, _scratch) = test_hub("pick-split-touch");
+            seed_two_pane_layout(&hub, "c1");
+            dispatch_ok(&hub, rearrange(RearrangeLayout::Horizontal)).await;
+            let split = serde_json::from_value(serde_json::json!({
+                "type": "split_pane", "tab_id": "t1", "pane_id": "p1",
+                "direction": "vertical", "place": "second", "new_session_id": null,
+                "touch": true,
+            }))
+            .expect("a split request");
+            dispatch_ok(&hub, split).await;
+            let tab = only_tab(&hub, "c1");
+            assert_eq!(tab.picked_layout, None, "the tab stops following its pick");
+            assert!(
+                matches!(tab.grid().expect("a grid tab"),
+                    GridNode::Split { direction: SplitDirection::Horizontal, first, second, .. }
+                        if matches!(**first, GridNode::Split { direction: SplitDirection::Vertical, .. })
+                            && matches!(&**second, GridNode::Pane { pane_id, .. } if pane_id == "p2")),
+                "p1's column splits and p2 keeps its own: {:?}",
+                tab.grid()
+            );
         }
 
         #[test]

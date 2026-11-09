@@ -3903,11 +3903,17 @@ export type ClientMessage =
    * refused split is answered with [`DaemonMessage::Error`] carrying
    * `request_id`.
    *
+   * `touch`: The user asked for this split by hand (a header button, a menu row,
+   * a leaf dropped on a pane edge): the split is the arrangement, so the
+   * tab keeps the sizes it has from now on instead of following its
+   * picked layout. Automatic placement leaves it false, so the tab is
+   * still rebuilt from its pick.
+   *
    * `host`: The host key of a session on another daemon; `None` is this daemon.
    *
    * `request_id`: Echoed on the [`DaemonMessage::Error`] that refuses it.
    */
-  | { type: "split_pane"; tab_id: string; pane_id: string; direction: SplitDirection; place: SplitPlace; new_session_id: string | null; host?: string | null; request_id?: string | null }
+  | { type: "split_pane"; tab_id: string; pane_id: string; direction: SplitDirection; place: SplitPlace; touch?: boolean; new_session_id: string | null; host?: string | null; request_id?: string | null }
   /**
    * Close a pane. If it was the only pane in the tab, the tab is removed.
    * Otherwise the parent split collapses to the remaining sibling. A

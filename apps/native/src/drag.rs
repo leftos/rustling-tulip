@@ -772,6 +772,7 @@ fn unbound_drop(
         pane_id,
         direction,
         place,
+        touch: true,
         new_session_id: session_id,
         host,
         request_id,
@@ -1966,6 +1967,7 @@ mod tests {
                         "pane_id": "b",
                         "direction": direction,
                         "place": place,
+                        "touch": true,
                         "new_session_id": "u",
                         "request_id": "r",
                     })
@@ -2052,6 +2054,7 @@ mod tests {
                         "pane_id": pane_id,
                         "direction": direction,
                         "place": place,
+                        "touch": true,
                         "new_session_id": "u",
                         "request_id": "r",
                     })
@@ -2279,6 +2282,7 @@ mod tests {
                     "pane_id": "b",
                     "direction": "horizontal",
                     "place": "first",
+                    "touch": true,
                     "new_session_id": "rb",
                     "host": BOX,
                     "request_id": "r",

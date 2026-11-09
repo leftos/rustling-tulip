@@ -350,7 +350,9 @@ Dashboard and viewer tabs cannot be renamed (no Rename row in the tab menu, and 
 
 A pick marks the tab with `RearrangeTab`; an `ExtractToNewTab` that names a layout marks its new tab too (the first-connect chooser's overflow tabs, the Move-panes dialog; the chooser's first tab is rearranged). The remembered type is the one the daemon actually built, so a wire layout it does not know is kept as `Balanced`.
 
-While a tab is untouched since its pick, the daemon rebuilds it on every pane addition or removal: `SplitPane`, `ClosePane`, a session-removal close across each client's tabs (`close_session_panes`), the source of `ExtractToNewTab`, and both sides of a cross-tab `MovePane` that does not set `touch`. A rebuild keeps pane ids, their order and unbound panes.
+While a tab is untouched since its pick, the daemon rebuilds it on every pane addition or removal: an automatic `SplitPane`, `ClosePane`, a session-removal close across each client's tabs (`close_session_panes`), the source of `ExtractToNewTab`, and both sides of a cross-tab `MovePane` that does not set `touch`. A rebuild keeps pane ids, their order and unbound panes.
+
+A split by hand (a pane header's split button, its ⋯ menu or a leaf edge drop, `SplitPane` with `touch`) splits the pane asked for and ends the pick, as a divider drag does.
 
 A concrete grid keeps its column count (a three-column pick with a fourth pane is three plus one) and carries `aspect: None`.
 

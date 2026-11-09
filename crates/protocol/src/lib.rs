@@ -4879,6 +4879,13 @@ pub enum ClientMessage {
         pane_id: String,
         direction: SplitDirection,
         place: SplitPlace,
+        /// The user asked for this split by hand (a header button, a menu row,
+        /// a leaf dropped on a pane edge): the split is the arrangement, so the
+        /// tab keeps the sizes it has from now on instead of following its
+        /// picked layout. Automatic placement leaves it false, so the tab is
+        /// still rebuilt from its pick.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        touch: bool,
         new_session_id: Option<String>,
         /// The host key of a session on another daemon; `None` is this daemon.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7524,6 +7531,7 @@ mod tests {
                 pane_id: "p1".to_owned(),
                 direction: SplitDirection::Vertical,
                 place: SplitPlace::Second,
+                touch: false,
                 new_session_id: None,
                 host: None,
                 request_id: request_id.clone(),
@@ -7698,6 +7706,7 @@ mod tests {
                 pane_id: "p1".to_owned(),
                 direction: SplitDirection::Vertical,
                 place: SplitPlace::Second,
+                touch: false,
                 new_session_id: Some("s2".to_owned()),
                 host: host.clone(),
                 request_id: None,
@@ -9665,6 +9674,7 @@ mod tests {
             pane_id: "p1".to_string(),
             direction: SplitDirection::Horizontal,
             place: SplitPlace::Second,
+            touch: false,
             new_session_id: None,
             host: None,
             request_id: None,

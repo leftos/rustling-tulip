@@ -1048,6 +1048,7 @@ fn split_beside(h: &mut Harness<'_>, client: &LiveClient, pane: &str, session_id
         pane_id: pane.to_owned(),
         direction: SplitDirection::Horizontal,
         place: SplitPlace::Second,
+        touch: false,
         new_session_id: Some(session_id.to_owned()),
         host: None,
         request_id: None,

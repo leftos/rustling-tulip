@@ -2091,3 +2091,19 @@ fn the_header_tip_carries_the_title_tip_text(cx: &mut TestAppContext) {
     assert_eq!(header_tip_text(&mut h), Some(title_tip));
     assert!(!never_painted(&mut h, HEADER_TIP), "and it is painted");
 }
+
+#[gpui::test]
+fn a_split_button_counts_as_arranging_the_tab_by_hand(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = side_by_side(session("s1").build(), session("s2").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.click_on("split-down-p1");
+    let sent = h.sent();
+    let wire = serde_json::to_value(sent.first().expect("the split went out")).expect("wire");
+    assert_eq!(wire["type"], json!("split_pane"), "{wire}");
+    assert_eq!(wire["pane_id"], json!("p1"), "{wire}");
+    assert_eq!(wire["direction"], json!("vertical"), "{wire}");
+    assert_eq!(wire["place"], json!("second"), "{wire}");
+    assert_eq!(wire["touch"], json!(true), "{wire}");
+}

@@ -242,6 +242,7 @@ fn assert_split_p2(h: &mut Harness, direction: SplitDirection, place: SplitPlace
                 new_session_id: Some(session),
                 host: None,
                 request_id: Some(_),
+                ..
             }] if tab_id == "t1"
                 && pane_id == "p2"
                 && *sent_direction == direction
@@ -710,6 +711,7 @@ fn a_remote_leaf_dropped_on_a_pane_edge_splits_with_its_host(cx: &mut TestAppCon
                 new_session_id: Some(session),
                 host: Some(host),
                 request_id: Some(_),
+                ..
             }] if tab_id == "t1" && pane_id == "p1" && session == "b1" && host == REMOTE
         ),
         "This PC splits the pane with the remote session, naming its host: sent {sent:?}"

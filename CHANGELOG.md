@@ -26,6 +26,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Chat and the phone show a Heads up notice's later steps as buttons, including the step after Dismiss.
 - A question stays answerable when a tool beside it finishes, and the phone no longer says a question needs your permission.
 - Phone Finished notifications no longer fire while a session is still working, thinking or running background work, and wait 5 seconds as the desktop does.
+- Split down and Split right split the pane you asked for, even in a tab you rearranged, instead of adding a pane in the middle.
 - Answering a long question from a toast, the Dashboard or the phone's Home now works instead of failing with "the prompt is no longer up".
 - Esc in desktop Chat interrupts a running turn, as it does in the terminal and on the phone.
 - Restarting a session whose pane showed Chat or Summary brings the pane back on that view, not on the terminal.
