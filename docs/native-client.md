@@ -320,8 +320,9 @@ On a remote host the path field stays enabled with the hint "Created on {host} i
 
 The client always opens, whatever its saved state holds. `start_guard.rs` counts starts that panicked on the main thread before the run was stable, in `start-guard.json` (`{"failed_starts", "last_panic"}`, [on-disk.md](on-disk.md)). A run is stable 60 s after its first tab list from This PC, or on a clean quit; a cloaked run waits an hour, so a stalled machine never lets a driven spec's panic land after it. `main` reads the guard first (`start_guard::begin`) and passes the resulting `StartMode` to `open_main_window`.
 
-- **One failed start** closes the tabs (a safe start). On the first tab list from This PC, `RootView.on_message` saves the list to `layout-set-aside-<UTC stamp>`, sends `CloseTab` per tab, and draws no restored tab. Sessions keep running. Restored views (`active_tab_id`, pop-outs, session views, the Dashboard's view) are dropped too; other settings stay.
-- **Exactly two failed starts** also move `native-ui.json` to `native-ui.json.corrupt-<UTC stamp>`, once only. Later failed starts touch no file. Three newest copies are kept per prefix.
+- **One failed start** retries: the next start opens normally, since a crash can be temporary, and reaching stable clears the count. Closing tabs is the last resort.
+- **Two failed starts in a row** close the tabs (a safe start). On the first tab list from This PC, `RootView.on_message` saves the list to `layout-set-aside-<UTC stamp>`, sends `CloseTab` per tab, and draws no restored tab. Sessions keep running. Restored views (`active_tab_id`, pop-outs, session views, the Dashboard's view) are dropped too; other settings stay.
+- **Exactly three failed starts** also move `native-ui.json` to `native-ui.json.corrupt-<UTC stamp>`, once only. Later failed starts touch no file. Three newest copies are kept per prefix.
 - **The notice** is a modal titled "Opened with your tabs closed" (`start_guard_view.rs`), dismissed by OK, Enter or Esc.
 - **A main-thread panic** shows a message box from a helper thread (`MessageBoxW` on Windows, `osascript` on macOS), at most once per process, and none in a cloaked run. A background thread's panic stays log-only, since the process carries on.
 - **A `native-ui.json` that does not parse** keeps a copy, keeps each top-level field that still reads, and is saved back (`sidebar.rs` `load_ui_state`). The daemon makes a loaded tab list safe in the same spirit (`sanitize_loaded_tabs`), and the client clamps a split ratio when drawing (`drawn_ratio`).
@@ -332,7 +333,7 @@ Decisions and rejected alternatives:
 - The message box runs on a helper thread. A modal loop on the panicking thread was rejected: it would re-enter GPUI's window procedure.
 - The panic is not caught around the draw. It aborts through a Win32 callback, so unwinding cannot be relied on there; the panic hook is the one place that sees it.
 
-Specs: `ui_safe_start.rs`; `native-smoke` holds `a_panic_at_start_closes_the_tabs_on_the_next_start`, which uses the driver's `panic` method; `native-shot safe-start` draws the notice.
+Specs: `ui_safe_start.rs`; `native-smoke` holds `two_panics_at_start_close_the_tabs_on_the_next_start`, which uses the driver's `panic` method; `native-shot safe-start` draws the notice.
 
 ## Tab layouts
 

@@ -56,16 +56,18 @@ static PANIC_RECORDED: AtomicBool = AtomicBool::new(false);
 /// Whether this process has already shown the crash message.
 static PANIC_BOX_SHOWN: AtomicBool = AtomicBool::new(false);
 
-/// How a start opens, from how many starts before it panicked.
+/// How a start opens, from how many starts before it panicked: normally after
+/// one failed start at most, with the saved tabs closed after two, and with
+/// `native-ui.json` set aside after three or more.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum StartMode {
+    /// Open the saved layout as it is.
     #[default]
     Normal,
+    /// Close the saved tabs, keeping a copy of the layout first.
     CloseTabs,
     /// Also sets `native-ui.json` aside; `kept_ui` is the copy made of it.
-    CloseTabsAndResetUi {
-        kept_ui: Option<PathBuf>,
-    },
+    CloseTabsAndResetUi { kept_ui: Option<PathBuf> },
 }
 
 /// What the app says on a safe start, once This PC's tab list has come.
@@ -156,17 +158,18 @@ fn write_guard(dir: &Path, guard: &Guard) {
 }
 
 /// Reads the guard in `dir`, writes back that this start is under way, and
-/// says how to open. The second failed start sets `native-ui.json` aside; a
-/// later one leaves the file alone, since the safe start has saved defaults
-/// there by then.
+/// says how to open: normally after one failed start at most, with the tabs
+/// closed after two, and with `native-ui.json` set aside after three. A later
+/// start leaves the file alone, since the safe start has saved defaults there
+/// by then.
 #[must_use]
 pub fn begin(dir: &Path) -> StartMode {
     let guard = read_guard(dir);
     write_guard(dir, &guard);
     match guard.failed_starts {
-        0 => StartMode::Normal,
-        1 => StartMode::CloseTabs,
-        2 => StartMode::CloseTabsAndResetUi {
+        0 | 1 => StartMode::Normal,
+        2 => StartMode::CloseTabs,
+        3 => StartMode::CloseTabsAndResetUi {
             kept_ui: set_aside_ui_file(dir),
         },
         _ => StartMode::CloseTabsAndResetUi { kept_ui: None },
@@ -190,19 +193,23 @@ fn set_aside_ui_file(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Records that this start panicked, once per process and only before
-/// [`mark_stable`].
-pub fn record_panic(dir: &Path, message: &str) {
+/// [`mark_stable`], and returns the failed-start count the guard file holds
+/// afterwards.
+#[must_use]
+pub fn record_panic(dir: &Path, message: &str) -> u32 {
     if is_stable() || PANIC_RECORDED.swap(true, Ordering::SeqCst) {
-        return;
+        return read_guard(dir).failed_starts;
     }
     let guard = read_guard(dir);
+    let failed_starts = guard.failed_starts.saturating_add(1);
     write_guard(
         dir,
         &Guard {
-            failed_starts: guard.failed_starts.saturating_add(1),
+            failed_starts,
             last_panic: Some(message.to_owned()),
         },
     );
+    read_guard(dir).failed_starts
 }
 
 /// This run is past the risky part: forget the failed starts.
@@ -229,21 +236,57 @@ pub fn claim_panic_box() -> bool {
     !PANIC_BOX_SHOWN.swap(true, Ordering::SeqCst)
 }
 
+/// What the next start does after a panic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextStart {
+    /// Open the saved layout as it is.
+    OpensNormally,
+    /// Open with the saved tabs closed.
+    ClosesTabs,
+    /// Open with the saved tabs closed and `native-ui.json` set aside.
+    ClosesTabsAndResetsUi,
+    /// The panic changes nothing about the next start.
+    Unaffected,
+}
+
+/// What a panic means for the next start, from whether this run was still
+/// starting and how many starts in a row have now failed.
+#[must_use]
+pub fn next_start_after(during_start: bool, failed_starts: u32) -> NextStart {
+    if !during_start {
+        return NextStart::Unaffected;
+    }
+    match failed_starts {
+        0 | 1 => NextStart::OpensNormally,
+        3 => NextStart::ClosesTabsAndResetsUi,
+        _ => NextStart::ClosesTabs,
+    }
+}
+
 /// The message box's text for a panic.
 #[must_use]
-pub fn panic_text(message: &str, during_start: bool, log_path: &Path) -> String {
+pub fn panic_text(message: &str, next: NextStart, log_path: &Path) -> String {
     let message: String = message.chars().take(PANIC_MESSAGE_CAP).collect();
     let log = log_path.display();
-    if during_start {
-        format!(
+    match next {
+        NextStart::OpensNormally => format!(
+            "Rustling Tulip crashed while starting.\n\n{message}\n\nYour sessions keep running. \
+             Start Rustling Tulip again to carry on; if it crashes again, it opens with your tabs \
+             closed. The log is at {log}."
+        ),
+        NextStart::ClosesTabs => format!(
             "Rustling Tulip crashed while starting.\n\n{message}\n\nThe next start opens with \
              your tabs closed, and your sessions keep running. The log is at {log}."
-        )
-    } else {
-        format!(
+        ),
+        NextStart::ClosesTabsAndResetsUi => format!(
+            "Rustling Tulip crashed while starting.\n\n{message}\n\nThe next start opens with your \
+             tabs closed and your window and sidebar settings back at their defaults, with a copy \
+             of them kept. Your sessions keep running. The log is at {log}."
+        ),
+        NextStart::Unaffected => format!(
             "Rustling Tulip crashed.\n\n{message}\n\nYour sessions keep running. Start Rustling \
              Tulip again to carry on. The log is at {log}."
-        )
+        ),
     }
 }
 
@@ -460,15 +503,35 @@ mod tests {
     }
 
     #[test]
-    fn one_failed_start_closes_the_tabs() {
+    fn one_failed_start_opens_normally() {
         let dir = seeded("one", 1);
-        assert_eq!(begin(&dir.0), StartMode::CloseTabs);
+        assert_eq!(begin(&dir.0), StartMode::Normal);
         assert_eq!(dir.guard()["failed_starts"], json!(1));
     }
 
     #[test]
-    fn two_failed_starts_also_reset_the_ui() {
+    fn two_failed_starts_close_the_tabs() {
         let dir = seeded("two", 2);
+        let ui = dir.0.join(UI_FILE);
+        std::fs::write(&ui, r#"{"a":1}"#).expect("seed native-ui.json");
+
+        assert_eq!(begin(&dir.0), StartMode::CloseTabs);
+
+        assert_eq!(
+            dir.names(UI_COPY_PREFIX),
+            Vec::<String>::new(),
+            "the file gets no copy yet"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ui).expect("read the file"),
+            r#"{"a":1}"#,
+            "the file is untouched"
+        );
+    }
+
+    #[test]
+    fn three_failed_starts_also_reset_the_ui() {
+        let dir = seeded("three", 3);
         let ui = dir.0.join(UI_FILE);
         std::fs::write(&ui, r#"{"a":1}"#).expect("seed native-ui.json");
 
@@ -492,7 +555,7 @@ mod tests {
 
     #[test]
     fn a_reset_with_no_ui_file_keeps_nothing() {
-        let dir = seeded("nofile", 2);
+        let dir = seeded("nofile", 3);
         assert_eq!(
             begin(&dir.0),
             StartMode::CloseTabsAndResetUi { kept_ui: None }
@@ -502,7 +565,7 @@ mod tests {
 
     #[test]
     fn a_later_reset_keeps_the_first_copy() {
-        let dir = seeded("later", 2);
+        let dir = seeded("later", 3);
         let ui = dir.0.join(UI_FILE);
         std::fs::write(&ui, r#"{"a":1}"#).expect("seed native-ui.json");
 
@@ -519,13 +582,13 @@ mod tests {
         );
 
         std::fs::write(&ui, r#"{"b":2}"#).expect("a new native-ui.json");
-        dir.seed(&json!({"failed_starts": 3, "last_panic": "x"}).to_string());
+        dir.seed(&json!({"failed_starts": 4, "last_panic": "x"}).to_string());
         let later = begin(&dir.0);
 
         assert_eq!(
             later,
             StartMode::CloseTabsAndResetUi { kept_ui: None },
-            "the third start sets nothing aside"
+            "the fourth start sets nothing aside"
         );
         assert_eq!(dir.names(UI_COPY_PREFIX), names, "still the one copy");
         assert_eq!(
@@ -568,8 +631,12 @@ mod tests {
     fn a_panic_before_stable_counts_once() {
         let dir = TestDir::new("counts");
         assert_eq!(begin(&dir.0), StartMode::Normal);
-        record_panic(&dir.0, "first");
-        record_panic(&dir.0, "second");
+        assert_eq!(record_panic(&dir.0, "first"), 1, "the panic counts");
+        assert_eq!(
+            record_panic(&dir.0, "second"),
+            1,
+            "the second panic in this process adds nothing"
+        );
         assert_eq!(dir.guard()["failed_starts"], json!(1));
         assert_eq!(dir.guard()["last_panic"], json!("first"));
     }
@@ -580,8 +647,23 @@ mod tests {
         assert_eq!(begin(&dir.0), StartMode::Normal);
         assert!(dir.0.join(GUARD_FILE).exists(), "the start wrote its guard");
         mark_stable(&dir.0);
-        record_panic(&dir.0, "late");
+        assert_eq!(
+            record_panic(&dir.0, "late"),
+            0,
+            "a stable run counts nothing"
+        );
         assert!(!dir.0.join(GUARD_FILE).exists());
+    }
+
+    #[test]
+    fn next_start_after_cases() {
+        assert_eq!(next_start_after(false, 5), NextStart::Unaffected);
+        assert_eq!(next_start_after(true, 0), NextStart::OpensNormally);
+        assert_eq!(next_start_after(true, 1), NextStart::OpensNormally);
+        assert_eq!(next_start_after(true, 2), NextStart::ClosesTabs);
+        assert_eq!(next_start_after(true, 3), NextStart::ClosesTabsAndResetsUi);
+        assert_eq!(next_start_after(true, 4), NextStart::ClosesTabs);
+        assert_eq!(next_start_after(true, 9), NextStart::ClosesTabs);
     }
 
     #[test]
@@ -604,9 +686,41 @@ mod tests {
     }
 
     #[test]
+    fn panic_text_says_the_next_start_opens_normally() {
+        assert_eq!(
+            panic_text(
+                "boom",
+                NextStart::OpensNormally,
+                Path::new("C:/logs/native.log")
+            ),
+            "Rustling Tulip crashed while starting.\n\nboom\n\nYour sessions keep running. Start \
+             Rustling Tulip again to carry on; if it crashes again, it opens with your tabs \
+             closed. The log is at C:/logs/native.log."
+        );
+    }
+
+    #[test]
+    fn panic_text_says_the_settings_reset_too() {
+        assert_eq!(
+            panic_text(
+                "boom",
+                NextStart::ClosesTabsAndResetsUi,
+                Path::new("C:/logs/native.log")
+            ),
+            "Rustling Tulip crashed while starting.\n\nboom\n\nThe next start opens with your \
+             tabs closed and your window and sidebar settings back at their defaults, with a \
+             copy of them kept. Your sessions keep running. The log is at C:/logs/native.log."
+        );
+    }
+
+    #[test]
     fn panic_text_during_start_says_the_tabs_close() {
         assert_eq!(
-            panic_text("boom", true, Path::new("C:/logs/native.log")),
+            panic_text(
+                "boom",
+                NextStart::ClosesTabs,
+                Path::new("C:/logs/native.log")
+            ),
             "Rustling Tulip crashed while starting.\n\nboom\n\nThe next start opens with your \
              tabs closed, and your sessions keep running. The log is at C:/logs/native.log."
         );
@@ -615,7 +729,11 @@ mod tests {
     #[test]
     fn panic_text_later_says_start_again() {
         assert_eq!(
-            panic_text("boom", false, Path::new("C:/logs/native.log")),
+            panic_text(
+                "boom",
+                NextStart::Unaffected,
+                Path::new("C:/logs/native.log")
+            ),
             "Rustling Tulip crashed.\n\nboom\n\nYour sessions keep running. Start Rustling Tulip \
              again to carry on. The log is at C:/logs/native.log."
         );
@@ -623,7 +741,7 @@ mod tests {
 
     #[test]
     fn panic_text_caps_a_long_message_on_a_char_boundary() {
-        let text = panic_text(&"·".repeat(2000), true, Path::new("log"));
+        let text = panic_text(&"·".repeat(2000), NextStart::Unaffected, Path::new("log"));
         assert_eq!(text.chars().filter(|c| *c == '·').count(), 600);
     }
 

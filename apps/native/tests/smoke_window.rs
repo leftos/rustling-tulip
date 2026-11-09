@@ -1181,8 +1181,8 @@ mod driven {
     /// A hang guard on each wait for the driver: its discovery file, one
     /// reply, or an effect read back through it; not an expected duration.
     const DRIVER_TIMEOUT: Duration = Duration::from_secs(60);
-    /// A hang guard on a panicked client exiting and on the next start closing
-    /// its tabs, not an expected duration.
+    /// A hang guard on a panicked client exiting, and on a next start after
+    /// two panics closing its tabs: not an expected duration.
     const SAFE_START_TIMEOUT: Duration = Duration::from_secs(120);
     /// How long a spec's `wait_for` waits at most, inside [`DRIVER_TIMEOUT`].
     const WAIT_FOR_MS: u64 = 30_000;
@@ -1463,7 +1463,7 @@ mod driven {
         clippy::panic,
         reason = "a client that exits now fails the spec at once"
     )]
-    fn a_panic_at_start_closes_the_tabs_on_the_next_start() {
+    fn two_panics_at_start_close_the_tabs_on_the_next_start() {
         let mut daemon = LiveDaemon::start("smoke-safe-start");
         let (client_id, tab_id) = seed_dashboard_tab(&mut daemon);
         let config = daemon.config_dir();
@@ -1489,11 +1489,43 @@ mod driven {
                 .is_some_and(|text| text.contains("driver asked for a panic")),
             "{guard}"
         );
+        assert!(
+            layout_copies(&config).is_empty(),
+            "the first crash sets nothing aside"
+        );
 
-        let mut second = launch_driven_client(&daemon);
+        let mut retried = launch_driven_client(&daemon);
+        let mut retried_driver = Driver::connect(retried.0.id());
+        retried_driver.ok("ping", &json!({}));
+        retried_driver.wait(
+            &json!({"state": "tabs.0.id", "equals": tab_id.as_str()}),
+            "the retried start shows the saved tab",
+        );
+        assert!(
+            !layout_is_empty(&config, &client_id),
+            "the retried start keeps the tab"
+        );
+        assert!(
+            layout_copies(&config).is_empty(),
+            "the retried start sets no layout aside"
+        );
+        retried_driver.fire("panic");
+        let status = wait_exit(&mut retried);
+        assert!(
+            !status.success(),
+            "the second panicked client exited with {status}"
+        );
+
+        let guard: Value = serde_json::from_str(
+            &std::fs::read_to_string(config.join("start-guard.json")).expect("read the guard"),
+        )
+        .expect("the guard is valid JSON");
+        assert_eq!(guard["failed_starts"], json!(2), "{guard}");
+
+        let mut third = launch_driven_client(&daemon);
         let deadline = Instant::now() + SAFE_START_TIMEOUT;
         while !layout_is_empty(&config, &client_id) {
-            if let Some(status) = second.0.try_wait().expect("poll the client") {
+            if let Some(status) = third.0.try_wait().expect("poll the client") {
                 panic!("the client exited during the safe start: {status}");
             }
             assert!(

@@ -37,7 +37,7 @@
 //! with Allow and Deny, and a Finished card, as
 //! the app's own toasts draw them. `open-shell` shows the Open a shell
 //! dialog with a folder path longer than its field, the caret at its end.
-//! `safe-start` shows the notice a start after a crashed one raises.
+//! `safe-start` shows the notice a start after two crashed ones raises.
 //! `update` shows Settings scrolled to its
 //! update rows with a ready update in the footer, and `update-notes` the
 //! What's new window the footer's button opens over that ready update.

@@ -508,8 +508,8 @@ pub struct RootDeps {
     /// Checks for, starts and reads back updates: the footer's notice,
     /// Settings' update rows and the toast after an update.
     pub updater: Arc<dyn update::Updater>,
-    /// How this start opens: one that follows a panicked start closes the
-    /// tabs This PC sends.
+    /// How this start opens: after two panicked starts it closes the tabs
+    /// This PC sends, and after three it also sets the UI settings aside.
     pub start_mode: start_guard::StartMode,
 }
 

@@ -22,7 +22,7 @@ use anyhow::Context as _;
 use daemon_client::capped_log::{self, CappedLog};
 use gpui::{App, Application};
 use rustling_tulip_native::driver_gate::{self, GateDecision};
-use rustling_tulip_native::start_guard::{self, StartMode};
+use rustling_tulip_native::start_guard::{self, NextStart, StartMode};
 use rustling_tulip_native::{Assets, LOG_FILE, offscreen, toast_activation, update};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -99,9 +99,9 @@ fn open_mode(dir: &Path) -> StartMode {
 /// panic shows the message.
 fn on_main_thread_panic(config: Option<&Path>, message: &str) {
     let during_start = !start_guard::is_stable();
-    if let Some(dir) = config {
-        start_guard::record_panic(dir, message);
-    }
+    let next = config.map_or(NextStart::Unaffected, |dir| {
+        start_guard::next_start_after(during_start, start_guard::record_panic(dir, message))
+    });
     if offscreen::requested() || !start_guard::claim_panic_box() {
         return;
     }
@@ -109,7 +109,7 @@ fn on_main_thread_panic(config: Option<&Path>, message: &str) {
         || PathBuf::from(LOG_FILE),
         |dir| dir.join("logs").join(LOG_FILE),
     );
-    let text = start_guard::panic_text(message, during_start, &log_path);
+    let text = start_guard::panic_text(message, next, &log_path);
     match std::thread::Builder::new()
         .name("panic-box".to_owned())
         .spawn(move || start_guard::show_panic_box(&text))

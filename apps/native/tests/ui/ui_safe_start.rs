@@ -1,4 +1,4 @@
-//! Safe-start specs: a start after a panicked one closes the tabs This PC
+//! Safe-start specs: a start after two panicked ones closes the tabs This PC
 //! sends before any is drawn, keeps a dated copy of them and says so; a normal
 //! start does none of it, and bad saved shapes still draw. Each spec runs in a
 //! process of its own, so the start guard's statics start fresh.

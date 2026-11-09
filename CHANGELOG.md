@@ -23,7 +23,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
-- A crash at start-up now says what happened, and the next start opens with your tabs closed and a copy of them kept.
+- A crash at start-up now says what happened, and a second in a row opens with your tabs closed and a copy of them kept.
 - A damaged saved state now loses only the bad entries, keeping your other repos, workspaces and tabs.
 - Chat and the phone show a Heads up notice's later steps as buttons, including the step after Dismiss.
 - A question stays answerable when a tool beside it finishes, and the phone no longer says a question needs your permission.
