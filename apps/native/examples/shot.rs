@@ -38,6 +38,9 @@
 //! the app's own toasts draw them. `open-shell` shows the Open a shell
 //! dialog with a folder path longer than its field, the caret at its end.
 //! `safe-start` shows the notice a start after two crashed ones raises.
+//! `panes-accent` shows a 2x2 grid of four panes with the Theme pane
+//! focused, and `panes-accent-chosen` the same grid with the Periwinkle
+//! pane focused.
 //! `update` shows Settings scrolled to its
 //! update rows with a ready update in the footer, and `update-notes` the
 //! What's new window the footer's button opens over that ready update.
@@ -230,10 +233,12 @@ enum View {
     Gates,
     OpenShell,
     SafeStart,
+    PanesAccent,
+    PanesAccentChosen,
 }
 
 impl View {
-    const ALL: [Self; 35] = [
+    const ALL: [Self; 37] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -269,6 +274,8 @@ impl View {
         Self::Toast,
         Self::OpenShell,
         Self::SafeStart,
+        Self::PanesAccent,
+        Self::PanesAccentChosen,
     ];
 
     fn name(self) -> &'static str {
@@ -307,6 +314,8 @@ impl View {
             Self::Gates => "gates",
             Self::OpenShell => "open-shell",
             Self::SafeStart => "safe-start",
+            Self::PanesAccent => "panes-accent",
+            Self::PanesAccentChosen => "panes-accent-chosen",
             Self::Toast => "toast",
         }
     }
@@ -331,7 +340,9 @@ impl View {
             Self::ConnectionsSsh => 4,
             Self::Themes | Self::Chat | Self::SettingsDashboard => 3,
             Self::ThemesEdit => 5,
-            Self::Update
+            // The jump palette opens, then takes its query and Enter.
+            Self::PanesAccentChosen
+            | Self::Update
             | Self::UpdateNotes
             | Self::Summary
             | Self::SettingsClaude
@@ -390,6 +401,11 @@ impl View {
             Self::Main | Self::MainCompact | Self::MainNarrow => {
                 !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
             }
+            // The four-pane grid with its Theme pane focused.
+            Self::PanesAccent => root.focused_pane().as_deref() == Some("p1"),
+            // The same grid with the Periwinkle pane focused from the jump
+            // palette.
+            Self::PanesAccentChosen => root.focused_pane().as_deref() == Some("p3"),
             Self::SourceControl => root.activity() == Activity::SourceControl,
             Self::Diff => root.active_tab_id() == Some(DIFF_TAB),
             Self::Settings => root.settings_open(),
@@ -569,6 +585,8 @@ impl Shot {
             | View::Gates
             | View::OpenShell
             | View::SafeStart
+            | View::PanesAccent
+            | View::PanesAccentChosen
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -1265,7 +1283,9 @@ fn drive(
         | View::MainNarrow
         | View::MultiHost
         | View::SafeStart
+        | View::PanesAccent
         | View::Toast => Ok(()),
+        View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
         View::OpenShell => open_shell(window, cx),
@@ -1363,6 +1383,21 @@ fn drive(
             Ok(())
         }
     }
+}
+
+/// Step `step` of the `panes-accent-chosen` shot: opens the jump palette,
+/// then types the Periwinkle pane's label and presses Enter, which focuses
+/// it through the tab's own focus. A click cannot do it: the cloaked window
+/// never becomes active, so a press on a pane raises no focus event for the
+/// tab to record.
+fn drive_panes_accent_chosen(step: usize, window: &mut Window, cx: &mut App) -> Result<()> {
+    if step == 0 {
+        return press("ctrl-shift-p", window, cx);
+    }
+    for c in "periwinkle".chars() {
+        press(&c.to_string(), window, cx)?;
+    }
+    press("enter", window, cx)
 }
 
 /// The stand-in installer the `update` shot's ready update holds open,
@@ -1734,6 +1769,9 @@ impl Fixture {
         }))
         .context("the fixture's workspaces")?;
         let mut rows = session_rows();
+        if matches!(view, View::PanesAccent | View::PanesAccentChosen) {
+            rows.extend(accent_rows());
+        }
         if matches!(view, View::Dashboard | View::DashboardCompact) {
             dashboard_rows(&mut rows);
         }
@@ -1744,10 +1782,12 @@ impl Fixture {
             .into_iter()
             .map(|row| row.snapshot(now))
             .collect::<Result<Vec<_>>>()?;
-        let mut tabs = vec![
-            grid_tab("t-tulip", "tulip", &tulip_grid(view)),
-            grid_tab("t-yaat", "yaat", &yaat_grid()),
-        ];
+        let mut tabs = vec![grid_tab("t-tulip", "tulip", &tulip_grid(view))];
+        // The accent shots' four panes take p1 to p4, so their one tab is
+        // the only one, and a second tab's panes cannot clash with them.
+        if !matches!(view, View::PanesAccent | View::PanesAccentChosen) {
+            tabs.push(grid_tab("t-yaat", "yaat", &yaat_grid()));
+        }
         if view == View::Diff {
             tabs.push(json!({
                 "id": DIFF_TAB,
@@ -1815,6 +1855,24 @@ fn pane(id: &str, session: &str) -> GridNode {
 /// Petal session, its shell and an empty pane side by side, each too
 /// narrow for its header's buttons.
 fn tulip_grid(view: View) -> GridNode {
+    if matches!(view, View::PanesAccent | View::PanesAccentChosen) {
+        return GridNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(GridNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(pane("p1", "s-shell")),
+                second: Box::new(pane("p2", "s-rose")),
+            }),
+            second: Box::new(GridNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(pane("p3", "s-periwinkle")),
+                second: Box::new(pane("p4", "s-lilac")),
+            }),
+        };
+    }
     if view == View::MainNarrow {
         return GridNode::Split {
             direction: SplitDirection::Horizontal,
@@ -2012,6 +2070,31 @@ fn session_rows() -> Vec<Row> {
             minutes: 48,
             extra: json!({ "kind": "workspace", "workspace_id": WORKSPACE }),
         },
+    ]
+}
+
+/// The three chosen accents the `panes-accent` and `panes-accent-chosen`
+/// shots draw beside the Theme shell, each with the frame band the accent
+/// picker stores with it.
+fn accent_rows() -> Vec<Row> {
+    let shell = |id: &'static str, label: &'static str, accent: &str| Row {
+        id,
+        label,
+        status: "idle",
+        members: json!([member(TULIP, "main", TULIP_PATH)]),
+        minutes: 4,
+        extra: json!({
+            "mode": "plain_shell",
+            "current_cwd": TULIP_PATH,
+            "program_name": "pwsh",
+            "user_label": label,
+            "appearance": { "accent_color": accent, "terminal_frame_color": accent },
+        }),
+    };
+    vec![
+        shell("s-rose", "Rose", "#e7849b"),
+        shell("s-periwinkle", "Periwinkle", "#8fb3f0"),
+        shell("s-lilac", "Lilac", "#c9b8ff"),
     ]
 }
 

@@ -3603,7 +3603,7 @@ impl RootView {
             return;
         }
         if self.is_tab_popped(tab_id) {
-            self.tabs.set_focused(tab_id, pane_id);
+            self.set_focused_pane(tab_id, pane_id, cx);
             self.focus_history.record(tab_id, Some(pane_id));
             self.update_pane_roles(cx);
             self.activate_popout(

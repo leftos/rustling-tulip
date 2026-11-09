@@ -4,6 +4,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use alacritty_terminal::vte::ansi::Rgb;
+
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
@@ -481,7 +483,7 @@ impl RootView {
             if let Some(session) = session {
                 self.sidebar.mark_seen_on(&session.host, &session.id);
             }
-            self.tabs.set_focused(&tab_id, pane_id);
+            self.set_focused_pane(&tab_id, pane_id, cx);
             self.focus_history.record(&tab_id, Some(pane_id));
             self.preselected_target = None;
             // In a popped tab's own window, the pane shows its session while
@@ -672,17 +674,20 @@ impl RootView {
         by_user: bool,
         cx: &mut Context<Self>,
     ) {
-        let resolved: Vec<(String, Resolved)> = self
+        let resolved: Vec<(String, Resolved, bool)> = self
             .panes
             .iter()
             .filter(|(_, slot)| keep(slot))
             .map(|(pane_id, slot)| {
                 let resolved = self.pane_appearance(&slot.tab_id, slot.session.as_deref());
-                (pane_id.clone(), resolved)
+                // A session pop-out's pane belongs to no tab; the window is
+                // all its own, so it draws its band as a focused pane does.
+                let focused = self.pane_place(pane_id).is_none_or(|(_, focused)| focused);
+                (pane_id.clone(), resolved, focused)
             })
             .collect();
         let authored = theme(cx).terminal;
-        for (pane_id, resolved) in resolved {
+        for (pane_id, resolved, focused) in resolved {
             let Some(slot) = self.panes.get_mut(&pane_id) else {
                 continue;
             };
@@ -693,10 +698,14 @@ impl RootView {
             let override_bg = (resolved.background.source != Source::BuiltIn)
                 .then(|| appearance::term_rgb(resolved.background.value));
             let palette = crate::theme::resolve_palette(override_bg, &authored);
-            let frame = resolved.frame.value.map(appearance::term_rgb);
+            let band = frame_band(
+                focused,
+                resolved.frame.value.map(appearance::term_rgb),
+                appearance::term_rgb(resolved.accent.value),
+            );
             slot.view.update(cx, |pane, cx| {
                 pane.set_font(resolved.font(), by_user, cx);
-                pane.set_colors(palette, frame, resolved.frame_width.value, cx);
+                pane.set_colors(palette, band, resolved.frame_width.value, cx);
             });
         }
     }
@@ -722,6 +731,20 @@ impl RootView {
     pub fn pane_header_fill(&self, pane_id: &str, cx: &App) -> Option<u32> {
         let (_, focused) = self.pane_place(pane_id)?;
         Some(header_fill(focused, &theme(cx)))
+    }
+
+    /// The two ends of pane `pane_id`'s header fade, `0xRRGGBB`: its accent
+    /// mixed over the header's own fill at the left edge, and the plain fill
+    /// where the wash ends, whichever pane has the focus.
+    #[must_use]
+    pub fn pane_header_fade(&self, pane_id: &str, cx: &App) -> Option<(u32, u32)> {
+        let (session, focused) = self.pane_place(pane_id)?;
+        let accent = self.panes.get(pane_id).map_or_else(
+            || self.sidebar.appearance(session).accent.value,
+            |slot| slot.accent,
+        );
+        let (from, to) = header_fade_colors(header_fill(focused, &theme(cx)), accent);
+        Some((appearance::packed(from), appearance::packed(to)))
     }
 
     /// The session pane `pane_id` shows, and whether the pane has its
@@ -1232,15 +1255,23 @@ impl RootView {
             .unwrap_or_default()
     }
 
+    /// Gives `tab_id`'s focus to `pane_id` and applies every pane's colours
+    /// again: the band follows the focus even when the terminal never takes
+    /// the keyboard, as the spawn dialog opening over it leaves it.
+    pub(crate) fn set_focused_pane(&mut self, tab_id: &str, pane_id: &str, cx: &mut Context<Self>) {
+        self.tabs.set_focused(tab_id, pane_id);
+        self.apply_pane_fonts(false, cx);
+    }
+
     /// Gives pane `pane_id` of `tab_id` its tab's focus and the keyboard.
     fn focus_pane_in(
         &mut self,
         tab_id: &str,
         pane_id: &str,
         window: &mut Window,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        self.tabs.set_focused(tab_id, pane_id);
+        self.set_focused_pane(tab_id, pane_id, cx);
         self.focus_history.record(tab_id, Some(pane_id));
         self.preselected_target = None;
         self.remember_focused_session();
@@ -1641,9 +1672,11 @@ impl RootView {
             .and_then(|_| self.pane_session_in(tab_id, pane_id))
             .map(|(host, session)| self.session_header_parts(&host, session));
         let target = self.header_target(tab_id, pane_id, session_id, parts.as_ref(), here);
+        let header_ground = header_fill(focused, &t);
+        let (fade_from, fade_to) = header_fade_stops(header_ground, colors.accent_line);
         let header = self
             .pane_header(&target, colors.accent_line, cx)
-            .bg(gpui::rgb(header_fill(focused, &t)))
+            .bg(gpui::linear_gradient(90.0, fade_from, fade_to))
             .child(
                 div()
                     .absolute()
@@ -2996,9 +3029,49 @@ fn member_tip(name: String, member: &SessionMember) -> String {
     }
 }
 
+/// The colour a pane's frame band draws: its frame colour while it has its
+/// tab's focus, else its accent where no frame is set; `None` while it does
+/// not, where the band shows the terminal's background.
+fn frame_band(focused: bool, frame: Option<Rgb>, accent: Rgb) -> Option<Rgb> {
+    if focused {
+        Some(frame.unwrap_or(accent))
+    } else {
+        None
+    }
+}
+
 /// A pane header's fill: raised while the pane has its tab's focus.
 fn header_fill(focused: bool, t: &UiTheme) -> u32 {
     if focused { t.raised } else { t.surface }
+}
+
+/// How much of its accent a header's fade mixes over the header's own fill
+/// at its left edge, the same whether the pane has the focus or not.
+const HEADER_FADE_STRENGTH: f64 = 0.22;
+
+/// The fraction of a header's width at which its fade reaches the plain
+/// fill.
+const HEADER_FADE_END: f32 = 0.34;
+
+/// `fill`'s header fade as the two colours its gradient draws: the accent
+/// mixed [`HEADER_FADE_STRENGTH`] over `fill` at the left edge, and the plain
+/// fill where the wash ends.
+fn header_fade_colors(fill: u32, accent: u32) -> (Rgb, Rgb) {
+    let ground = appearance::term_rgb(fill);
+    (
+        crate::theme::mix(ground, appearance::term_rgb(accent), HEADER_FADE_STRENGTH),
+        ground,
+    )
+}
+
+/// The header's gradient stops: the accent wash at the left edge and the
+/// plain fill at [`HEADER_FADE_END`] of the header's width.
+fn header_fade_stops(fill: u32, accent: u32) -> (gpui::LinearColorStop, gpui::LinearColorStop) {
+    let (from, to) = header_fade_colors(fill, accent);
+    (
+        gpui::linear_color_stop(gpui::rgb(appearance::packed(from)), 0.0),
+        gpui::linear_color_stop(gpui::rgb(appearance::packed(to)), HEADER_FADE_END),
+    )
 }
 
 /// The header's left side: the status glyph, the name and the chips, or
@@ -4001,10 +4074,15 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{HeaderChip, HeaderChipKind, RetryGate, drawn_ratio, header_parts, status_label};
+    use super::{
+        HeaderChip, HeaderChipKind, RetryGate, drawn_ratio, frame_band, header_fade_colors,
+        header_fade_stops, header_parts, status_label,
+    };
+    use crate::appearance::term_rgb;
     use crate::runtime_icon::RuntimeIcon;
     use crate::tabs::SessionRef;
     use crate::target::HostKey;
+    use crate::theme::mix;
     use protocol::{AgentDescriptor, AgentId, SessionMode, SessionSnapshot, SessionStatus};
     use serde_json::json;
 
@@ -4039,6 +4117,43 @@ mod tests {
         );
         assert_eq!(status_label(SessionStatus::Stopped, false), "stopped");
         assert_eq!(status_label(SessionStatus::Error, false), "error");
+    }
+
+    #[test]
+    fn a_focused_band_is_the_frame_else_the_accent() {
+        let accent = term_rgb(0x00b4_8ead);
+        let frame = term_rgb(0x0012_3456);
+        assert_eq!(frame_band(true, Some(frame), accent), Some(frame));
+        assert_eq!(frame_band(true, None, accent), Some(accent));
+    }
+
+    #[test]
+    fn an_unfocused_band_draws_nothing_whatever_the_frame() {
+        let accent = term_rgb(0x00b4_8ead);
+        let frame = term_rgb(0x0012_3456);
+        assert_eq!(frame_band(false, Some(frame), accent), None);
+        assert_eq!(frame_band(false, None, accent), None);
+    }
+
+    #[test]
+    fn a_header_fades_its_accent_over_its_own_fill() {
+        let fill = 0x16_151a;
+        let accent = 0x008f_b3f0;
+        assert_eq!(
+            header_fade_colors(fill, accent),
+            (mix(term_rgb(fill), term_rgb(accent), 0.22), term_rgb(fill))
+        );
+    }
+
+    #[test]
+    fn the_fade_reaches_the_plain_fill_a_third_of_the_way_across() {
+        let (start, end) = header_fade_stops(0x16_151a, 0x008f_b3f0);
+        assert!((start.percentage - 0.0).abs() < f32::EPSILON);
+        assert!(
+            (end.percentage - 0.34).abs() < f32::EPSILON,
+            "the wash ends at {} of the header, not 0.34",
+            end.percentage
+        );
     }
 
     /// Session `id` of This PC.

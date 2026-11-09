@@ -697,7 +697,7 @@ impl RootView {
         self.tabs.note_layout_request(&message);
         self.send_to(&HostKey::Local, message);
         if drop.swap {
-            self.tabs.focus_pane(&drop.dst_tab_id, &drop.dst_pane_id);
+            self.set_focused_pane(&drop.dst_tab_id, &drop.dst_pane_id, cx);
         }
     }
 
