@@ -88,8 +88,14 @@ const CONFIRM_CAP: Duration = Duration::from_millis(700);
 /// has ended. While a task is in progress each model step opens on a spinner
 /// row no rule reads for a little over a second, and a window of
 /// [`CONFIRM_CAP`] would publish `Idle` under it. A `Stop` that was lost still
-/// ends the turn once this has passed.
+/// ends the turn once this has passed, unless a working title holds it past
+/// that (see [`TITLE_QUIET_LIMIT`]).
 const IDLE_WITHOUT_STOP: Duration = Duration::from_secs(3);
+
+/// How long a working title holds a turn no `Stop` has ended: a CLI that goes
+/// quiet for this long hands the turn back, so a dead or hung one still reads
+/// `Idle` without the owner doing anything.
+const TITLE_QUIET_LIMIT: Duration = TURN_END_CEILING;
 
 /// The rule that reads an Esc interrupt's row: an interrupted turn fires no
 /// `Stop` and says so on screen, so it keeps the short window.
@@ -262,6 +268,10 @@ enum Moved {
 /// One session's screen check: its inputs, and the state of the check it has
 /// scheduled and the change it is confirming. The agent watcher runs it alone;
 /// the plain-shell watcher runs it beside its classifier.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags of one check; a state machine would not describe them"
+)]
 struct ScreenWatch {
     registry: Arc<SessionRegistry>,
     session_id: String,
@@ -283,6 +293,8 @@ struct ScreenWatch {
     /// The rule the last executed check matched, kept for the `status_trace`
     /// line a status change writes.
     last_rule: Option<Arc<str>>,
+    /// The last executed check read a title rule saying the turn runs.
+    title_working: bool,
     /// Whether a dialog on screen may raise `AwaitingInput`: false from the
     /// moment the session enters or leaves a prompt that the screen still
     /// shows, until a check reads anything other than a dialog. A dialog left
@@ -363,6 +375,9 @@ impl TurnEndSign {
 /// What one screen check read from one frame.
 struct ScreenRead {
     reading: Reading,
+    /// A title rule of the agent's table matches the frame: the title says a
+    /// turn runs, whatever rule the body gave.
+    title_working: bool,
     /// The background rule that fires on the frame.
     background: Option<Arc<str>>,
     /// The last non-empty row is a shell's prompt.
@@ -544,6 +559,7 @@ impl ScreenWatch {
             size: None,
             last_verdict: None,
             last_rule: None,
+            title_working: false,
             dialog_edge_armed: true,
             subagent_dialog: None,
             screen_set_background: false,
@@ -646,6 +662,7 @@ impl ScreenWatch {
         };
         let Some(ScreenRead {
             mut reading,
+            title_working,
             mut background,
             prompt,
             agent_view,
@@ -682,6 +699,7 @@ impl ScreenWatch {
             rule = ?reading.rule,
             verdict = ?reading.verdict,
             from_title = reading.from_title,
+            title_working,
             background = ?background,
             prompt,
             status = ?read.status,
@@ -691,6 +709,7 @@ impl ScreenWatch {
         );
         self.last_verdict = Some(reading.verdict);
         self.last_rule.clone_from(&reading.rule);
+        self.title_working = title_working;
         if reading.verdict != Verdict::State(ScreenState::AwaitingInput) {
             self.dialog_edge_armed = true;
         }
@@ -927,6 +946,7 @@ impl ScreenWatch {
             };
             let read = ScreenRead {
                 reading: self.rules.read(&screen),
+                title_working: self.rules.title_reads_working(&screen),
                 background: self.rules.read_background(&screen),
                 prompt: rules::last_row_is_shell_prompt(&screen),
                 agent_view,
@@ -1071,11 +1091,11 @@ impl ScreenWatch {
             self.publish_at_once(read, target, quiet);
         } else {
             self.confirm.candidate = None;
-            let no_stop = target == SessionStatus::Idle
-                && read.status == SessionStatus::Working
-                && read.hook_driven
-                && read.held.is_none()
-                && reading.rule.as_deref() != Some(INTERRUPT_RULE);
+            let no_stop = Self::turn_without_stop(read, reading, target);
+            if no_stop && self.title_holds_turn(now) {
+                self.confirm.window = None;
+                return;
+            }
             if self
                 .confirm
                 .agree_after(read, Target::Status(target), now, no_stop)
@@ -1084,6 +1104,33 @@ impl ScreenWatch {
                 self.publish_as(read, target, "screen", background);
             }
         }
+    }
+
+    /// Whether `target` ends a hook-driven turn that no `Stop` has ended, and
+    /// so waits for [`IDLE_WITHOUT_STOP`] before it publishes: a turn whose
+    /// `Stop` was lost. An interrupt reads as its own end, so it keeps the
+    /// short window.
+    fn turn_without_stop(read: StatusRead, reading: &Reading, target: SessionStatus) -> bool {
+        target == SessionStatus::Idle
+            && read.status == SessionStatus::Working
+            && read.hook_driven
+            && read.held.is_none()
+            && reading.rule.as_deref() != Some(INTERRUPT_RULE)
+    }
+
+    /// Whether a working title still holds a turn no `Stop` has ended: true
+    /// until the terminal has been quiet for [`TITLE_QUIET_LIMIT`], when the
+    /// check it schedules lets the idle screen's window open.
+    fn title_holds_turn(&mut self, now: Instant) -> bool {
+        let Some(limit) = self
+            .last_output
+            .map(|at| at + TITLE_QUIET_LIMIT)
+            .filter(|&limit| self.title_working && now < limit)
+        else {
+            return false;
+        };
+        self.confirm.read_by(limit);
+        true
     }
 
     /// Set the record's background flag after a window of checks showing
@@ -2203,9 +2250,9 @@ mod tests {
 mod hysteresis_tests {
     use super::{
         AgentStreams, CHECK_DEBOUNCE, CONFIRM_SPACING, FOREIGN_WRITE_HOLD, IDLE_WITHOUT_STOP,
-        LAUNCH_HOLD, SHELL_IDLE_AFTER, ScreenWrite, ShellLaunch, ShellStreams, State, agent_up,
-        apply_screen_status, hand_shell_back, on_plain_shell_transition, record_status, watch,
-        watch_plain_shell,
+        LAUNCH_HOLD, SHELL_IDLE_AFTER, ScreenWrite, ShellLaunch, ShellStreams, State,
+        TITLE_QUIET_LIMIT, agent_up, apply_screen_status, hand_shell_back,
+        on_plain_shell_transition, record_status, watch, watch_plain_shell,
     };
     use crate::paths::Dirs;
     use crate::screen::rules::{CompiledRules, rules_for};
@@ -3161,6 +3208,238 @@ mod hysteresis_tests {
     async fn a_stale_idle_box_waits_for_the_window_and_a_spinner_cancels_it_plain_shell() {
         let h = start("shell-hook-working-long-idle", true);
         assert_a_stale_idle_box_waits_for_the_window(&h).await;
+    }
+
+    /// The OSC title of a turn that runs.
+    const WORKING_TITLE: &str = "\x1b]0;◐ Fixing tests\x07";
+    /// The OSC title of an idle CLI.
+    const IDLE_TITLE: &str = "\x1b]0;✳ Fixing tests\x07";
+
+    /// The rows a task subject wider than the pane leaves: the spinner wraps
+    /// over rows no rule reads, and the idle box under it wins.
+    const WRAPPED_SPINNER_ROWS: [&str; 2] = [
+        "✶ Fix the widget",
+        "the fetch boundary (first pass), then run the full gate…… · thinking",
+    ];
+
+    /// `bytes` under the OSC `title`.
+    fn under_title(title: &str, bytes: Vec<u8>) -> Vec<u8> {
+        let mut frame = title.as_bytes().to_vec();
+        frame.extend(bytes);
+        frame
+    }
+
+    /// A task subject wider than the pane wraps the spinner over rows no rule
+    /// reads, so the body reads the idle box while the title says the turn
+    /// runs.
+    #[tokio::test(start_paused = true)]
+    async fn a_wrapped_spinner_under_a_working_title_keeps_a_turn_with_no_stop_working() {
+        let h = start_record(
+            "wrapped-spinner",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(under_title(
+            WORKING_TITLE,
+            idle_frame(&WRAPPED_SPINNER_ROWS),
+        ));
+        advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "an idle box under a working title ended a turn with no Stop"
+        );
+    }
+
+    /// The same rows in a shell the spawn typed the agent into: the shell's
+    /// watcher runs the one check too.
+    #[tokio::test(start_paused = true)]
+    async fn a_shell_hosted_wrapped_spinner_under_a_working_title_keeps_its_turn_working() {
+        let h = start_record(
+            "shell-wrapped-spinner",
+            true,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(under_title(
+            WORKING_TITLE,
+            idle_frame(&WRAPPED_SPINNER_ROWS),
+        ));
+        advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a shell-hosted idle box under a working title ended the turn"
+        );
+    }
+
+    /// A CLI that keeps repainting holds its turn past the quiet limit: the
+    /// limit counts silence, never the turn.
+    #[tokio::test(start_paused = true)]
+    async fn a_repainting_wrapped_spinner_outlasts_the_quiet_limit() {
+        let h = start_record(
+            "repainting-spinner",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        for repaint in 0..3 {
+            h.chunk(under_title(
+                WORKING_TITLE,
+                idle_frame(&WRAPPED_SPINNER_ROWS),
+            ));
+            advance(Duration::from_secs(30)).await;
+            assert_eq!(
+                h.status(),
+                SessionStatus::Working,
+                "repaint {repaint} let the turn end"
+            );
+        }
+    }
+
+    /// A dead CLI's title holds the turn only until the terminal has been
+    /// quiet for the limit; the check it scheduled then lets the idle box's
+    /// window open.
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_cli_under_a_stale_working_title_ends_after_the_quiet_limit() {
+        let h = start_record("dead-cli-title", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.chunk(under_title(
+            WORKING_TITLE,
+            idle_frame(&WRAPPED_SPINNER_ROWS),
+        ));
+        advance(TITLE_QUIET_LIMIT.saturating_sub(IDLE_WITHOUT_STOP)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the title let go of the turn before its quiet limit"
+        );
+        advance(IDLE_WITHOUT_STOP + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a dead CLI's title held the turn past its quiet limit"
+        );
+    }
+
+    /// A title that turns working inside the idle box's window cancels it: the
+    /// screen is no longer evidence the turn ended.
+    #[tokio::test(start_paused = true)]
+    async fn a_title_turning_working_mid_window_cancels_it() {
+        let h = start_record(
+            "title-mid-window",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(IDLE_WITHOUT_STOP / 2).await;
+        h.chunk(WORKING_TITLE.as_bytes().to_vec());
+        advance(IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a title turning working mid-window did not cancel it"
+        );
+    }
+
+    /// A title that turns idle ends the turn the working title was holding,
+    /// through the idle box's own window.
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_stop_under_a_working_title_ends_when_the_title_turns() {
+        let h = start_record(
+            "title-turns-idle",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(under_title(
+            WORKING_TITLE,
+            idle_frame(&WRAPPED_SPINNER_ROWS),
+        ));
+        advance(IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the working title did not hold the lost Stop"
+        );
+        h.chunk(IDLE_TITLE.as_bytes().to_vec());
+        advance(IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle title left a lost Stop standing"
+        );
+    }
+
+    /// A lost `Stop` still lands: the same rows under the idle title demote.
+    #[tokio::test(start_paused = true)]
+    async fn a_wrapped_spinner_row_under_the_idle_title_still_demotes_a_lost_stop() {
+        let h = start_record("wrapped-idle", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.chunk(under_title(IDLE_TITLE, idle_frame(&WRAPPED_SPINNER_ROWS)));
+        advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a lost Stop stayed Working"
+        );
+    }
+
+    /// A shell's title over the idle box is no sign of a turn on its own.
+    #[tokio::test(start_paused = true)]
+    async fn a_shell_title_over_the_idle_box_does_not_hold_a_turn() {
+        let h = start_record("shell-title", true, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.chunk(under_title("\x1b]0;MINGW64:/c\x07", idle_frame(&[])));
+        advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a shell title held a hook-driven turn"
+        );
+    }
+
+    /// A real `Stop` waits for nothing: the working title over the idle box
+    /// lands it in the short window.
+    #[tokio::test(start_paused = true)]
+    async fn a_real_stop_under_a_working_title_lands_in_the_short_window() {
+        let h = start_record(
+            "stop-under-title",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &main_stop(false));
+        h.chunk(under_title(WORKING_TITLE, idle_frame(&[])));
+        pass_hold().await;
+        advance(ms(850)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the title delayed a held Stop"
+        );
+        assert!(!h.holds_turn_end(), "the held turn end stayed");
+    }
+
+    /// An Esc interrupt fires no `Stop`: the interrupt row under the working
+    /// title keeps the short window.
+    #[tokio::test(start_paused = true)]
+    async fn an_interrupt_row_under_a_working_title_keeps_the_short_window() {
+        let h = start_record(
+            "interrupt-title",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(under_title(WORKING_TITLE, idle_frame(&[INTERRUPT_ROW])));
+        advance(ms(850)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the title lengthened the interrupt's window"
+        );
     }
 
     /// A hook-driven `Working` whose CLI has ended must still demote: the

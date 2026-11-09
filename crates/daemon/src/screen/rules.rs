@@ -193,6 +193,23 @@ impl CompiledRules {
             .map(|rule| Arc::clone(&rule.name))
     }
 
+    /// Whether the terminal's title says a turn runs: a rule reading the
+    /// title, giving the [`ScreenState::Working`] state, matches the frame.
+    /// The rules are read by region and verdict, so a plugin that names the
+    /// turn's title its own way is read the same, and one with no such rule
+    /// never holds a turn this way.
+    #[must_use]
+    pub fn title_reads_working(&self, screen: &Screen) -> bool {
+        let mut regions = RegionLines::default();
+        self.rules
+            .iter()
+            .filter(|rule| {
+                rule.region == ScreenRegion::Title
+                    && rule.verdict == Verdict::State(ScreenState::Working)
+            })
+            .any(|rule| rule.outcome(regions.get(screen, rule.region)) == Outcome::Matched)
+    }
+
     /// The state the screen shows, with what every rule saw on the way, the
     /// background rules among them.
     #[must_use]
@@ -1452,6 +1469,35 @@ mod tests {
                 rule: None,
                 from_title: false
             }
+        );
+    }
+
+    /// Whether Claude's rules read a working title on a screen titled `title`.
+    fn title_reads_working(title: &str) -> bool {
+        let mut screen = Screen::new(40, 5);
+        screen.feed(format!("\x1b]0;{title}\x07").as_bytes());
+        rules_for(&agent_registry::default_agent()).title_reads_working(&screen)
+    }
+
+    #[test]
+    fn title_reads_working_is_true_only_for_a_working_title() {
+        assert!(title_reads_working("◐ Fixing tests"), "a working title");
+        assert!(!title_reads_working("✳ Fixing tests"), "the idle title");
+        assert!(!title_reads_working("MINGW64:/c"), "a shell's title");
+        let untitled = rules_for(&agent_registry::default_agent());
+        assert!(
+            !untitled.title_reads_working(&Screen::new(40, 5)),
+            "no title at all"
+        );
+    }
+
+    #[test]
+    fn a_plugin_without_title_rules_never_reads_a_working_title() {
+        let mut screen = Screen::new(40, 5);
+        screen.feed("\x1b]0;◐ Fixing tests\x07".as_bytes());
+        assert!(
+            !compiled(Vec::new()).title_reads_working(&screen),
+            "a table with no title rule held a turn"
         );
     }
 

@@ -242,7 +242,7 @@ Where it mounts:
 
 `ScreenRules { rules: Vec<ScreenRule> }` is defined in `crates/agents/api/src/screen_rules.rs` and derives `Serialize` and `Deserialize`. A `ScreenRule` is `{ name, priority, region, matcher, not, verdict }`:
 
-- `region` is a `ScreenRegion`: the last N non-empty rows (`BottomNonEmpty`), the rows between the prompt box's two rules (`PromptBoxBody`), the last N non-empty rows above the prompt box (`AbovePromptBox`) or the OSC title (`Title`).
+- `region` is a `ScreenRegion`: the last N non-empty rows (`BottomNonEmpty`), the rows between the prompt box's two rules (`PromptBoxBody`), the last N non-empty rows above the prompt box (`AbovePromptBox`) or the OSC title (`Title`). A `Title` rule with verdict `Working` also withholds a no-`Stop` `Idle` from a hook-driven turn while the terminal keeps writing (up to the quiet limit, `TITLE_QUIET_LIMIT`), so it matters beyond the ceiling; rows are physical, so a wrapped spinner row can miss its rule.
 - `matcher` is a `LineMatcher`: `Contains` (a literal substring of a row) or `Regex` (matched per row). `not` is a list of matchers that veto the rule when any hits the same region.
 - `verdict` is a `ScreenVerdict`: `Working`, `AwaitingInput`, `Idle`, or `Keep` (an overlay is open, so the status stays as it is).
 - Every enum carries an `Unknown` variant that absorbs a value a newer plugin sends. A table with any bad rule (a structural problem, an unknown region, matcher, guard or verdict, an empty pattern, too many rules, an over-long pattern, too many guards, a regex that does not compile) is refused whole by `ScreenRules::validate`: the daemon logs one error and that agent's screen sets no status.
