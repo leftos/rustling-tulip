@@ -4,6 +4,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.11.1-alpha
+
 ### Fixed
 
 - A Ctrl+click from another computer fetches a file from any git worktree of the session's repo, and says why when a path is outside them.

@@ -20,7 +20,7 @@ members = [
 exclude = ["vendor/gpui"]
 
 [workspace.package]
-version = "0.11.0-alpha"
+version = "0.11.1-alpha"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
