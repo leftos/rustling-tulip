@@ -63,6 +63,14 @@ export const FEATURE_DETAILED_LOGGING = "detailed_logging";
 export const FEATURE_FOLDER_FETCH = "folder_fetch";
 
 /**
+ * `Welcome.features` entry: the daemon lists the folders a session's link
+ * paths may lie in ([`ClientMessage::ListSessionFolders`]) and serves
+ * `FetchFile`, `FetchFolder` and `StatPath` from every git worktree of a
+ * registered repo. A client asks only when the connected daemon lists it.
+ */
+export const FEATURE_SESSION_FOLDERS = "session_folders";
+
+/**
  * `Welcome.features` entry: the daemon keeps a default shell for plain-shell
  * sessions and for the shell that hosts an interactive agent
  * ([`ClientMessage::SetDefaultShell`], [`DaemonMessage::DefaultShell`]) and
@@ -2108,6 +2116,19 @@ export interface EnvName {
 }
 
 /**
+ * One folder a session's link paths may lie in, as
+ * [`DaemonMessage::SessionFolders`] lists it. A hint: the daemon's check at
+ * fetch time is the boundary.
+ */
+export interface SessionFolder {
+  /** The registered repo to name when fetching from this folder. */
+  repo_id: string;
+  repo_name: string;
+  /** The folder, in git's or the registry's spelling. */
+  path: string;
+}
+
+/**
  * What a [`ClientMessage::StatPath`] path names, as [`DaemonMessage::PathStat`]
  * reports it.
  */
@@ -3493,7 +3514,10 @@ export type ClientMessage =
   /**
    * Download a file from the repo root (or one of its session worktrees).
    * `path` is relative to that root; the daemon refuses `..`, absolute
-   * paths and anything resolving outside the root. The daemon answers
+   * paths and anything resolving outside the root. A `worktree_path` must
+   * be the registered path, a folder `git worktree list` names for the
+   * repo, or a folder under the worktrees root; the daemon checks it on
+   * each request and uses its own spelling of it. The daemon answers
    * with [`DaemonMessage::FileFetchStarted`], then
    * [`DaemonMessage::FileChunk`]s, then [`DaemonMessage::FileFetchDone`],
    * or [`DaemonMessage::FileFetchError`] at any point.
@@ -3507,7 +3531,10 @@ export type ClientMessage =
    * and `""` or `"."` names the root itself; the daemon refuses `..`,
    * absolute or prefixed paths, anything resolving outside the root, a
    * `worktree_path` that is the worktrees root itself, and a target that
-   * is not a folder. It walks the folder following no link: links,
+   * is not a folder. A `worktree_path` must be the registered path, a
+   * folder `git worktree list` names for the repo, or a folder under the
+   * worktrees root; the daemon checks it on each request and uses its own
+   * spelling of it. It walks the folder following no link: links,
    * entries that are neither files nor folders, names that are not
    * Unicode, `.git` and the ignored folders (`node_modules`, `target`,
    * `.venv`, caches, at any depth) are left out. A folder over 20 000
@@ -3532,6 +3559,15 @@ export type ClientMessage =
    * `id`: Client-assigned request id, echoed on the answer.
    */
   | { type: "stat_path"; id: string; repo_id: string; worktree_path?: string | null; path: string }
+  /**
+   * List the folders this session's link paths may lie in: the daemon
+   * answers with [`DaemonMessage::SessionFolders`]. A hint for choosing
+   * which `repo_id` and `worktree_path` to fetch with: the check at fetch
+   * time is the boundary, and a client may ask about any session.
+   *
+   * `id`: Client-assigned request id, echoed on the answer.
+   */
+  | { type: "list_session_folders"; id: string; session_id: string }
   /**
    * Stop the [`ClientMessage::FetchFile`] or [`ClientMessage::FetchFolder`]
    * transfer with this id. Once the daemon sees the cancel it queues
@@ -4994,6 +5030,15 @@ export type DaemonMessage =
    * its size in bytes for a file (0 for anything else).
    */
   | { type: "path_stat"; id: string; kind: PathKind; size: number }
+  /**
+   * The answer to [`ClientMessage::ListSessionFolders`]: a workspace's
+   * member worktrees, registered paths and git worktrees, in member order,
+   * or for a shell the repo holding its working directory. A hint: the
+   * check at fetch time is the boundary. `error` carries an unknown
+   * session, or the reason a repo's worktrees could not be read, with the
+   * folders that did read.
+   */
+  | { type: "session_folders"; id: string; folders: SessionFolder[]; error?: string | null }
   /**
    * The answer to [`ClientMessage::UploadFile`]: the file is saved at
    * `path`, the absolute host path as display text.

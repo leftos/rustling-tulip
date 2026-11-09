@@ -60,8 +60,7 @@ pub(crate) use self::spawn::spawn_session;
 /// The account login's own terminal session.
 pub(crate) use self::spawn::{CommandSession, CommandSpec, agent_program, spawn_command_session};
 
-use self::connection::{AuthKind, ConnCtx, cancel_fetch, client_session, start_fetch};
-use self::git::repo_target_or_err;
+use self::connection::{AuthKind, ConnCtx, cancel_fetch, client_session};
 use self::hooks::{hook_handler, presented_bearer, proof_handler};
 use self::recovery::{reattach_orphans, start_history_broadcaster};
 use self::remote::{
@@ -72,10 +71,10 @@ use self::settings::start_keep_awake;
 use crate::integrity::{IntegrityLevel, LoopbackPeer, PeerIntegrity};
 use crate::orphan::OrphanMeta;
 use crate::paths::Dirs;
+use crate::pty_state;
 use crate::session::SessionRegistry;
 use crate::state::AppState;
 use crate::tailnet_listener::TailnetListener;
-use crate::{file_fetch, pty_state};
 use anyhow::Context as _;
 use axum::Router;
 use axum::extract::State;
@@ -1007,20 +1006,10 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::ListEnvNames { .. }
         | ClientMessage::ListSessionHistory { .. }
         | ClientMessage::RecoverSessions { .. }) => recovery::handle(hub, m, ctx).await?,
-        ClientMessage::FetchFile {
-            id,
-            repo_id,
-            worktree_path,
-            path,
-        } => {
-            let target = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())
-                .and_then(|root| file_fetch::confine_path(&root, &path));
-            start_fetch(ctx, id, target, |id, path, tx, token| {
-                tokio::spawn(file_fetch::stream_file(id, path, tx, token))
-            })
-            .await;
-        }
-        m @ (ClientMessage::FetchFolder { .. } | ClientMessage::StatPath { .. }) => {
+        m @ (ClientMessage::FetchFile { .. }
+        | ClientMessage::FetchFolder { .. }
+        | ClientMessage::StatPath { .. }
+        | ClientMessage::ListSessionFolders { .. }) => {
             folder::handle(hub, m, ctx).await;
         }
         m @ ClientMessage::UploadFile { .. } => upload::handle(hub, m, ctx).await?,

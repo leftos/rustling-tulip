@@ -332,6 +332,30 @@ pub async fn list_worktrees(repo: &Path) -> anyhow::Result<Vec<(String, PathBuf)
         .collect())
 }
 
+/// Every folder `git worktree list` names for `repo`, main worktree first and
+/// prunable entries left out, in git's own spelling. A folder is named here
+/// on git's word alone: git checks no back-link and does not see a junction
+/// swapped in, so a caller deciding access checks the folder itself. Bounded
+/// like every [`git_inspect`](crate::git_inspect) read, and takes no repo lock.
+///
+/// `-z`, since a newline in a name can forge an entry on a Unix host. A git
+/// too old for it exits non-zero, which is an error here.
+pub(crate) async fn worktree_folders(repo: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let stdout =
+        crate::git_inspect::run_git_read(repo, &["worktree", "list", "--porcelain", "-z"]).await?;
+    Ok(folders_in_z_list(&stdout))
+}
+
+/// The folders of `git worktree list --porcelain -z` output, prunable ones
+/// left out.
+fn folders_in_z_list(stdout: &str) -> Vec<PathBuf> {
+    parse_worktree_fields(stdout.split('\0'))
+        .into_iter()
+        .filter(|entry| !entry.prunable)
+        .map(|entry| entry.path)
+        .collect()
+}
+
 /// One worktree of `git worktree list --porcelain`.
 #[derive(Debug)]
 struct WorktreeEntry {
@@ -352,10 +376,17 @@ struct WorktreeEntry {
 /// `prunable [reason]` and `locked [reason]` each mark the entry above them;
 /// either line may carry a reason after a space, and `locked` may stand bare.
 fn parse_worktree_list(stdout: &str) -> Vec<WorktreeEntry> {
+    parse_worktree_fields(stdout.lines())
+}
+
+/// [`parse_worktree_list`] over the output's fields: its lines, or the
+/// NUL-separated fields of `-z`, where an empty field ends a record as a blank
+/// line does.
+fn parse_worktree_fields<'a>(fields: impl Iterator<Item = &'a str>) -> Vec<WorktreeEntry> {
     let mut entries: Vec<WorktreeEntry> = Vec::new();
     let mut current: Option<WorktreeEntry> = None;
 
-    for line in stdout.lines() {
+    for line in fields {
         if let Some(path) = line.strip_prefix("worktree ") {
             if let Some(entry) = current.take() {
                 entries.push(entry);
@@ -1902,6 +1933,22 @@ mod tests {
             "every target skipped is an error, not a merge"
         );
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_z_list_keeps_a_newline_in_a_name_and_drops_prunable_entries() {
+        let stdout = "worktree /repo/main\0HEAD 1\0branch refs/heads/main\0\0\
+                      worktree /repo/a\nworktree /forged\0HEAD 2\0detached\0\0\
+                      worktree /repo/gone\0HEAD 3\0prunable gitdir file points nowhere\0\0\
+                      worktree /repo/locked\0HEAD 4\0locked why\nnot\0\0";
+        assert_eq!(
+            folders_in_z_list(stdout),
+            [
+                PathBuf::from("/repo/main"),
+                PathBuf::from("/repo/a\nworktree /forged"),
+                PathBuf::from("/repo/locked"),
+            ]
+        );
     }
 
     #[test]

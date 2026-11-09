@@ -12,10 +12,11 @@
 #[expect(dead_code, reason = "each spec file uses its own share of the helper")]
 mod support;
 
+use std::process::Command;
 use std::sync::Arc;
 
 use daemon_client::device_tokens::{DeviceTokenStore as _, MemoryTokens};
-use gpui::TestAppContext;
+use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonMessage, RemoteState};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
@@ -653,6 +654,100 @@ fn remote_folder_fetch_lands_the_tree_byte_exact(
         "b.bin landed byte-exact"
     );
     assert!(device.opened().is_empty(), "a fetched folder does not open");
+}
+
+/// A Ctrl+clicked path in a worktree `git worktree add` cut beside the
+/// session's repo is fetched from the host's own list of the session's
+/// folders, and lands byte-exact under the host's and repo's download
+/// folder.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn remote_fetch_from_a_sibling_worktree_lands_the_file(
+    host_cx: &mut TestAppContext,
+    device_cx: &mut TestAppContext,
+) {
+    const FILE: &[u8] = b"rt-e2e sibling worktree note\n";
+    let daemon = LiveDaemon::start_remote("remote-sibling");
+    let home = LiveDaemon::start("remote-sibling-home");
+    let repo = daemon.git_fixture();
+    let name = repo
+        .file_name()
+        .expect("the fixture dir has a name")
+        .to_string_lossy()
+        .into_owned();
+    let sibling = repo
+        .parent()
+        .expect("the fixture has a parent")
+        .join(format!("{name}.wt"))
+        .join("s")
+        .join(&name);
+    std::fs::create_dir_all(&sibling).expect("create the sibling worktree folder");
+    let added = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "add", "-b", "sibling"])
+        .arg(&sibling)
+        .status()
+        .expect("run git (is it on PATH?)");
+    assert!(added.success(), "git worktree add failed: {added}");
+    let note = sibling.join("note.txt");
+    std::fs::write(&note, FILE).expect("write the worktree's note");
+
+    let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
+    let port = serve_remote(&mut host, &host_client, &daemon);
+    host_client.send(ClientMessage::AddRepo {
+        path: repo.to_string_lossy().into_owned(),
+        name: None,
+    });
+    host.wait_until("the fixture repo in state.json", |_| {
+        daemon.repo_id(&repo).is_some()
+    });
+
+    let tokens = Arc::new(MemoryTokens::default());
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
+    wait_not_approved(&mut device, &device_client, 0);
+    pair(&mut host, &host_client, &mut device, &device_client);
+    let root = home.dir().join("remote-files");
+    let set = root.clone();
+    device.root_update(move |view, _, _| view.set_remote_files_root(set));
+
+    device_client.send(spawn_shell(&repo));
+    let pane = place_remote_session(&mut device);
+    device.wait_for_row(&pane, "the shell's prompt", |row| {
+        row.trim_end().ends_with('>')
+    });
+
+    let shown = note.to_string_lossy().replace('\\', "/");
+    device.type_into(&pane, &format!("echo {shown}\n"));
+    let (col, row) = text_row(&mut device, &pane, &shown);
+    let at = device.cell_center(&pane, col + 2, row);
+    device.click(at, Modifiers::secondary_key());
+
+    let landed = root.join(REMOTE_HOST).join(&name).join("note.txt");
+    device.wait_until("the sibling worktree's note to land", |_| landed.exists());
+    assert_eq!(
+        std::fs::read(&landed).expect("the note landed"),
+        FILE,
+        "{}",
+        landed.display()
+    );
+}
+
+/// Waits for the first row of `pane` holding `text` and returns the column
+/// its first character sits in, and the row's index.
+fn text_row(h: &mut Harness<'_>, pane: &str, text: &str) -> (usize, usize) {
+    let mut found = None;
+    h.wait_until("the text on a row of the pane", |h| {
+        found = h.root(|root, app| {
+            root.pane_grid_text(pane, app).and_then(|rows| {
+                rows.iter().enumerate().find_map(|(row, line)| {
+                    line.find(text).map(|at| (line[..at].chars().count(), row))
+                })
+            })
+        });
+        found.is_some()
+    });
+    found.expect("the wait just found it")
 }
 
 /// Turning remote access off closes the served connection, and the device's

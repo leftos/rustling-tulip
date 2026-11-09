@@ -75,7 +75,7 @@ async fn run_git_read_raw(repo: &Path, args: &[&str]) -> anyhow::Result<(bool, S
 }
 
 /// [`run_git_read_raw`] whose non-zero exit is an error carrying git's stderr.
-async fn run_git_read(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
+pub(crate) async fn run_git_read(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
     let (success, stdout, stderr) = run_git_read_raw(repo, args).await?;
     if !success {
         return Err(anyhow!("git {args:?} failed: {stderr}"));
@@ -806,13 +806,17 @@ pub(crate) mod test_support {
     /// works whatever the machine's global git config says.
     pub(crate) async fn init_repo(tag: &str) -> TestDir {
         let dir = TestDir::new(tag);
-        let root = dir.path();
+        init_at(dir.path()).await;
+        dir
+    }
+
+    /// [`init_repo`] at `root`, an existing folder.
+    pub(crate) async fn init_at(root: &Path) {
         git(root, &["init"]).await;
         git(root, &["config", "user.email", "t@example.com"]).await;
         git(root, &["config", "user.name", "Test"]).await;
         // A global commit.gpgsign=true without a usable key would block commits.
         git(root, &["config", "commit.gpgsign", "false"]).await;
-        dir
     }
 
     /// Write `body` and commit it, so a later write is an uncommitted edit.

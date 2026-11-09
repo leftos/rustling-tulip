@@ -11,12 +11,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
+use protocol::SessionFolder;
 
 use crate::folder_unpack::Announced;
 
+use crate::fetch_link::Root;
 use crate::html_media::{
     MAX_MEDIA_BATCH_BYTES, MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE, MEDIA_FETCHES_IN_FLIGHT,
 };
+use crate::links::TerminalLinkCandidate;
 use crate::open::OpenJob;
 use crate::target::{HostKey, Target};
 
@@ -313,6 +316,33 @@ pub fn display_host_path(resolved: &str) -> String {
         rest.to_owned()
     } else {
         resolved.to_owned()
+    }
+}
+
+/// Why a fetch of `path` is refused though the host lists `folders`: the
+/// listing `error` comes first, then the repos the folders belong to.
+#[must_use]
+pub fn outside_detail(
+    folders: &[SessionFolder],
+    error: Option<&str>,
+    host: &str,
+    path: &str,
+) -> String {
+    if let Some(reason) = error {
+        return format!("Couldn't read the git worktrees on {host}: {reason}.");
+    }
+    let mut repos: Vec<(&str, &str)> = Vec::new();
+    for folder in folders {
+        if !repos.iter().any(|(id, _)| *id == folder.repo_id) {
+            repos.push((folder.repo_id.as_str(), folder.repo_name.as_str()));
+        }
+    }
+    match repos.as_slice() {
+        [] => format!(
+            "This shell isn't in a repo on {host} or one of its git worktrees, so {path} can't be fetched."
+        ),
+        [(_, name)] => format!("{path} is outside {name} and its git worktrees."),
+        _ => format!("{path} is outside this session's repos and their git worktrees."),
     }
 }
 
@@ -1047,6 +1077,24 @@ impl PendingStat {
     }
 }
 
+/// A link's Ctrl+click waiting on the host's list of the folders its session
+/// may lie in: the link as the client read it, and the button that asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAsk {
+    /// The host the link's pane is on.
+    pub(crate) host: HostKey,
+    /// The link's candidates, in the order the client would read them.
+    pub(crate) candidates: Vec<TerminalLinkCandidate>,
+    /// The link's text, as its toast and its refusal name it.
+    pub(crate) target: String,
+    /// The pane's working directory, for a relative link.
+    pub(crate) cwd: Option<String>,
+    /// The session's own folders, the only ones a relative candidate joins.
+    pub(crate) own_roots: Vec<Root>,
+    /// Whether the saved copy opens in the viewer (Ctrl+Shift+click).
+    pub(crate) prefer_viewer: bool,
+}
+
 /// What a fetch's done toast offers once the fetch has ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DoneAction {
@@ -1065,8 +1113,12 @@ pub struct FetchRegistry {
     next_id: u64,
     next_group: u64,
     next_stat: u64,
+    next_ask: u64,
     entries: HashMap<String, FetchEntry>,
     stats: HashMap<String, PendingStat>,
+    /// Each link's ask for its session's folders, by the ask's id, whose
+    /// toast shows.
+    folder_asks: HashMap<String, PendingAsk>,
     /// The action of each ended fetch's done toast, by the toast's key,
     /// while the toast shows.
     done: HashMap<String, DoneAction>,
@@ -1085,8 +1137,10 @@ impl FetchRegistry {
             next_id: 0,
             next_group: 0,
             next_stat: 0,
+            next_ask: 0,
             entries: HashMap::new(),
             stats: HashMap::new(),
+            folder_asks: HashMap::new(),
             done: HashMap::new(),
             unpack_hold: None,
         }
@@ -1148,6 +1202,19 @@ impl FetchRegistry {
         Some((id, reading))
     }
 
+    /// Records a link's ask `ask` under a new id and returns it.
+    pub fn begin_folder_ask(&mut self, ask: PendingAsk) -> String {
+        self.next_ask += 1;
+        let id = format!("ask-{}-{}", self.launch, self.next_ask);
+        self.folder_asks.insert(id.clone(), ask);
+        id
+    }
+
+    /// Ends the ask `id`, returning it.
+    pub fn take_folder_ask(&mut self, id: &str) -> Option<PendingAsk> {
+        self.folder_asks.remove(id)
+    }
+
     /// Whether `id` is a stat waiting on its answer.
     #[cfg(test)]
     #[must_use]
@@ -1175,9 +1242,19 @@ impl FetchRegistry {
         self.stats.remove(id)
     }
 
-    /// Drops every stat from `host`.
-    pub fn drop_stats_of(&mut self, host: &HostKey) {
+    /// Drops every stat and folder ask from `host`, returning the dropped
+    /// asks' ids, whose toasts go with them.
+    pub fn drop_stats_of(&mut self, host: &HostKey) -> Vec<String> {
         self.stats.retain(|_, stat| stat.host != *host);
+        let mut dropped = Vec::new();
+        self.folder_asks.retain(|id, ask| {
+            let keep = ask.host != *host;
+            if !keep {
+                dropped.push(id.clone());
+            }
+            keep
+        });
+        dropped
     }
 
     /// [`Self::new_group`], keyed `key`: a link's stat id, whose early
@@ -1424,13 +1501,14 @@ mod tests {
     use super::{
         AlreadyFetching, DoneAction, FetchEntry, FetchRegistry, FetchRequest, MediaBatch, MediaEnd,
         WriteOutcome, WriteStep, display_host_path, download_path, folder_download_path,
-        host_folder, host_label, is_under, parent_folder_request, part_path, run_writer,
-        sanitize_segment,
+        host_folder, host_label, is_under, outside_detail, parent_folder_request, part_path,
+        run_writer, sanitize_segment,
     };
     use crate::folder_unpack::Announced;
     use crate::html_media::{MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE};
     use crate::target::{HostKey, Target};
     use crate::temp_dir::TempDir;
+    use protocol::SessionFolder;
 
     fn chunk(seq: u64, data: &[u8]) -> WriteStep {
         WriteStep::Chunk {
@@ -1984,6 +2062,62 @@ mod tests {
         assert!(
             !registry.is_stat(&other),
             "a closed host's stats are dropped"
+        );
+    }
+
+    /// The session folder naming `path` in the repo `repo`.
+    fn folder(repo: &str, path: &str) -> SessionFolder {
+        SessionFolder {
+            repo_id: repo.to_owned(),
+            repo_name: repo.to_owned(),
+            path: path.to_owned(),
+        }
+    }
+
+    #[test]
+    fn outside_detail_for_a_failed_listing() {
+        assert_eq!(
+            outside_detail(
+                &[folder("r1", "C:/wt/x")],
+                Some("git worktree list failed"),
+                "box",
+                r"D:\elsewhere\a.rs",
+            ),
+            "Couldn't read the git worktrees on box: git worktree list failed."
+        );
+    }
+
+    #[test]
+    fn outside_detail_for_one_repo() {
+        assert_eq!(
+            outside_detail(
+                &[folder("r1", "C:/wt/x"), folder("r1", "C:/wt/s/r1")],
+                None,
+                "box",
+                "D:/elsewhere/a.rs",
+            ),
+            "D:/elsewhere/a.rs is outside r1 and its git worktrees."
+        );
+    }
+
+    #[test]
+    fn outside_detail_for_several_repos() {
+        assert_eq!(
+            outside_detail(
+                &[folder("r1", "C:/wt/x"), folder("r2", "C:/repos/r2")],
+                None,
+                "box",
+                "D:/elsewhere/a.rs",
+            ),
+            "D:/elsewhere/a.rs is outside this session's repos and their git worktrees."
+        );
+    }
+
+    #[test]
+    fn outside_detail_for_a_shell_outside_every_repo() {
+        assert_eq!(
+            outside_detail(&[], None, "box", r"D:\elsewhere\a.rs"),
+            r"This shell isn't in a repo on box or one of its git worktrees, so D:\elsewhere\a.rs can't be fetched."
         );
     }
 
