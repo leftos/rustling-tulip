@@ -55,6 +55,10 @@ const DOT_LEFT: f32 = GUTTER - 10.0;
 /// How far right of a dot's right edge its menu opens.
 const MENU_GAP: f32 = 4.0;
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent switches — host locality, query answering, a pending dead key, focus at the press — not one state"
+)]
 pub struct TerminalPane {
     /// The grid pane this terminal fills, which names its dots.
     pane_id: String,
@@ -84,6 +88,10 @@ pub struct TerminalPane {
     /// The last cell a motion report named, so a move inside a cell sends
     /// nothing.
     last_motion: Option<(usize, usize)>,
+    /// Whether this pane held the keyboard when the press now being handled
+    /// began. Read in the capture phase, since a palette's close can hand
+    /// focus back to this pane before the press reaches `on_mouse_down`.
+    focused_at_press: bool,
     /// Whether this pane may size the session's PTY yet.
     size_gate: SizeGate,
     /// Whether this pane answers its session's terminal queries: one pane
@@ -547,6 +555,7 @@ impl TerminalPane {
             layout: None,
             tracker: Tracker::default(),
             last_motion: None,
+            focused_at_press: false,
             size_gate: SizeGate::default(),
             answers_queries: false,
             marked: None,
@@ -1577,6 +1586,14 @@ impl TerminalPane {
         self.send_to_child(&mouse::encode(&report, encoding), automatic);
     }
 
+    /// Whether `event`, a press with no gesture in progress, would be reported
+    /// to the program. Shift+right-click is the way to a program's own right
+    /// button, so it is reported whatever Shift would do on another button.
+    fn press_would_report(&self, event: &MouseDownEvent) -> bool {
+        let shift = event.modifiers.shift && event.button != MouseButton::Right;
+        self.tracker.idle() && mouse::reports(self.term.mode(), shift)
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -1622,6 +1639,13 @@ impl TerminalPane {
             if text.is_some_and(|text| !text.is_empty()) {
                 self.paste(cx);
             }
+            cx.notify();
+            return;
+        }
+        // The press that brings focus to a pane only focuses it: under mouse
+        // reporting it would otherwise reach the program, and a click meant to
+        // focus a pane could answer a question on screen.
+        if !self.focused_at_press && self.press_would_report(event) {
             cx.notify();
             return;
         }
@@ -2251,6 +2275,9 @@ impl Render for TerminalPane {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, _| {
+                this.focused_at_press = this.focus.is_focused(window);
+            }))
             .on_any_mouse_down(cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move));
         for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {

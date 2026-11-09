@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - A damaged settings file no longer copies its contents, which could include a secret, into the log.
+- A click that focuses a pane or dismisses the jump palette no longer reaches the program, so it can't answer a question on screen.
 
 ## v0.11.0-alpha
 

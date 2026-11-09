@@ -790,6 +790,125 @@ fn two_panes_on_s1<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a>
     Harness::with(cx, dir, &fixture)
 }
 
+/// `two_panes_on_s1` with mouse reporting on and `p1` focused and drained,
+/// so a press on `p2` is the first one there with nothing left over.
+fn one_focused_pane_reporting<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = two_panes_on_s1(cx, dir);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.pty("s1", b"\x1b[?1000h\x1b[?1006h");
+    // The window starts inactive and gets no focus events until it is
+    // activated, as the desktop does; the click's frame lets it land.
+    h.cx.update(|window, _| window.activate_window());
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent_input("s1");
+    h
+}
+
+#[gpui::test]
+fn the_first_press_on_an_unfocused_pane_only_focuses_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+
+    let at = h.cell_center("p2", 2, 3);
+    h.click(at, Modifiers::none());
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the press that brings focus to a pane reaches no program"
+    );
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "the first press still focuses the pane"
+    );
+}
+
+#[gpui::test]
+fn the_second_press_on_a_pane_reaches_the_program(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+
+    let at = h.cell_center("p2", 2, 3);
+    h.click(at, Modifiers::none());
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the first press only focuses p2"
+    );
+
+    h.click(at, Modifiers::none());
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\x1b[<0;3;4M\x1b[<0;3;4m",
+        "the second press, on the now focused pane, is reported"
+    );
+}
+
+#[gpui::test]
+fn a_drag_that_brings_focus_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+
+    let (from, to) = (h.cell_center("p2", 0, 0), h.cell_center("p2", 4, 0));
+    h.drag(from, to, [Modifiers::none(); 2]);
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "nor does the release, or the drag it was in: no gesture began"
+    );
+}
+
+#[gpui::test]
+fn a_shift_right_press_that_brings_focus_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+
+    let at = h.cell_center("p2", 2, 3);
+    h.right_click_with(at, Modifiers::shift());
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "a Shift+right press that brings focus reports nothing"
+    );
+}
+
+#[gpui::test]
+fn a_press_that_closes_the_jump_palette_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+    h.keys("ctrl-shift-p");
+    assert!(
+        h.root(|root, _| root.quick_jump_open()),
+        "the palette is open"
+    );
+
+    // The bottom row of p1, well below the top-centred palette.
+    let row = h.grid_text("p1").len() - 1;
+    let at = h.cell_center("p1", 2, row);
+    for selector in ["quick-jump-query", "quick-jump-rows"] {
+        assert!(
+            !h.bounds(selector).contains(&at),
+            "the press is outside {selector}"
+        );
+    }
+
+    h.click(at, Modifiers::none());
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the press that closes the palette reaches no program"
+    );
+    assert!(
+        !h.root(|root, _| root.quick_jump_open()),
+        "the palette closed"
+    );
+
+    h.click(at, Modifiers::none());
+    let want = format!("\x1b[<0;3;{}M\x1b[<0;3;{}m", row + 1, row + 1);
+    assert_eq!(
+        h.sent_input("s1"),
+        want.as_bytes(),
+        "the second press, on the now focused pane, is reported"
+    );
+}
+
 #[gpui::test]
 fn two_panes_on_one_session_answer_a_live_query_once(cx: &mut TestAppContext) {
     let dir = TestDir::new();
