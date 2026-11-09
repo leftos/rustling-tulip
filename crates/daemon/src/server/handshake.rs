@@ -246,17 +246,18 @@ fn authorize_device(
     Some(live.register(&device_id, life.clone()))
 }
 
-/// The capabilities this daemon lists in `Welcome.features` (`protocol::FEATURE_*`).
-/// A feature joins only once the daemon fully honours it, since a client that
-/// sees it listed offers the capability to the user.
 /// The `screen` subcommand's dump: a daemon listing it answers `DumpScreen`
 /// with a session's grid and the trace of its screen rules over it.
 const FEATURE_SCREEN_DUMP: &str = "screen_dump";
 
-/// The features every daemon lists, whatever its state. The account and gate
-/// state features are not here: they join in [`welcome_message`] only when
-/// the hub holds an accounts service or a gate state, since a daemon without
-/// one cannot honour them.
+/// The capabilities this daemon lists in `Welcome.features` (`protocol::FEATURE_*`).
+/// A feature joins only once the daemon fully honours it, since a client that
+/// sees it listed offers the capability to the user.
+///
+/// These are the features every daemon lists, whatever its state. The account
+/// and gate state features are not here: they join in [`welcome_message`]
+/// only when the hub holds an accounts service or a gate state, since a
+/// daemon without one cannot honour them.
 const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_AGENT_COMMANDS,
     protocol::FEATURE_DEVICE_PAIRING,
@@ -273,6 +274,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_UPLOAD_FILE,
     protocol::FEATURE_CLIENT_PRESENCE,
     protocol::FEATURE_TYPED_PROMPT_ANSWERS,
+    protocol::FEATURE_REMOTE_UPDATE,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
@@ -660,6 +662,10 @@ mod tests {
         assert!(
             !DAEMON_FEATURES.contains(&protocol::FEATURE_ACCOUNT_EVENTS),
             "the account events feature joins only with the accounts feature"
+        );
+        assert!(
+            DAEMON_FEATURES.contains(&protocol::FEATURE_REMOTE_UPDATE),
+            "every daemon answers a remote update, if only with why it cannot"
         );
     }
 

@@ -94,6 +94,13 @@ pub fn feed_base() -> String {
     }
 }
 
+/// Whether this build checks the feed: a build without debug assertions
+/// always does, a dev build only with [`FEED_BASE_VAR`] set.
+#[must_use]
+pub fn checks_allowed() -> bool {
+    !cfg!(debug_assertions) || std::env::var_os(FEED_BASE_VAR).is_some_and(|v| !v.is_empty())
+}
+
 /// A platform the release feed publishes update assets for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {

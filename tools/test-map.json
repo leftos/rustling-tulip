@@ -143,6 +143,12 @@
     },
     {
       "paths": [
+        "crates/daemon/src/server/update.rs"
+      ],
+      "filter": "package(daemon) & test(/^server::update::/)"
+    },
+    {
+      "paths": [
         "crates/daemon/src/server/pwa_static.rs",
         "crates/daemon/src/server/remote.rs"
       ],

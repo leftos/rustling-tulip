@@ -1875,6 +1875,7 @@ dependencies = [
  "tracer-protocol",
  "tracing",
  "tracing-subscriber",
+ "update-core",
  "uuid",
  "which 8.0.2",
  "windows 0.61.3",

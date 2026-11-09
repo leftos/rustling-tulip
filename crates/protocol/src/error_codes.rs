@@ -47,7 +47,8 @@ pub const RESUME_FAILED: &str = "resume_failed";
 /// A repo's or workspace's preset list could not be read: an unknown repo or
 /// workspace, or a `presets.json` that cannot be read or parsed.
 pub const PRESETS_FAILED: &str = "presets_failed";
-/// Another writer is typing into the session; retry.
+/// Another writer is typing into the session, or another update is running;
+/// retry.
 pub const BUSY: &str = "busy";
 /// The terminal's state does not take a chat message now.
 pub const CHAT_REFUSED: &str = "chat_refused";
@@ -73,6 +74,10 @@ pub const GATE_WRITE_FAILED: &str = "gate_write_failed";
 /// A request carried more data than the daemon accepts, such as a file over
 /// [`crate::UPLOAD_MAX_BYTES`] in [`crate::ClientMessage::UploadFile`].
 pub const TOO_LARGE: &str = "too_large";
+/// The host cannot update itself; the message says why.
+pub const UPDATE_REFUSED: &str = "update_refused";
+/// The host's own app cancelled the update before it started.
+pub const UPDATE_CANCELED: &str = "update_canceled";
 
 /// Every code in the catalogue.
 pub const ALL: &[&str] = &[
@@ -107,6 +112,8 @@ pub const ALL: &[&str] = &[
     ACCOUNT_FAILED,
     GATE_WRITE_FAILED,
     TOO_LARGE,
+    UPDATE_REFUSED,
+    UPDATE_CANCELED,
 ];
 
 #[cfg(test)]

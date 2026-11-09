@@ -1806,7 +1806,6 @@ fn open_new_tab(
 )]
 mod tests {
     use super::*;
-    use crate::paths::Dirs;
     use crate::session::SessionRegistry;
     use crate::state::AppState;
     use std::sync::{
@@ -2911,23 +2910,7 @@ mod tests {
 
     fn test_hub() -> (Hub, broadcast::Receiver<PresetEvent>, ScratchDir) {
         let scratch = ScratchDir::new();
-        let config = scratch.path().join("config");
-        let sessions_dir = config.join("sessions");
-        let worktrees_dir = scratch.path().join("worktrees");
-        let binaries_dir = scratch.path().join("binaries");
-        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
-        std::fs::create_dir_all(&worktrees_dir).expect("create worktrees dir");
-        std::fs::create_dir_all(&binaries_dir).expect("create binaries dir");
-        let dirs = Dirs {
-            config: config.clone(),
-            state_file: config.join("state.json"),
-            handshake_file: config.join("daemon.json"),
-            remote_config_file: config.join("remote.json"),
-            sessions_dir,
-            worktrees_dir,
-            binaries_dir,
-            bin_templates: None,
-        };
+        let dirs = crate::server::test_support::scratch_dirs(scratch.path(), None);
         let state = Arc::new(AppState::load_or_default(&dirs).expect("load test state"));
         let sessions = SessionRegistry::new(dirs.clone());
         let (attention_tx, _) = mpsc::unbounded_channel();
@@ -3008,6 +2991,7 @@ mod tests {
             peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
             accounts: None,
             gate_state: None,
+            host_update: Arc::new(crate::server::HostUpdate::nothing_installed()),
         };
         (hub, preset_rx, scratch)
     }

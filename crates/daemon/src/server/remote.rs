@@ -597,6 +597,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_tailnet_connection_is_not_refused_a_remote_update() {
+        let msg = ClientMessage::RemoteUpdate {
+            request_id: "u1".to_owned(),
+        };
+        assert_eq!(
+            host_only_refusal(&msg, &AuthKind::Tailnet(test_peer())),
+            None,
+            "{msg:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_tailnet_connection_is_refused_account_administration() {
         let (hub, _scratch, service) = accounts_hub("tailnet-account-admin");

@@ -144,6 +144,12 @@ export const FEATURE_CLIENT_PRESENCE = "client_presence";
 export const FEATURE_TYPED_PROMPT_ANSWERS = "typed_prompt_answers";
 
 /**
+ * `Welcome.features` entry: the daemon answers [`ClientMessage::RemoteUpdate`]:
+ * it updates itself to the newest release, or says why it cannot.
+ */
+export const FEATURE_REMOTE_UPDATE = "remote_update";
+
+/**
  * The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
  * right after `Welcome` when its `Hello` carried no valid device token: the
  * connection stays open as a pairing connection. The daemon also answers it
@@ -3270,6 +3276,15 @@ export type ClientMessage =
    */
   | { type: "upload_file"; request_id: string; session_id: string; name: string; data_b64: string }
   /**
+   * Ask the host to update itself to the newest official release; the
+   * request names no file, version or path. Answered by
+   * [`DaemonMessage::RemoteUpdateStarted`] or an `Error` with this
+   * `request_id`.
+   *
+   * `request_id`: Client-assigned request id, echoed on the answer.
+   */
+  | { type: "remote_update"; request_id: string }
+  /**
    * `claim`: True when the sending pane had keyboard or pointer input in the
    * last few seconds, or when this client just resized the pane (its
    * window, a split divider, the sidebar, or its own font change):
@@ -5065,6 +5080,11 @@ export type DaemonMessage =
    */
   | { type: "file_uploaded"; request_id: string; session_id: string; path: string }
   /**
+   * The host has launched the installer for `version`; it restarts
+   * shortly. The answer to [`ClientMessage::RemoteUpdate`].
+   */
+  | { type: "remote_update_started"; request_id: string; version: string }
+  /**
    * Bytes of a file followed by [`ClientMessage::TailFile`], base64,
    * at most 64 KiB a message. `path` is the path as the request named it;
    * `offset` is the file offset of the first byte. `reset` means the file
@@ -5191,9 +5211,9 @@ export type DaemonMessage =
    * `GetCommit`, `GetRemoteUrl`), spawn preview (`PreviewSpawn`,
    * `PreviewWorkspaceSpawn`), branch-name suggestion
    * (`SuggestBranchName`), preset list (`ListPresets`), an upload
-   * (`UploadFile`) or chat request (`LoadChat`, `LoadSummary`,
-   * `ChatSend`, `ChatAnswer`) that failed, on the reply to its
-   * requester.
+   * (`UploadFile`), a host update (`RemoteUpdate`) or chat request
+   * (`LoadChat`, `LoadSummary`, `ChatSend`, `ChatAnswer`) that failed,
+   * on the reply to its requester.
    *
    * `code`: The failure's stable machine-readable code, one of
    * [`error_codes`]; a client keeps a code it does not know as an
@@ -5595,7 +5615,10 @@ export const ErrorCode = {
    * workspace, or a `presets.json` that cannot be read or parsed.
    */
   PRESETS_FAILED: "presets_failed",
-  /** Another writer is typing into the session; retry. */
+  /**
+   * Another writer is typing into the session, or another update is running;
+   * retry.
+   */
   BUSY: "busy",
   /** The terminal's state does not take a chat message now. */
   CHAT_REFUSED: "chat_refused",
@@ -5629,4 +5652,8 @@ export const ErrorCode = {
    * [`crate::UPLOAD_MAX_BYTES`] in [`crate::ClientMessage::UploadFile`].
    */
   TOO_LARGE: "too_large",
+  /** The host cannot update itself; the message says why. */
+  UPDATE_REFUSED: "update_refused",
+  /** The host's own app cancelled the update before it started. */
+  UPDATE_CANCELED: "update_canceled",
 } as const;

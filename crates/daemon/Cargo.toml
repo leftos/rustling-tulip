@@ -31,6 +31,8 @@ daemon-client = { workspace = true }
 tailnet = { workspace = true }
 agent-api = { workspace = true }
 agent-registry = { workspace = true }
+# `checks_allowed`, the dev-build rule a remote update request is refused by.
+update-core = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

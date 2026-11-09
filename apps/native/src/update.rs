@@ -15,9 +15,9 @@ use std::time::Duration;
 
 pub use update_core::{
     DEFAULT_FEED_BASE, FEED_BASE_VAR, HASH_MISMATCH, LastResult, Offer, Platform, Ready,
-    ReleaseNotes, UPDATE_MUTEX, asset_name, changelog_text, check_and_download, clean_old,
-    feed_base, fetch_changelog, parse_changelog, parse_releases, parse_releases_for, parse_sha256,
-    take_last_result,
+    ReleaseNotes, UPDATE_MUTEX, asset_name, changelog_text, check_and_download, checks_allowed,
+    clean_old, feed_base, fetch_changelog, parse_changelog, parse_releases, parse_releases_for,
+    parse_sha256, take_last_result,
 };
 
 /// The prefix of the hidden folder a macOS update unpacks the downloaded app
@@ -79,13 +79,6 @@ pub trait Updater {
 
     /// The outcome the last update recorded, read once: the file is deleted.
     fn read_last_result(&self) -> Option<LastResult>;
-}
-
-/// Whether this build checks the feed: a build without debug assertions
-/// always does, a dev build only with [`FEED_BASE_VAR`] set.
-#[must_use]
-pub fn checks_allowed() -> bool {
-    !cfg!(debug_assertions) || std::env::var_os(FEED_BASE_VAR).is_some_and(|v| !v.is_empty())
 }
 
 /// The updater against the real feed, the real updates folder and a real

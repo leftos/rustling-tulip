@@ -41,6 +41,8 @@ mod screen;
 mod settings;
 mod summarizer;
 mod tail;
+mod update;
+pub(crate) use self::update::HostUpdate;
 mod upload;
 pub(crate) use self::recovery::RecoveryClaims;
 
@@ -234,6 +236,10 @@ pub struct Hub {
     /// from the user's gates, so it may report no gate state or another
     /// account's.
     pub(crate) gate_state: Option<crate::gate_state::GateHub>,
+    /// What a [`ClientMessage::RemoteUpdate`] checks the host against: where
+    /// the install is, what runs from it, and whether an update is already
+    /// running in this daemon.
+    pub(crate) host_update: Arc<HostUpdate>,
 }
 
 impl Hub {
@@ -616,6 +622,7 @@ pub async fn run(
                 crate::gate_state::live_history_source(),
             )
         }),
+        host_update: Arc::new(HostUpdate::system()),
     };
     start_hub_tasks(&hub, client_count_rx);
     let resume_ids = start_logins(&hub, &login_hub, resume_ids).await;
@@ -1013,6 +1020,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             folder::handle(hub, m, ctx).await;
         }
         m @ ClientMessage::UploadFile { .. } => upload::handle(hub, m, ctx).await?,
+        m @ ClientMessage::RemoteUpdate { .. } => update::handle(hub, m, ctx).await?,
         ClientMessage::CancelFetch { id } => cancel_fetch(ctx.fetches, &id).await,
         m @ (ClientMessage::TailFile { .. } | ClientMessage::UntailFile { .. }) => {
             tail::handle(hub, m, ctx).await;

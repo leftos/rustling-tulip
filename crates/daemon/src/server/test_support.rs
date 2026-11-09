@@ -96,6 +96,26 @@ pub(crate) fn push_state_in(dir: PathBuf) -> Arc<std::sync::Mutex<crate::push::s
     )))
 }
 
+/// A test hub's folders under `scratch`, its sessions, worktrees and binaries
+/// folders created.
+pub(crate) fn scratch_dirs(scratch: &Path, bin_templates: Option<PathBuf>) -> Dirs {
+    let config = scratch.join("config");
+    let dirs = Dirs {
+        config: config.clone(),
+        state_file: config.join("state.json"),
+        handshake_file: config.join("daemon.json"),
+        remote_config_file: config.join("remote.json"),
+        sessions_dir: config.join("sessions"),
+        worktrees_dir: scratch.join("worktrees"),
+        binaries_dir: scratch.join("binaries"),
+        bin_templates,
+    };
+    std::fs::create_dir_all(&dirs.sessions_dir).expect("create sessions dir");
+    std::fs::create_dir_all(&dirs.worktrees_dir).expect("create worktrees dir");
+    std::fs::create_dir_all(&dirs.binaries_dir).expect("create binaries dir");
+    dirs
+}
+
 pub(super) fn build_test_hub(
     scratch: ScratchDir,
     bin_templates: Option<PathBuf>,
@@ -104,20 +124,7 @@ pub(super) fn build_test_hub(
     ScratchDir,
     mpsc::UnboundedReceiver<pty_state::AttentionEvent>,
 ) {
-    let config = scratch.path().join("config");
-    let dirs = Dirs {
-        config: config.clone(),
-        state_file: config.join("state.json"),
-        handshake_file: config.join("daemon.json"),
-        remote_config_file: config.join("remote.json"),
-        sessions_dir: config.join("sessions"),
-        worktrees_dir: scratch.path().join("worktrees"),
-        binaries_dir: scratch.path().join("binaries"),
-        bin_templates,
-    };
-    std::fs::create_dir_all(&dirs.sessions_dir).expect("create sessions dir");
-    std::fs::create_dir_all(&dirs.worktrees_dir).expect("create worktrees dir");
-    std::fs::create_dir_all(&dirs.binaries_dir).expect("create binaries dir");
+    let dirs = scratch_dirs(scratch.path(), bin_templates);
     let state = Arc::new(AppState::load_or_default(&dirs).expect("load test state"));
     let sessions = SessionRegistry::new(dirs.clone());
     let (attention_tx, attention_rx) = mpsc::unbounded_channel();
@@ -202,6 +209,7 @@ pub(super) fn build_test_hub(
         peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
         accounts: None,
         gate_state: None,
+        host_update: Arc::new(super::HostUpdate::nothing_installed()),
     };
     (hub, scratch, attention_rx)
 }

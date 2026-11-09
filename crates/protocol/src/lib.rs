@@ -121,6 +121,10 @@ pub const FEATURE_CLIENT_PRESENCE: &str = "client_presence";
 /// the connected daemon lists it.
 pub const FEATURE_TYPED_PROMPT_ANSWERS: &str = "typed_prompt_answers";
 
+/// `Welcome.features` entry: the daemon answers [`ClientMessage::RemoteUpdate`]:
+/// it updates itself to the newest release, or says why it cannot.
+pub const FEATURE_REMOTE_UPDATE: &str = "remote_update";
+
 /// The most file bytes one [`ClientMessage::UploadFile`] carries, checked by
 /// the client before sending and by the daemon.
 pub const UPLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -4140,6 +4144,14 @@ pub enum ClientMessage {
         /// The file's bytes, standard base64.
         data_b64: String,
     },
+    /// Ask the host to update itself to the newest official release; the
+    /// request names no file, version or path. Answered by
+    /// [`DaemonMessage::RemoteUpdateStarted`] or an `Error` with this
+    /// `request_id`.
+    RemoteUpdate {
+        /// Client-assigned request id, echoed on the answer.
+        request_id: String,
+    },
     Resize {
         session_id: String,
         cols: u16,
@@ -6338,6 +6350,12 @@ pub enum DaemonMessage {
         session_id: String,
         path: String,
     },
+    /// The host has launched the installer for `version`; it restarts
+    /// shortly. The answer to [`ClientMessage::RemoteUpdate`].
+    RemoteUpdateStarted {
+        request_id: String,
+        version: String,
+    },
     /// Bytes of a file followed by [`ClientMessage::TailFile`], base64,
     /// at most 64 KiB a message. `path` is the path as the request named it;
     /// `offset` is the file offset of the first byte. `reset` means the file
@@ -6506,9 +6524,9 @@ pub enum DaemonMessage {
         /// `GetCommit`, `GetRemoteUrl`), spawn preview (`PreviewSpawn`,
         /// `PreviewWorkspaceSpawn`), branch-name suggestion
         /// (`SuggestBranchName`), preset list (`ListPresets`), an upload
-        /// (`UploadFile`) or chat request (`LoadChat`, `LoadSummary`,
-        /// `ChatSend`, `ChatAnswer`) that failed, on the reply to its
-        /// requester.
+        /// (`UploadFile`), a host update (`RemoteUpdate`) or chat request
+        /// (`LoadChat`, `LoadSummary`, `ChatSend`, `ChatAnswer`) that failed,
+        /// on the reply to its requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         /// The failure's stable machine-readable code, one of
@@ -7921,6 +7939,42 @@ mod tests {
                         && session_id == "s1"
                         && name == "shot.png"
                         && data_b64 == "aGk="
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn remote_update_round_trips() {
+        let msg = ClientMessage::RemoteUpdate {
+            request_id: "req-1".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"remote_update""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::RemoteUpdate { request_id } if request_id == "req-1"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn remote_update_started_round_trips() {
+        let msg = DaemonMessage::RemoteUpdateStarted {
+            request_id: "req-1".to_owned(),
+            version: "0.9.0".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"remote_update_started""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::RemoteUpdateStarted { request_id, version }
+                    if request_id == "req-1" && version == "0.9.0"
             ),
             "{json}"
         );
