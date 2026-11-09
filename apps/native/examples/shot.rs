@@ -3454,6 +3454,7 @@ fn dashboard_facts(now: DateTime<Utc>) -> Result<DaemonMessage> {
                     {
                         "key": "subagent:a1", "kind": "subagent", "name": "Check the footer pill spacing",
                         "task": "Running Grep · footer.rs", "state": "running", "started_at": ago(4),
+                        "model": "Opus 5.5", "effort": "high",
                         "children": [{
                             "key": "subagent:a2", "kind": "subagent", "name": "Read the palette",
                             "task": "finished · 3 tokens to reuse", "state": "finished", "started_at": ago(3),

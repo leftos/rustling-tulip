@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - An account's Fable 7-day limit shows beside its overall 7-day one in Accounts and Settings, whenever it is in use.
+- The Dashboard shows each subagent's model and effort level after its name, such as "Opus 5.5 · high".
 
 ### Fixed
 

@@ -1261,6 +1261,14 @@ pub struct AgentNode {
     pub started_at: DateTime<Utc>,
     #[serde(default)]
     pub stuck: Option<StuckReason>,
+    /// A subagent's model, as a display name (`Opus 5.5`); `None` when
+    /// unknown or for other nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// A subagent's effort level (`high`); `None` when unknown or for other
+    /// nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(default)]
     pub children: Vec<AgentNode>,
 }
@@ -9094,6 +9102,8 @@ mod tests {
             state: AgentState::Finished,
             started_at: dashboard_time(2),
             stuck: None,
+            model: None,
+            effort: None,
             children: Vec::new(),
         };
         let dispatch = AgentNode {
@@ -9105,6 +9115,8 @@ mod tests {
             state: AgentState::Running,
             started_at: dashboard_time(0),
             stuck: Some(StuckReason::ToolFailures { count: 3 }),
+            model: None,
+            effort: None,
             children: vec![shell],
         };
         SessionFacts {
@@ -9209,6 +9221,42 @@ mod tests {
             !json.contains("activity"),
             "an agent with no counts sends none: {json}"
         );
+    }
+
+    #[test]
+    fn an_agent_node_round_trips_its_model_and_effort() {
+        let node = AgentNode {
+            key: "subagent:a1".to_string(),
+            kind: AgentKind::Subagent,
+            name: "look at the parser".to_string(),
+            task: String::new(),
+            activity: Vec::new(),
+            state: AgentState::Running,
+            started_at: dashboard_time(0),
+            stuck: None,
+            model: Some("Opus 5.5".to_string()),
+            effort: Some("high".to_string()),
+            children: Vec::new(),
+        };
+        let json = serde_json::to_string(&node).expect("serialize");
+        assert!(json.contains(r#""model":"Opus 5.5""#), "{json}");
+        assert!(json.contains(r#""effort":"high""#), "{json}");
+        let back: AgentNode = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, node);
+
+        let mut quiet = node.clone();
+        quiet.model = None;
+        quiet.effort = None;
+        let json = serde_json::to_string(&quiet).expect("serialize");
+        assert!(!json.contains("model"), "no model sends no key: {json}");
+        assert!(!json.contains("effort"), "no effort sends no key: {json}");
+
+        let bare: AgentNode = serde_json::from_str(
+            r#"{"key":"bg:b1","kind":"shell","name":"bg shell b1","state":"running","started_at":"2026-10-28T12:00:00Z"}"#,
+        )
+        .expect("a node without them decodes");
+        assert_eq!(bare.model, None);
+        assert_eq!(bare.effort, None);
     }
 
     #[test]

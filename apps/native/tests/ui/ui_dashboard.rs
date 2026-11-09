@@ -508,7 +508,7 @@ fn agent_tree() -> serde_json::Value {
     json!([
         {
             "key": "subagent:1", "kind": "subagent", "name": "look at the parser", "state": "running",
-            "started_at": minutes_ago(3),
+            "started_at": minutes_ago(3), "model": "Opus 5.5", "effort": "high",
             "children": [
                 { "key": "subagent:2", "kind": "subagent", "name": "read it", "state": "finished", "started_at": minutes_ago(2) },
             ],
@@ -575,6 +575,38 @@ fn nested_rows_show_under_working_rows_only(cx: &mut TestAppContext) {
         );
     }
     assert_eq!(cells(&mut h, "i1").nested.len(), 0);
+}
+
+#[gpui::test]
+fn a_subagent_row_shows_its_spawn_after_its_name(cx: &mut TestAppContext) {
+    let fixture = on_dashboard(vec![working("w1")]);
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    h.send(facts_message(vec![
+        facts("w1").agents(agent_tree()).build(),
+    ]));
+
+    let nested = cells(&mut h, "w1").nested;
+    assert_eq!(
+        nested[0].spawn.as_deref(),
+        Some("Opus 5.5 · high"),
+        "the model and effort after the name"
+    );
+    assert!(
+        drawn(&mut h, "dashboard-sub-w1-subagent:1-spawn"),
+        "its spawn is drawn"
+    );
+    assert_eq!(nested[1].spawn, None, "a subagent with neither shows none");
+    assert!(
+        !drawn(&mut h, "dashboard-sub-w1-subagent:2-spawn"),
+        "and draws no element"
+    );
+    assert_eq!(nested[2].spawn, None, "a shell shows none either");
+    assert!(
+        !drawn(&mut h, "dashboard-sub-w1-bg:1-spawn"),
+        "and draws no element"
+    );
 }
 
 #[gpui::test]

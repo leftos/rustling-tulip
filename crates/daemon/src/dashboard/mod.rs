@@ -901,6 +901,8 @@ fn subagent_node(node: &SubagentNode, tree: &TreeContext) -> Option<AgentNode> {
         key: format!("subagent:{}", node.agent_id),
         kind: AgentKind::Subagent,
         name: subagent_name(node).to_owned(),
+        model: node.model.clone(),
+        effort: node.effort.clone(),
         // A node rule 1 finished never ended on its own: it has no result.
         task: if state == node.state {
             subagent_task(node, state, tree.now)
@@ -980,6 +982,8 @@ fn running_shell_node(task: &BackgroundTask, tree: &TreeContext) -> AgentNode {
         state,
         started_at: shell_start(task, tree),
         stuck: None,
+        model: None,
+        effort: None,
         children: Vec::new(),
     }
 }
@@ -1001,6 +1005,8 @@ fn ended_shell_node(ended: &EndedTask, tree: &TreeContext) -> AgentNode {
         state: tree.state(ended.state),
         started_at: shell_start(&ended.task, tree),
         stuck: None,
+        model: None,
+        effort: None,
         children: Vec::new(),
     }
 }
@@ -1222,6 +1228,29 @@ mod tests {
         assert_eq!(top.children.len(), 1);
         assert_eq!(top.children[0].key, "subagent:a2");
         assert_eq!(top.children[0].task, "finished · 2 findings, both fixed");
+    }
+
+    #[test]
+    fn a_subagent_node_carries_its_model_and_effort() {
+        let mut launcher = node("a1", AgentState::Running);
+        launcher.model = Some("Opus 5.5".to_owned());
+        launcher.effort = Some("high".to_owned());
+        let snapshot = ActivitySnapshot {
+            subagents: vec![launcher],
+            ..ActivitySnapshot::default()
+        };
+        let nodes = agent_tree(&snapshot, &tree(true, None));
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].model.as_deref(), Some("Opus 5.5"));
+        assert_eq!(nodes[0].effort.as_deref(), Some("high"));
+
+        let unknown = ActivitySnapshot {
+            subagents: vec![node("a2", AgentState::Running)],
+            ..ActivitySnapshot::default()
+        };
+        let nodes = agent_tree(&unknown, &tree(true, None));
+        assert_eq!(nodes[0].model, None, "a subagent with none sends none");
+        assert_eq!(nodes[0].effort, None);
     }
 
     #[test]

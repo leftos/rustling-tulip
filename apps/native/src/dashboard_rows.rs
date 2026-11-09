@@ -376,6 +376,9 @@ pub struct NestedRow {
     pub name: String,
     /// What it runs now, or how it ended.
     pub task: String,
+    /// A subagent's model and effort, `Opus 5.5 · high`; `None` when neither
+    /// is known.
+    pub spawn: Option<String>,
     /// True for a task that runs something now, drawn in the monospace face.
     pub mono: bool,
     /// Its own stuck flag, worded as the row's flags are.
@@ -859,6 +862,7 @@ fn push_nested(nodes: &[AgentNode], depth: usize, now: DateTime<Utc>, rows: &mut
             state: node.state,
             name: node.name.clone(),
             task: node.task.clone(),
+            spawn: spawn_label(node),
             mono: node.task.starts_with("Running"),
             stuck: node
                 .stuck
@@ -867,6 +871,18 @@ fn push_nested(nodes: &[AgentNode], depth: usize, now: DateTime<Utc>, rows: &mut
             dimmed: node.state == AgentState::Finished,
         });
         push_nested(&node.children, depth + 1, now, rows);
+    }
+}
+
+/// A subagent's model and effort, `Opus 5.5 · high`, from whichever of them
+/// is known.
+fn spawn_label(node: &AgentNode) -> Option<String> {
+    let model = node.model.as_deref().filter(|model| !model.is_empty());
+    let effort = node.effort.as_deref().filter(|effort| !effort.is_empty());
+    match (model, effort) {
+        (Some(model), Some(effort)) => Some(format!("{model} · {effort}")),
+        (Some(one), None) | (None, Some(one)) => Some(one.to_owned()),
+        (None, None) => None,
     }
 }
 
@@ -1486,6 +1502,8 @@ mod tests {
             kind,
             name: key.to_owned(),
             task: String::new(),
+            model: None,
+            effort: None,
             activity: Vec::new(),
             state,
             started_at: at(0),
@@ -1931,6 +1949,28 @@ mod tests {
         assert!(rows[1].dimmed, "a finished node draws dimmed");
         assert!(rows[2].dimmed);
         assert_eq!(nested_rows(&[], at(0)).len(), 0);
+    }
+
+    #[test]
+    fn a_nested_row_joins_the_subagents_model_and_effort() {
+        let spawn = |model: Option<&str>, effort: Option<&str>| {
+            let mut agent = node("subagent:1", AgentKind::Subagent, AgentState::Running);
+            agent.model = model.map(str::to_owned);
+            agent.effort = effort.map(str::to_owned);
+            nested_rows(&[agent], at(0))[0].spawn.clone()
+        };
+        assert_eq!(
+            spawn(Some("Opus 5.5"), Some("high")),
+            Some("Opus 5.5 · high".to_owned())
+        );
+        assert_eq!(spawn(Some("Opus 5.5"), None), Some("Opus 5.5".to_owned()));
+        assert_eq!(spawn(None, Some("high")), Some("high".to_owned()));
+        assert_eq!(spawn(None, None), None);
+        assert_eq!(
+            spawn(Some(""), Some("")),
+            None,
+            "an empty value reads as unknown"
+        );
     }
 
     #[test]

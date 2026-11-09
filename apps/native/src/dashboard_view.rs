@@ -1324,7 +1324,16 @@ fn nested_row(
                         &format!("{name}-glyph"),
                         t,
                     ))
-                    .child(line_text(&format!("{name}-name"), &nested.name).flex_1()),
+                    .child(line_text(&format!("{name}-name"), &nested.name).flex_1())
+                    .when_some(nested.spawn.as_deref(), |cell, spawn| {
+                        let spawn_id = format!("{name}-spawn");
+                        cell.child(
+                            line_text(&spawn_id, spawn)
+                                .flex_none()
+                                .text_color(gpui::rgb(t.text_2))
+                                .driver_id(move || spawn_id.clone()),
+                        )
+                    }),
             ),
         )
         .child(flexible().child(task))

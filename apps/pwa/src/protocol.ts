@@ -1051,6 +1051,16 @@ export interface AgentNode {
   state: AgentState;
   started_at: string;
   stuck?: StuckReason | null;
+  /**
+   * A subagent's model, as a display name (`Opus 5.5`); `None` when
+   * unknown or for other nodes.
+   */
+  model?: string | null;
+  /**
+   * A subagent's effort level (`high`); `None` when unknown or for other
+   * nodes.
+   */
+  effort?: string | null;
   children?: AgentNode[];
 }
 
