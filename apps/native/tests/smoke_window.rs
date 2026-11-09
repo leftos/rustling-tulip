@@ -2018,6 +2018,8 @@ mod driven {
         driver.ok("click", &json!({"element": "settings-tab-notifications"}));
         scroll_into_view(driver, TOAST_STYLE_APP);
         driver.ok("click", &json!({"element": TOAST_STYLE_APP}));
+        scroll_into_view(driver, "settings-apply");
+        driver.ok("click", &json!({"element": "settings-apply"}));
         let saved = smoke.daemon.config_dir().join("native-ui.json");
         let deadline = Instant::now() + super::CONNECT_TIMEOUT;
         loop {
