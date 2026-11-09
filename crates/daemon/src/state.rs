@@ -174,17 +174,19 @@ impl AppState {
         // the agent CLI still sees `\\?\…` as its cwd on the next spawn,
         // producing a different per-project memory key than running it by hand.
         let migrated = migrate_paths_in_place(&mut inner);
+        let sanitized = sanitize_loaded_layouts(&mut inner);
         let state = Self {
             dirs: dirs.clone(),
             inner: Mutex::new(inner),
             state_file_corrupt,
         };
-        if migrated || state_file_corrupt {
-            // Best-effort: put the simplified paths, and whatever a corrupt
-            // file still yielded, on disk right away. A start that never
-            // writes again then finds the file it should keep, rather than
-            // none: the corrupt original has moved aside and only this write
-            // stands between the salvage and an empty next start.
+        if migrated || state_file_corrupt || sanitized {
+            // Best-effort: put the simplified paths, whatever a corrupt file
+            // still yielded, and any tab list put right, on disk right away. A
+            // start that never writes again then finds the file it should
+            // keep, rather than none: the corrupt original has moved aside and
+            // only this write stands between the salvage and an empty next
+            // start.
             if let Err(err) = state.write_to_disk() {
                 tracing::warn!(?err, "failed to persist the loaded state.json");
             }
@@ -767,6 +769,18 @@ fn seal_secret_rows_in_place(state: &mut PersistedState, file: &Path) -> bool {
     changed
 }
 
+/// Brings every tab list read from disk into a shape the daemon can serve:
+/// repeated tab and pane ids are dropped and out-of-range split ratios are
+/// clamped, each with a logged reason. Returns `true` if anything changed.
+fn sanitize_loaded_layouts(state: &mut PersistedState) -> bool {
+    let mut changed = false;
+    for layout in state.layouts.values_mut() {
+        changed |= crate::tabs::sanitize_loaded_tabs(&mut layout.tabs);
+    }
+    changed |= crate::tabs::sanitize_loaded_tabs(&mut state.legacy_tabs);
+    changed
+}
+
 /// Walk through every stored path and rewrite it to the simplified form (no
 /// `\\?\` prefix on Windows). Returns `true` if anything changed.
 fn migrate_paths_in_place(state: &mut PersistedState) -> bool {
@@ -803,6 +817,7 @@ fn simplify_str(s: &str) -> Option<String> {
 mod tests {
     use super::*;
     use protocol::{GridNode, TabContent};
+    use serde_json::json;
 
     fn sample_tab(id: &str) -> TabEntry {
         TabEntry {
@@ -2164,6 +2179,71 @@ mod tests {
             "the earlier copy is untouched"
         );
         assert!(!dirs.state_file.exists(), "the bad file moved aside");
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_bad_tab_list_is_put_right_on_load() {
+        let dirs = scratch_dirs("bad-tabs");
+        let state = json!({
+            "repos": [],
+            "workspaces": [],
+            "layouts": {
+                "bad": {
+                    "tabs": [
+                        {
+                            "id": "t1",
+                            "name": "Tab",
+                            "content": {"kind": "grid", "grid": {
+                                "kind": "split",
+                                "direction": "horizontal",
+                                "ratio": 7.0,
+                                "first": {"kind": "pane", "pane_id": "a", "session_id": null},
+                                "second": {"kind": "pane", "pane_id": "b", "session_id": null},
+                            }},
+                            "created_at": "2026-01-01T00:00:00Z",
+                        },
+                        {
+                            "id": "t1",
+                            "name": "Again",
+                            "content": {"kind": "grid", "grid": {
+                                "kind": "pane",
+                                "pane_id": "c",
+                                "session_id": null,
+                            }},
+                            "created_at": "2026-01-01T00:00:00Z",
+                        }
+                    ]
+                }
+            }
+        });
+        std::fs::write(&dirs.state_file, state.to_string()).expect("write state.json");
+
+        let loaded = AppState::load_or_default(&dirs).expect("load state");
+
+        assert_eq!(
+            loaded.client_layout("bad").len(),
+            1,
+            "the tab repeating an id is gone from the loaded state"
+        );
+        assert!(
+            !loaded.state_file_corrupt(),
+            "a parsing file is not corrupt"
+        );
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(&dirs.state_file).expect("read state.json"),
+        )
+        .expect("valid JSON");
+        let tabs = saved["layouts"]["bad"]["tabs"]
+            .as_array()
+            .expect("a tab list");
+        assert_eq!(tabs.len(), 1, "the corrected list is on disk: {saved}");
+        assert_eq!(
+            tabs[0]["content"]["grid"]["ratio"],
+            json!(0.95),
+            "the saved ratio is in range: {saved}"
+        );
 
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

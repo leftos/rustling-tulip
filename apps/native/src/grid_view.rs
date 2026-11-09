@@ -3168,6 +3168,7 @@ fn branch_chip(id: &str, base: Stateful<Div>, text: String, t: &UiTheme) -> Stat
 /// A split's two children around their divider, the first sized by `ratio`.
 fn split_box(direction: SplitDirection, ratio: f32, parts: [AnyElement; 3]) -> AnyElement {
     let [first, divider, second] = parts;
+    let ratio = drawn_ratio(ratio);
     let horizontal = direction == SplitDirection::Horizontal;
     let cell = || div().flex().min_w(px(0.0)).min_h(px(0.0)).overflow_hidden();
     let first_cell = if horizontal {
@@ -3183,6 +3184,17 @@ fn split_box(direction: SplitDirection, ratio: f32, parts: [AnyElement; 3]) -> A
         .child(divider)
         .child(cell().flex_1().child(second))
         .into_any_element()
+}
+
+/// The share of a split its first child is drawn with, whatever the layout
+/// holds: not a finite number is an even split, and anything else stays inside
+/// the daemon's range.
+fn drawn_ratio(ratio: f32) -> f32 {
+    if ratio.is_finite() {
+        tabs::clamp_ratio(ratio)
+    } else {
+        0.5
+    }
 }
 
 /// The note a pane draws for `session` while it has no terminal to show: a
@@ -3989,12 +4001,30 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{HeaderChip, HeaderChipKind, RetryGate, header_parts, status_label};
+    use super::{HeaderChip, HeaderChipKind, RetryGate, drawn_ratio, header_parts, status_label};
     use crate::runtime_icon::RuntimeIcon;
     use crate::tabs::SessionRef;
     use crate::target::HostKey;
     use protocol::{AgentDescriptor, AgentId, SessionMode, SessionSnapshot, SessionStatus};
     use serde_json::json;
+
+    #[test]
+    fn drawn_ratio_cases() {
+        for (ratio, drawn) in [
+            (0.0, 0.05),
+            (-1.0, 0.05),
+            (7.0, 0.95),
+            (0.5, 0.5),
+            (f32::NAN, 0.5),
+            (f32::INFINITY, 0.5),
+        ] {
+            assert!(
+                (drawn_ratio(ratio) - drawn).abs() < f32::EPSILON,
+                "{ratio} draws as {}, not {drawn}",
+                drawn_ratio(ratio)
+            );
+        }
+    }
 
     const DEEPSEEK_PROVIDER_TIP: &str = "Runs on DeepSeek";
 

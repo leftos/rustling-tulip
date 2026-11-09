@@ -1181,6 +1181,9 @@ mod driven {
     /// A hang guard on each wait for the driver: its discovery file, one
     /// reply, or an effect read back through it; not an expected duration.
     const DRIVER_TIMEOUT: Duration = Duration::from_secs(60);
+    /// A hang guard on a panicked client exiting and on the next start closing
+    /// its tabs, not an expected duration.
+    const SAFE_START_TIMEOUT: Duration = Duration::from_secs(120);
     /// How long a spec's `wait_for` waits at most, inside [`DRIVER_TIMEOUT`].
     const WAIT_FOR_MS: u64 = 30_000;
     /// The sidebar's narrowest width (`MIN_WIDTH` in
@@ -1320,6 +1323,22 @@ mod driven {
             reply
         }
 
+        /// Sends `method` and reads no reply, for a call the client does not
+        /// live to answer.
+        fn fire(&mut self, method: &str) {
+            let id = self.next_id;
+            self.next_id += 1;
+            let request = json!({"id": id, "method": method, "params": {}});
+            let mut line = serde_json::to_string(&request).expect("encode a driver request");
+            line.push('\n');
+            self.pipe
+                .as_mut()
+                .expect("no call is in flight")
+                .get_mut()
+                .write_all(line.as_bytes())
+                .expect("write to the driver pipe");
+        }
+
         /// The result of `method` with `params`, failing the spec with the
         /// error it got instead.
         fn ok(&mut self, method: &str, params: &Value) -> Value {
@@ -1372,6 +1391,120 @@ mod driven {
         assert_no_layout_chooser(&smoke);
         let driver = Driver::connect(window_pid(smoke.hwnd));
         (smoke, driver)
+    }
+
+    /// Stops `daemon` and starts it again on a saved layout holding one
+    /// Dashboard tab, which the daemon's start keeps, for the identity the
+    /// client binary will launch with. Returns that identity and the tab's id.
+    fn seed_dashboard_tab(daemon: &mut LiveDaemon) -> (String, String) {
+        let tab_id = "smoke-safe-start-tab".to_owned();
+        let client_id =
+            daemon_client::client_identity_in(&daemon.config_dir(), super::CLIENT_ID_FILE)
+                .expect("create the smoke client's identity")
+                .client_id;
+        daemon.kill();
+        let state = json!({
+            "repos": [],
+            "workspaces": [],
+            "layouts": { client_id.as_str(): { "tabs": [{
+                "id": tab_id,
+                "name": "Dashboard",
+                "content": { "kind": "dashboard" },
+                "created_at": "2026-01-01T00:00:00Z",
+            }] } },
+        });
+        std::fs::write(daemon.config_dir().join("state.json"), state.to_string())
+            .expect("seed state.json");
+        daemon.restart_after_reboot();
+        (client_id, tab_id)
+    }
+
+    /// Waits for `client` to exit, under a hang guard, and returns its status.
+    fn wait_exit(client: &mut Client) -> std::process::ExitStatus {
+        let deadline = Instant::now() + SAFE_START_TIMEOUT;
+        loop {
+            if let Some(status) = client.0.try_wait().expect("read the client's exit") {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "hung: the client is still running {SAFE_START_TIMEOUT:?} after its panic"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Whether `state.json` in `config` holds an empty layout for `client_id`.
+    /// A file caught mid-replace reads as not yet.
+    fn layout_is_empty(config: &std::path::Path, client_id: &str) -> bool {
+        std::fs::read_to_string(config.join("state.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|state| state["layouts"][client_id]["tabs"].as_array().cloned())
+            .is_some_and(|tabs| tabs.is_empty())
+    }
+
+    /// The text of every kept copy of a closed layout in `config`.
+    fn layout_copies(config: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(config)
+            .expect("list the config dir")
+            .map(|entry| entry.expect("an entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("layout-set-aside-"))
+            })
+            .map(|path| std::fs::read_to_string(path).expect("read a kept copy"))
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+    #[expect(
+        clippy::panic,
+        reason = "a client that exits now fails the spec at once"
+    )]
+    fn a_panic_at_start_closes_the_tabs_on_the_next_start() {
+        let mut daemon = LiveDaemon::start("smoke-safe-start");
+        let (client_id, tab_id) = seed_dashboard_tab(&mut daemon);
+        let config = daemon.config_dir();
+
+        let mut crashed = launch_driven_client(&daemon);
+        let mut driver = Driver::connect(crashed.0.id());
+        driver.ok("ping", &json!({}));
+        driver.fire("panic");
+        let status = wait_exit(&mut crashed);
+        assert!(
+            !status.success(),
+            "the panicked client exited with {status}"
+        );
+
+        let guard: Value = serde_json::from_str(
+            &std::fs::read_to_string(config.join("start-guard.json")).expect("read the guard"),
+        )
+        .expect("the guard is valid JSON");
+        assert_eq!(guard["failed_starts"], json!(1), "{guard}");
+        assert!(
+            guard["last_panic"]
+                .as_str()
+                .is_some_and(|text| text.contains("driver asked for a panic")),
+            "{guard}"
+        );
+
+        let mut second = launch_driven_client(&daemon);
+        let deadline = Instant::now() + SAFE_START_TIMEOUT;
+        while !layout_is_empty(&config, &client_id) {
+            if let Some(status) = second.0.try_wait().expect("poll the client") {
+                panic!("the client exited during the safe start: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "hung: the layout still holds tabs {SAFE_START_TIMEOUT:?} into the safe start"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let copies = layout_copies(&config);
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert!(copies[0].contains(&tab_id), "{copies:?}");
     }
 
     fn number(value: &Value) -> f64 {

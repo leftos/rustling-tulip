@@ -26,8 +26,7 @@ use crate::tabs::collect_panes;
 use crate::target::{HostKey, Target};
 use crate::window_state::WindowState;
 
-/// The sidebar layout file, in the client's config dir.
-pub const UI_FILE: &str = "native-ui.json";
+pub use crate::start_guard::UI_FILE;
 pub const MIN_WIDTH: f32 = 200.0;
 pub const DEFAULT_WIDTH: f32 = 280.0;
 
@@ -3787,7 +3786,8 @@ fn is_noisy_shell_title(title: &str) -> bool {
 }
 
 /// The persisted layout in `dir`; the defaults when the file is missing or
-/// unreadable.
+/// unreadable. A file that does not parse keeps a copy beside it and what still
+/// reads, and the salvaged state is saved back.
 pub fn load_ui_state(dir: &Path) -> UiState {
     let path = dir.join(UI_FILE);
     let text = match std::fs::read_to_string(&path) {
@@ -3803,11 +3803,51 @@ pub fn load_ui_state(dir: &Path) -> UiState {
     };
     serde_json::from_str(&text).unwrap_or_else(|err| {
         tracing::warn!(
-            "{} is not valid: {err}; using the default sidebar layout",
-            path.display()
+            "{} is not valid at line {}; keeping a copy and what still reads",
+            path.display(),
+            err.line()
         );
-        UiState::default()
+        keep_and_salvage(dir, &text)
     })
+}
+
+/// What the unparsable `text` of the layout file in `dir` still holds, saved
+/// back once a copy of the file is kept. Without a copy the file stays as it
+/// is.
+fn keep_and_salvage(dir: &Path, text: &str) -> UiState {
+    let path = dir.join(UI_FILE);
+    let kept = crate::start_guard::keep_copy(
+        &path,
+        crate::start_guard::UI_COPY_PREFIX,
+        chrono::Utc::now(),
+    );
+    if let Err(err) = kept {
+        tracing::warn!("keeping a copy of {}: {err:#}", path.display());
+        return salvage_ui_state(text);
+    }
+    let state = salvage_ui_state(text);
+    if let Err(err) = save_ui_state(dir, &state) {
+        tracing::warn!("saving the salvaged sidebar layout: {err:#}");
+    }
+    state
+}
+
+/// Every top-level field of `text` that still parses, the others at their
+/// defaults. A field that fails is named in the log, its value never is.
+fn salvage_ui_state(text: &str) -> UiState {
+    let Ok(serde_json::Value::Object(file)) = serde_json::from_str::<serde_json::Value>(text)
+    else {
+        return UiState::default();
+    };
+    let mut kept = serde_json::Map::new();
+    for (key, value) in file {
+        kept.insert(key.clone(), value);
+        if serde_json::from_value::<UiState>(serde_json::Value::Object(kept.clone())).is_err() {
+            tracing::warn!(%key, "a saved setting did not read; using its default");
+            kept.remove(&key);
+        }
+    }
+    serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_default()
 }
 
 /// The key in the layout file listing the network hosts a terminal link may
@@ -5815,6 +5855,100 @@ pub(crate) mod tests {
         save_ui_state(&dir.0, &state).expect("save over the existing file");
         assert_eq!(load_ui_state(&dir.0), state);
         assert!(!dir.0.join(format!("{UI_FILE}.tmp")).exists());
+    }
+
+    /// The kept copies of the layout file in `dir`.
+    fn kept_ui_copies(dir: &TestDir) -> Vec<PathBuf> {
+        std::fs::read_dir(&dir.0)
+            .expect("list the config dir")
+            .map(|entry| entry.expect("an entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(crate::start_guard::UI_COPY_PREFIX))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_malformed_ui_file_gives_the_defaults_and_keeps_a_copy() {
+        let dir = TestDir::new("malformed");
+        std::fs::write(dir.0.join(UI_FILE), "{ not json").expect("write");
+
+        assert_eq!(load_ui_state(&dir.0), UiState::default());
+
+        let copies = kept_ui_copies(&dir);
+        assert_eq!(copies.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&copies[0]).expect("read the copy"),
+            "{ not json"
+        );
+    }
+
+    #[test]
+    fn a_wrong_typed_field_keeps_the_other_fields() {
+        let dir = TestDir::new("wrong-type");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            json!({"sidebar_width": "wide", "active_tab_id": "t1", "sidebar_collapsed": true})
+                .to_string(),
+        )
+        .expect("write");
+
+        let state = load_ui_state(&dir.0);
+
+        assert_eq!(state.active_tab_id.as_deref(), Some("t1"));
+        assert!(state.sidebar_collapsed);
+        assert!((state.sidebar_width - UiState::default().sidebar_width).abs() < f32::EPSILON);
+        assert_eq!(kept_ui_copies(&dir).len(), 1);
+    }
+
+    #[test]
+    fn a_salvaged_file_reads_the_same_twice() {
+        let dir = TestDir::new("twice");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            json!({"sidebar_width": "wide", "active_tab_id": "t1"}).to_string(),
+        )
+        .expect("write");
+
+        let first = load_ui_state(&dir.0);
+        let second = load_ui_state(&dir.0);
+
+        assert_eq!(first, second);
+        assert_eq!(first.active_tab_id.as_deref(), Some("t1"));
+        assert_eq!(kept_ui_copies(&dir).len(), 1);
+    }
+
+    #[test]
+    fn a_salvaged_file_keeps_its_unc_hosts() {
+        let dir = TestDir::new("unc");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            json!({"sidebar_width": "wide", "unc_hosts": ["nas"]}).to_string(),
+        )
+        .expect("write");
+
+        let _ = load_ui_state(&dir.0);
+
+        assert_eq!(load_unc_hosts(&dir.0), ["nas"]);
+        assert_eq!(kept_ui_copies(&dir).len(), 1, "the file was salvaged");
+    }
+
+    #[test]
+    fn an_old_release_ui_file_is_not_salvaged() {
+        let dir = TestDir::new("released");
+        let text = v0_5_1_alpha_ui_file().to_string();
+        std::fs::write(dir.0.join(UI_FILE), &text).expect("write");
+
+        let state = load_ui_state(&dir.0);
+
+        assert!(state.sidebar_collapsed);
+        assert_eq!(kept_ui_copies(&dir), Vec::<PathBuf>::new());
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read the file"),
+            text
+        );
     }
 
     /// `native-ui.json` as v0.5.1-alpha wrote it for the state its

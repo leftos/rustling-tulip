@@ -10,6 +10,7 @@ use protocol::{
     GridNode, MergeLayout, PaneDropEdge, RearrangeLayout, SplitDirection, SplitPlace, TabContent,
     TabEntry,
 };
+use std::collections::HashSet;
 use uuid::Uuid;
 
 const MIN_RATIO: f32 = 0.05;
@@ -53,6 +54,67 @@ fn clamp_ratio(ratio: f32) -> f32 {
         DEFAULT_RATIO
     } else {
         ratio.clamp(MIN_RATIO, MAX_RATIO)
+    }
+}
+
+/// Makes a tab list read from disk safe to serve: a tab whose id repeats an
+/// earlier tab's, or in which a non-empty pane id repeats, is dropped with a
+/// logged reason, and every split's ratio is brought into range. Says whether
+/// anything changed.
+pub fn sanitize_loaded_tabs(tabs: &mut Vec<TabEntry>) -> bool {
+    let mut changed = false;
+    let before = tabs.len();
+    let mut seen_tab_ids: HashSet<String> = HashSet::new();
+    tabs.retain(|tab| {
+        if !seen_tab_ids.insert(tab.id.clone()) {
+            tracing::warn!(tab = %tab.id, "dropping a tab whose id repeats an earlier tab's");
+            return false;
+        }
+        if tab.grid().is_some_and(pane_id_repeats) {
+            tracing::warn!(tab = %tab.id, "dropping a tab in which a pane id repeats");
+            return false;
+        }
+        true
+    });
+    changed |= tabs.len() != before;
+    for tab in tabs.iter_mut() {
+        if tab.grid_mut().is_some_and(clamp_saved_ratios) {
+            tracing::warn!(tab = %tab.id, "bringing a saved split ratio into range");
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Whether a non-empty pane id appears twice in `grid`.
+fn pane_id_repeats(grid: &GridNode) -> bool {
+    let panes = collect_panes(grid);
+    let mut seen: HashSet<&str> = HashSet::new();
+    panes
+        .iter()
+        .any(|pane| !pane.pane_id.is_empty() && !seen.insert(pane.pane_id.as_str()))
+}
+
+/// Brings every split's ratio in `grid` into range; says whether any changed.
+fn clamp_saved_ratios(grid: &mut GridNode) -> bool {
+    match grid {
+        GridNode::Pane { .. } => false,
+        GridNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            let mut changed = false;
+            let clamped = clamp_ratio(*ratio);
+            if clamped.to_bits() != ratio.to_bits() {
+                *ratio = clamped;
+                changed = true;
+            }
+            changed |= clamp_saved_ratios(first);
+            changed |= clamp_saved_ratios(second);
+            changed
+        }
     }
 }
 
@@ -3789,5 +3851,79 @@ mod tests {
         let cloned = clone_tabs_fresh_ids(&src);
         assert_eq!(cloned[0].picked_layout, Some(three_cols));
         assert_eq!(cloned[1].picked_layout, None);
+    }
+
+    /// A grid tab with `id`, holding `grid`.
+    fn tab_entry(id: &str, grid: GridNode) -> TabEntry {
+        TabEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            content: TabContent::Grid { grid },
+            created_at: Utc::now(),
+            picked_layout: None,
+        }
+    }
+
+    #[test]
+    fn a_repeated_tab_id_is_dropped_on_load() {
+        let first = tab_entry("t1", pane("a", None));
+        let second = tab_entry("t1", pane("b", None));
+        let mut tabs = vec![first.clone(), second];
+
+        assert!(sanitize_loaded_tabs(&mut tabs));
+        assert_eq!(tabs, [first], "the first stays, the second goes");
+    }
+
+    #[test]
+    fn a_repeated_pane_id_drops_its_tab_on_load() {
+        let bad = tab_entry(
+            "t1",
+            split(Horizontal, 0.5, pane("a", None), pane("a", None)),
+        );
+        let good = tab_entry("t2", pane("b", None));
+        let mut tabs = vec![bad, good.clone()];
+
+        assert!(sanitize_loaded_tabs(&mut tabs));
+        assert_eq!(tabs, [good], "the tab with the repeat goes");
+    }
+
+    #[test]
+    fn empty_pane_ids_are_not_repeats_on_load() {
+        let grid = split(Horizontal, 0.5, pane("", None), pane("", None));
+        let tab = tab_entry("t1", grid);
+        let mut tabs = vec![tab.clone()];
+
+        assert!(!sanitize_loaded_tabs(&mut tabs));
+        assert_eq!(tabs, [tab]);
+    }
+
+    #[test]
+    fn a_saved_ratio_is_brought_into_range() {
+        let nested = split(Horizontal, 7.0, pane("b", None), pane("c", None));
+        let grid = split(Horizontal, 0.0, pane("a", None), nested);
+        let mut tabs = vec![tab_entry("t1", grid)];
+
+        assert!(sanitize_loaded_tabs(&mut tabs));
+
+        let expected = split(
+            Horizontal,
+            0.05,
+            pane("a", None),
+            split(Horizontal, 0.95, pane("b", None), pane("c", None)),
+        );
+        assert_eq!(tabs[0].grid(), Some(&expected));
+    }
+
+    #[test]
+    fn a_good_tab_list_is_left_alone() {
+        let first = tab_entry(
+            "t1",
+            split(Horizontal, 0.5, pane("a", None), pane("b", None)),
+        );
+        let second = tab_entry("t2", pane("c", None));
+        let mut tabs = vec![first.clone(), second.clone()];
+
+        assert!(!sanitize_loaded_tabs(&mut tabs));
+        assert_eq!(tabs, [first, second]);
     }
 }

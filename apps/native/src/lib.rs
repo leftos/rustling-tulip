@@ -155,6 +155,8 @@ mod spawn_preview;
 mod spawn_view;
 mod spawns;
 pub mod ssh;
+pub mod start_guard;
+mod start_guard_view;
 mod stash_view;
 mod stashes;
 mod status_glyph;
@@ -506,12 +508,20 @@ pub struct RootDeps {
     /// Checks for, starts and reads back updates: the footer's notice,
     /// Settings' update rows and the toast after an update.
     pub updater: Arc<dyn update::Updater>,
+    /// How this start opens: one that follows a panicked start closes the
+    /// tabs This PC sends.
+    pub start_mode: start_guard::StartMode,
 }
 
 /// Opens the client's window on a live daemon connection, focusing
 /// `wanted_session` once it arrives. A driven run (`drive`, which the driver
 /// gate decided) starts the driver endpoint once the window is open.
-pub fn open_main_window(wanted_session: Option<String>, drive: bool, cx: &mut App) {
+pub fn open_main_window(
+    wanted_session: Option<String>,
+    drive: bool,
+    start_mode: start_guard::StartMode,
+    cx: &mut App,
+) {
     bind_keys(cx);
     fonts::register_bundled(cx);
     let offscreen = offscreen::requested();
@@ -536,7 +546,7 @@ pub fn open_main_window(wanted_session: Option<String>, drive: bool, cx: &mut Ap
             if offscreen {
                 offscreen::show_cloaked(window, WINDOW_SIZE);
             }
-            let root = cx.new(|cx| RootView::new(wanted_session, window, cx));
+            let root = cx.new(|cx| RootView::new(wanted_session, start_mode, window, cx));
             if drive {
                 start_driver(window, &root, cx);
             }
@@ -1190,6 +1200,13 @@ pub struct RootView {
     cleanup_failed: cleanup_failed::CleanupQueue,
     /// The cleanup-failed dialog's keyboard focus.
     cleanup_focus: FocusHandle,
+    /// The mode a safe start still has to act on, until This PC's first tab
+    /// list or layout question comes.
+    pending_safe_start: start_guard::StartMode,
+    /// The notice a safe start raised, until it is dismissed.
+    start_notice: Option<start_guard::StartNotice>,
+    start_notice_focus: FocusHandle,
+    stable_timer_started: bool,
     /// Opens the terminals' links, on background threads.
     opener: Arc<dyn Opener>,
     /// The OS notifications attention events fire.
@@ -1338,6 +1355,7 @@ impl RootView {
     /// layout and files, and the system clock.
     pub fn new(
         wanted_session: Option<String>,
+        start_mode: start_guard::StartMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1364,6 +1382,7 @@ impl RootView {
                 .map(|dir| log_paths(&dir))
                 .map_err(|err| format!("config folder unavailable: {err:#}")),
             wanted: wanted_session,
+            start_mode,
             now: Arc::new(Instant::now),
             quit: Box::new(|cx: &mut App| cx.quit()),
             open: Arc::new(SystemOpener),
@@ -1504,12 +1523,17 @@ impl RootView {
             autostart,
             tokens,
             updater,
+            start_mode,
         } = deps;
+        let quit = start_guard_view::stable_on_quit(quit, ui_dir.clone());
         Self::watch_window(window, cx);
         Self::watch_close_request(window, cx);
         let mut ui = ui_dir
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
+        if start_mode != start_guard::StartMode::Normal {
+            start_guard_view::drop_restored_views(&mut ui);
+        }
         if ui.general.detailed_logging {
             let outcome = crate::logging::set_detailed(true);
             crate::logging::log_outcome(outcome, true);
@@ -1689,6 +1713,10 @@ impl RootView {
             pending_arrangement: None,
             cleanup_failed: cleanup_failed::CleanupQueue::default(),
             cleanup_focus: cx.focus_handle(),
+            pending_safe_start: start_mode,
+            start_notice: None,
+            start_notice_focus: cx.focus_handle(),
+            stable_timer_started: false,
             opener: open,
             notifications: notify::Notifications::new(notify, toast_placer, sound),
             run_confirm: None,
@@ -2723,6 +2751,7 @@ impl RootView {
             || self.notices.has_modal()
             || self.layout_chooser.is_some()
             || !self.cleanup_failed.is_empty()
+            || self.start_notice.is_some()
             || self.exit.is_some()
             || self.open_in_main(Overlay::PaneClose)
             || self.pane_ui.move_panes.is_some()
@@ -4739,7 +4768,7 @@ impl RootView {
         &mut self,
         host: &HostKey,
         generation: u64,
-        msg: DaemonMessage,
+        mut msg: DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4756,6 +4785,7 @@ impl RootView {
         {
             return;
         }
+        self.on_safe_start_message(host, &mut msg, window, cx);
         self.settings_ok_hears(host, &msg, window, cx);
         // The sidebar takes the message before the panes do, so what a
         // snapshot changed is read from the old one.
@@ -5438,7 +5468,8 @@ impl RootView {
         } else if let Some(taken) = self.on_device_pairing_key(ks, window, cx) {
             Some(taken)
         } else {
-            self.on_cleanup_failed_key(ks, window, cx).then_some(true)
+            (self.on_start_notice_key(ks, window, cx) || self.on_cleanup_failed_key(ks, window, cx))
+                .then_some(true)
         };
         if taken == Some(true) {
             cx.stop_propagation();
@@ -6108,6 +6139,7 @@ impl Render for RootView {
             .children(self.exit_layer(cx))
             .children(delete_over)
             .children(self.cleanup_failed_layer(window, cx))
+            .children(self.start_notice_layer(cx))
             .children(overlay)
             .children(self.device_pairing_layer(cx))
             .children(self.connection_picker_layer(cx))

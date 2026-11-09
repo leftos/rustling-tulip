@@ -68,6 +68,7 @@ mod ui_remote_access;
 mod ui_repo_remove;
 mod ui_repos;
 mod ui_resume_report;
+mod ui_safe_start;
 mod ui_session_actions;
 mod ui_settings;
 mod ui_settings_hosts;

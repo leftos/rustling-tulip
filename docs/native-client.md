@@ -316,6 +316,24 @@ Settings → Worktrees edits the daemon's worktrees-root override, (a draft sent
 
 On a remote host the path field stays enabled with the hint "Created on {host} if it does not exist." and Browse stays disabled. Folder and file pickers go through `RootDeps.pick_folder` / `RootDeps.pick_file`, so specs inject fakes: GPUI's test platform cannot prompt. In a cloaked or driven client (`offscreen::requested()`) the deps hold `folder_picker::offscreen_*_picker` instead, which open no dialog, since the desktop would show it: Add repo, Browse, the preset wizard's picks and Settings' picks act as a cancel, Themes Export shows "native dialogs are off in a cloaked client", and each attempt logs a warning.
 
+## Start guard
+
+The client always opens, whatever its saved state holds. `start_guard.rs` counts starts that panicked on the main thread before the run was stable, in `start-guard.json` (`{"failed_starts", "last_panic"}`, [on-disk.md](on-disk.md)). A run is stable 60 s after its first tab list from This PC, or on a clean quit; a cloaked run waits an hour, so a stalled machine never lets a driven spec's panic land after it. `main` reads the guard first (`start_guard::begin`) and passes the resulting `StartMode` to `open_main_window`.
+
+- **One failed start** closes the tabs (a safe start). On the first tab list from This PC, `RootView.on_message` saves the list to `layout-set-aside-<UTC stamp>`, sends `CloseTab` per tab, and draws no restored tab. Sessions keep running. Restored views (`active_tab_id`, pop-outs, session views, the Dashboard's view) are dropped too; other settings stay.
+- **Exactly two failed starts** also move `native-ui.json` to `native-ui.json.corrupt-<UTC stamp>`, once only. Later failed starts touch no file. Three newest copies are kept per prefix.
+- **The notice** is a modal titled "Opened with your tabs closed" (`start_guard_view.rs`), dismissed by OK, Enter or Esc.
+- **A main-thread panic** shows a message box from a helper thread (`MessageBoxW` on Windows, `osascript` on macOS), at most once per process, and none in a cloaked run. A background thread's panic stays log-only, since the process carries on.
+- **A `native-ui.json` that does not parse** keeps a copy, keeps each top-level field that still reads, and is saved back (`sidebar.rs` `load_ui_state`). The daemon makes a loaded tab list safe in the same spirit (`sanitize_loaded_tabs`), and the client clamps a split ratio when drawing (`drawn_ratio`).
+
+Decisions and rejected alternatives:
+
+- Only a panic counts. Counting every unfinished start was rejected: a kill, an update or a power cut would close the user's tabs. Non-panic crashes are not counted.
+- The message box runs on a helper thread. A modal loop on the panicking thread was rejected: it would re-enter GPUI's window procedure.
+- The panic is not caught around the draw. It aborts through a Win32 callback, so unwinding cannot be relied on there; the panic hook is the one place that sees it.
+
+Specs: `ui_safe_start.rs`; `native-smoke` holds `a_panic_at_start_closes_the_tabs_on_the_next_start`, which uses the driver's `panic` method; `native-shot safe-start` draws the notice.
+
 ## Tab layouts
 
 A client's tabs and their split trees are daemon-side and keyed by client id (`state.rs` `ClientLayout`), so two clients can show the same sessions in different tabs and layouts. A tab's layout type is a `RearrangeLayout`; `TabEntry.picked_layout` records the type last picked for that tab, and holds only while the user has not arranged the tab's panes by hand since.
@@ -1250,6 +1268,7 @@ An error reply names a code (`unknown_method`, `bad_params`, `not_found`, `not_v
 | `key` | `keys`: one keystroke, such as `ctrl-,` | `{"pressed": keys}` | `bad_params` for more than one keystroke or an unreadable one |
 | `move` | a target (`x`, `y` or `element`) | `{"at": {"x", "y"}}` | target errors as below |
 | `pane_text` | `pane?` | `{"pane", "lines", "text"}`: the visible rows only, never scrollback; `text` is those rows as one string with a soft-wrapped line joined (no newline where it wrapped), `lines` the grid rows as drawn, one string each; the default pane is the active tab's focused pane, else its first | `not_found` for an unknown pane (the hint lists the active tab's panes) or a tab with no pane |
+| `panic` | none | none: panics on the UI thread, as a fault in a real start would (driver builds only; it proves the start guard) | none |
 | `paste` | `text` | `{"pasted": n}`: the text pasted into whatever holds focus as Ctrl+V (Cmd+V on macOS) pastes it, newlines included; the clipboard is put back as it was, or left holding the text when it was empty | `bad_params` for an empty text |
 | `ping` | none | `{"version"}` | none |
 | `screenshot` | none | `{"path", "width", "height"}` | `refused` as above; the in-process handler also refuses it, since only the pipe answers it |

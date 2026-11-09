@@ -990,6 +990,19 @@
     },
     {
       "paths": [
+        "apps/native/src/start_guard.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^start_guard::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_safe_start::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/start_guard_view.rs",
+        "apps/native/tests/ui/ui_safe_start.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^ui_safe_start::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/stash_view.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^stash_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_keys|ui_stashes)::/))"

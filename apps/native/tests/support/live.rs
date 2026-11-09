@@ -884,6 +884,7 @@ impl<'a> Harness<'a> {
         let updater = Arc::new(super::UpdaterRecorder::default());
         let opened = Rc::new(RefCell::new(Vec::new()));
         let deps = RootDeps {
+            start_mode: rustling_tulip_native::start_guard::StartMode::Normal,
             open_host: make_transport(&opened),
             ui_dir: Some(ui_dir),
             paths: Err("live specs have no log paths".to_owned()),

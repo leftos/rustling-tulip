@@ -22,8 +22,9 @@ use anyhow::Context as _;
 use daemon_client::capped_log::{self, CappedLog};
 use gpui::{App, Application};
 use rustling_tulip_native::driver_gate::{self, GateDecision};
+use rustling_tulip_native::start_guard::{self, StartMode};
 use rustling_tulip_native::{Assets, LOG_FILE, offscreen, toast_activation, update};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -81,9 +82,50 @@ fn init_tracing() {
     }
 }
 
+/// Reads the start guard in `dir` and says how this start opens, logging a
+/// safe start.
+fn open_mode(dir: &Path) -> StartMode {
+    let mode = start_guard::begin(dir);
+    if mode != StartMode::Normal {
+        tracing::warn!(?mode, "the last start crashed; opening safely");
+    }
+    mode
+}
+
+/// A panic on the main thread: counts it against this start, then says what
+/// happened from a helper thread, since a modal loop on the panicking thread
+/// would re-enter GPUI's window procedure. A cloaked run shows nothing, and
+/// unwinding out of a Win32 callback runs the hook again, so only the first
+/// panic shows the message.
+fn on_main_thread_panic(config: Option<&Path>, message: &str) {
+    let during_start = !start_guard::is_stable();
+    if let Some(dir) = config {
+        start_guard::record_panic(dir, message);
+    }
+    if offscreen::requested() || !start_guard::claim_panic_box() {
+        return;
+    }
+    let log_path = config.map_or_else(
+        || PathBuf::from(LOG_FILE),
+        |dir| dir.join("logs").join(LOG_FILE),
+    );
+    let text = start_guard::panic_text(message, during_start, &log_path);
+    match std::thread::Builder::new()
+        .name("panic-box".to_owned())
+        .spawn(move || start_guard::show_panic_box(&text))
+    {
+        Ok(shower) => {
+            let _ = shower.join();
+        }
+        Err(err) => tracing::warn!("showing the crash message: {err}"),
+    }
+}
+
 /// Log every panic, the network thread's included, through tracing so it
-/// reaches `native.log`, then run the default hook.
-fn install_panic_hook() {
+/// reaches `native.log`, then run the default hook. A panic on the main thread
+/// also counts against the start guard in `config` and tells the user; a
+/// background thread's stays in the log, as the process carries on.
+fn install_panic_hook(config: Option<PathBuf>) {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
@@ -91,6 +133,9 @@ fn install_panic_hook() {
             thread = thread.name().unwrap_or("<unnamed>"),
             "panic: {info}"
         );
+        if thread.name() == Some("main") {
+            on_main_thread_panic(config.as_deref(), &info.to_string());
+        }
         default_hook(info);
     }));
 }
@@ -146,7 +191,11 @@ fn refuse_driver_run(reason: &str) -> ! {
 fn main() {
     let drive = driver_gate();
     init_tracing();
-    install_panic_hook();
+    let config = daemon_client::config_dir()
+        .inspect_err(|err| tracing::warn!("no config dir for the start guard: {err:#}"))
+        .ok();
+    let start_mode = config.as_deref().map_or_else(StartMode::default, open_mode);
+    install_panic_hook(config);
     // Bring the login launch up to date: an entry already naming this install's
     // daemon is rewritten in its current `--detach` form. An entry naming any
     // other path, or none at all, is left alone. The cloaked smoke window
@@ -173,7 +222,7 @@ fn main() {
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            rustling_tulip_native::open_main_window(wanted_session, drive, cx);
+            rustling_tulip_native::open_main_window(wanted_session, drive, start_mode, cx);
         });
 }
 

@@ -37,6 +37,7 @@
 //! with Allow and Deny, and a Finished card, as
 //! the app's own toasts draw them. `open-shell` shows the Open a shell
 //! dialog with a folder path longer than its field, the caret at its end.
+//! `safe-start` shows the notice a start after a crashed one raises.
 //! `update` shows Settings scrolled to its
 //! update rows with a ready update in the footer, and `update-notes` the
 //! What's new window the footer's button opens over that ready update.
@@ -228,10 +229,11 @@ enum View {
     Accounts,
     Gates,
     OpenShell,
+    SafeStart,
 }
 
 impl View {
-    const ALL: [Self; 34] = [
+    const ALL: [Self; 35] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -266,6 +268,7 @@ impl View {
         Self::Gates,
         Self::Toast,
         Self::OpenShell,
+        Self::SafeStart,
     ];
 
     fn name(self) -> &'static str {
@@ -303,6 +306,7 @@ impl View {
             Self::Accounts => "accounts",
             Self::Gates => "gates",
             Self::OpenShell => "open-shell",
+            Self::SafeStart => "safe-start",
             Self::Toast => "toast",
         }
     }
@@ -369,6 +373,10 @@ impl View {
     }
 
     /// Whether `root` shows this view.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a flat exhaustive match over the views"
+    )]
     fn reached(self, root: &RootView) -> bool {
         match self {
             // Drawn by `start_toast_shot`, in a window with no root view.
@@ -378,6 +386,7 @@ impl View {
             // The Gates panel over the fake daemon's gate state.
             Self::Gates => root.shown_activity() == Activity::Gates,
             Self::OpenShell => root.shell_dialog_open(),
+            Self::SafeStart => root.start_notice_open(),
             Self::Main | Self::MainCompact | Self::MainNarrow => {
                 !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
             }
@@ -559,6 +568,7 @@ impl Shot {
             | View::Accounts
             | View::Gates
             | View::OpenShell
+            | View::SafeStart
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -945,6 +955,11 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
         (tx, events)
     });
     RootDeps {
+        start_mode: if view == View::SafeStart {
+            rustling_tulip_native::start_guard::StartMode::CloseTabs
+        } else {
+            rustling_tulip_native::start_guard::StartMode::Normal
+        },
         open_host,
         ui_dir: Some(ui_dir.to_path_buf()),
         paths: Err("the shot has no config dir".to_owned()),
@@ -1232,6 +1247,10 @@ fn open_chat(window: &mut Window, cx: &mut App) -> Result<()> {
 /// or, where no key opens it, a click posted to the window at `address`;
 /// the `viewer` view opens a viewer tab of `sample` at a line, as a link
 /// does. `step` counts the rounds of [`View::steps`].
+#[expect(
+    clippy::too_many_lines,
+    reason = "a flat exhaustive match over the views"
+)]
 fn drive(
     view: View,
     step: usize,
@@ -1241,7 +1260,12 @@ fn drive(
     cx: &mut App,
 ) -> Result<()> {
     match view {
-        View::Main | View::MainCompact | View::MainNarrow | View::MultiHost | View::Toast => Ok(()),
+        View::Main
+        | View::MainCompact
+        | View::MainNarrow
+        | View::MultiHost
+        | View::SafeStart
+        | View::Toast => Ok(()),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
         View::OpenShell => open_shell(window, cx),

@@ -2674,7 +2674,27 @@ impl<'a> Harness<'a> {
             dir,
             wanted,
             updater,
-            Err("specs have no config dir".to_owned()),
+            (
+                Err("specs have no config dir".to_owned()),
+                rustling_tulip_native::start_guard::StartMode::Normal,
+            ),
+        );
+        harness.pin_contrast();
+        harness
+    }
+
+    /// Opens the window as [`Self::open`] does, as a start in `start_mode`.
+    pub fn open_in_mode(
+        cx: &'a mut TestAppContext,
+        dir: &TestDir,
+        start_mode: rustling_tulip_native::start_guard::StartMode,
+    ) -> Self {
+        let mut harness = Self::boot(
+            cx,
+            dir,
+            None,
+            Arc::new(UpdaterRecorder::default()),
+            (Err("specs have no config dir".to_owned()), start_mode),
         );
         harness.pin_contrast();
         harness
@@ -2688,7 +2708,10 @@ impl<'a> Harness<'a> {
             dir,
             None,
             Arc::new(UpdaterRecorder::default()),
-            Err("specs have no config dir".to_owned()),
+            (
+                Err("specs have no config dir".to_owned()),
+                rustling_tulip_native::start_guard::StartMode::Normal,
+            ),
         );
         harness.load(fixture);
         harness
@@ -2706,7 +2729,10 @@ impl<'a> Harness<'a> {
         dir: &TestDir,
         wanted: Option<&str>,
         updater: Arc<UpdaterRecorder>,
-        paths: Result<LogPaths, String>,
+        (paths, start_mode): (
+            Result<LogPaths, String>,
+            rustling_tulip_native::start_guard::StartMode,
+        ),
     ) -> Self {
         cx.update(bind_keys);
         // A spec never reads the developer's own clipboard bitmap.
@@ -2731,6 +2757,7 @@ impl<'a> Harness<'a> {
             open_host: fake_transport_sharing((tx, rx), &opened, &extra_hosts),
             ui_dir: Some(dir.path().to_path_buf()),
             paths,
+            start_mode,
             wanted: wanted.map(str::to_owned),
             now: clock.clock(),
             quit: quit_recorder(&quits),
@@ -2809,6 +2836,7 @@ impl<'a> Harness<'a> {
             open_host: fake_transport_sharing((tx, rx), &opened, &extra_hosts),
             ui_dir: Some(dir.path().to_path_buf()),
             paths: Err("specs have no config dir".to_owned()),
+            start_mode: rustling_tulip_native::start_guard::StartMode::Normal,
             wanted: None,
             now: clock.clock(),
             quit: quit_recorder(&quits),
@@ -3143,7 +3171,10 @@ impl<'a> Harness<'a> {
             dir,
             None,
             Arc::new(UpdaterRecorder::default()),
-            Ok(log_paths(dir.path())),
+            (
+                Ok(log_paths(dir.path())),
+                rustling_tulip_native::start_guard::StartMode::Normal,
+            ),
         );
         harness.pin_contrast();
         harness.load(fixture);

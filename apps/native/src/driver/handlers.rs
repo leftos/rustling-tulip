@@ -51,6 +51,7 @@ pub fn handle(
         "type_text" => type_text(request, window, cx),
         "paste" => paste(request, window, cx),
         "pane_text" => pane_text(request, root.read(cx), cx),
+        "panic" => panic_on_request(),
         "action" => action(request, root, window, cx),
         // It awaits a capture thread, so the pipe's dispatcher answers it.
         "screenshot" => Err(request.fail(
@@ -65,6 +66,15 @@ pub fn handle(
         _ => return Reply::unknown_method(request.id, &request.method),
     };
     outcome.map_or_else(|failed| failed, |result| Reply::ok(request.id, result))
+}
+
+/// Panics on the UI thread, as a fault in a real start would.
+#[expect(
+    clippy::panic,
+    reason = "a driven run proves the start guard with a real panic"
+)]
+fn panic_on_request() -> ! {
+    panic!("driver asked for a panic")
 }
 
 /// The window's logical size and scale, the tabs, the shown tab's panes,

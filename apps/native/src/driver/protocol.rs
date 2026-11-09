@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Every method a request may name, sorted.
-pub const METHODS: [&str; 14] = [
+pub const METHODS: [&str; 15] = [
     "action",
     "click",
     "drag",
@@ -18,6 +18,7 @@ pub const METHODS: [&str; 14] = [
     "key",
     "move",
     "pane_text",
+    "panic",
     "paste",
     "ping",
     "screenshot",
@@ -543,7 +544,7 @@ mod tests {
                 "error": {
                     "code": "unknown_method",
                     "message": "unknown method: nope",
-                    "hint": "methods: action, click, drag, find, key, move, pane_text, paste, ping, screenshot, state, type_text, wait_for, wheel",
+                    "hint": "methods: action, click, drag, find, key, move, pane_text, panic, paste, ping, screenshot, state, type_text, wait_for, wheel",
                 },
             })
         );
