@@ -7,6 +7,7 @@ members = [
     "crates/daemon",
     "crates/daemon-client",
     "crates/tailnet",
+    "crates/update-core",
     "crates/agents/api",
     "crates/agents/claude",
     "crates/agents/claude/accounts",
@@ -49,6 +50,7 @@ protocol = { path = "crates/protocol" }
 tracer-protocol = { path = "crates/tracer-protocol" }
 daemon-client = { path = "crates/daemon-client" }
 tailnet = { path = "crates/tailnet" }
+update-core = { path = "crates/update-core" }
 agent-api = { path = "crates/agents/api" }
 agent-claude = { path = "crates/agents/claude" }
 claude-accounts = { path = "crates/agents/claude/accounts" }

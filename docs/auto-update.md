@@ -2,7 +2,7 @@
 
 The native client finds a newer published release, downloads it in the background, verifies it, and on the user's word installs it and comes back up on the new version. The client and the daemon are both updated. Interactive sessions survive, because their tracers outlive the daemon.
 
-The code is the client's `update.rs` (feed, pick, download, verify), `update_view.rs` (timer, notice, Restart to update, toasts), `whats_new_view.rs` (the What's new window), the daemon's `cli_apply_update.rs` (the file swap), `crates/daemon-client/src/supervisor.rs` (daemon takeover) and the NSIS script `tools/installer/rustling-tulip.nsi`.
+The code is `crates/update-core` (feed, pick, download, verify, `last-result.json` read, the update lock; the client's `update.rs` re-exports it and keeps `Updater`, the start of the installer and the launch cleanup), the client's `update_view.rs` (timer, notice, Restart to update, toasts), `whats_new_view.rs` (the What's new window), the daemon's `cli_apply_update.rs` (the file swap), `crates/daemon-client/src/supervisor.rs` (daemon takeover) and the NSIS script `tools/installer/rustling-tulip.nsi`.
 
 The client's side of the UI is in [native-client.md](./native-client.md) ("Updates"), the release steps in [release.md](./release.md) and what the installer does in [tools/installer/README.md](../tools/installer/README.md).
 
@@ -83,6 +83,6 @@ Velopack was considered and not used. It would replace the NSIS installer and ad
 
 ## Proof
 
-The proof is the local-server tests in `apps/native/src/update.rs` (feed parse, pick, download, hash, `.sha256` parse, cleanup, against a local HTTP server on the real clock), the `ui_update` specs (`apps/native/tests/ui/ui_update.rs`, with the updater injected), the macOS start and cleanup tests in the same file (argument list, bundle path, leftover removal, and on a Mac the refusals and staging), the `apply-update` and supervisor tests, and the release's agent-run smoke of the installer.
+The proof is the local-server tests in `crates/update-core` (feed parse, pick, download, hash, `.sha256` parse, against a local HTTP server on the real clock), the `ui_update` specs (`apps/native/tests/ui/ui_update.rs`, with the updater injected), the macOS start and cleanup tests in `apps/native/src/update.rs` (argument list, bundle path, leftover removal, and on a Mac the refusals and staging), the `apply-update` and supervisor tests, and the release's agent-run smoke of the installer.
 
 There is no live e2e spec and no fake-releases feed shim. `.\rt.ps1 native-shot update` shows the footer notice and `native-shot update-notes` the What's new window.

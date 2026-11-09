@@ -37,6 +37,7 @@ crates/
   daemon-client/ - client-side daemon supervision shared by the clients
   dev-daemon/   - an isolated daemon under a `.tmp` folder for the live tests and the driver tools; never shipped
   tailnet/      - Tailscale CLI wrapper and the owner rule for tailnet peers
+  update-core/  - the updater's release feed, download, verify and update lock, shared by the client (and later the daemon); no GPUI
   agents/api/   - the agent plugin trait and its context types
   agents/claude/ - the Claude plugin (argv, hook settings, stream-json parsing), with its fake `claude` CLI shim for the native e2e tier in `fake/`
   agents/registry/ - the compiled-in list of agent plugins
@@ -398,6 +399,8 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Untouched (picked) layout**: a tab whose layout type was last chosen by a pick (Rearrange or the first-connect chooser) and has not been hand-resized (a divider drag) or hand-arranged since; the daemon rebuilds that type as panes come and go, and the per-client flag is `TabEntry.picked_layout`; see `docs/native-client.md` ("Tab layouts").
 
   A pick of the automatic grid also remembers the pane area's aspect and follows it when the window is resized (that re-fit keeps the tab's empty panes, where a fixed pick just keeps its count).
+- **Update core**: the `update-core` crate (`crates/update-core`): the updater's release feed, download, SHA-256 verify, `last-result.json` read, update lock and detached launch, with no GPUI; the native client re-exports it from `apps/native/src/update.rs`.
+- **Update mutex**: the Windows named mutex `Local\rustling-tulip-update` (`UPDATE_MUTEX` in `update-core`, taken with `try_lock`) that keeps one installer and one `apply-update` running at a time.
 - **User hooks**: the hook entries the app adds to an agent's own user settings (Claude Code's `settings.json`) so a session started outside the app reports its status through the hook shim; `GetAgentUserHooks` and `SetAgentUserHooks` read and edit them, and `UserHooksState` (off, on, partial, stale) says what the file holds; see `docs/agent-plugins.md` ("User hooks") and `docs/on-disk.md`.
 - **VAPID key**: the daemon's P-256 key pair that signs its Web Push requests (`push/vapid.json`); the phone subscribes with its public half, and replacing it invalidates every push subscription; see `docs/plans/mobile-app.md` ("Push").
 - **Visible frame**: the part of a macOS screen the menu bar and the Dock leave free (`NSScreen.visibleFrame`), in points, where the app's toast stack sits; Windows' counterpart is the work area.

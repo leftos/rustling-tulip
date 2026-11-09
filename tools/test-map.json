@@ -189,6 +189,12 @@
     },
     {
       "paths": [
+        "crates/update-core/**"
+      ],
+      "filter": "package(update-core) | rdeps(update-core)"
+    },
+    {
+      "paths": [
         "crates/daemon-client/src/device_tokens.rs"
       ],
       "filter": "(package(daemon-client) & test(/^device_tokens::/)) | (binary_id(rustling-tulip-native) & test(/^(connection|net)::/))"

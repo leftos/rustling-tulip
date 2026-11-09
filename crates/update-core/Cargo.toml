@@ -1,0 +1,43 @@
+[package]
+name = "update-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The updater's feed, download and verify steps, shared by the native client and the daemon"
+publish = false
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+semver = { workspace = true }
+sha2 = "0.10"
+# The release feed and its downloads over HTTPS, rustls on the `ring` backend
+# with the OS's root certificates; the `json` feature is not used, since the
+# feed is read as text.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-native-roots",
+] }
+
+[target.'cfg(windows)'.dependencies]
+# `FILE_SHARE_READ`: the verified download is held open for reading alone. The
+# update lock: `CreateMutexW`, `WaitForSingleObject`, `ReleaseMutex`.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    # `CreateMutexW`'s `SECURITY_ATTRIBUTES` parameter.
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }

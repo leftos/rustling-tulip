@@ -139,7 +139,7 @@ Auto-update downloads live in a machine-local root beside the others, `%LOCALAPP
 
 On macOS the folder holds the verified zip, and Restart to update unpacks it into a hidden `.rustling-tulip-update-<version>-<8 hex>/` folder beside the installed `rustling-tulip.app` (not under `updates`, so the rename into place stays on one volume); `apply-update` leaves the replaced bundle as `rustling-tulip.app.old` beside it.
 
-Older folders and the `.old` files an update left in the install folder are deleted at the next launch; on macOS the launch also deletes `rustling-tulip.app.old` and every `.rustling-tulip-update-*` folder beside the running bundle (`apps/native/src/update.rs`, `docs/auto-update.md`).
+Older folders and the `.old` files an update left in the install folder are deleted at the next launch; on macOS the launch also deletes `rustling-tulip.app.old` and every `.rustling-tulip-update-*` folder beside the running bundle (`apps/native/src/update.rs` `clean_at_launch`, `crates/update-core`, `docs/auto-update.md`).
 
 The Dashboard summarizer runs the agent's CLI in a fifth machine-local root beside those, `ProjectDirs::data_local_dir().join("summarizer")` (no override variable), `%LOCALAPPDATA%\leftos\rustling-tulip\data\summarizer\` on Windows: nothing lives there but the CLI's working folder, which is kept empty and never emptied by the daemon. It is created on first use (`crates/daemon/src/paths.rs` `resolve_summarizer_dir`, `crates/daemon/src/summarizer/cli.rs`).
 

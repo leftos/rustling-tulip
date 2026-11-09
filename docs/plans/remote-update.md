@@ -30,7 +30,7 @@ The check is the one the client's updater makes: the release's `.sha256`, from t
 ## What the code does not do yet
 
 - A headless daemon cannot run an update. `apply-update --relaunch` starts only the client, so with no client nothing restarts the daemon, and on a host with the app closed the machine stays without a daemon until the next logon.
-- The check, download and verify steps live in the native client (`apps/native/src/update.rs`), which the daemon does not link.
+- The check, download and verify steps live in `crates/update-core`, which the daemon does not link yet.
 - A running `bridge` blocks the swap with exit 3, since it runs from the install folder.
 - A host has no per-connection record of its clients, and no addressed send to one.
 - A release carries no machine-readable note of what it breaks.
@@ -40,7 +40,7 @@ The check is the one the client's updater makes: the release's `.sha256`, from t
 Each part lands on `feat/remote-update`, and each is a sub-issue of RT-1298.
 
 - [ ] **Versions on the wire.** `Welcome.build_version`, `Hello.client_version` and `client_kind`, a `remote_update` feature string, the host's version and "behind" state in the Connections dialog and Settings > Hosts. Regenerate `apps/pwa/src/protocol.ts`.
-- [ ] **The shared updater core.** Move finding, downloading and verifying a release out of `apps/native/src/update.rs` into a crate both the client and the daemon link, with no behaviour change.
+- [x] **The shared updater core.** Move finding, downloading and verifying a release out of `apps/native/src/update.rs` into a crate both the client and the daemon link, with no behaviour change.
 - [ ] **A host updates itself on request.** A new client message, the daemon fetching and verifying its own asset and running the swap detached from itself, restarting the daemon afterwards when no client will, and answering with why when it cannot. The host's own app restarts on a countdown with Cancel.
 - [ ] **Client to host, in the client.** The update action per host, the confirm dialog listing that host's sessions, progress, reconnect, and the result or failure shown to the requester.
 - [ ] **The breaking flag.** A machine-readable note in each release of what it breaks, read by the confirm dialog, and the requester updating itself right after the host. `docs/release.md` says when to set it.
