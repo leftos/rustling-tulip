@@ -1633,8 +1633,13 @@ impl TerminalPane {
         // Ctrl+V does: the program never sees the press, so a program on
         // another host cannot answer it from that host's clipboard. With no
         // text on the clipboard it sends nothing, not Ctrl+V's `^V`, which
-        // such a program would answer the same way.
-        if event.button == MouseButton::Right && !event.modifiers.shift && self.tracker.idle() {
+        // such a program would answer the same way. A right-click that brings
+        // the window forward does neither: it only focuses.
+        if event.button == MouseButton::Right
+            && !event.modifiers.shift
+            && !event.first_mouse
+            && self.tracker.idle()
+        {
             let text = cx.read_from_clipboard().and_then(|item| item.text());
             if text.is_some_and(|text| !text.is_empty()) {
                 self.paste(cx);
@@ -1642,10 +1647,11 @@ impl TerminalPane {
             cx.notify();
             return;
         }
-        // The press that brings focus to a pane only focuses it: under mouse
-        // reporting it would otherwise reach the program, and a click meant to
-        // focus a pane could answer a question on screen.
-        if !self.focused_at_press && self.press_would_report(event) {
+        // The press that brings focus to a pane, or the window itself forward,
+        // only focuses: under mouse reporting it would otherwise reach the
+        // program, and a click meant to focus a pane or bring the window
+        // forward could answer a question on screen.
+        if (!self.focused_at_press || event.first_mouse) && self.press_would_report(event) {
             cx.notify();
             return;
         }

@@ -12,7 +12,9 @@ use crate::support;
 use std::time::Duration;
 
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
-use gpui::{Modifiers, MouseButton, Point, TestAppContext, point, px, size};
+use gpui::{
+    Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Point, TestAppContext, point, px, size,
+};
 use protocol::{ClientMessage, DaemonMessage, ImagePaste, SessionSnapshot, SplitDirection};
 use rustling_tulip_native::fonts::FontSettings;
 use rustling_tulip_native::ui_theme::UiTheme;
@@ -854,6 +856,75 @@ fn a_drag_that_brings_focus_sends_nothing(cx: &mut TestAppContext) {
     assert!(
         h.sent_input("s1").is_empty(),
         "nor does the release, or the drag it was in: no gesture began"
+    );
+}
+
+#[gpui::test]
+fn a_press_that_brings_the_window_forward_only_focuses(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+
+    // p1 still holds the keyboard, as the pane last used does while another
+    // app is in front; the platform marks the press that activates the window.
+    let at = h.cell_center("p1", 2, 3);
+    h.cx.simulate_event(MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+        first_mouse: true,
+    });
+    h.cx.simulate_event(MouseUpEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+    });
+    h.cx.run_until_parked();
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the press that brings the window forward reaches no program"
+    );
+
+    h.click(at, Modifiers::none());
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\x1b[<0;3;4M\x1b[<0;3;4m",
+        "a later ordinary click reaches the program"
+    );
+}
+
+#[gpui::test]
+fn an_activating_right_click_neither_pastes_nor_reaches_the_program(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+    h.set_clipboard("x");
+
+    let at = h.cell_center("p1", 2, 3);
+    h.cx.simulate_event(MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Right,
+        click_count: 1,
+        first_mouse: true,
+    });
+    h.cx.simulate_event(MouseUpEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Right,
+        click_count: 1,
+    });
+    h.cx.run_until_parked();
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the right press that brings the window forward neither pastes nor reaches the program"
+    );
+
+    h.right_click(at);
+    assert_eq!(
+        h.sent_input("s1"),
+        b"x",
+        "a later ordinary right-click pastes as before"
     );
 }
 
