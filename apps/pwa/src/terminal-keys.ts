@@ -69,7 +69,8 @@ export function replyKey(state: KeyBarState, sessionId: string, text: string): K
 /**
  * The shapes of the terminal's own answers: device attributes (DA1, DA2), a
  * cursor position report, a status report, a mode report, a window report,
- * an OSC or DCS reply, and a focus report. Each matches a whole string only.
+ * an OSC or DCS reply, a focus report, and an SGR mouse report. Each matches
+ * a whole string only.
  */
 /* oxlint-disable no-control-regex -- ESC and BEL are the bytes these replies are made of. */
 const TERMINAL_REPLIES: readonly RegExp[] = [
@@ -82,14 +83,15 @@ const TERMINAL_REPLIES: readonly RegExp[] = [
   /^\x1b\][\s\S]*(?:\x07|\x1b\\)$/,
   /^\x1bP[\s\S]*\x1b\\$/,
   /^\x1b\[[IO]$/,
+  /^\x1b\[<\d+;\d+;\d+[Mm]$/,
 ];
 /* oxlint-enable no-control-regex */
 
 /**
  * Whether `text` from the terminal's `onData` is the terminal answering
  * the child (a device attributes, status or cursor report, a mode report,
- * a window report, an OSC or DCS reply, a focus report) rather than keys
- * the user pressed.
+ * a window report, an OSC or DCS reply, a focus report, a mouse report)
+ * rather than keys the user pressed.
  */
 export function isTerminalReply(text: string): boolean {
   return TERMINAL_REPLIES.some((pattern) => pattern.test(text));

@@ -115,6 +115,9 @@ test("keys_the_terminal_answering_the_child_is_a_reply", () => {
     "\x1bP1$r0m\x1b\\",
     "\x1b[I",
     "\x1b[O",
+    "\x1b[<0;3;4M",
+    "\x1b[<0;3;4m",
+    "\x1b[<35;10;2M",
   ];
   for (const reply of replies) {
     expect(isTerminalReply(reply), JSON.stringify(reply)).toBe(true);
@@ -139,6 +142,9 @@ test("keys_keys_the_user_pressed_are_not_a_reply", () => {
     "a",
     "Q",
     "pasted text\nwith two lines",
+    "\x1b[<",
+    "\x1b[<0;3M",
+    "a\x1b[<0;3;4M",
   ];
   for (const key of keys) {
     expect(isTerminalReply(key), JSON.stringify(key)).toBe(false);
