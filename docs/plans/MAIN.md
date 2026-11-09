@@ -4,13 +4,24 @@
 
 ## Do first
 
-- [ ] RT-1300 Stop a long task name's wrapped spinner reading as Idle and firing Finished · release vNext — High · Wave 2b — Hook status
-- [ ] RT-1298 Let a remote client update its host, and a host its clients · release vNext — High · Wave 6 — Remote enhancements
+- [/] RT-1320 Make the pre-create spawn tests wait on the child, not a 5 s race · release vNext — Urgent · Backlog
+- [ ] RT-1298 Let a remote client update its host, and a host its clients · release vNext — High · Remote update
+- [ ] RT-1322 Show a tall question's whole text on its Chat card, from the hook — High · Wave 5 — Attention feed on the desktop
+
+## Remote update
+
+- [ ] RT-1303 Let a host update itself when a client asks (sub-issue of RT-1298) · release vNext
+- [ ] RT-1304 Offer a host's update from the client, with its confirm dialog and result (sub-issue of RT-1298) · release vNext
+- [ ] RT-1305 Mark in a release what it breaks, and warn before a remote update (sub-issue of RT-1298) · release vNext
+- [ ] RT-1306 Update connected clients from the host (sub-issue of RT-1298) · release vNext
+- [ ] RT-1307 Update an SSH host through a detached helper (sub-issue of RT-1298) · release vNext
+- [ ] RT-1308 Prove remote update on a second machine, both directions (sub-issue of RT-1298) · release vNext
+- [ ] RT-1316 Merge feat/remote-update to main (#206) (sub-issue of RT-1298)
 
 ## Wave 17 — Themes
 
 - [ ] RT-674 Step the appearance editor from in-flight values and save an app change once
-- [ ] RT-1299 Dim a pane's accent the same whether it comes from the theme or a chosen colour · release vNext
+- [/] RT-1299 Dim a pane's accent the same whether it comes from the theme or a chosen colour · release vNext
 
 ## Wave 16 — Several hosts in one window
 
@@ -52,7 +63,9 @@
 - [ ] RT-1086 Open a Ctrl+clicked path that ends in a ?query or #fragment, reading #L4 as a line
 - [ ] RT-1255 Offer a menu on Ctrl+click of a file path: default app, internal viewer or containing folder · release vNext
 - [ ] RT-1282 Restore a saved layout from the safe-start notice · release vNext
-- [ ] RT-1294 Keep a click that brings the window forward from answering a question · release vNext
+- [ ] RT-1315 Keep a click that brings the window forward from pressing a toast, Dashboard or chat card answer
+- [ ] RT-1317 Split the terminal's mouse-down handler into one method per press kind
+- [ ] RT-1321 Remove the Trusted checkbox: bypass permissions is the one way, remembered without confirming · release vNext
 
 ## Wave 2b — Hook status
 
@@ -60,11 +73,15 @@
 - [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None
 - [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id
 - [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI
-- [ ] RT-754 Decide whether the screen may end a hook-driven turn, or a working title vetoes it
 - [ ] RT-755 Log every status writer and every toast decision
 - [ ] RT-764 Stop subagent hook events starving the screen's demotion after an Esc
 - [ ] RT-766 Stop the status watcher spinning on a ShellAgent frame with no agent and no prompt
 - [ ] RT-767 Work through the held turn end's leftover cases
+- [ ] RT-1311 Keep a stale interrupt row from ending a new turn under a working title
+- [ ] RT-1312 Let a dropped turn-end hold land Idle when a working title stays up
+- [ ] RT-1313 End a hung CLI's turn when its screen freezes on a readable spinner
+- [ ] RT-1314 Stop the shell-hosted watcher spinning on an open window under an overlay
+- [ ] RT-1323 Keep a question footer quoted in the transcript from reading as AwaitingInput
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
@@ -94,13 +111,13 @@
 - [ ] RT-1178 Keep every waiting session's toast and answers on screen when a toast grows tall
 - [ ] RT-1179 Re-place open toasts when the UI text size or font changes
 - [ ] RT-1180 Decide a toast's Sent state from the session on its own host
+- [ ] RT-1318 Carry a dashboard answer's request in one struct instead of six parameters
 
 ## Wave 6 — Remote enhancements
 
 - [ ] RT-58 Underline every terminal link and open it with a plain click
 - [ ] RT-97 Resolve clicked terminal paths on the daemon, using the lines above the click
 - [ ] RT-98 Index each session's transcript file paths and cwds for exact link resolution
-- [ ] RT-686 Update a connected remote host's daemon from the client, with automatic session recovery
 - [ ] RT-99 Pick between candidates when a clicked path matches several files
 - [ ] RT-100 Open an unchanged fetched file from the local cache
 - [ ] RT-102 Resume a remote connection without replaying scrollback
@@ -290,7 +307,6 @@
 - [ ] RT-253 Check whether the daemon's tokio-rustls can be dev-only after TS.5
 - [ ] RT-260 Autostart test: stop writing to the live HKCU Run key
 - [ ] RT-262 Run the ui_ellipsis specs: test-release builds without debug assertions
-- [!] RT-294 Route rt.ps1 native-e2e to the builder through the gate
 - [ ] RT-324 Drive the native client headless: hidden window, virtual input, captures
   - [ ] RT-316 Capture the native client in any state: native-shot views for the overlays and empty area, and a drive-and-capture command
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
@@ -318,6 +334,7 @@
 - [ ] RT-861 Forget a driver id's bounds in UI specs once it stops being drawn
 - [ ] RT-1236 Strip the owner's other Claude variables from a driven run's children
 - [ ] RT-1244 Refuse a driven run's add_repo under any checkout or agent instruction file
+- [ ] RT-1324 Make the settings-claude and settings-hosts shots open their page again
 
 ## macOS
 
@@ -348,10 +365,6 @@
   - [ ] RT-215 AH.2 Pi runtime: backend, session id and dialog entry
   - [ ] RT-216 AH.3 DeepSeek Harness runtime, with hooks and resume
   - [ ] RT-217 AH.4 Spawn dialog runtime dropdown
-
-## Open questions and blocked items
-
-- [!] RT-50 Auto-update for the native client
 
 ## Ideas needing a design pass
 
@@ -589,7 +602,7 @@
 - [ ] RT-1247 Make the daemon's default log filter name its real target
 - [ ] RT-1249 Open a palette shell where the palette was opened, not behind a pop-out
 - [ ] RT-1250 Keep a Chat card box's text across card changes and keys that answer without it
-- [ ] RT-1253 Read a question dialog taller than the terminal · release vNext
+- [/] RT-1253 Read a question dialog taller than the terminal · release vNext
 - [ ] RT-1254 Answer a question at narrow widths, with a wide option label, or with a preview
 - [ ] RT-1265 Read a prompt with Claude Code's right-hand file panel open
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading
@@ -617,7 +630,7 @@
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-786, RT-787, RT-867, RT-868, RT-869
-- [finished-toast.md](finished-toast.md) — RT-754, RT-755, RT-757, RT-769, RT-770
+- [finished-toast.md](finished-toast.md) — RT-755, RT-757, RT-769, RT-770
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
@@ -628,8 +641,9 @@
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, RT-1111, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
-- [remote-access.md](remote-access.md) — RT-686, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
-- [screen-status.md](screen-status.md) — RT-289, RT-754
-- [ssh-remote.md](ssh-remote.md) — RT-536, RT-686, RT-792
+- [remote-access.md](remote-access.md) — Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
+- [remote-update.md](remote-update.md) — RT-1303, RT-1304, RT-1305, RT-1306, RT-1307, RT-1308, Remote update
+- [screen-status.md](screen-status.md) — RT-289
+- [ssh-remote.md](ssh-remote.md) — RT-536, RT-792
 - [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406
 - [toast-position.md](toast-position.md) — RT-1105
