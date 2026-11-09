@@ -1100,6 +1100,8 @@ mod tests {
             parent_agent_id: None,
             agent_type: Some("Explore".to_owned()),
             description: Some(format!("look at {id}")),
+            model: None,
+            effort: None,
             started_at: Some(at(1)),
             finished_at: (state != AgentState::Running).then(|| at(4)),
             state,
