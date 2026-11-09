@@ -3044,6 +3044,9 @@ pub enum ComposerState {
     Unknown,
 }
 
+/// The subject of the `✦ Dismissed.` step a Heads up notice's buttons lead to.
+pub const HEADS_UP_DISMISSED_SUBJECT: &str = "Dismissed.";
+
 /// A prompt the agent is waiting on: the card the client draws over the
 /// composer, and what the user may answer it with.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

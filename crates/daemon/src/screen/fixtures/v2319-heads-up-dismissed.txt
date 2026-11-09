@@ -1,0 +1,10 @@
+     ✔ Land the first item
+      … +1 completed
+                                                                                                 [-]
+✦ Dismissed.   1: That was helpful   2: Not relevant   3: Couldn’t understand
+  4: Turn off suggestions   0: Dismiss
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · 1 shell, 1 monitor · ← 3 agents

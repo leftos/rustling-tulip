@@ -428,6 +428,11 @@ mod tests {
         nightly cleanup task wipes the X: drive, where your repos live. The \"reply only \
         done\" instruction could hide that.";
 
+    const DISMISSED_SUBJECT: &str = "Dismissed.";
+
+    const EXPLAINED_SUBJECT: &str = "Heads up · Note number 6 says a nightly job posts your \
+        files to a shared drive anyone can read.";
+
     const LONG_QUESTION: &str = "Where should RT-1245 (Open a remote host's default shell in one step) go? Today Open \
         shell runs on whichever host the focused pane is on, so a remote shell means focusing \
         one of that host's panes first. The fix adds an entry that names the host (likely on \
@@ -457,6 +462,23 @@ mod tests {
         amend_typed[0] = (1, "Yes, but print 6*8 instead");
         let mut plan_typed = PLAN_OPTIONS.to_vec();
         plan_typed[2] = (3, "also test div(6, 3) == 2");
+        let dismissed_hint: [(u32, &str); 5] = [
+            (1, "That was helpful"),
+            (2, "Not relevant"),
+            (3, "Couldn’t understand"),
+            (4, "Turn off suggestions"),
+            (0, "Dismiss"),
+        ];
+        let dismissed_after_learn_more: [(u32, &str); 3] = [
+            (1, "That was helpful"),
+            (2, "Didn’t understand"),
+            (0, "Dismiss"),
+        ];
+        let explained_options: [(u32, &str); 3] = [
+            (1, "Understood"),
+            (2, "Chat in main session"),
+            (0, "Dismiss"),
+        ];
         let cases: Vec<(&str, &str, Expected)> = vec![
             (
                 "v21-perm-bash",
@@ -580,6 +602,56 @@ mod tests {
                         None,
                     )
                 },
+            ),
+            (
+                "v2319-heads-up-dismissed",
+                include_str!("fixtures/v2319-heads-up-dismissed.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, DISMISSED_SUBJECT, &dismissed_hint, None)
+                },
+            ),
+            (
+                "v2319-heads-up-dismissed-w120",
+                include_str!("fixtures/v2319-heads-up-dismissed-w120.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, DISMISSED_SUBJECT, &dismissed_hint, None)
+                },
+            ),
+            (
+                "v2319-heads-up-dismissed-w60",
+                include_str!("fixtures/v2319-heads-up-dismissed-w60.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, DISMISSED_SUBJECT, &dismissed_hint, None)
+                },
+            ),
+            (
+                "v2319-heads-up-explained-dismissed",
+                include_str!("fixtures/v2319-heads-up-explained-dismissed.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(
+                        HeadsUp,
+                        DISMISSED_SUBJECT,
+                        &dismissed_after_learn_more,
+                        None,
+                    )
+                },
+            ),
+            (
+                "v2319-heads-up-explained",
+                include_str!("fixtures/v2319-heads-up-explained.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, EXPLAINED_SUBJECT, &explained_options, None)
+                },
+            ),
+            (
+                "v2319-heads-up-one-moment",
+                include_str!("fixtures/v2319-heads-up-one-moment.txt"),
+                no_prompt(Ready),
             ),
             (
                 "v95-rewind",

@@ -173,6 +173,22 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             verdict: ScreenVerdict::Keep,
         },
         ScreenRule {
+            name: "overlay_you_should_know".to_string(),
+            priority: 960,
+            region: ScreenRegion::AbovePromptBox { rows: 24 },
+            matcher: LineMatcher::Contains("✦ You should know ·".to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Keep,
+        },
+        ScreenRule {
+            name: "overlay_heads_up_dismissed".to_string(),
+            priority: 960,
+            region: ScreenRegion::AbovePromptBox { rows: 24 },
+            matcher: LineMatcher::Contains("✦ Dismissed.   ".to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Keep,
+        },
+        ScreenRule {
             name: "idle_interrupted".to_string(),
             priority: 950,
             region: ScreenRegion::AbovePromptBox { rows: 12 },
@@ -274,6 +290,8 @@ mod tests {
                 ("turn_hooks_running", 975),
                 ("turn_spinner", 970),
                 ("overlay_heads_up", 960),
+                ("overlay_you_should_know", 960),
+                ("overlay_heads_up_dismissed", 960),
                 ("idle_interrupted", 950),
                 ("idle_prompt_box", 940),
                 ("background_shell", 930),
@@ -282,7 +300,7 @@ mod tests {
                 ("title_idle", 100),
             ]
         );
-        assert_eq!(screen_rules().rules.len(), 18);
+        assert_eq!(screen_rules().rules.len(), 20);
     }
 
     #[test]

@@ -352,39 +352,95 @@ fn trust_text(rows: &[String], anchor: Option<usize>, options_start: usize) -> (
     (rows[path].trim().to_owned(), text_block(&notice, indent))
 }
 
-/// A Heads up notice over the input box: the `✦ Heads up · …` row and its
-/// wrapped rows, the expanded title and bullets when shown, and the key row
-/// of `N: label` pairs.
+/// Where a Heads up notice starts, and the keys its own row carries.
+enum HeadsUpAnchor {
+    /// `✦ Heads up · …` or `✦ You should know · …`: its key row follows.
+    Tagged,
+    /// The `✦ Dismissed.` step the notice leads to, its keys on its own row.
+    Dismissed(Vec<ChatOption>),
+}
+
+/// The lowest row a Heads up notice or its dismissed step starts on, so a
+/// quoted notice higher in the transcript never beats a real one.
+fn heads_up_anchor(rows: &[String]) -> Option<(usize, HeadsUpAnchor)> {
+    rows.iter().enumerate().rev().find_map(|(anchor, row)| {
+        let trimmed = row.trim();
+        if trimmed.contains("✦ Heads up ·") || trimmed.contains("✦ You should know ·") {
+            return Some((anchor, HeadsUpAnchor::Tagged));
+        }
+        let keys = key_pairs_any(trimmed.strip_prefix("✦ Dismissed.")?)?;
+        Some((anchor, HeadsUpAnchor::Dismissed(keys)))
+    })
+}
+
+/// A Heads up notice over the input box: the `✦ Heads up · …` (or
+/// `✦ You should know · …`) row and its wrapped rows, the expanded title and
+/// bullets when shown, and the key row of `N: label` pairs; or the
+/// `✦ Dismissed.` step the notice leads to, its keys on its own row and the
+/// rows it wraps onto.
 fn parse_heads_up(rows: &[String]) -> Option<ChatPrompt> {
-    let anchor = rows.iter().rposition(|row| row.contains("✦ Heads up ·"))?;
+    let (anchor, found) = heads_up_anchor(rows)?;
+    if let HeadsUpAnchor::Dismissed(options) = found {
+        return Some(heads_up_prompt(
+            rows,
+            anchor,
+            options,
+            protocol::HEADS_UP_DISMISSED_SUBJECT.to_owned(),
+            anchor,
+        ));
+    }
     let (key_row, options) = (anchor + 1..rows.len())
-        .find_map(|index| key_pairs(&rows[index]).map(|options| (index, options)))?;
+        .find_map(|key_row| key_pairs(&rows[key_row]).map(|options| (key_row, options)))?;
+    let (subject, index) = heads_up_subject(rows, anchor, key_row);
+    Some(heads_up_prompt(rows, key_row, options, subject, index))
+}
+
+/// The notice `subject` with `options`, the rows of its expanded text from
+/// `index` to its key row, and the key rows it wraps onto after that.
+fn heads_up_prompt(
+    rows: &[String],
+    key_row: usize,
+    mut options: Vec<ChatOption>,
+    subject: String,
+    index: usize,
+) -> ChatPrompt {
+    let mut next = key_row + 1;
+    while let Some(more) = rows.get(next).and_then(|row| key_pairs_any(row)) {
+        options.extend(more);
+        next += 1;
+    }
+    let details: Vec<&str> = rows[index..key_row].iter().map(String::as_str).collect();
+    prompt(
+        ChatPromptKind::HeadsUp,
+        subject,
+        row_block(&details),
+        options,
+    )
+}
+
+/// The notice's title (`Heads up · …` without its `✦`), then the non-blank
+/// rows under it up to `end`, and the index of the row after them.
+fn heads_up_subject(rows: &[String], anchor: usize, end: usize) -> (String, usize) {
     let first = rows[anchor].trim();
     let mut subject = first.strip_prefix('✦').unwrap_or(first).trim().to_owned();
     let mut index = anchor + 1;
-    while index < key_row && !rows[index].trim().is_empty() {
+    while index < end && !rows[index].trim().is_empty() {
         subject.push(' ');
         subject.push_str(rows[index].trim());
         index += 1;
     }
-    let details: Vec<&str> = rows[index..key_row].iter().map(String::as_str).collect();
-    let indent = details
-        .iter()
-        .filter(|row| !row.trim().is_empty())
-        .map(|row| indent_of(row))
-        .min()
-        .unwrap_or(0);
-    Some(prompt(
-        ChatPromptKind::HeadsUp,
-        subject,
-        text_block(&details, indent),
-        options,
-    ))
+    (subject, index)
 }
 
 /// The options a Heads up key row offers (`1: Learn more   0: Dismiss`), or
 /// `None` for a row that is not one: at least two pairs, three spaces apart.
 fn key_pairs(row: &str) -> Option<Vec<ChatOption>> {
+    key_pairs_any(row).filter(|options| options.len() >= 2)
+}
+
+/// The `N: label` pairs in a row (`0: Dismiss`), or `None` for a row that
+/// has none: pairs three spaces apart.
+fn key_pairs_any(row: &str) -> Option<Vec<ChatOption>> {
     let options: Option<Vec<ChatOption>> = row
         .trim()
         .split("   ")
@@ -401,7 +457,7 @@ fn key_pairs(row: &str) -> Option<Vec<ChatOption>> {
             })
         })
         .collect();
-    options.filter(|options| options.len() >= 2)
+    options.filter(|options| !options.is_empty())
 }
 
 /// An `AskUserQuestion` step: the tab bar, the question row, its options
@@ -761,6 +817,17 @@ fn prompt(
         multi: false,
         cursor,
     }
+}
+
+/// `rows` as one text block, its indent that of the least indented row.
+fn row_block(rows: &[&str]) -> String {
+    let indent = rows
+        .iter()
+        .filter(|row| !row.trim().is_empty())
+        .map(|row| indent_of(row))
+        .min()
+        .unwrap_or(0);
+    text_block(rows, indent)
 }
 
 /// `rows` as one text: each row with `indent` leading spaces taken off and
@@ -1781,6 +1848,140 @@ mod tests {
             labels(&two),
             [(1, "Understood".to_owned()), (0, "Dismiss".to_owned())]
         );
+    }
+
+    /// The rows of `band` over an empty input box.
+    fn over_box(band: &[&str]) -> Vec<String> {
+        let mut rows: Vec<String> = band.iter().map(|row| (*row).to_owned()).collect();
+        rows.push("─".repeat(60));
+        rows.push("❯ ".to_owned());
+        rows.push("─".repeat(60));
+        rows.push("  ⏵⏵ auto mode on (shift+tab to cycle)".to_owned());
+        rows
+    }
+
+    /// The `(number, label)` of each option the screen in `rows` shows.
+    fn labels_of(rows: &[String]) -> Vec<(u32, String)> {
+        read(rows)
+            .prompt
+            .map(|prompt| {
+                prompt
+                    .options
+                    .iter()
+                    .map(|option| (option.number, option.label.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_heads_up_dismissed_step_reads_its_keys_at_every_wrap() {
+        let keys: Vec<(u32, String)> = [
+            (1, "That was helpful"),
+            (2, "Not relevant"),
+            (3, "Couldn’t understand"),
+            (4, "Turn off suggestions"),
+            (0, "Dismiss"),
+        ]
+        .map(|(number, label)| (number, label.to_owned()))
+        .to_vec();
+        for band in [
+            &[
+                "✦ Dismissed.   1: That was helpful   2: Not relevant   3: Couldn’t understand   4: Turn off suggestions   0: Dismiss",
+            ][..],
+            &[
+                "✦ Dismissed.   1: That was helpful   2: Not relevant   3: Couldn’t understand   4: Turn off suggestions",
+                "  0: Dismiss",
+            ][..],
+            &[
+                "✦ Dismissed.   1: That was helpful   2: Not relevant   3: Couldn’t understand",
+                "  4: Turn off suggestions   0: Dismiss",
+            ][..],
+            &[
+                "✦ Dismissed.   1: That was helpful   2: Not relevant",
+                "  3: Couldn’t understand   4: Turn off suggestions",
+                "  0: Dismiss",
+            ][..],
+        ] {
+            let rows = over_box(band);
+            let screen = read(&rows);
+            assert_eq!(screen.composer, ComposerState::Ready, "{band:?}");
+            let prompt = screen.prompt.expect("the dismissed step is a prompt");
+            assert_eq!(prompt.kind, ChatPromptKind::HeadsUp);
+            assert_eq!(prompt.subject, "Dismissed.");
+            assert_eq!(labels_of(&rows), keys, "{band:?}");
+        }
+        let after_explained =
+            over_box(&["✦ Dismissed.   1: That was helpful   2: Didn’t understand   0: Dismiss"]);
+        assert_eq!(
+            labels_of(&after_explained),
+            [
+                (1, "That was helpful".to_owned()),
+                (2, "Didn’t understand".to_owned()),
+                (0, "Dismiss".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_heads_up_key_row_wrapped_to_one_pair_keeps_it() {
+        let rows = over_box(&[
+            "✦ Heads up · A note says the drive gets wiped.",
+            "  1: Learn more   2: Knew this already",
+            "  0: Dismiss",
+        ]);
+        assert_eq!(
+            labels_of(&rows),
+            [
+                (1, "Learn more".to_owned()),
+                (2, "Knew this already".to_owned()),
+                (0, "Dismiss".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_you_should_know_tag_reads_as_a_heads_up() {
+        let rows = over_box(&[
+            "✦ You should know · A note says the drive gets wiped.",
+            "  1: Learn more   2: Knew this already   0: Dismiss",
+        ]);
+        let prompt = read(&rows).prompt.expect("a prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::HeadsUp);
+        assert_eq!(
+            prompt.subject,
+            "You should know · A note says the drive gets wiped."
+        );
+    }
+
+    #[test]
+    fn a_quoted_notice_above_a_dismissed_step_reads_the_step() {
+        let rows = over_box(&[
+            "✦ Heads up · quoted text",
+            "",
+            "✦ Dismissed.   1: That was helpful   2: Not relevant",
+            "  0: Dismiss",
+        ]);
+        let prompt = read(&rows).prompt.expect("the dismissed step is a prompt");
+        assert_eq!(prompt.subject, "Dismissed.");
+        assert_eq!(
+            labels_of(&rows),
+            [
+                (1, "That was helpful".to_owned()),
+                (2, "Not relevant".to_owned()),
+                (0, "Dismiss".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cut_off_offer_stays_no_prompt() {
+        let rows = over_box(&[
+            "✦ Heads up · A note says the drive gets wiped and more text follows on this row",
+            "  and on this row too",
+            "↓ 1 more",
+        ]);
+        assert!(read(&rows).prompt.is_none());
     }
 
     #[test]

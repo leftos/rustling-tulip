@@ -1,0 +1,14 @@
+                                                                                                                    [-]
+✦ Heads up · Note number 6 says a nightly job posts your files to a shared drive anyone can read.
+
+  Why this note matters
+  - The nightly job posts what it finds to a shared drive.
+  - Anyone with the link can read it there.
+  - Consider moving the job's output somewhere private.
+
+  1: Understood   2: Chat in main session   0: Dismiss
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_api::{Key, KeyHolder, ViewGoal, ViewReading, ViewRefusal, ViewStep};
-use protocol::{AgentId, ChatPromptKind, ChatScreen, ComposerState, SessionNoticeKind};
+use protocol::{AgentId, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState, SessionNoticeKind};
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
@@ -400,6 +400,12 @@ pub struct ViewReturn {
     key_pending: bool,
 }
 
+/// Whether `prompt` is a Heads up notice to return to main for: the notice
+/// itself, never the `Dismissed.` step its buttons lead to.
+fn is_notice(prompt: &ChatPrompt) -> bool {
+    prompt.kind == ChatPromptKind::HeadsUp && prompt.subject != protocol::HEADS_UP_DISMISSED_SUBJECT
+}
+
 impl ViewReturn {
     /// Whether a drive is under way or a pressed key awaits its reading: the
     /// terminal is mid-switch and its keys are not free.
@@ -441,7 +447,7 @@ impl ViewReturn {
             .is_some_and(|line| line.starts_with(NOTE_PREFIX));
         let heads_up_shown = chat
             .and_then(|chat| chat.prompt.as_ref())
-            .is_some_and(|prompt| prompt.kind == ChatPromptKind::HeadsUp);
+            .is_some_and(is_notice);
         if !heads_up_shown {
             self.handled_heads_up = None;
         }
@@ -517,7 +523,7 @@ impl ViewReturn {
         if view.dialog {
             return None;
         }
-        if let Some(heads_up) = prompt.filter(|prompt| prompt.kind == ChatPromptKind::HeadsUp) {
+        if let Some(heads_up) = prompt.filter(|prompt| is_notice(prompt)) {
             let identity = crate::screen::dialogs::prompt_identity(heads_up);
             if self.handled_heads_up != Some(identity) {
                 self.handled_heads_up = Some(identity);
@@ -633,10 +639,9 @@ impl ViewReturn {
             return;
         }
         let due = match saved.after {
-            RestoreAfter::HeadsUpGone => chat
-                .prompt
-                .as_ref()
-                .is_none_or(|prompt| prompt.kind != ChatPromptKind::HeadsUp),
+            RestoreAfter::HeadsUpGone => {
+                chat.prompt.as_ref().is_none_or(|prompt| !is_notice(prompt))
+            }
             RestoreAfter::MainWorking => chat.composer == ComposerState::Working,
         };
         if !due || !self.stash_still_held(view, out) {
@@ -909,6 +914,17 @@ mod tests {
         chat(
             ComposerState::Ready,
             Some(prompt(ChatPromptKind::HeadsUp, body)),
+        )
+    }
+
+    /// The `Dismissed.` step a Heads up notice's buttons lead to.
+    fn dismissed() -> ChatScreen {
+        chat(
+            ComposerState::Ready,
+            Some(ChatPrompt {
+                subject: protocol::HEADS_UP_DISMISSED_SUBJECT.to_owned(),
+                ..prompt(ChatPromptKind::HeadsUp, "")
+            }),
         )
     }
 
@@ -1186,6 +1202,28 @@ mod tests {
             )),
             [Key::Down],
             "a new notice returns again"
+        );
+    }
+
+    #[test]
+    fn a_dismissed_step_does_not_pull_the_view_back_to_main() {
+        let mut machine = ViewReturn::default();
+        let actions = feed(&mut machine, &agent_view(SLEEPER), Some(&dismissed()));
+        assert!(keys(&actions).is_empty(), "{actions:?}");
+        assert_eq!(machine.saved(), None);
+    }
+
+    #[test]
+    fn a_stashed_draft_comes_back_while_the_dismissed_step_shows() {
+        let mut machine = stashed_and_back_in_main();
+        assert_eq!(
+            keys(&feed(
+                &mut machine,
+                &stashed(main_view()),
+                Some(&dismissed())
+            )),
+            [Key::Down],
+            "the step is not a notice, so the draft goes back"
         );
     }
 

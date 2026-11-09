@@ -2402,6 +2402,9 @@ export type ComposerState =
   /** A full-screen overlay owns the keyboard. */
   | { state: "overlay"; name: string };
 
+/** The subject of the `✦ Dismissed.` step a Heads up notice's buttons lead to. */
+export const HEADS_UP_DISMISSED_SUBJECT = "Dismissed.";
+
 /**
  * A prompt the agent is waiting on: the card the client draws over the
  * composer, and what the user may answer it with.
