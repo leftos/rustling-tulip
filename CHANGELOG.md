@@ -4,6 +4,15 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.11.0-alpha
+
+### Highlights
+
+- The phone app opens each session as a chat, with a live terminal, a Needs you tray and notifications when a session needs you or finishes.
+- Answer a question or permission prompt in your own words from Chat's cards or a toast.
+- Ctrl+Shift+P opens a jump palette to go straight to any pane, tab, session, repo or workspace.
+- A crash at start-up now says what happened, and the client always opens, closing your tabs only if it crashes twice in a row.
+
 ### Added
 
 - Open a shell on any connected computer from the jump palette (Ctrl+Shift+P, "Open shell on …") or from its row in Connections.
