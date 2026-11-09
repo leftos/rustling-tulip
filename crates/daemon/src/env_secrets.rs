@@ -1712,8 +1712,9 @@ mod tests {
         );
     }
 
-    /// A `state.json` that failed to parse leaves the walk with no
-    /// `last_spawn_config`s to read, so the sweep deletes nothing either.
+    /// A `state.json` that failed to parse sets the corrupt flag, and the walk
+    /// refuses to collect references at all, since a dropped entry may have
+    /// held one; the sweep deletes nothing.
     #[test]
     fn a_sweep_after_a_corrupt_state_file_deletes_nothing() {
         let (_lock, _config_dir) = scratch("sweep-corrupt-state");

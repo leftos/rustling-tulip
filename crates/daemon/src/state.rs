@@ -14,7 +14,9 @@ use protocol::{
     AgentId, ContainerRef, DefaultShell, KeepAwakeMode, OptionValues, RepoEntry,
     SummarizerSettings, TabEntry, WorkspaceEntry,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -132,9 +134,10 @@ impl AgentCommand {
 pub struct AppState {
     pub dirs: Dirs,
     inner: Mutex<PersistedState>,
-    /// True when `state.json` existed but could not be parsed, so `inner` is a
-    /// fresh default and this process does not know what the file referenced.
-    /// A startup sweep that must not miss a reference declines to act.
+    /// True when `state.json` existed but could not be parsed, so `inner` holds
+    /// only what could be salvaged and this process may not know every repo,
+    /// workspace or `last_spawn_config` the file carried. A startup sweep that
+    /// must not miss a reference declines to act.
     state_file_corrupt: bool,
 }
 
@@ -152,15 +155,15 @@ impl AppState {
                         Ok(kept) => tracing::warn!(
                             ?err,
                             kept = %kept.display(),
-                            "state.json corrupt; kept its bytes and starting fresh"
+                            "state.json corrupt; kept its bytes and salvaging what still reads"
                         ),
                         Err(keep_err) => tracing::error!(
                             ?err,
                             error = ?keep_err,
-                            "state.json corrupt and could not be kept; starting fresh"
+                            "state.json corrupt and could not be kept; salvaging what still reads"
                         ),
                     }
-                    (PersistedState::default(), true)
+                    (salvage_state(&bytes), true)
                 }
             }
         } else {
@@ -176,11 +179,14 @@ impl AppState {
             inner: Mutex::new(inner),
             state_file_corrupt,
         };
-        if migrated {
-            // Best-effort: persist the simplified paths immediately so the
-            // next daemon start sees clean state without re-migrating.
+        if migrated || state_file_corrupt {
+            // Best-effort: put the simplified paths, and whatever a corrupt
+            // file still yielded, on disk right away. A start that never
+            // writes again then finds the file it should keep, rather than
+            // none: the corrupt original has moved aside and only this write
+            // stands between the salvage and an empty next start.
             if let Err(err) = state.write_to_disk() {
-                tracing::warn!(?err, "failed to persist path-migrated state.json");
+                tracing::warn!(?err, "failed to persist the loaded state.json");
             }
         }
         Ok(state)
@@ -208,8 +214,8 @@ impl AppState {
     }
 
     /// Whether `state.json` existed but could not be parsed, so this process
-    /// runs on a fresh default and does not know which repos, workspaces or
-    /// `last_spawn_config`s the file carried.
+    /// runs on what could be salvaged from it and a dropped entry may have held
+    /// a reference it no longer knows about.
     pub fn state_file_corrupt(&self) -> bool {
         self.state_file_corrupt
     }
@@ -502,7 +508,7 @@ fn corrupt_stamp(at: DateTime<Utc>) -> String {
 
 /// Move the unparsable `state_file` aside as `state.json.corrupt-<stamp>` in its
 /// folder, then drop every such copy but the newest few, so a start that fell
-/// back to defaults never destroys what was there.
+/// back to what still parses never destroys what was there.
 ///
 /// The move is a rename; when it fails (the file is held open, or the two names
 /// sit on different volumes) `bytes` — the content the caller already read — is
@@ -601,6 +607,128 @@ fn prune_corrupt_states(folder: &Path, kept: &Path) {
             );
         }
     }
+}
+
+/// What can still be read from a `state.json` that failed to parse: every field
+/// and every list entry that parses on its own, the rest dropped with a logged
+/// reason. Entirely unreadable bytes give the defaults.
+fn salvage_state(bytes: &[u8]) -> PersistedState {
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        log_dropped_field("<file>");
+        return PersistedState::default();
+    };
+    let Value::Object(fields) = value else {
+        log_dropped_field("<file>");
+        return PersistedState::default();
+    };
+    // The two registries carry no serde default, so a file missing either one
+    // still needs the key there to parse at all; their empty arrays read as a
+    // file that simply held none.
+    let mut salvaged = Map::new();
+    salvaged.insert("repos".to_owned(), Value::Array(Vec::new()));
+    salvaged.insert("workspaces".to_owned(), Value::Array(Vec::new()));
+    for (key, value) in fields {
+        let value = keep_parsing_field(&key, value);
+        salvaged.insert(key.clone(), value);
+        if serde_json::from_value::<PersistedState>(Value::Object(salvaged.clone())).is_err() {
+            salvaged.remove(&key);
+            log_dropped_field(&key);
+        }
+    }
+    if let Ok(state) = serde_json::from_value::<PersistedState>(Value::Object(salvaged)) {
+        state
+    } else {
+        log_dropped_field("<file>");
+        PersistedState::default()
+    }
+}
+
+/// One `"state.json: dropped a bad field"` warning naming `field` and nothing
+/// else, so no value out of the file can reach the log.
+fn log_dropped_field(field: &str) {
+    tracing::warn!(field, count = 1_usize, "state.json: dropped a bad field");
+}
+
+/// One `"state.json: dropped a bad entry"` warning naming where under `field`
+/// the entries were dropped and how many, never their content.
+fn log_dropped_entries(field: &str, count: usize) {
+    tracing::warn!(field, count, "state.json: dropped a bad entry");
+}
+
+/// `value` with every entry that does not parse on its own dropped, so one bad
+/// entry costs only itself. A key this build holds no entries under is returned
+/// as it came.
+fn keep_parsing_field(key: &str, value: Value) -> Value {
+    match key {
+        "repos" => keep_parsing::<RepoEntry>(key, value),
+        "workspaces" => keep_parsing::<WorkspaceEntry>(key, value),
+        "legacy_tabs" | "tabs" => keep_parsing::<TabEntry>(key, value),
+        "layouts" => keep_parsing_layouts(value),
+        _ => value,
+    }
+}
+
+/// `value` filtered to the array elements that parse as one `T`, logging what
+/// it dropped under `field`. A value that is not an array reads as an empty one.
+fn keep_parsing<T: DeserializeOwned>(field: &str, value: Value) -> Value {
+    let Value::Array(items) = value else {
+        log_dropped_field(field);
+        return Value::Array(Vec::new());
+    };
+    let total = items.len();
+    let kept: Vec<Value> = items
+        .into_iter()
+        .filter(|item| serde_json::from_value::<T>(item.clone()).is_ok())
+        .collect();
+    if kept.len() < total {
+        log_dropped_entries(field, total - kept.len());
+    }
+    Value::Array(kept)
+}
+
+/// Every layout whose tabs, filtered to the ones that parse, still parse as a
+/// `ClientLayout`; a layout of any other shape is dropped. A value that is not a
+/// JSON object reads as an empty one.
+fn keep_parsing_layouts(value: Value) -> Value {
+    let Value::Object(layouts) = value else {
+        log_dropped_field("layouts");
+        return Value::Object(Map::new());
+    };
+    let mut kept = Map::new();
+    for (client_id, mut layout) in layouts {
+        keep_layout_fields(&client_id, &mut layout);
+        if serde_json::from_value::<ClientLayout>(layout.clone()).is_ok() {
+            kept.insert(client_id, layout);
+        } else {
+            tracing::warn!(
+                client_id = %client_id,
+                count = 1_usize,
+                "state.json: dropped a bad entry"
+            );
+        }
+    }
+    Value::Object(kept)
+}
+
+/// One layout value with its `"tabs"` array filtered to the tabs that parse and
+/// a `"name"` that is not text removed, logging what it dropped under the client
+/// the layout belongs to. A layout that is not a JSON object is left as it is
+/// for its own parse to drop; one with no `"tabs"` parses as no tabs and is kept.
+fn keep_layout_fields(client_id: &str, layout: &mut Value) {
+    let Some(fields) = layout.as_object_mut() else {
+        return;
+    };
+    if let Some(name) = fields.get("name").cloned()
+        && serde_json::from_value::<Option<String>>(name).is_err()
+    {
+        fields.remove("name");
+        log_dropped_entries(&format!("layouts.{client_id}.name"), 1);
+    }
+    let Some(tabs) = fields.remove("tabs") else {
+        return;
+    };
+    let kept = keep_parsing::<TabEntry>(&format!("layouts.{client_id}.tabs"), tabs);
+    fields.insert("tabs".to_owned(), kept);
 }
 
 /// Serialize `state` and swap it in as `state.json` through
@@ -1748,6 +1876,224 @@ mod tests {
                 .iter()
                 .any(|copy| std::fs::read(copy).expect("read a copy") == b"not json either"),
             "the copy just made is among the kept ones"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// The v0.5.1-alpha `state.json` as a mutable JSON tree, for the tests that
+    /// damage one part of it and check what salvage still keeps.
+    fn v0_5_1_tree() -> serde_json::Value {
+        serde_json::from_str(V0_5_1_STATE_JSON).expect("parse the v0.5.1 state.json")
+    }
+
+    #[test]
+    fn a_bad_tab_keeps_the_repos_and_the_other_tabs() {
+        let mut tree = v0_5_1_tree();
+        let tabs = tree["layouts"]["client-1"]["tabs"]
+            .as_array_mut()
+            .expect("the layout holds a tabs array");
+        let mut broken = tabs[0].clone();
+        broken["id"] = serde_json::json!("tab-2");
+        broken["content"]["grid"]["kind"] = serde_json::json!("nonsense");
+        tabs.push(broken);
+
+        let state = salvage_state(tree.to_string().as_bytes());
+
+        assert_eq!(state.repos.len(), 1, "the repo is kept");
+        assert_eq!(state.workspaces.len(), 1, "the workspace is kept");
+        let layout = state.layouts.get("client-1").expect("the layout is kept");
+        assert_eq!(layout.tabs.len(), 1, "only the good tab is kept");
+        assert_eq!(layout.tabs[0].id, "tab-1", "the good tab is the one kept");
+    }
+
+    #[test]
+    fn a_bad_repo_entry_keeps_the_other_repos() {
+        let mut tree = v0_5_1_tree();
+        tree["repos"]
+            .as_array_mut()
+            .expect("repos is an array")
+            .push(serde_json::json!({"id": 3}));
+
+        let state = salvage_state(tree.to_string().as_bytes());
+
+        assert_eq!(state.repos.len(), 1, "one repo is kept");
+        assert_eq!(state.repos[0].id, "repo-a", "the good repo is the one kept");
+        assert_eq!(state.workspaces.len(), 1, "the workspace is kept");
+    }
+
+    #[test]
+    fn a_bad_workspace_entry_keeps_the_other_workspaces() {
+        let mut tree = v0_5_1_tree();
+        tree["workspaces"]
+            .as_array_mut()
+            .expect("workspaces is an array")
+            .push(serde_json::json!({"id": 3}));
+
+        let state = salvage_state(tree.to_string().as_bytes());
+
+        assert_eq!(state.workspaces.len(), 1, "one workspace is kept");
+        assert_eq!(
+            state.workspaces[0].id, "ws-a",
+            "the good workspace is the one kept"
+        );
+        assert_eq!(state.repos.len(), 1, "the repo is kept");
+    }
+
+    #[test]
+    fn a_wrong_typed_field_keeps_the_rest() {
+        let mut tree = v0_5_1_tree();
+        tree["session_order"] = serde_json::json!(7);
+
+        let state = salvage_state(tree.to_string().as_bytes());
+
+        assert!(state.session_order.is_empty(), "the bad field reads empty");
+        assert_eq!(state.repos.len(), 1, "the repo is kept");
+        assert_eq!(state.layouts.len(), 1, "the layout is kept");
+    }
+
+    #[test]
+    fn a_file_missing_repos_keeps_the_rest() {
+        let mut tree = v0_5_1_tree();
+        tree.as_object_mut()
+            .expect("the state is a JSON object")
+            .remove("repos");
+
+        let state = salvage_state(tree.to_string().as_bytes());
+
+        assert!(state.repos.is_empty(), "the missing list reads empty");
+        assert_eq!(state.workspaces.len(), 1, "the workspace is kept");
+        assert_eq!(state.layouts.len(), 1, "the layout is kept");
+    }
+
+    #[test]
+    fn a_wrong_kind_of_list_reads_as_empty() {
+        let mut tree = v0_5_1_tree();
+        tree["repos"] = serde_json::json!(3);
+        tree["layouts"] = serde_json::json!([]);
+
+        let state = salvage_state(tree.to_string().as_bytes());
+
+        assert!(state.repos.is_empty(), "a repos number reads empty");
+        assert!(state.layouts.is_empty(), "a layouts array reads empty");
+        assert_eq!(state.workspaces.len(), 1, "the workspace is kept");
+    }
+
+    #[test]
+    fn a_layout_that_is_not_an_object_is_dropped() {
+        let mut tree = v0_5_1_tree();
+        tree["layouts"]["other"] = serde_json::json!(3);
+
+        let state = salvage_state(tree.to_string().as_bytes());
+
+        assert_eq!(state.layouts.len(), 1, "only the good layout is kept");
+        assert!(
+            state.layouts.contains_key("client-1"),
+            "the good client's layout is the one kept"
+        );
+    }
+
+    #[test]
+    fn a_bad_legacy_tab_is_dropped() {
+        for key in ["legacy_tabs", "tabs"] {
+            let mut tree = v0_5_1_tree();
+            let fields = tree.as_object_mut().expect("the state is a JSON object");
+            let good = fields
+                .remove("legacy_tabs")
+                .expect("the v0.5.1 state holds a legacy tab");
+            let mut tabs = good.as_array().expect("legacy_tabs is an array").clone();
+            tabs.push(serde_json::json!({"id": 3}));
+            fields.insert(key.to_owned(), serde_json::Value::Array(tabs));
+
+            let state = salvage_state(tree.to_string().as_bytes());
+
+            assert_eq!(state.legacy_tabs.len(), 1, "one tab survives under {key}");
+            assert_eq!(
+                state.legacy_tabs[0].id, "tab-legacy",
+                "the good tab survives under {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn bytes_that_are_not_json_give_the_defaults() {
+        let state = salvage_state(b"{ not json");
+
+        assert!(state.repos.is_empty(), "no repos");
+        assert!(state.layouts.is_empty(), "no layouts");
+    }
+
+    #[test]
+    fn json_that_is_not_an_object_gives_the_defaults() {
+        let state = salvage_state(b"[1,2]");
+
+        assert!(state.repos.is_empty(), "no repos");
+        assert!(state.layouts.is_empty(), "no layouts");
+    }
+
+    #[test]
+    fn a_damaged_file_salvages_keeps_its_copy_and_counts_as_corrupt() {
+        let dirs = scratch_dirs("salvage-kept");
+        let mut tree = v0_5_1_tree();
+        tree["layouts"]["client-1"]["tabs"][0]["content"]["grid"]["kind"] =
+            serde_json::json!("nonsense");
+        let damaged = tree.to_string();
+        std::fs::write(&dirs.state_file, &damaged).expect("seed a damaged state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("load state");
+
+        assert!(state.state_file_corrupt(), "the flag stays true");
+        assert!(
+            state.with_persisted(|persisted| persisted.repos.len() == 1),
+            "the repo is salvaged"
+        );
+        let copies = corrupt_copies(&dirs.config);
+        assert_eq!(copies.len(), 1, "exactly one copy: {copies:?}");
+        assert_eq!(
+            std::fs::read(&copies[0]).expect("read the copy"),
+            damaged.as_bytes(),
+            "the copy holds the original bytes"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_wrong_typed_layout_name_keeps_its_tabs() {
+        let mut tree = v0_5_1_tree();
+        tree["layouts"]["client-1"]["name"] = serde_json::json!(7);
+
+        let state = salvage_state(tree.to_string().as_bytes());
+
+        let layout = state.layouts.get("client-1").expect("the layout is kept");
+        assert_eq!(layout.tabs.len(), 1, "the layout keeps its tab");
+        assert_eq!(layout.tabs[0].id, "tab-1", "the good tab is kept");
+        assert!(layout.name.is_none(), "the bad name is dropped");
+    }
+
+    #[test]
+    fn a_salvage_is_on_disk_when_the_load_returns() {
+        let dirs = scratch_dirs("salvage-written");
+        let mut tree = v0_5_1_tree();
+        tree["layouts"]["client-1"]["tabs"][0]["content"]["grid"]["kind"] =
+            serde_json::json!("nonsense");
+        let damaged = tree.to_string();
+        std::fs::write(&dirs.state_file, &damaged).expect("seed a damaged state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("load state");
+
+        assert!(state.state_file_corrupt(), "the flag stays true");
+        let saved: PersistedState = serde_json::from_slice(
+            &std::fs::read(&dirs.state_file).expect("the salvage is written before load returns"),
+        )
+        .expect("the salvaged state.json parses");
+        assert_eq!(saved.repos.len(), 1, "the salvaged repo is on disk");
+        let copies = corrupt_copies(&dirs.config);
+        assert_eq!(copies.len(), 1, "exactly one copy: {copies:?}");
+        assert_eq!(
+            std::fs::read(&copies[0]).expect("read the copy"),
+            damaged.as_bytes(),
+            "the copy holds the original bytes"
         );
 
         let _ = std::fs::remove_dir_all(&dirs.config);
