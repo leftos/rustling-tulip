@@ -123,6 +123,30 @@ fn the_chip_shows_the_active_account_and_its_bars(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_popover_shows_a_model_limit_in_use(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    popover(
+        &mut h,
+        vec![
+            account(1, "main")
+                .active()
+                .model_limit("Fable", 37.0)
+                .build(),
+            account(2, "ops").model_limit("Fable", 0.0).build(),
+        ],
+    );
+    assert!(
+        drawn(&mut h, "accounts-fable-7d-1=37%"),
+        "a per-model limit in use draws its line"
+    );
+    assert!(
+        !drawn(&mut h, "accounts-fable-7d-2=0%"),
+        "a per-model limit at 0 % draws no line"
+    );
+}
+
+#[gpui::test]
 fn the_footer_chip_follows_the_focused_panes_host(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = support::remote_in_pane(

@@ -846,6 +846,16 @@ impl AccountBuilder {
         self
     }
 
+    /// With a per-model limit of `pct` for `model`, no reset time.
+    pub fn model_limit(mut self, model: &str, pct: f64) -> Self {
+        self.0.model_limits.push(protocol::AccountModelLimit {
+            model: model.to_owned(),
+            pct,
+            resets_at: None,
+        });
+        self
+    }
+
     /// With its usage fetched `minutes` ago.
     pub fn fetched_minutes_ago(mut self, minutes: i64) -> Self {
         self.0.fetched_at = Some(Utc::now() - chrono::Duration::minutes(minutes));

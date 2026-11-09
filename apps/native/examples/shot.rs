@@ -2434,6 +2434,11 @@ fn shot_accounts(now: DateTime<Utc>, request_id: Option<String>) -> DaemonMessag
     };
     let main = protocol::AccountSnapshot {
         active: true,
+        model_limits: vec![protocol::AccountModelLimit {
+            model: "Fable".to_owned(),
+            pct: 37.0,
+            resets_at: Some(now + chrono::Duration::minutes(60 * 45)),
+        }],
         ..account(1, "main", 34.0, 41.0)
     };
     let lab = protocol::AccountSnapshot {

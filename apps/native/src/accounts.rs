@@ -18,8 +18,8 @@ use std::fmt::Display;
 
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use protocol::{
-    AccountEventKind, AccountLoginState, AccountSnapshot, AccountUsageStatus, AccountUsageWindow,
-    AutoSwitchState, AutoSwitchStrategy, DaemonMessage,
+    AccountEventKind, AccountLoginState, AccountModelLimit, AccountSnapshot, AccountUsageStatus,
+    AccountUsageWindow, AutoSwitchState, AutoSwitchStrategy, DaemonMessage,
 };
 
 use crate::target::HostKey;
@@ -642,11 +642,12 @@ impl Tag {
     }
 }
 
-/// One window line of a row: `5h` or `7d`, its bar and its reset text,
-/// which is danger-coloured when the window is used up.
+/// One window line of a row: `5h`, `7d`, or a per-model limit labelled
+/// `{model} 7d`, its bar and its reset text, which is danger-coloured when
+/// the window is used up.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WindowLine {
-    pub(crate) label: &'static str,
+    pub(crate) label: String,
     pub(crate) bar: Bar,
     pub(crate) reset: String,
     pub(crate) used_up: bool,
@@ -713,14 +714,16 @@ where
     let windows = if relogin {
         Vec::new()
     } else {
-        [("5h", &account.five_hour), ("7d", &account.seven_day)]
+        let mut windows = [("5h", &account.five_hour), ("7d", &account.seven_day)]
             .into_iter()
             .filter_map(|(label, window)| {
                 window
                     .as_ref()
                     .map(|window| window_line(label, window, dim, now, tz))
             })
-            .collect()
+            .collect::<Vec<WindowLine>>();
+        windows.extend(model_lines(&account.model_limits, dim, now, tz));
+        windows
     };
     let switch = (!account.active && !relogin).then(|| SwitchButton {
         label: if switching == Some(account.number) {
@@ -757,7 +760,7 @@ where
 
 /// The line for `window`, labelled `label`, of a row `dim` or not.
 fn window_line<Tz: TimeZone>(
-    label: &'static str,
+    label: impl Into<String>,
     window: &AccountUsageWindow,
     dim: bool,
     now: DateTime<Utc>,
@@ -774,11 +777,60 @@ where
         (false, None) => "not started".to_owned(),
     };
     WindowLine {
-        label,
+        label: label.into(),
         bar: bar(window, dim),
         reset,
         used_up,
     }
+}
+
+/// The per-model limit lines of a row: one per limit whose displayed
+/// percentage is above zero, in the daemon's order, each labelled
+/// `{model} 7d`.
+fn model_lines<Tz: TimeZone>(
+    limits: &[AccountModelLimit],
+    dim: bool,
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> Vec<WindowLine>
+where
+    Tz::Offset: Display,
+{
+    limits
+        .iter()
+        .filter(|limit| {
+            limit.pct > 0.0 && limit.pct.is_finite() && format!("{:.0}", limit.pct) != "0"
+        })
+        .map(|limit| {
+            window_line(
+                format!("{} 7d", limit.model),
+                &AccountUsageWindow {
+                    pct: limit.pct,
+                    resets_at: limit.resets_at,
+                },
+                dim,
+                now,
+                tz,
+            )
+        })
+        .collect()
+}
+
+/// A label as a selector id: lowercased, each run of other characters
+/// collapsed to one `-`, and the ends trimmed of `-`.
+pub(crate) fn label_slug(label: &str) -> String {
+    let mut slug = String::with_capacity(label.len());
+    let mut dash = false;
+    for ch in label.chars() {
+        if ch.is_alphanumeric() {
+            slug.extend(ch.to_lowercase());
+            dash = false;
+        } else if !dash {
+            slug.push('-');
+            dash = true;
+        }
+    }
+    slug.trim_matches('-').to_owned()
 }
 
 /// `at` on the wall clock of `tz`: `HH:MM` on `now`'s day, else
@@ -1102,16 +1154,16 @@ pub(crate) fn age_text(elapsed: TimeDelta) -> String {
 mod tests {
     use chrono::{DateTime, TimeDelta, TimeZone, Utc};
     use protocol::{
-        AccountEventKind, AccountKind, AccountLoginState, AccountSnapshot, AccountUsageStatus,
-        AccountUsageWindow, AutoSwitchState, AutoSwitchStrategy, DaemonMessage, FleetVerdict,
-        FleetWindow,
+        AccountEventKind, AccountKind, AccountLoginState, AccountModelLimit, AccountSnapshot,
+        AccountUsageStatus, AccountUsageWindow, AutoSwitchState, AutoSwitchStrategy, DaemonMessage,
+        FleetVerdict, FleetWindow,
     };
 
     use super::{
         AccountsState, AliasChange, ChipCandidate, Level, RELOGIN_LINE, Removal, RowActions,
         STORE_READ_ONLY, Segment, Tag, WriteAction, account_toast, add_login_note, age_text,
         alias_change, bar, checked_line, chip, chip_host, cooldown_segments, forecast, header,
-        hysteresis_step, login_status, moved_order, paused_line, row, row_actions,
+        hysteresis_step, label_slug, login_status, moved_order, paused_line, row, row_actions,
         strategy_segments, threshold_step, window_segments,
     };
     use crate::target::HostKey;
@@ -1710,6 +1762,54 @@ mod tests {
             shown,
             [("not started", false), ("used up · back 18:05", true)]
         );
+    }
+
+    /// A per-model limit of `model` at `pct`, resetting at `resets_at`.
+    fn model_limit(model: &str, pct: f64, resets_at: Option<DateTime<Utc>>) -> AccountModelLimit {
+        AccountModelLimit {
+            model: model.to_owned(),
+            pct,
+            resets_at,
+        }
+    }
+
+    #[test]
+    fn a_row_shows_a_model_limit_above_zero_after_its_7d_line() {
+        let mut lab = account(3, "lab");
+        let resets = now() + TimeDelta::hours(30);
+        lab.model_limits = vec![
+            model_limit("Fable", 37.4, Some(resets)),
+            model_limit("Opus", 0.4, None),
+            model_limit("Sonnet", 0.0, None),
+        ];
+        let lines = row(&lab, None, false, now(), &Utc).windows;
+        let labels: Vec<&str> = lines.iter().map(|line| line.label.as_str()).collect();
+        assert_eq!(labels, ["5h", "7d", "Fable 7d"]);
+        assert_eq!(lines[2].bar.pct, "37%");
+        assert_eq!(lines[2].reset, "resets Thu 18:00");
+        assert!(!lines[2].used_up);
+    }
+
+    #[test]
+    fn a_row_with_only_zero_model_limits_shows_no_model_line() {
+        let mut lab = account(3, "lab");
+        lab.model_limits = vec![
+            model_limit("Fable", 0.0, Some(now())),
+            model_limit("Opus", f64::NAN, None),
+        ];
+        let labels: Vec<String> = row(&lab, None, false, now(), &Utc)
+            .windows
+            .into_iter()
+            .map(|line| line.label)
+            .collect();
+        assert_eq!(labels, ["5h", "7d"]);
+    }
+
+    #[test]
+    fn label_slug_turns_a_model_limit_label_into_an_id() {
+        assert_eq!(label_slug("Fable 7d"), "fable-7d");
+        assert_eq!(label_slug("5h"), "5h");
+        assert_eq!(label_slug("  Opus__7d  "), "opus-7d");
     }
 
     #[test]

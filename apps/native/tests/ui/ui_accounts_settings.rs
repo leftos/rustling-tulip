@@ -289,6 +289,31 @@ fn the_page_lists_a_row_per_account(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_page_shows_a_model_limit_in_use(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(
+        &mut h,
+        vec![
+            account(1, "main")
+                .active()
+                .model_limit("Fable", 37.0)
+                .build(),
+            account(2, "ops").model_limit("Fable", 0.0).build(),
+        ],
+        None,
+    );
+    assert!(
+        drawn(&mut h, "settings-accounts-fable-7d-1=37%"),
+        "a per-model limit in use draws its line"
+    );
+    assert!(
+        !drawn(&mut h, "settings-accounts-fable-7d-2=0%"),
+        "a per-model limit at 0 % draws no line"
+    );
+}
+
+#[gpui::test]
 fn switch_on_the_page_sends_switch_account(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);

@@ -707,6 +707,7 @@ fn tag_view(tag: Tag, n: u32, t: &UiTheme, cx: &mut Context<RootView>) -> Div {
 /// A row's window line: its label, bar, percentage and reset text.
 fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>) -> Div {
     let label = line.label;
+    let slug = accounts::label_slug(&label);
     div()
         .flex()
         .items_center()
@@ -714,7 +715,7 @@ fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>
         .h(px(19.0))
         .child(
             div()
-                .w(px(18.0))
+                .min_w(px(18.0))
                 .flex_none()
                 .text_size(ui_px(cx, 11.0))
                 .text_color(gpui::rgb(t.subtle))
@@ -729,7 +730,7 @@ fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>
                 .justify_end()
                 .font_weight(ui_weight(cx, FontWeight::SEMIBOLD))
                 .text_color(gpui::rgb(pct_color(line.bar.level, t)))
-                .child(tagged_text(format!("accounts-{label}-{n}"), line.bar.pct)),
+                .child(tagged_text(format!("accounts-{slug}-{n}"), line.bar.pct)),
         )
         .child(
             div()
@@ -742,7 +743,7 @@ fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>
                     t.text_2
                 }))
                 .child(tagged_text(
-                    format!("accounts-reset-{label}-{n}"),
+                    format!("accounts-reset-{slug}-{n}"),
                     line.reset,
                 )),
         )

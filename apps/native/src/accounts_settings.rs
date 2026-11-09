@@ -1150,7 +1150,8 @@ fn window_line(
     t: &UiTheme,
     cx: &mut Context<RootView>,
 ) -> Div {
-    let label = line.label;
+    let label = line.label.as_str();
+    let slug = accounts::label_slug(label);
     let (width, height) = ROW_BAR;
     let bar = div()
         .flex_none()
@@ -1171,11 +1172,11 @@ fn window_line(
         .gap(px(8.0))
         .child(
             div()
-                .w(px(18.0))
+                .min_w(px(18.0))
                 .flex_none()
                 .text_size(ui_px(cx, 11.0))
                 .text_color(gpui::rgb(t.subtle))
-                .child(label),
+                .child(label.to_owned()),
         )
         .child(bar)
         .child(
@@ -1186,7 +1187,7 @@ fn window_line(
                 .justify_end()
                 .text_color(gpui::rgb(pct_color(line.bar.level, t)))
                 .child(tagged_text(
-                    format!("settings-accounts-{label}-{n}"),
+                    format!("settings-accounts-{slug}-{n}"),
                     line.bar.pct.clone(),
                 )),
         )
@@ -1201,7 +1202,7 @@ fn window_line(
                     t.text_2
                 }))
                 .child(tagged_text(
-                    format!("settings-accounts-reset-{label}-{n}"),
+                    format!("settings-accounts-reset-{slug}-{n}"),
                     line.reset.clone(),
                 )),
         )
