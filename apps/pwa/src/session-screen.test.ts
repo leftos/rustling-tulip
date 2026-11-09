@@ -15,14 +15,16 @@ import {
 import { quickRepliesFor } from "./quick";
 import {
   OFFLINE_NOT_SENT,
+  opensOnTerminal,
   parseRoute,
   sessionLook,
   sessionScreen,
+  terminalWithSnapshot,
   type AnswerCache,
   type DockKind,
   type SessionScreen,
 } from "./session-screen";
-import type { ChatEntry, ChatPrompt, ChatScreen, SessionSnapshot } from "./protocol";
+import type { ChatEntry, ChatPrompt, ChatScreen, SessionMode, SessionSnapshot } from "./protocol";
 
 const USER: ChatEntry = { kind: "user", id: "u1", text: "Add the reset on a target switch" };
 const ANSWER: ChatEntry = { kind: "answer", id: "a1", text: "Added reset_for_target." };
@@ -197,6 +199,26 @@ test("sessionLook: a session missing once Home loaded has ended", () => {
   const home = { ...resetHome(), sessions: [session("s1")], loaded: true };
   expect(sessionLook(home, "s2")).toEqual({ title: "", isAgent: false, ended: true });
   expect(sessionLook(home, "s1").ended).toBe(false);
+});
+
+test("a_plain_shell_opens_on_the_terminal", () => {
+  expect(opensOnTerminal("plain_shell")).toBe(true);
+});
+
+test("an_interactive_session_opens_on_chat", () => {
+  expect(opensOnTerminal("interactive")).toBe(false);
+  expect(opensOnTerminal("headless")).toBe(false);
+  // A mode a newer daemon names, which this build does not know, opens on the chat too.
+  expect(opensOnTerminal("future_mode" as unknown as SessionMode)).toBe(false);
+});
+
+test("a_late_snapshot_does_not_override_the_toggle", () => {
+  // Nothing pressed yet, so the arriving snapshot decides where the screen opens.
+  expect(terminalWithSnapshot(null, "plain_shell")).toBe(true);
+  expect(terminalWithSnapshot(null, "interactive")).toBe(false);
+  // Pressed before the snapshot arrived, the user's own choice stands.
+  expect(terminalWithSnapshot(false, "plain_shell")).toBe(false);
+  expect(terminalWithSnapshot(true, "interactive")).toBe(true);
 });
 
 test("a user entry and an answer draw as bubbles", () => {

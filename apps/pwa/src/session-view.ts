@@ -38,6 +38,7 @@ import {
   sameScreen,
   sessionLook,
   sessionScreen,
+  terminalWithSnapshot,
   type AnswerCache,
   type ChatRow,
   type ComposerView,
@@ -83,6 +84,8 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   let status: ConnectionStateName = connection.status();
   /** The header's Terminal toggle: on, the terminal replaces the chat. */
   let terminalOn = false;
+  /** The user's own toggle choice; null until they press it. */
+  let terminalChoice: boolean | null = null;
   /** The terminal's Ctrl is armed for the next key; re-read after every input. */
   let ctrlArmed = false;
   /** The mounted terminal, while the terminal is shown; null otherwise. */
@@ -123,6 +126,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   const title = element("h2", "session-title");
   const toggle = button("session-toggle", "", () => {
     terminalOn = !terminalOn;
+    terminalChoice = terminalOn;
     dock = null;
     update();
   });
@@ -213,8 +217,22 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     send: (message) => (userTerminalInput ? sendUser(message) : connection.send(message)),
   };
 
+  /**
+   * The terminal toggle follows the session's snapshot: a plain shell opens on
+   * its terminal, anything else on the chat. A snapshot known at the first
+   * paint sets it then, and one arriving later sets it when it comes; once the
+   * user presses the toggle, their own choice stands against later snapshots.
+   */
+  function syncMode(): void {
+    const mode = readHome().sessions.find((session) => session.id === sessionId)?.mode;
+    if (mode !== undefined) {
+      terminalOn = terminalWithSnapshot(terminalChoice, mode);
+    }
+  }
+
   function update(): void {
     syncTimer();
+    syncMode();
     if (chat.phase === "refused") {
       mirrorRefused = true;
     }

@@ -15,7 +15,7 @@ import {
   type SheetState,
 } from "./prompt-sheet";
 import { quickRepliesFor, type QuickReplyGroup } from "./quick";
-import type { ChatEntry, ChatScreen } from "./protocol";
+import type { ChatEntry, ChatScreen, SessionMode } from "./protocol";
 
 /**
  * What the session screen draws: the chat rows, the composer, the dock one of
@@ -218,6 +218,23 @@ export function sessionLook(model: HomeModel, sessionId: string): SessionLook {
     return { title: "", isAgent: false, ended: model.loaded };
   }
   return { title: displayLabel(session), isAgent: session.agent !== null, ended: false };
+}
+
+/**
+ * Whether a session of `mode` opens on the terminal instead of the chat: only
+ * a plain shell does, since an agent typed into a shell still has a chat. A
+ * mode this build does not know opens on the chat too.
+ */
+export function opensOnTerminal(mode: SessionMode): boolean {
+  return mode === "plain_shell";
+}
+
+/**
+ * The Terminal toggle once the session's snapshot arrives: the user's own
+ * choice when they already pressed it, else the view its mode opens on.
+ */
+export function terminalWithSnapshot(choice: boolean | null, mode: SessionMode): boolean {
+  return choice ?? opensOnTerminal(mode);
 }
 
 /** The session screen for one input. */
