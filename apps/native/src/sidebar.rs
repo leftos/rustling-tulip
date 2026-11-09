@@ -3790,8 +3790,8 @@ fn is_noisy_shell_title(title: &str) -> bool {
 /// reads, and the salvaged state is saved back.
 pub fn load_ui_state(dir: &Path) -> UiState {
     let path = dir.join(UI_FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return UiState::default(),
         Err(err) => {
             tracing::warn!(
@@ -3799,6 +3799,16 @@ pub fn load_ui_state(dir: &Path) -> UiState {
                 path.display()
             );
             return UiState::default();
+        }
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::warn!(
+                "{} is not valid UTF-8; keeping a copy and what still reads",
+                path.display()
+            );
+            return keep_and_salvage(dir, &String::from_utf8_lossy(err.as_bytes()));
         }
     };
     serde_json::from_str(&text).unwrap_or_else(|err| {
@@ -5548,6 +5558,28 @@ pub(crate) mod tests {
         save_ui_state(&dir.0, &state).expect("save");
         std::fs::write(dir.0.join(UI_FILE), "{ not json").expect("write corrupt file");
         assert_eq!(load_ui_state(&dir.0), UiState::default());
+    }
+
+    #[test]
+    fn a_ui_file_that_is_not_utf8_keeps_a_copy() {
+        let dir = TestDir::new("not-utf8");
+        let raw = b"{\"a\":\"\xFF\xFE\"}".to_vec();
+        std::fs::write(dir.0.join(UI_FILE), &raw).expect("write the file");
+
+        assert_eq!(load_ui_state(&dir.0), UiState::default());
+
+        let copies = kept_ui_copies(&dir);
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert_eq!(
+            std::fs::read(&copies[0]).expect("read the copy"),
+            raw,
+            "the copy holds the exact bytes"
+        );
+        let saved = std::fs::read(dir.0.join(UI_FILE)).expect("read the file");
+        assert!(
+            String::from_utf8(saved).is_ok(),
+            "the file is valid UTF-8 again"
+        );
     }
 
     #[test]

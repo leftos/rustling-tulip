@@ -31,10 +31,13 @@ pub(crate) fn drop_restored_views(ui: &mut UiState) {
 }
 
 /// `quit`, first forgetting the failed starts in `dir`: a clean quit means the
-/// start was good.
+/// start was good. A safe start that has not acted yet keeps its count, since
+/// the next start still has to carry it out.
 pub(crate) fn stable_on_quit(quit: QuitFn, dir: Option<PathBuf>) -> QuitFn {
     Box::new(move |cx: &mut App| {
-        if let Some(dir) = &dir {
+        if let Some(dir) = &dir
+            && !start_guard::safe_start_pending()
+        {
             start_guard::mark_stable(dir);
         }
         quit(cx);
@@ -64,30 +67,49 @@ impl RootView {
         self.start_notice.as_ref().map(StartNotice::lines)
     }
 
-    /// This PC's first tab list or layout question starts the stable timer,
-    /// and ends a safe start: a tab list is saved, closed and replaced with an
-    /// empty one before anything reads it, so no restored tab is ever drawn.
-    /// A start whose host never connects keeps its mode and shows no notice.
+    /// This PC's tab messages, once they concern the start: a tab the safe
+    /// start closed is never drawn, and a tab list arriving later has its
+    /// closed tabs taken out and closed again. This PC's first tab list or
+    /// layout question also starts the stable timer and ends a safe start: a
+    /// tab list is saved, closed and replaced with an empty one before
+    /// anything reads it, so no restored tab is ever drawn. A start whose host
+    /// never connects keeps its mode and shows no notice.
+    ///
+    /// Returns whether `msg` is used up and must draw nothing.
     pub(crate) fn on_safe_start_message(
         &mut self,
         host: &HostKey,
         msg: &mut DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        if *host != HostKey::Local
-            || !matches!(
-                msg,
-                DaemonMessage::Tabs { .. } | DaemonMessage::LayoutInitRequired { .. }
-            )
-        {
-            return;
+    ) -> bool {
+        if *host != HostKey::Local {
+            return false;
+        }
+        match msg {
+            DaemonMessage::Tabs { tabs } => {
+                for tab_id in self.closed_by_safe_start.filter_tabs(tabs) {
+                    self.send_to(host, ClientMessage::CloseTab { tab_id });
+                }
+            }
+            DaemonMessage::TabUpdated { tab } if self.closed_by_safe_start.holds(&tab.id) => {
+                return true;
+            }
+            DaemonMessage::TabRemoved { tab_id } => self.closed_by_safe_start.forget(tab_id),
+            _ => {}
+        }
+        if !matches!(
+            msg,
+            DaemonMessage::Tabs { .. } | DaemonMessage::LayoutInitRequired { .. }
+        ) {
+            return false;
         }
         self.start_stable_timer(cx);
         if self.pending_safe_start == StartMode::Normal {
-            return;
+            return false;
         }
         let mode = std::mem::take(&mut self.pending_safe_start);
+        start_guard::set_safe_start_pending(false);
         let layout_copy = if let DaemonMessage::Tabs { tabs } = msg {
             self.close_restored_tabs(&std::mem::take(tabs))
         } else {
@@ -100,12 +122,13 @@ impl RootView {
         // normal start would bring them back.
         self.save_ui();
         cx.notify();
+        false
     }
 
     /// Saves `tabs` to a dated copy and asks This PC to close each. Their
     /// sessions keep running. A copy that cannot be saved logs, and they close
     /// all the same: the start comes first.
-    fn close_restored_tabs(&self, tabs: &[TabEntry]) -> Option<PathBuf> {
+    fn close_restored_tabs(&mut self, tabs: &[TabEntry]) -> Option<PathBuf> {
         if tabs.is_empty() {
             return None;
         }
@@ -114,6 +137,7 @@ impl RootView {
             .as_deref()
             .and_then(|dir| save_closed_tabs(dir, tabs));
         for tab in tabs {
+            self.closed_by_safe_start.note(tab.id.clone());
             self.send_to(
                 &HostKey::Local,
                 ClientMessage::CloseTab {
@@ -129,6 +153,8 @@ impl RootView {
         if std::mem::replace(&mut self.stable_timer_started, true) {
             return;
         }
+        // Only a run's first tab list re-arms the window; a reconnect must not make a late panic count.
+        start_guard::tabs_arrived();
         let Some(dir) = self.ui_dir.clone() else {
             return;
         };

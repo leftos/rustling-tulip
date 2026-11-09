@@ -13,7 +13,8 @@ use crate::support;
 use gpui::TestAppContext;
 use protocol::{ClientMessage, DaemonMessage, GridNode, SplitDirection, TabEntry};
 use rustling_tulip_native::start_guard::{
-    GUARD_FILE, LAYOUT_COPY_PREFIX, NOTICE_TITLE, STABLE_AFTER, StartMode,
+    GUARD_FILE, LAYOUT_COPY_PREFIX, NOTICE_TITLE, STABLE_AFTER, StartMode, is_stable,
+    stable_without_tabs,
 };
 use rustling_tulip_native::target::Target;
 use serde_json::{Value, json};
@@ -54,6 +55,12 @@ fn notice_open(h: &mut Harness<'_>) -> bool {
 
 fn tab_ids(h: &mut Harness<'_>) -> Vec<String> {
     h.root(|root, _| root.tab_ids())
+}
+
+/// Closes the window, which quits at once when no session is running.
+fn quit(h: &mut Harness<'_>) {
+    let _ = h.cx.simulate_close();
+    h.cx.run_until_parked();
 }
 
 fn layout_copies(dir: &TestDir) -> Vec<String> {
@@ -174,6 +181,106 @@ fn a_remote_hosts_tab_list_does_not_end_the_safe_start(cx: &mut TestAppContext) 
 
     assert_eq!(closed(&h.sent()), ["t1", "d1"]);
     assert!(notice_open(&mut h));
+}
+
+#[gpui::test]
+fn a_reconnects_tab_list_draws_nothing_the_safe_start_closed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = safe_start(cx, &dir);
+    h.send(DaemonMessage::Tabs { tabs: two_tabs() });
+    assert_eq!(closed(&h.sent()), ["t1", "d1"]);
+
+    h.send(DaemonMessage::Tabs { tabs: two_tabs() });
+
+    assert_eq!(tab_ids(&mut h), Vec::<String>::new());
+    assert_eq!(closed(&h.sent()), ["t1", "d1"], "the tabs are closed again");
+}
+
+#[gpui::test]
+fn a_tab_update_in_flight_draws_nothing_the_safe_start_closed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = safe_start(cx, &dir);
+    h.send(DaemonMessage::Tabs { tabs: two_tabs() });
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p1", None)),
+    });
+
+    assert_eq!(tab_ids(&mut h), Vec::<String>::new());
+}
+
+#[gpui::test]
+fn a_new_tab_after_a_safe_start_draws(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = safe_start(cx, &dir);
+    h.send(DaemonMessage::Tabs { tabs: two_tabs() });
+
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t2", &pane("p2", None))],
+    });
+
+    assert_eq!(tab_ids(&mut h), ["t2"]);
+}
+
+#[gpui::test]
+fn a_reconnects_tab_list_keeps_a_stable_run_stable(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    h.send(DaemonMessage::Tabs { tabs: two_tabs() });
+    h.advance(STABLE_AFTER);
+    assert!(is_stable());
+
+    h.send(DaemonMessage::Tabs { tabs: two_tabs() });
+
+    assert!(is_stable(), "a reconnect does not re-arm the start window");
+}
+
+#[gpui::test]
+fn a_remote_tab_list_does_not_rearm_the_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    stable_without_tabs();
+    assert!(is_stable());
+
+    let remote = Target::tailnet(REMOTE, None);
+    let mut host = h.host(&remote);
+    host.connect();
+    host.send(DaemonMessage::Tabs { tabs: two_tabs() });
+
+    assert!(is_stable(), "a remote host's list leaves the window alone");
+}
+
+#[gpui::test]
+fn quitting_before_the_first_tab_list_keeps_the_count(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let guard = dir.path().join(GUARD_FILE);
+    std::fs::write(&guard, r#"{"failed_starts":2,"last_panic":"x"}"#).expect("seed the guard");
+    let mut h = Harness::open_in_mode(cx, &dir, StartMode::CloseTabs);
+
+    quit(&mut h);
+
+    assert_eq!(h.quit_requests(), 1, "the close quits at once");
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(&guard).expect("the guard stays"))
+            .expect("valid JSON");
+    assert_eq!(saved["failed_starts"], json!(2), "the count stays");
+}
+
+#[gpui::test]
+fn quitting_after_the_safe_start_forgets_the_count(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let guard = dir.path().join(GUARD_FILE);
+    std::fs::write(&guard, r#"{"failed_starts":2,"last_panic":"x"}"#).expect("seed the guard");
+    let mut h = Harness::open_in_mode(cx, &dir, StartMode::CloseTabs);
+    h.send(DaemonMessage::Tabs { tabs: two_tabs() });
+
+    quit(&mut h);
+
+    assert_eq!(h.quit_requests(), 1, "the close quits at once");
+    assert!(
+        !guard.exists(),
+        "the safe start happened, so the count goes"
+    );
 }
 
 #[gpui::test]

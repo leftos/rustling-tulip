@@ -1206,6 +1206,8 @@ pub struct RootView {
     start_notice: Option<start_guard::StartNotice>,
     start_notice_focus: FocusHandle,
     stable_timer_started: bool,
+    /// The tabs a safe start closed, until the daemon has no record of them.
+    closed_by_safe_start: start_guard::ClosedTabs,
     /// Opens the terminals' links, on background threads.
     opener: Arc<dyn Opener>,
     /// The OS notifications attention events fire.
@@ -1530,6 +1532,7 @@ impl RootView {
         let mut ui = ui_dir
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
+        start_guard::set_safe_start_pending(start_mode != start_guard::StartMode::Normal);
         if start_mode != start_guard::StartMode::Normal {
             start_guard_view::drop_restored_views(&mut ui);
         }
@@ -1716,6 +1719,7 @@ impl RootView {
             start_notice: None,
             start_notice_focus: cx.focus_handle(),
             stable_timer_started: false,
+            closed_by_safe_start: start_guard::ClosedTabs::default(),
             opener: open,
             notifications: notify::Notifications::new(notify, toast_placer, sound),
             run_confirm: None,
@@ -4784,7 +4788,9 @@ impl RootView {
         {
             return;
         }
-        self.on_safe_start_message(host, &mut msg, window, cx);
+        if self.on_safe_start_message(host, &mut msg, window, cx) {
+            return;
+        }
         self.settings_ok_hears(host, &msg, window, cx);
         // The sidebar takes the message before the panes do, so what a
         // snapshot changed is read from the old one.

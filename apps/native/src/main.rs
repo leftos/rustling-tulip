@@ -140,6 +140,22 @@ fn install_panic_hook(config: Option<PathBuf>) {
     }));
 }
 
+/// Counts a run with no tab list from its daemon stable after its own window,
+/// so a panic hours in is not read as a failed start. The thread holds no lock
+/// and dies with the process.
+fn spawn_no_tabs_timer() {
+    let wait = start_guard::no_tabs_stable_after(offscreen::requested());
+    match std::thread::Builder::new()
+        .name("start-guard-no-tabs".to_owned())
+        .spawn(move || {
+            std::thread::sleep(wait);
+            start_guard::stable_without_tabs();
+        }) {
+        Ok(_) => {}
+        Err(err) => tracing::warn!("starting the no-tabs timer: {err}"),
+    }
+}
+
 /// Splits `--updated-from <version>`, which the installer's relaunch adds,
 /// out of the launch arguments, so the version is never taken for a session
 /// id.
@@ -196,6 +212,7 @@ fn main() {
         .ok();
     let start_mode = config.as_deref().map_or_else(StartMode::default, open_mode);
     install_panic_hook(config);
+    spawn_no_tabs_timer();
     // Bring the login launch up to date: an entry already naming this install's
     // daemon is rewritten in its current `--detach` form. An entry naming any
     // other path, or none at all, is left alone. The cloaked smoke window

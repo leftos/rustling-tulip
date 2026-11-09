@@ -7,12 +7,14 @@
 //! the client, an update or a power cut never closes anyone's tabs. Nothing
 //! here panics: a failed write logs and the start carries on.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
+use protocol::TabEntry;
 use serde::{Deserialize, Serialize};
 
 /// The sidebar layout file, in the client's config dir.
@@ -35,6 +37,20 @@ pub fn stable_after(cloaked: bool) -> Duration {
         STABLE_AFTER
     }
 }
+/// How long a run with no tab list from its daemon counts as starting.
+const NO_TABS_STABLE_AFTER: Duration = Duration::from_secs(600);
+/// The same for a cloaked run, which a loaded machine can hold up for long.
+const CLOAKED_NO_TABS_STABLE_AFTER: Duration = Duration::from_secs(7200);
+
+/// How long a run waits for a tab list before it counts as stable without one.
+#[must_use]
+pub fn no_tabs_stable_after(cloaked: bool) -> Duration {
+    if cloaked {
+        CLOAKED_NO_TABS_STABLE_AFTER
+    } else {
+        NO_TABS_STABLE_AFTER
+    }
+}
 /// The prefix of a kept copy of `native-ui.json`.
 pub const UI_COPY_PREFIX: &str = "native-ui.json.corrupt-";
 /// The prefix of a kept copy of the tab list a safe start closed.
@@ -55,6 +71,10 @@ static STABLE: AtomicBool = AtomicBool::new(false);
 static PANIC_RECORDED: AtomicBool = AtomicBool::new(false);
 /// Whether this process has already shown the crash message.
 static PANIC_BOX_SHOWN: AtomicBool = AtomicBool::new(false);
+/// Whether this run has had a tab list from its daemon.
+static TABS_SEEN: AtomicBool = AtomicBool::new(false);
+/// Whether a safe start still has to act on This PC's first tab list.
+static SAFE_START_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// How a start opens, from how many starts before it panicked: normally after
 /// one failed start at most, with the saved tabs closed after two, and with
@@ -117,12 +137,52 @@ impl StartNotice {
     }
 }
 
+/// The ids of the tabs a safe start closed, so they are never drawn again
+/// until the daemon no longer has them.
+#[derive(Debug, Default)]
+pub struct ClosedTabs(HashSet<String>);
+
+impl ClosedTabs {
+    /// Holds `id` as closed by the safe start.
+    pub fn note(&mut self, id: impl Into<String>) {
+        self.0.insert(id.into());
+    }
+
+    /// Releases `id`; the daemon no longer has a tab with it.
+    pub fn forget(&mut self, id: &str) {
+        self.0.remove(id);
+    }
+
+    /// Whether the safe start closed `id`.
+    #[must_use]
+    pub fn holds(&self, id: &str) -> bool {
+        self.0.contains(id)
+    }
+
+    /// Takes every held tab out of `tabs` and returns its id; a held id `tabs`
+    /// no longer lists is forgotten, since the daemon no longer has it.
+    pub fn filter_tabs(&mut self, tabs: &mut Vec<TabEntry>) -> Vec<String> {
+        let listed: HashSet<&str> = tabs.iter().map(|tab| tab.id.as_str()).collect();
+        self.0.retain(|id| listed.contains(id.as_str()));
+        let closed: Vec<String> = tabs
+            .iter()
+            .filter(|tab| self.holds(&tab.id))
+            .map(|tab| tab.id.clone())
+            .collect();
+        tabs.retain(|tab| !self.holds(&tab.id));
+        closed
+    }
+}
+
 /// The guard file's shape.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Guard {
     failed_starts: u32,
     last_panic: Option<String>,
+    /// Whether a start has already set `native-ui.json` aside.
+    #[serde(default)]
+    ui_set_aside: bool,
 }
 
 /// The guard in `dir`; a fresh one when the file is missing or unusable.
@@ -169,11 +229,30 @@ pub fn begin(dir: &Path) -> StartMode {
     match guard.failed_starts {
         0 | 1 => StartMode::Normal,
         2 => StartMode::CloseTabs,
-        3 => StartMode::CloseTabsAndResetUi {
-            kept_ui: set_aside_ui_file(dir),
-        },
+        3 => reset_ui_once(dir, guard),
         _ => StartMode::CloseTabsAndResetUi { kept_ui: None },
     }
+}
+
+/// The third start's reset: sets `native-ui.json` aside and marks the guard, so
+/// no later start sets the defaults it saved aside again.
+fn reset_ui_once(dir: &Path, guard: Guard) -> StartMode {
+    if guard.ui_set_aside {
+        return StartMode::CloseTabsAndResetUi { kept_ui: None };
+    }
+    let kept_ui = set_aside_ui_file(dir);
+    // A set-aside that failed leaves the file in place, and marking the reset
+    // done would skip it for good.
+    if !dir.join(UI_FILE).exists() {
+        write_guard(
+            dir,
+            &Guard {
+                ui_set_aside: true,
+                ..guard
+            },
+        );
+    }
+    StartMode::CloseTabsAndResetUi { kept_ui }
 }
 
 /// Moves `native-ui.json` in `dir` aside, returning its copy; a file that is
@@ -200,33 +279,72 @@ pub fn record_panic(dir: &Path, message: &str) -> u32 {
     if is_stable() || PANIC_RECORDED.swap(true, Ordering::SeqCst) {
         return read_guard(dir).failed_starts;
     }
-    let guard = read_guard(dir);
-    let failed_starts = guard.failed_starts.saturating_add(1);
-    write_guard(
-        dir,
-        &Guard {
-            failed_starts,
-            last_panic: Some(message.to_owned()),
-        },
-    );
+    let mut guard = read_guard(dir);
+    guard.failed_starts = guard.failed_starts.saturating_add(1);
+    guard.last_panic = Some(message.to_owned());
+    write_guard(dir, &guard);
     read_guard(dir).failed_starts
+}
+
+/// Removes the guard in `dir`, so the next start counts from zero; a removal
+/// that fails for any reason but not-found writes a zero guard over it
+/// instead, since a stale count would close tabs on a healthy next start.
+fn forget_guard(dir: &Path, remove: impl FnOnce(&Path) -> std::io::Result<()>) {
+    let path = dir.join(GUARD_FILE);
+    match remove(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            tracing::warn!(
+                "removing {}: {err}; counting from zero instead",
+                path.display()
+            );
+            write_guard(dir, &Guard::default());
+        }
+    }
 }
 
 /// This run is past the risky part: forget the failed starts.
 pub fn mark_stable(dir: &Path) {
     STABLE.store(true, Ordering::SeqCst);
-    let path = dir.join(GUARD_FILE);
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => tracing::warn!("removing {}: {err}", path.display()),
-    }
+    forget_guard(dir, |path| std::fs::remove_file(path));
 }
 
 /// Whether this run is past the risky part of its start.
 #[must_use]
 pub fn is_stable() -> bool {
     STABLE.load(Ordering::SeqCst)
+}
+
+/// This run has a tab list from its daemon, so the no-tabs window is over and
+/// a tab list arriving after it re-arms the start window.
+pub fn tabs_arrived() {
+    TABS_SEEN.store(true, Ordering::SeqCst);
+    STABLE.store(false, Ordering::SeqCst);
+}
+
+/// Records that a safe start still has to act, so a quit before it does not
+/// forget the count.
+pub fn set_safe_start_pending(pending: bool) {
+    SAFE_START_PENDING.store(pending, Ordering::SeqCst);
+}
+
+/// Whether a safe start still has to act on This PC's tab list.
+#[must_use]
+pub fn safe_start_pending() -> bool {
+    SAFE_START_PENDING.load(Ordering::SeqCst)
+}
+
+/// Counts this run stable when no tab list ever came, keeping the count a
+/// pending safe start still needs.
+pub fn stable_without_tabs() {
+    if !TABS_SEEN.load(Ordering::SeqCst) {
+        STABLE.store(true, Ordering::SeqCst);
+        // A tab list that arrived in between wins: its panic must still count.
+        if TABS_SEEN.load(Ordering::SeqCst) {
+            STABLE.store(false, Ordering::SeqCst);
+        }
+    }
 }
 
 /// Whether this process should show the crash message: the first panic only,
@@ -603,6 +721,58 @@ mod tests {
     }
 
     #[test]
+    fn a_kill_during_the_reset_start_keeps_the_real_copy() {
+        let dir = seeded("kill-reset", 3);
+        let ui = dir.0.join(UI_FILE);
+        std::fs::write(&ui, "real").expect("seed native-ui.json");
+
+        let first = begin(&dir.0);
+
+        let names = dir.names(UI_COPY_PREFIX);
+        assert_eq!(names.len(), 1, "{names:?}");
+        let copy = dir.0.join(&names[0]);
+        assert_eq!(
+            first,
+            StartMode::CloseTabsAndResetUi {
+                kept_ui: Some(copy.clone())
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(&copy).expect("read the copy"),
+            "real"
+        );
+
+        std::fs::write(&ui, "defaults").expect("the defaults the reset saved");
+        assert_eq!(
+            begin(&dir.0),
+            StartMode::CloseTabsAndResetUi { kept_ui: None },
+            "the second start at three sets nothing aside"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ui).expect("read the file"),
+            "defaults",
+            "the defaults stay"
+        );
+        assert_eq!(dir.names(UI_COPY_PREFIX), names, "still the one copy");
+    }
+
+    #[test]
+    fn a_failed_set_aside_leaves_the_reset_unmarked() {
+        let dir = seeded("failed-set-aside", 3);
+        let ui = dir.0.join(UI_FILE);
+        std::fs::create_dir(&ui).expect("hold native-ui.json");
+
+        let mode = begin(&dir.0);
+
+        assert_eq!(mode, StartMode::CloseTabsAndResetUi { kept_ui: None });
+        assert!(
+            !read_guard(&dir.0).ui_set_aside,
+            "a reset that did not happen is not marked done"
+        );
+        assert!(ui.is_dir(), "the file stays where it is");
+    }
+
+    #[test]
     fn many_failed_starts_stay_at_the_last_level() {
         let dir = seeded("many", 9);
         let ui = dir.0.join(UI_FILE);
@@ -625,6 +795,33 @@ mod tests {
         dir.seed("not json");
         assert_eq!(begin(&dir.0), StartMode::Normal);
         assert_eq!(dir.guard()["failed_starts"], json!(0));
+    }
+
+    #[test]
+    fn a_guard_from_v0_11_reads_with_no_reset_mark() {
+        let dir = TestDir::new("v0-11");
+        dir.seed(r#"{"failed_starts":3,"last_panic":"x"}"#);
+
+        let guard = read_guard(&dir.0);
+        assert_eq!(guard.failed_starts, 3);
+        assert!(!guard.ui_set_aside, "an old file has set nothing aside");
+
+        let ui = dir.0.join(UI_FILE);
+        std::fs::write(&ui, "real").expect("seed native-ui.json");
+        let mode = begin(&dir.0);
+
+        let names = dir.names(UI_COPY_PREFIX);
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert_eq!(
+            mode,
+            StartMode::CloseTabsAndResetUi {
+                kept_ui: Some(dir.0.join(&names[0]))
+            }
+        );
+        assert!(
+            read_guard(&dir.0).ui_set_aside,
+            "the first reset marks the file, so it happens once"
+        );
     }
 
     #[test]
@@ -656,6 +853,63 @@ mod tests {
     }
 
     #[test]
+    fn a_panic_keeps_the_reset_mark() {
+        let dir = TestDir::new("keeps-mark");
+        dir.seed(&json!({"failed_starts": 3, "last_panic": "x", "ui_set_aside": true}).to_string());
+
+        assert_eq!(record_panic(&dir.0, "boom"), 4);
+
+        let guard = read_guard(&dir.0);
+        assert_eq!(guard.failed_starts, 4);
+        assert!(guard.ui_set_aside, "the reset mark stays");
+    }
+
+    #[test]
+    fn a_run_with_no_tabs_stops_counting_after_its_window() {
+        stable_without_tabs();
+
+        assert!(is_stable(), "a run with no tab list counts stable");
+    }
+
+    fn a_tab(id: &str) -> TabEntry {
+        serde_json::from_value(json!({
+            "id": id,
+            "name": id,
+            "content": { "kind": "dashboard" },
+            "created_at": "2026-01-01T00:00:00Z",
+        }))
+        .expect("a tab fixture")
+    }
+
+    #[test]
+    fn closed_tabs_filter_only_what_they_hold() {
+        let mut closed = ClosedTabs::default();
+        closed.note("a");
+        closed.note("b");
+        let mut tabs = vec![a_tab("a"), a_tab("c")];
+
+        let taken = closed.filter_tabs(&mut tabs);
+
+        assert_eq!(taken, ["a"]);
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].id, "c");
+        assert!(closed.holds("a"), "a stays held while the daemon lists it");
+        assert!(!closed.holds("b"), "b is forgotten, the daemon lost it");
+    }
+
+    #[test]
+    fn tabs_arriving_late_count_again() {
+        stable_without_tabs();
+        assert!(is_stable());
+
+        tabs_arrived();
+
+        assert!(!is_stable(), "a late tab list re-arms the start window");
+        stable_without_tabs();
+        assert!(!is_stable(), "the no-tabs window is over once tabs came");
+    }
+
+    #[test]
     fn next_start_after_cases() {
         assert_eq!(next_start_after(false, 5), NextStart::Unaffected);
         assert_eq!(next_start_after(true, 0), NextStart::OpensNormally);
@@ -664,6 +918,29 @@ mod tests {
         assert_eq!(next_start_after(true, 3), NextStart::ClosesTabsAndResetsUi);
         assert_eq!(next_start_after(true, 4), NextStart::ClosesTabs);
         assert_eq!(next_start_after(true, 9), NextStart::ClosesTabs);
+    }
+
+    #[test]
+    fn a_failed_removal_forgets_the_count() {
+        let dir = seeded("forget", 2);
+
+        forget_guard(&dir.0, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "locked",
+            ))
+        });
+
+        assert_eq!(
+            read_guard(&dir.0).failed_starts,
+            0,
+            "the count is forgotten"
+        );
+        assert_eq!(
+            begin(&dir.0),
+            StartMode::Normal,
+            "the next start opens normally"
+        );
     }
 
     #[test]

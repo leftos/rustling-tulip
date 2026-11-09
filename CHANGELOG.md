@@ -8,6 +8,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - A damaged settings file no longer copies its contents, which could include a secret, into the log.
 - A click that focuses a pane or dismisses the jump palette no longer reaches the program, so it can't answer a question on screen.
+- After opening with your tabs closed, a reconnect no longer brings them back, and quitting before that happens no longer skips it next time.
+- A settings file that isn't valid text keeps a copy instead of being overwritten, and a failed reset of your settings is tried again.
 
 ## v0.11.0-alpha
 
