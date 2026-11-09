@@ -28,7 +28,7 @@ use super::sessions::{request_origin, write_meta_then_sync};
 use super::{Hub, StateEvent};
 use crate::conversations;
 use crate::conversations::discovery::{self, Baseline, Waiter};
-use crate::conversations::pre_create::{self, PreCreateSpec};
+use crate::conversations::pre_create::{self, PRE_CREATE_TIMEOUT, PreCreateSpec};
 use crate::orphan::OrphanMeta;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
@@ -55,6 +55,7 @@ use protocol::{
     SessionMember, SessionMetrics, SessionMode, SessionRole, SessionStatus, SpawnRequest,
     SpawnTarget,
 };
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -955,21 +956,35 @@ fn plain_shell_meta(
     )
 }
 
+/// The arguments [`planned_conversation`] plans from.
+struct PlanInput<'a> {
+    backend: &'static dyn AgentPlugin,
+    cfg: &'a SpawnArgs,
+    program: &'a str,
+    leading_args: &'a [String],
+    cwd: &'a Path,
+    extra_env: &'a [(String, String)],
+}
+
 /// The conversation id an interactive spawn records and passes its CLI, the
 /// conversation it resumes, and the baseline its discovery starts from, as
 /// `backend` plans them: a minted id is recorded, a resumed one is recorded
 /// and resumed, a pre-created one is recorded when `program` (with
-/// `leading_args`, in `cwd`) printed one, and a discovered one is looked for
-/// after launch, against the conversations `backend` already holds for `cwd`
-/// (looked up with the rows of `extra_env`).
+/// `leading_args`, in `cwd`) printed one before `expire` resolved, and a
+/// discovered one is looked for after launch, against the conversations
+/// `backend` already holds for `cwd` (looked up with the rows of `extra_env`).
 async fn planned_conversation(
-    backend: &'static dyn AgentPlugin,
-    cfg: &SpawnArgs,
-    program: &str,
-    leading_args: &[String],
-    cwd: &Path,
-    extra_env: &[(String, String)],
+    input: PlanInput<'_>,
+    expire: impl Future<Output = ()>,
 ) -> (Option<String>, Option<String>, Option<Baseline>) {
+    let PlanInput {
+        backend,
+        cfg,
+        program,
+        leading_args,
+        cwd,
+        extra_env,
+    } = input;
     match backend.conversation_plan(&cfg.options, cfg.resume_conversation.as_deref()) {
         ConversationPlan::Minted(id) => (Some(id), None, None),
         ConversationPlan::Resumed(id) => (Some(id.clone()), Some(id), None),
@@ -983,7 +998,7 @@ async fn planned_conversation(
                 env_remove: cfg.env.remove.clone(),
             };
             let agent = &backend.descriptor().id.0;
-            let id = pre_create::pre_create(spec, parse).await;
+            let id = pre_create::run_until(spec, parse, expire).await;
             if let Some(id) = &id {
                 info!(agent = %agent, id_len = id.len(), "pre-created the conversation");
             } else {
@@ -1144,12 +1159,15 @@ async fn spawn_interactive_session(
     let raw_program = command.program.clone();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
     let (conversation_id, resume_conversation, discover) = planned_conversation(
-        backend,
-        cfg,
-        &program,
-        &prepend_args,
-        &primary_cwd,
-        &stored_config.extra_env,
+        PlanInput {
+            backend,
+            cfg,
+            program: &program,
+            leading_args: &prepend_args,
+            cwd: &primary_cwd,
+            extra_env: &stored_config.extra_env,
+        },
+        tokio::time::sleep(PRE_CREATE_TIMEOUT),
     )
     .await;
     // The argv names the hook files, so they are written before the argv is
@@ -2663,6 +2681,8 @@ mod tests {
         repo_entry_plain, secret_ref, spawnless_test_hub, test_hub, workspace_entry,
     };
     use protocol::SessionEnd;
+    #[cfg(windows)]
+    use std::time::Duration;
     use tokio::sync::broadcast;
 
     #[tokio::test]
@@ -2733,8 +2753,13 @@ mod tests {
         }
     }
 
+    /// The hang guard on a planning test's pre-create child, failing as "hung".
+    #[cfg(windows)]
+    const PRE_CREATE_CEILING: Duration = Duration::from_secs(120);
+
     /// The conversation `planned_conversation` plans for a test agent whose
-    /// plan pre-creates it by running `script` in `powershell.exe`.
+    /// plan pre-creates it by running `script` in `powershell.exe`, under a
+    /// deadline that never fires: the run ends on the child, never on time.
     #[cfg(windows)]
     async fn planned_by_pre_create(script: &str) -> (Option<String>, Option<String>) {
         let agent = Box::leak(Box::new(agent_api::test_agent::TestAgent::new(
@@ -2749,9 +2774,23 @@ mod tests {
         )));
         let cfg = test_agent_spawn_args();
         let scratch = ScratchDir::new("pre-create-plan");
-        let (id, resume, _) =
-            planned_conversation(agent, &cfg, "powershell.exe", &[], scratch.path(), &[]).await;
-        (id, resume)
+        let planned = tokio::time::timeout(
+            PRE_CREATE_CEILING,
+            planned_conversation(
+                PlanInput {
+                    backend: agent,
+                    cfg: &cfg,
+                    program: "powershell.exe",
+                    leading_args: &[],
+                    cwd: scratch.path(),
+                    extra_env: &[],
+                },
+                std::future::pending(),
+            ),
+        )
+        .await
+        .expect("hung: the pre-create run never ended");
+        (planned.0, planned.1)
     }
 
     #[tokio::test]
@@ -2769,8 +2808,18 @@ mod tests {
             }],
         );
         let cfg = test_agent_spawn_args();
-        let (id, resume, discover) =
-            planned_conversation(agent, &cfg, "test-agent.exe", &[], scratch.path(), &[]).await;
+        let (id, resume, discover) = planned_conversation(
+            PlanInput {
+                backend: agent,
+                cfg: &cfg,
+                program: "test-agent.exe",
+                leading_args: &[],
+                cwd: scratch.path(),
+                extra_env: &[],
+            },
+            std::future::pending(),
+        )
+        .await;
         assert_eq!((id, resume), (None, None));
         let baseline = discover.expect("a discover plan takes a baseline");
 
@@ -2797,8 +2846,18 @@ mod tests {
         ));
         let scratch = ScratchDir::new("discover-start-up");
         let cfg = test_agent_spawn_args();
-        let (_, _, discover) =
-            planned_conversation(agent, &cfg, "test-agent.exe", &[], scratch.path(), &[]).await;
+        let (_, _, discover) = planned_conversation(
+            PlanInput {
+                backend: agent,
+                cfg: &cfg,
+                program: "test-agent.exe",
+                leading_args: &[],
+                cwd: scratch.path(),
+                extra_env: &[],
+            },
+            std::future::pending(),
+        )
+        .await;
         let baseline = discover.expect("a discover plan takes a baseline");
         let launched_at = baseline.launched_at;
 
