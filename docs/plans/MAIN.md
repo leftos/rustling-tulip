@@ -4,24 +4,25 @@
 
 ## Do first
 
-- [/] RT-1320 Make the pre-create spawn tests wait on the child, not a 5 s race · release vNext — Urgent · Backlog
 - [ ] RT-1298 Let a remote client update its host, and a host its clients · release vNext — High · Remote update
-- [ ] RT-1322 Show a tall question's whole text on its Chat card, from the hook — High · Wave 5 — Attention feed on the desktop
 
 ## Remote update
 
 - [ ] RT-1303 Let a host update itself when a client asks (sub-issue of RT-1298) · release vNext
+  - [ ] RT-1330 Count down a host update on the host's own app, with Cancel · release vNext
+  - [ ] RT-1331 Let a macOS host update itself when a client asks · release vNext
 - [ ] RT-1304 Offer a host's update from the client, with its confirm dialog and result (sub-issue of RT-1298) · release vNext
 - [ ] RT-1305 Mark in a release what it breaks, and warn before a remote update (sub-issue of RT-1298) · release vNext
 - [ ] RT-1306 Update connected clients from the host (sub-issue of RT-1298) · release vNext
 - [ ] RT-1307 Update an SSH host through a detached helper (sub-issue of RT-1298) · release vNext
 - [ ] RT-1308 Prove remote update on a second machine, both directions (sub-issue of RT-1298) · release vNext
 - [ ] RT-1316 Merge feat/remote-update to main (#206) (sub-issue of RT-1298)
+- [ ] RT-1336 Keep one process list and one update mutex in the daemon
+- [ ] RT-1337 Release a host's update guard when its installer never stops the daemon
 
 ## Wave 17 — Themes
 
 - [ ] RT-674 Step the appearance editor from in-flight values and save an app change once
-- [/] RT-1299 Dim a pane's accent the same whether it comes from the theme or a chosen colour · release vNext
 
 ## Wave 16 — Several hosts in one window
 
@@ -53,7 +54,6 @@
 - [ ] RT-1168 Let fixed-size controls grow to fit their contents across the native client · release vNext
 - [ ] RT-544 Take the bind and cert files off the tailnet listener's paused-clock schedule tests
 - [ ] RT-676 Let a manual install over a running client finish when the close dialog takes over 30 s
-- [ ] RT-689 Reset the remembered Trusted choice when Settings' trusted default changes, and fix its hint
 - [ ] RT-690 Cut a dimmed headless Last row's summary with an ellipsis in the Spawn submenu
 - [ ] RT-694 Keep the footer from clipping in a narrow window and clear a stale not-found status
 - [ ] RT-699 Keep the terminal link tip off dialogs and the link, and name Cmd on macOS
@@ -65,7 +65,6 @@
 - [ ] RT-1282 Restore a saved layout from the safe-start notice · release vNext
 - [ ] RT-1315 Keep a click that brings the window forward from pressing a toast, Dashboard or chat card answer
 - [ ] RT-1317 Split the terminal's mouse-down handler into one method per press kind
-- [ ] RT-1321 Remove the Trusted checkbox: bypass permissions is the one way, remembered without confirming · release vNext
 
 ## Wave 2b — Hook status
 
@@ -288,6 +287,7 @@
 - [ ] RT-1224 Re-read docs/daemon-cli.md against its named files' changes since 2026-11-06
 - [ ] RT-1248 Say how to raise log levels for a driven run
 - [ ] RT-1292 Fix doc drift around the safe start and control sizing
+- [ ] RT-1338 Repoint three issues that cite the deleted reboot-resume design
 
 ## Build tooling
 
@@ -553,7 +553,6 @@
 - [ ] RT-1037 Keep an isolated daemon's summarizer folder under its config override
 - [ ] RT-1039 Tracer: end a stopped session's whole process tree, not only its direct child
 - [ ] RT-1041 Accounts: show the poll's NoCredentials, ForeignCredential and StoreUnwritable outcomes in each account's status
-- [ ] RT-1042 Accounts: send each account's per-model limits and extra-usage state from the usage cache
 - [ ] RT-1043 Fold the panel when the Sessions item shown in place of a stored Gates is clicked
 - [ ] RT-1044 Line up a waiting gate's command with its folder line in the Gates view
 - [ ] RT-1045 Give two unknown-kind gate pools distinct selectors in the Gates view
@@ -602,7 +601,6 @@
 - [ ] RT-1247 Make the daemon's default log filter name its real target
 - [ ] RT-1249 Open a palette shell where the palette was opened, not behind a pop-out
 - [ ] RT-1250 Keep a Chat card box's text across card changes and keys that answer without it
-- [/] RT-1253 Read a question dialog taller than the terminal · release vNext
 - [ ] RT-1254 Answer a question at narrow widths, with a wide option label, or with a preview
 - [ ] RT-1265 Read a prompt with Claude Code's right-hand file panel open
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading
@@ -617,6 +615,14 @@
 - [ ] RT-1295 Close the held-back press's edges: a second button, hover reports during its drag
 - [ ] RT-1296 Close the start guard's last edges: a held guard file, unc_hosts in a non-UTF-8 file, a killed reset's notice
 - [ ] RT-1297 Tidy the fetch toasts: git's raw error, a folder link's missing name
+- [ ] RT-1326 Make the pre-create tests' 30 s death ceiling a hang guard, not a time assertion
+- [ ] RT-1327 Read a quoted question footer above a bash-mode input box as no dialog
+- [ ] RT-1332 Relaunch the app when an update loses the update lock
+- [ ] RT-1333 Keep a second installer from clearing the first one's staged files
+
+## No project
+
+- [ ] RT-1335 Line up a per-model limit's bar with the 5h and 7d bars
 
 ## Design files
 
@@ -642,7 +648,7 @@
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, RT-1111, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
 - [remote-access.md](remote-access.md) — Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
-- [remote-update.md](remote-update.md) — RT-1303, RT-1304, RT-1305, RT-1306, RT-1307, RT-1308, Remote update
+- [remote-update.md](remote-update.md) — RT-1303, RT-1304, RT-1305, RT-1306, RT-1307, RT-1308, RT-1330, RT-1331, Remote update
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792
 - [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406
