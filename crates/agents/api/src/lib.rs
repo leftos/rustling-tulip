@@ -160,6 +160,10 @@ pub struct HookReport {
     pub status: Option<SessionStatus>,
     /// How the event changes what the session is waiting for.
     pub pending: PendingUpdate,
+    /// The tool a `PostToolUse` or `PostToolUseFailure` just finished, named by
+    /// its `tool_name`; `None` for every other event and for one that names no
+    /// tool.
+    pub finished_tool: Option<String>,
     /// The conversation the session moved to (a new conversation's start, or
     /// a resumed one's own id).
     pub conversation_id: Option<String>,

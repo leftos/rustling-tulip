@@ -217,6 +217,7 @@ impl Agent for TestAgent {
         Some(HookReport {
             status: Some(status),
             pending: PendingUpdate::Clear,
+            finished_tool: None,
             conversation_id: None,
             last_message: Some(format!("{mode} trusted={trusted}")),
             failure: None,

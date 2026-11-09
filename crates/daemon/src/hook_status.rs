@@ -447,12 +447,29 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
 /// left beside another status is stale and is replaced). A weak idle (an
 /// idle the agent reports while it may still be waiting) is ignored while the
 /// record waits on a pending prompt.
+///
+/// A prompt a tool owns ends only when that tool finishes: tools run in
+/// parallel, so a `Glob`'s `PostToolUse` can land after an `AskUserQuestion`'s
+/// `PreToolUse`, and clearing the question there let the `permission_prompt`
+/// notification 6 s later word a permission its prompt never asked for. A
+/// `PostToolUse` that names no tool clears as it always has.
 fn leaves_pending_alone(record: &SessionRecord, report: &HookReport) -> bool {
-    if record.pending_input.is_none() {
+    let Some(pending) = record.pending_input.as_ref() else {
+        return false;
+    };
+    if record.status != SessionStatus::AwaitingInput {
         return false;
     }
-    let waiting = record.status == SessionStatus::AwaitingInput;
-    waiting && (report.subagent || report.weak_idle)
+    if report.subagent || report.weak_idle {
+        return true;
+    }
+    matches!(
+        (
+            agent_api::hook_vocabulary::pending_tool(pending),
+            report.finished_tool.as_deref(),
+        ),
+        (Some(own), Some(finished)) if own != finished
+    )
 }
 
 /// Warn about a hook-reported permission mode that differs from the spawn's.
@@ -887,6 +904,150 @@ mod tests {
     /// Apply `body` to `record` at hook time `time`, as the hook route does.
     fn apply_body(record: &mut SessionRecord, time: u128, body: &Value) -> Applied {
         apply_to_record(record, Some(time), &report(body))
+    }
+
+    /// A record a `PreToolUse` of `AskUserQuestion` has just made wait, stamped at 2.
+    fn record_asking_a_question() -> SessionRecord {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::Working;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        let question = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{
+                "question": "Step 2 of 20. Did it pair?",
+                "header": "Step 2",
+                "multiSelect": false,
+                "options": [
+                    {"label": "Pass"}, {"label": "Fail"}, {"label": "Skip"}, {"label": "Stop for now"},
+                ],
+            }]},
+        });
+        apply_body(&mut record, 2, &question);
+        record
+    }
+
+    /// The order a real 2.1.319 fires for `[Glob, AskUserQuestion]`: the sibling
+    /// ends after the question's `PreToolUse`, and `Notification` comes 6.4 s on.
+    #[test]
+    fn a_sibling_tool_ending_keeps_the_pending_question() {
+        let mut record = record_asking_a_question();
+        apply_body(
+            &mut record,
+            3,
+            &json!({"hook_event_name": "PostToolUse", "tool_name": "Glob"}),
+        );
+        apply_body(
+            &mut record,
+            4,
+            &json!({
+                "hook_event_name": "Notification",
+                "notification_type": "permission_prompt",
+                "message": "Claude needs your permission",
+            }),
+        );
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert!(
+            matches!(
+                &record.pending_input,
+                Some(PendingInput::Question { questions })
+                    if questions.len() == 1
+                        && questions[0].options == ["Pass", "Fail", "Skip", "Stop for now"]
+            ),
+            "the question is still what is pending: {:?}",
+            record.pending_input
+        );
+    }
+
+    /// Claude fires this `Notification` for every dialog, a question's too, so
+    /// with nothing pending its bare text says nothing about the kind.
+    #[expect(
+        clippy::panic,
+        reason = "the test asserts which prompt kind is pending, with a diagnostic"
+    )]
+    #[test]
+    fn a_bare_permission_notification_does_not_word_a_permission() {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::AwaitingInput;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        apply_body(
+            &mut record,
+            2,
+            &json!({
+                "hook_event_name": "Notification",
+                "notification_type": "permission_prompt",
+                "message": "Claude needs your permission",
+            }),
+        );
+        let Some(PendingInput::Other { message }) = &record.pending_input else {
+            panic!("expected an unnamed prompt: {:?}", record.pending_input);
+        };
+        assert!(
+            !message.to_lowercase().contains("permission"),
+            "the prompt on screen may be a question: {message}"
+        );
+    }
+
+    /// The question's own tool ending is what ends its prompt.
+    #[test]
+    fn the_tools_own_post_tool_use_ends_its_pending_question() {
+        let mut record = record_asking_a_question();
+        apply_body(
+            &mut record,
+            3,
+            &json!({"hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion"}),
+        );
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(record.pending_input, None);
+    }
+
+    /// A stored prompt's tool name is capped, so the report's must be capped
+    /// the same way or the tool cannot match its own `PostToolUse`.
+    #[test]
+    fn a_long_tool_names_own_post_tool_use_ends_its_prompt() {
+        let long = "t".repeat(500);
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::Working;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        apply_body(
+            &mut record,
+            2,
+            &json!({
+                "hook_event_name": "PermissionRequest",
+                "tool_name": long.clone(),
+                "tool_input": {"command": "ls"},
+            }),
+        );
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        apply_body(
+            &mut record,
+            3,
+            &json!({"hook_event_name": "PostToolUse", "tool_name": long}),
+        );
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(record.pending_input, None);
+    }
+
+    /// An empty `tool_name` names no tool, so it clears as a missing one does.
+    #[test]
+    fn a_post_tool_use_naming_no_tool_clears_the_prompt() {
+        for name in [json!(""), json!(null)] {
+            let mut record = record_asking_a_question();
+            apply_body(
+                &mut record,
+                3,
+                &json!({"hook_event_name": "PostToolUse", "tool_name": name}),
+            );
+            assert_eq!(record.status, SessionStatus::Working, "{name}");
+            assert_eq!(record.pending_input, None, "{name}");
+        }
+        let mut record = record_asking_a_question();
+        apply_body(&mut record, 3, &json!({"hook_event_name": "PostToolUse"}));
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(record.pending_input, None);
     }
 
     #[test]

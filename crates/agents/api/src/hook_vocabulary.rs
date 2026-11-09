@@ -19,6 +19,11 @@ const DETAIL_MAX_CHARS: usize = 200;
 /// Characters kept of a question's text and of an `Other` prompt's message.
 const MESSAGE_MAX_CHARS: usize = 1000;
 
+/// The message a `permission_prompt` notification carries when the dialog has
+/// no detail of its own, a question's and a plan approval's included, so it
+/// names no kind at all.
+const BARE_PERMISSION_MESSAGE: &str = "Claude needs your permission";
+
 /// Questions kept from one `AskUserQuestion` payload.
 const MAX_QUESTIONS: usize = 8;
 
@@ -97,6 +102,9 @@ pub struct HookDetails {
     pub last_assistant_message: Option<String>,
     /// The CLI's own permission mode at the time of the event.
     pub permission_mode: Option<String>,
+    /// The payload's `tool_name`: the tool a `PreToolUse`, `PermissionRequest`,
+    /// `PostToolUse` or `PostToolUseFailure` is about.
+    pub tool_name: Option<String>,
     /// Why a `StopFailure` failed: the payload's `reason`, else its `message`.
     pub failure_detail: Option<String>,
     /// The payload's `reason`: why a `SessionEnd` ended (`clear` for a
@@ -132,6 +140,7 @@ pub fn details(body: &Value) -> HookDetails {
         session_id: text("session_id"),
         last_assistant_message: text("last_assistant_message"),
         permission_mode: text("permission_mode"),
+        tool_name: text("tool_name"),
         failure_detail: text("reason")
             .filter(|reason| !reason.is_empty())
             .or_else(|| text("message")),
@@ -289,6 +298,14 @@ fn report(signal: Signal, details: &HookDetails) -> HookReport {
             .clone()
             .filter(|_| event == "Stop"),
         failure,
+        // The name is capped as the stored prompt's is, so a long tool can
+        // still match its own `PostToolUse`; an empty one names no tool.
+        finished_tool: details
+            .tool_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .filter(|_| matches!(event, "PostToolUse" | "PostToolUseFailure"))
+            .map(|name| truncate(name, DETAIL_MAX_CHARS)),
         permission_mismatch: None,
         agent_ended: event == "SessionEnd" && details.reason.as_deref() != Some("clear"),
         agent_started: event == "SessionStart",
@@ -391,24 +408,39 @@ fn permission_request(body: &Value) -> Option<Signal> {
 }
 
 /// A notification is the backstop for a prompt `PermissionRequest` misses.
-/// Its message counts only when nothing richer is already pending.
+/// Its message counts only when nothing richer is already pending, and a
+/// `permission_prompt`'s message names no kind at all.
 fn notification(body: &Value) -> Option<Signal> {
     let kind = body.get("notification_type").and_then(Value::as_str)?;
     if kind == "idle_prompt" {
         return Some(signal(Some(SessionStatus::Idle), PendingUpdate::Clear));
     }
-    if kind == "permission_prompt" || kind.starts_with("elicitation_") {
-        // Neither kind's `message` is guaranteed, so each falls back to what
-        // the prompt is.
-        let fallback = if kind == "permission_prompt" {
-            "Claude Code asks for permission"
-        } else {
-            "An MCP server asks for input"
-        };
+    if kind == "permission_prompt" {
+        // Claude fires this about 6 s after every dialog, a question's and a
+        // plan's too, so the bare wording names a permission the prompt may
+        // never have asked for; one that names its tool still says something.
+        // Both clients draw their own neutral line for an empty message.
+        let named = body
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|message| {
+                let message = message.trim();
+                !message.is_empty() && message != BARE_PERMISSION_MESSAGE
+            });
+        let message =
+            named.map_or_else(String::new, |message| truncate(message, MESSAGE_MAX_CHARS));
+        return Some(signal(
+            Some(SessionStatus::AwaitingInput),
+            PendingUpdate::KeepOr(PendingInput::Other { message }),
+        ));
+    }
+    if kind.starts_with("elicitation_") {
+        // An elicitation's `message` is not guaranteed, so it falls back to
+        // what the prompt is.
         let message = body
             .get("message")
             .and_then(Value::as_str)
-            .unwrap_or(fallback);
+            .unwrap_or("An MCP server asks for input");
         return Some(signal(
             Some(SessionStatus::AwaitingInput),
             PendingUpdate::KeepOr(PendingInput::Other {
@@ -422,6 +454,20 @@ fn notification(body: &Value) -> Option<Signal> {
 /// The tool a payload names, when it names one.
 fn tool_name(body: &Value) -> Option<&str> {
     body.get("tool_name").and_then(Value::as_str)
+}
+
+/// The tool a pending prompt belongs to, which is the one whose `PostToolUse`
+/// ends it: `Question` is Claude's `AskUserQuestion` and `PlanApproval` its
+/// `ExitPlanMode`, a `Permission` belongs to the tool it names, and any other
+/// kind to no tool at all.
+#[must_use]
+pub fn pending_tool(pending: &PendingInput) -> Option<&str> {
+    match pending {
+        PendingInput::Question { .. } => Some("AskUserQuestion"),
+        PendingInput::PlanApproval { .. } => Some("ExitPlanMode"),
+        PendingInput::Permission { tool_name, .. } => Some(tool_name),
+        PendingInput::Other { .. } | PendingInput::Unknown => None,
+    }
 }
 
 /// The questions an `AskUserQuestion` payload carries; empty when it carries
@@ -1032,18 +1078,18 @@ mod tests {
         assert_eq!(
             pending_of(&permission),
             PendingUpdate::KeepOr(PendingInput::Other {
-                message: "Claude needs your permission".to_owned(),
+                message: String::new(),
             })
         );
-        // A notification's message is optional: each kind falls back to what
-        // the prompt is, so the pending input never shows an empty line.
+        // The kind says nothing about what is asking: Claude fires it for a
+        // question and a plan approval too, so its message is not kept.
         assert_eq!(
             pending_of(&json!({
                 "hook_event_name": "Notification",
                 "notification_type": "permission_prompt",
             })),
             PendingUpdate::KeepOr(PendingInput::Other {
-                message: "Claude Code asks for permission".to_owned(),
+                message: String::new(),
             })
         );
         assert_eq!(
@@ -1063,6 +1109,51 @@ mod tests {
             })),
             Some(SessionStatus::AwaitingInput)
         );
+    }
+
+    #[test]
+    fn a_permission_notification_that_names_the_tool_keeps_its_message() {
+        for message in [
+            "Claude needs your permission to use Bash",
+            "Claude Code needs your approval for the plan",
+        ] {
+            assert_eq!(
+                pending_of(&json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "permission_prompt",
+                    "message": message,
+                })),
+                PendingUpdate::KeepOr(PendingInput::Other {
+                    message: message.to_owned(),
+                }),
+                "{message}"
+            );
+        }
+        // The bare wording and an absent message say nothing about the kind.
+        for body in [
+            json!({
+                "hook_event_name": "Notification",
+                "notification_type": "permission_prompt",
+                "message": "Claude needs your permission",
+            }),
+            json!({
+                "hook_event_name": "Notification",
+                "notification_type": "permission_prompt",
+                "message": "  Claude needs your permission  ",
+            }),
+            json!({
+                "hook_event_name": "Notification",
+                "notification_type": "permission_prompt",
+            }),
+        ] {
+            assert_eq!(
+                pending_of(&body),
+                PendingUpdate::KeepOr(PendingInput::Other {
+                    message: String::new(),
+                }),
+                "{body}"
+            );
+        }
     }
 
     #[test]
@@ -1126,6 +1217,7 @@ mod tests {
                 session_id: Some("0b6f4c7e-1111-4222-8333-944455556666".to_owned()),
                 last_assistant_message: Some("Done.".to_owned()),
                 permission_mode: Some("plan".to_owned()),
+                tool_name: None,
                 failure_detail: Some("overloaded".to_owned()),
                 reason: Some("overloaded".to_owned()),
                 subagent: false,
@@ -1152,6 +1244,7 @@ mod tests {
                 session_id: None,
                 last_assistant_message: None,
                 permission_mode: None,
+                tool_name: None,
                 failure_detail: None,
                 reason: None,
                 subagent: false,
