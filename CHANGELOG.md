@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- An account's Fable 7-day limit shows beside its overall 7-day one in Accounts and Settings, whenever it is in use.
+
 ### Fixed
 
 - A session whose task name is too long for its pane no longer reads as finished mid-turn, so no false Finished notice fires.
