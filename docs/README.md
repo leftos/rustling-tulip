@@ -37,7 +37,7 @@ crates/
   daemon-client/ - client-side daemon supervision shared by the clients
   dev-daemon/   - an isolated daemon under a `.tmp` folder for the live tests and the driver tools; never shipped
   tailnet/      - Tailscale CLI wrapper and the owner rule for tailnet peers
-  update-core/  - the updater's release feed, download, verify and update lock, shared by the client (and later the daemon); no GPUI
+  update-core/  - the updater's release feed, download, verify and update lock, shared by the client and the daemon; no GPUI
   agents/api/   - the agent plugin trait and its context types
   agents/claude/ - the Claude plugin (argv, hook settings, stream-json parsing), with its fake `claude` CLI shim for the native e2e tier in `fake/`
   agents/registry/ - the compiled-in list of agent plugins
@@ -316,6 +316,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Refresh lane**: the accounts driver's command channel a write uses to re-read the store, so its answer carries the refreshed snapshot.
 - **Rehost**: moving the panes of a host key that lost the daemon to the key that owns it, by `ClientMessage::RehostPanes` sent to This PC, which rewrites the host of the requester's matching panes in its layout (`apps/native/src/hosts.rs` `rehost_stranded_panes`, `crates/daemon/src/tabs.rs` `rehost_panes`).
 - **Remote mode**: what the native client's capability table says of a tailnet or SSH host (`Target::Tailnet`, `Target::Ssh`), per host and beside This PC rather than instead of it: local-file actions are disabled with a reason and Stop and the daemon's files are hidden, and quitting only disconnects the host. See `docs/native-client.md`.
+- **Remote update**: a paired client asking a Windows host's daemon to update itself (`ClientMessage::RemoteUpdate`, feature `remote_update`): the daemon checks the host, downloads and verifies the release and starts its installer with `/S /UPDATE /RESTARTDAEMON`, answering `RemoteUpdateStarted` or an `update_refused` error (`docs/auto-update.md` decision 11).
 - **Remote status**: the daemon's `RemoteStatus` message, pushed at connect and broadcast on every change, whose `state` (`RemoteState`) says why remote access is off, down or serving (`crates/protocol/src/lib.rs`).
 - **remote.json**: the config-dir file that turns the daemon's remote (tailnet) access on: `{enabled, port}`, absent until the owner turns it on (the daemon writes it when `ConfigureRemote` changes it), with the port defaulting to 8787; a missing, unreadable or zero-port file means off (`crates/daemon/src/remote_config.rs`).
 - **Reserved arguments**: the flags an agent plugin builds itself (`Agent::reserved_args`; Claude reserves 16, such as `--settings`, `--resume` and `-p`), which a launch command's extra arguments may not repeat.

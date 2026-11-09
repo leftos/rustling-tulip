@@ -890,7 +890,7 @@ A toast is a rounded card in the app's theme: an accent stripe (the rail's Askin
 
 ## Updates
 
-The client updates itself from published releases; the mechanism (trust model, feed, verify, file swap, daemon takeover) is in [auto-update.md](./auto-update.md). Updates are for this PC only: no daemon message, tailnet peer or SSH host triggers or feeds it.
+The client updates itself from published releases; the mechanism (trust model, feed, verify, file swap, daemon takeover) is in [auto-update.md](./auto-update.md). The app's own updater is for this PC only; a paired client can also ask a Windows host's daemon to update itself (`RemoteUpdate`, decision 11 there), which the native client does not send yet.
 
 It checks at launch and every hour, skipped while an update is ready, and downloads a newer release in the background (`update_view.rs`). A dev build checks only when `RUSTLING_TULIP_UPDATE_FEED` is set.
 

@@ -14,7 +14,7 @@ The check is the one the client's updater makes: the release's `.sha256`, from t
 
 - **Who may ask:** any paired tailnet device or an SSH client.
 - **Consent:** the requester confirms in a dialog listing the host's running sessions. The host's own client, if open, shows who asked. No approval at the host and no host setting.
-- **App open on the host:** it restarts itself after a countdown with Cancel, as Restart to update does.
+- **App open on the host:** it restarts itself after a countdown with Cancel; Restart to update has no countdown, so the countdown is new.
 - **SSH hosts:** a detached helper started over a second SSH command runs on after the channel drops, and the client reads the result on reconnect. Tailnet hosts are built first.
 - **Host to client:** the same power both ways. From the host, "Update connected clients" gives each native client the same countdown with Cancel, and it updates itself by the same rule. Phone apps just reload.
 - **A release that breaks sessions or the protocol:** the release carries a machine-readable flag. The confirm dialog says what will end and lets it go ahead, and the host goes first, the requesting client updating itself right after.

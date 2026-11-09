@@ -14,6 +14,8 @@ With `--to <name>.app` it replaces the whole bundle by rename instead: `--from` 
 
 Its exit codes: 0 applied, 1 bad arguments, 2 the daemon would not stop, 3 an exe still runs from the install folder, 4 another update holds the lock, 5 a file failed and was rolled back. `rustling-tulipd --version` and `-V` print `rustling-tulipd <version>` and exit 0.
 
+A paired client's `RemoteUpdate` makes the daemon itself start the installer with `/S /UPDATE /RESTARTDAEMON`, so `apply-update` runs with `--restart-daemon` and retires this daemon as for any update; the daemon holds the update mutex from before its download until after the launch (`docs/auto-update.md` decision 11).
+
 The daemon is a GUI-subsystem exe, so `--version`, `pair`, `sessions`, `shutdown` and `apply-update` attach the parent console before writing (`attach_parent_console` in `crates/daemon/src/cli_pair.rs`). A valid redirected stdout or stderr is kept, so `> out.txt` captures the output even when the caller has a console (`ssh host cmd /c`); only a null handle gets the console, opened as `CONOUT$` (`crates/daemon/tests/cli_console.rs`).
 
 The daemon starts for no arguments or for `--detach` alone (the login Run entry and the logon task). The plain start also takes `--start-failure-file <path>`, at most once and in any position: the daemon writes the error it failed to start with there, before it opens any log, and only for a failure before it publishes `daemon.json`.
