@@ -2,7 +2,7 @@
 //! folder: compiled in every build, since a build without the `driver`
 //! feature must refuse a driven run too.
 
-use daemon_client::isolation::check_isolated;
+use daemon_client::isolation::{REMOTE_FILES_DIR_VAR, check_isolated, check_isolated_var};
 
 use crate::offscreen::OFFSCREEN_ENV;
 
@@ -73,6 +73,11 @@ pub fn decide(
     if let Err(err) = check_isolated(|variable| get(variable).map(Into::into)) {
         return GateDecision::Refuse(err.to_string());
     }
+    if let Err(err) = check_isolated_var(REMOTE_FILES_DIR_VAR, |variable| {
+        get(variable).map(Into::into)
+    }) {
+        return GateDecision::Refuse(err.to_string());
+    }
     if let Some(unset) = override_vars.iter().find(|variable| !set(variable)) {
         return GateDecision::Refuse(format!(
             "{DRIVER_ENV}=1 needs {unset} set, so a driven run never starts a real agent CLI"
@@ -86,7 +91,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use daemon_client::isolation::ISOLATED_DIR_VARS;
+    use daemon_client::isolation::{ISOLATED_DIR_VARS, REMOTE_FILES_DIR_VAR};
 
     use super::{
         DRIVER_ENV, DRIVER_TOASTS_ENV, GateDecision, OFFSCREEN_ENV, decide, driver_toasts_wanted,
@@ -112,6 +117,10 @@ mod tests {
             .iter()
             .map(|var| ((*var).to_owned(), absolute(&["repo", ".tmp", "drive", var])))
             .collect();
+        vars.insert(
+            REMOTE_FILES_DIR_VAR.to_owned(),
+            absolute(&["repo", ".tmp", "drive", "remote-files"]),
+        );
         vars.insert(DRIVER_ENV.to_owned(), "1".to_owned());
         vars.insert(OFFSCREEN_ENV.to_owned(), "1".to_owned());
         vars.insert(
@@ -199,6 +208,21 @@ mod tests {
             reason.contains("RUSTLING_TULIP_WORKTREES_DIR is not set"),
             "{reason}"
         );
+    }
+
+    #[test]
+    fn a_driven_run_refuses_an_unset_remote_files_folder() {
+        let reason = refusal(gate(&env(&[(REMOTE_FILES_DIR_VAR, None)]), true));
+        assert!(reason.contains(REMOTE_FILES_DIR_VAR), "{reason}");
+        assert!(reason.contains("is not set"), "{reason}");
+    }
+
+    #[test]
+    fn a_driven_run_refuses_a_remote_files_folder_outside_tmp() {
+        let outside = absolute(&["Users", "me", "AppData", "rustling-tulip", "remote-files"]);
+        let reason = refusal(gate(&env(&[(REMOTE_FILES_DIR_VAR, Some(&outside))]), true));
+        assert!(reason.contains(REMOTE_FILES_DIR_VAR), "{reason}");
+        assert!(reason.contains("is not under a .tmp folder"), "{reason}");
     }
 
     #[test]

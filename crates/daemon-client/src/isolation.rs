@@ -14,6 +14,11 @@ pub const ISOLATED_DIR_VARS: [&str; 3] = [
     "RUSTLING_TULIP_WORKTREES_DIR",
 ];
 
+/// The variable naming the folder a client saves files fetched from a remote
+/// host under. A driven run isolates it too; a daemon has no such folder, so
+/// it stays out of [`ISOLATED_DIR_VARS`].
+pub const REMOTE_FILES_DIR_VAR: &str = "RUSTLING_TULIP_REMOTE_FILES_DIR";
+
 /// The folder name a driven run's folders must sit under.
 const TMP_FOLDER: &str = ".tmp";
 
@@ -78,6 +83,18 @@ pub fn check_isolated(get: impl Fn(&str) -> Option<OsString>) -> Result<(), NotI
         check_dir(get(variable)).map_err(|reason| NotIsolated { variable, reason })?;
     }
     Ok(())
+}
+
+/// [`check_isolated`] for one more `variable`, which a driven client needs
+/// isolated and a daemon does not have.
+///
+/// # Errors
+/// The variable and the reason, as [`check_isolated`] gives them.
+pub fn check_isolated_var(
+    variable: &'static str,
+    get: impl Fn(&str) -> Option<OsString>,
+) -> Result<(), NotIsolated> {
+    check_dir(get(variable)).map_err(|reason| NotIsolated { variable, reason })
 }
 
 /// Why `value` is not an isolated folder, if it is not.
@@ -214,6 +231,24 @@ mod tests {
         let err = refused(&vars);
         assert_eq!(err.variable, "RUSTLING_TULIP_CONFIG_DIR");
         assert_eq!(err.reason, Reason::Relative(relative));
+    }
+
+    #[test]
+    fn one_more_variable_is_checked_like_the_others() {
+        let one =
+            |value: Option<OsString>| check_isolated_var(REMOTE_FILES_DIR_VAR, |_| value.clone());
+
+        let err = one(None).expect_err("an unset variable is refused");
+        assert_eq!(err.variable, REMOTE_FILES_DIR_VAR);
+        assert_eq!(err.reason, Reason::Unset);
+
+        let outside = absolute(&["Users", "me", "AppData", "rustling-tulip"]);
+        let err = one(Some(outside.clone().into_os_string()))
+            .expect_err("a folder outside .tmp is refused");
+        assert_eq!(err.reason, Reason::NotUnderTmp(outside));
+
+        let under_tmp = absolute(&["repo", ".tmp", "drive", "remote-files"]);
+        assert_eq!(one(Some(under_tmp.into_os_string())), Ok(()));
     }
 
     #[test]

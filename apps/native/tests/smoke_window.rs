@@ -1222,7 +1222,11 @@ mod driven {
         command
             .envs(envs.iter().map(|(key, value)| (*key, value.as_os_str())))
             .env(OFFSCREEN_ENV, "1")
-            .env(DRIVER_ENV, "1");
+            .env(DRIVER_ENV, "1")
+            .env(
+                daemon_client::isolation::REMOTE_FILES_DIR_VAR,
+                daemon.dir().join("remote-files"),
+            );
         for plugin in agent_registry::all() {
             let variable = plugin.program_env_var();
             let (_, fake) = envs

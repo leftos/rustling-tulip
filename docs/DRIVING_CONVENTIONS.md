@@ -167,7 +167,7 @@ Source: `docs/native-client.md` ("Tests"), `apps/native/examples/shot.rs`, `apps
 
 A driven client runs against an isolated daemon whose config, binaries and worktrees dirs are absolute and under a `.tmp` folder, so the owner's real sessions, settings and logs stay untouched: a client with default dirs attaches to the user's real daemon and resizes their PTYs, and a daemon whose binaries dir is not under `.tmp` reaps the installed app's tracers.
 
-The driver gate refuses a driven run otherwise (exit 4), and `launch` starts an `IsolatedDaemon` (`crates/dev-daemon`) under `<repo_root>/.tmp/driver/<session>-<server pid>/`, with every registered agent's override pointed at its fake CLI, unless `launch`'s allowlisted `env` names a real one (`RUSTLING_TULIP_CLAUDE`).
+The driver gate refuses a driven run otherwise (exit 4), and it holds the client's remote-files folder (`RUSTLING_TULIP_REMOTE_FILES_DIR`) to the same rule, so a file fetched from a remote host never lands in the owner's downloads. `launch` starts an `IsolatedDaemon` (`crates/dev-daemon`) under `<repo_root>/.tmp/driver/<session>-<server pid>/`, saves fetched files under its `remote-files` folder, with every registered agent's override pointed at its fake CLI, unless `launch`'s allowlisted `env` names a real one (`RUSTLING_TULIP_CLAUDE`).
 
 The client is ready when its discovery file appears and the endpoint answers `ping`, not when the process starts. The agent starts it itself, in the background, and stops it with `stop` when finished; a client the owner already had running is never driven.
 
@@ -304,7 +304,7 @@ Source: `apps/native/src/driver/capture.rs`, `apps/native/src/driver/endpoint.rs
 
 A native file or folder picker runs outside the app's windows, where posted input cannot fill it, and in a driven run it would open on the user's desktop. In a driven run the client should open no dialog: the agent queues one answer (a path or a cancel) per dialog before the action, each dialog takes the oldest, and one opened on an empty queue fails at once. `RootDeps.pick_folder` and `pick_file` are already injectable closures, which is the seam.
 
-Not met: a driven run uses the system pickers, and the endpoint has no queue.
+Not met: the endpoint has no queue. A driven run opens no dialog (`folder_picker::offscreen_folder_picker`, `offscreen_file_picker` and `offscreen_save_picker`, chosen under `offscreen::requested()`): each answers as a cancel, or the save picker as an error, and logs that native dialogs are off.
 Source: `apps/native/src/lib.rs` (`RootDeps`), `apps/native/src/folder_picker.rs`; another project's driving friction log and dialog-queue tool. Seen: 0 here (seeded from yaat).
 
 ### Name what the driver cannot reach, and the route for each
@@ -312,7 +312,7 @@ Source: `apps/native/src/lib.rs` (`RootDeps`), `apps/native/src/folder_picker.rs
 
 The endpoint reaches only what the client draws in its main window. Out of reach: native file and folder pickers (a queued answer is the route, "Answer file dialogs" above), toasts, pop-out windows' input and capture, IME composition (driven by the real IME context, which posting cannot fake), drag and drop from Explorer, and modified pointer input (refused; a chord goes through `key`, or a named `action`). Hover-only UI never shows under posted input; `action` `set_hover` sets it.
 
-A refusal is a named error saying the surface is out of reach, returned before any input is sent. An agent that does not know this burns turns trying to click a native dialog. Not met: an action that opens a native picker is not refused in a driven run.
+A refusal is a named error saying the surface is out of reach, returned before any input is sent. An agent that does not know this burns turns trying to click a native dialog. Not met: an action that opens a native picker is not refused in a driven run; the picker answers as a cancel.
 Source: `docs/native-client.md` ("Driver endpoint"), `docs/plans/headless-drive.md`; another project's instructions. Seen: 0 here (seeded from towercab-3d).
 
 ### Send the app's logs to one file and read its tail, allowing for the flush
@@ -344,7 +344,7 @@ Source: `apps/native/Cargo.toml`, `apps/native/src/driver_gate.rs`, `apps/native
 
 `RUSTLING_TULIP_DRIVER=1`, exactly, read once in `main` before tracing starts or any folder, log or registry entry is touched, turns on the endpoint; `launch` always sets it.
 
-Any other non-empty value, a build without the feature, a missing `RUSTLING_TULIP_OFFSCREEN_WINDOW`, dirs that fail `check_isolated` or an unset agent override refuses the run with `driver run refused: <reason>` on stderr and exit code 4, before any native start-up; a failed cloak exits with its own code, 3. The pipe's DACL grants only the current user and refuses remote clients.
+Any other non-empty value, a build without the feature, a missing `RUSTLING_TULIP_OFFSCREEN_WINDOW`, dirs that fail `check_isolated`, a remote-files folder that fails `check_isolated_var`, or an unset agent override refuses the run with `driver run refused: <reason>` on stderr and exit code 4, before any native start-up; a failed cloak exits with its own code, 3. The pipe's DACL grants only the current user and refuses remote clients.
 Source: `apps/native/src/driver_gate.rs`, `apps/native/src/offscreen.rs`, `apps/native/src/driver/pipe.rs`; another project's startup and automation-mode code. Seen: 0 here (seeded from yaat).
 
 ### Put every activating or out-of-process UI path behind one seam, pinned by source tests

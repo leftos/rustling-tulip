@@ -250,7 +250,6 @@ use crate::needs_you_view::moves_needs_you;
 use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
 use crate::notify::{SilentNotifier, SystemNotifier};
-use crate::open::SystemOpener;
 use crate::overlay_owner::{Overlay, OverlayOwners};
 use crate::popout_view::PopoutView;
 use crate::popouts::{POPOUT_CASCADE, POPOUT_MIN_SIZE, POPOUT_SIZE, Popouts};
@@ -1385,7 +1384,7 @@ impl RootView {
             start_mode,
             now: Arc::new(Instant::now),
             quit: Box::new(|cx: &mut App| cx.quit()),
-            open: Arc::new(SystemOpener),
+            open: crate::open::opener_for(offscreen::requested()),
             notify: if offscreen::requested() {
                 Arc::new(SilentNotifier)
             } else {

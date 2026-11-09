@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use daemon_client::isolation::REMOTE_FILES_DIR_VAR;
 use dev_daemon::{DaemonSpec, IsolatedDaemon, TestShell};
 use serde::Deserialize;
 use serde_json::json;
@@ -239,6 +240,7 @@ fn client_command(
         .envs(envs.iter().map(|(key, value)| (*key, value)))
         .env(DRIVER_ENV, "1")
         .env(OFFSCREEN_ENV, "1")
+        .env(REMOTE_FILES_DIR_VAR, scratch.join("remote-files"))
         .current_dir(scratch)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

@@ -12,6 +12,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use protocol::{RepoEntry, SessionSnapshot, WorkspaceEntry};
 
@@ -69,9 +70,10 @@ const EXECUTABLE_EXTENSIONS: &[&str] = &[
     "search-ms",
 ];
 
-/// Where a terminal link is opened. The client passes [`SystemOpener`]; a
-/// spec passes a recorder, since the test platform cannot open anything.
-/// Every method may block, so each runs on a background thread.
+/// Where a terminal link is opened. The client passes [`SystemOpener`], or
+/// [`LoggingOpener`] around it when its window is cloaked; a spec passes a
+/// recorder, since the test platform cannot open anything. Every method may
+/// block, so each runs on a background thread.
 pub trait Opener: Send + Sync {
     /// Opens `url`: an `http` or `https` URL [`validate_http_url`] passed,
     /// or the `ms-settings:` URI of Windows' notification settings.
@@ -190,6 +192,86 @@ impl Opener for SystemOpener {
 
     fn path_exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+}
+
+/// The opener of a cloaked window, which must never put anything on the
+/// desktop it runs on: each open only says what it would have done. What
+/// a link resolves to still reads the real file system.
+pub struct LoggingOpener(SystemOpener);
+
+impl Opener for LoggingOpener {
+    fn url(&self, url: &str) -> Result<(), String> {
+        tracing::info!("a cloaked window would open url: {url}");
+        Ok(())
+    }
+
+    fn vscode(&self, path: &Path, line: u32, column: u32) -> Result<(), OpenFailure> {
+        tracing::info!(
+            "a cloaked window would open vscode: {}:{line}:{column}",
+            path.display()
+        );
+        Ok(())
+    }
+
+    fn vscode_folder(&self, paths: &[PathBuf]) -> Result<(), OpenFailure> {
+        let folders: Vec<String> = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        tracing::info!(
+            "a cloaked window would open vscode_folder: {}",
+            folders.join(", ")
+        );
+        Ok(())
+    }
+
+    fn vscode_workspace(&self, path: &Path) -> Result<(), OpenFailure> {
+        tracing::info!(
+            "a cloaked window would open vscode_workspace: {}",
+            path.display()
+        );
+        Ok(())
+    }
+
+    fn default_app(&self, path: &Path) -> Result<(), String> {
+        tracing::info!(
+            "a cloaked window would open default_app: {}",
+            path.display()
+        );
+        Ok(())
+    }
+
+    fn reveal(&self, path: &Path) -> Result<(), String> {
+        tracing::info!("a cloaked window would open reveal: {}", path.display());
+        Ok(())
+    }
+
+    fn mapped_unc_hosts(&self) -> Vec<String> {
+        self.0.mapped_unc_hosts()
+    }
+
+    fn is_dangerous_type(&self, extension: &str) -> bool {
+        self.0.is_dangerous_type(extension)
+    }
+
+    fn existing(&self, reading: &Path) -> Option<Result<PathBuf, String>> {
+        self.0.existing(reading)
+    }
+
+    fn path_exists(&self, path: &Path) -> bool {
+        self.0.path_exists(path)
+    }
+}
+
+/// The opener a window runs with: [`SystemOpener`] as usual, or
+/// [`LoggingOpener`] around it for a window that is never shown.
+#[must_use]
+pub fn opener_for(offscreen: bool) -> Arc<dyn Opener> {
+    if offscreen {
+        Arc::new(LoggingOpener(SystemOpener))
+    } else {
+        Arc::new(SystemOpener)
     }
 }
 
@@ -946,8 +1028,8 @@ mod tests {
 
     use super::{
         JobOutcome, OpenAction, OpenFailure, OpenJob, Opener, Resolution, VsCodeTarget, base_dirs,
-        copy_path, existing_on_disk, macos_vscode_commands, repo_folder, resolve_with, runs_code,
-        simplify_path, unc_host, validate_http_url, workspace_vscode_target,
+        copy_path, existing_on_disk, macos_vscode_commands, opener_for, repo_folder, resolve_with,
+        runs_code, simplify_path, unc_host, validate_http_url, workspace_vscode_target,
     };
     use crate::links::TerminalLinkCandidate;
     use crate::temp_dir::TempDir;
@@ -1063,6 +1145,21 @@ mod tests {
             "linked_vscode_workspace": linked,
         }))
         .expect("workspace fixture")
+    }
+
+    #[test]
+    fn a_cloaked_windows_opener_launches_nothing() {
+        let missing = std::env::temp_dir().join("rustling-tulip-cloaked-opener-does-not-exist");
+        let opener = opener_for(true);
+        assert_eq!(opener.default_app(&missing), Ok(()));
+        assert_eq!(opener.reveal(&missing), Ok(()));
+    }
+
+    #[test]
+    fn a_cloaked_windows_opener_still_reads_the_file_system() {
+        let dir = TempDir::new("cloaked-opener");
+        let file = dir.file("kept.txt");
+        assert!(opener_for(true).path_exists(&file));
     }
 
     #[test]
