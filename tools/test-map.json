@@ -19,7 +19,8 @@
     "apps/native/tests/ui/main.rs",
     ".config/nextest.toml",
     "tools/test-map.json",
-    "rt.ps1"
+    "rt.ps1",
+    "vendor/**"
   ],
   "ignore": [
     "**/*.md",
@@ -1650,6 +1651,18 @@
         "apps/native/tests/smoke_window.rs"
       ],
       "filter": "binary_id(rustling-tulip-native::smoke_window)"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ellipsis_real_text.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::ellipsis_real_text)"
+    },
+    {
+      "paths": [
+        "apps/native/src/pane_header_fit.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^pane_header_fit::/)"
     },
     {
       "paths": [

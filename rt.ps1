@@ -1304,8 +1304,8 @@ function Invoke-Native {
 # Runs one of the native client's ignored spec files. The specs start their
 # own daemon from the binaries beside the test binary, so the daemon and
 # tracer are built first in the same profile (test-release, or release with
-# -Release). One at a time (the serial-live test group in
-# .config/nextest.toml): each spec owns a daemon and, for the smoke specs, a
+# -Release). The specs that start a daemon run one at a time (the serial-live
+# test group in .config/nextest.toml): each owns a daemon and, for the smoke specs, a
 # client window. The build and the specs run as one gate call, re-entering
 # this script under the gate: gated separately, the build and the specs could
 # run on different machines, leaving the specs without the daemon binary.
@@ -1391,7 +1391,7 @@ function Get-E2eTestFile {
 }
 
 function Invoke-NativeSmoke {
-    Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window' -Slot light -Name smoke -Features driver -Filter 'not test(/live_drive_/)'
+    Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window', 'ellipsis_real_text' -Slot light -Name smoke -Features driver -Filter 'not test(/live_drive_/)'
 }
 
 # The live drive check reads the foreground window and cursor of the desktop

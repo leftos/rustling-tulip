@@ -50,6 +50,8 @@ tools/
   installer/    - the NSIS installer script, and `pack-macos.ps1`, which builds the macOS app bundle and disk image on a Mac
   protocol-ts/  - the generator that writes the wire types as TypeScript into `apps/pwa/src/protocol.ts`, with its staleness test; never shipped
   rt-driver-mcp/ - the `rt-driver` MCP server that launches and drives an isolated native client; never shipped
+vendor/
+  gpui/         - a trimmed copy of gpui 0.2.2 with one text-shaping fix, patched in through the workspace `Cargo.toml`; see its VENDORED.md
 docs/
   README.md     - this page: the docs start page and the glossary
   architecture.md - components, what the product does, task index

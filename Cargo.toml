@@ -17,6 +17,7 @@ members = [
     "tools/folder-bench",
     "tools/protocol-ts",
 ]
+exclude = ["vendor/gpui"]
 
 [workspace.package]
 version = "0.10.0-alpha"
@@ -88,3 +89,6 @@ lto = false
 codegen-units = 16
 incremental = true
 strip = false
+
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
