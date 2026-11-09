@@ -11,6 +11,7 @@ It is alpha software.
 ### Sessions and the sidebar
 
 - Start a Claude session or a plain shell in a repo's own folder, or in a new git worktree on its own branch, so parallel sessions never edit the same checkout.
+- Add any folder as a repo: one that is not a git repo shows as DIR and opens sessions in place, with no worktree or branch choice.
 - Group repos into a workspace: one session works across all of them, with their relative paths kept. A VS Code `.code-workspace` file next to a repo is offered as a workspace.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
 - Tab pills and, on Windows, a badge on the taskbar button count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead.
@@ -20,9 +21,10 @@ It is alpha software.
 - The Dashboard tab, opened from the activity rail, opens on a Compact view of every running agent by repo, with its state, work and subagents and no scrolling. Its By status view adds context, recent work, cost, a two-hour activity bar and the Linear issue named in each session's branch, with a drawer per session.
 - Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane; the header counts today's cost, tokens and commits across every session.
 - `rustling-tulipd` drives sessions from a shell or a script: `sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch`, each with `--json`.
+- Ctrl+Shift+P opens a jump palette: type to find any open pane, tab, session, repo or workspace, and Enter goes straight there. It also opens a shell on any connected computer.
 - Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
 - Tabs and split panes: drag a pane or a sidebar session onto a pane to split, swap or move it, rearrange a tab into a grid, and undo a closed tab or a moved pane.
-- The sidebar groups sessions by repo or by tab, in Comfortable or Compact rows, and can show every session under a repo, only the busy ones, or just a count.
+- The sidebar groups sessions by repo or by tab, in Comfortable or Compact rows, with session names smaller than the repo name that holds them, and can show every session under a repo, only the busy ones, or just a count.
 - Repos sort with the ones that need you on top, by latest activity, or in your own order, and an All / Active switch hides the repos and workspaces with nothing running.
 - Right-click a repo or workspace for a Spawn submenu: Last, each agent, Shell and your presets. The New session dialog picks its target from a list that narrows as you type, and remembers your Trusted choice.
 - Pick each host's default shell for new sessions and shells, from the shells installed there (PowerShell, cmd, Git Bash, WSL, Nushell, fish, zsh or bash) or your own command. Claude sessions start inside it.
@@ -39,7 +41,7 @@ It is alpha software.
 ### Chat and summary views
 
 - A Claude session's pane can show its conversation as a chat instead of the terminal (the pane's Chat button, its menu or Ctrl+Shift+M), with answers appearing as they are written. Each session remembers which view it was last shown in.
-- Answer Claude's questions and permission prompts from cards, by click or key, and send messages from a box under the chat that keeps your text when a send is refused.
+- Answer Claude's questions, plans and permission prompts from cards, by click or key or in your own words in the card's text box, and send messages from a box under the chat that keeps your text when a send is refused.
 - A strip under the chat shows what is still running: subagents, background shells and the next wakeup, with their ages.
 - A Bash or PowerShell card shows its command one statement per line, and a command that writes a log offers Tail: a scrolling box under the card that follows the file as it grows.
 - The Summary view (Ctrl+Shift+U) shows a session as one line per stretch of work, each opening into its messages.
@@ -79,7 +81,8 @@ It is alpha software.
 - Ctrl+click a file path in a remote session's terminal, or use Fetch file…, to copy the file to this PC and open it. An HTML page brings its images and stylesheets with it.
 - Ctrl+click a folder path to fetch the whole folder, with progress and Cancel, leaving out `.git`, `node_modules` and caches. A fetched file's notice offers Fetch whole folder, and a fetched folder's offers Reveal.
 - When a host's session count changed since your last visit, the app offers to keep your layout, open all its sessions or start empty.
-- An iPhone on the tailnet can open the same sessions as a Home Screen web app with push notifications; see [the phone app guide](docs/phone-app.md).
+- Paste an image with Ctrl+V, or drop files onto a terminal, in a session on another computer: they are copied there and their paths pasted.
+- An iPhone on the tailnet can open the same sessions as a Home Screen web app: each session as a chat or a live terminal, a Needs you tray, and push notifications that wait while you are at your computer; see [the phone app guide](docs/phone-app.md).
 
 ### Remote access over SSH
 
@@ -149,6 +152,15 @@ On a Mac with Apple silicon (there is no build for Intel Macs):
 4. Secret environment rows need Windows Credential Manager, so on a Mac a session with a secret row will not start; give it the secret through an `${env:NAME}` row instead.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.11.0-alpha
+
+- The phone app opens each session as a chat, with a live terminal, a Needs you tray and notifications when a session needs you or finishes.
+- Answer a question or permission prompt in your own words from Chat's cards or a toast.
+- Ctrl+Shift+P opens a jump palette to go straight to any pane, tab, session, repo or workspace.
+- A crash at start-up now says what happened, and the client always opens, closing your tabs only if it crashes twice in a row.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.11.0-alpha).
 
 ## What's new in v0.10.0-alpha
 
