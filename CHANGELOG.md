@@ -8,6 +8,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - A session whose task name is too long for its pane no longer reads as finished mid-turn, so no false Finished notice fires.
 - A question whose answers have previews no longer offers answer buttons in a toast or on the Dashboard that could only fail; it offers Go to pane.
+- The What's new window shows a scrollbar when its notes run longer than it can show.
 - A damaged settings file no longer copies its contents, which could include a secret, into the log.
 - A click that focuses a pane or the window, or dismisses the jump palette, no longer reaches the program, so it can't answer a question.
 - After opening with your tabs closed, a reconnect no longer brings them back, and quitting before that happens no longer skips it next time.
