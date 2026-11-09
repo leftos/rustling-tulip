@@ -1173,6 +1173,8 @@ pub struct RootView {
     /// The What's new window, while open.
     whats_new: Option<WhatsNew>,
     whats_new_focus: FocusHandle,
+    /// The What's new body's scrollbar, reset each time the window opens.
+    whats_new_scroll: scrollbar::Scrollbar,
     /// Quick-shell folders waiting for the spawn they came with to land.
     quick_shell_saves: PendingQuickShell,
     /// Branch names the daemon suggested, per repo or workspace.
@@ -1702,6 +1704,7 @@ impl RootView {
             host_path_focus: cx.focus_handle(),
             whats_new: None,
             whats_new_focus: cx.focus_handle(),
+            whats_new_scroll: scrollbar::Scrollbar::default(),
             shell_generation: 0,
             quick_shell_saves: PendingQuickShell::default(),
             branch_cache: BranchCache::default(),

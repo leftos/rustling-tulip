@@ -522,6 +522,50 @@ fn a_ready_update_offers_whats_new_in_the_footer(cx: &mut TestAppContext) {
     assert!(!whats_new(&mut h).0, "Close closes the window");
 }
 
+/// The thumb the What's new body's scrollbar shows now, after a frame.
+fn whats_new_scroll_thumb(h: &mut Harness<'_>) -> Option<rustling_tulip_native::Thumb> {
+    h.bounds("whats-new-body");
+    let root = h.root.clone();
+    h.cx.update(|_, cx| root.read(cx).whats_new_scroll_thumb())
+}
+
+/// A changelog long enough to overflow the window's body.
+fn long_notes() -> String {
+    let bullets: Vec<String> = (0..60).map(|n| format!("- line {n}")).collect();
+    format!("## v0.99.0\n\n{}", bullets.join("\n"))
+}
+
+#[gpui::test]
+fn whats_new_shows_a_scrollbar_when_its_notes_run_long(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_offer_notes(&long_notes());
+    let mut h = ready_update(cx, &dir, &updater);
+
+    press_in_settings(&mut h, "settings-whats-new");
+    let viewport = h.bounds("whats-new-body").size.height / px(1.0);
+    let thumb = whats_new_scroll_thumb(&mut h).expect("the notes overflow, so a thumb shows");
+    assert!(
+        thumb.top == 0.0 && thumb.height >= 24.0 && thumb.height < viewport,
+        "a thumb at the top, shorter than the {viewport} px body: {thumb:?}"
+    );
+}
+
+#[gpui::test]
+fn whats_new_shows_no_scrollbar_when_its_notes_fit(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_offer_notes("## v0.99.0\n\n- one");
+    let mut h = ready_update(cx, &dir, &updater);
+
+    press_in_settings(&mut h, "settings-whats-new");
+    assert_eq!(
+        whats_new_scroll_thumb(&mut h),
+        None,
+        "the notes fit, so no thumb"
+    );
+}
+
 #[gpui::test]
 fn settings_offers_whats_new_beside_restart(cx: &mut TestAppContext) {
     let dir = TestDir::new();
