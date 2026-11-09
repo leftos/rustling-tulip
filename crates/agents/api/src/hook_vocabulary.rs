@@ -505,6 +505,19 @@ fn question(item: &Value) -> PendingQuestion {
                 .unzip()
         })
         .unwrap_or_default();
+    // A preview is drawn beside its option instead of answering the question
+    // from a toast, so the question is marked as one a toast cannot answer.
+    let preview = item
+        .get("options")
+        .and_then(Value::as_array)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                option
+                    .get("preview")
+                    .and_then(Value::as_str)
+                    .is_some_and(|preview| !preview.is_empty())
+            })
+        });
     PendingQuestion {
         question: truncate(&text(item, "question"), MESSAGE_MAX_CHARS),
         header: truncate(&text(item, "header"), DETAIL_MAX_CHARS),
@@ -514,6 +527,7 @@ fn question(item: &Value) -> PendingQuestion {
             .get("multiSelect")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        preview,
     }
 }
 
@@ -882,6 +896,7 @@ mod tests {
                             "You prefer coffee.".to_owned()
                         ],
                         multi_select: true,
+                        preview: false,
                     },
                     PendingQuestion {
                         question: "Which editor?".to_owned(),
@@ -889,6 +904,7 @@ mod tests {
                         options: vec!["vim".to_owned()],
                         option_descriptions: vec![String::new()],
                         multi_select: false,
+                        preview: false,
                     },
                 ],
             })
@@ -917,10 +933,50 @@ mod tests {
                     options: vec!["main".to_owned(), "dev".to_owned()],
                     option_descriptions: vec!["The release branch.".to_owned(), String::new()],
                     multi_select: false,
+                    preview: false,
                 }],
             }),
             "an option with no description holds its place with an empty one"
         );
+    }
+
+    #[test]
+    fn a_question_with_a_preview_is_marked() {
+        let body = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{
+                "question": "Which shape?",
+                "options": [
+                    {"label": "Current", "preview": "fn shape() {\n    let a = 1;\n}"},
+                    {"label": "Other"}
+                ]
+            }]},
+        });
+        let questions = questions_of(&body).expect("a question prompt");
+        let question = questions.first().expect("one question");
+        assert!(
+            question.preview,
+            "an option carrying a preview marks the question"
+        );
+    }
+
+    #[test]
+    fn a_question_without_one_is_not() {
+        let body = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{
+                "question": "Which branch?",
+                "options": [
+                    {"label": "main", "preview": ""},
+                    {"label": "dev"}
+                ]
+            }]},
+        });
+        let questions = questions_of(&body).expect("a question prompt");
+        let question = questions.first().expect("one question");
+        assert!(!question.preview, "no option carries a preview");
     }
 
     #[test]
@@ -969,6 +1025,7 @@ mod tests {
                     options: Vec::new(),
                     option_descriptions: Vec::new(),
                     multi_select: false,
+                    preview: false,
                 }],
             })
         );

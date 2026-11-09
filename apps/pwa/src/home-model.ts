@@ -468,7 +468,7 @@ function questionChoices(questions: readonly PendingQuestion[]): readonly TrayCh
     return [];
   }
   const question = questions[0];
-  if (question === undefined || question.multi_select === true) {
+  if (question === undefined || question.multi_select === true || question.preview === true) {
     return [];
   }
   const options = question.options ?? [];

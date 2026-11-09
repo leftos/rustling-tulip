@@ -14,15 +14,14 @@ pub fn json_error_at(err: &serde_json::Error) -> String {
 }
 
 /// The filter a daemon logs with unless the Detailed logging switch is on:
-/// everything at info, plus the daemon crate's own debug lines, which
-/// `daemon.log` has always carried.
-pub const DEFAULT_FILTER: &str = "info,daemon=debug,tower_http=info";
+/// every target at info, with `tower_http`'s info lines kept explicitly.
+pub const DEFAULT_FILTER: &str = "info,tower_http=info";
 
 /// The filter the Detailed logging switch selects: the default filter plus
 /// the `status_trace` decision lines the switch exists for. Every other
 /// dependency's debug output stays out, so the 5 MiB log keeps its room for
 /// those lines instead of rolling over minutes after the switch is turned on.
-pub const DETAILED_FILTER: &str = "info,daemon=debug,tower_http=info,status_trace=debug";
+pub const DETAILED_FILTER: &str = "info,tower_http=info,status_trace=debug";
 
 /// The running filter's handle. Absent when `RUST_LOG` set the filter at
 /// start: that filter is the user's, and the switch never replaces it.

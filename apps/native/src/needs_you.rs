@@ -300,6 +300,7 @@ mod tests {
             options: Vec::new(),
             option_descriptions: Vec::new(),
             multi_select: false,
+            preview: false,
         }
     }
 

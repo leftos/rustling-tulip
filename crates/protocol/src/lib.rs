@@ -1015,6 +1015,10 @@ pub struct PendingQuestion {
     /// True when the prompt accepts more than one choice.
     #[serde(default)]
     pub multi_select: bool,
+    /// True when any option carries a preview, which the client draws beside
+    /// the labels instead of answering from a toast.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preview: bool,
 }
 
 /// What a waiting session's summary says it needs.
@@ -13406,6 +13410,16 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_question_without_preview_reads_false() {
+        // The JSON a daemon before previews sends.
+        let question: PendingQuestion = serde_json::from_str(
+            r#"{"question":"Which branch?","header":"","options":["main","dev"],"multi_select":false}"#,
+        )
+        .expect("a question from a daemon that predates previews");
+        assert!(!question.preview);
+    }
+
+    #[test]
     fn pending_input_round_trips() {
         let cases = vec![
             PendingInput::Question {
@@ -13416,6 +13430,7 @@ mod tests {
                         options: vec!["Tea".to_owned(), "Coffee".to_owned()],
                         option_descriptions: vec!["Hot leaves.".to_owned(), String::new()],
                         multi_select: true,
+                        preview: false,
                     },
                     PendingQuestion {
                         question: "Which editor?".to_owned(),
@@ -13423,6 +13438,7 @@ mod tests {
                         options: Vec::new(),
                         option_descriptions: Vec::new(),
                         multi_select: false,
+                        preview: false,
                     },
                 ],
             },

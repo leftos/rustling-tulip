@@ -651,7 +651,7 @@ pub(crate) fn ask_block(input: &RowInput<'_>) -> Option<AskBlock> {
             now_text(input),
             None,
             question_choices(questions),
-            Some(AskBox::type_something()),
+            (!question_previews(questions)).then(AskBox::type_something),
         ),
         PendingInput::Permission { tool_name, summary } => (
             ASK_PERMISSION.to_owned(),
@@ -692,13 +692,20 @@ fn permission_text(input: &RowInput<'_>, tool_name: &str) -> String {
     }
 }
 
+/// Whether the prompt's single question carries previews, which are drawn in
+/// the pane rather than answered from here.
+fn question_previews(questions: &[PendingQuestion]) -> bool {
+    matches!(questions, [question] if question.preview)
+}
+
 /// One button per option of a single single-choice question, hinted `1` to
-/// `n`; none for several questions, a multi-select or no options.
+/// `n`; none for several questions, a multi-select, a preview question or no
+/// options.
 fn question_choices(questions: &[PendingQuestion]) -> Vec<AskChoice> {
     let [question] = questions else {
         return Vec::new();
     };
-    if question.multi_select {
+    if question.multi_select || question.preview {
         return Vec::new();
     }
     question
@@ -1287,6 +1294,7 @@ mod tests {
             options: options.iter().map(|option| (*option).to_owned()).collect(),
             option_descriptions: Vec::new(),
             multi_select,
+            preview: false,
         }
     }
 
@@ -1513,6 +1521,7 @@ mod tests {
                 options: Vec::new(),
                 option_descriptions: Vec::new(),
                 multi_select: false,
+                preview: false,
             }],
         });
         assert_eq!(
@@ -2207,6 +2216,21 @@ mod tests {
             questions: vec![question("Anything?", &[], false)],
         });
         assert_eq!(block_of(&no_options, None).choices.len(), 0);
+    }
+
+    #[test]
+    fn a_preview_question_offers_no_buttons_or_typed_box() {
+        let preview = asking(PendingInput::Question {
+            questions: vec![protocol::PendingQuestion {
+                preview: true,
+                ..question("Which shape?", &["a", "b"], false)
+            }],
+        });
+        let block = block_of(&preview, None);
+        assert_eq!(block.label, "Question ·");
+        assert!(block.choices.is_empty(), "a preview question: {block:?}");
+        assert_eq!(block.typed, None, "ask_block offers no box at all");
+        assert_eq!(typed(&block), None, "and none is drawn");
     }
 
     #[test]

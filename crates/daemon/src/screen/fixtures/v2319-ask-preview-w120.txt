@@ -1,0 +1,32 @@
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   X:\dev\rustling-tulip\.tmp\rt1309\work
+
+▎ Auto mode is now Claude Code's default permission mode.
+▎ Auto mode lets Claude handle permission prompts automatically. Claude checks each tool call for risky actions and
+▎ prompt injection before executing, runs the ones it assesses as lower-risk, and blocks the rest.
+▎ https://code.claude.com/docs/en/permission-modes
+
+❯ ASK:pv400
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Shape
+
+│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta
+│ echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf
+│ hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet
+│ kilo lima mike november oscar papa alpha bravo ch?
+
+❯ 1. An option label of some      ┌──────────────────────────────────────────┐
+    length 1                      │ fn shape() {                             │
+  2. An option label of some      │     let a = 1;                           │
+    length 2                      │     let b = 2;                           │
+  3. An option label of some      │     a + b                                │
+    length 3                      │ }                                        │
+                                  └──────────────────────────────────────────┘
+
+                                  Notes: press n to add notes
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel

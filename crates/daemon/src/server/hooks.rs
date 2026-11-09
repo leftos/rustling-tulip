@@ -409,6 +409,7 @@ mod tests {
                     options: vec!["A".to_owned(), "B".to_owned()],
                     option_descriptions: vec![String::new(), String::new()],
                     multi_select: false,
+                    preview: false,
                 }],
             })
         );

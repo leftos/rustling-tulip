@@ -17,7 +17,11 @@ use protocol::{
     ChatAnswerKind, ChatPrompt, ChatPromptKind, ClientMessage, DaemonMessage, PendingInput,
     PendingQuestion, PromptChoice,
 };
-use tracing::{debug, warn};
+use tracing::{info, warn};
+
+/// The refusal of an answer to a prompt the record still waits on but the
+/// screen cannot be read for: the pane it is drawn in is where it is answered.
+const PROMPT_UNREADABLE: &str = "Couldn't read this prompt; answer it in its pane.";
 
 /// Handle the Dashboard messages `dispatch` routes here.
 pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
@@ -73,16 +77,34 @@ fn answer_prompt(
     }
     let out_tx = ctx.out_tx.clone();
     tokio::spawn(async move {
-        if let Err(refusal) = answer_waiting(&target, since, choice).await {
-            debug!(
+        if let Err(refused) = answer_waiting(&target, since, choice).await {
+            info!(
                 session_id = %target.session_id,
-                code = refusal.code,
-                message = %refusal.message,
+                code = refused.refusal.code,
+                why = refused.why,
                 "dashboard answer refused"
             );
+            let refusal = refused.refusal;
             refuse(&out_tx, refusal.code, refusal.message, request_id);
         }
     });
+}
+
+/// A refusal and the check that made it, for the refusal log.
+struct Refused {
+    refusal: TypeRefusal,
+    why: &'static str,
+}
+
+impl Refused {
+    fn at(refusal: TypeRefusal, why: &'static str) -> Self {
+        Self { refusal, why }
+    }
+}
+
+/// The refusal of a record that moved on since the toast's `since`.
+fn record_moved() -> Refused {
+    Refused::at(TypeRefusal::refused(PROMPT_GONE), "record_moved")
 }
 
 /// Answer `target`'s pending prompt with `choice` while the session still
@@ -92,14 +114,18 @@ async fn answer_waiting(
     target: &TypeTarget,
     since: DateTime<Utc>,
     choice: PromptChoice,
-) -> Result<(), TypeRefusal> {
+) -> Result<(), Refused> {
     let (pending, folder) = pending_since(target, since)?;
-    within_options(&choice, &pending)?;
+    within_options(&choice, &pending).map_err(|refusal| Refused::at(refusal, "not_this_dialog"))?;
     let reading = screen_reader(target).current().await;
-    let prompt = dialog_for(&reading, &pending, folder.as_deref())?;
-    let kind = chat_answer_for(choice, prompt)?;
+    let prompt = dialog_for(&reading, &pending, folder.as_deref())
+        .map_err(|refusal| Refused::at(refusal, "unreadable"))?;
+    let kind = chat_answer_for(choice, prompt)
+        .map_err(|refusal| Refused::at(refusal, "not_this_dialog"))?;
     let identity = prompt_identity(prompt);
-    chat_answer::answer_identified(target, identity, since, &pending, &kind).await
+    chat_answer::answer_identified(target, identity, since, &pending, &kind)
+        .await
+        .map_err(|refusal| Refused::at(refusal, "lane_recheck"))
 }
 
 /// Refuse an option index past the pending question's options, and a typed
@@ -135,21 +161,21 @@ fn within_options(choice: &PromptChoice, pending: &PendingInput) -> Result<(), T
 fn pending_since(
     target: &TypeTarget,
     since: DateTime<Utc>,
-) -> Result<(PendingInput, Option<String>), TypeRefusal> {
+) -> Result<(PendingInput, Option<String>), Refused> {
     let record = target
         .sessions
         .get(&target.session_id)
-        .ok_or_else(|| TypeRefusal::refused(PROMPT_GONE))?;
+        .ok_or_else(record_moved)?;
     let record = lock(&record);
     if record.status_since != Some(since) {
-        return Err(TypeRefusal::refused(PROMPT_GONE));
+        return Err(record_moved());
     }
     let pending = record
         .pending_input
         .clone()
-        .ok_or_else(|| TypeRefusal::refused(PROMPT_GONE))?;
+        .ok_or_else(|| Refused::at(TypeRefusal::refused(PROMPT_GONE), "no_pending"))?;
     if !offered(&pending) {
-        return Err(not_this_prompt());
+        return Err(Refused::at(not_this_prompt(), "not_this_dialog"));
     }
     let folder = session_folders(&record)
         .into_iter()
@@ -176,7 +202,8 @@ fn offered(pending: &PendingInput) -> bool {
 /// question with at most one question tab, asking the pending question with
 /// its options first in order; for a permission, a permission dialog whose
 /// subject or body shows the pending call's summary, or whose subject is
-/// the file it names under the session's working `folder`.
+/// the file it names under the session's working `folder`. A prompt the
+/// screen cannot be read for is refused as unreadable, not as gone.
 fn dialog_for<'r>(
     reading: &'r Reading,
     pending: &PendingInput,
@@ -198,7 +225,7 @@ fn dialog_for<'r>(
             }
             _ => false,
         })
-        .ok_or_else(|| TypeRefusal::refused(PROMPT_GONE))
+        .ok_or_else(|| TypeRefusal::refused(PROMPT_UNREADABLE))
 }
 
 /// Whether `prompt` asks `question`: the same question text, and the
@@ -1135,7 +1162,7 @@ mod tests {
         use crate::screen::fixture_screen::screen_from;
         use crate::screen::{Screen, SharedScreen};
         use crate::server::Hub;
-        use crate::server::dashboard::{chat_answer_for, names_path};
+        use crate::server::dashboard::{PROMPT_UNREADABLE, chat_answer_for, names_path};
         use crate::server::test_support::{
             HANG_GUARD, ScratchDir, drain, idle_record, next_message, test_hub,
         };
@@ -1159,6 +1186,11 @@ mod tests {
         /// A question long enough that the screen draws it with a gutter.
         const LONG_QUESTION: &str =
             include_str!("../screen/fixtures/v2319-ask-long-question-w120.txt");
+        /// A question whose options carry previews, as Claude Code 2.1.319
+        /// draws it at 120x32: labels wrapped in a left column, the preview
+        /// box beside them, `n to add notes` in the footer.
+        const PREVIEW_QUESTION: &str =
+            include_str!("../screen/fixtures/v2319-ask-preview-w120.txt");
 
         const ASKED_AT_LENGTH: &str = "Where should RT-1245 (Open a remote host's default shell in one step) go? \
             Today Open shell runs on whichever host the focused pane is on, so a remote shell \
@@ -1354,6 +1386,7 @@ mod tests {
                     options: options.iter().map(|&option| option.to_owned()).collect(),
                     option_descriptions: Vec::new(),
                     multi_select,
+                    preview: false,
                 }],
             }
         }
@@ -1372,6 +1405,31 @@ mod tests {
                     ],
                     option_descriptions: Vec::new(),
                     multi_select: false,
+                    preview: false,
+                }],
+            }
+        }
+
+        /// The preview question's text, as the hook reported it.
+        const SHAPE_PREVIEW_ASKED: &str = "bravo charlie delta echo foxtrot golf hotel india juliet kilo \
+            lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india \
+            juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf \
+            hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo \
+            foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo ch?";
+
+        /// The hook's single-choice question `asked`, its `count` options
+        /// labelled as the rig labelled them, marked as carrying previews.
+        fn shaped(asked: &str, count: usize) -> PendingInput {
+            PendingInput::Question {
+                questions: vec![PendingQuestion {
+                    question: asked.to_owned(),
+                    header: "Shape".to_owned(),
+                    options: (1..=count)
+                        .map(|n| format!("An option label of some length {n}"))
+                        .collect(),
+                    option_descriptions: Vec::new(),
+                    multi_select: false,
+                    preview: true,
                 }],
             }
         }
@@ -1518,7 +1576,8 @@ mod tests {
         async fn answer_prompt_refuses_a_missing_dialog() {
             let mut w = waiting("dash-answer-no-dialog", NO_DIALOG, bash_permission());
             w.answer(PromptChoice::Allow).await;
-            w.refused(CHAT_REFUSED, GONE, "no dialog on screen").await;
+            w.refused(CHAT_REFUSED, PROMPT_UNREADABLE, "no dialog on screen")
+                .await;
 
             let mut w = waiting(
                 "dash-answer-other-dialog",
@@ -1526,8 +1585,12 @@ mod tests {
                 question(&["Red", "Blue"], false),
             );
             w.answer(PromptChoice::Option { index: 0 }).await;
-            w.refused(CHAT_REFUSED, GONE, "a permission dialog for a question")
-                .await;
+            w.refused(
+                CHAT_REFUSED,
+                PROMPT_UNREADABLE,
+                "a permission dialog for a question",
+            )
+            .await;
         }
 
         #[tokio::test]
@@ -1626,8 +1689,12 @@ mod tests {
             };
             let mut w = waiting("dash-answer-other-command", PERMISSION, pending);
             w.answer(PromptChoice::Allow).await;
-            w.refused(CHAT_REFUSED, GONE, "the dialog asks for another command")
-                .await;
+            w.refused(
+                CHAT_REFUSED,
+                PROMPT_UNREADABLE,
+                "the dialog asks for another command",
+            )
+            .await;
 
             let empty = PendingInput::Permission {
                 tool_name: "Bash".to_owned(),
@@ -1635,8 +1702,12 @@ mod tests {
             };
             let mut w = waiting("dash-answer-no-summary", PERMISSION, empty);
             w.answer(PromptChoice::Allow).await;
-            w.refused(CHAT_REFUSED, GONE, "a permission with no summary to match")
-                .await;
+            w.refused(
+                CHAT_REFUSED,
+                PROMPT_UNREADABLE,
+                "a permission with no summary to match",
+            )
+            .await;
         }
 
         /// An Edit of `calc.py` awaiting its permission, the hook naming
@@ -1734,8 +1805,12 @@ mod tests {
                 Some(r"C:\Users\someone\proj"),
             );
             w.answer(PromptChoice::Allow).await;
-            w.refused(CHAT_REFUSED, GONE, "the dialog edits another file")
-                .await;
+            w.refused(
+                CHAT_REFUSED,
+                PROMPT_UNREADABLE,
+                "the dialog edits another file",
+            )
+            .await;
         }
 
         #[tokio::test]
@@ -1764,8 +1839,28 @@ mod tests {
                 question(&["Red", "Green"], false),
             );
             w.answer(PromptChoice::Option { index: 0 }).await;
-            w.refused(CHAT_REFUSED, GONE, "the dialog shows other options")
-                .await;
+            w.refused(
+                CHAT_REFUSED,
+                PROMPT_UNREADABLE,
+                "the dialog shows other options",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_refuses_an_unreadable_question_as_unreadable() {
+            let mut w = waiting(
+                "dash-answer-preview",
+                PREVIEW_QUESTION,
+                shaped(SHAPE_PREVIEW_ASKED, 3),
+            );
+            w.answer(PromptChoice::Option { index: 1 }).await;
+            w.refused(
+                CHAT_REFUSED,
+                PROMPT_UNREADABLE,
+                "a preview question, whose dialog reads as an overlay",
+            )
+            .await;
         }
 
         #[tokio::test]

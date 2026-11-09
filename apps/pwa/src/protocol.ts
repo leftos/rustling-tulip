@@ -857,6 +857,11 @@ export interface PendingQuestion {
   option_descriptions?: string[];
   /** True when the prompt accepts more than one choice. */
   multi_select?: boolean;
+  /**
+   * True when any option carries a preview, which the client draws beside
+   * the labels instead of answering from a toast.
+   */
+  preview?: boolean;
 }
 
 /** What a waiting session's summary says it needs. */

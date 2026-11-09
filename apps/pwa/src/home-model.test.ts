@@ -221,6 +221,17 @@ test("home_card_for_one_single_choice_question", () => {
   ]);
 });
 
+test("a preview question offers no choices", () => {
+  const preview: PendingInput = {
+    kind: "question",
+    questions: [{ question: "Which shape?", options: ["Current", "Other"], preview: true }],
+  };
+
+  const [card] = needsYou(modelFrom(sessions(awaiting("s1", preview))));
+  expect(card?.detail).toBe("Which shape?");
+  expect(card?.choices).toEqual([]);
+});
+
 test("home_card_for_a_permission", () => {
   const permission: PendingInput = {
     kind: "permission",
