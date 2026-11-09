@@ -51,6 +51,8 @@ pub(crate) struct HoldOffs {
     /// The start-up resume of the sessions the last run lost, while it runs —
     /// the same flag as `Hub::resume_in_flight`.
     pub(crate) resume_in_flight: Arc<AtomicBool>,
+    /// A host update downloading or launching: the daemon stays up for it.
+    pub(crate) update_in_flight: Arc<AtomicBool>,
 }
 
 /// The activity watches the watcher reads beside the session events: the
@@ -197,6 +199,10 @@ async fn run(
                     );
                     continue;
                 }
+                if hold_offs.update_in_flight.load(Ordering::SeqCst) {
+                    info!("idle-exit: host update still in flight; grace timer restarted");
+                    continue;
+                }
                 // The preset-lock await above could have raced a spawn.
                 if !is_idle(&mut watches, &sessions) {
                     continue;
@@ -328,6 +334,7 @@ mod tests {
             HoldOffs {
                 preset_jobs: Arc::clone(&preset_jobs),
                 resume_in_flight: Arc::clone(&resume_in_flight),
+                update_in_flight: Arc::default(),
             },
             GRACE,
         );

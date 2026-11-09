@@ -1328,6 +1328,7 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
         crate::idle_exit::HoldOffs {
             preset_jobs: Arc::clone(&hub.preset_cancellations),
             resume_in_flight: Arc::clone(&hub.resume_in_flight),
+            update_in_flight: Arc::clone(&hub.host_update.update_in_flight),
         },
         crate::idle_exit::GRACE_PERIOD,
     );
