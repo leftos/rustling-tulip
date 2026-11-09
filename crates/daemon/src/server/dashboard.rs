@@ -243,8 +243,20 @@ fn asks(prompt: &ChatPrompt, question: &PendingQuestion) -> bool {
         .map(String::as_str)
         .map(words)
         .collect();
-    without_whitespace(&prompt.subject) == without_whitespace(&question.question)
-        && labels.starts_with(&wanted)
+    labels.starts_with(&wanted) && asks_the_question(prompt, &question.question)
+}
+
+/// Whether `prompt` asks `asked`: a dialog read with its bar holds the whole
+/// question; a dialog whose bar scrolled off holds only the rows the grid
+/// still shows, which are the question's end.
+fn asks_the_question(prompt: &ChatPrompt, asked: &str) -> bool {
+    let shown = without_whitespace(&prompt.subject);
+    let asked = without_whitespace(asked);
+    if prompt.questions.is_empty() {
+        !shown.is_empty() && asked.ends_with(shown.as_str())
+    } else {
+        shown == asked
+    }
 }
 
 /// Whether `prompt`'s subject or body shows `summary`, or its subject is
@@ -1162,7 +1174,7 @@ mod tests {
         use crate::screen::fixture_screen::screen_from;
         use crate::screen::{Screen, SharedScreen};
         use crate::server::Hub;
-        use crate::server::dashboard::{PROMPT_UNREADABLE, chat_answer_for, names_path};
+        use crate::server::dashboard::{PROMPT_UNREADABLE, asks, chat_answer_for, names_path};
         use crate::server::test_support::{
             HANG_GUARD, ScratchDir, drain, idle_record, next_message, test_hub,
         };
@@ -1191,6 +1203,9 @@ mod tests {
         /// box beside them, `n to add notes` in the footer.
         const PREVIEW_QUESTION: &str =
             include_str!("../screen/fixtures/v2319-ask-preview-w120.txt");
+        /// A question taller than its 100x24 grid: the rule over its tab bar
+        /// and the bar itself have scrolled off the top.
+        const TALL_QUESTION: &str = include_str!("../screen/fixtures/v2319-ask-tall-100x24.txt");
 
         const ASKED_AT_LENGTH: &str = "Where should RT-1245 (Open a remote host's default shell in one step) go? \
             Today Open shell runs on whichever host the focused pane is on, so a remote shell \
@@ -1417,9 +1432,18 @@ mod tests {
             hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo \
             foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo ch?";
 
+        /// The tall question's text, as the hook reported it.
+        const SHAPE_TALL_ASKED: &str = "bravo charlie delta echo foxtrot golf hotel india juliet kilo \
+            lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india \
+            juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf \
+            hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo \
+            foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie \
+            delta echo foxtrot golf hotel india juliet kilo lima mike no?";
+
         /// The hook's single-choice question `asked`, its `count` options
-        /// labelled as the rig labelled them, marked as carrying previews.
-        fn shaped(asked: &str, count: usize) -> PendingInput {
+        /// labelled as the rig labelled them, and whether they carry
+        /// previews.
+        fn shaped(asked: &str, count: usize, preview: bool) -> PendingInput {
             PendingInput::Question {
                 questions: vec![PendingQuestion {
                     question: asked.to_owned(),
@@ -1429,7 +1453,7 @@ mod tests {
                         .collect(),
                     option_descriptions: Vec::new(),
                     multi_select: false,
-                    preview: true,
+                    preview,
                 }],
             }
         }
@@ -1852,7 +1876,7 @@ mod tests {
             let mut w = waiting(
                 "dash-answer-preview",
                 PREVIEW_QUESTION,
-                shaped(SHAPE_PREVIEW_ASKED, 3),
+                shaped(SHAPE_PREVIEW_ASKED, 3, true),
             );
             w.answer(PromptChoice::Option { index: 1 }).await;
             w.refused(
@@ -1872,6 +1896,87 @@ mod tests {
             );
             w.answer(PromptChoice::Option { index: 0 }).await;
             w.types_and_ends(b"1", "the first option's digit").await;
+        }
+
+        /// What the answer does first: the keys it types, or the message it
+        /// is refused with, whichever comes.
+        async fn first_step(w: &mut Waiting) -> Result<Vec<u8>, String> {
+            tokio::select! {
+                typed = w.term.typed() => Ok(typed),
+                msg = next_message(&mut w.conn.rx) => Err(format!("{msg:?}")),
+            }
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_answers_a_question_taller_than_its_grid() {
+            let mut w = waiting(
+                "dash-answer-tall",
+                TALL_QUESTION,
+                shaped(SHAPE_TALL_ASKED, 4, false),
+            );
+            w.answer(PromptChoice::Option { index: 0 }).await;
+            assert_eq!(
+                first_step(&mut w).await,
+                Ok(b"1".to_vec()),
+                "the first option's digit"
+            );
+            w.term.show(NO_DIALOG).await;
+            w.term.lane_free().await;
+            assert!(
+                drain(&mut w.conn.rx).is_empty(),
+                "the answer was not refused"
+            );
+            assert!(w.term.typed_now().is_empty(), "nothing more is typed");
+        }
+
+        /// A tall question whose first words have scrolled off the top: the
+        /// hook's question is longer than the rows the grid still shows, so
+        /// only its end is on screen.
+        #[tokio::test]
+        async fn answer_prompt_answers_a_tall_question_whose_head_has_scrolled_off() {
+            let asked = format!("zulu yankee xray {SHAPE_TALL_ASKED}");
+            let mut w = waiting(
+                "dash-answer-tall-head",
+                TALL_QUESTION,
+                shaped(&asked, 4, false),
+            );
+            w.answer(PromptChoice::Option { index: 1 }).await;
+            assert_eq!(
+                first_step(&mut w).await,
+                Ok(b"2".to_vec()),
+                "the second option's digit"
+            );
+            w.term.show(NO_DIALOG).await;
+            w.term.lane_free().await;
+            assert!(
+                drain(&mut w.conn.rx).is_empty(),
+                "the answer was not refused"
+            );
+            assert!(w.term.typed_now().is_empty(), "nothing more is typed");
+        }
+
+        #[test]
+        fn asks_refuses_a_barless_prompt_whose_text_is_not_the_questions_end() {
+            let prompt = prompt_on(TALL_QUESTION);
+            assert!(
+                prompt.questions.is_empty(),
+                "the tall dialog's bar is out of view"
+            );
+            let questions = match shaped(SHAPE_TALL_ASKED, 4, false) {
+                PendingInput::Question { questions } => questions,
+                _ => Vec::new(),
+            };
+            let question = questions.first().expect("shaped makes one question");
+            assert!(
+                asks(&prompt, question),
+                "the visible rows are the question's end"
+            );
+            let mut other = question.clone();
+            other.question = SHAPE_TALL_ASKED.replacen("bravo", "zulu", 1);
+            assert!(
+                !asks(&prompt, &other),
+                "text that is not the question's end"
+            );
         }
 
         #[tokio::test]

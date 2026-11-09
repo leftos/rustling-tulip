@@ -462,12 +462,17 @@ fn key_pairs_any(row: &str) -> Option<Vec<ChatOption>> {
 
 /// An `AskUserQuestion` step: the tab bar, the question row, its options
 /// down to the card's inner rule, then the `Enter to select` footer; or the
-/// review step when `Review your answers` follows the tab bar.
+/// review step when `Review your answers` follows the tab bar. A step whose
+/// tab bar has scrolled off the top of the grid reads through
+/// [`parse_question_without_bar`].
 fn parse_question(rows: &[String]) -> Option<Parsed> {
     let rules = rule_indices(rows);
-    let bar = (0..rows.len())
+    let Some(bar) = (0..rows.len())
         .rev()
-        .find(|&index| is_tab_bar(rows, &rules, index))?;
+        .find(|&index| is_tab_bar(rows, &rules, index))
+    else {
+        return parse_question_without_bar(rows);
+    };
     let mut tabs = question_tabs(&rows[bar]);
     let title = find(rows, bar + 1, |row| !row.trim().is_empty());
     if let Some(title) = title
@@ -508,6 +513,112 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
             found.options,
         )
     }))
+}
+
+/// A question step whose tab bar has scrolled off the top of the grid: its
+/// numbered options, a single question's footer and the `Chat about this`
+/// option every such step draws under its inner rule in view, the
+/// question's rows from the top of the dialog's visible part down to its
+/// first option. It has no tabs, which is what tells it apart from a dialog
+/// read with its bar.
+fn parse_question_without_bar(rows: &[String]) -> Option<Parsed> {
+    let footer = single_question_footer(rows)?;
+    let first_option = (0..footer).find(|&index| numbered(&rows[index]).is_some())?;
+    let end = option_end(rows, first_option, footer);
+    if !has_chat_about_this(rows, end, footer) {
+        return None;
+    }
+    let found = question_options(&rows[first_option..end]);
+    if found.options.is_empty() {
+        return Some(Parsed::HalfDrawn);
+    }
+    let start = question_start(rows, first_option);
+    Some(Parsed::Prompt(ChatPrompt {
+        questions: Vec::new(),
+        multi: found.multi,
+        cursor: found.cursor,
+        ..prompt(
+            ChatPromptKind::Question,
+            question_text(&rows[start..first_option]),
+            String::new(),
+            found.options,
+        )
+    }))
+}
+
+/// The row a barless dialog's footer starts on, when one shows: `Enter to
+/// select … Esc to cancel`, naming neither `Tab` (a multi-question card's
+/// footer) nor another Esc action (a select list's `Esc to go back`).
+fn single_question_footer(rows: &[String]) -> Option<usize> {
+    (0..rows.len())
+        .rev()
+        .find(|&index| is_single_question_footer(rows, index) && footer_is_last(rows, index))
+}
+
+/// A footer's whole text from `index`: the row itself and every non-blank
+/// row directly under it, up to the first blank row or the end of the grid,
+/// each trimmed and joined with one space, since a narrow pane wraps the
+/// footer onto a second row.
+fn footer_text(rows: &[String], index: usize) -> String {
+    let mut text = String::new();
+    for row in &rows[index..] {
+        let piece = row.trim();
+        if piece.is_empty() {
+            break;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(piece);
+    }
+    text
+}
+
+/// Whether the footer starting on `rows[index]` is a single question's:
+/// `Enter to select …` naming `Esc to cancel`, with no `Tab` in it, whether
+/// it shows on one row or wraps onto the row under it.
+fn is_single_question_footer(rows: &[String], index: usize) -> bool {
+    let text = footer_text(rows, index);
+    text.starts_with(QUESTION_FOOTER) && text.contains("Esc to cancel") && !text.contains("Tab")
+}
+
+/// Whether nothing but the footer's own wrapped tail, blank rows and rules
+/// sit under `footer`: an input box's `❯` row or a numbered list below it
+/// means the footer was quoted in the transcript, not drawn by a dialog.
+fn footer_is_last(rows: &[String], footer: usize) -> bool {
+    rows[footer + 1..].iter().all(|row| {
+        let text = row.trim();
+        !text.starts_with(CURSOR) && numbered(row).is_none()
+    })
+}
+
+/// The row a barless dialog's options end on: the first rule after
+/// `first_option`, or its footer when no rule shows.
+fn option_end(rows: &[String], first_option: usize, footer: usize) -> usize {
+    rule_indices(rows)
+        .into_iter()
+        .find(|&index| index > first_option && index < footer)
+        .unwrap_or(footer)
+}
+
+/// Whether the rows between a barless dialog's inner rule and its footer
+/// hold the numbered `Chat about this` option every `AskUserQuestion` step
+/// draws there: a footer quoted in the transcript has none.
+fn has_chat_about_this(rows: &[String], end: usize, footer: usize) -> bool {
+    (end..footer)
+        .any(|index| numbered(&rows[index]).is_some_and(|option| option.label == CHAT_ABOUT_THIS))
+}
+
+/// Where a barless dialog's visible part starts: its first `│`-gutter row,
+/// else the row after a tab bar still drawn at the top of the grid (its
+/// rule having scrolled off), else the grid's first row.
+fn question_start(rows: &[String], first_option: usize) -> usize {
+    let top = (0..first_option).find(|&index| !rows[index].trim().is_empty());
+    let bar = top.filter(|&index| rows[index].trim_start().starts_with([TAB_OPEN, TAB_DONE]));
+    let from = bar.map_or(0, |index| index + 1);
+    (from..first_option)
+        .find(|&index| rows[index].trim_start().starts_with('│'))
+        .unwrap_or(from)
 }
 
 /// A question wrapped over `rows` (from its title to its first option),
@@ -2048,6 +2159,295 @@ mod tests {
     /// The prompt `screen` shows.
     fn question(screen: &[String]) -> ChatPrompt {
         read(screen).prompt.expect("a question prompt")
+    }
+
+    /// A question taller than its grid, as Claude Code 2.1.319 draws it at
+    /// 100x24: the rule over its tab bar and the bar itself have scrolled off
+    /// the top, so only the question's rows and its options are in view.
+    #[test]
+    fn a_question_taller_than_the_grid_reads_without_its_bar() {
+        let mut screen = rows(&[
+            "",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike no?",
+            "",
+            "❯ 1. An option label of some length 1",
+            "     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo",
+            "     charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alph?",
+            "  2. An option label of some length 2",
+            "     golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo",
+            "     foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie del?",
+            "  3. An option label of some length 3",
+            "     juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel",
+            "     india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot g?",
+            "  4. An option label of some length 4",
+            "     mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo",
+            "     lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india j?",
+            "  5. Type something.",
+        ]);
+        screen.push("─".repeat(100));
+        screen.extend(rows(&[
+            "  6. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]));
+        let screen = read(&screen);
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.as_ref().expect("a question prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::Question);
+        assert!(prompt.questions.is_empty(), "the dialog has no bar to read");
+        assert!(
+            prompt.subject.ends_with("kilo lima mike no?"),
+            "the visible rows are the question's end: {}",
+            prompt.subject
+        );
+        assert_eq!(
+            labels(&screen),
+            [
+                (1, "An option label of some length 1".to_owned()),
+                (2, "An option label of some length 2".to_owned()),
+                (3, "An option label of some length 3".to_owned()),
+                (4, "An option label of some length 4".to_owned()),
+                (5, "Type something".to_owned()),
+            ]
+        );
+    }
+
+    /// The same tall question at 40 columns, where Claude Code wraps its
+    /// footer onto a second row: the `Esc` ends the first row and `to cancel`
+    /// starts the next, and the barless dialog still reads.
+    #[test]
+    fn a_tall_question_whose_footer_wraps_at_40_columns_reads_without_its_bar() {
+        let mut screen = rows(&[
+            "",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike no?",
+            "",
+            "❯ 1. An option label of some length 1",
+            "     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo",
+            "     charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alph?",
+            "  2. An option label of some length 2",
+            "     golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo",
+            "     foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie del?",
+            "  3. An option label of some length 3",
+            "     juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel",
+            "     india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot g?",
+            "  4. An option label of some length 4",
+            "     mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo",
+            "     lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india j?",
+            "  5. Type something.",
+        ]);
+        screen.push("─".repeat(100));
+        screen.extend(rows(&[
+            "  6. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc",
+            "to cancel",
+        ]));
+        let screen = read(&screen);
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.as_ref().expect("a question prompt");
+        assert!(prompt.questions.is_empty(), "the dialog has no bar to read");
+        assert_eq!(
+            labels(&screen),
+            [
+                (1, "An option label of some length 1".to_owned()),
+                (2, "An option label of some length 2".to_owned()),
+                (3, "An option label of some length 3".to_owned()),
+                (4, "An option label of some length 4".to_owned()),
+                (5, "Type something".to_owned()),
+            ]
+        );
+    }
+
+    /// The same tall question at 48 columns, where the first footer row ends
+    /// `… · Esc to` and the second brings `cancel`.
+    #[test]
+    fn a_tall_question_whose_footer_wraps_at_48_columns_reads_without_its_bar() {
+        let mut screen = rows(&[
+            "",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike no?",
+            "",
+            "❯ 1. An option label of some length 1",
+            "     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo",
+            "     charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alph?",
+            "  2. An option label of some length 2",
+            "     golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo",
+            "     foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie del?",
+            "  3. An option label of some length 3",
+            "     juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel",
+            "     india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot g?",
+            "  4. An option label of some length 4",
+            "     mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo",
+            "     lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india j?",
+            "  5. Type something.",
+        ]);
+        screen.push("─".repeat(100));
+        screen.extend(rows(&[
+            "  6. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to",
+            "cancel",
+        ]));
+        let screen = read(&screen);
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.as_ref().expect("a question prompt");
+        assert!(prompt.questions.is_empty(), "the dialog has no bar to read");
+        assert_eq!(
+            labels(&screen),
+            [
+                (1, "An option label of some length 1".to_owned()),
+                (2, "An option label of some length 2".to_owned()),
+                (3, "An option label of some length 3".to_owned()),
+                (4, "An option label of some length 4".to_owned()),
+                (5, "Type something".to_owned()),
+            ]
+        );
+    }
+
+    /// A multi-question card's footer wrapped the same way: its first row
+    /// keeps `Tab`, so the barless dialog stays unread.
+    #[test]
+    fn a_tall_multi_question_footer_that_wraps_stays_unread() {
+        let mut screen = rows(&[
+            "",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike no?",
+            "",
+            "❯ 1. An option label of some length 1",
+            "     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo",
+            "     charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alph?",
+            "  2. An option label of some length 2",
+            "     golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo",
+            "     foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie del?",
+            "  3. An option label of some length 3",
+            "     juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel",
+            "     india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot g?",
+            "  4. An option label of some length 4",
+            "     mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo",
+            "     lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india j?",
+            "  5. Type something.",
+        ]);
+        screen.push("─".repeat(100));
+        screen.extend(rows(&[
+            "  6. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc",
+            "to cancel",
+        ]));
+        assert!(
+            read(&screen).prompt.is_none(),
+            "a wrapped multi-question footer stays unread"
+        );
+    }
+
+    /// A multi-question card whose bar and the rows above it have scrolled
+    /// off the top: its footer still names `Tab`, so it stays unread without
+    /// its bar.
+    #[test]
+    fn a_multi_question_card_without_its_bar_reads_no_prompt() {
+        let wide = rule();
+        let screen = read(&rows(&[
+            "Which function should be added to calc.py next?",
+            "",
+            "❯ 1. sub",
+            "     Subtraction: returns a - b",
+            "  2. div",
+            "     Division: returns a / b (needs a decision on division by zero)",
+            "  3. pow",
+            "     Exponentiation: returns a ** b",
+            "  4. Type something.",
+            wide.as_str(),
+            "  5. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]));
+        assert!(
+            screen.prompt.is_none(),
+            "a multi-question card stays unread without its bar"
+        );
+    }
+
+    /// A reply that quotes a dialog's footer in the transcript, above an
+    /// idle input box: a footer alone is not a question.
+    #[test]
+    fn a_quoted_question_footer_in_an_idle_transcript_reads_no_question() {
+        let mut screen = rows(&[
+            "A reply that quotes a dialog:",
+            "",
+            "  1. Numbered point",
+            "  2. Another",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]);
+        screen.push(rule());
+        screen.extend(rows(&["❯", ""]));
+        screen.push(rule());
+        screen.extend(rows(&["? for shortcuts"]));
+        let screen = read(&screen);
+        assert!(screen.prompt.is_none(), "a quoted footer is not a dialog");
+        assert_eq!(screen.composer, ComposerState::Ready);
+    }
+
+    /// A select list's footer says `Esc to go back`, not `Esc to cancel`, so
+    /// it is not a question.
+    #[test]
+    fn a_select_list_whose_esc_goes_back_reads_no_question() {
+        let screen = read(&rows(&[
+            "Select a folder",
+            "",
+            "❯ 1. repo",
+            "  2. scratch",
+            "",
+            "Enter to select · Esc to go back",
+        ]));
+        assert!(
+            screen.prompt.is_none(),
+            "a select list's footer is not a question's"
+        );
+    }
+
+    /// A single question one row taller than its grid: only the rule over
+    /// its tab bar has scrolled off, so the bar is the grid's first row and
+    /// is not part of the question's text.
+    #[test]
+    fn a_question_with_only_its_top_rule_cut_off_reads_its_text() {
+        let mut screen = rows(&[
+            " ☐ Colour",
+            "",
+            "Which colour should the badge use?",
+            "",
+            "❯ 1. Red",
+            "  2. Blue",
+            "  3. Type something.",
+        ]);
+        screen.push(rule());
+        screen.extend(rows(&[
+            "  4. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]));
+        let screen = read(&screen);
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.as_ref().expect("a question prompt");
+        assert_eq!(prompt.subject, "Which colour should the badge use?");
+        assert!(
+            prompt.questions.is_empty(),
+            "the bar is not read without its rule"
+        );
     }
 
     #[test]
