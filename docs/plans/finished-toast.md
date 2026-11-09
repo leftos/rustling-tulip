@@ -21,7 +21,7 @@ A hook-driven Claude session gets a reliable turn end from `Stop`/`StopFailure`,
    - classifier: `on_plain_shell_transition` and `hand_shell_back`
 
    Status changes happen a few times per turn, so info level is cheap.
-2. **The daemon's default log filter has a dead directive.** `crates/daemon/src/main.rs` `init_tracing` uses `"info,daemon=debug,tower_http=info"`, but the log target is `rustling_tulipd` (every line reads `rustling_tulipd::…`), so `daemon=debug` matches nothing and no daemon `debug!` ever reaches `daemon.log`. Either retarget it to `rustling_tulipd=debug` (check volume first; the screen watcher has debug lines on hot paths) or drop it.
+2. **The daemon's default log filter has a dead directive.** (Done, RT-1309: the directive is dropped; the filter is `info,tower_http=info`.) Before that, `crates/daemon/src/main.rs` `init_tracing` used `"info,daemon=debug,tower_http=info"`, but the log target is `rustling_tulipd` (every line reads `rustling_tulipd::…`), so `daemon=debug` matches nothing and no daemon `debug!` ever reaches `daemon.log`. Either retarget it to `rustling_tulipd=debug` (check volume first; the screen watcher has debug lines on hot paths) or drop it.
 3. **The client logs no toasts.** `native.log` has no line when a Finished/Needs you toast is raised or skipped. A line in `raise_toast` (session id, title, skip reason) would let a user report be matched to the daemon's status lines.
 
 ## Product idea from the owner

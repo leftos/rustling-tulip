@@ -85,7 +85,7 @@ Sending `/compact` to a session from Git Bash needs `MSYS_NO_PATHCONV=1`, or the
 
 On a daemon that is not serving the tailnet listener, the debug line `no push is sent kind=Finished` shows the real trigger's decision for each Finished.
 
-`AnswerPrompt` with `allow` on a question probes `dialog_for` without typing anything: the reply is "does not fit" when the dialog passed and "no longer up" when it did not, so one dialog can be probed at every grid size.
+`AnswerPrompt` with `allow` on a question probes `dialog_for` without typing anything: the reply is "does not fit" when the dialog passed and "Couldn't read this prompt; answer it in its pane." when it did not, so one dialog can be probed at every grid size.
 
 Such a rig's `cargo build` goes through the gate without `--local`: a routed build brings `target/debug/*.exe` back to this PC. `--local` fits the rig's own run, which drives this PC's processes.
 

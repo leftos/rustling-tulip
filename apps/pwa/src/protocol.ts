@@ -858,8 +858,8 @@ export interface PendingQuestion {
   /** True when the prompt accepts more than one choice. */
   multi_select?: boolean;
   /**
-   * True when any option carries a preview, which the client draws beside
-   * the labels instead of answering from a toast.
+   * True when any option carries a preview, which only the agent's own
+   * dialog in the pane draws, so a toast offers Go to pane, not answers.
    */
   preview?: boolean;
 }
