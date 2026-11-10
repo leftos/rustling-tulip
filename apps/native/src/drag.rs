@@ -645,8 +645,12 @@ pub enum LeafDrop {
     /// would, with that move's undo entry.
     Move(PaneDrop),
     /// An unbound leaf: this message places its session, with no undo, as
-    /// a click on the leaf places it.
-    Send(Box<ClientMessage>),
+    /// a click on the leaf places it. `session` is the one it places, which
+    /// claims the pane's size when its bind arrives.
+    Send {
+        message: Box<ClientMessage>,
+        session: SessionRef,
+    },
 }
 
 /// The pane of a tab a leaf is dropped on, and the edge of it the pointer
@@ -765,7 +769,13 @@ fn unbound_drop(
             session_id,
             host,
         };
-        return Some((PaneDropEdge::Replace, LeafDrop::Send(Box::new(message))));
+        return Some((
+            PaneDropEdge::Replace,
+            LeafDrop::Send {
+                message: Box::new(message),
+                session: session.clone(),
+            },
+        ));
     };
     let message = ClientMessage::SplitPane {
         tab_id,
@@ -777,7 +787,13 @@ fn unbound_drop(
         host,
         request_id,
     };
-    Some((edge, LeafDrop::Send(Box::new(message))))
+    Some((
+        edge,
+        LeafDrop::Send {
+            message: Box::new(message),
+            session: session.clone(),
+        },
+    ))
 }
 
 /// What the leaf of `session` dropped at `target` does, and the edge it
@@ -853,9 +869,10 @@ pub fn leaf_pill_drop(
     let Some((src_tab, src_pane)) = leaf_source_pane(tabs, session) else {
         return match tabs.place_in(pill, hosted, sessions) {
             Placement::NewTab => None,
-            placement @ Placement::Pane { .. } => Some(LeafDrop::Send(Box::new(
-                placement.message(hosted.host, &session.id, request_id),
-            ))),
+            placement @ Placement::Pane { .. } => Some(LeafDrop::Send {
+                message: Box::new(placement.message(hosted.host, &session.id, request_id)),
+                session: session.clone(),
+            }),
         };
     };
     let grid = tabs.tab(pill)?.grid()?;
@@ -1827,7 +1844,7 @@ mod tests {
         let (edge, drop) = drop.expect("the leaf drops");
         let message = match drop {
             LeafDrop::Move(pane) => pane.message(),
-            LeafDrop::Send(message) => *message,
+            LeafDrop::Send { message, .. } => *message,
         };
         (edge, wire(&message))
     }

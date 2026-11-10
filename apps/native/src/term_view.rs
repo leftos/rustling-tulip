@@ -362,17 +362,25 @@ const CLAIM_WINDOW: Duration = Duration::from_secs(5);
 /// Whether the pane may size its session's PTY: only once a layout pass has
 /// measured its real size, and only while it drives the session's size. A
 /// size it sends claims the session over other clients when the pane had
-/// input within [`CLAIM_WINDOW`], or when it is the first changed measure
+/// input within [`CLAIM_WINDOW`], when it is the first changed measure
 /// after this client resized the pane (the window, a split divider, the
-/// sidebar or a font size). An attach, a re-bind, a reconnect, a tab
-/// switch, a focus change and another client's layout or appearance change
-/// do not claim.
+/// sidebar or a font size), or when the user bound the pane's session in
+/// this client since the pane last sent a size. An attach, a reconnect, a
+/// tab switch, a focus change and another client's layout or appearance
+/// change do not claim.
 #[derive(Debug, Default, Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate fact a size send reads, cleared at its own moment"
+)]
 struct SizeGate {
     measured: bool,
     driving: bool,
     /// This client resized the pane, and the pane has not measured since.
     resized: bool,
+    /// The user bound this pane's session in this client, so the next size
+    /// the pane sends claims it.
+    bound: bool,
     /// When the pane last had keyboard or pointer input.
     last_input: Option<Instant>,
     /// Where the pointer last moved over the pane, so a move event at the
@@ -436,6 +444,24 @@ impl SizeGate {
     /// does not claim what follows.
     fn drop_resized(&mut self) {
         self.resized = false;
+    }
+
+    /// The user bound this pane's session in this client: the next size the
+    /// pane sends claims.
+    fn mark_bound(&mut self) {
+        self.bound = true;
+    }
+
+    /// Takes whether the user bound this pane's session in this client, so
+    /// the size being sent claims it.
+    fn take_bound(&mut self) -> bool {
+        std::mem::take(&mut self.bound)
+    }
+
+    /// The pane changed hands or connections: a bind before it does not
+    /// claim what follows.
+    fn drop_bound(&mut self) {
+        self.bound = false;
     }
 
     /// Returns whether to send the size now: when the pane takes over with
@@ -901,6 +927,14 @@ impl TerminalPane {
         self.size_gate.mark_resized();
     }
 
+    /// The user bound this pane's session in this client (the unbound pill,
+    /// Add to current tab, a drop on the pane or a tab pill): the next size
+    /// the pane sends claims the session, so the PTY takes the new pane's
+    /// size at once.
+    pub fn claim_next_size(&mut self) {
+        self.size_gate.mark_bound();
+    }
+
     /// Whether this pane answers its session's terminal queries, from
     /// history and live output alike. The others drop their answers.
     pub fn set_answers_queries(&mut self, answers: bool) {
@@ -1085,6 +1119,7 @@ impl TerminalPane {
         self.sync_deadline = None;
         self.size_gate.forget_input();
         self.size_gate.drop_resized();
+        self.size_gate.drop_bound();
     }
 
     /// Forget the attachment for a new connection, which starts unattached.
@@ -1101,6 +1136,7 @@ impl TerminalPane {
         self.sync_timer = None;
         self.sync_deadline = None;
         self.size_gate.drop_resized();
+        self.size_gate.drop_bound();
     }
 
     /// Whether the attached session takes input; a composition is only
@@ -1341,9 +1377,9 @@ impl TerminalPane {
     }
 
     /// Sends the terminal's size when the size gate allows, claimed when
-    /// `resized` (a shown pane's measured size changed) or the pane had
-    /// recent input.
-    fn send_resize(&self, resized: bool) {
+    /// `resized` (a shown pane's measured size changed), the pane had recent
+    /// input, or the user bound its session in this client.
+    fn send_resize(&mut self, resized: bool) {
         if !self.size_gate.allows() {
             return;
         }
@@ -1354,11 +1390,12 @@ impl TerminalPane {
         let (Ok(cols), Ok(rows)) = (u16::try_from(cols), u16::try_from(rows)) else {
             return;
         };
+        let bound = self.size_gate.take_bound();
         self.send(ClientMessage::Resize {
             session_id,
             cols,
             rows,
-            claim: resized || self.size_gate.claims((self.now)()),
+            claim: resized || self.size_gate.claims((self.now)()) || bound,
         });
     }
 

@@ -267,6 +267,11 @@ pub struct TabsModel {
     /// when it carries one. A tab one names is not marked closing, since
     /// the request may keep it.
     layout_in_flight: Vec<(String, Option<String>)>,
+    /// The sessions the user bound to a pane in this client, each with what
+    /// the bind waits for: the pane claims its size when that bind arrives.
+    /// A refused request drops its entry; a pane-replacing bind is decided
+    /// by the first layout update after it is armed.
+    pending_binds: Vec<(SessionRef, BindTarget)>,
     /// The reorders this client sent that no echo has settled, oldest
     /// first: the request's id, the strip's order before it applied and the
     /// order it sent. A refusal hands the order it found to the entry after
@@ -1058,6 +1063,40 @@ impl Placement {
     }
 }
 
+/// What a pending bind waits for: the layout request that carries it, or,
+/// for a request with no id, the pane it replaces the session of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindTarget {
+    Request(String),
+    /// The pane id.
+    Pane(String),
+}
+
+/// The id of the layout request a placement's message carries, when it
+/// carries one: a message that replaces a pane's session names none.
+#[must_use]
+pub fn placement_request_id(message: &ClientMessage) -> Option<String> {
+    match message {
+        ClientMessage::SplitPane { request_id, .. }
+        | ClientMessage::CreateTab { request_id, .. } => request_id.clone(),
+        _ => None,
+    }
+}
+
+/// What a bind placed by `message` waits for: the request it carries, else
+/// the pane whose session it replaces; none for any other message.
+#[must_use]
+pub fn bind_target(message: &ClientMessage) -> Option<BindTarget> {
+    placement_request_id(message)
+        .map(BindTarget::Request)
+        .or_else(|| match message {
+            ClientMessage::ReplacePaneSession { pane_id, .. } => {
+                Some(BindTarget::Pane(pane_id.clone()))
+            }
+            _ => None,
+        })
+}
+
 /// The host a placement's `msg` goes to: a session-level message (the
 /// discard of a replaced session) to `session_host`, the session's own
 /// host; every layout message to This PC, the layout home.
@@ -1497,6 +1536,7 @@ impl TabsModel {
     /// tab whose arrival has not consumed it, no arrival activates for it.
     pub fn disarm_create(&mut self, request_id: &str) {
         self.pending_create.retain(|armed| armed != request_id);
+        self.drop_binds(request_id);
     }
 
     /// Forgets every requested new tab: a fresh connection answers none of
@@ -1647,6 +1687,7 @@ impl TabsModel {
     pub fn fail_layout_request(&mut self, request_id: &str) {
         self.layout_in_flight
             .retain(|(_, id)| id.as_deref() != Some(request_id));
+        self.drop_binds(request_id);
         let closing = &mut self.closing;
         self.closing_requests.retain(|tab_id, id| {
             let refused = id == request_id;
@@ -1657,11 +1698,52 @@ impl TabsModel {
         });
     }
 
-    /// Forgets every layout request in flight: a fresh connection answers
-    /// none of the old one's requests.
+    /// Forgets every layout request in flight and every pending bind: a
+    /// fresh connection answers none of the old one's requests.
     pub fn clear_layout_requests(&mut self) {
         self.layout_in_flight.clear();
         self.pending_reorders.clear();
+        self.pending_binds.clear();
+    }
+
+    /// The user bound `session` to a pane in this client, waiting for
+    /// `target`: the layout request that carries the bind, or the pane whose
+    /// session a request with no id replaces. The first bind it reaches
+    /// claims the pane's size.
+    pub fn arm_bind(&mut self, session: &SessionRef, target: BindTarget) {
+        self.pending_binds.push((session.clone(), target));
+    }
+
+    /// Takes whether the user bound `session` to a pane in this client and
+    /// no bind of it has arrived yet: a bind by a request is taken in any
+    /// pane `session` lands in, one by a pane only in `pane_id`.
+    pub fn take_bind(&mut self, session: &SessionRef, pane_id: &str) -> bool {
+        let mut bound = false;
+        self.pending_binds.retain(|(pending, target)| {
+            let matches = pending == session
+                && match target {
+                    BindTarget::Request(_) => true,
+                    BindTarget::Pane(pane) => pane == pane_id,
+                };
+            bound |= matches;
+            !matches
+        });
+        bound
+    }
+
+    /// Forgets every pane-replacing bind still pending: the layout update
+    /// just applied was the first after each was armed, and it did not show
+    /// the session in its pane.
+    pub fn settle_pane_binds(&mut self) {
+        self.pending_binds
+            .retain(|(_, target)| !matches!(target, BindTarget::Pane(_)));
+    }
+
+    /// Forgets the binds the request `request_id` carries: it either failed
+    /// or answers a connection that is gone.
+    fn drop_binds(&mut self, request_id: &str) {
+        self.pending_binds
+            .retain(|(_, target)| !matches!(target, BindTarget::Request(id) if id == request_id));
     }
 
     /// Where `session` goes: into the active tab by
@@ -3977,5 +4059,50 @@ pub(crate) mod tests {
             find_tab_containing_session(&tabs, &SessionRef::new(remote("lab"), "s1")),
             None
         );
+    }
+
+    fn s1() -> SessionRef {
+        SessionRef::new(HostKey::Local, "s1")
+    }
+
+    #[test]
+    fn pending_bind_by_request_is_taken_in_any_pane() {
+        let mut model = TabsModel::new(None);
+        model.arm_bind(&s1(), BindTarget::Request("r1".to_owned()));
+        assert!(model.take_bind(&s1(), "anywhere"));
+        assert!(!model.take_bind(&s1(), "anywhere"), "a bind is taken once");
+    }
+
+    #[test]
+    fn pending_bind_by_request_is_dropped_when_its_request_fails() {
+        let mut model = TabsModel::new(None);
+        model.arm_bind(&s1(), BindTarget::Request("r1".to_owned()));
+        model.fail_layout_request("r1");
+        assert!(!model.take_bind(&s1(), "p1"));
+    }
+
+    #[test]
+    fn pending_bind_by_pane_is_taken_only_in_its_pane() {
+        let mut model = TabsModel::new(None);
+        model.arm_bind(&s1(), BindTarget::Pane("p1".to_owned()));
+        assert!(!model.take_bind(&s1(), "other"));
+        assert!(model.take_bind(&s1(), "p1"));
+    }
+
+    #[test]
+    fn pending_bind_by_pane_is_dropped_by_the_next_layout_update() {
+        let mut model = TabsModel::new(None);
+        model.arm_bind(&s1(), BindTarget::Pane("p1".to_owned()));
+        model.settle_pane_binds();
+        assert!(!model.take_bind(&s1(), "p1"));
+    }
+
+    #[test]
+    fn clearing_layout_requests_drops_every_pending_bind() {
+        let mut model = TabsModel::new(None);
+        model.arm_bind(&s1(), BindTarget::Request("r1".to_owned()));
+        model.arm_bind(&s1(), BindTarget::Pane("p1".to_owned()));
+        model.clear_layout_requests();
+        assert!(!model.take_bind(&s1(), "p1"));
     }
 }

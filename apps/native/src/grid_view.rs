@@ -307,6 +307,16 @@ impl RootView {
                 self.panes.insert(binding.pane_id.clone(), slot);
             }
             let sender = self.hosts.sender(&binding.host);
+            // A pane that newly shows a session claims its size when this
+            // client's user bound it there; the bind is taken once.
+            let newly_bound = self.panes.get(&binding.pane_id).is_some_and(|slot| {
+                slot.session != binding.session_id || slot.host != binding.host
+            });
+            let bound = newly_bound
+                && binding.session_id.as_ref().is_some_and(|id| {
+                    let session = SessionRef::new(binding.host.clone(), id.clone());
+                    self.tabs.take_bind(&session, &binding.pane_id)
+                });
             let Some(slot) = self.panes.get_mut(&binding.pane_id) else {
                 continue;
             };
@@ -325,6 +335,9 @@ impl RootView {
             let remote = binding.host != HostKey::Local;
             slot.view.update(cx, |pane, _| {
                 pane.release();
+                if bound {
+                    pane.claim_next_size();
+                }
                 if rehosted {
                     pane.set_sender(sender, remote);
                 }
@@ -338,6 +351,8 @@ impl RootView {
                 self.open_pane_view(&binding.pane_id, session_id.as_deref());
             }
         }
+        // A pane-replacing bind this update did not take is not coming.
+        self.tabs.settle_pane_binds();
         shown
     }
 
@@ -2321,11 +2336,16 @@ impl RootView {
     }
 
     /// Sends what a pane or leaf drop does: a pane move with its undo entry,
-    /// or the request that places an unbound session, with none.
+    /// or the request that places an unbound session, with none. The placing
+    /// request arms the bind, so the pane the session lands in claims its
+    /// size.
     pub(crate) fn send_leaf_drop(&mut self, drop: LeafDrop, cx: &mut Context<Self>) {
         match drop {
             LeafDrop::Move(drop) => self.send_pane_move(&drop, cx),
-            LeafDrop::Send(message) => {
+            LeafDrop::Send { message, session } => {
+                if let Some(target) = tabs::bind_target(&message) {
+                    self.tabs.arm_bind(&session, target);
+                }
                 self.tabs.note_layout_request(&message);
                 self.send_to(&HostKey::Local, *message);
             }

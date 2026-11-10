@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A session you place in a pane takes that pane's size at once, instead of keeping its old size until the pointer moves over it.
 - Ctrl+clicking a path written in parentheses before a colon, such as `(X:\dev\page.html):`, opens the file instead of failing to find it.
 - A session whose task name is too long for its pane no longer reads as finished mid-turn, so no false Finished notice fires.
 - A question whose answers have previews no longer offers answer buttons in a toast or on the Dashboard that could only fail; it offers Go to pane.

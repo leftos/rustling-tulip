@@ -280,7 +280,7 @@ use crate::stash_view::StashUi;
 use crate::status_glyph::{GlyphSize, glyph_view};
 use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{
-    HostedSession, PaneTarget, Placement, SessionRef, TabsModel, auto_grid_resends,
+    BindTarget, HostedSession, PaneTarget, Placement, SessionRef, TabsModel, auto_grid_resends,
     find_tab_containing_session, is_auto_grid, tab_pills,
 };
 use crate::target::HostKey;
@@ -2646,6 +2646,10 @@ impl RootView {
         }
         let request_id = new_request_id();
         self.tabs.arm_create(&request_id);
+        self.tabs.arm_bind(
+            &SessionRef::new(host.clone(), id),
+            BindTarget::Request(request_id.clone()),
+        );
         self.send_to(
             &HostKey::Local,
             Placement::NewTab.message(host, id, Some(request_id)),
@@ -3754,6 +3758,13 @@ impl RootView {
             Placement::Pane { .. } => None,
         };
         let msg = placement.message(host, &session.id, request_id);
+        // The message arms the bind, so the pane the session lands in claims
+        // its size at once instead of keeping its old viewport: a new tab or
+        // a split by its request id, a replaced session by its pane.
+        if let Some(target) = tabs::bind_target(&msg) {
+            self.tabs
+                .arm_bind(&SessionRef::new(host.clone(), session.id.clone()), target);
+        }
         self.tabs.note_layout_request(&msg);
         self.send_to(&HostKey::Local, msg);
     }
