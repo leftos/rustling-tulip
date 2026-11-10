@@ -1633,6 +1633,11 @@ fn the_claude_page_rows_come_from_the_descriptor(cx: &mut TestAppContext) {
         "the provider shows its default's label"
     );
     assert_eq!(
+        claude_choice(&mut h, "effort").as_deref(),
+        Some("CLI default"),
+        "the effort row is on the page, showing its no-value choice"
+    );
+    assert_eq!(
         claude_choice(&mut h, "model"),
         None,
         "the model is not on the Settings page"
@@ -1650,11 +1655,17 @@ fn the_claude_page_rows_come_from_the_descriptor(cx: &mut TestAppContext) {
         "settings-claude-permission-mode-plan",
         "settings-claude-provider-anthropic",
         "settings-claude-provider-deepseek",
+        "settings-claude-effort-cli-default",
+        "settings-claude-effort-low",
+        "settings-claude-effort-medium",
+        "settings-claude-effort-high",
+        "settings-claude-effort-xhigh",
+        "settings-claude-effort-max",
     ] {
         assert_eq!(
             settings_focus(&mut h),
             Some(stop),
-            "permission mode, then provider, in the descriptor's order"
+            "permission mode, then provider, then effort, in the descriptor's order"
         );
         h.keys("tab");
     }
@@ -2269,6 +2280,13 @@ fn launch_command_rows_hidden_until_agent_commands_arrive(cx: &mut TestAppContex
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
+        Some("settings-claude-effort-cli-default"),
+        "the effort row follows the provider"
+    );
+    tab_to(&mut h, "settings-claude-effort-max");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
         Some("settings-cancel"),
         "the ring holds no launch rows before the daemon reports: the footer's Cancel follows"
     );
@@ -2311,6 +2329,13 @@ fn launch_command_rows_disabled_without_the_feature(cx: &mut TestAppContext) {
         "nothing is sent"
     );
     h.click_on("settings-claude-provider-deepseek");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-claude-effort-cli-default"),
+        "the effort row follows the provider"
+    );
+    tab_to(&mut h, "settings-claude-effort-max");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
@@ -3484,6 +3509,13 @@ fn program_env_locks_the_program_row_and_names_the_variable(cx: &mut TestAppCont
         "the read-only row takes no typing"
     );
     tab_to(&mut h, "settings-claude-provider-deepseek");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-claude-effort-cli-default"),
+        "the effort row follows the provider"
+    );
+    tab_to(&mut h, "settings-claude-effort-max");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),

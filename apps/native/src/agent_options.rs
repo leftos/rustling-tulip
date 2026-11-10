@@ -629,7 +629,7 @@ mod tests {
             model(&options),
             FieldEditor::Model {
                 placeholder: Some(CLI_DEFAULT_LABEL.to_owned()),
-                suggestions: strings(&["opus", "sonnet", "haiku"]),
+                suggestions: strings(&["fable", "opus", "sonnet", "haiku"]),
             },
             "no rule matches: the field's own suggestions and the no-value placeholder"
         );
@@ -902,7 +902,7 @@ mod tests {
         let options = AgentOptions::new(claude(), None);
         assert_eq!(
             ids(&options.settings_fields()),
-            strings(&["permission_mode", "provider"]),
+            strings(&["permission_mode", "provider", "effort"]),
             "Claude's model is a spawn-only field"
         );
         assert!(

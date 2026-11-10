@@ -6111,6 +6111,10 @@ mod tests {
                 Control::FieldText("model".to_owned()),
                 Control::FieldSuggestion {
                     field: "model".to_owned(),
+                    value: "fable".to_owned(),
+                },
+                Control::FieldSuggestion {
+                    field: "model".to_owned(),
                     value: "opus".to_owned(),
                 },
                 Control::FieldSuggestion {
@@ -6121,6 +6125,12 @@ mod tests {
                     field: "model".to_owned(),
                     value: "haiku".to_owned(),
                 },
+                choice("effort", "cli-default"),
+                choice("effort", "low"),
+                choice("effort", "medium"),
+                choice("effort", "high"),
+                choice("effort", "xhigh"),
+                choice("effort", "max"),
                 Control::EnvAdd,
                 Control::Cancel,
                 Control::Submit,
@@ -6963,7 +6973,9 @@ mod tests {
             model(&form),
             Some(FieldEditor::Model {
                 placeholder: Some("CLI default".to_owned()),
-                suggestions: ["opus", "sonnet", "haiku"].map(str::to_owned).to_vec(),
+                suggestions: ["fable", "opus", "sonnet", "haiku"]
+                    .map(str::to_owned)
+                    .to_vec(),
             })
         );
         press(&mut form, &choice("provider", "deepseek"));
