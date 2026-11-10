@@ -8,8 +8,6 @@
 
 ## Remote update
 
-- [ ] RT-1305 Mark in a release what it breaks, and warn before a remote update (sub-issue of RT-1298) · release vNext
-- [ ] RT-1307 Update an SSH host through a detached helper (sub-issue of RT-1298) · release vNext
 - [ ] RT-1308 Prove remote update on a second machine, both directions (sub-issue of RT-1298) · release vNext
 - [ ] RT-1316 Merge feat/remote-update to main (#206) (sub-issue of RT-1298)
 - [ ] RT-1336 Keep one process list and one update mutex in the daemon
@@ -288,6 +286,7 @@
 - [ ] RT-1339 Re-read docs/tracer-abi.md against its named files' changes since 2026-11-03
 - [ ] RT-1354 Document RUSTLING_TULIP_BIN_TEMPLATES in the environment variables table
 - [ ] RT-1394 Repoint four issues that cite a missing docs/plans/reboot-resume.md
+- [ ] RT-1395 Reword the fake ssh README: it runs any rustling-tulipd verb, not only bridge
 
 ## Build tooling
 
@@ -336,6 +335,7 @@
 - [ ] RT-1244 Refuse a driven run's add_repo under any checkout or agent instruction file
 - [ ] RT-1324 Make the settings-claude and settings-hosts shots open their page again
 - [ ] RT-1374 Fail native-smoke when the gate refuses to run it, instead of exiting 0
+- [ ] RT-1396 Map the remote-update and spawn files in tools/test-map.json
 
 ## macOS
 
@@ -385,8 +385,6 @@
 - [ ] RT-123 Open remote paths in VS Code Remote instead of copying
 - [ ] RT-124 Fetch every file a turn touched as one folder
 - [ ] RT-125 Launch a session from the phone: launch last again, a preset, or /nextup in a repo · release vNext
-  - [ ] RT-1381 Launch a container's last spawn config on the daemon with LaunchLast · release vNext
-  - [ ] RT-1382 Launch last from the phone's Home, resending until the daemon answers · release vNext
   - [ ] RT-1383 Start a /nextup session from the phone in any repo or workspace · release vNext
   - [ ] RT-1384 Launch a no-input preset from the phone · release vNext
 - [ ] RT-293 Show a running shell command's live output beside its session
@@ -605,7 +603,6 @@
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading
 - [ ] RT-1271 Close the remaining gaps in turn-end and pending-prompt reading
 - [ ] RT-1284 Close the remaining edges of how a prompt ends · release vNext
-- [ ] RT-1287 Fix what the v0.11.0-alpha smoke run found · release vNext
 - [ ] RT-1288 Fix the polish the v0.11.0-alpha smoke run saw · release vNext
 - [ ] RT-1290 Touch no disk for a client's worktree_path until it is vouched for
 - [ ] RT-1291 Take the worktree size walk off the connection's reader
@@ -641,6 +638,14 @@
 - [ ] RT-1391 Align the phone's resume order with the daemon's and close ResumeSession's test gaps
 - [ ] RT-1392 Let × cancel a client's self-update countdown, and show its download
 - [ ] RT-1393 Word the Update connected clients toast for one and for zero
+- [ ] RT-1397 Tell an SSH requester apart from a local connection when it updates a host
+- [ ] RT-1398 Answer a resent LaunchLast from the spawn journal before its lookup and checks
+- [ ] RT-1399 Split mountHomeView and homeGroups in the phone app under the size limits
+- [ ] RT-1400 Stop the release-break warning at the newest release with the host's own installer
+- [ ] RT-1401 Word the self-update after a flagged host update as this app's own, and mute the checking line
+- [ ] RT-1402 Offer this app's update when a host it updated refuses this app's protocol version
+- [ ] RT-1403 Read the install folder from InstallLocation in the bridge's update check
+- [ ] RT-1404 Focus the main window's root when its focused pane is popped out
 
 ## Design files
 
@@ -668,7 +673,7 @@
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
 - [remote-access.md](remote-access.md) — Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
 - [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1361, RT-1362, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
-- [remote-update.md](remote-update.md) — RT-1305, RT-1307, RT-1308, RT-1353, RT-1355, Remote update
+- [remote-update.md](remote-update.md) — RT-1308, RT-1353, RT-1355, RT-1397, Remote update
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792
 - [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406
