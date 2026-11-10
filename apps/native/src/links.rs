@@ -1158,13 +1158,18 @@ fn locate(segments: &[Segment], index: usize) -> Location {
 /// The match with the punctuation a sentence ends on stripped off it.
 fn trim_link_candidate(value: &str) -> String {
     let mut next = value;
-    while let Some(found) = TRAILING_PUNCTUATION.find(next) {
-        next = &next[..found.start()];
-    }
-    if let Some(without_colon) = next.strip_suffix(':')
-        && !is_bare_drive(next)
-    {
-        next = without_colon;
+    loop {
+        if let Some(found) = TRAILING_PUNCTUATION.find(next) {
+            next = &next[..found.start()];
+            continue;
+        }
+        if let Some(without_colon) = next.strip_suffix(':')
+            && !is_bare_drive(next)
+        {
+            next = without_colon;
+            continue;
+        }
+        break;
     }
     next.to_owned()
 }
@@ -1477,6 +1482,23 @@ mod tests {
         assert_eq!(links[0].target, "./docs/plan.md");
         assert_eq!(links[0].line, None);
         assert_eq!(links[0].column, None);
+    }
+
+    #[test]
+    fn a_parenthesised_path_before_a_colon_drops_both() {
+        let path = r"X:\dev\delve-the-dungeon\.tmp\mocks\combat-intuition-1031\index.html";
+        let links = detect_links(&format!("in the mock ({path}): at Combat Intuition 1"));
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, path);
+        assert_eq!(links[0].candidates, vec![candidate(path, None, None)]);
+        assert_eq!(trim_link_candidate("X:/a.rs:12):"), "X:/a.rs:12");
+    }
+
+    #[test]
+    fn a_url_in_parentheses_before_a_colon_drops_both() {
+        let links = detect_links("see (https://example.com/a):");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "https://example.com/a");
     }
 
     #[test]
