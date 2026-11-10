@@ -42,8 +42,8 @@ use crate::session::{
 use crate::spawn_journal::{Begin, Outcome};
 use crate::tracer_log::AgentNote;
 use crate::{
-    env_secrets, headless, inject, orphan, osc_title, pty_state, screen, spawn_plan, tracer_client,
-    user_env, workspace as ws,
+    branch_names, env_secrets, headless, inject, orphan, osc_title, pty_state, screen, spawn_plan,
+    tracer_client, user_env, workspace as ws,
 };
 use agent_api::{
     AgentPlugin, ConversationPlan, EnvPlan, KeyLookup, ResolvedRows, SpawnCheck, SpawnContext,
@@ -52,9 +52,9 @@ use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use directories::UserDirs;
 use protocol::{
-    AgentId, AppearanceOverrides, ClientMessage, DaemonMessage, OptionValues, SessionKind,
-    SessionMember, SessionMetrics, SessionMode, SessionRole, SessionStatus, SpawnRequest,
-    SpawnTarget,
+    AgentId, AppearanceOverrides, ClientMessage, ContainerRef, DaemonMessage, OptionValues,
+    RepoEntry, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionRole, SessionStatus,
+    SpawnConfig, SpawnRequest, SpawnTarget, WorkspaceEntry,
 };
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -130,6 +130,9 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             }
         }
         ClientMessage::SpawnSession(req) => return handle_spawn_session(hub, req, ctx).await,
+        ClientMessage::LaunchLast { target, request_id } => {
+            return handle_launch_last(hub, &target, request_id, ctx).await;
+        }
         _ => warn!("spawn::handle: dispatch routed a message this module does not handle"),
     }
     Ok(())
@@ -200,6 +203,124 @@ async fn handle_spawn_session(
         }
     }
     Ok(())
+}
+
+/// Handle a `LaunchLast`: find the container's stored spawn config, refuse
+/// what cannot be replayed from here, and hand the request to
+/// [`handle_spawn_session`], so it shares that message's journal, echo and
+/// failure path.
+async fn handle_launch_last(
+    hub: &Hub,
+    target: &ContainerRef,
+    request_id: Option<String>,
+    ctx: &ConnCtx<'_>,
+) -> anyhow::Result<()> {
+    let (repos, workspaces) = hub
+        .state
+        .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
+    let (name, config) = match stored_launch_config(&repos, &workspaces, target) {
+        Ok(found) => found,
+        Err((code, message)) => {
+            send_launch_last_refusal(ctx.out_tx, message, request_id, code);
+            return Ok(());
+        }
+    };
+    let fresh = match config.replay_suggest_target(&repos) {
+        Some(suggest) => {
+            match branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), &suggest).await {
+                Ok(fresh) => Some(fresh),
+                Err(err) => {
+                    send_launch_last_refusal(
+                        ctx.out_tx,
+                        err.to_string(),
+                        request_id,
+                        protocol::error_codes::SPAWN_REFUSED,
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        None => None,
+    };
+    let mut req = config.to_replay_request(&repos, fresh);
+    req.request_id = request_id.clone();
+    if in_place_checkout_confirm(hub, &req).await.is_some() {
+        let message = format!(
+            "{name} has uncommitted changes, so its last launch can't switch branches here. \
+             Launch it from the desktop."
+        );
+        send_launch_last_refusal(
+            ctx.out_tx,
+            message,
+            request_id,
+            protocol::error_codes::SPAWN_REFUSED,
+        );
+        return Ok(());
+    }
+    info!(container = ?target, "launch_last: spawning");
+    handle_spawn_session(hub, req, ctx).await
+}
+
+/// The name and stored spawn config a `LaunchLast` replays, or the code and
+/// message refusing it: an unknown container, one that never launched, a
+/// headless launch the desktop has to make, or a standalone config with no
+/// repo or workspace behind it.
+fn stored_launch_config(
+    repos: &[RepoEntry],
+    workspaces: &[WorkspaceEntry],
+    target: &ContainerRef,
+) -> Result<(String, SpawnConfig), (&'static str, String)> {
+    let (name, stored) = match target {
+        ContainerRef::Repo(id) => repos
+            .iter()
+            .find(|repo| repo.id == *id)
+            .map(|repo| (repo.name.clone(), repo.last_spawn_config.as_ref())),
+        ContainerRef::Workspace(id) => workspaces
+            .iter()
+            .find(|workspace| workspace.id == *id)
+            .map(|workspace| (workspace.name.clone(), workspace.last_spawn_config.as_ref())),
+    }
+    .ok_or_else(|| {
+        (
+            protocol::error_codes::NOT_FOUND,
+            "No such repo or workspace.".to_string(),
+        )
+    })?;
+    let config = stored.ok_or_else(|| {
+        (
+            protocol::error_codes::SPAWN_REFUSED,
+            format!("{name} has no last launch yet."),
+        )
+    })?;
+    if config.mode == SessionMode::Headless {
+        return Err((
+            protocol::error_codes::SPAWN_REFUSED,
+            "A headless launch can't be repeated from here; launch it from the desktop."
+                .to_string(),
+        ));
+    }
+    if matches!(config.target, SpawnTarget::Standalone { .. }) {
+        return Err((
+            protocol::error_codes::INVALID_REQUEST,
+            "A standalone launch has no repo or workspace to repeat.".to_string(),
+        ));
+    }
+    Ok((name, config.clone()))
+}
+
+/// Answer a `LaunchLast` the daemon will not launch with an `Error` carrying
+/// the caller's request id and `code`.
+fn send_launch_last_refusal(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    message: String,
+    request_id: Option<String>,
+    code: &'static str,
+) {
+    let _ = out_tx.send(DaemonMessage::Error {
+        message,
+        request_id,
+        code: Some(code.to_owned()),
+    });
 }
 
 /// Record `outcome` for the request `journalled` names, if it was a
@@ -5828,6 +5949,123 @@ mod tests {
         };
         assert_eq!(session.id, "s1");
         assert_eq!(request_id.as_deref(), Some("rq-j1"));
+        assert_eq!(hub.sessions.snapshots().len(), 1, "no second session");
+    }
+
+    /// A spawnless hub with repo `r1` holding `config` as its stored last
+    /// spawn config.
+    fn hub_with_stored_launch(tag: &str, config: Option<SpawnConfig>) -> (Hub, ScratchDir) {
+        let (hub, scratch) = spawnless_test_hub(tag);
+        let repo = scratch.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        let mut entry = repo_entry("r1", "r1", &repo);
+        entry.last_spawn_config = config;
+        hub.state
+            .mutate(|s| s.repos.push(entry))
+            .expect("register repo");
+        (hub, scratch)
+    }
+
+    /// `target` as a fresh spawn stores it: the one-shot answers dropped.
+    fn stored_config(target: SpawnTarget, mode: SessionMode) -> SpawnConfig {
+        SpawnConfig::from_request(&env_spawn(target, mode, Vec::new(), None))
+    }
+
+    /// The reply a `LaunchLast` for repo `r1` gets.
+    async fn launch_last_of_r1(hub: &Hub, request_id: Option<&str>) -> DaemonMessage {
+        dispatch_one(
+            hub,
+            ClientMessage::LaunchLast {
+                target: ContainerRef::Repo("r1".to_string()),
+                request_id: request_id.map(str::to_owned),
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn launch_last_without_a_stored_config_is_refused() {
+        let (hub, _scratch) = hub_with_stored_launch("launch-last-no-config", None);
+        let reply = launch_last_of_r1(&hub, Some("q1")).await;
+        let DaemonMessage::Error {
+            message,
+            request_id,
+            code,
+        } = reply
+        else {
+            panic!("a repo with no last launch is refused, got {reply:?}");
+        };
+        assert_eq!(code.as_deref(), Some(protocol::error_codes::SPAWN_REFUSED));
+        assert_eq!(message, "r1 has no last launch yet.");
+        assert_eq!(
+            request_id.as_deref(),
+            Some("q1"),
+            "the refusal echoes the id"
+        );
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn launch_last_of_an_unknown_container_is_not_found() {
+        let (hub, _scratch) = spawnless_test_hub("launch-last-unknown");
+        let reply = launch_last_of_r1(&hub, Some("q2")).await;
+        let DaemonMessage::Error {
+            request_id, code, ..
+        } = reply
+        else {
+            panic!("an unknown container is refused, got {reply:?}");
+        };
+        assert_eq!(code.as_deref(), Some(protocol::error_codes::NOT_FOUND));
+        assert_eq!(request_id.as_deref(), Some("q2"));
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn launch_last_of_a_headless_config_is_refused() {
+        let (hub, _scratch) = hub_with_stored_launch(
+            "launch-last-headless",
+            Some(stored_config(
+                single_target(false, None),
+                SessionMode::Headless,
+            )),
+        );
+        let reply = launch_last_of_r1(&hub, Some("q3")).await;
+        let DaemonMessage::Error {
+            request_id, code, ..
+        } = reply
+        else {
+            panic!("a headless launch is refused, got {reply:?}");
+        };
+        assert_eq!(code.as_deref(), Some(protocol::error_codes::SPAWN_REFUSED));
+        assert_eq!(request_id.as_deref(), Some("q3"));
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_resent_launch_last_answers_with_the_journalled_session() {
+        let (hub, _scratch) = hub_with_stored_launch(
+            "launch-last-resent",
+            Some(stored_config(
+                single_target(false, None),
+                SessionMode::PlainShell,
+            )),
+        );
+        hub.sessions.insert(idle_record("s1"));
+        let device = device_key(&AuthKind::Local, "c1").expect("a local connection is journalled");
+        journal_spawned(&hub, &device, "rq-ll1", "s1");
+        let reply = launch_last_of_r1(&hub, Some("rq-ll1")).await;
+        let DaemonMessage::SessionUpdated {
+            session,
+            request_id,
+        } = reply
+        else {
+            panic!("a repeat is answered with the journalled session, got {reply:?}");
+        };
+        assert_eq!(session.id, "s1");
+        assert_eq!(request_id.as_deref(), Some("rq-ll1"));
         assert_eq!(hub.sessions.snapshots().len(), 1, "no second session");
     }
 

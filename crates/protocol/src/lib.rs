@@ -123,6 +123,10 @@ pub const FEATURE_TYPED_PROMPT_ANSWERS: &str = "typed_prompt_answers";
 /// [`ClientMessage::ResumeAbandoned`] for an abandoned one.
 pub const FEATURE_RESUME_SESSION: &str = "resume_session";
 
+/// `Welcome.features` entry: the daemon launches a repo's or workspace's last
+/// spawn config from one [`ClientMessage::LaunchLast`].
+pub const FEATURE_LAUNCH_LAST: &str = "launch_last";
+
 /// The most file bytes one [`ClientMessage::UploadFile`] carries, checked by
 /// the client before sending and by the daemon.
 pub const UPLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -1988,6 +1992,35 @@ impl SpawnTarget {
             Self::Standalone { .. } => None,
         }
     }
+
+    /// Whether this target creates worktrees, so a replay needs a branch name
+    /// no other launch holds.
+    #[must_use]
+    pub fn uses_worktree(&self) -> bool {
+        matches!(
+            self,
+            Self::Single {
+                use_worktree: true,
+                ..
+            } | Self::Workspace {
+                use_worktree: true,
+                ..
+            }
+        )
+    }
+
+    /// Whether this target spawns into a registered folder that is not a git
+    /// repository: it runs in place whatever the stored config says.
+    #[must_use]
+    pub fn replays_in_place(&self, repos: &[RepoEntry]) -> bool {
+        match self {
+            Self::Single { repo_id, .. } => repos
+                .iter()
+                .find(|repo| &repo.id == repo_id)
+                .is_some_and(|repo| !repo.is_git),
+            Self::Workspace { .. } | Self::Standalone { .. } => false,
+        }
+    }
 }
 
 impl SpawnConfig {
@@ -2089,6 +2122,46 @@ impl SpawnConfig {
             | SpawnTarget::Standalone { .. } => {}
         }
         req
+    }
+
+    /// The repo or workspace a worktree config asks a fresh branch name
+    /// about; `None` when the config runs in place, outside a repo, or in a
+    /// folder that is no git repository.
+    #[must_use]
+    pub fn replay_suggest_target(&self, repos: &[RepoEntry]) -> Option<SuggestTarget> {
+        if !self.target.uses_worktree() || self.target.replays_in_place(repos) {
+            return None;
+        }
+        self.target.suggest_target()
+    }
+
+    /// The request a replay sends: the stored config as a duplicate, with the
+    /// fresh branch name a worktree launch waited for. A folder that is no git
+    /// repository runs in place, on no branch, whatever the stored config
+    /// says.
+    #[must_use]
+    pub fn to_replay_request(
+        &self,
+        repos: &[RepoEntry],
+        fresh_branch: Option<String>,
+    ) -> SpawnRequest {
+        let mut request = self.to_duplicate_request(fresh_branch);
+        let in_place = request.target.replays_in_place(repos);
+        if in_place
+            && let SpawnTarget::Single {
+                branch_name,
+                base_branch,
+                use_worktree,
+                existing_worktree,
+                ..
+            } = &mut request.target
+        {
+            branch_name.clear();
+            *base_branch = None;
+            *use_worktree = false;
+            *existing_worktree = None;
+        }
+        request
     }
 }
 
@@ -4245,6 +4318,14 @@ pub enum ClientMessage {
         session_id: String,
         /// Echoed on the requester's [`DaemonMessage::SessionUpdated`] for
         /// the new session and on a refusal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Launch `target`'s stored last spawn config again, as the daemon replays
+    /// it: a worktree config on a fresh branch name, a folder that is no git
+    /// repository in place. Journalled by `request_id` like `SpawnSession`.
+    LaunchLast {
+        target: ContainerRef,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -10841,6 +10922,98 @@ mod tests {
         }
     }
 
+    /// A registered repo `id` whose folder is a git repository, or a plain
+    /// folder when `is_git` is false.
+    fn replay_repo(id: &str, is_git: bool) -> RepoEntry {
+        RepoEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: format!("X:/dev/{id}"),
+            default_branch: None,
+            default_use_worktree: true,
+            is_git,
+            appearance: AppearanceOverrides::default(),
+            last_agent: None,
+            last_spawn_config: None,
+        }
+    }
+
+    #[test]
+    fn a_worktree_replay_takes_the_fresh_branch() {
+        let config = duplicate_source_config(single_target("wt/sleepy-otter", true));
+        let req = config.to_replay_request(&[replay_repo("r1", true)], Some("b2".to_string()));
+        match req.target {
+            SpawnTarget::Single {
+                branch_name,
+                use_worktree,
+                ..
+            } => {
+                assert_eq!(branch_name, "b2");
+                assert!(use_worktree);
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_replay_of_a_plain_folder_runs_in_place() {
+        let config = duplicate_source_config(pinned_single_target("wt/sleepy-otter", "wt/pin"));
+        let req = config.to_replay_request(&[replay_repo("r1", false)], None);
+        match req.target {
+            SpawnTarget::Single {
+                branch_name,
+                base_branch,
+                use_worktree,
+                existing_worktree,
+                ..
+            } => {
+                assert_eq!(branch_name, "");
+                assert_eq!(base_branch, None);
+                assert!(!use_worktree);
+                assert_eq!(existing_worktree, None);
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_in_place_replay_asks_no_branch_name() {
+        let config = duplicate_source_config(single_target("main", false));
+        assert_eq!(
+            config.replay_suggest_target(&[replay_repo("r1", true)]),
+            None,
+            "an in-place launch runs on the branch it was saved with"
+        );
+    }
+
+    #[test]
+    fn a_worktree_replay_of_a_workspace_asks_about_it() {
+        let config = duplicate_source_config(SpawnTarget::Workspace {
+            workspace_id: "ws1".to_string(),
+            branch_name: "wt/sleepy-otter".to_string(),
+            base_branch: None,
+            use_worktree: true,
+            worktree_reuse: WorktreeReusePolicy::Reuse,
+            existing_worktrees: Vec::new(),
+        });
+        assert_eq!(
+            config.replay_suggest_target(&[]),
+            Some(SuggestTarget::Workspace {
+                workspace_id: "ws1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_worktree_replay_of_a_plain_folder_asks_no_branch_name() {
+        let config = duplicate_source_config(single_target("wt/sleepy-otter", true));
+        assert_eq!(
+            config.replay_suggest_target(&[replay_repo("r1", false)]),
+            None,
+            "a plain folder runs in place whatever the stored config says"
+        );
+    }
+
     #[test]
     fn repo_entry_decodes_without_last_agent() {
         // Existing state.json files lack `last_agent`; serde default must
@@ -12711,6 +12884,42 @@ mod tests {
             "{decoded:?}"
         );
         assert_eq!(FEATURE_RESUME_SESSION, "resume_session");
+    }
+
+    #[test]
+    fn launch_last_round_trips() {
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"launch_last","target":{"kind":"repo","id":"r1"},"request_id":"q1"}"#,
+        )
+        .expect("the message decodes");
+        assert!(
+            matches!(
+                &msg,
+                ClientMessage::LaunchLast { target: ContainerRef::Repo(id), request_id: Some(request) }
+                    if id == "r1" && request == "q1"
+            ),
+            "{msg:?}"
+        );
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"launch_last","target":{"kind":"repo","id":"r1"},"request_id":"q1"}"#
+        );
+        let without_id: ClientMessage = serde_json::from_str(
+            r#"{"type":"launch_last","target":{"kind":"workspace","id":"w1"}}"#,
+        )
+        .expect("a message without request_id decodes");
+        assert!(
+            matches!(
+                &without_id,
+                ClientMessage::LaunchLast { target: ContainerRef::Workspace(id), request_id: None }
+                    if id == "w1"
+            ),
+            "{without_id:?}"
+        );
+        let json = serde_json::to_string(&without_id).expect("serialize");
+        assert!(!json.contains("request_id"), "{json}");
+        assert_eq!(FEATURE_LAUNCH_LAST, "launch_last");
     }
 
     #[test]

@@ -154,6 +154,12 @@ export const FEATURE_TYPED_PROMPT_ANSWERS = "typed_prompt_answers";
 export const FEATURE_RESUME_SESSION = "resume_session";
 
 /**
+ * `Welcome.features` entry: the daemon launches a repo's or workspace's last
+ * spawn config from one [`ClientMessage::LaunchLast`].
+ */
+export const FEATURE_LAUNCH_LAST = "launch_last";
+
+/**
  * The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
  * right after `Welcome` when its `Hello` carried no valid device token: the
  * connection stays open as a pairing connection. The daemon also answers it
@@ -3269,6 +3275,12 @@ export type ClientMessage =
    * the new session and on a refusal.
    */
   | { type: "resume_session"; session_id: string; request_id?: string | null }
+  /**
+   * Launch `target`'s stored last spawn config again, as the daemon replays
+   * it: a worktree config on a fresh branch name, a folder that is no git
+   * repository in place. Journalled by `request_id` like `SpawnSession`.
+   */
+  | { type: "launch_last"; target: ContainerRef; request_id?: string | null }
   /**
    * Fetch the persisted [`SpawnConfig`] for a session so the spawn
    * dialog can pre-fill all fields with the source's values. Replied
