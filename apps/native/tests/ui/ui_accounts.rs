@@ -368,6 +368,25 @@ fn the_chip_opens_and_closes_the_popover(cx: &mut TestAppContext) {
     );
 }
 
+/// An email wider than a row, so its detail line wraps.
+const LONG: &str = "a-very-long-mailbox-name-that-keeps-going-and-going-and-going-and-going-and-going-and-going@a-long-company-domain.example.com";
+
+#[gpui::test]
+fn a_long_email_wraps_in_the_popover(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    popover(
+        &mut h,
+        vec![account(1, "main").email(LONG).active().build()],
+    );
+    let name = h.bounds("accounts-name-1=main");
+    let detail = h.bounds(&format!("accounts-detail-1={LONG}"));
+    assert!(
+        detail.size.height > name.size.height * 1.5,
+        "the detail {detail:?} wraps past the name {name:?}"
+    );
+}
+
 #[gpui::test]
 fn the_popover_stays_closed_after_a_reconnect(cx: &mut TestAppContext) {
     let dir = TestDir::new();

@@ -773,8 +773,6 @@ impl RootView {
             .children(row.detail.clone().map(|detail| {
                 div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
                     .text_color(gpui::rgb(t.subtle))
                     .child(tagged_text(format!("settings-accounts-detail-{n}"), detail))
             }))
@@ -1194,8 +1192,6 @@ fn window_line(
         .child(
             div()
                 .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
                 .text_color(gpui::rgb(if line.used_up {
                     t.danger_text
                 } else {

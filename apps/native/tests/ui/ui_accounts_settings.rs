@@ -288,6 +288,26 @@ fn the_page_lists_a_row_per_account(cx: &mut TestAppContext) {
     assert!(!drawn(&mut h, "settings-accounts-forecast"));
 }
 
+/// An email wider than a row, so its detail line wraps.
+const LONG: &str = "a-very-long-mailbox-name-that-keeps-going-and-going-and-going-and-going-and-going-and-going@a-long-company-domain.example.com";
+
+#[gpui::test]
+fn a_long_email_wraps_on_the_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(
+        &mut h,
+        vec![account(1, "main").email(LONG).active().build()],
+        None,
+    );
+    let name = h.bounds("settings-accounts-name-1=main");
+    let detail = h.bounds(&format!("settings-accounts-detail-1={LONG}"));
+    assert!(
+        detail.size.height > name.size.height * 1.5,
+        "the detail {detail:?} wraps past the name {name:?}"
+    );
+}
+
 #[gpui::test]
 fn the_page_shows_a_model_limit_in_use(cx: &mut TestAppContext) {
     let dir = TestDir::new();

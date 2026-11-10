@@ -570,8 +570,6 @@ impl RootView {
             .children(row.detail.map(|detail| {
                 div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
                     .text_color(gpui::rgb(t.subtle))
                     .child(tagged_text(format!("accounts-detail-{n}"), detail))
             }))
@@ -712,7 +710,7 @@ fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>
         .flex()
         .items_center()
         .gap(px(8.0))
-        .h(px(19.0))
+        .min_h(px(19.0))
         .child(
             div()
                 .min_w(px(18.0))
@@ -735,8 +733,6 @@ fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>
         .child(
             div()
                 .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
                 .text_color(gpui::rgb(if line.used_up {
                     t.danger_text
                 } else {

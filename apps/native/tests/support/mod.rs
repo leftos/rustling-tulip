@@ -807,6 +807,12 @@ pub fn account(number: u32, alias: &str) -> AccountBuilder {
 pub struct AccountBuilder(protocol::AccountSnapshot);
 
 impl AccountBuilder {
+    /// Its email, in place of `{alias}@example.com`.
+    pub fn email(mut self, email: &str) -> Self {
+        email.clone_into(&mut self.0.email);
+        self
+    }
+
     /// The account in use.
     pub fn active(mut self) -> Self {
         self.0.active = true;
