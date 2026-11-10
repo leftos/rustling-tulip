@@ -84,6 +84,7 @@ test("a_connection_sends_through_the_real_wrapper_once_open", async () => {
     },
     visibility: { isHidden: () => false, onChange: () => () => undefined },
     tokenStore: memoryTokenStore("device-token"),
+    reloadApp: () => undefined,
   });
   connection.start();
   await flush();

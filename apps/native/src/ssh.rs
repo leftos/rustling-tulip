@@ -182,6 +182,7 @@ fn test_hello() -> ClientMessage {
         client_name: None,
         client_version: None,
         client_kind: None,
+        client_features: Vec::new(),
     }
 }
 

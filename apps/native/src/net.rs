@@ -688,6 +688,7 @@ impl Net {
                 .and_then(|id| id.client_name.clone()),
             client_version: Some(protocol::BUILD_VERSION.to_owned()),
             client_kind: Some(protocol::ClientKind::Native),
+            client_features: Vec::new(),
         }
     }
 

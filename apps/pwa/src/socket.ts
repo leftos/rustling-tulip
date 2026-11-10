@@ -48,6 +48,11 @@ export interface ConnectionDeps {
   clearTimeout(handle: TimerHandle): void;
   readonly visibility: Visibility;
   readonly tokenStore: TokenStore;
+  /**
+   * Reload the page, as a host's `reload_app` asks. Injected so a test can
+   * see it, and so nothing but `main.ts` touches `location`.
+   */
+  reloadApp(): void;
 }
 
 /**
@@ -114,6 +119,8 @@ export function createConnection(deps: ConnectionDeps): Connection {
   let started = false;
   let stopped = false;
   let pairing: PairingState = INITIAL_PAIRING;
+  // Whether a host already asked for a reload this visit.
+  let reloadRequested = false;
   // The token the daemon issued on this page visit: the next dial presents it
   // whether or not the store kept it.
   // `null` after the daemon refused the token, while a forget is under way, or
@@ -192,6 +199,18 @@ export function createConnection(deps: ConnectionDeps): Connection {
     void Promise.resolve().then(() => {
       dispatch({ type: "tokenChanged" });
     });
+  }
+
+  /**
+   * Reload for a host's `reload_app`: once per page visit, since the page is
+   * going anyway and a second message must not start a reload loop.
+   */
+  function reloadOnce(): void {
+    if (reloadRequested) {
+      return;
+    }
+    reloadRequested = true;
+    deps.reloadApp();
   }
 
   function closeSocket(): void {
@@ -290,6 +309,9 @@ export function createConnection(deps: ConnectionDeps): Connection {
         break;
       case "deliver":
         notify({ kind: "message", message: effect.message });
+        if (effect.message.type === "reload_app") {
+          reloadOnce();
+        }
         if (state.name === "pairing") {
           foldPairing({ type: "message", message: effect.message });
           if (effect.message.type === "device_token") {

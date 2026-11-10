@@ -7,8 +7,8 @@ use anyhow::{Context as _, anyhow};
 use axum::extract::ws::Message;
 use futures::StreamExt as _;
 use protocol::{
-    ClientMessage, ClonableLayout, ConnectionOrigin, DaemonMessage, InboundClientMessage,
-    SUPPORTED_PROTOCOL_VERSIONS,
+    ClientKind, ClientMessage, ClonableLayout, ConnectionOrigin, DaemonMessage,
+    InboundClientMessage, SUPPORTED_PROTOCOL_VERSIONS,
 };
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -24,6 +24,13 @@ pub(super) struct Handshake {
     /// connection then falls back to the shared legacy layout.
     pub(super) client_id: Option<String>,
     pub(super) client_name: Option<String>,
+    /// The client's build version, absent when it has none.
+    pub(super) client_version: Option<String>,
+    /// What kind of program it is; `None` for a command-line tool and for an
+    /// older client.
+    pub(super) client_kind: Option<ClientKind>,
+    /// The `CLIENT_FEATURE_*` strings it implements.
+    pub(super) client_features: Vec<String>,
     /// The tailnet device presented no valid token: the connection may only
     /// pair, and gets no state.
     pub(super) pairing: bool,
@@ -137,6 +144,7 @@ async fn read_hello<R: Inbound>(
         client_name,
         client_version,
         client_kind,
+        client_features,
     }) = parsed
     else {
         return Err(anyhow!("first message must be Hello"));
@@ -161,6 +169,7 @@ async fn read_hello<R: Inbound>(
         client_id = client_id.as_deref().unwrap_or("(legacy)"),
         client_version = client_version.as_deref().unwrap_or("(unknown)"),
         ?client_kind,
+        ?client_features,
         "handshake negotiated protocol version"
     );
     let _ = out_tx.send(welcome_message(
@@ -174,6 +183,9 @@ async fn read_hello<R: Inbound>(
         negotiated_version: negotiated,
         client_id,
         client_name,
+        client_version,
+        client_kind,
+        client_features,
         pairing,
         device: live.as_ref().map(|live| live.device_id().to_owned()),
         live,
@@ -275,6 +287,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_CLIENT_PRESENCE,
     protocol::FEATURE_TYPED_PROMPT_ANSWERS,
     protocol::FEATURE_REMOTE_UPDATE,
+    protocol::FEATURE_CLIENT_UPDATE,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
@@ -713,6 +726,19 @@ mod tests {
         assert!(
             DAEMON_FEATURES.contains(&protocol::FEATURE_REMOTE_UPDATE),
             "every daemon answers a remote update, if only with why it cannot"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_client_update() {
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_CLIENT_UPDATE)
+            ),
+            "{welcome:?}"
         );
     }
 

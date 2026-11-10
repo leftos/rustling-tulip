@@ -44,6 +44,9 @@ const connection = createConnection({
     },
   },
   tokenStore: indexedDbTokenStore(),
+  reloadApp: () => {
+    location.reload();
+  },
 });
 
 // The pairing screen fills the page's section from the pairing model and the

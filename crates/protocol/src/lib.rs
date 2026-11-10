@@ -125,6 +125,14 @@ pub const FEATURE_TYPED_PROMPT_ANSWERS: &str = "typed_prompt_answers";
 /// it updates itself to the newest release, or says why it cannot.
 pub const FEATURE_REMOTE_UPDATE: &str = "remote_update";
 
+/// `Welcome.features` entry: the daemon tells its connected clients to update
+/// themselves ([`ClientMessage::UpdateConnectedClients`]).
+pub const FEATURE_CLIENT_UPDATE: &str = "client_update";
+
+/// `Hello.client_features` entry: this client updates itself when a host asks
+/// it to ([`DaemonMessage::UpdateYourself`]).
+pub const CLIENT_FEATURE_UPDATE_YOURSELF: &str = "update_yourself";
+
 /// The most file bytes one [`ClientMessage::UploadFile`] carries, checked by
 /// the client before sending and by the daemon.
 pub const UPLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -3960,6 +3968,10 @@ pub enum ClientMessage {
         /// command-line tool and from an older client.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_kind: Option<ClientKind>,
+        /// What this client can be asked to do, as the `CLIENT_FEATURE_*`
+        /// strings it implements. Empty from an older client.
+        #[serde(default)]
+        client_features: Vec<String>,
     },
     ListRepos,
     AddRepo {
@@ -4162,6 +4174,16 @@ pub enum ClientMessage {
     CancelHostUpdate {
         /// The daemon's id for the update, from `HostUpdateScheduled`.
         update_id: String,
+    },
+    /// Ask the host to tell each client connected to it to update itself: a
+    /// native client that advertises `update_yourself` gets
+    /// [`DaemonMessage::UpdateYourself`], a phone gets
+    /// [`DaemonMessage::ReloadApp`]. Answered by
+    /// [`DaemonMessage::ConnectedClientsNotified`]. Local-only: refused on a
+    /// tailnet connection.
+    UpdateConnectedClients {
+        /// Client-assigned request id, echoed on the answer.
+        request_id: Option<String>,
     },
     Resize {
         session_id: String,
@@ -6405,6 +6427,27 @@ pub enum DaemonMessage {
     HostUpdateCanceled {
         update_id: String,
     },
+    /// The answer to [`ClientMessage::UpdateConnectedClients`]: how many
+    /// connections were told to update themselves (`native`), told to reload
+    /// (`phones`), and left out because they cannot update themselves
+    /// (`too_old`).
+    ConnectedClientsNotified {
+        request_id: Option<String>,
+        native: u32,
+        phones: u32,
+        too_old: u32,
+    },
+    /// The host asked this client to update itself by the rule every update
+    /// follows: fetch the newest official release itself and check its hash.
+    /// `update_id` is the host's id for the request; `requested_by` is
+    /// display text naming who asked. The client runs the countdown.
+    UpdateYourself {
+        update_id: String,
+        requested_by: String,
+    },
+    /// The host offers a newer phone app: reload the page. Sent to each phone
+    /// connection.
+    ReloadApp,
     /// Bytes of a file followed by [`ClientMessage::TailFile`], base64,
     /// at most 64 KiB a message. `path` is the path as the request named it;
     /// `offset` is the file offset of the first byte. `reset` means the file
@@ -8011,6 +8054,83 @@ mod tests {
     }
 
     #[test]
+    fn update_connected_clients_round_trips() {
+        let msg = ClientMessage::UpdateConnectedClients {
+            request_id: Some("req-1".to_owned()),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(
+            json.contains(r#""type":"update_connected_clients""#),
+            "{json}"
+        );
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::UpdateConnectedClients { request_id: Some(id) } if id == "req-1"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn connected_clients_notified_round_trips() {
+        let msg = DaemonMessage::ConnectedClientsNotified {
+            request_id: Some("req-1".to_owned()),
+            native: 2,
+            phones: 1,
+            too_old: 3,
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(
+            json.contains(r#""type":"connected_clients_notified""#),
+            "{json}"
+        );
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::ConnectedClientsNotified {
+                    request_id: Some(id),
+                    native: 2,
+                    phones: 1,
+                    too_old: 3,
+                } if id == "req-1"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn update_yourself_round_trips() {
+        let msg = DaemonMessage::UpdateYourself {
+            update_id: "client-update-1".to_owned(),
+            requested_by: "a connection on this PC".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"update_yourself""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::UpdateYourself { update_id, requested_by }
+                    if update_id == "client-update-1"
+                        && requested_by == "a connection on this PC"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn reload_app_round_trips() {
+        let msg = DaemonMessage::ReloadApp;
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"reload_app""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(matches!(back, DaemonMessage::ReloadApp), "{json}");
+    }
+
+    #[test]
     fn remote_update_started_round_trips() {
         let msg = DaemonMessage::RemoteUpdateStarted {
             request_id: "req-1".to_owned(),
@@ -8362,6 +8482,20 @@ mod tests {
                     client_kind: None,
                     ..
                 }
+            ),
+            "{parsed:?}"
+        );
+    }
+
+    #[test]
+    fn hello_without_client_features_decodes() {
+        let old = r#"{"type":"hello","protocol_version":23,"auth_token":"abc"}"#;
+        let parsed: ClientMessage =
+            serde_json::from_str(old).expect("an older client's hello decodes");
+        assert!(
+            matches!(
+                &parsed,
+                ClientMessage::Hello { client_features, .. } if client_features.is_empty()
             ),
             "{parsed:?}"
         );

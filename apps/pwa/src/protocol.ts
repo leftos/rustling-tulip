@@ -150,6 +150,18 @@ export const FEATURE_TYPED_PROMPT_ANSWERS = "typed_prompt_answers";
 export const FEATURE_REMOTE_UPDATE = "remote_update";
 
 /**
+ * `Welcome.features` entry: the daemon tells its connected clients to update
+ * themselves ([`ClientMessage::UpdateConnectedClients`]).
+ */
+export const FEATURE_CLIENT_UPDATE = "client_update";
+
+/**
+ * `Hello.client_features` entry: this client updates itself when a host asks
+ * it to ([`DaemonMessage::UpdateYourself`]).
+ */
+export const CLIENT_FEATURE_UPDATE_YOURSELF = "update_yourself";
+
+/**
  * The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
  * right after `Welcome` when its `Hello` carried no valid device token: the
  * connection stays open as a pairing connection. The daemon also answers it
@@ -3129,8 +3141,11 @@ export type ClientMessage =
    *
    * `client_kind`: What kind of program this is ([`ClientKind`]). Absent from a
    * command-line tool and from an older client.
+   *
+   * `client_features`: What this client can be asked to do, as the `CLIENT_FEATURE_*`
+   * strings it implements. Empty from an older client.
    */
-  | { type: "hello"; protocol_version: number; protocol_versions?: number[]; auth_token: string; client_id?: string | null; client_name?: string | null; client_version?: string | null; client_kind?: ClientKind | null }
+  | { type: "hello"; protocol_version: number; protocol_versions?: number[]; auth_token: string; client_id?: string | null; client_name?: string | null; client_version?: string | null; client_kind?: ClientKind | null; client_features?: string[] }
   | { type: "list_repos" }
   | { type: "add_repo"; path: string; name: string | null }
   | { type: "remove_repo"; repo_id: string }
@@ -3296,6 +3311,17 @@ export type ClientMessage =
    * `update_id`: The daemon's id for the update, from `HostUpdateScheduled`.
    */
   | { type: "cancel_host_update"; update_id: string }
+  /**
+   * Ask the host to tell each client connected to it to update itself: a
+   * native client that advertises `update_yourself` gets
+   * [`DaemonMessage::UpdateYourself`], a phone gets
+   * [`DaemonMessage::ReloadApp`]. Answered by
+   * [`DaemonMessage::ConnectedClientsNotified`]. Local-only: refused on a
+   * tailnet connection.
+   *
+   * `request_id`: Client-assigned request id, echoed on the answer.
+   */
+  | { type: "update_connected_clients"; request_id: string | null }
   /**
    * `claim`: True when the sending pane had keyboard or pointer input in the
    * last few seconds, or when this client just resized the pane (its
@@ -5131,6 +5157,25 @@ export type DaemonMessage =
    * run. Sent only to local connections.
    */
   | { type: "host_update_canceled"; update_id: string }
+  /**
+   * The answer to [`ClientMessage::UpdateConnectedClients`]: how many
+   * connections were told to update themselves (`native`), told to reload
+   * (`phones`), and left out because they cannot update themselves
+   * (`too_old`).
+   */
+  | { type: "connected_clients_notified"; request_id: string | null; native: number; phones: number; too_old: number }
+  /**
+   * The host asked this client to update itself by the rule every update
+   * follows: fetch the newest official release itself and check its hash.
+   * `update_id` is the host's id for the request; `requested_by` is
+   * display text naming who asked. The client runs the countdown.
+   */
+  | { type: "update_yourself"; update_id: string; requested_by: string }
+  /**
+   * The host offers a newer phone app: reload the page. Sent to each phone
+   * connection.
+   */
+  | { type: "reload_app" }
   /**
    * Bytes of a file followed by [`ClientMessage::TailFile`], base64,
    * at most 64 KiB a message. `path` is the path as the request named it;

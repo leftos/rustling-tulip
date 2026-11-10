@@ -2964,6 +2964,7 @@ mod tests {
             preset_job_snapshots: Arc::default(),
             state_events,
             client_count,
+            clients: crate::server::Clients::default(),
             remote_enabled: Arc::new(remote_enabled),
             tailnet: Arc::new(AsyncMutex::new(None)),
             remote_status: Arc::new(watch::Sender::new(crate::server::RemoteSlot::initial(

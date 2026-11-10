@@ -489,6 +489,7 @@ interface Harness {
 interface HarnessOptions {
   readonly tokenStore?: TokenStore;
   readonly hiddenAtStart?: boolean;
+  readonly reloadApp?: () => void;
 }
 
 function harness(options: HarnessOptions = {}): Harness {
@@ -508,6 +509,7 @@ function harness(options: HarnessOptions = {}): Harness {
     },
     visibility: visibility.source,
     tokenStore: options.tokenStore ?? memoryTokenStore(DEVICE_TOKEN),
+    reloadApp: options.reloadApp ?? (() => undefined),
   });
   connection.subscribe((notice) => {
     notices.push(notice);
@@ -587,6 +589,23 @@ test("connection_drops_an_unparseable_frame_and_stays_ready", async () => {
   expect(notices).toHaveLength(before);
   expect(lastStatus(notices)).toBe("ready");
   expect(warn).toHaveBeenCalled();
+});
+
+test("reload_app reloads the page once", async () => {
+  const reloadApp = vi.fn();
+  const { connection, sockets } = harness({ reloadApp });
+
+  connection.start();
+  await flush();
+  const socket = socketAt(sockets, 0);
+  socket.open();
+  socket.receive(WELCOME);
+
+  // The host may say it twice; one page visit reloads once.
+  socket.receive({ type: "reload_app" });
+  socket.receive({ type: "reload_app" });
+
+  expect(reloadApp).toHaveBeenCalledOnce();
 });
 
 test("connection_ignores_a_stale_socket_close", async () => {

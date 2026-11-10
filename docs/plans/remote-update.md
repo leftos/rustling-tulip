@@ -45,6 +45,7 @@ Each part lands on `feat/remote-update`, and each is a sub-issue of RT-1298.
 - [x] **Client to host, in the client.** The update action per host, the confirm dialog listing that host's sessions, progress, reconnect, and the result or failure shown to the requester.
 - [ ] **The breaking flag.** A machine-readable note in each release of what it breaks, read by the confirm dialog, and the requester updating itself right after the host. `docs/release.md` says when to set it.
 - [ ] **Host to client.** A per-connection record on the host, an addressed message, "Update connected clients", and the client's countdown with Cancel.
+  - Part 1 is in: the wire, the daemon's record of live connections and the phone's reload. The native client's countdown and the host's action remain.
 - [ ] **SSH hosts.** The detached helper over a second SSH command, surviving the bridge's exit, with the result read on reconnect.
 - [ ] **Proof.** A live spec against a fake release feed, and a real update on a second machine (`docs/release.md` smoke test), both directions, on Windows and macOS.
 

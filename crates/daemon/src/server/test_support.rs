@@ -182,6 +182,7 @@ pub(super) fn build_test_hub(
         preset_job_snapshots: Arc::default(),
         state_events,
         client_count,
+        clients: super::Clients::default(),
         remote_enabled: Arc::new(remote_enabled),
         tailnet: Arc::new(AsyncMutex::new(None)),
         remote_status: Arc::new(tokio::sync::watch::Sender::new(RemoteSlot::initial(
@@ -1037,6 +1038,7 @@ pub(super) fn hello(auth_token: &str, client_name: Option<&str>) -> ClientMessag
         client_name: client_name.map(str::to_owned),
         client_version: None,
         client_kind: None,
+        client_features: Vec::new(),
     }
 }
 

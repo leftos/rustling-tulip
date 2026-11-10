@@ -239,6 +239,7 @@ fn hello(handshake: &DaemonHandshake) -> ClientMessage {
         client_name: Some(CLIENT_NAME.to_owned()),
         client_version: None,
         client_kind: None,
+        client_features: Vec::new(),
     }
 }
 

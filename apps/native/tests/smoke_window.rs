@@ -188,6 +188,7 @@ fn connect(daemon: &LiveDaemon, client_id: &str) -> Socket {
             client_name: None,
             client_version: None,
             client_kind: None,
+            client_features: Vec::new(),
         },
     );
     read_until(&mut ws, "\"type\":\"welcome\"");

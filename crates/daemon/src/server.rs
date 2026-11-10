@@ -21,6 +21,8 @@ pub(crate) mod accounts_fake {
     pub(crate) use super::accounts::fake::{ADDED, HANG, account, dispatch_local, next_reply};
 }
 mod chat;
+mod clients;
+pub(crate) use self::clients::Clients;
 mod connection;
 mod dashboard;
 mod folder;
@@ -147,6 +149,11 @@ pub struct Hub {
     /// listening — the broadcasts would just be dropped on the floor and
     /// every event would cost a couple of `git` subprocesses for nothing.
     pub client_count: Arc<tokio::sync::watch::Sender<usize>>,
+    /// Every served connection's record, by connection id, kept while its
+    /// connection lives: what kind of program it is, its version and
+    /// capabilities, and where to send to it. Written by its connection's
+    /// teardown guard.
+    pub clients: Clients,
     /// The persisted remote-access switch: `true` while `remote.json` says
     /// remote access is on, whatever the listener's own state. Idle exit
     /// reads it so a host with remote access on never exits.
@@ -596,6 +603,7 @@ pub async fn run(
         preset_job_snapshots: Arc::default(),
         state_events,
         client_count,
+        clients: Clients::default(),
         remote_enabled: Arc::new(tokio::sync::watch::Sender::new(remote.enabled)),
         tailnet: Arc::new(AsyncMutex::new(None)),
         remote_status: Arc::new(tokio::sync::watch::Sender::new(RemoteSlot::initial(remote))),
@@ -1027,6 +1035,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::RemoteUpdate { .. } | ClientMessage::CancelHostUpdate { .. }) => {
             update::handle(hub, m, ctx).await?;
         }
+        m @ ClientMessage::UpdateConnectedClients { .. } => clients::handle(hub, m, ctx),
         ClientMessage::CancelFetch { id } => cancel_fetch(ctx.fetches, &id).await,
         m @ (ClientMessage::TailFile { .. } | ClientMessage::UntailFile { .. }) => {
             tail::handle(hub, m, ctx).await;
@@ -1687,6 +1696,7 @@ mod tests {
                 client_name: None,
                 client_version: None,
                 client_kind: None,
+                client_features: Vec::new(),
             };
             let text = serde_json::to_string(&hello).expect("serialize the Hello");
             client

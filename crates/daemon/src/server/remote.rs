@@ -518,6 +518,10 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
         ClientMessage::SetGateSlotCount { .. } => Some("gate slot counts are local-only"),
         // Asking for a host update stays open to every origin.
         ClientMessage::CancelHostUpdate { .. } => Some("cancelling a host update is local-only"),
+        // Telling every client of the host to update stays on this PC.
+        ClientMessage::UpdateConnectedClients { .. } => {
+            Some("updating connected clients is local-only")
+        }
         _ => None,
     }
 }
@@ -607,6 +611,18 @@ mod tests {
         assert_eq!(
             host_only_refusal(&msg, &AuthKind::Tailnet(test_peer())),
             None,
+            "{msg:?}"
+        );
+    }
+
+    #[test]
+    fn a_tailnet_connection_is_refused_update_connected_clients() {
+        let msg = ClientMessage::UpdateConnectedClients {
+            request_id: Some("u1".to_owned()),
+        };
+        assert_eq!(
+            host_only_refusal(&msg, &AuthKind::Tailnet(test_peer())),
+            Some("updating connected clients is local-only"),
             "{msg:?}"
         );
     }

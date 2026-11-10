@@ -119,6 +119,7 @@ function harness(options: HarnessOptions = {}): Harness {
     },
     visibility: visibility.source,
     tokenStore: options.tokenStore ?? memoryTokenStore(DEVICE_TOKEN),
+    reloadApp: () => undefined,
   });
   connection.subscribe((notice) => {
     notices.push(notice);

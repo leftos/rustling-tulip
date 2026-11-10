@@ -610,6 +610,7 @@ impl Session {
             client_name: Some("folder-bench".to_owned()),
             client_version: None,
             client_kind: None,
+            client_features: Vec::new(),
         })?;
         loop {
             match self.next()? {

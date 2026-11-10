@@ -1,5 +1,6 @@
 //! One client WebSocket connection: its id and auth kind, the client count, the event forwarders, the send pump and the receive loop.
-use super::handshake::{handshake, push_initial_state, send_resume_report};
+use super::clients::{ClientEntry, ClientGuard};
+use super::handshake::{Handshake, handshake, push_initial_state, send_resume_report};
 use super::live_devices::LiveConnection;
 use super::pairing::pairing_session;
 use super::sessions::spawn_session_forwarder;
@@ -267,21 +268,50 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
     client_session_until(hub, socket, auth, None).await;
 }
 
-/// The guards that end `connection`'s Dashboard watch, unload its chats and
-/// stop it counting as at the desk when dropped, on every way out, panic
-/// included.
+/// The guards that end `connection`'s Dashboard watch, unload its chats, stop
+/// it counting as at the desk and drop its client record when dropped, on
+/// every way out, panic included.
 fn connection_watches(
     hub: &Hub,
     connection: u64,
+    handshake: &Handshake,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    auth: &AuthKind,
 ) -> (
     crate::dashboard::WatchGuard,
     crate::chat_mirror::ChatLoadGuard,
     crate::presence::PresenceGuard,
+    ClientGuard,
 ) {
     (
         hub.dashboard.watch_guard(connection),
         hub.chat_mirror.guard(connection),
         crate::presence::PresenceGuard::new(Arc::clone(&hub.presence), connection),
+        register_client(hub, connection, handshake, out_tx, auth),
+    )
+}
+
+/// Record `connection` so other connections can address it, with what its
+/// `Hello` said it is. The guard removes the record when it is dropped, on
+/// every way out, panic included; it holds a clone of `out_tx`, so it drops
+/// before that.
+fn register_client(
+    hub: &Hub,
+    connection: u64,
+    handshake: &Handshake,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    auth: &AuthKind,
+) -> ClientGuard {
+    hub.clients.register(
+        connection,
+        ClientEntry {
+            out_tx: out_tx.clone(),
+            kind: handshake.client_kind,
+            version: handshake.client_version.clone(),
+            features: handshake.client_features.clone(),
+            name: handshake.client_name.clone(),
+            auth: auth.clone(),
+        },
     )
 }
 
@@ -403,10 +433,10 @@ pub(super) async fn client_session_until<S: Socket>(
     // Subscribe to global session events. After splitting PtyOutput out, this
     // channel only carries low-volume control events.
     let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
-    // End any Dashboard watch and chat load of this connection, and stop it
-    // counting as at the desk, on every way out, panic included; dropped
-    // before `out_tx`, since the first two hold clones.
-    let watches = connection_watches(&hub, connection);
+    // End any Dashboard watch and chat load of this connection, stop it
+    // counting as at the desk and drop its client record, on every way out,
+    // panic included; dropped before `out_tx`, since they hold clones.
+    let watches = connection_watches(&hub, connection, &handshake, &out_tx, &auth);
     let event_task = spawn_session_forwarder(Arc::clone(&hub.sessions), out_tx.clone(), connection);
 
     // Subscribe to tab-layout and preset-launch events. Tab events are
@@ -446,9 +476,7 @@ pub(super) async fn client_session_until<S: Socket>(
 
     info!("client_session: recv_loop returned; tearing down");
     stop_transfers(&conn.lane, &fetches, &tails).await;
-    drop(watches);
-    drop(file_tx);
-    drop(out_tx);
+    drop((watches, file_tx, out_tx));
     event_task.abort();
     tab_event_task.abort();
     preset_event_task.abort();
@@ -1739,6 +1767,7 @@ mod tests {
             client_name: None,
             client_version: None,
             client_kind: None,
+            client_features: Vec::new(),
         };
         ws_send(&mut client, &unsupported).await;
 

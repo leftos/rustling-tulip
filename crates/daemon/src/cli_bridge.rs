@@ -337,6 +337,7 @@ mod tests {
             client_name: Some("bridge test".to_owned()),
             client_version: None,
             client_kind: None,
+            client_features: Vec::new(),
         };
         let json = serde_json::to_string(&hello).expect("serialize the hello");
         assert!(json.contains(r#""auth_token":"""#), "{json}");
