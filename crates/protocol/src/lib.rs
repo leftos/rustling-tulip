@@ -127,6 +127,12 @@ pub const FEATURE_RESUME_SESSION: &str = "resume_session";
 /// spawn config from one [`ClientMessage::LaunchLast`].
 pub const FEATURE_LAUNCH_LAST: &str = "launch_last";
 
+/// `Welcome.features` entry: the daemon answers a [`ClientMessage::LaunchPreset`]
+/// whose `job_id` names a job it still holds a snapshot of with that job's latest
+/// [`DaemonMessage::PresetLaunchJobUpdated`], to the sender only, and starts no
+/// second job, so a client may resend an unanswered launch with its job id.
+pub const FEATURE_PRESET_JOB_REPEAT: &str = "preset_job_repeat";
+
 /// The most file bytes one [`ClientMessage::UploadFile`] carries, checked by
 /// the client before sending and by the daemon.
 pub const UPLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -12920,6 +12926,7 @@ mod tests {
         let json = serde_json::to_string(&without_id).expect("serialize");
         assert!(!json.contains("request_id"), "{json}");
         assert_eq!(FEATURE_LAUNCH_LAST, "launch_last");
+        assert_eq!(FEATURE_PRESET_JOB_REPEAT, "preset_job_repeat");
     }
 
     #[test]

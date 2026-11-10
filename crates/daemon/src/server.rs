@@ -1077,8 +1077,10 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             // Run the batch in a background task so the dispatcher returns
             // immediately and the connection stays responsive while sessions
             // spawn. Progress/failed messages stream back via the daemon-wide
-            // preset_events broadcast that every connected client forwards.
-            let hub = hub.clone();
+            // preset_events broadcast that every connected client forwards. A
+            // launch whose job id is a repeat of a job the daemon still holds
+            // is answered from that job's snapshot instead of starting a
+            // second batch.
             let args = crate::presets::LaunchArgs {
                 job_id,
                 target,
@@ -1089,9 +1091,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 max_panes_per_tab_override,
                 client_id: client_id.to_string(),
             };
-            tokio::spawn(async move {
-                crate::presets::launch(hub, args).await;
-            });
+            crate::presets::start(hub, args, out_tx);
         }
         ClientMessage::CancelPresetLaunch { job_id } => {
             let sender = hub.preset_cancellations.lock().await.get(&job_id).cloned();

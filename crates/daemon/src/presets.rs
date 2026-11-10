@@ -58,27 +58,42 @@ pub struct LaunchArgs {
     pub client_id: String,
 }
 
+/// Start a preset launch from a client's `ClientMessage::LaunchPreset`: answer
+/// a repeat of a job this daemon still holds with that job's latest snapshot,
+/// and start anything else in the background. `out_tx` is the requesting
+/// connection's queue, so a repeat's answer reaches only the client that asked
+/// again. The answer is sent while the store's lock is held, so it is never
+/// older than the snapshot a later record broadcasts.
+pub(crate) fn start(
+    hub: &Hub,
+    args: LaunchArgs,
+    out_tx: &tokio::sync::mpsc::UnboundedSender<protocol::DaemonMessage>,
+) {
+    let mut args = args;
+    args.job_id = normalize_job_id(&args.job_id);
+    let mut jobs = crate::sync::lock(&hub.preset_job_snapshots);
+    match jobs.claim(resolving_snapshot(&args)) {
+        Some(existing) => {
+            info!(
+                job_id = %existing.job_id,
+                "preset launch: a repeat of a known job; answered with its snapshot"
+            );
+            let _ = out_tx.send(protocol::DaemonMessage::PresetLaunchJobUpdated { job: existing });
+        }
+        None => {
+            tokio::spawn(launch(hub.clone(), args));
+        }
+    }
+    drop(jobs);
+}
+
 pub async fn launch(hub: Hub, args: LaunchArgs) {
     let mut args = args;
     args.job_id = normalize_job_id(&args.job_id);
     let job_id = args.job_id.clone();
     let preset_id = args.preset_id.clone();
     let target = args.target.clone();
-    send_job_update(
-        &hub,
-        PresetLaunchJobSnapshot {
-            job_id: job_id.clone(),
-            preset_id: preset_id.clone(),
-            target: target.clone(),
-            total: 0,
-            launched: 0,
-            created_session_ids: Vec::new(),
-            created_tab_ids: Vec::new(),
-            status: PresetLaunchJobStatus::Resolving,
-            error: None,
-            current_tab_id: None,
-        },
-    );
+    send_job_update(&hub, resolving_snapshot(&args));
     let (cancel_tx, cancel_rx) = watch::channel(false);
     hub.preset_cancellations
         .lock()
@@ -123,6 +138,22 @@ fn normalize_job_id(job_id: &str) -> String {
         format!("preset-{}", Uuid::new_v4())
     } else {
         trimmed.to_string()
+    }
+}
+
+/// The snapshot a launch starts from, before [`run`] resolves anything.
+fn resolving_snapshot(args: &LaunchArgs) -> PresetLaunchJobSnapshot {
+    PresetLaunchJobSnapshot {
+        job_id: args.job_id.clone(),
+        preset_id: args.preset_id.clone(),
+        target: args.target.clone(),
+        total: 0,
+        launched: 0,
+        created_session_ids: Vec::new(),
+        created_tab_ids: Vec::new(),
+        status: PresetLaunchJobStatus::Resolving,
+        error: None,
+        current_tab_id: None,
     }
 }
 
@@ -183,6 +214,17 @@ impl PresetJobSnapshots {
             stored.finished_at = Some(self.finished);
         }
         self.prune();
+    }
+
+    /// Claim `job`'s id for a new launch: `Some` with the snapshot already
+    /// held for that id, so the caller starts nothing, or `None` after
+    /// recording `job` as its job's first snapshot.
+    pub fn claim(&mut self, job: PresetLaunchJobSnapshot) -> Option<PresetLaunchJobSnapshot> {
+        if let Some(stored) = self.jobs.iter().find(|s| s.snapshot.job_id == job.job_id) {
+            return Some(stored.snapshot.clone());
+        }
+        self.record(job);
+        None
     }
 
     /// Every stored snapshot, in job start order.
@@ -2934,6 +2976,110 @@ mod tests {
             .filter(|j| j.status != PresetLaunchJobStatus::Spawning)
             .count();
         assert_eq!(finished, FINISHED_JOB_SNAPSHOTS);
+    }
+
+    #[test]
+    fn a_claim_of_a_known_job_returns_its_snapshot_and_records_nothing() {
+        let mut jobs = PresetJobSnapshots::default();
+        jobs.record(job_snapshot("job-a", PresetLaunchJobStatus::Spawning));
+
+        let claimed = jobs.claim(job_snapshot("job-a", PresetLaunchJobStatus::Resolving));
+
+        assert_eq!(
+            claimed.map(|job| job.status),
+            Some(PresetLaunchJobStatus::Spawning)
+        );
+        let snapshots = jobs.snapshots();
+        assert_eq!(snapshots.len(), 1, "a claim of a known job records nothing");
+        assert_eq!(snapshots[0].status, PresetLaunchJobStatus::Spawning);
+    }
+
+    #[test]
+    fn a_claim_of_a_new_job_records_it() {
+        let mut jobs = PresetJobSnapshots::default();
+
+        let claimed = jobs.claim(job_snapshot("job-b", PresetLaunchJobStatus::Resolving));
+
+        assert!(claimed.is_none(), "a new job's claim starts it");
+        let snapshots = jobs.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].job_id, "job-b");
+    }
+
+    fn launch_args(job_id: &str) -> LaunchArgs {
+        LaunchArgs {
+            job_id: job_id.to_string(),
+            target: PresetTarget::Repo {
+                repo_id: "repo-1".to_string(),
+            },
+            preset_id: "preset-1".to_string(),
+            source: LaunchPresetSource::Inline {
+                prompts: vec!["prompt 1".to_string()],
+            },
+            variable_values: Vec::new(),
+            use_worktree_override: None,
+            max_panes_per_tab_override: None,
+            client_id: "test-client".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resent_launch_with_a_known_job_id_starts_no_second_job() {
+        let (hub, mut preset_rx, _scratch) = test_hub();
+        crate::sync::lock(&hub.preset_job_snapshots)
+            .record(job_snapshot("job-r", PresetLaunchJobStatus::Spawning));
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+
+        start(&hub, launch_args("job-r"), &out_tx);
+
+        let answer = out_rx.try_recv().expect("the repeat is answered");
+        assert!(
+            matches!(
+                &answer,
+                protocol::DaemonMessage::PresetLaunchJobUpdated { job }
+                    if job.job_id == "job-r" && job.status == PresetLaunchJobStatus::Spawning
+            ),
+            "{answer:?}"
+        );
+        assert!(
+            matches!(
+                preset_rx.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "a repeat is answered to its sender only, never broadcast"
+        );
+        assert_eq!(
+            crate::sync::lock(&hub.preset_job_snapshots)
+                .snapshots()
+                .len(),
+            1
+        );
+        assert!(
+            hub.preset_cancellations.lock().await.is_empty(),
+            "a repeat starts no job, so it registers no cancel handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_launch_with_a_blank_job_id_is_never_a_repeat() {
+        let (hub, _preset_rx, _scratch) = test_hub();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+
+        start(&hub, launch_args("  "), &out_tx);
+        start(&hub, launch_args("  "), &out_tx);
+
+        assert!(
+            matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "a blank job id names no job, so it is never a repeat"
+        );
+        let snapshots = crate::sync::lock(&hub.preset_job_snapshots).snapshots();
+        assert_eq!(snapshots.len(), 2);
+        assert_ne!(snapshots[0].job_id, snapshots[1].job_id);
+        assert!(
+            snapshots
+                .iter()
+                .all(|job| job.job_id.starts_with("preset-"))
+        );
     }
 
     fn new_tab_preset(max_panes_per_tab: Option<u32>) -> PresetEntry {
