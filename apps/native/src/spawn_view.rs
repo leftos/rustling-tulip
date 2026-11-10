@@ -593,6 +593,7 @@ impl RootView {
             || self.open_in_main(Overlay::SessionMenu)
             || self.container_menu.is_some()
             || self.open_in_main(Overlay::ShellMenu)
+            || self.open_in_main(Overlay::LinkMenu)
             || self.sc_picker_open
             || self.changes.file_menu.is_some()
             || self.changes.discard.is_some()

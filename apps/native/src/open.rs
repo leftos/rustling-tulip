@@ -288,6 +288,15 @@ pub enum OpenAction {
     DefaultApp(PathBuf),
 }
 
+/// What a path link's click asked for: the default app (VS Code at a line),
+/// the viewer, or the file's folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkAction {
+    DefaultApp,
+    Viewer,
+    Folder,
+}
+
 /// Where a workspace row's "Open in VS Code" points.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VsCodeTarget {

@@ -12,7 +12,7 @@ use crate::file_fetch_view::OUTSIDE_FETCH_FOLDER;
 use crate::links::{LinkKind, TerminalLink, TerminalLinkCandidate};
 use crate::notice_view::modal_panel;
 use crate::notices::{ToastKind, ToastSpec};
-use crate::open::{self, JobOutcome, OpenAction, OpenFailure, OpenJob, Resolution};
+use crate::open::{self, JobOutcome, LinkAction, OpenAction, OpenFailure, OpenJob, Resolution};
 use crate::remote_mode::Capabilities;
 use crate::run_confirm::{RunButton, RunConfirm};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
@@ -26,20 +26,20 @@ use crate::{RootView, file_fetch};
 pub(crate) const COULD_NOT_OPEN: &str = "Couldn't open";
 
 /// The terminal a link was Ctrl+clicked in: the host its slot sends to,
-/// and the session it shows; and whether Shift was held too, asking for
-/// the viewer.
+/// and the session it shows; and what the click asked a path to do.
 pub(crate) struct LinkSource<'a> {
     pub(crate) host: &'a HostKey,
     pub(crate) session: Option<&'a str>,
-    pub(crate) prefer_viewer: bool,
+    pub(crate) action: LinkAction,
 }
 
-/// How a file opens: by `origin`'s route, and in the viewer when
-/// `prefer_viewer` and the viewer can show it, else in the external app.
+/// How a file opens: by `origin`'s route, and as `action` asks: in the
+/// viewer when the viewer can show it, else in the external app; or
+/// revealed in its folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Opening {
     pub(crate) origin: Origin,
-    pub(crate) prefer_viewer: bool,
+    pub(crate) action: LinkAction,
 }
 
 /// The toast of a file over the viewer's size cap, sent out instead.
@@ -133,8 +133,9 @@ impl RootView {
     }
 
     /// A pane's Ctrl+click picked `link`; a path in it resolves against
-    /// `base_dirs`, the folders of the pane's session, and opens in the
-    /// external app, or in the viewer for a Ctrl+Shift+click. A path in a
+    /// `base_dirs`, the folders of the pane's session, and opens as the
+    /// source's action asks: in the external app, in the viewer, or
+    /// revealed in its folder. A path in a
     /// pane of a remote host is fetched from its session's repos instead,
     /// never opened on This PC, whether or not the window holds that host's
     /// connection.
@@ -170,13 +171,13 @@ impl RootView {
             // they go first, unchecked.
             LinkKind::Path if !opens_here => {
                 let link = with_spaced_first(link);
-                self.fetch_path_link(&link, &host, session, source.prefer_viewer, cx);
+                self.fetch_path_link(&link, &host, session, source.action, cx);
             }
             LinkKind::Path => {
                 let candidates = link.candidates.clone();
                 let opening = Opening {
                     origin: Origin::Link,
-                    prefer_viewer: source.prefer_viewer,
+                    action: source.action,
                 };
                 self.resolve_path(candidates, base_dirs, opening, window, cx);
             }
@@ -327,10 +328,10 @@ impl RootView {
         }
     }
 
-    /// Opens `action`'s file as `opening` says: when it prefers the viewer,
-    /// a text file in the viewer, checked on a background thread, and
-    /// anything else by the external route; otherwise every file by the
-    /// external route, unchecked.
+    /// Opens `action`'s file as `opening` says: for the viewer, a text file
+    /// in the viewer, checked on a background thread, and anything else by
+    /// the external route; for its folder, revealed there, with no run
+    /// confirm; otherwise every file by the external route, unchecked.
     pub(crate) fn open_text_or_external(
         &mut self,
         action: OpenAction,
@@ -339,9 +340,21 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let origin = opening.origin;
-        if !opening.prefer_viewer {
-            self.open_external(action, origin, window, cx);
-            return;
+        match opening.action {
+            LinkAction::DefaultApp => {
+                self.open_external(action, origin, window, cx);
+                return;
+            }
+            LinkAction::Folder => {
+                let job = OpenJob::Reveal(action_path(&action).to_path_buf());
+                let route = Route {
+                    then: Then::Nothing,
+                    origin,
+                };
+                self.open_by(job, route, window, cx);
+                return;
+            }
+            LinkAction::Viewer => {}
         }
         let probed = action.clone();
         let verdict = cx

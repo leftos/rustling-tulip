@@ -28,12 +28,13 @@ use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::header_tip::SHOW_DELAY as HEADER_TIP_DELAY;
+use crate::link_menu::LinkMenu;
 use crate::open_view::LinkSource;
 use crate::pane_header_fit;
 use crate::popouts::{self, PopoutKey};
 use crate::runtime_icon::{RuntimeIcon, runtime_icon, runtime_icon_view};
 use crate::session_actions::StopPlace;
-use crate::session_menu::{BorderedButton, bordered_button};
+use crate::session_menu::{BorderedButton, MENU_MAX_SHARE, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::{can_attach, chip_tip, display_label, label_tooltip, runtime_label};
 use crate::spawn_view::{DISABLED_OPACITY, SpawnEntry};
@@ -863,7 +864,7 @@ impl RootView {
                 link,
                 base_dirs,
                 session,
-                prefer_viewer,
+                action,
             } => {
                 let Some(host) = host else {
                     tracing::debug!(%slot_id, "a gone terminal's link click; not opened");
@@ -872,9 +873,34 @@ impl RootView {
                 let source = LinkSource {
                     host: &host,
                     session: session.as_deref(),
-                    prefer_viewer: *prefer_viewer,
+                    action: *action,
                 };
                 self.open_link(link, base_dirs.clone(), &source, window, cx);
+            }
+            PaneEvent::LinkMenu {
+                link,
+                base_dirs,
+                session,
+                at,
+            } => {
+                let Some(host) = host else {
+                    tracing::debug!(%slot_id, "a gone terminal's link click; no menu");
+                    return;
+                };
+                let menu = LinkMenu {
+                    link: link.clone(),
+                    base_dirs: base_dirs.clone(),
+                    session: session.clone(),
+                    host,
+                    at: *at,
+                    selected: 0,
+                    max_height: window.viewport_size().height * MENU_MAX_SHARE,
+                };
+                // The press focuses the clicked pane, but its focus-in never
+                // runs once the menu takes the keyboard, so the pane the click
+                // was in takes it here and gets it back when the menu closes.
+                self.pane_focused(slot_id, window, cx);
+                self.open_link_menu(menu, window, cx);
             }
             PaneEvent::CheckSpacedLink(check) => {
                 let Some(host) = host else {

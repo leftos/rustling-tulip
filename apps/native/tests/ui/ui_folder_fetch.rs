@@ -133,7 +133,7 @@ fn click_link(h: &mut Harness<'_>, text: &str, col: usize) {
 /// Ctrl+clicks column `col` of `p2`'s first row.
 fn click_again(h: &mut Harness<'_>, col: usize) {
     let on = h.cell_center("p2", col, 0);
-    h.click(on, Modifiers::secondary_key());
+    h.pick_link(on);
 }
 
 /// The fetch messages (stats, fetches and cancels) sent to the saved host

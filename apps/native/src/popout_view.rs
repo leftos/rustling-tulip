@@ -270,6 +270,7 @@ impl RootView {
         let open = match overlay {
             Overlay::SessionMenu => self.menu.is_some(),
             Overlay::ShellMenu => self.shell_menu.is_some(),
+            Overlay::LinkMenu => self.link_menu.is_some(),
             Overlay::EmptyPaneMenu => self.pane_ui.menu.is_some(),
             Overlay::PaneOverflowMenu => self.pane_ui.overflow.is_some(),
             Overlay::PaneClose => self.pane_ui.close.is_some(),
@@ -314,6 +315,7 @@ impl RootView {
         let mut layers: Vec<AnyElement> = Vec::new();
         layers.extend(self.session_menu_layer(here, cx).into_iter().flatten());
         layers.extend(self.shell_menu_layer(here, cx).into_iter().flatten());
+        layers.extend(self.link_menu_layer(here, cx).into_iter().flatten());
         layers.extend(self.empty_pane_menu_layer(here, cx).into_iter().flatten());
         layers.extend(
             self.pane_overflow_menu_layer(here, cx)
@@ -326,7 +328,8 @@ impl RootView {
     }
 
     /// A key in a pop-out window: the pane-close dialog it draws takes
-    /// every key, Esc closes a menu it draws, Ctrl+Shift+M switches its
+    /// every key, Esc closes a menu it draws, Up, Down and Enter move
+    /// through and pick its link menu's rows, Ctrl+Shift+M switches its
     /// pane between terminal and chat, and Ctrl+Shift+P opens the jump
     /// palette in the main window. Anything else goes on to its terminal.
     pub(crate) fn on_popout_key(
@@ -350,6 +353,8 @@ impl RootView {
         {
             self.close_shell_menu(window, cx);
             true
+        } else if self.on_popout_link_menu_key(event, window, cx) {
+            true
         } else if let Some(key) = crate::keys::pane_view_key(ks) {
             // Swallowed even with nothing to switch: Ctrl+M is Enter and
             // Ctrl+U a line kill to the terminal.
@@ -367,6 +372,28 @@ impl RootView {
         }
     }
 
+    /// A key for the link menu a pop-out draws: Esc closes it, and Up, Down
+    /// and Enter move through and pick its rows. `false` for any other key,
+    /// and while the menu draws in another window.
+    fn on_popout_link_menu_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let ks = &event.keystroke;
+        if ks.key == "escape"
+            && self.link_menu.is_some()
+            && self
+                .overlays
+                .shows(Overlay::LinkMenu, window.window_handle().window_id())
+        {
+            self.close_link_menu(window, cx);
+            return true;
+        }
+        self.on_link_menu_key(ks, window, cx)
+    }
+
     /// Window `window_id` closed or docked back: the overlays it drew close
     /// with it, and its toasts move to the main window.
     pub(crate) fn drop_window_overlays(&mut self, window_id: WindowId) {
@@ -377,6 +404,7 @@ impl RootView {
                     self.menu = None;
                 }
                 Overlay::ShellMenu => self.shell_menu = None,
+                Overlay::LinkMenu => self.link_menu = None,
                 Overlay::EmptyPaneMenu => self.pane_ui.menu = None,
                 Overlay::PaneOverflowMenu => self.pane_ui.overflow = None,
                 Overlay::PaneClose => self.pane_ui.close = None,

@@ -161,7 +161,7 @@ fn path_link_fetches_instead_of_opening_on_remote(cx: &mut TestAppContext) {
     h.host(&saved_target())
         .pty("s1", br"wrote C:\wt\x\docs\notes.md");
     let on = h.cell_center("p2", 9, 0);
-    h.click(on, Modifiers::secondary_key());
+    h.pick_link(on);
     assert_eq!(h.opened(), [], "a host path never opens on this PC");
     let fetches: Vec<(String, Option<String>, String)> = h
         .host(&saved_target())

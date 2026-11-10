@@ -31,7 +31,7 @@ use crate::hosts::HostSender;
 use crate::links::{LinkKind, LinkSegment, TerminalLink};
 use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
-use crate::open;
+use crate::open::{self, LinkAction};
 use crate::paste_upload;
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
 use crate::shell_marks::{ShellDot, ShellStatus};
@@ -482,13 +482,22 @@ pub enum PaneEvent {
     Copied { text: String },
     /// Ctrl+click picked `link`; a path in it resolves against
     /// `base_dirs`, the folders of `session`, the pane's session.
-    /// `prefer_viewer`: Shift was held too, so a text file opens in the
-    /// viewer rather than the external app.
+    /// `action`: what the click asked a path to do; Ctrl+Shift+click asks
+    /// for the viewer.
     OpenLink {
         link: TerminalLink,
         base_dirs: Vec<String>,
         session: Option<String>,
-        prefer_viewer: bool,
+        action: LinkAction,
+    },
+    /// Ctrl+click picked the path `link`: the root opens the link menu at
+    /// `at`, in window coordinates, whose pick opens it as
+    /// [`PaneEvent::OpenLink`] would.
+    LinkMenu {
+        link: TerminalLink,
+        base_dirs: Vec<String>,
+        session: Option<String>,
+        at: Point<Pixels>,
     },
     /// Ctrl+hover reached a path with spaced readings: the root checks them
     /// in a pane that opens files here, and widens the link to the first
@@ -1608,10 +1617,10 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        // Ctrl+click on a link opens it (Ctrl+Shift+click in the viewer),
-        // ahead of a selection or a mouse report; its release then finds no
-        // gesture to end. Only the first press of a multi-click opens it;
-        // the later ones do nothing.
+        // Ctrl+click on a URL opens it and on a path opens the link menu
+        // (Ctrl+Shift+click views a path), ahead of a selection or a mouse
+        // report; its release then finds no gesture to end. Only the first
+        // press of a multi-click acts; the later ones do nothing.
         if event.button == MouseButton::Left
             && event.modifiers.secondary()
             && let Some(link) = self
@@ -1619,12 +1628,7 @@ impl TerminalPane {
                 .and_then(|cell| self.link_at(cell.row, cell.col))
         {
             if event.click_count == 1 {
-                cx.emit(PaneEvent::OpenLink {
-                    link,
-                    base_dirs: self.base_dirs.clone(),
-                    session: self.session_id().map(str::to_owned),
-                    prefer_viewer: event.modifiers.shift,
-                });
+                cx.emit(self.link_click(link, event));
             }
             cx.notify();
             return;
@@ -2304,16 +2308,42 @@ impl Render for TerminalPane {
     }
 }
 
-/// What the tip over a hovered link of `kind` says: a path opens or views,
-/// a URL only opens.
+/// What the tip over a hovered link of `kind` says: a path offers its menu
+/// or views, a URL only opens.
 fn link_tip_text(kind: LinkKind) -> &'static str {
     match kind {
-        LinkKind::Path => "Ctrl+click to open · Ctrl+Shift+click to view",
+        LinkKind::Path => "Ctrl+click for options · Ctrl+Shift+click to view",
         LinkKind::Url => "Ctrl+click to open",
     }
 }
 
 impl TerminalPane {
+    /// What a Ctrl+click `event` on `link` asks the root for: the link menu
+    /// for a path, at the click; else the open itself, in the viewer for a
+    /// Ctrl+Shift+click.
+    fn link_click(&self, link: TerminalLink, event: &MouseDownEvent) -> PaneEvent {
+        let base_dirs = self.base_dirs.clone();
+        let session = self.session_id().map(str::to_owned);
+        if matches!(link.kind, LinkKind::Path) && !event.modifiers.shift {
+            return PaneEvent::LinkMenu {
+                link,
+                base_dirs,
+                session,
+                at: event.position,
+            };
+        }
+        PaneEvent::OpenLink {
+            link,
+            base_dirs,
+            session,
+            action: if event.modifiers.shift {
+                LinkAction::Viewer
+            } else {
+                LinkAction::DefaultApp
+            },
+        }
+    }
+
     /// The tip naming the gestures of the link Ctrl+hover underlines, just
     /// below the hovered cell and kept inside the window.
     fn link_tip(&self, cx: &App) -> Option<AnyElement> {

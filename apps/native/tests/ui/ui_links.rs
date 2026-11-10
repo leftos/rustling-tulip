@@ -1,7 +1,8 @@
 //! Terminal link specs: Ctrl+hover underlines the link under the mouse and
-//! names its gestures, and Ctrl+click opens it — a URL in the browser, a
-//! path with a line in VS Code, a plain path in its default app — through a
-//! recording opener; Ctrl+Shift+click views a text path in the viewer.
+//! names its gestures; Ctrl+click opens a URL in the browser, and on a path
+//! opens the link menu, whose entries open it in VS Code at its line or its
+//! default app, in the viewer, or in its folder, through a recording opener;
+//! Ctrl+Shift+click views a text path in the viewer.
 
 #![expect(
     clippy::expect_used,
@@ -13,10 +14,10 @@ use crate::support;
 use std::path::{Path, PathBuf};
 
 use gpui::{Modifiers, TestAppContext, point, px};
-use protocol::{ClientMessage, SessionSnapshot};
-use rustling_tulip_native::ToastKind;
+use protocol::{ClientMessage, SessionSnapshot, SplitDirection};
+use rustling_tulip_native::{OpenOutcome, PopoutKey, ToastKind};
 use serde_json::{Value, json};
-use support::{Fixture, Harness, Opened, TestDir, session};
+use support::{Fixture, Harness, Opened, TestDir, pane, session, split, tab};
 
 const URL: &str = "https://example.com/docs";
 
@@ -77,7 +78,7 @@ fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
     h.cx.debug_bounds(selector).is_some()
 }
 
-const BOTH_GESTURES: &str = "pane-link-tip-p1=Ctrl+click to open · Ctrl+Shift+click to view";
+const BOTH_GESTURES: &str = "pane-link-tip-p1=Ctrl+click for options · Ctrl+Shift+click to view";
 const OPEN_ONLY: &str = "pane-link-tip-p1=Ctrl+click to open";
 
 #[gpui::test]
@@ -99,6 +100,7 @@ fn ctrl_click_on_a_url_opens_it(cx: &mut TestAppContext) {
     h.pty("s1", format!("see {URL} here").as_bytes());
     let on = h.cell_center("p1", 10, 0);
     h.click(on, ctrl());
+    assert!(!h.in_model("link-menu"), "a URL opens no menu");
     assert_eq!(h.opened(), [Opened::Url(URL.to_owned())]);
     let off = h.cell_center("p1", 1, 0);
     h.click(off, ctrl());
@@ -120,8 +122,10 @@ fn ctrl_click_on_a_path_with_line_opens_vscode_at_the_line(cx: &mut TestAppConte
     );
     let with_column = h.cell_center("p1", 12, 0);
     h.click(with_column, ctrl());
+    h.keys("enter");
     let line_only = h.cell_center("p1", 8, 1);
     h.click(line_only, ctrl());
+    h.keys("enter");
     assert_eq!(
         h.opened(),
         [
@@ -140,15 +144,126 @@ fn ctrl_click_on_a_path_with_line_opens_vscode_at_the_line(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn ctrl_click_on_a_text_path_opens_the_default_app(cx: &mut TestAppContext) {
+fn ctrl_click_on_a_text_path_then_enter_opens_the_default_app(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let file = write_file(dir.path(), "docs/notes.md");
     let mut h = attached(cx, &dir, shell_in(dir.path()));
     h.pty("s1", b"wrote docs/notes.md");
     let on = h.cell_center("p1", 9, 0);
     h.click(on, ctrl());
+    assert_eq!(h.opened(), [], "the click only opens the menu");
+    assert!(h.in_model("link-menu"));
+    h.keys("enter");
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+    assert!(!h.in_model("link-menu"), "a pick closes the menu");
     assert_eq!(viewer_opens(&mut h), Vec::<PathBuf>::new(), "no viewer tab");
+}
+
+/// A shell in a fresh folder holding `docs/notes.md`, with a Ctrl+click on
+/// the link to it made; returns the harness, the file and the click point.
+fn notes_menu<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+) -> (Harness<'a>, PathBuf, gpui::Point<gpui::Pixels>) {
+    let file = write_file(dir.path(), "docs/notes.md");
+    let mut h = attached(cx, dir, shell_in(dir.path()));
+    h.pty("s1", b"wrote docs/notes.md");
+    let on = h.cell_center("p1", 9, 0);
+    h.click(on, ctrl());
+    (h, file, on)
+}
+
+/// The text of the open link menu's row `id`.
+fn row_label(h: &mut Harness<'_>, id: &'static str) -> Option<&'static str> {
+    h.root(move |root, _| root.link_menu_row_label(id))
+}
+
+#[gpui::test]
+fn ctrl_click_on_a_path_shows_three_entries(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _, _) = notes_menu(cx, &dir);
+    for id in ["link-menu-default", "link-menu-viewer", "link-menu-folder"] {
+        assert!(h.in_model(id), "{id} is in the menu");
+    }
+    assert_eq!(
+        row_label(&mut h, "link-menu-default"),
+        Some("Open in default app")
+    );
+    assert_eq!(
+        row_label(&mut h, "link-menu-viewer"),
+        Some("Open in viewer")
+    );
+    assert_eq!(
+        row_label(&mut h, "link-menu-folder"),
+        Some("Open containing folder")
+    );
+}
+
+#[gpui::test]
+fn ctrl_click_on_a_path_with_a_line_names_vscode(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    write_file(dir.path(), "src/main.rs");
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", b"error at src/main.rs:12:5 here");
+    let on = h.cell_center("p1", 12, 0);
+    h.click(on, ctrl());
+    assert_eq!(
+        row_label(&mut h, "link-menu-default"),
+        Some("Open in VS Code")
+    );
+}
+
+#[gpui::test]
+fn the_viewer_entry_opens_the_viewer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, file, _) = notes_menu(cx, &dir);
+    h.click_on("link-menu-viewer");
+    assert_eq!(viewer_opens(&mut h), [file]);
+    assert_eq!(h.opened(), [], "no default app");
+}
+
+#[gpui::test]
+fn the_folder_entry_reveals_the_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, file, _) = notes_menu(cx, &dir);
+    h.click_on("link-menu-folder");
+    assert_eq!(h.opened(), [Opened::Reveal(file)]);
+}
+
+#[gpui::test]
+fn down_then_enter_picks_the_viewer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, file, _) = notes_menu(cx, &dir);
+    h.keys("down");
+    h.keys("enter");
+    assert_eq!(viewer_opens(&mut h), [file]);
+    assert_eq!(h.opened(), [], "no default app");
+}
+
+#[gpui::test]
+fn escape_and_an_outside_click_close_the_link_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _, on) = notes_menu(cx, &dir);
+    assert!(h.in_model("link-menu"));
+    h.keys("escape");
+    assert!(!h.in_model("link-menu"), "Esc closes the menu");
+    assert_eq!(h.opened(), [], "and opens nothing");
+
+    h.click(on, ctrl());
+    assert!(h.in_model("link-menu"));
+    let grid = h.bounds("pane-grid-p1");
+    let far = point(
+        grid.origin.x + grid.size.width - px(10.0),
+        grid.origin.y + grid.size.height - px(10.0),
+    );
+    assert!(
+        !h.bounds("link-menu").contains(&far),
+        "the click is over the pane, not the menu"
+    );
+    h.click(far, Modifiers::none());
+    assert!(!h.in_model("link-menu"), "and a click outside it");
+    assert_eq!(h.opened(), [], "which picked no entry");
+    assert_eq!(viewer_opens(&mut h), Vec::<PathBuf>::new());
 }
 
 #[gpui::test]
@@ -235,7 +350,7 @@ fn a_local_path_link_still_opens_locally(cx: &mut TestAppContext) {
     );
     h.pty("s1", b"wrote docs/notes.md");
     let on = h.cell_center("p1", 9, 0);
-    h.click(on, ctrl());
+    h.pick_link(on);
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
     assert!(
         !h.sent()
@@ -268,7 +383,7 @@ fn soft_wrapped_path_opens_whole(cx: &mut TestAppContext) {
         "the path wraps onto a second row: {text:?}"
     );
     let on_second_row = h.cell_center("p1", 3, 1);
-    h.click(on_second_row, ctrl());
+    h.pick_link(on_second_row);
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
 }
 
@@ -298,7 +413,7 @@ fn a_path_wrapped_inside_a_capped_reply_box_opens_whole(cx: &mut TestAppContext)
     let on_lower = h.cell_center("p1", 4, 1);
     h.hover(on_lower, ctrl());
     assert_eq!(h.hovered_link("p1"), Some(rel));
-    h.click(on_lower, ctrl());
+    h.pick_link(on_lower);
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
 }
 
@@ -335,7 +450,7 @@ fn a_path_with_spaces_underlines_and_opens_whole(cx: &mut TestAppContext) {
         Some(shown),
         "the whole spaced path is underlined"
     );
-    h.click(on, ctrl());
+    h.pick_link(on);
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
 }
 
@@ -359,13 +474,13 @@ fn prose_after_a_path_stays_split_when_no_spaced_file_exists(cx: &mut TestAppCon
     h.hover(on_first, ctrl());
     h.cx.run_until_parked();
     assert_eq!(h.hovered_link("p1"), Some(shown), "the path alone");
-    h.click(on_first, ctrl());
+    h.pick_link(on_first);
 
     let (row, col) = find_on_grid(&mut h, "bar.rs");
     let on_second = h.cell_center("p1", col, row);
     h.hover(on_second, ctrl());
     assert_eq!(h.hovered_link("p1").as_deref(), Some("src/bar.rs"));
-    h.click(on_second, ctrl());
+    h.pick_link(on_second);
     assert_eq!(
         h.opened(),
         [Opened::DefaultApp(first), Opened::DefaultApp(second)]
@@ -399,7 +514,7 @@ fn quoted_path_with_spaces_widens_when_it_exists(cx: &mut TestAppContext) {
         Some("my-docs/a b.txt"),
         "the whole quoted path is underlined"
     );
-    h.click(on, ctrl());
+    h.pick_link(on);
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
 }
 
@@ -419,7 +534,7 @@ fn hover_on_a_later_path_checks_its_own_readings(cx: &mut TestAppContext) {
         Some(shown),
         "the later path's own spaced reading is checked"
     );
-    h.click(on, ctrl());
+    h.pick_link(on);
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
 }
 
@@ -442,7 +557,7 @@ fn widen_survives_new_output_elsewhere_on_screen(cx: &mut TestAppContext) {
         Some(shown),
         "the widen holds once other rows change"
     );
-    h.click(on, ctrl());
+    h.pick_link(on);
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
 }
 
@@ -472,7 +587,7 @@ fn widen_holds_on_the_second_row_of_a_wrapped_path(cx: &mut TestAppContext) {
     // The next row is the wrapped run of the long folder name; the click
     // reads that row's links afresh.
     let below = h.cell_center("p1", 0, row + 1);
-    h.click(below, ctrl());
+    h.pick_link(below);
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
 }
 
@@ -520,7 +635,7 @@ fn unresolvable_path_shows_a_toast(cx: &mut TestAppContext) {
     let mut h = attached(cx, &dir, shell_in(dir.path()));
     h.pty("s1", b"open docs/missing.md");
     let on = h.cell_center("p1", 8, 0);
-    h.click(on, ctrl());
+    h.pick_link(on);
     assert_eq!(h.opened(), []);
     let toasts = h.root(|root, _| {
         root.toasts()
@@ -544,7 +659,7 @@ fn bat_link_clicked<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'
     let mut h = attached(cx, dir, shell_in(dir.path()));
     h.pty("s1", b"run tools/run.bat");
     let on = h.cell_center("p1", 8, 0);
-    h.click(on, ctrl());
+    h.pick_link(on);
     (h, file)
 }
 
@@ -571,6 +686,23 @@ fn ctrl_click_on_a_bat_asks_before_running(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_folder_entry_on_a_bat_does_not_ask(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "tools/run.bat");
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", b"run tools/run.bat");
+    let on = h.cell_center("p1", 8, 0);
+    h.click(on, ctrl());
+    h.click_on("link-menu-folder");
+    assert_eq!(h.opened(), [Opened::Reveal(file)]);
+    assert_eq!(
+        h.run_confirm(),
+        None,
+        "revealing runs nothing, so nothing asks"
+    );
+}
+
+#[gpui::test]
 fn run_in_the_confirm_opens_it(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, file) = bat_link_clicked(cx, &dir);
@@ -579,7 +711,7 @@ fn run_in_the_confirm_opens_it(cx: &mut TestAppContext) {
     assert_eq!(h.run_confirm(), None);
 
     let on = h.cell_center("p1", 8, 0);
-    h.click(on, ctrl());
+    h.pick_link(on);
     h.keys("tab tab enter");
     assert_eq!(
         h.opened(),
@@ -597,7 +729,7 @@ fn show_in_explorer_reveals_it(cx: &mut TestAppContext) {
     assert_eq!(h.run_confirm(), None);
 
     let on = h.cell_center("p1", 8, 0);
-    h.click(on, ctrl());
+    h.pick_link(on);
     press(&mut h, "run-confirm-reveal");
     assert_eq!(
         h.opened(),
@@ -613,7 +745,7 @@ fn cancel_opens_nothing(cx: &mut TestAppContext) {
     assert_eq!(h.run_confirm(), None, "Esc closes the confirm");
 
     let on = h.cell_center("p1", 8, 0);
-    h.click(on, ctrl());
+    h.pick_link(on);
     assert!(h.run_confirm().is_some());
     press(&mut h, "run-confirm-cancel");
     assert_eq!(h.run_confirm(), None);
@@ -661,7 +793,7 @@ fn boxed_link_border_is_not_clickable(cx: &mut TestAppContext) {
         h.hovered_link("p1"),
         Some(format!("docs/{}.md", "a".repeat(16)))
     );
-    h.click(on_tail, ctrl());
+    h.pick_link(on_tail);
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
 }
 
@@ -757,12 +889,12 @@ fn an_edit_to_unc_hosts_applies_on_the_next_click(cx: &mut TestAppContext) {
         Some("Add it to unc_hosts in native-ui.json to allow it.".to_owned()),
     );
 
-    h.click(on, ctrl());
+    h.pick_link(on);
     assert_eq!(h.opened(), []);
     assert_eq!(toasts(&mut h), std::slice::from_ref(&refused));
 
     hand_edit_unc_hosts(&dir, Some(&["NAS"]));
-    h.click(on, ctrl());
+    h.pick_link(on);
     let opened = Opened::DefaultApp(PathBuf::from(r"\\nas\share\notes.md"));
     assert_eq!(
         h.opened(),
@@ -771,7 +903,7 @@ fn an_edit_to_unc_hosts_applies_on_the_next_click(cx: &mut TestAppContext) {
     );
 
     hand_edit_unc_hosts(&dir, None);
-    h.click(on, ctrl());
+    h.pick_link(on);
     assert_eq!(h.opened(), [opened], "unlisted again, so it does not");
     assert_eq!(
         toasts(&mut h),
@@ -779,6 +911,107 @@ fn an_edit_to_unc_hosts_applies_on_the_next_click(cx: &mut TestAppContext) {
         "the second refusal of the same host updates the toast that is up"
     );
     assert_eq!(toast_kinds(&mut h), [ToastKind::Warning]);
+}
+
+/// A tab `t1` with `p1` on `s1` and `p2` on `s2`, both shells in `dir`'s
+/// folder, their scrollback answered and `p1` holding the keyboard.
+fn two_shell_panes<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").shell(&cwd).build(),
+            session("s2").shell(&cwd).build(),
+        ],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    h.cx.update(|window, _| window.activate_window());
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
+    h
+}
+
+/// The pane its tab has focused.
+fn focused_pane(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.focused_pane())
+}
+
+#[gpui::test]
+fn ctrl_click_in_another_pane_moves_the_keyboard_there(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    write_file(dir.path(), "docs/notes.md");
+    let mut h = two_shell_panes(cx, &dir);
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p1"),
+        "p1 starts with the keyboard"
+    );
+    h.pty("s2", b"wrote docs/notes.md");
+    let on = h.cell_center("p2", 9, 0);
+    h.click(on, ctrl());
+    assert!(h.in_model("link-menu"), "the Ctrl+click opens the menu");
+    h.keys("escape");
+    assert!(!h.in_model("link-menu"), "Esc closes the menu");
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p2"),
+        "the keyboard stays on the pane the click was in"
+    );
+}
+
+/// [`two_shell_panes`] with `p2` popped out into a window of its own.
+fn pane_popped<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = two_shell_panes(cx, dir);
+    let key = PopoutKey::Pane {
+        tab_id: "t1".to_owned(),
+        pane_id: "p2".to_owned(),
+    };
+    assert_eq!(
+        h.root_update(move |root, window, cx| root.open_popout(key, window, cx)),
+        OpenOutcome::Opened
+    );
+    h
+}
+
+#[gpui::test]
+fn link_menu_keys_act_only_in_its_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    write_file(dir.path(), "docs/notes.md");
+    let mut h = pane_popped(cx, &dir);
+    h.pty("s1", b"wrote docs/notes.md");
+    h.pty("s2", b"wrote docs/notes.md");
+    h.cx.run_until_parked();
+
+    // The main window opens a menu of its own, which holds its keyboard.
+    let in_main = h.cell_center("p1", 9, 0);
+    h.click(in_main, ctrl());
+    assert!(h.in_model("link-menu"), "the main window's menu is open");
+
+    // The pop-out then opens its menu, which the overlay owner moves to.
+    let root = h.root.clone();
+    let mut popout = h.popout_window();
+    let at = popout
+        .update(|_, cx| root.read(cx).pane_cell_center("p2", 9, 0, cx))
+        .expect("p2 is laid out in the pop-out");
+    popout.simulate_click(at, ctrl());
+
+    // Up and Enter in the main window, which draws no menu any more, drive none.
+    h.keys("down enter");
+    assert!(
+        h.root(|root, _| root.link_menu_open()),
+        "the pop-out's menu is open and stays open"
+    );
+    assert_eq!(h.opened(), [], "no entry was picked");
+    assert_eq!(viewer_opens(&mut h), Vec::<PathBuf>::new(), "no viewer tab");
 }
 
 #[gpui::test]

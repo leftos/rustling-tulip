@@ -88,6 +88,8 @@ mod keys;
 pub mod launch_last;
 mod layout_chooser;
 mod layout_chooser_view;
+mod link_menu;
+mod link_menu_view;
 mod links;
 pub mod logging;
 mod md_blocks;
@@ -246,6 +248,7 @@ use crate::footer::{CountSpan, StopConfirm, flyout_rows, status_counts};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::host_path_prompt_view::HostPathDialog;
 use crate::hosts::{HostConn, Hosts, PaneForgets};
+use crate::link_menu::LinkMenu;
 use crate::needs_you_view::moves_needs_you;
 use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
@@ -331,7 +334,7 @@ pub use crate::notices::{
     ToastKind, ToastSpec, toast_action_selector,
 };
 pub use crate::notify::{Notifier, NotifyState, PairingActionSink};
-pub use crate::open::{OpenFailure, Opener};
+pub use crate::open::{LinkAction, OpenFailure, Opener};
 pub use crate::pairing::{
     DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix, WaitingRow,
     approve_message, deny_message,
@@ -1003,6 +1006,8 @@ pub struct RootView {
     menu: Option<SessionMenu>,
     /// The gutter-dot command menu, while open.
     shell_menu: Option<ShellMenu>,
+    /// The menu a Ctrl+click on a path link opened, while open.
+    link_menu: Option<LinkMenu>,
     /// The open menu's keyboard focus, so Esc reaches it.
     menu_focus: FocusHandle,
     /// The repo or workspace context menu, while open.
@@ -1634,6 +1639,7 @@ impl RootView {
             paths,
             menu: None,
             shell_menu: None,
+            link_menu: None,
             menu_focus: cx.focus_handle(),
             container_menu: None,
             more_menu: sidebar_view::MoreMenu::Closed,
@@ -5558,6 +5564,7 @@ impl RootView {
             return;
         }
         if self.on_container_menu_key(ks, window, cx)
+            || self.on_link_menu_key(ks, window, cx)
             || self.on_container_row_key(ks, window, cx)
             || self.on_dashboard_toggle_key(ks, event.is_held, window, cx)
         {
@@ -5705,6 +5712,11 @@ impl RootView {
             && ks.key == "escape"
         {
             self.close_shell_menu(window, cx);
+        } else if self.link_menu.is_some()
+            && self.overlays.shows(Overlay::LinkMenu, here)
+            && ks.key == "escape"
+        {
+            self.close_link_menu(window, cx);
         } else if self.sc_picker_open && ks.key == "escape" {
             self.close_sc_picker(window, cx);
         } else if self.changes.file_menu.is_some() && ks.key == "escape" {
@@ -6082,6 +6094,7 @@ impl Render for RootView {
             .children(self.dashboard_band_layer(cx))
             .children(self.session_menu_layer(here, cx).into_iter().flatten())
             .children(self.shell_menu_layer(here, cx).into_iter().flatten())
+            .children(self.link_menu_layer(here, cx).into_iter().flatten())
             .children(self.tab_menu_layer(cx).into_iter().flatten())
             .children(self.pane_menu_layers(here, cx))
             .children(self.container_menu_layer(cx).into_iter().flatten())

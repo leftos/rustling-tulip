@@ -3575,6 +3575,10 @@ impl<'a> Harness<'a> {
                 root.shell_menu_open()
             } else if selector.starts_with("shell-menu-") {
                 root.shell_menu_rows().contains(&selector)
+            } else if selector == "link-menu" {
+                root.link_menu_open()
+            } else if selector.starts_with("link-menu-") {
+                root.link_menu_row_label(&selector).is_some()
             } else if selector == "shell-clear-default" {
                 root.shell_dialog_clears_default()
             } else if selector.starts_with("shell-") {
@@ -3618,6 +3622,13 @@ impl<'a> Harness<'a> {
     pub fn click(&mut self, at: Point<Pixels>, modifiers: Modifiers) {
         self.cx.simulate_click(at, modifiers);
         self.cx.run_until_parked();
+    }
+
+    /// Ctrl+clicks a path link at `at` and picks the menu's first entry, as
+    /// a Ctrl+click alone did before the link menu.
+    pub fn pick_link(&mut self, at: Point<Pixels>) {
+        self.click(at, Modifiers::secondary_key());
+        self.keys("enter");
     }
 
     /// Runs `change` on the root view, then lets the view settle.

@@ -4245,6 +4245,7 @@ impl RootView {
         self.close_more_menu(window, cx);
         self.close_empty_pane_menu(window, cx);
         self.close_pane_overflow_menu(window, cx);
+        self.close_link_menu(window, cx);
         self.overlays
             .opened(Overlay::ShellMenu, window.window_handle().window_id());
         self.shell_menu = Some(ShellMenu {
@@ -4260,14 +4261,15 @@ impl RootView {
         cx.notify();
     }
 
-    /// Closes the gutter menu and hands the keyboard back to the terminal of
-    /// the window it was open in.
+    /// Closes the shell-integration dot menu and the link menu, handing the
+    /// keyboard back to the terminal of the window each was open in.
     pub(crate) fn close_shell_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.shell_menu.take().is_some() {
             let owner = self.overlays.owner(Overlay::ShellMenu);
             self.hand_back_focus(owner, window, cx);
             cx.notify();
         }
+        self.close_link_menu(window, cx);
     }
 
     /// Whether `menu`'s command can be typed again: it is not empty, its

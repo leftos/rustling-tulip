@@ -16,8 +16,9 @@ use std::process::Command;
 use std::sync::Arc;
 
 use daemon_client::device_tokens::{DeviceTokenStore as _, MemoryTokens};
-use gpui::{Modifiers, TestAppContext};
+use gpui::TestAppContext;
 use protocol::{ClientMessage, DaemonMessage, RemoteState};
+use rustling_tulip_native::LinkAction;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetCommand};
@@ -512,7 +513,7 @@ fn remote_html_fetch_brings_its_relative_media(
         line: None,
         column: None,
         open_when_done: true,
-        prefer_viewer: false,
+        action: LinkAction::DefaultApp,
     };
     device
         .root_update(move |view, _, cx| view.fetch_remote_file(request, cx))
@@ -624,7 +625,7 @@ fn remote_folder_fetch_lands_the_tree_byte_exact(
         line: None,
         column: None,
         open_when_done: false,
-        prefer_viewer: false,
+        action: LinkAction::DefaultApp,
     };
     device
         .root_update(move |view, _, cx| view.fetch_remote_folder(request, cx))
@@ -721,7 +722,7 @@ fn remote_fetch_from_a_sibling_worktree_lands_the_file(
     device.type_into(&pane, &format!("echo {shown}\n"));
     let (col, row) = text_row(&mut device, &pane, &shown);
     let at = device.cell_center(&pane, col + 2, row);
-    device.click(at, Modifiers::secondary_key());
+    device.pick_link(at);
 
     let landed = root.join(REMOTE_HOST).join(&name).join("note.txt");
     device.wait_until("the sibling worktree's note to land", |_| landed.exists());

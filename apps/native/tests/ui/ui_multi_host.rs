@@ -15,6 +15,7 @@ use protocol::{
     VscodeWorkspaceFolder, VscodeWorkspaceSuggestion, WorktreeCleanupFailure,
     WorktreeLockingProcess,
 };
+use rustling_tulip_native::LinkAction;
 use rustling_tulip_native::ScKey;
 use rustling_tulip_native::connection_picker::PeerSource;
 use rustling_tulip_native::file_fetch::FetchRequest;
@@ -738,7 +739,7 @@ fn fetch_request(target: &Target, repo_id: &str, rel: &str) -> FetchRequest {
         line: None,
         column: None,
         open_when_done: false,
-        prefer_viewer: true,
+        action: LinkAction::Viewer,
     }
 }
 
@@ -3926,7 +3927,7 @@ fn a_path_link_in_a_remote_pane_fetches_from_that_host_when_both_hosts_hold_the_
     h.sent();
 
     let on = h.cell_center("p1", 9, 0);
-    h.click(on, Modifiers::secondary_key());
+    h.pick_link(on);
 
     let fetched: Vec<String> = h
         .host(&remote())

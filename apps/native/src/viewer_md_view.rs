@@ -24,7 +24,7 @@ use crate::fonts::{self, ui_px_at};
 use crate::links::TerminalLinkCandidate;
 use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
 use crate::notices::ToastKind;
-use crate::open::OpenJob;
+use crate::open::{LinkAction, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, Opening, Origin, Then};
 use crate::stretchtext::Composed;
 use crate::syntax::{self, Highlighted, LineSpans, TokenClass};
@@ -957,10 +957,12 @@ impl RootView {
                     column: None,
                 };
                 let base_dirs = vec![folder.to_string_lossy().into_owned()];
-                let opening = Opening {
-                    origin,
-                    prefer_viewer,
+                let action = if prefer_viewer {
+                    LinkAction::Viewer
+                } else {
+                    LinkAction::DefaultApp
                 };
+                let opening = Opening { origin, action };
                 self.resolve_path(vec![candidate], base_dirs, opening, window, cx);
             }
             LinkTarget::Anchor(slug) => self.scroll_to_md_anchor(tab_id, &slug, cx),

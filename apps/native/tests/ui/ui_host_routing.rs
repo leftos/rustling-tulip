@@ -558,7 +558,7 @@ fn a_remote_panes_link_fetches_from_that_host_when_both_hold_the_repo_id(cx: &mu
 
     h.host(&saved_remote()).pty("s1", b"see C:/wt/x/src/a.rs");
     let on = h.cell_center("p2", 6, 0);
-    h.click(on, Modifiers::secondary_key());
+    h.pick_link(on);
 
     let fetches = |sent: Vec<ClientMessage>| -> Vec<String> {
         sent.into_iter()
