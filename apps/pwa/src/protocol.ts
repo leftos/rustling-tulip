@@ -150,6 +150,14 @@ export const FEATURE_TYPED_PROMPT_ANSWERS = "typed_prompt_answers";
 export const FEATURE_REMOTE_UPDATE = "remote_update";
 
 /**
+ * What a daemon's `AuthFailed.reason` starts with when the client's `Hello`
+ * shares no protocol version with it. Clients of older releases match on
+ * it to tell a host that moved past their protocol, so the text never
+ * changes.
+ */
+export const NO_COMMON_PROTOCOL_REASON = "no compatible protocol version";
+
+/**
  * `Welcome.features` entry: the daemon tells its connected clients to update
  * themselves ([`ClientMessage::UpdateConnectedClients`]).
  */
