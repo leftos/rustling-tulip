@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - Connections and Settings show the release each host runs, and mark a host on an older release than this app as Behind.
+- When another device updates this PC, the app counts down 10 seconds, says who asked, offers Cancel, then reopens after the update.
 
 ### Fixed
 

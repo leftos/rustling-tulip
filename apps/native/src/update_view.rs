@@ -1,7 +1,8 @@
 //! The updater on screen: the checks it runs, the footer's notice of a ready
 //! update and its Restart to update button, the footer's client version, the
 //! Settings → General update rows and their Restart to update button, and
-//! the toast after an update
+//! the toast after an update, and the countdown toast of an update This
+//! PC's daemon starts for another device
 //! (`docs/auto-update.md`, decisions 3, 5, 6 and 8). The checking and the
 //! installing are [`crate::update`]'s.
 
@@ -12,8 +13,12 @@ use futures::FutureExt as _;
 use futures::future::Shared;
 use gpui::{AnyElement, ClickEvent, Context, Task, Window, div, prelude::*, px};
 
+use protocol::{ClientMessage, DaemonMessage};
+
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
+use crate::host_update::{HOST_UPDATE_CANCEL, HostUpdateCountdown, toast_key};
 use crate::notices::{ToastAction, ToastKind, ToastSpec};
+use crate::target::HostKey;
 use crate::ui_theme::theme;
 use crate::update::{AlreadyRunning, LastResult, Ready, Updater};
 use crate::{FOOTER_PILL_HEIGHT, FOOTER_PILL_TEXT_SIZE, RootView, tagged_text};
@@ -38,6 +43,9 @@ const WHATS_NEW_LABEL: &str = "What's new";
 pub(crate) const INSTALLED_TOAST_KEY: &str = "update-installed";
 /// The installed toast's button that opens the What's new window.
 pub(crate) const WHATS_NEW_ACTION: &str = "whats-new";
+const CANCEL_LABEL: &str = "Cancel";
+/// How often the host update's countdown redraws its title.
+const HOST_UPDATE_TICK: Duration = Duration::from_secs(1);
 
 /// What the last check found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,6 +317,179 @@ impl RootView {
                 self.push_toast(ToastKind::Error, START_FAILED_TITLE, detail, cx);
             }
         }
+    }
+
+    /// This PC's daemon counting down to an update another device asked
+    /// for: its toast shows and counts down, goes when the update is
+    /// cancelled, and the client quits as Keep sessions running does when
+    /// the update starts. A remote host's notices are ignored.
+    pub(crate) fn on_host_update_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
+        if *host != HostKey::Local {
+            return;
+        }
+        match msg {
+            DaemonMessage::HostUpdateScheduled {
+                update_id,
+                requested_by,
+                version,
+                seconds,
+            } => {
+                let update = HostUpdateCountdown::scheduled(
+                    update_id.clone(),
+                    requested_by.clone(),
+                    version.clone(),
+                    *seconds,
+                    (self.now)(),
+                );
+                self.schedule_host_update(update, cx);
+            }
+            DaemonMessage::HostUpdateCanceled { update_id } => {
+                self.host_update_canceled(update_id, cx);
+            }
+            DaemonMessage::HostUpdateLaunched { update_id } => {
+                self.host_update_launched(update_id, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// Shows `update`'s countdown in place of any other; an update that
+    /// already ended stays ended.
+    fn schedule_host_update(&mut self, update: HostUpdateCountdown, cx: &mut Context<Self>) {
+        if self.host_update_ended.as_deref() == Some(update.update_id.as_str()) {
+            tracing::debug!(update_id = %update.update_id, "update: a notice for an ended update ignored");
+            return;
+        }
+        let shown = self
+            .host_update
+            .as_ref()
+            .map(|shown| shown.update_id.clone());
+        let ticking = shown.as_deref() == Some(update.update_id.as_str());
+        if let Some(other) = shown.filter(|id| id != &update.update_id) {
+            self.dismiss_toast_key(&toast_key(&other), cx);
+        }
+        tracing::info!(update_id = %update.update_id, "update: this PC's daemon counts down to an update");
+        let update_id = update.update_id.clone();
+        self.host_update = Some(update);
+        self.show_host_update(cx);
+        // One timer per update: another id's countdown replaces this one's,
+        // and dropping the old task stops it.
+        if !ticking || self.host_update_timer.is_none() {
+            self.host_update_timer = Some(Self::tick_host_update(update_id, cx));
+        }
+    }
+
+    /// The countdown's toast, its title read off the clock.
+    fn show_host_update(&mut self, cx: &mut Context<Self>) {
+        let Some(update) = &self.host_update else {
+            return;
+        };
+        let spec = ToastSpec {
+            kind: ToastKind::Info,
+            title: update.title((self.now)()),
+            detail: Some(update.body()),
+            key: Some(toast_key(&update.update_id)),
+            sticky: true,
+            actions: vec![ToastAction {
+                id: HOST_UPDATE_CANCEL,
+                label: CANCEL_LABEL,
+                danger: false,
+            }],
+        };
+        self.push_toast_spec(spec, cx);
+    }
+
+    /// Redraws the countdown's title every second while update
+    /// `update_id` still counts down; dropping the task stops it.
+    fn tick_host_update(update_id: String, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(HOST_UPDATE_TICK).await;
+                // Fails only when the view is gone, and the countdown with it.
+                let counting = this
+                    .update(cx, |root, cx| root.host_update_ticked(&update_id, cx))
+                    .unwrap_or(false);
+                if !counting {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// A second went by: the toast, while it shows, takes the new title.
+    /// Returns whether update `update_id` still counts down.
+    fn host_update_ticked(&mut self, update_id: &str, cx: &mut Context<Self>) -> bool {
+        if self
+            .host_update
+            .as_ref()
+            .is_none_or(|update| update.update_id != update_id)
+        {
+            return false;
+        }
+        // The × closes the countdown's toast for good.
+        let key = toast_key(update_id);
+        let shown = self
+            .notices
+            .toasts()
+            .iter()
+            .any(|toast| toast.key.as_deref() == Some(key.as_str()));
+        if shown {
+            self.show_host_update(cx);
+        }
+        true
+    }
+
+    /// The daemon cancelled update `update_id`: its countdown goes, and a
+    /// late repeat of its notice is ignored.
+    fn host_update_canceled(&mut self, update_id: &str, cx: &mut Context<Self>) {
+        self.host_update_ended = Some(update_id.to_owned());
+        if self
+            .host_update
+            .as_ref()
+            .is_none_or(|update| update.update_id != update_id)
+        {
+            return;
+        }
+        tracing::info!(update_id, "update: this PC's update was cancelled");
+        self.host_update = None;
+        self.host_update_timer = None;
+        self.dismiss_toast_key(&toast_key(update_id), cx);
+    }
+
+    /// The daemon started update `update_id`, counted down or not: the
+    /// client quits as Keep sessions running does, leaving the daemon and
+    /// its sessions to the installer.
+    fn host_update_launched(&mut self, update_id: &str, cx: &mut Context<Self>) {
+        tracing::info!(
+            update_id,
+            "update: this PC's daemon started an update; quitting"
+        );
+        self.host_update_ended = Some(update_id.to_owned());
+        self.host_update_timer = None;
+        if let Some(update) = self.host_update.take() {
+            self.dismiss_toast_key(&toast_key(&update.update_id), cx);
+        }
+        self.dismiss_toast_key(&toast_key(update_id), cx);
+        self.request_quit(cx);
+    }
+
+    /// The countdown toast's Cancel: asks This PC's daemon to cancel the
+    /// update; the toast stays until the daemon says it did.
+    pub(crate) fn cancel_host_update(&mut self) {
+        let Some(update) = &self.host_update else {
+            return;
+        };
+        tracing::info!(update_id = %update.update_id, "update: asking this PC's daemon to cancel");
+        let update_id = update.update_id.clone();
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::CancelHostUpdate { update_id },
+        );
     }
 
     /// The footer's notice, `Update {version} ready`, once a check found one.

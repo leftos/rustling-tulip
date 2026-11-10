@@ -516,6 +516,8 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
         | ClientMessage::StartAccountLogin { .. }
         | ClientMessage::CancelAccountLogin { .. } => Some("account administration is local-only"),
         ClientMessage::SetGateSlotCount { .. } => Some("gate slot counts are local-only"),
+        // Asking for a host update stays open to every origin.
+        ClientMessage::CancelHostUpdate { .. } => Some("cancelling a host update is local-only"),
         _ => None,
     }
 }
@@ -607,6 +609,28 @@ mod tests {
             None,
             "{msg:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_connection_is_refused_cancel_host_update() {
+        let (hub, _scratch) = test_hub("tailnet-cancel-host-update");
+        let update_id = hub.host_update.begin_test_countdown(&hub.state_events);
+        let mut events = hub.state_events.subscribe();
+
+        let reply = dispatch_one_as(
+            &hub,
+            ClientMessage::CancelHostUpdate { update_id },
+            &AuthKind::Tailnet(test_peer()),
+        )
+        .await;
+
+        assert!(
+            matches!(&reply, DaemonMessage::Error { message, request_id: None, code: Some(code) }
+                if message == "cancelling a host update is local-only"
+                    && code == protocol::error_codes::LOCAL_ONLY),
+            "{reply:?}"
+        );
+        assert!(events.try_recv().is_err(), "nothing was cancelled");
     }
 
     #[tokio::test]
@@ -2297,7 +2321,7 @@ mod tests {
     fn a_new_client_gets_remote_status_at_connect() {
         let (hub, _scratch) = test_hub("remote-status-connect");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
         let mut remote = Vec::new();
         while let Ok(message) = out_rx.try_recv() {
             if let DaemonMessage::RemoteStatus {

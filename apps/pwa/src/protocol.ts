@@ -3285,6 +3285,18 @@ export type ClientMessage =
    */
   | { type: "remote_update"; request_id: string }
   /**
+   * Cancel the host update counting down as `update_id`
+   * ([`DaemonMessage::HostUpdateScheduled`]). Local-only: refused on a
+   * tailnet connection. A cancel in time aborts the update: every local
+   * connection is sent [`DaemonMessage::HostUpdateCanceled`] and the
+   * requester an `Error` with code `update_canceled`. A cancel after the
+   * countdown ended is refused with `busy`; an unknown or already
+   * cancelled id with `not_found`. Neither refusal carries a `request_id`.
+   *
+   * `update_id`: The daemon's id for the update, from `HostUpdateScheduled`.
+   */
+  | { type: "cancel_host_update"; update_id: string }
+  /**
    * `claim`: True when the sending pane had keyboard or pointer input in the
    * last few seconds, or when this client just resized the pane (its
    * window, a split divider, the sidebar, or its own font change):
@@ -5084,6 +5096,27 @@ export type DaemonMessage =
    * shortly. The answer to [`ClientMessage::RemoteUpdate`].
    */
   | { type: "remote_update_started"; request_id: string; version: string }
+  /**
+   * A host update was asked for and will go ahead in `seconds` unless a
+   * local connection sends [`ClientMessage::CancelHostUpdate`] with this
+   * `update_id`. Sent only to local connections: to each one attached
+   * when the countdown starts, and with the seconds left to one that
+   * connects or lags during it. `update_id` is the daemon's own id,
+   * never the requester's `request_id`; `requested_by` is display text
+   * naming who asked.
+   */
+  | { type: "host_update_scheduled"; update_id: string; requested_by: string; version: string; seconds: number }
+  /**
+   * The countdown for `update_id` ended uncancelled: the update goes
+   * ahead now. Sent to local connections before the installer starts,
+   * so the app can quit first; the daemon waits a while for it to.
+   */
+  | { type: "host_update_launched"; update_id: string }
+  /**
+   * The update counting down as `update_id` was cancelled and will not
+   * run. Sent only to local connections.
+   */
+  | { type: "host_update_canceled"; update_id: string }
   /**
    * Bytes of a file followed by [`ClientMessage::TailFile`], base64,
    * at most 64 KiB a message. `path` is the path as the request named it;

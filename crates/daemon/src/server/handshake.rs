@@ -333,6 +333,7 @@ pub(super) fn push_initial_state(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     client_id: &str,
     needs_layout_chooser: bool,
+    local: bool,
 ) {
     // A folder may have gained or lost `.git` since the list was last read;
     // the other clients hear of a change through the broadcast.
@@ -430,6 +431,11 @@ pub(super) fn push_initial_state(
         }
         drop(current);
     }
+    // A local connection only: the host update's current phase, read and
+    // sent under the lock every host update notice is published under.
+    if local {
+        hub.host_update.send_phase(out_tx);
+    }
     send_resume_report(hub, out_tx, client_id);
 }
 
@@ -482,6 +488,42 @@ mod tests {
         reports
     }
 
+    /// Every `HostUpdateScheduled` (its id and seconds) an initial-state push
+    /// put on the wire, draining `out_rx`.
+    fn scheduled_notices(
+        out_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
+    ) -> Vec<(String, u32)> {
+        let mut notices = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            if let DaemonMessage::HostUpdateScheduled {
+                update_id, seconds, ..
+            } = message
+            {
+                notices.push((update_id, seconds));
+            }
+        }
+        notices
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_local_connection_that_connects_mid_countdown_gets_the_seconds_left() {
+        let (hub, _scratch) = test_hub("host-update-mid-countdown");
+        let update_id = hub.host_update.begin_test_countdown(&hub.state_events);
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+
+        let (local_tx, mut local_rx) = mpsc::unbounded_channel();
+        push_initial_state(&hub, &local_tx, "c1", false, true);
+        let (tailnet_tx, mut tailnet_rx) = mpsc::unbounded_channel();
+        push_initial_state(&hub, &tailnet_tx, "c2", false, false);
+
+        assert_eq!(scheduled_notices(&mut local_rx), [(update_id, 7)]);
+        assert_eq!(
+            scheduled_notices(&mut tailnet_rx),
+            [],
+            "a tailnet connection is not told"
+        );
+    }
+
     #[test]
     fn initial_repos_report_a_folder_without_git_as_plain() {
         let (hub, scratch) = test_hub("initial-repos-plain");
@@ -496,7 +538,7 @@ mod tests {
             .expect("register the folder as git");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
 
         let mut repos = None;
         while let Ok(message) = out_rx.try_recv() {
@@ -519,14 +561,14 @@ mod tests {
         *crate::sync::lock(&hub.start_resume) = Some((2, 1));
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
         assert_eq!(
             resume_reports(&mut out_rx),
             [(2, 1)],
             "a client connecting after the resume hears how it went"
         );
 
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
         assert_eq!(
             resume_reports(&mut out_rx),
             [],
@@ -548,7 +590,7 @@ mod tests {
             .expect("store a command");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
 
         let mut sent = Vec::new();
         while let Ok(message) = out_rx.try_recv() {
@@ -580,7 +622,7 @@ mod tests {
             .expect("store settings");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
 
         let mut kinds = Vec::new();
         while let Ok(message) = out_rx.try_recv() {
@@ -618,7 +660,7 @@ mod tests {
         );
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
         let mut seen = None;
         while let Ok(message) = out_rx.try_recv() {
             if let DaemonMessage::DetailedLogging { enabled } = message {
@@ -633,7 +675,7 @@ mod tests {
         let (hub, _scratch) = test_hub("resume-report-clean");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
 
         assert_eq!(
             resume_reports(&mut out_rx),
@@ -738,7 +780,7 @@ mod tests {
     fn initial_state_sends_the_default_shell() {
         let (hub, _scratch) = test_hub("default-shell-initial");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
         assert_eq!(
             default_shells(&mut out_rx),
             [("auto".to_owned(), None)],
@@ -751,7 +793,7 @@ mod tests {
                 command: Some("bash -l".to_owned()),
             }))
             .expect("store a shell");
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
         assert_eq!(
             default_shells(&mut out_rx),
             [("custom".to_owned(), Some("bash -l".to_owned()))]
@@ -763,7 +805,7 @@ mod tests {
                 command: None,
             }))
             .expect("store an unknown shell");
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
         assert_eq!(
             default_shells(&mut out_rx),
             [("auto".to_owned(), None)],
@@ -1152,7 +1194,7 @@ mod tests {
     fn gate_initial_state_carries_the_current_value() {
         let (mut hub, _scratch) = test_hub("gate-initial-state");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
         assert_eq!(
             gate_states(&mut out_rx),
             [],
@@ -1160,7 +1202,7 @@ mod tests {
         );
 
         crate::server::test_support::enable_gate_state(&mut hub, None, None);
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
         assert_eq!(
             gate_states(&mut out_rx),
             [],
@@ -1179,7 +1221,7 @@ mod tests {
             covered: Vec::new(),
         };
         crate::server::test_support::enable_gate_state(&mut hub, Some(state.clone()), None);
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
         assert_eq!(gate_states(&mut out_rx), [Some(state)]);
     }
 

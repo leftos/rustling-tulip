@@ -82,6 +82,7 @@ mod history;
 mod history_view;
 mod host_path_prompt;
 mod host_path_prompt_view;
+mod host_update;
 mod hosts;
 mod html_media;
 mod keys;
@@ -1131,6 +1132,14 @@ pub struct RootView {
     notices: Notices,
     /// Wakes the view when the next toast's time is up.
     toast_timer: Option<Task<()>>,
+    /// The update This PC's daemon counts down to, while its toast shows.
+    host_update: Option<host_update::HostUpdateCountdown>,
+    /// The last update the daemon cancelled or launched; a repeat of its
+    /// countdown notice is ignored.
+    host_update_ended: Option<String>,
+    /// Wakes the view when the countdown's next second is up; the one timer
+    /// the update on screen ticks with.
+    host_update_timer: Option<Task<()>>,
     /// The modal notices' keyboard focus.
     notice_focus: FocusHandle,
     /// What a close or a move can be taken back with, newest first.
@@ -1682,6 +1691,9 @@ impl RootView {
             repo_remove_focus: cx.focus_handle(),
             notices: Notices::default(),
             toast_timer: None,
+            host_update: None,
+            host_update_ended: None,
+            host_update_timer: None,
             notice_focus: cx.focus_handle(),
             undo: UndoShelf::default(),
             undo_timer: None,
@@ -4806,6 +4818,7 @@ impl RootView {
         self.on_summarizer_message(host, &msg, cx);
         self.on_accounts_message(host, &msg, cx);
         self.on_gates_message(host, &msg, cx);
+        self.on_host_update_message(host, &msg, cx);
         self.on_shell_message(host, &msg, window, cx);
         if self.on_panel_message(host, &msg, window, cx) {
             return;

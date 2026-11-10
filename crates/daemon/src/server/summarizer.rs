@@ -452,7 +452,7 @@ mod tests {
         let (hub, _scratch) = test_hub("summ-status-connect");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
-        push_initial_state(&hub, &out_tx, "c1", false);
+        push_initial_state(&hub, &out_tx, "c1", false, true);
 
         let mut kinds = Vec::new();
         for message in drain(&mut out_rx) {

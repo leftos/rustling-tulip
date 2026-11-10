@@ -4152,6 +4152,17 @@ pub enum ClientMessage {
         /// Client-assigned request id, echoed on the answer.
         request_id: String,
     },
+    /// Cancel the host update counting down as `update_id`
+    /// ([`DaemonMessage::HostUpdateScheduled`]). Local-only: refused on a
+    /// tailnet connection. A cancel in time aborts the update: every local
+    /// connection is sent [`DaemonMessage::HostUpdateCanceled`] and the
+    /// requester an `Error` with code `update_canceled`. A cancel after the
+    /// countdown ended is refused with `busy`; an unknown or already
+    /// cancelled id with `not_found`. Neither refusal carries a `request_id`.
+    CancelHostUpdate {
+        /// The daemon's id for the update, from `HostUpdateScheduled`.
+        update_id: String,
+    },
     Resize {
         session_id: String,
         cols: u16,
@@ -6356,6 +6367,30 @@ pub enum DaemonMessage {
         request_id: String,
         version: String,
     },
+    /// A host update was asked for and will go ahead in `seconds` unless a
+    /// local connection sends [`ClientMessage::CancelHostUpdate`] with this
+    /// `update_id`. Sent only to local connections: to each one attached
+    /// when the countdown starts, and with the seconds left to one that
+    /// connects or lags during it. `update_id` is the daemon's own id,
+    /// never the requester's `request_id`; `requested_by` is display text
+    /// naming who asked.
+    HostUpdateScheduled {
+        update_id: String,
+        requested_by: String,
+        version: String,
+        seconds: u32,
+    },
+    /// The countdown for `update_id` ended uncancelled: the update goes
+    /// ahead now. Sent to local connections before the installer starts,
+    /// so the app can quit first; the daemon waits a while for it to.
+    HostUpdateLaunched {
+        update_id: String,
+    },
+    /// The update counting down as `update_id` was cancelled and will not
+    /// run. Sent only to local connections.
+    HostUpdateCanceled {
+        update_id: String,
+    },
     /// Bytes of a file followed by [`ClientMessage::TailFile`], base64,
     /// at most 64 KiB a message. `path` is the path as the request named it;
     /// `offset` is the file offset of the first byte. `reset` means the file
@@ -7975,6 +8010,81 @@ mod tests {
                 &back,
                 DaemonMessage::RemoteUpdateStarted { request_id, version }
                     if request_id == "req-1" && version == "0.9.0"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn cancel_host_update_round_trips() {
+        let msg = ClientMessage::CancelHostUpdate {
+            update_id: "hu-1".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"cancel_host_update""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::CancelHostUpdate { update_id } if update_id == "hu-1"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn host_update_scheduled_round_trips() {
+        let msg = DaemonMessage::HostUpdateScheduled {
+            update_id: "hu-1".to_owned(),
+            requested_by: "phone.example.ts.net".to_owned(),
+            version: "0.9.0".to_owned(),
+            seconds: 10,
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"host_update_scheduled""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::HostUpdateScheduled { update_id, requested_by, version, seconds }
+                    if update_id == "hu-1"
+                        && requested_by == "phone.example.ts.net"
+                        && version == "0.9.0"
+                        && *seconds == 10
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn host_update_launched_round_trips() {
+        let msg = DaemonMessage::HostUpdateLaunched {
+            update_id: "hu-1".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"host_update_launched""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::HostUpdateLaunched { update_id } if update_id == "hu-1"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn host_update_canceled_round_trips() {
+        let msg = DaemonMessage::HostUpdateCanceled {
+            update_id: "hu-1".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"host_update_canceled""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::HostUpdateCanceled { update_id } if update_id == "hu-1"
             ),
             "{json}"
         );

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Modifiers, TestAppContext, VisualTestContext, px};
+use protocol::{ClientMessage, DaemonMessage};
 use rustling_tulip_native::NetCommand;
 use rustling_tulip_native::update::LastResult;
 use rustling_tulip_native::{
@@ -777,4 +778,171 @@ fn settings_shows_the_version_and_last_check(cx: &mut TestAppContext) {
     updater.offer_nothing();
     press_in_settings(&mut h, "settings-general-check-now");
     assert_eq!(settings_lines(&mut h), [version, "Up to date".to_owned()]);
+}
+
+/// The host-update countdown toast's Cancel button.
+const HOST_UPDATE_CANCEL: &str = "host-update-cancel";
+const COUNTDOWN_BODY: &str =
+    "Asked by leftos-macbook. Updates to 0.12.0-alpha; your sessions keep running.";
+
+fn scheduled(update_id: &str, seconds: u32) -> DaemonMessage {
+    DaemonMessage::HostUpdateScheduled {
+        update_id: update_id.to_owned(),
+        requested_by: "leftos-macbook".to_owned(),
+        version: "0.12.0-alpha".to_owned(),
+        seconds,
+    }
+}
+
+/// The host-update countdown toasts that show.
+fn countdown_toasts(h: &mut Harness<'_>) -> Vec<Toast> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .filter(|toast| {
+                toast
+                    .key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with("host-update-"))
+            })
+            .cloned()
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn a_host_update_countdown_shows_who_asked_and_counts_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+
+    h.send(scheduled("u1", 10));
+    assert!(
+        toasts(&mut h).contains(&(
+            "Updating in 10 s".to_owned(),
+            Some(COUNTDOWN_BODY.to_owned())
+        )),
+        "{:?}",
+        toasts(&mut h)
+    );
+
+    h.advance(Duration::from_secs(3));
+    assert!(
+        toasts(&mut h).contains(&(
+            "Updating in 7 s".to_owned(),
+            Some(COUNTDOWN_BODY.to_owned())
+        )),
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(
+        countdown_toasts(&mut h).len(),
+        1,
+        "one toast, updated in place"
+    );
+}
+
+#[gpui::test]
+fn cancel_sends_cancel_host_update_with_its_id(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.send(scheduled("u1", 10));
+    h.sent();
+
+    let id = countdown_toasts(&mut h)
+        .first()
+        .expect("the countdown toast shows")
+        .id;
+    h.click_on(&toast_action_selector(id, HOST_UPDATE_CANCEL));
+    h.cx.run_until_parked();
+
+    let cancels: Vec<String> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::CancelHostUpdate { update_id } => Some(update_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancels, ["u1"]);
+    assert_eq!(
+        countdown_toasts(&mut h).len(),
+        1,
+        "the toast stays until the daemon says it was cancelled"
+    );
+}
+
+#[gpui::test]
+fn host_update_canceled_takes_the_countdown_away(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.send(scheduled("u1", 10));
+
+    h.send(DaemonMessage::HostUpdateCanceled {
+        update_id: "u2".to_owned(),
+    });
+    assert_eq!(countdown_toasts(&mut h).len(), 1, "another update's cancel");
+
+    h.send(DaemonMessage::HostUpdateCanceled {
+        update_id: "u1".to_owned(),
+    });
+    assert_eq!(countdown_toasts(&mut h), []);
+    h.advance(Duration::from_secs(2));
+    assert!(
+        countdown_toasts(&mut h).is_empty(),
+        "the tick does not bring it back"
+    );
+}
+
+#[gpui::test]
+fn a_scheduled_after_its_cancel_is_ignored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.send(scheduled("u1", 10));
+    h.send(DaemonMessage::HostUpdateCanceled {
+        update_id: "u1".to_owned(),
+    });
+
+    h.send(scheduled("u1", 9));
+
+    assert_eq!(countdown_toasts(&mut h), []);
+}
+
+#[gpui::test]
+fn host_update_launched_quits_keeping_sessions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.send(scheduled("u1", 10));
+    h.commands();
+
+    h.send(DaemonMessage::HostUpdateLaunched {
+        update_id: "u1".to_owned(),
+    });
+
+    assert_eq!(h.quit_requests(), 1, "the client quits");
+    assert!(!h.root(|root, _| root.exit_dialog_open()), "no exit dialog");
+    assert_eq!(shutdowns(&mut h), 0, "the daemon keeps running");
+    assert_eq!(countdown_toasts(&mut h), []);
+}
+
+#[gpui::test]
+fn a_remote_hosts_host_update_messages_are_ignored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::saved_remote_over(cx, &dir, &support::two_tab_fixture(), &["b1", "b2"]);
+
+    h.host(&support::saved_remote()).send(scheduled("u1", 10));
+    assert!(
+        countdown_toasts(&mut h).is_empty(),
+        "no countdown for a remote host"
+    );
+
+    h.host(&support::saved_remote())
+        .send(DaemonMessage::HostUpdateLaunched {
+            update_id: "u1".to_owned(),
+        });
+    assert_eq!(h.quit_requests(), 0, "a remote host's update does not quit");
 }

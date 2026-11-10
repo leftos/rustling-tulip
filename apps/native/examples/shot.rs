@@ -214,6 +214,7 @@ enum View {
     Menu,
     Update,
     UpdateNotes,
+    UpdateCountdown,
     Chat,
     ChatCompact,
     Summary,
@@ -233,7 +234,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 35] = [
+    const ALL: [Self; 36] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -253,6 +254,7 @@ impl View {
         Self::Menu,
         Self::Update,
         Self::UpdateNotes,
+        Self::UpdateCountdown,
         Self::Chat,
         Self::ChatCompact,
         Self::Summary,
@@ -292,6 +294,7 @@ impl View {
             Self::Menu => "menu",
             Self::Update => "update",
             Self::UpdateNotes => "update-notes",
+            Self::UpdateCountdown => "update-countdown",
             Self::Chat => "chat",
             Self::ChatCompact => "chat-compact",
             Self::Summary => "summary",
@@ -457,6 +460,11 @@ impl View {
             Self::UpdateNotes => {
                 root.whats_new_open() && root.whats_new_text().as_deref() == Some(SHOT_NOTES)
             }
+            // The countdown toast This PC's daemon raised.
+            Self::UpdateCountdown => root
+                .toasts()
+                .iter()
+                .any(|toast| toast.title.starts_with("Updating in")),
             Self::SettingsDashboard => {
                 root.settings_open()
                     && root.settings_tab() == "Dashboard"
@@ -554,6 +562,7 @@ impl Shot {
             | View::Menu
             | View::Update
             | View::UpdateNotes
+            | View::UpdateCountdown
             | View::Chat
             | View::ChatCompact
             | View::Summary
@@ -1265,6 +1274,7 @@ fn drive(
         | View::MainNarrow
         | View::MultiHost
         | View::SafeStart
+        | View::UpdateCountdown
         | View::Toast => Ok(()),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
@@ -2162,6 +2172,14 @@ impl FakeDaemon {
         if self.view == View::Gates {
             self.send(DaemonMessage::GateState {
                 state: Some(Box::new(shot_gate_state(self.now))),
+            })?;
+        }
+        if self.view == View::UpdateCountdown {
+            self.send(DaemonMessage::HostUpdateScheduled {
+                update_id: "u1".to_owned(),
+                requested_by: "leftos-macbook".to_owned(),
+                version: "0.12.0-alpha".to_owned(),
+                seconds: 10,
             })?;
         }
         self.send(DaemonMessage::AgentCommands {

@@ -14,7 +14,7 @@ The check is the one the client's updater makes: the release's `.sha256`, from t
 
 - **Who may ask:** any paired tailnet device or an SSH client.
 - **Consent:** the requester confirms in a dialog listing the host's running sessions. The host's own client, if open, shows who asked. No approval at the host and no host setting.
-- **App open on the host:** it restarts itself after a countdown with Cancel; Restart to update has no countdown, so the countdown is new.
+- **App open on the host:** it restarts itself after a 10-second countdown with Cancel, which the daemon runs and the app shows; Restart to update has no countdown.
 - **SSH hosts:** a detached helper started over a second SSH command runs on after the channel drops, and the client reads the result on reconnect. Tailnet hosts are built first.
 - **Host to client:** the same power both ways. From the host, "Update connected clients" gives each native client the same countdown with Cancel, and it updates itself by the same rule. Phone apps just reload.
 - **A release that breaks sessions or the protocol:** the release carries a machine-readable flag. The confirm dialog says what will end and lets it go ahead, and the host goes first, the requesting client updating itself right after.
@@ -29,8 +29,6 @@ The check is the one the client's updater makes: the release's `.sha256`, from t
 
 ## What the code does not do yet
 
-- A headless daemon cannot run an update. `apply-update --relaunch` starts only the client, so with no client nothing restarts the daemon, and on a host with the app closed the machine stays without a daemon until the next logon.
-- The check, download and verify steps live in `crates/update-core`, which the daemon does not link yet.
 - A running `bridge` blocks the swap with exit 3, since it runs from the install folder.
 - A host has no per-connection record of its clients, and no addressed send to one.
 - A release carries no machine-readable note of what it breaks.
@@ -41,7 +39,7 @@ Each part lands on `feat/remote-update`, and each is a sub-issue of RT-1298.
 
 - [x] **Versions on the wire.** `Welcome.build_version`, `Hello.client_version` and `client_kind`, the host's version and "behind" state in the Connections dialog and Settings > Hosts. Regenerate `apps/pwa/src/protocol.ts`.
 - [x] **The shared updater core.** Move finding, downloading and verifying a release out of `apps/native/src/update.rs` into a crate both the client and the daemon link, with no behaviour change.
-- [ ] **A host updates itself on request.** A new client message, a `remote_update` feature string listed once a host can honour it, the daemon fetching and verifying its own asset and running the swap detached from itself, restarting the daemon afterwards when no client will, and answering with why when it cannot. The host's own app restarts on a countdown with Cancel.
+- [x] **A host updates itself on request.** A new client message, a `remote_update` feature string listed once a host can honour it, the daemon fetching and verifying its own asset and running the swap detached from itself, restarting the daemon afterwards when no client will, and answering with why when it cannot. The host's own app restarts on a countdown with Cancel.
 - [ ] **Client to host, in the client.** The update action per host, the confirm dialog listing that host's sessions, progress, reconnect, and the result or failure shown to the requester.
 - [ ] **The breaking flag.** A machine-readable note in each release of what it breaks, read by the confirm dialog, and the requester updating itself right after the host. `docs/release.md` says when to set it.
 - [ ] **Host to client.** A per-connection record on the host, an addressed message, "Update connected clients", and the client's countdown with Cancel.

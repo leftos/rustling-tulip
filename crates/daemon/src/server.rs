@@ -395,6 +395,10 @@ pub enum StateEvent {
         spend_today_usd: f64,
         cap_reached: bool,
     },
+    /// A host update notice: [`protocol::DaemonMessage::HostUpdateScheduled`],
+    /// `HostUpdateLaunched` or `HostUpdateCanceled`, published under the
+    /// host update's phase lock. Only loopback connections forward it.
+    HostUpdate(Box<protocol::DaemonMessage>),
 }
 
 #[derive(Debug, Clone)]
@@ -1020,7 +1024,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             folder::handle(hub, m, ctx).await;
         }
         m @ ClientMessage::UploadFile { .. } => upload::handle(hub, m, ctx).await?,
-        m @ ClientMessage::RemoteUpdate { .. } => update::handle(hub, m, ctx).await?,
+        m @ (ClientMessage::RemoteUpdate { .. } | ClientMessage::CancelHostUpdate { .. }) => {
+            update::handle(hub, m, ctx).await?;
+        }
         ClientMessage::CancelFetch { id } => cancel_fetch(ctx.fetches, &id).await,
         m @ (ClientMessage::TailFile { .. } | ClientMessage::UntailFile { .. }) => {
             tail::handle(hub, m, ctx).await;

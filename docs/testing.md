@@ -108,6 +108,7 @@ The views:
 - `connections-scan-error`: the same host manager over a tailnet scan that failed with a long Tailscale error, drawn on its own lines under "On your tailnet".
 - `menu`: the sessions panel's ⋯ menu open over the repo rows with a toast over the panes.
 - `update`: the footer's `Update {version} ready` notice.
+- `update-countdown`: the sticky toast `Updating in 10 s` of a host update counting down, with its `Asked by` detail and `Cancel` button.
 - `update-notes`: the What's new window over a ready 0.99.0.
 - `chat`: a session pane in Chat mode with its chat drawn over a two-question prompt card whose options carry descriptions and an open Tail box on the running Bash card.
 - `chat-compact`: the chat in Compact mode at its bottom, showing a collapsed run line of a read, a search and a run call.

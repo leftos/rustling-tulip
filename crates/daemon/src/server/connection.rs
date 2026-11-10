@@ -419,17 +419,17 @@ pub(super) async fn client_session_until<S: Socket>(
         client_id.clone(),
     );
     let preset_event_task = spawn_preset_forwarder(&hub, out_tx.clone());
-    let state_event_task = spawn_state_forwarder(
-        &hub,
-        hub.state_events.subscribe(),
-        out_tx.clone(),
-        client_id.clone(),
-        matches!(auth, AuthKind::Local),
-    );
+    let (state_event_task, attached) = spawn_state_events(&hub, &out_tx, &client_id, &auth);
 
     // Send initial state snapshots: this client's layout, or the first-connect
     // chooser when it has none yet.
-    push_initial_state(&hub, &out_tx, &client_id, needs_layout_chooser);
+    push_initial_state(
+        &hub,
+        &out_tx,
+        &client_id,
+        needs_layout_chooser,
+        attached.is_some(),
+    );
 
     let ctx = ConnCtx {
         out_tx: &out_tx,
@@ -727,6 +727,30 @@ fn spawn_tab_forwarder(
     })
 }
 
+/// This connection's state forwarder and, for a local connection, its count
+/// as attached, which a host update's countdown waits on; the caller holds
+/// it until the connection ends.
+fn spawn_state_events(
+    hub: &Hub,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    client_id: &str,
+    auth: &AuthKind,
+) -> (
+    tokio::task::JoinHandle<()>,
+    Option<super::update::LocalAttach>,
+) {
+    let local = matches!(auth, AuthKind::Local);
+    let attached = local.then(|| hub.host_update.attach_local());
+    let task = spawn_state_forwarder(
+        hub,
+        hub.state_events.subscribe(),
+        out_tx.clone(),
+        client_id.to_owned(),
+        local,
+    );
+    (task, attached)
+}
+
 /// Forwards this connection's share of the registry's state events. The
 /// start-up resume's report reaches a client at most once per daemon run: a
 /// connection whose client id the initial-state push already told drops it.
@@ -894,8 +918,19 @@ fn spawn_state_forwarder(
                         cap_reached,
                     });
                 }
+                Ok(StateEvent::HostUpdate(message)) => {
+                    if local {
+                        let _ = out_tx.send(*message);
+                    }
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
+                    // A lost host update notice is not repeated, so a local
+                    // connection is sent the current phase, read and sent
+                    // under the lock the notices are published under.
+                    if local {
+                        hub.host_update.send_phase(&out_tx);
+                    }
                     // The report is sent once and no later event repeats it,
                     // so a stream that lagged past it asks for it again here.
                     send_resume_report(&hub, &out_tx, &client_id);
@@ -2487,6 +2522,79 @@ mod tests {
         let (accounts, auto) = resent.expect("the lagged stream hears the cached accounts");
         assert_eq!(accounts, [account]);
         assert_eq!(auto, None);
+    }
+
+    #[tokio::test]
+    async fn a_lagged_local_connection_is_resent_the_current_phase() {
+        let (hub, _scratch) = test_hub("lagged-host-update");
+        // Published before the forwarder subscribes, so only the lag's
+        // resend can carry it.
+        let update_id = hub.host_update.begin_test_countdown(&hub.state_events);
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            true,
+        );
+
+        for _ in 0..=crate::server::STATE_EVENT_CAPACITY {
+            let _ = hub.state_events.send(StateEvent::Repos(Vec::new()));
+        }
+
+        let mut resent = None;
+        for _ in 0..=crate::server::STATE_EVENT_CAPACITY + 4 {
+            let message = next_message(&mut rx).await;
+            if let DaemonMessage::HostUpdateScheduled {
+                update_id, seconds, ..
+            } = message
+            {
+                resent = Some((update_id, seconds));
+                break;
+            }
+        }
+        forwarder.abort();
+        let (id, seconds) = resent.expect("the lagged stream hears the countdown again");
+        assert_eq!(id, update_id);
+        assert!((1..=10).contains(&seconds), "{seconds}");
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_connection_gets_no_host_update_messages() {
+        let (hub, _scratch) = test_hub("tailnet-host-update");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            false,
+        );
+        let id = || "hu-1".to_owned();
+        let notices = [
+            DaemonMessage::HostUpdateScheduled {
+                update_id: id(),
+                requested_by: "a connection on this PC".to_owned(),
+                version: "0.99.0".to_owned(),
+                seconds: 10,
+            },
+            DaemonMessage::HostUpdateLaunched { update_id: id() },
+            DaemonMessage::HostUpdateCanceled { update_id: id() },
+        ];
+        for notice in notices {
+            let _ = hub
+                .state_events
+                .send(StateEvent::HostUpdate(Box::new(notice)));
+        }
+        let _ = hub.state_events.send(StateEvent::Repos(Vec::new()));
+
+        let first = next_message(&mut rx).await;
+        forwarder.abort();
+        assert!(
+            matches!(first, DaemonMessage::Repos { .. }),
+            "the notices are dropped: {first:?}"
+        );
     }
 
     #[tokio::test]
