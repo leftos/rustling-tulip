@@ -4611,6 +4611,7 @@ impl RootView {
             self.agent_tabs.forget_applies(&HostKey::Local);
             self.launch_last.clear();
             self.forget_gate_state();
+            self.forget_host_update(cx);
         }
         // The handshake, the fetches streaming over the connection and the
         // remote access status are the old target's daemon's.

@@ -897,6 +897,44 @@ fn host_update_canceled_takes_the_countdown_away(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_dropped_connection_takes_the_host_update_countdown_away(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.send(scheduled("u1", 10));
+
+    h.lose_connection();
+    assert_eq!(countdown_toasts(&mut h), []);
+    h.advance(Duration::from_secs(2));
+    assert!(
+        countdown_toasts(&mut h).is_empty(),
+        "the tick does not bring it back"
+    );
+}
+
+#[gpui::test]
+fn a_reconnect_shows_the_daemons_countdown_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.send(scheduled("u1", 10));
+    h.lose_connection();
+    h.reconnect_with_features(&[]);
+
+    h.send(scheduled("u1", 6));
+
+    assert!(
+        toasts(&mut h).contains(&(
+            "Updating in 6 s".to_owned(),
+            Some(COUNTDOWN_BODY.to_owned())
+        )),
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(countdown_toasts(&mut h).len(), 1);
+}
+
+#[gpui::test]
 fn a_scheduled_after_its_cancel_is_ignored(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let updater = Arc::new(UpdaterRecorder::default());

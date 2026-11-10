@@ -461,6 +461,21 @@ impl RootView {
         self.dismiss_toast_key(&toast_key(update_id), cx);
     }
 
+    /// This PC's connection closed while an update counted down: its
+    /// countdown and toast go at once, so a reconnect shows only what the
+    /// daemon then reports. An update that ended stays ended.
+    pub(crate) fn forget_host_update(&mut self, cx: &mut Context<Self>) {
+        let Some(update) = self.host_update.take() else {
+            return;
+        };
+        self.host_update_timer = None;
+        self.dismiss_toast_key(&toast_key(&update.update_id), cx);
+        tracing::info!(
+            update_id = %update.update_id,
+            "update: this PC's connection closed; dropping its update countdown"
+        );
+    }
+
     /// The daemon started update `update_id`, counted down or not: the
     /// client quits as Keep sessions running does, leaving the daemon and
     /// its sessions to the installer.
