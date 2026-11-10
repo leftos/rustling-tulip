@@ -9,6 +9,10 @@
 ## Remote update
 
 - [ ] RT-1308 Prove remote update on a second machine, both directions (sub-issue of RT-1298) · release vNext
+  - [/] RT-1406 Remote update proof B: gated install seam and a full live update · release vNext
+  - [ ] RT-1407 Remote update proof C: host-to-client live spec · release vNext
+  - [ ] RT-1408 Remote update proof D: real Windows update on the buildbox · release vNext
+  - [ ] RT-1409 Remote update proof E: real macOS update on the Mac mini · release vNext
 - [ ] RT-1316 Merge feat/remote-update to main (#206) (sub-issue of RT-1298)
 - [ ] RT-1336 Keep one process list and one update mutex in the daemon
 - [ ] RT-1337 Release a host's update guard when its installer never stops the daemon
@@ -38,7 +42,6 @@
   - [ ] RT-1097 Stage the Accounts page's auto-switch settings until OK or Apply
   - [ ] RT-1098 Stage the Accounts page's Up and Down reordering until OK or Apply
   - [ ] RT-1099 Stage Appearance and the Themes picker's Use until OK or Apply, with a live preview Cancel reverts
-  - [ ] RT-1100 Play the chosen notification sound, not the saved one, from Settings' Play button
   - [ ] RT-1101 Stage the Dashboard's Clear of the stored key until OK or Apply, and name it
   - [ ] RT-1102 Test the Dashboard settings shown in Settings, not the saved ones
   - [ ] RT-1103 Confirm before removing a saved Claude account in Settings › Accounts
@@ -336,6 +339,7 @@
 - [ ] RT-1324 Make the settings-claude and settings-hosts shots open their page again
 - [ ] RT-1374 Fail native-smoke when the gate refuses to run it, instead of exiting 0
 - [ ] RT-1396 Map the remote-update and spawn files in tools/test-map.json
+- [ ] RT-1412 Refuse an e2e-loopback-peers daemon in the installer and macOS pack
 
 ## macOS
 
@@ -387,6 +391,7 @@
 - [ ] RT-125 Launch a session from the phone: launch last again, a preset, or /nextup in a repo · release vNext
   - [ ] RT-1383 Start a /nextup session from the phone in any repo or workspace · release vNext
   - [ ] RT-1384 Launch a no-input preset from the phone · release vNext
+    - [ ] RT-1411 List and launch no-input presets on phone Home · release vNext
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit
 - [ ] RT-661 Plan file-type previewers for the in-app viewer: images, PDF, tables and more
@@ -639,13 +644,15 @@
 - [ ] RT-1392 Let × cancel a client's self-update countdown, and show its download
 - [ ] RT-1393 Word the Update connected clients toast for one and for zero
 - [ ] RT-1397 Tell an SSH requester apart from a local connection when it updates a host
-- [ ] RT-1398 Answer a resent LaunchLast from the spawn journal before its lookup and checks
-- [ ] RT-1399 Split mountHomeView and homeGroups in the phone app under the size limits
 - [ ] RT-1400 Stop the release-break warning at the newest release with the host's own installer
 - [ ] RT-1401 Word the self-update after a flagged host update as this app's own, and mute the checking line
 - [ ] RT-1402 Offer this app's update when a host it updated refuses this app's protocol version
 - [ ] RT-1403 Read the install folder from InstallLocation in the bridge's update check
 - [ ] RT-1404 Focus the main window's root when its focused pane is popped out
+- [ ] RT-1413 Journal a LaunchLast before its checkout preflight so a mid-checkout resend hears the session
+- [ ] RT-1414 Let the live remote-update refusal specs pass on an elevated run
+- [ ] RT-1416 Check the host-update sandbox switch before the daemon's startup work
+- [ ] RT-1417 Read RUSTLING_TULIP_CONFIG_DIR the same way everywhere, non-Unicode values included
 
 ## Design files
 
