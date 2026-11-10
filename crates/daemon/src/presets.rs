@@ -3035,6 +3035,10 @@ mod tests {
         assert!(!marker.exists(), "no script ran before the refusal");
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test hub's one literal, kept beside the daemon's own"
+    )]
     fn test_hub() -> (Hub, broadcast::Receiver<PresetEvent>, ScratchDir) {
         let scratch = ScratchDir::new();
         let config = scratch.path().join("config");
@@ -3115,6 +3119,7 @@ mod tests {
             keep_awake_mode: Arc::new(keep_awake_mode),
             keep_awake_status,
             recovering: crate::server::RecoveryClaims::default(),
+            spawn_journal: Arc::default(),
             resume_in_flight: Arc::default(),
             start_resume: Arc::default(),
             resume_reported: Arc::default(),

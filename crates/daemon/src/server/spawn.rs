@@ -22,7 +22,7 @@ use self::worktree::{
     materialize_single_worktree, pinned_branch, preview_single_spawn, reject_pin_without_worktree,
     single_worktree_target, worktree_paths_for_config,
 };
-use super::connection::ConnCtx;
+use super::connection::{AuthKind, ConnCtx};
 use super::git::{active_sessions_using_worktree, worktree_in_use_failure};
 use super::sessions::{request_origin, write_meta_then_sync};
 use super::{Hub, StateEvent};
@@ -39,6 +39,7 @@ use crate::session::SessionRegistry;
 use crate::session::{
     SessionRecord, UpdateOrigin, attach_lifecycle, default_agent, new_id, push_recent_action,
 };
+use crate::spawn_journal::{Begin, Outcome};
 use crate::tracer_log::AgentNote;
 use crate::{
     env_secrets, headless, inject, orphan, osc_title, pty_state, screen, spawn_plan, tracer_client,
@@ -63,9 +64,7 @@ use tracing::{debug, info, warn};
 
 /// Handle the spawn and spawn-preview messages `dispatch` routes here.
 pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::Result<()> {
-    let ConnCtx {
-        out_tx, connection, ..
-    } = *ctx;
+    let ConnCtx { out_tx, .. } = *ctx;
     match msg {
         ClientMessage::PreviewWorkspaceSpawn {
             workspace_id,
@@ -130,26 +129,144 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                 Err(err) => send_preview_failure(out_tx, &err, request_id),
             }
         }
-        ClientMessage::SpawnSession(req) => {
-            // A request `check_spawn_request` refuses is refused before the
-            // user is asked to confirm a checkout it would never make.
-            if let Err(failure) = check_spawn_request(&req) {
-                send_spawn_failure(out_tx, &failure.into(), req.request_id.as_deref());
-            } else if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
-                let _ = out_tx.send(confirm);
-            } else {
-                // The requester hears of its spawn through the registry's one
-                // broadcast, which carries `request_id` on this connection.
-                let request_id = req.request_id.clone();
-                let origin = request_origin(connection, request_id.clone());
-                if let Err(err) = spawn_session(hub, req, origin, false).await {
-                    send_spawn_failure(out_tx, &err, request_id.as_deref());
-                }
-            }
-        }
+        ClientMessage::SpawnSession(req) => return handle_spawn_session(hub, req, ctx).await,
         _ => warn!("spawn::handle: dispatch routed a message this module does not handle"),
     }
     Ok(())
+}
+
+/// Handle a `SpawnSession`: refuse or confirm it as before, then journal it by
+/// the device that sent it, so a request the client resent makes no second
+/// session and hears the first one's outcome.
+async fn handle_spawn_session(
+    hub: &Hub,
+    req: SpawnRequest,
+    ctx: &ConnCtx<'_>,
+) -> anyhow::Result<()> {
+    let ConnCtx {
+        out_tx,
+        client_id,
+        auth,
+        connection,
+        ..
+    } = *ctx;
+    // A request `check_spawn_request` refuses is refused before the user is
+    // asked to confirm a checkout it would never make.
+    if let Err(failure) = check_spawn_request(&req) {
+        send_spawn_failure(out_tx, &failure.into(), req.request_id.as_deref());
+        return Ok(());
+    }
+    if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
+        let _ = out_tx.send(confirm);
+        return Ok(());
+    }
+    let request_id = req.request_id.clone();
+    // A repeat of a request this device already sent is answered from the
+    // journal; only a new one reaches the spawn.
+    let journalled = request_id
+        .as_deref()
+        .zip(device_key(auth, client_id))
+        .map(|(id, device)| (device, id.to_owned()));
+    if let Some((device, id)) = &journalled
+        && let Begin::Repeat(outcome) =
+            hub.spawn_journal
+                .begin(device, id, std::time::Instant::now())
+    {
+        send_journalled_outcome(hub, out_tx, &outcome, request_id.as_deref());
+        return Ok(());
+    }
+    // The requester hears of its spawn through the registry's one broadcast,
+    // which carries `request_id` on this connection.
+    let origin = request_origin(connection, request_id.clone());
+    match spawn_session(hub, req, origin, false).await {
+        Ok(snapshot) => {
+            finish_journal(
+                hub,
+                journalled,
+                Outcome::Spawned {
+                    session_id: snapshot.id.clone(),
+                },
+            );
+        }
+        Err(err) => {
+            finish_journal(
+                hub,
+                journalled,
+                Outcome::Failed {
+                    error: Arc::new(journalled_error(&err)),
+                },
+            );
+            send_spawn_failure(out_tx, &err, request_id.as_deref());
+        }
+    }
+    Ok(())
+}
+
+/// Record `outcome` for the request `journalled` names, if it was a
+/// journalled one.
+fn finish_journal(hub: &Hub, journalled: Option<(String, String)>, outcome: Outcome) {
+    let Some((device, request_id)) = journalled else {
+        return;
+    };
+    hub.spawn_journal
+        .finish(&device, &request_id, outcome, std::time::Instant::now());
+}
+
+/// The journalling key for a connection's device: a tailnet peer is its
+/// stable node id, a loopback client its `client_id`. A connection that sends
+/// no `client_id` shares the legacy id with every other one, so it identifies
+/// no device and its spawns are not journalled.
+fn device_key(auth: &AuthKind, client_id: &str) -> Option<String> {
+    match auth {
+        AuthKind::Tailnet(peer) => Some(format!("tailnet:{}", peer.stable_id)),
+        AuthKind::Local if client_id == crate::state::LEGACY_CLIENT_ID => None,
+        AuthKind::Local => Some(format!("local:{client_id}")),
+    }
+}
+
+/// Answer a repeated request with what its first send came to: nothing while
+/// it runs, its session, or the failure it was answered with.
+fn send_journalled_outcome(
+    hub: &Hub,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    outcome: &Outcome,
+    request_id: Option<&str>,
+) {
+    match outcome {
+        Outcome::Pending => {}
+        Outcome::Spawned { session_id } => {
+            let session = hub
+                .sessions
+                .snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.id == *session_id);
+            if let Some(session) = session {
+                let _ = out_tx.send(DaemonMessage::SessionUpdated {
+                    session,
+                    request_id: request_id.map(str::to_owned),
+                });
+            } else {
+                send_spawn_failure(out_tx, &anyhow!("That session has ended."), request_id);
+            }
+        }
+        Outcome::Failed { error } => send_spawn_failure(out_tx, error.as_ref(), request_id),
+    }
+}
+
+/// `err` as the journal keeps it: a structured [`spawn_plan::SpawnFailure`]
+/// is rebuilt field for field, so [`send_spawn_failure`] answers a repeat with
+/// the same modal; any other error keeps its rendered chain.
+fn journalled_error(err: &anyhow::Error) -> anyhow::Error {
+    err.downcast_ref::<spawn_plan::SpawnFailure>().map_or_else(
+        || anyhow!("{err:#}"),
+        |failure| {
+            anyhow::Error::new(spawn_plan::SpawnFailure {
+                title: failure.title.clone(),
+                detail: failure.detail.clone(),
+                hint: failure.hint.clone(),
+            })
+        },
+    )
 }
 
 /// Answers a failed spawn preview (`PreviewSpawn`, `PreviewWorkspaceSpawn`)
@@ -2654,18 +2771,21 @@ mod tests {
     use super::*;
     use crate::history;
     use crate::server::child_env_probe;
+    use crate::server::connection::{FetchRegistry, PtyLane};
+    use crate::server::dispatch;
     use crate::server::recovery::resume_abandoned;
     use crate::server::sessions::{DuplicateAsk, duplicate_session, stop_session};
     use crate::server::test_support::{
         DEEPSEEK_KEY_SENTINEL, MISSING_SECRET_ID, ScratchDir, UNSET_REF, deepseek_key,
-        deepseek_spawn, dispatch_one, env, env_ref_repo_hub, env_spawn, git_init, git_ok,
-        hook_settings_file, hook_test_hub, idle_record, lookup_a, no_key, repo_entry,
+        deepseek_spawn, dispatch_one, dispatch_one_as, env, env_ref_repo_hub, env_spawn, git_init,
+        git_ok, hook_settings_file, hook_test_hub, idle_record, lookup_a, no_key, repo_entry,
         repo_entry_plain, secret_ref, spawnless_test_hub, test_hub, workspace_entry,
     };
     use protocol::SessionEnd;
+    use std::collections::HashMap;
     #[cfg(windows)]
     use std::time::Duration;
-    use tokio::sync::broadcast;
+    use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
     #[tokio::test]
     async fn command_session_env_carries_term_and_the_login_env() {
@@ -5624,6 +5744,235 @@ mod tests {
                 }
             ),
             "a spawn without an id gets a prompt without one: {reply:?}"
+        );
+    }
+
+    /// `stable_id`'s phone as a tailnet connection sees it.
+    fn peer(stable_id: &str) -> tailnet::PeerIdentity {
+        tailnet::PeerIdentity {
+            stable_id: stable_id.to_owned(),
+            name: format!("{stable_id}.tail1234.ts.net"),
+            user_id: 2,
+            login: "owner@example.com".to_owned(),
+        }
+    }
+
+    /// Dispatch `msg` over a fresh connection of `client_id` and `auth` and
+    /// return its single reply.
+    async fn dispatch_as_client(
+        hub: &Hub,
+        msg: ClientMessage,
+        auth: &AuthKind,
+        client_id: &str,
+    ) -> DaemonMessage {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::channel(1);
+        let pty_lane: Arc<PtyLane> = Arc::default();
+        let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+        let ctx = ConnCtx {
+            out_tx: &out_tx,
+            file_tx: &file_tx,
+            pty_lane: &pty_lane,
+            fetches: &fetches,
+            tails: &Arc::default(),
+            client_id,
+            client_name: None,
+            connection: 1,
+            auth,
+        };
+        dispatch(hub, msg, &ctx)
+            .await
+            .expect("a failed read is reported on the wire, not returned from dispatch");
+        let first = out_rx.try_recv().expect("one reply is sent");
+        assert!(out_rx.try_recv().is_err(), "exactly one reply is sent");
+        first
+    }
+
+    /// Record `device`'s request `request_id` as having spawned `session_id`.
+    fn journal_spawned(hub: &Hub, device: &str, request_id: &str, session_id: &str) {
+        let now = std::time::Instant::now();
+        assert!(
+            matches!(hub.spawn_journal.begin(device, request_id, now), Begin::New),
+            "the entry is new"
+        );
+        hub.spawn_journal.finish(
+            device,
+            request_id,
+            Outcome::Spawned {
+                session_id: session_id.to_owned(),
+            },
+            now,
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_resent_spawn_answers_with_the_journalled_session() {
+        let (hub, _scratch) = spawnless_test_hub("journal-resent-session");
+        hub.sessions.insert(idle_record("s1"));
+        let device = device_key(&AuthKind::Local, "c1").expect("a local connection is journalled");
+        journal_spawned(&hub, &device, "rq-j1", "s1");
+        let req = env_spawn(
+            single_target(true, None),
+            SessionMode::Interactive,
+            Vec::new(),
+            Some("rq-j1"),
+        );
+        let reply = dispatch_one(&hub, ClientMessage::SpawnSession(req)).await;
+        let DaemonMessage::SessionUpdated {
+            session,
+            request_id,
+        } = reply
+        else {
+            panic!("a repeat is answered with the journalled session, got {reply:?}");
+        };
+        assert_eq!(session.id, "s1");
+        assert_eq!(request_id.as_deref(), Some("rq-j1"));
+        assert_eq!(hub.sessions.snapshots().len(), 1, "no second session");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_resent_spawn_from_another_device_spawns_again() {
+        let (hub, _scratch) = spawnless_test_hub("journal-other-device");
+        hub.sessions.insert(idle_record("s1"));
+        let first = device_key(&AuthKind::Tailnet(peer("nFirst")), "c1")
+            .expect("a tailnet peer is journalled");
+        journal_spawned(&hub, &first, "rq-j2", "s1");
+        let req = env_spawn(
+            single_target(true, None),
+            SessionMode::PlainShell,
+            Vec::new(),
+            Some("rq-j2"),
+        );
+        let second_device = AuthKind::Tailnet(peer("nSecond"));
+        let reply = dispatch_one_as(&hub, ClientMessage::SpawnSession(req), &second_device).await;
+        let DaemonMessage::ActionFailed { request_id, .. } = reply else {
+            panic!("a second device starts its own spawn, got {reply:?}");
+        };
+        assert_eq!(request_id.as_deref(), Some("rq-j2"));
+        assert!(
+            matches!(
+                hub.spawn_journal.outcome_of(&first, "rq-j2"),
+                Some(Outcome::Spawned { session_id }) if session_id == "s1"
+            ),
+            "the first device's entry is untouched"
+        );
+        assert_eq!(
+            hub.sessions.snapshots().len(),
+            1,
+            "the journalled session is all there is"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_spawn_without_a_request_id_is_not_journalled() {
+        let (hub, _scratch) = spawnless_test_hub("journal-no-id");
+        let req = || {
+            env_spawn(
+                single_target(true, None),
+                SessionMode::PlainShell,
+                Vec::new(),
+                None,
+            )
+        };
+        for _ in 0..2 {
+            let reply = dispatch_one(&hub, ClientMessage::SpawnSession(req())).await;
+            let DaemonMessage::ActionFailed { .. } = reply else {
+                panic!("each send reaches the spawn, got {reply:?}");
+            };
+        }
+        assert_eq!(
+            hub.spawn_journal.entry_count(
+                &device_key(&AuthKind::Local, "c1").expect("a local connection is journalled")
+            ),
+            0,
+            "a request with no id leaves no entry"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_resent_spawn_answers_the_same_failure() {
+        let (hub, _scratch) = spawnless_test_hub("journal-resent-failed");
+        let req = || {
+            env_spawn(
+                single_target(true, None),
+                SessionMode::PlainShell,
+                Vec::new(),
+                Some("rq-j4"),
+            )
+        };
+        let first = dispatch_one(&hub, ClientMessage::SpawnSession(req())).await;
+        let second = dispatch_one(&hub, ClientMessage::SpawnSession(req())).await;
+        let (
+            DaemonMessage::ActionFailed {
+                title: first_title,
+                detail: first_detail,
+                hint: first_hint,
+                request_id: first_id,
+            },
+            DaemonMessage::ActionFailed {
+                title: second_title,
+                detail: second_detail,
+                hint: second_hint,
+                request_id: second_id,
+            },
+        ) = (&first, &second)
+        else {
+            panic!("both sends fail, got {first:?} and {second:?}");
+        };
+        assert_eq!(first_id.as_deref(), Some("rq-j4"));
+        assert_eq!(second_id.as_deref(), Some("rq-j4"));
+        assert_eq!(
+            (first_title, first_detail, first_hint),
+            (second_title, second_detail, second_hint),
+            "the repeat carries the first failure unchanged"
+        );
+        assert!(!first_detail.is_empty(), "the failure carries its text");
+        let device = device_key(&AuthKind::Local, "c1").expect("a local connection is journalled");
+        assert_eq!(hub.spawn_journal.entry_count(&device), 1, "one entry");
+        assert!(
+            matches!(
+                hub.spawn_journal.outcome_of(&device, "rq-j4"),
+                Some(Outcome::Failed { .. })
+            ),
+            "the entry holds the failure"
+        );
+    }
+
+    /// A connection that sends no `client_id` identifies no device, so its
+    /// spawns are not journalled: two runs sharing one request id both spawn.
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn spawns_from_connections_with_no_client_id_are_not_journalled() {
+        let (hub, _scratch) = spawnless_test_hub("journal-legacy-client");
+        let legacy = crate::state::LEGACY_CLIENT_ID;
+        let req = || {
+            env_spawn(
+                single_target(true, None),
+                SessionMode::PlainShell,
+                Vec::new(),
+                Some("drive"),
+            )
+        };
+        for _ in 0..2 {
+            let reply = dispatch_as_client(
+                &hub,
+                ClientMessage::SpawnSession(req()),
+                &AuthKind::Local,
+                legacy,
+            )
+            .await;
+            let DaemonMessage::ActionFailed { .. } = reply else {
+                panic!("each run reaches the spawn, got {reply:?}");
+            };
+        }
+        assert_eq!(
+            hub.spawn_journal.entry_count(&format!("local:{legacy}")),
+            0,
+            "a connection with no client id leaves no entry"
         );
     }
 

@@ -96,6 +96,10 @@ pub(crate) fn push_state_in(dir: PathBuf) -> Arc<std::sync::Mutex<crate::push::s
     )))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the test hub's one literal, kept beside the daemon's own"
+)]
 pub(super) fn build_test_hub(
     scratch: ScratchDir,
     bin_templates: Option<PathBuf>,
@@ -183,6 +187,7 @@ pub(super) fn build_test_hub(
         keep_awake_mode: Arc::new(keep_awake_mode),
         keep_awake_status,
         recovering: RecoveryClaims::default(),
+        spawn_journal: Arc::default(),
         resume_in_flight: Arc::default(),
         start_resume: Arc::default(),
         resume_reported: Arc::default(),

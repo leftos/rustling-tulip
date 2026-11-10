@@ -171,6 +171,9 @@ pub struct Hub {
     /// The session ids a recovery or a Resume is spawning for right now, so
     /// the two never start the same session twice.
     pub recovering: RecoveryClaims,
+    /// The spawn requests each device sent, so one a client resends after a
+    /// flaky link makes no second session.
+    pub spawn_journal: Arc<crate::spawn_journal::SpawnJournal>,
     /// True while the start-up resume of the sessions the last run lost is
     /// spawning them; idle exit holds off meanwhile.
     pub resume_in_flight: Arc<std::sync::atomic::AtomicBool>,
@@ -592,6 +595,7 @@ pub async fn run(
         keep_awake_mode: Arc::new(keep_awake_tx),
         keep_awake_status: keep_awake_status_rx,
         recovering: RecoveryClaims::default(),
+        spawn_journal: Arc::default(),
         resume_in_flight: Arc::default(),
         start_resume: Arc::default(),
         resume_reported: Arc::default(),
