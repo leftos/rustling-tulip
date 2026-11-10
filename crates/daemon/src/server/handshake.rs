@@ -8,7 +8,7 @@ use axum::extract::ws::Message;
 use futures::StreamExt as _;
 use protocol::{
     ClientKind, ClientMessage, ClonableLayout, ConnectionOrigin, DaemonMessage,
-    InboundClientMessage, SUPPORTED_PROTOCOL_VERSIONS,
+    InboundClientMessage, NO_COMMON_PROTOCOL_REASON, SUPPORTED_PROTOCOL_VERSIONS,
 };
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -158,7 +158,7 @@ async fn read_hello<R: Inbound>(
     let negotiated =
         negotiate_protocol_version(protocol_version, &protocol_versions).ok_or_else(|| {
             anyhow!(
-                "no compatible protocol version: client advertises scalar={protocol_version} \
+                "{NO_COMMON_PROTOCOL_REASON}: client advertises scalar={protocol_version} \
                  + range={protocol_versions:?}, daemon supports {SUPPORTED_PROTOCOL_VERSIONS:?}"
             )
         })?;
@@ -450,8 +450,8 @@ pub(super) fn push_initial_state(
         hub.host_update.send_phase(out_tx);
     }
     send_resume_report(hub, out_tx, client_id);
-    // Every connection, local and tailnet, last: how the host's last update
-    // ended, for a client that asked for it.
+    // Last: how the host's last update ended, sent to every connection,
+    // local and tailnet; a client acts on it only for an update it asked for.
     if let Some(result) = hub.host_update.last_result() {
         let _ = out_tx.send(result);
     }
@@ -1334,6 +1334,36 @@ mod tests {
                 })
             ),
             "{welcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hello_with_no_common_version_is_refused_with_the_stable_reason() {
+        let (hub, _scratch) = test_hub("no-common-version");
+        let token = hub.auth_token.clone();
+        let (mut client, _session) = mem_session(&hub, AuthKind::Local);
+        let mut refused = hello(&token, None);
+        if let protocol::ClientMessage::Hello {
+            protocol_version,
+            protocol_versions,
+            ..
+        } = &mut refused
+        {
+            // u32::MAX is guaranteed not to be in the daemon's supported list.
+            *protocol_version = u32::MAX;
+            *protocol_versions = vec![u32::MAX];
+        }
+        client.send(&refused);
+        let reply = tokio::time::timeout(HANG_GUARD, client.next(true))
+            .await
+            .expect("the daemon answers the Hello");
+        assert!(
+            matches!(
+                &reply,
+                Some(DaemonMessage::AuthFailed { reason })
+                    if reason.starts_with(protocol::NO_COMMON_PROTOCOL_REASON)
+            ),
+            "{reply:?}"
         );
     }
 

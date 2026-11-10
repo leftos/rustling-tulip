@@ -11,6 +11,17 @@ How a versioned release of rustling-tulip is cut, starting with `v0.1.0-alpha`. 
   A release missing the macOS pair stays valid for Windows and is simply not offered to a Mac as an update ([auto-update.md](./auto-update.md)).
 - The version lives in one place, `[workspace.package] version` in `Cargo.toml`, which every crate inherits; the installer reads it from there.
 
+## Mark what a release breaks
+
+A release that breaks live sessions or the protocol says so in a marker line, which the app reads from the release's notes on the feed (`update_core::breaks_of`): `<!-- breaks: sessions, protocol -->`, with either word or both. It is the first line of the version's `CHANGELOG.md` section, right under its `## v<version>` heading, so it reaches the notes file the publish step uploads; the app leaves the line out of the notes it shows.
+
+- `sessions`: an update to this release ends the live sessions on the machine it updates: a tracer ABI break ([tracer-abi.md](./tracer-abi.md)), a session sidecar change an older daemon's sessions cannot be read back from, or anything else that ends live sessions across an update.
+- `protocol`: `protocol-version.json`'s `supported` range drops a version the last release spoke, so a client of the last release can no longer connect to this one.
+
+A release with no marker breaks nothing. The Update host dialog warns from the markers of every release between the host's version and the newest, and after an update that breaks either, the app that asked updates itself right after the host when its own release check succeeded and it is older than the newest release.
+
+Before publishing, check what changed since the last release: `git diff <last tag> -- protocol-version.json crates/tracer-protocol`. A change to `supported` that drops a version, or a tracer ABI bump, needs its word in the marker.
+
 ## Steps
 
 1. **Scope.** `uv run --project ~/.claude/tools/linear python -m linear release status rustling-tulip`: every issue in `vNext` is Done or Canceled. An open one either lands first or moves out with `linear release add rustling-tulip --next <ID>`.
@@ -35,6 +46,6 @@ How a versioned release of rustling-tulip is cut, starting with `v0.1.0-alpha`. 
 8. **Tag and push.** `git tag -a v<version> -m "rustling-tulip v<version>"` on the commit the gates ran on, then `git push origin main v<version>`.
 9. **Publish.** `gh release create v<version> target/installer/rustling-tulip-<version>-setup.exe target/installer/rustling-tulip-<version>-setup.exe.sha256 target/installer/rustling-tulip-<version>-macos-arm64.dmg target/installer/rustling-tulip-<version>-macos-arm64.zip target/installer/rustling-tulip-<version>-macos-arm64.zip.sha256 --repo leftos/rustling-tulip --title "rustling-tulip v<version>" --notes-file <notes> --latest`, never `--prerelease`.
 
-   The notes are the version's `CHANGELOG.md` section without its `## v<version>` heading (the client's What's new window shows each release's body under its own heading, [auto-update.md](./auto-update.md)), checked against the issues `linear release status` lists in `vNext`.
+   The notes are the version's `CHANGELOG.md` section without its `## v<version>` heading (the client's What's new window shows each release's body under its own heading, [auto-update.md](./auto-update.md)), checked against the issues `linear release status` lists in `vNext`. A release that breaks sessions or the protocol keeps its marker line as the notes' first line ([Mark what a release breaks](#mark-what-a-release-breaks)).
 10. **Linear.** Once the release is public: `uv run --project ~/.claude/tools/linear python -m linear release complete rustling-tulip --version v<version> --sha <tag commit> --repo-root .`. It files every shipped Done issue under the new release and moves `vNext+1` up into `vNext`. Never run it twice for one version; a cut that missed issues is fixed with `linear release settle`.
 11. **After the first release** the repo's test mode turns `stable` (the `rustling-tulip-nextup` profile's `test mode:` line and CLAUDE.md), so every landed change runs the full suite from then on.

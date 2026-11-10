@@ -34,7 +34,7 @@ use rustling_tulip_native::{
     set_bitmap_reader, set_idle_reader, spawn_net,
     target::{HostKey, Target},
     ui_theme::UiTheme,
-    update::{AlreadyRunning, LastResult, Ready, Updater},
+    update::{AlreadyRunning, Breaks, BreaksOffer, LastResult, Ready, Updater},
 };
 use serde_json::{Value, json};
 
@@ -2106,6 +2106,15 @@ pub struct UpdaterRecorder {
     changelog_calls: Mutex<Vec<(Option<String>, String)>>,
     /// The answer a changelog call gives.
     changelog_answer: Mutex<Result<String, String>>,
+    /// Each release check's `from` version.
+    breaks_calls: Mutex<Vec<String>>,
+    /// The answer a release check gives.
+    breaks_answer: Mutex<Result<Option<BreaksOffer>, String>>,
+    /// While set, release checks wait for [`UpdaterRecorder::release_breaks`].
+    breaks_held: AtomicBool,
+    /// The release checks waiting while held.
+    breaks_waiting:
+        Mutex<Vec<futures::channel::oneshot::Sender<anyhow::Result<Option<BreaksOffer>>>>>,
     checks: AtomicUsize,
     installs: Mutex<Vec<PathBuf>>,
     last_result_reads: AtomicUsize,
@@ -2124,6 +2133,10 @@ impl Default for UpdaterRecorder {
             notes: Mutex::new(String::new()),
             changelog_calls: Mutex::new(Vec::new()),
             changelog_answer: Mutex::new(Ok(String::new())),
+            breaks_calls: Mutex::new(Vec::new()),
+            breaks_answer: Mutex::new(Ok(None)),
+            breaks_held: AtomicBool::new(false),
+            breaks_waiting: Mutex::new(Vec::new()),
             checks: AtomicUsize::new(0),
             installs: Mutex::new(Vec::new()),
             last_result_reads: AtomicUsize::new(0),
@@ -2183,6 +2196,44 @@ impl UpdaterRecorder {
     /// Each changelog call's `(after, through)` versions, oldest first.
     pub fn changelog_calls(&self) -> Vec<(Option<String>, String)> {
         locked(&self.changelog_calls).clone()
+    }
+
+    /// Release checks find `newest` after the host's version, breaking
+    /// `breaks`.
+    pub fn offer_breaks(&self, newest: &str, breaks: Breaks) {
+        let answer = semver::Version::parse(newest)
+            .map(|newest| Some(BreaksOffer { newest, breaks }))
+            .map_err(|err| format!("the spec's version {newest:?} is not semver: {err}"));
+        *locked(&self.breaks_answer) = answer;
+    }
+
+    /// Release checks fail with `error`.
+    pub fn fail_breaks(&self, error: &str) {
+        *locked(&self.breaks_answer) = Err(error.to_owned());
+    }
+
+    /// Release checks wait until [`Self::release_breaks`].
+    pub fn hold_breaks(&self) {
+        self.breaks_held.store(true, Ordering::SeqCst);
+    }
+
+    /// Every waiting release check answers, and later ones answer at once.
+    pub fn release_breaks(&self) {
+        self.breaks_held.store(false, Ordering::SeqCst);
+        for waiting in std::mem::take(&mut *locked(&self.breaks_waiting)) {
+            let _ = waiting.send(self.answer_breaks());
+        }
+    }
+
+    /// Each release check's `from` version, oldest first.
+    pub fn breaks_calls(&self) -> Vec<String> {
+        locked(&self.breaks_calls).clone()
+    }
+
+    fn answer_breaks(&self) -> anyhow::Result<Option<BreaksOffer>> {
+        locked(&self.breaks_answer)
+            .clone()
+            .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
     /// How many checks ran.
@@ -2254,6 +2305,24 @@ impl Updater for UpdaterRecorder {
             Ok(text) => Ok(text),
             Err(error) => Err(anyhow::anyhow!("{error}")),
         })
+        .boxed()
+    }
+
+    fn breaks_since(
+        &self,
+        from: semver::Version,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<Option<BreaksOffer>>> {
+        use futures::FutureExt as _;
+        locked(&self.breaks_calls).push(from.to_string());
+        if !self.breaks_held.load(Ordering::SeqCst) {
+            return futures::future::ready(self.answer_breaks()).boxed();
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        locked(&self.breaks_waiting).push(tx);
+        async move {
+            rx.await
+                .map_err(|_| anyhow::anyhow!("the held release check was dropped"))?
+        }
         .boxed()
     }
 

@@ -10,10 +10,10 @@ use tracing::{info, warn};
 use update_core::macos_stage::{STAGING_PREFIX, bundle_of};
 
 pub use update_core::{
-    DEFAULT_FEED_BASE, FEED_BASE_VAR, HASH_MISMATCH, LastResult, Offer, Platform, Ready,
-    ReleaseNotes, UPDATE_MUTEX, asset_name, changelog_text, check_and_download, checks_allowed,
-    clean_old, feed_base, fetch_changelog, parse_changelog, parse_releases, parse_releases_for,
-    parse_sha256, take_last_result,
+    Breaks, BreaksOffer, DEFAULT_FEED_BASE, FEED_BASE_VAR, HASH_MISMATCH, LastResult, Offer,
+    Platform, Ready, ReleaseNotes, UPDATE_MUTEX, asset_name, breaks_of, breaks_since,
+    changelog_text, check_and_download, checks_allowed, clean_old, feed_base, fetch_changelog,
+    parse_changelog, parse_releases, parse_releases_for, parse_sha256, take_last_result,
 };
 
 /// The arguments the installer runs with for an update.
@@ -60,6 +60,18 @@ pub trait Updater {
         after: Option<semver::Version>,
         through: semver::Version,
     ) -> futures::future::BoxFuture<'static, anyhow::Result<String>>;
+
+    /// What the releases after `from` up to the newest break, read from the
+    /// feed, and the newest version; `None` when nothing is newer.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the feed cannot be fetched or decoded, or in a build that
+    /// does not check for updates.
+    fn breaks_since(
+        &self,
+        from: semver::Version,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<Option<BreaksOffer>>>;
 
     /// Starts `ready`'s installer for an update.
     ///
@@ -156,6 +168,32 @@ impl Updater for SystemUpdater {
             spawned.context("spawning the changelog fetch")?;
             rx.await
                 .map_err(|_| anyhow!("the changelog fetch ended without an answer"))?
+        }
+        .boxed()
+    }
+
+    fn breaks_since(
+        &self,
+        from: semver::Version,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<Option<BreaksOffer>>> {
+        use futures::FutureExt as _;
+        if !self.active {
+            return futures::future::ready(Err(anyhow!(
+                "this build does not check for updates (a dev build needs {FEED_BASE_VAR})"
+            )))
+            .boxed();
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("update-breaks".to_owned())
+            .spawn(move || {
+                // The receiver is gone only when the window closed.
+                let _ = tx.send(breaks_since(&from, &feed_base()));
+            });
+        async move {
+            spawned.context("spawning the release check")?;
+            rx.await
+                .map_err(|_| anyhow!("the release check ended without an answer"))?
         }
         .boxed()
     }

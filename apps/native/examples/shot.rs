@@ -78,7 +78,7 @@ use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
 use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::ui_theme::theme;
-use rustling_tulip_native::update::{LastResult, Ready, Updater};
+use rustling_tulip_native::update::{Breaks, BreaksOffer, LastResult, Ready, Updater};
 use rustling_tulip_native::{
     Activity, AppToast, AppToastKind, AskBlock, AskBox, AskChoice, Assets, CardText, Clock,
     Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS,
@@ -232,10 +232,11 @@ enum View {
     OpenShell,
     SafeStart,
     UpdateHost,
+    UpdateHostBreaks,
 }
 
 impl View {
-    const ALL: [Self; 37] = [
+    const ALL: [Self; 38] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -273,6 +274,7 @@ impl View {
         Self::OpenShell,
         Self::SafeStart,
         Self::UpdateHost,
+        Self::UpdateHostBreaks,
     ];
 
     fn name(self) -> &'static str {
@@ -313,6 +315,7 @@ impl View {
             Self::OpenShell => "open-shell",
             Self::SafeStart => "safe-start",
             Self::UpdateHost => "update-host",
+            Self::UpdateHostBreaks => "update-host-breaks",
             Self::Toast => "toast",
         }
     }
@@ -374,7 +377,11 @@ impl View {
     fn on_hosts(self) -> bool {
         matches!(
             self,
-            Self::MultiHost | Self::SpawnHosts | Self::SettingsHosts | Self::UpdateHost
+            Self::MultiHost
+                | Self::SpawnHosts
+                | Self::SettingsHosts
+                | Self::UpdateHost
+                | Self::UpdateHostBreaks
         )
     }
 
@@ -397,6 +404,10 @@ impl View {
             Self::UpdateHost => root
                 .host_update_dialog()
                 .is_some_and(|dialog| dialog.sessions.len() == 2),
+            // The same dialog once its release check found both breaks.
+            Self::UpdateHostBreaks => root
+                .host_update_dialog()
+                .is_some_and(|dialog| dialog.sessions.len() == 2 && dialog.warnings.len() == 2),
             Self::Main | Self::MainCompact | Self::MainNarrow => {
                 !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
             }
@@ -586,6 +597,7 @@ impl Shot {
             | View::OpenShell
             | View::SafeStart
             | View::UpdateHost
+            | View::UpdateHostBreaks
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -607,9 +619,11 @@ impl Shot {
             View::Connections | View::ConnectionsSsh | View::ConnectionsScanError => {
                 connections_ui_state()
             }
-            View::MultiHost | View::SpawnHosts | View::SettingsHosts | View::UpdateHost => {
-                multi_host_ui_state()
-            }
+            View::MultiHost
+            | View::SpawnHosts
+            | View::SettingsHosts
+            | View::UpdateHost
+            | View::UpdateHostBreaks => multi_host_ui_state(),
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -1015,6 +1029,13 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
         updater: Arc::new(ShotUpdater {
             installer: ui_dir.join(SHOT_INSTALLER),
             offers: matches!(view, View::Update | View::UpdateNotes),
+            breaks: (view == View::UpdateHostBreaks).then(|| BreaksOffer {
+                newest: semver::Version::new(0, 99, 0),
+                breaks: Breaks {
+                    sessions: true,
+                    protocol: true,
+                },
+            }),
         }),
     }
 }
@@ -1357,7 +1378,7 @@ fn drive(
             Ok(())
         }
         View::Connections => open_picker(window, cx),
-        View::UpdateHost => open_update_host(window, cx),
+        View::UpdateHost | View::UpdateHostBreaks => open_update_host(window, cx),
         View::ConnectionsScanError => open_picker_over(Arc::new(ShotPeersFailed), window, cx),
         View::Themes => drive_themes(step, window, cx),
         View::ThemesEdit => drive_themes_edit(step, window, cx),
@@ -1550,12 +1571,25 @@ struct ShotUpdater {
     installer: PathBuf,
     /// Whether a check finds the update: only the `update` shot's does.
     offers: bool,
+    /// What a release check finds: only the `update-host-breaks` shot's
+    /// finds anything, and only that shot's updater is active, so its
+    /// dialog runs the check.
+    breaks: Option<BreaksOffer>,
 }
 
 impl Updater for ShotUpdater {
-    /// The shot's window never records a version or announces an install.
+    /// The shot's window never records a version or announces an install,
+    /// but in the `update-host-breaks` shot, whose dialog runs a release
+    /// check only for an active updater.
     fn is_active(&self) -> bool {
-        false
+        self.breaks.is_some()
+    }
+
+    fn breaks_since(
+        &self,
+        _from: semver::Version,
+    ) -> BoxFuture<'static, Result<Option<BreaksOffer>>> {
+        futures::future::ready(Ok(self.breaks.clone())).boxed()
     }
 
     fn check(&self, _current: &semver::Version) -> BoxFuture<'static, Result<Option<Ready>>> {
@@ -1915,7 +1949,7 @@ impl RemoteFixture {
         }
         .snapshot(now)?;
         let mut sessions = vec![session];
-        if view == View::UpdateHost {
+        if matches!(view, View::UpdateHost | View::UpdateHostBreaks) {
             sessions.push(
                 Row {
                     id: "b-docs",
@@ -2241,7 +2275,7 @@ impl FakeDaemon {
         conn.on_connecting();
         conn.on_socket_open(8787);
         // Only the update-host shot's "box" can update on request.
-        let features = if self.view == View::UpdateHost {
+        let features = if matches!(self.view, View::UpdateHost | View::UpdateHostBreaks) {
             vec![protocol::FEATURE_REMOTE_UPDATE.to_owned()]
         } else {
             Vec::new()

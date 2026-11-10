@@ -26,7 +26,8 @@ use rustling_tulip_native::connection_picker::{
     AddMode, PeerSource, RowDetail, RowState, SshTestCancel, SshTester,
 };
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
-use rustling_tulip_native::{Connection, NetCommand, NetEvent, RootView};
+use rustling_tulip_native::update::Breaks;
+use rustling_tulip_native::{Connection, HostUpdateDialogView, NetCommand, NetEvent, RootView};
 use serde_json::{Value, json};
 use support::{Fixture, Harness, PROTOCOL, TestDir, session, shell_spawns};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -709,6 +710,327 @@ fn update_host_confirms_listing_the_hosts_sessions_then_sends_remote_update(
         !ring.contains(&format!("connections-row-{HOST}-update")),
         "a host with an update pending is not offered another: {ring:?}"
     );
+}
+
+/// The newest release the flagged specs' release check finds, newer than
+/// this client.
+const NEWEST: &str = "99.0.0";
+
+/// Whether a toast shows this app's own update counting down.
+fn counting_down(h: &mut Harness<'_>) -> bool {
+    toasts(h)
+        .iter()
+        .any(|(title, _)| title.starts_with("Updating this app in"))
+}
+
+/// Asks `HOST` for a release that breaks the protocol, then sees it start
+/// and drop: the request's id.
+fn flagged_update_started(h: &mut Harness<'_>) -> String {
+    h.updater().offer_breaks(
+        NEWEST,
+        Breaks {
+            sessions: false,
+            protocol: true,
+        },
+    );
+    update_started(h, NEWEST)
+}
+
+/// Asks `HOST` to update with the release check the updater already
+/// answers, then sees it start to `version` and drop: the request's id.
+fn update_started(h: &mut Harness<'_>, version: &str) -> String {
+    let id = ask_update(h);
+    host_started(h, id, version)
+}
+
+/// `HOST` answers request `id` by starting its update to `version`, then
+/// drops: the id.
+fn host_started(h: &mut Harness<'_>, id: String, version: &str) -> String {
+    h.host(&tailnet(HOST))
+        .send(DaemonMessage::RemoteUpdateStarted {
+            request_id: id.clone(),
+            version: version.to_owned(),
+        });
+    h.host(&tailnet(HOST))
+        .event(NetEvent::State(closed(tailnet(HOST))));
+    assert!(
+        !counting_down(h),
+        "nothing counts down before the host is back: {:?}",
+        toasts(h)
+    );
+    id
+}
+
+#[gpui::test]
+fn a_release_that_ends_sessions_warns_in_the_update_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    h.updater().offer_breaks(
+        NEWEST,
+        Breaks {
+            sessions: true,
+            protocol: false,
+        },
+    );
+
+    h.click_on(&format!("connections-row-{HOST}-update"));
+
+    let dialog = h
+        .root(|root, _| root.host_update_dialog())
+        .expect("the confirm dialog is open");
+    assert_eq!(
+        dialog.body,
+        format!(
+            "{HOST} will download and check the newest official release itself, then restart its \
+             daemon. Its running sessions end."
+        )
+    );
+    assert_eq!(
+        dialog.warnings,
+        [format!("v{NEWEST} ends every session on {HOST}.")]
+    );
+    assert!(dialog.confirm_enabled);
+    assert_eq!(
+        h.updater().breaks_calls(),
+        [OLD_RELEASE],
+        "the check reads the releases after the host's version"
+    );
+}
+
+/// The dialog's body when the update keeps the host's sessions running.
+fn keeps_running_body() -> String {
+    format!(
+        "{HOST} will download and check the newest official release itself, then restart its \
+         daemon. Its sessions keep running."
+    )
+}
+
+/// Opens the dialog from `HOST`'s row: what it shows.
+fn open_update_dialog(h: &mut Harness<'_>) -> HostUpdateDialogView {
+    h.click_on(&format!("connections-row-{HOST}-update"));
+    h.root(|root, _| root.host_update_dialog())
+        .expect("the confirm dialog is open")
+}
+
+#[gpui::test]
+fn a_failed_release_check_says_so_and_lets_the_update_go_ahead(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    h.updater().fail_breaks("the feed is down");
+
+    let dialog = open_update_dialog(&mut h);
+
+    assert_eq!(
+        dialog.warnings,
+        ["Couldn't check what this update changes."]
+    );
+    assert!(dialog.confirm_enabled);
+    assert_eq!(dialog.body, keeps_running_body());
+    h.click_on("host-update-confirm");
+    let id = remote_updates(&h.host(&tailnet(HOST)).sent())
+        .into_iter()
+        .next()
+        .expect("one RemoteUpdate went to the host");
+    host_started(&mut h, id, NEWEST);
+    connect_updatable(&mut h, &tailnet(HOST), NEWEST);
+    assert!(
+        toasts(&mut h).contains(&(format!("{HOST} updated to {NEWEST}"), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert!(
+        !counting_down(&mut h),
+        "a failed check records no self-update: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn a_build_that_cannot_check_shows_no_warning(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    h.updater().set_inactive();
+    h.updater().offer_breaks(
+        NEWEST,
+        Breaks {
+            sessions: true,
+            protocol: true,
+        },
+    );
+
+    let dialog = open_update_dialog(&mut h);
+
+    assert_eq!(dialog.warnings, Vec::<String>::new());
+    assert!(dialog.confirm_enabled);
+    assert_eq!(dialog.body, keeps_running_body());
+    assert_eq!(
+        h.updater().breaks_calls(),
+        Vec::<String>::new(),
+        "a build that does not check reads no feed"
+    );
+}
+
+#[gpui::test]
+fn a_protocol_break_warns_that_this_app_updates_itself(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    h.updater().offer_breaks(
+        NEWEST,
+        Breaks {
+            sessions: false,
+            protocol: true,
+        },
+    );
+
+    let dialog = open_update_dialog(&mut h);
+
+    assert_eq!(
+        dialog.warnings,
+        [format!(
+            "v{NEWEST} can't talk to this app's version, so this app updates itself right after \
+             {HOST}."
+        )]
+    );
+    assert_eq!(dialog.body, keeps_running_body());
+    assert!(dialog.confirm_enabled);
+}
+
+#[gpui::test]
+fn both_breaks_list_the_sessions_line_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    h.updater().offer_breaks(
+        NEWEST,
+        Breaks {
+            sessions: true,
+            protocol: true,
+        },
+    );
+
+    let dialog = open_update_dialog(&mut h);
+
+    assert_eq!(
+        dialog.warnings,
+        [
+            format!("v{NEWEST} ends every session on {HOST}."),
+            format!(
+                "v{NEWEST} can't talk to this app's version, so this app updates itself right \
+                 after {HOST}."
+            ),
+        ]
+    );
+    assert!(
+        dialog.body.ends_with("Its running sessions end."),
+        "{}",
+        dialog.body
+    );
+    assert!(dialog.confirm_enabled);
+}
+
+#[gpui::test]
+fn an_app_already_on_the_newest_release_does_not_update_itself_after_the_host(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    let this_app = env!("CARGO_PKG_VERSION");
+    h.updater().offer_breaks(
+        this_app,
+        Breaks {
+            sessions: false,
+            protocol: true,
+        },
+    );
+
+    update_started(&mut h, this_app);
+    connect_updatable(&mut h, &tailnet(HOST), this_app);
+
+    assert!(
+        toasts(&mut h).contains(&(format!("{HOST} updated to {this_app}"), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert!(
+        !counting_down(&mut h),
+        "an app on the newest release owes no update: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn the_update_button_waits_for_the_release_check(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    h.updater().hold_breaks();
+
+    h.click_on(&format!("connections-row-{HOST}-update"));
+
+    let dialog = h
+        .root(|root, _| root.host_update_dialog())
+        .expect("the confirm dialog is open");
+    assert_eq!(dialog.warnings, ["Checking what this update changes…"]);
+    assert!(!dialog.confirm_enabled);
+    h.click_on("host-update-confirm");
+    h.keys("enter");
+    assert!(
+        h.root(|root, _| root.host_update_dialog()).is_some(),
+        "a disabled Update does nothing"
+    );
+    assert_eq!(
+        remote_updates(&h.host(&tailnet(HOST)).sent()),
+        Vec::<String>::new()
+    );
+
+    h.updater().release_breaks();
+    h.cx.run_until_parked();
+
+    let dialog = h
+        .root(|root, _| root.host_update_dialog())
+        .expect("the confirm dialog is open");
+    assert_eq!(dialog.warnings, Vec::<String>::new());
+    assert!(dialog.confirm_enabled);
+    h.click_on("host-update-confirm");
+    assert_eq!(remote_updates(&h.host(&tailnet(HOST)).sent()).len(), 1);
+}
+
+#[gpui::test]
+fn a_flagged_update_counts_down_this_apps_own_update_after_the_host_returns(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    flagged_update_started(&mut h);
+
+    connect_updatable(&mut h, &tailnet(HOST), NEWEST);
+
+    assert!(
+        toasts(&mut h).contains(&(format!("{HOST} updated to {NEWEST}"), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert!(counting_down(&mut h), "{:?}", toasts(&mut h));
+}
+
+#[gpui::test]
+fn a_host_that_refuses_this_apps_version_after_a_flagged_update_starts_the_countdown(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    flagged_update_started(&mut h);
+
+    h.host(&tailnet(HOST)).send(DaemonMessage::AuthFailed {
+        reason: "no compatible protocol version: client advertises scalar=30 + range=[30], \
+                 daemon supports [31]"
+            .to_owned(),
+    });
+
+    assert!(
+        toasts(&mut h).contains(&(format!("{HOST} updated to {NEWEST}"), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert!(counting_down(&mut h), "{:?}", toasts(&mut h));
 }
 
 #[gpui::test]

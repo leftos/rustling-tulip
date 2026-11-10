@@ -220,6 +220,80 @@ fn offer_of(release: &Release, platform: Platform) -> Option<Offer> {
     })
 }
 
+/// What an update to a release breaks, as the marker lines in its notes
+/// say (`docs/release.md`, "Mark what a release breaks").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Breaks {
+    /// The update ends the live sessions on the machine it updates.
+    pub sessions: bool,
+    /// The release no longer speaks a protocol version the one before it did.
+    pub protocol: bool,
+}
+
+impl Breaks {
+    /// Whether the update breaks anything.
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.sessions || self.protocol
+    }
+
+    /// What either breaks.
+    fn or(self, other: Self) -> Self {
+        Self {
+            sessions: self.sessions || other.sessions,
+            protocol: self.protocol || other.protocol,
+        }
+    }
+}
+
+/// The newest release after a version, and what the releases after that
+/// version up to it break together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreaksOffer {
+    /// The newest release's version.
+    pub newest: semver::Version,
+    /// What any release in the range breaks.
+    pub breaks: Breaks,
+}
+
+/// The words of a marker line, `<!-- breaks: sessions, protocol -->` with
+/// any spacing and `breaks` in any case, trimmed and lower-cased; `None` for
+/// any other line.
+fn marker_words(line: &str) -> Option<Vec<String>> {
+    let inner = line.trim().strip_prefix("<!--")?.strip_suffix("-->")?;
+    let (key, words) = inner.split_once(':')?;
+    if !key.trim().eq_ignore_ascii_case("breaks") {
+        return None;
+    }
+    Some(
+        words
+            .split(',')
+            .map(|word| word.trim().to_lowercase())
+            .collect(),
+    )
+}
+
+/// What the marker lines in the release notes `body` say the release
+/// breaks: `sessions` and `protocol` count, any other word is ignored, and
+/// notes without a marker break nothing.
+#[must_use]
+pub fn breaks_of(body: &str) -> Breaks {
+    body.lines()
+        .filter_map(marker_words)
+        .flatten()
+        .fold(Breaks::default(), |breaks, word| match word.as_str() {
+            "sessions" => Breaks {
+                sessions: true,
+                ..breaks
+            },
+            "protocol" => Breaks {
+                protocol: true,
+                ..breaks
+            },
+            _ => breaks,
+        })
+}
+
 /// One release's notes, from its feed body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseNotes {
@@ -231,11 +305,17 @@ pub struct ReleaseNotes {
 
 impl ReleaseNotes {
     /// The notes `release` carries: its tag parsed as `v<version>` and its
-    /// body normalized; `None` when the tag is not `v<version>` or the body
-    /// is empty.
+    /// body normalized, without the marker lines [`breaks_of`] reads; `None`
+    /// when the tag is not `v<version>` or the body is empty.
     fn of(release: &Release) -> Option<Self> {
         let version = semver::Version::parse(release.tag_name.strip_prefix('v')?).ok()?;
-        let body = release.body.as_deref()?.replace("\r\n", "\n");
+        let body = release
+            .body
+            .as_deref()?
+            .lines()
+            .filter(|line| marker_words(line).is_none())
+            .collect::<Vec<_>>()
+            .join("\n");
         let body = body.trim().to_owned();
         if body.is_empty() {
             return None;
@@ -293,6 +373,71 @@ pub fn parse_changelog(
 ) -> anyhow::Result<String> {
     let releases = decode_releases(json)?;
     Ok(changelog_text(&notes_between(&releases, after, through)))
+}
+
+/// The newest non-draft release in `releases` newer than `from`, assets or
+/// not, and what every non-draft release newer than `from` breaks; `None`
+/// when nothing is newer.
+fn breaks_in(releases: &[Release], from: &semver::Version) -> Option<BreaksOffer> {
+    let newer: Vec<(semver::Version, Breaks)> = releases
+        .iter()
+        .filter(|release| !release.draft)
+        .filter_map(|release| {
+            let version = semver::Version::parse(release.tag_name.strip_prefix('v')?).ok()?;
+            (version > *from).then(|| (version, breaks_of(release.body.as_deref().unwrap_or(""))))
+        })
+        .collect();
+    let newest = newer.iter().map(|(version, _)| version).max()?.clone();
+    let breaks = newer
+        .iter()
+        .fold(Breaks::default(), |all, (_, breaks)| all.or(*breaks));
+    Some(BreaksOffer { newest, breaks })
+}
+
+/// What the releases in the feed `json` after `from` break, and the newest
+/// of them, as [`breaks_since`] reads it; `None` when nothing is newer.
+///
+/// # Errors
+///
+/// Fails when the feed does not decode.
+pub fn parse_breaks_since(
+    json: &str,
+    from: &semver::Version,
+) -> anyhow::Result<Option<BreaksOffer>> {
+    Ok(breaks_in(&decode_releases(json)?, from))
+}
+
+/// Fetches the feed at `feed_base` once and returns the newest release after
+/// `from` and what the releases after `from` up to it break together;
+/// `None` when nothing is newer. The request runs on a thread of its own
+/// with a current-thread runtime; this blocks until it finishes, so call it
+/// from a background task.
+///
+/// # Errors
+///
+/// Fails when the feed cannot be fetched or decoded.
+pub fn breaks_since(
+    from: &semver::Version,
+    feed_base: &str,
+) -> anyhow::Result<Option<BreaksOffer>> {
+    let (from, feed_base) = (from.clone(), feed_base.to_owned());
+    let worker = std::thread::Builder::new()
+        .name("update-breaks".to_owned())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("building the update thread's runtime")?;
+            runtime.block_on(async {
+                let http = http_client_within(&from, CHANGELOG_TIMEOUT)?;
+                let body = fetch_feed(&http, &feed_base).await?;
+                parse_breaks_since(&body, &from)
+            })
+        })
+        .context("spawning the update thread")?;
+    worker
+        .join()
+        .map_err(|_| anyhow!("the update thread panicked"))?
 }
 
 /// The SHA-256 a release's `.sha256` asset holds: exactly
@@ -790,9 +935,9 @@ impl Drop for OwnedMutex {
 )]
 mod tests {
     use super::{
-        FEED_PATH, HASH_MISMATCH, LastResult, Platform, Ready, asset_name, check_and_download,
-        fetch_changelog, parse_changelog, parse_releases_for, parse_sha256, read_last_result,
-        take_last_result,
+        Breaks, BreaksOffer, FEED_PATH, HASH_MISMATCH, LastResult, Platform, Ready, asset_name,
+        breaks_of, breaks_since, check_and_download, fetch_changelog, parse_changelog,
+        parse_releases_for, parse_sha256, read_last_result, take_last_result,
     };
     use serde_json::{Value, json};
     use sha2::{Digest as _, Sha256};
@@ -1534,5 +1679,152 @@ mod tests {
         let server = serve(|_base| Vec::new());
 
         assert!(fetched_changelog(&server, None, "0.7.0").is_err());
+    }
+
+    #[test]
+    fn breaks_of_reads_both_kinds_and_ignores_others() {
+        assert_eq!(
+            breaks_of("<!-- breaks: sessions, protocol, colours -->\nNotes"),
+            Breaks {
+                sessions: true,
+                protocol: true
+            }
+        );
+        assert_eq!(
+            breaks_of("<!-- breaks: sessions -->"),
+            Breaks {
+                sessions: true,
+                protocol: false
+            }
+        );
+        assert_eq!(
+            breaks_of("<!--breaks:protocol-->"),
+            Breaks {
+                sessions: false,
+                protocol: true
+            }
+        );
+        assert_eq!(
+            breaks_of("Notes\r\n  <!-- BREAKS: sessions, protocol -->  \r\n"),
+            Breaks {
+                sessions: true,
+                protocol: true
+            }
+        );
+    }
+
+    #[test]
+    fn breaks_of_without_a_marker_is_nothing() {
+        for body in [
+            "### Fixed\n\n- a fix",
+            "breaks: sessions",
+            "<!-- note: sessions -->",
+            "This release breaks: sessions, protocol <!-- breaks: sessions -->",
+            "",
+        ] {
+            assert_eq!(breaks_of(body), Breaks::default(), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn the_marker_is_not_shown_in_the_notes() {
+        let json = feed(vec![
+            with_body(complete("v0.5.0", BASE), "five"),
+            with_body(
+                complete("v0.6.0", BASE),
+                "<!-- breaks: sessions -->\r\n### Fixed\r\n\r\n- a fix",
+            ),
+            with_body(complete("v0.7.0", BASE), "  <!--breaks:protocol-->  "),
+        ]);
+
+        let text =
+            parse_changelog(&json, Some(&v("0.4.0")), &v("0.7.0")).expect("the feed decodes");
+        let offer = parse_releases_for(&json, &v("0.5.0"), Platform::Windows).expect("an offer");
+
+        assert_eq!(
+            text,
+            "## v0.6.0\n\n### Fixed\n\n- a fix\n\n## v0.5.0\n\nfive"
+        );
+        assert_eq!(offer.notes, "## v0.6.0\n\n### Fixed\n\n- a fix");
+        assert!(!text.contains("<!--"), "{text:?}");
+    }
+
+    /// [`breaks_since`] against a feed of `releases`, off this thread and
+    /// bounded by [`HANG_GUARD`]; it asserts the feed is fetched once.
+    fn fetched_breaks(
+        releases: Vec<(&'static str, &'static str)>,
+        from: &str,
+    ) -> Option<BreaksOffer> {
+        let server = serve(move |base| {
+            let releases = releases
+                .into_iter()
+                .map(|(tag, body)| with_body(complete(tag, base), body))
+                .collect();
+            vec![(FEED_PATH.to_owned(), feed(releases).into_bytes())]
+        });
+        let (done_tx, done) = mpsc::channel();
+        let (base, from) = (server.base.clone(), v(from));
+        std::thread::spawn(move || {
+            let _ = done_tx.send(breaks_since(&from, &base));
+        });
+        let offer = done
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: breaks_since never returned")
+            .expect("the feed decodes");
+        assert_eq!(FeedServer::paths(&server.requests()), [FEED_PATH]);
+        offer
+    }
+
+    #[test]
+    fn breaks_since_combines_every_release_in_the_gap() {
+        let offer = fetched_breaks(
+            vec![
+                ("v1.0.0", "one"),
+                ("v1.1.0", "<!-- breaks: sessions -->\nOne one"),
+                ("v1.2.0", "One two"),
+            ],
+            "1.0.0",
+        );
+
+        assert_eq!(
+            offer,
+            Some(BreaksOffer {
+                newest: v("1.2.0"),
+                breaks: Breaks {
+                    sessions: true,
+                    protocol: false
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn breaks_since_ignores_releases_at_or_below_from() {
+        let offer = fetched_breaks(
+            vec![
+                ("v1.0.0", "<!-- breaks: sessions -->\nOne"),
+                ("v1.1.0", "<!-- breaks: protocol -->\nOne one"),
+                ("v1.2.0", "One two"),
+            ],
+            "1.1.0",
+        );
+
+        assert_eq!(
+            offer,
+            Some(BreaksOffer {
+                newest: v("1.2.0"),
+                breaks: Breaks::default(),
+            })
+        );
+    }
+
+    #[test]
+    fn breaks_since_with_nothing_newer_is_none() {
+        let offer = fetched_breaks(
+            vec![("v1.0.0", "one"), ("v1.1.0", "<!-- breaks: protocol -->")],
+            "1.1.0",
+        );
+
+        assert_eq!(offer, None);
     }
 }

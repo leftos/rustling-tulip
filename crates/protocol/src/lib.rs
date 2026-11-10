@@ -125,6 +125,12 @@ pub const FEATURE_TYPED_PROMPT_ANSWERS: &str = "typed_prompt_answers";
 /// it updates itself to the newest release, or says why it cannot.
 pub const FEATURE_REMOTE_UPDATE: &str = "remote_update";
 
+/// What a daemon's `AuthFailed.reason` starts with when the client's `Hello`
+/// shares no protocol version with it. Clients of older releases match on
+/// it to tell a host that moved past their protocol, so the text never
+/// changes.
+pub const NO_COMMON_PROTOCOL_REASON: &str = "no compatible protocol version";
+
 /// `Welcome.features` entry: the daemon tells its connected clients to update
 /// themselves ([`ClientMessage::UpdateConnectedClients`]).
 pub const FEATURE_CLIENT_UPDATE: &str = "client_update";

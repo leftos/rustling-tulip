@@ -19,6 +19,7 @@ use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::target::HostKey;
 use crate::ui_theme::theme;
+use crate::update::BreaksOffer;
 
 /// How often the pending updates' bounds are checked.
 const REMOTE_UPDATE_TICK: Duration = Duration::from_secs(1);
@@ -50,6 +51,27 @@ pub struct HostUpdateDialogView {
     pub warnings: Vec<String>,
     /// The Update button's label.
     pub confirm: String,
+    /// Whether the Update button takes a click: not while the release check
+    /// runs.
+    pub confirm_enabled: bool,
+}
+
+/// The warning while the release check runs.
+const CHECKING_LINE: &str = "Checking what this update changes…";
+/// The warning when the release check failed.
+const CHECK_FAILED_LINE: &str = "Couldn't check what this update changes.";
+
+/// What the dialog knows of what the update breaks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BreaksCheck {
+    /// The release check runs.
+    Checking,
+    /// The release check answered: the newest release after the host's
+    /// version and what it breaks, or `None` when nothing is newer.
+    Known(Option<BreaksOffer>),
+    /// The check failed, or could not run; `shown` says whether a line says
+    /// so (not in a build that does not check for updates).
+    Failed { shown: bool },
 }
 
 /// The confirm dialog's state.
@@ -58,29 +80,74 @@ pub(crate) struct HostUpdateDialog {
     /// The host's name as its Connections row shows it.
     name: String,
     sessions: Vec<HostUpdateSession>,
-    /// Lines that warn what the update ends; none yet.
-    warnings: Vec<String>,
+    check: BreaksCheck,
+    /// The release check under way; dropped with the dialog.
+    _check_task: Option<Task<()>>,
     focus: FocusHandle,
 }
 
 impl HostUpdateDialog {
     fn view(&self) -> HostUpdateDialogView {
         let name = &self.name;
+        let ends = matches!(&self.check, BreaksCheck::Known(Some(offer)) if offer.breaks.sessions);
+        let sessions_line = if ends {
+            "Its running sessions end."
+        } else {
+            "Its sessions keep running."
+        };
         HostUpdateDialogView {
             title: format!("Update {name} to the newest release?"),
             body: format!(
                 "{name} will download and check the newest official release itself, then restart \
-                 its daemon. Its sessions keep running."
+                 its daemon. {sessions_line}"
             ),
             sessions: self.sessions.clone(),
             no_sessions: self
                 .sessions
                 .is_empty()
                 .then(|| format!("No sessions are running on {name}.")),
-            warnings: self.warnings.clone(),
+            warnings: self.warnings(),
             confirm: format!("Update {name}"),
+            confirm_enabled: self.check != BreaksCheck::Checking,
         }
     }
+
+    /// The lines above the buttons: the check running or failing, or what
+    /// the newest release breaks.
+    fn warnings(&self) -> Vec<String> {
+        match &self.check {
+            BreaksCheck::Checking => vec![CHECKING_LINE.to_owned()],
+            BreaksCheck::Failed { shown: true } => vec![CHECK_FAILED_LINE.to_owned()],
+            BreaksCheck::Failed { shown: false } | BreaksCheck::Known(None) => Vec::new(),
+            BreaksCheck::Known(Some(offer)) => breaks_lines(&self.name, offer),
+        }
+    }
+
+    /// Whether this app updates itself once the host runs the new release:
+    /// the release breaks something and is newer than this app.
+    fn self_update_after(&self) -> bool {
+        let BreaksCheck::Known(Some(offer)) = &self.check else {
+            return false;
+        };
+        offer.breaks.any()
+            && RootView::client_version().is_some_and(|version| version < offer.newest)
+    }
+}
+
+/// The warnings for `offer` on the host named `name`, sessions first.
+fn breaks_lines(name: &str, offer: &BreaksOffer) -> Vec<String> {
+    let new = &offer.newest;
+    let mut lines = Vec::new();
+    if offer.breaks.sessions {
+        lines.push(format!("v{new} ends every session on {name}."));
+    }
+    if offer.breaks.protocol {
+        lines.push(format!(
+            "v{new} can't talk to this app's version, so this app updates itself right after \
+             {name}."
+        ));
+    }
+    lines
 }
 
 /// A session's status in words.
@@ -123,15 +190,69 @@ impl RootView {
             .iter()
             .map(session_line)
             .collect();
+        let (check, check_task) = self.start_breaks_check(&host, cx);
         let focus = cx.focus_handle();
         focus.focus(window);
         self.host_update_dialog = Some(HostUpdateDialog {
             host,
             name,
             sessions,
-            warnings: Vec::new(),
+            check,
+            _check_task: check_task,
             focus,
         });
+        cx.notify();
+    }
+
+    /// Starts reading from the feed what the releases after `host`'s
+    /// version break. A build that does not check for updates, or a host
+    /// whose version is unknown, cannot run it.
+    fn start_breaks_check(
+        &self,
+        host: &HostKey,
+        cx: &mut Context<Self>,
+    ) -> (BreaksCheck, Option<Task<()>>) {
+        let updater = self.updater();
+        if !updater.is_active() {
+            return (BreaksCheck::Failed { shown: false }, None);
+        }
+        let from = self
+            .conn_of(host)
+            .and_then(crate::Connection::build_version)
+            .and_then(|version| semver::Version::parse(version).ok());
+        let Some(from) = from else {
+            tracing::warn!(
+                ?host,
+                "update: the host's version is unknown; its release check fails"
+            );
+            return (BreaksCheck::Failed { shown: true }, None);
+        };
+        let fetch = updater.breaks_since(from);
+        let task = cx.spawn(async move |this, cx| {
+            let found = fetch.await;
+            // Fails only when the view is gone, and the dialog with it.
+            this.update(cx, |root, cx| root.host_update_checked(found, cx))
+                .ok();
+        });
+        (BreaksCheck::Checking, Some(task))
+    }
+
+    /// The open dialog's release check answered.
+    fn host_update_checked(
+        &mut self,
+        found: anyhow::Result<Option<BreaksOffer>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = &mut self.host_update_dialog else {
+            return;
+        };
+        dialog.check = match found {
+            Ok(offer) => BreaksCheck::Known(offer),
+            Err(err) => {
+                tracing::warn!("update: the release check failed: {err:#}");
+                BreaksCheck::Failed { shown: true }
+            }
+        };
         cx.notify();
     }
 
@@ -144,20 +265,37 @@ impl RootView {
     /// Update: asks the dialog's host to update, shows the Asking toast and
     /// starts the clock on its answer; then the dialog closes.
     fn confirm_host_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .host_update_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.check == BreaksCheck::Checking)
+        {
+            return;
+        }
         let Some(dialog) = self.host_update_dialog.take() else {
             return;
         };
         let request_id = crate::new_request_id();
-        tracing::info!(host = ?dialog.host, %request_id, "update: asking a host to update");
+        let self_update_after = dialog.self_update_after();
+        tracing::info!(
+            host = ?dialog.host,
+            %request_id,
+            self_update_after,
+            "update: asking a host to update"
+        );
         self.send_to(
             &dialog.host,
             ClientMessage::RemoteUpdate {
                 request_id: request_id.clone(),
             },
         );
-        let spec =
-            self.remote_updates
-                .request(&dialog.host, &dialog.name, request_id, (self.now)());
+        let spec = self.remote_updates.request(
+            &dialog.host,
+            &dialog.name,
+            request_id,
+            self_update_after,
+            (self.now)(),
+        );
         self.push_toast_spec(spec, cx);
         // A new loop for each request; dropping the old task stops it.
         self.remote_update_timer = Some(Self::tick_remote_updates(cx));
@@ -209,8 +347,10 @@ impl RootView {
     }
 
     /// The answers to an update this client asked of `host`: the update
-    /// starting, the host's `Welcome` once it is back, and how the update
-    /// ended.
+    /// starting, the host's `Welcome` once it is back, or its refusal of a
+    /// protocol this app no longer shares with it, and how the update ended.
+    /// After a flagged update whose host runs the new release, this app's
+    /// own update counts down.
     pub(crate) fn on_remote_update_message(
         &mut self,
         host: &HostKey,
@@ -230,10 +370,17 @@ impl RootView {
             DaemonMessage::HostUpdateResult { ok, message, .. } => {
                 self.remote_updates.on_result(host, *ok, message)
             }
+            DaemonMessage::AuthFailed { reason } => {
+                self.remote_updates.on_auth_failed(host, reason)
+            }
             _ => None,
         };
         if let Some(spec) = spec {
             self.push_toast_spec(spec, cx);
+        }
+        if let Some((host, id)) = self.remote_updates.take_self_update() {
+            tracing::info!(?host, request_id = %id, "update: the host runs the new release; this app updates next");
+            self.client_update_scheduled(&host, &id, cx);
         }
     }
 
@@ -301,7 +448,7 @@ impl RootView {
                 shift,
                 ButtonKind::Primary,
                 ButtonSize::Regular,
-                true,
+                view.confirm_enabled,
                 Layer::Floating,
                 &t,
             ),

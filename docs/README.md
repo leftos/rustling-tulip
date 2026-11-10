@@ -119,6 +119,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Behind**: a host running an older release than this client, by the `Welcome.build_version` it reported; the Connections dialog and Settings' host selector tag it in amber (`docs/native-client.md`).
 - **Binding window**: whichever of an account's usage windows (5-hour, 7-day, per-model) is fullest; its percentage decides auto-switch.
 - **Blocked (device)**: a `devices.json` record with `revoked: true`, refused at every pairing path until the owner forgets it (`ForgetDevice`).
+- **Breaking flag**: the hidden `<!-- breaks: sessions, protocol -->` line (either word or both) that opens a release's notes; the Update host dialog warns from it and the app reads it with `update_core::breaks_of` (`docs/release.md` "Mark what a release breaks").
 - **Bridge**: `rustling-tulipd bridge`, the subcommand an SSH client runs on the host to relay JSON protocol lines between stdin and stdout and the loopback daemon, filling the `Hello` token on the host (`crates/daemon/src/cli_bridge.rs`).
 - **Brief**: a worker's instructions: tree root, files, the change, and a proving command.
 - **Built-in theme**: a theme compiled into the native client (`BUILT_INS` in `apps/native/src/theme_store.rs`, the values in the generated `builtin_themes.rs`): Contrast, Nord, Catppuccin Mocha, Catppuccin Latte, Rose Pine, Dracula, TokyoNight and One Half Dark; a user theme file cannot take their ids (it gets a `-2` suffix).

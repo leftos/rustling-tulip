@@ -50,12 +50,19 @@ pub struct Pending {
     pub phase: Phase,
     /// When the update ends unanswered.
     pub deadline: Instant,
+    /// Whether this app updates itself once the host runs the new release:
+    /// recorded when the update was confirmed, for a release that breaks
+    /// sessions or the protocol and is newer than this app.
+    pub self_update_after: bool,
 }
 
 /// Every host's pending update, by host.
 #[derive(Debug, Default)]
 pub struct RemoteUpdates {
     pending: HashMap<HostKey, Pending>,
+    /// The host and request id of a flagged update whose host now runs the
+    /// new release: this app's own update is owed.
+    self_update: Option<(HostKey, String)>,
 }
 
 /// The key of `host`'s update toast, which every step updates in place.
@@ -93,12 +100,14 @@ fn reached(build_version: &str, version: &str) -> bool {
 
 impl RemoteUpdates {
     /// The request `request_id` went to `host`, named `name`: its update
-    /// is pending, and the Asking toast shows.
+    /// is pending, and the Asking toast shows. With `self_update_after`,
+    /// this app's own update is owed once the host runs the new release.
     pub fn request(
         &mut self,
         host: &HostKey,
         name: &str,
         request_id: String,
+        self_update_after: bool,
         now: Instant,
     ) -> ToastSpec {
         self.pending.insert(
@@ -108,6 +117,7 @@ impl RemoteUpdates {
                 name: name.to_owned(),
                 phase: Phase::Asking,
                 deadline: now + ASK_BOUND,
+                self_update_after,
             },
         );
         progress(host, format!("Asking {name} to update…"))
@@ -190,13 +200,8 @@ impl RemoteUpdates {
         let version = version.clone();
         let name = pending.name.clone();
         if reached(build_version, &version) {
-            self.pending.remove(host);
-            return Some(toast(
-                host,
-                ToastKind::Info,
-                format!("{name} updated to {version}"),
-                None,
-            ));
+            let pending = self.pending.remove(host)?;
+            return Some(self.updated(host, pending, &version));
         }
         pending.phase = Phase::BackOld {
             version,
@@ -208,6 +213,44 @@ impl RemoteUpdates {
             old_title(&name, build_version),
             None,
         ))
+    }
+
+    /// `host` refused this client's `Hello` saying `reason`: after a flagged
+    /// update started, a refusal for sharing no protocol version means the
+    /// host runs the new release, which ends the update as a `Welcome` on it
+    /// does, and this app's own update is owed. Anything else changes
+    /// nothing.
+    pub fn on_auth_failed(&mut self, host: &HostKey, reason: &str) -> Option<ToastSpec> {
+        let pending = self.pending.get(host)?;
+        let (Phase::Started { version } | Phase::Dropped { version }) = &pending.phase else {
+            return None;
+        };
+        if !pending.self_update_after || !reason.starts_with(protocol::NO_COMMON_PROTOCOL_REASON) {
+            return None;
+        }
+        let version = version.clone();
+        let pending = self.pending.remove(host)?;
+        Some(self.updated(host, pending, &version))
+    }
+
+    /// `host`'s ended `pending` update reached `version`: the toast that
+    /// says so, and this app's own update owed when the update was flagged.
+    fn updated(&mut self, host: &HostKey, pending: Pending, version: &str) -> ToastSpec {
+        if pending.self_update_after {
+            self.self_update = Some((host.clone(), pending.request_id));
+        }
+        toast(
+            host,
+            ToastKind::Info,
+            format!("{} updated to {version}", pending.name),
+            None,
+        )
+    }
+
+    /// The host and request id of the flagged update whose host now runs
+    /// the new release, once: this app's own update is owed.
+    pub fn take_self_update(&mut self) -> Option<(HostKey, String)> {
+        self.self_update.take()
     }
 
     /// `host` sent how its last update ended: a failure says why under
@@ -297,7 +340,7 @@ mod tests {
     /// Updates with `host()`'s request sent at `now`.
     fn asked(now: Instant) -> RemoteUpdates {
         let mut updates = RemoteUpdates::default();
-        updates.request(&host(), "box", ID.to_owned(), now);
+        updates.request(&host(), "box", ID.to_owned(), false, now);
         updates
     }
 
@@ -310,11 +353,117 @@ mod tests {
         updates
     }
 
+    /// Updates with `host()`'s flagged request sent at `now`: this app
+    /// updates itself after the host.
+    fn flagged_asked(now: Instant) -> RemoteUpdates {
+        let mut updates = RemoteUpdates::default();
+        updates.request(&host(), "box", ID.to_owned(), true, now);
+        updates
+    }
+
+    /// Updates whose flagged host started its update to 0.12.0 at `now`
+    /// and then dropped.
+    fn flagged_dropped(now: Instant) -> RemoteUpdates {
+        let mut updates = flagged_asked(now);
+        updates
+            .on_started(&host(), ID, "0.12.0", now)
+            .expect("the answer is ours");
+        updates.on_drop(&host(), now);
+        updates
+    }
+
+    const NO_COMMON: &str = "no compatible protocol version: client advertises scalar=30 \
+                             + range=[30], daemon supports [31]";
+
+    #[test]
+    fn a_flagged_update_owes_this_apps_update_once_the_host_welcomes_on_the_new_version() {
+        let now = Instant::now();
+        let mut updates = flagged_dropped(now);
+        assert_eq!(
+            updates.take_self_update(),
+            None,
+            "not before the host is back"
+        );
+        assert!(updates.on_welcome(&host(), Some("0.12.0")).is_some());
+        assert_eq!(updates.take_self_update(), Some((host(), ID.to_owned())));
+        assert_eq!(updates.take_self_update(), None, "taken once");
+    }
+
+    #[test]
+    fn an_unflagged_update_owes_nothing_after_the_host_welcomes() {
+        let now = Instant::now();
+        let mut updates = started(now);
+        updates.on_drop(&host(), now);
+        assert!(updates.on_welcome(&host(), Some("0.12.0")).is_some());
+        assert_eq!(updates.take_self_update(), None);
+    }
+
+    #[test]
+    fn no_common_protocol_after_a_flagged_drop_counts_as_updated() {
+        let now = Instant::now();
+        let mut updates = flagged_dropped(now);
+        let spec = updates
+            .on_auth_failed(&host(), NO_COMMON)
+            .expect("the host runs the new release");
+        assert_eq!(spec.title, "box updated to 0.12.0");
+        assert_eq!(spec.kind, ToastKind::Info);
+        assert!(!spec.sticky);
+        assert!(!updates.is_pending(&host()));
+        assert_eq!(updates.take_self_update(), Some((host(), ID.to_owned())));
+    }
+
+    #[test]
+    fn no_common_protocol_after_an_unflagged_drop_changes_nothing() {
+        let now = Instant::now();
+        let mut updates = started(now);
+        updates.on_drop(&host(), now);
+        assert_eq!(updates.on_auth_failed(&host(), NO_COMMON), None);
+        assert!(updates.is_pending(&host()));
+        assert_eq!(updates.take_self_update(), None);
+    }
+
+    #[test]
+    fn another_auth_failure_after_a_flagged_drop_changes_nothing() {
+        let now = Instant::now();
+        let mut updates = flagged_dropped(now);
+        for reason in ["bad token", "device not approved"] {
+            assert_eq!(updates.on_auth_failed(&host(), reason), None, "{reason}");
+        }
+        assert!(updates.is_pending(&host()));
+        assert_eq!(updates.take_self_update(), None);
+    }
+
+    #[test]
+    fn no_common_protocol_while_asking_changes_nothing() {
+        let now = Instant::now();
+        let mut updates = flagged_asked(now);
+        assert_eq!(updates.on_auth_failed(&host(), NO_COMMON), None);
+        assert!(updates.is_pending(&host()));
+        assert_eq!(updates.take_self_update(), None);
+    }
+
+    #[test]
+    fn a_flagged_update_that_fails_or_vanishes_owes_nothing() {
+        let now = Instant::now();
+        let mut refused = flagged_asked(now);
+        assert!(refused.on_refused(&host(), ID, "no").is_some());
+        assert_eq!(refused.take_self_update(), None, "a refusal");
+
+        let mut old = flagged_dropped(now);
+        assert!(old.on_welcome(&host(), Some("0.11.0")).is_some());
+        assert!(old.on_result(&host(), false, "failed").is_some());
+        assert_eq!(old.take_self_update(), None, "back on the old release");
+
+        let mut gone = flagged_dropped(now);
+        assert_eq!(gone.expire(now + RETURN_BOUND).len(), 1);
+        assert_eq!(gone.take_self_update(), None, "never came back");
+    }
+
     #[test]
     fn a_request_shows_asking() {
         let now = Instant::now();
         let mut updates = RemoteUpdates::default();
-        let spec = updates.request(&host(), "box", ID.to_owned(), now);
+        let spec = updates.request(&host(), "box", ID.to_owned(), false, now);
         assert_eq!(spec.title, "Asking box to update…");
         assert_eq!(spec.kind, ToastKind::Info);
         assert!(spec.sticky);

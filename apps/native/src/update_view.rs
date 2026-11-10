@@ -295,6 +295,17 @@ impl RootView {
         self.update.checking.clone()
     }
 
+    /// The updater the checks and installs go through.
+    pub(crate) fn updater(&self) -> Arc<dyn Updater> {
+        Arc::clone(&self.update.updater)
+    }
+
+    /// This client's version, the one a check compares the feed against;
+    /// `None` when it is not semver.
+    pub(crate) fn client_version() -> Option<semver::Version> {
+        semver::Version::parse(CLIENT_VERSION).ok()
+    }
+
     /// Settings' Check now: a check whether automatic checks are on or off.
     pub fn check_for_updates_now(&mut self, cx: &mut Context<Self>) {
         self.run_update_check(cx);
@@ -588,7 +599,12 @@ impl RootView {
     /// `host` asked this app to update itself: `update_id` counts down, in
     /// place of any countdown already running. A repeat of the id already
     /// counting down is ignored.
-    fn client_update_scheduled(&mut self, host: &HostKey, update_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn client_update_scheduled(
+        &mut self,
+        host: &HostKey,
+        update_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         if self
             .client_update
             .as_ref()
