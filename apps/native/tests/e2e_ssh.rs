@@ -24,7 +24,17 @@ use support::live::{
     FakeSsh, LiveClient, LiveDaemon, LiveHostSpec, LiveHosts, commit_all, kill_tree,
     processes_under, spawn_shell,
 };
+use support::update_feed::UpdateFeed;
 use support::{Harness, Opened};
+
+/// The daemon's refusals of a remote update on a host that has no installed
+/// copy, or whose daemon does not run from it (`NO_INSTALL` and
+/// `NOT_OWN_INSTALL` in `crates/daemon/src/server/update.rs`). A live daemon
+/// runs from `target/test-release`, so it answers one of them; which one
+/// depends on whether the machine running the spec has the app installed.
+const NO_INSTALL: &str = "No installed copy of rustling-tulip was found on this host.";
+const NOT_OWN_INSTALL: &str =
+    "This daemon doesn't run from the installed copy, so it can't update it.";
 
 /// The saved host's string: the fake ssh ignores it, and the fetched-file
 /// folder is named after it.
@@ -81,6 +91,57 @@ fn an_ssh_host_connects_and_lists_its_sessions(
     assert_eq!(
         runs[0].argv, EXPECTED_ARGV,
         "ssh ran with the documented options, `--`, the host and the bridge command"
+    );
+}
+
+/// A remote update asked over SSH is refused by a live daemon, which runs
+/// from no install of its own, before it downloads anything.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn a_remote_update_over_ssh_is_refused_by_a_daemon_with_no_install_of_its_own(
+    ssh_cx: &mut TestAppContext,
+) {
+    let feed = UpdateFeed::start("9.9.9-alpha", b"fake installer");
+    let daemon = LiveDaemon::start_with_env(
+        "ssh-update-refused",
+        &[("RUSTLING_TULIP_UPDATE_FEED", feed.base_url().into())],
+    );
+    let home = LiveDaemon::start("ssh-update-refused-home");
+    let _fake = use_fake_ssh(&daemon, None);
+    let (mut h, hosts) = open_ssh(ssh_cx, &home, &daemon, true);
+    let client = hosts.client(&ssh_key());
+    wait_open(&mut h, &client, "the client to connect over ssh");
+
+    let from = client.message_count();
+    client.send(ClientMessage::RemoteUpdate {
+        request_id: "ru-ssh".to_owned(),
+    });
+    let mut refusal = None;
+    h.wait_until("the host to answer the remote update", |_| {
+        refusal = client.find_message_from(from, |msg| match msg {
+            DaemonMessage::Error {
+                request_id: Some(id),
+                message,
+                code,
+            } if id == "ru-ssh" => Some((code.clone(), message.clone())),
+            _ => None,
+        });
+        refusal.is_some()
+    });
+    let (code, message) = refusal.expect("the wait just found it");
+    assert_eq!(
+        code.as_deref(),
+        Some(protocol::error_codes::UPDATE_REFUSED),
+        "the refusal's code ({message:?})"
+    );
+    assert!(
+        [NO_INSTALL, NOT_OWN_INSTALL].contains(&message.as_str()),
+        "the refusal is for a daemon with no install of its own: {message:?}"
+    );
+    assert_eq!(
+        feed.requests(),
+        Vec::<String>::new(),
+        "the refusal came before any download"
     );
 }
 

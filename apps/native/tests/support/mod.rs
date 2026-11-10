@@ -40,6 +40,7 @@ use serde_json::{Value, json};
 
 pub mod live;
 pub mod profile_server;
+pub mod update_feed;
 
 pub const PROTOCOL: u32 = 1;
 

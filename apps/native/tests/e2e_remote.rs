@@ -12,6 +12,9 @@
 #[expect(dead_code, reason = "each spec file uses its own share of the helper")]
 mod support;
 
+use std::fmt::Write as _;
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -21,9 +24,11 @@ use protocol::{ClientMessage, DaemonMessage, RemoteState};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetCommand};
+use sha2::{Digest as _, Sha256};
 use support::live::{
     LiveClient, LiveDaemon, LiveHostSpec, REMOTE_HOST, commit_all, free_port, spawn_shell,
 };
+use support::update_feed::UpdateFeed;
 use support::{Harness, Opened};
 
 /// The line the listener logs when the owner rule refuses a peer
@@ -42,6 +47,17 @@ const SERVER_ENDED_CLOSE: &str =
     "recv_loop: the tailnet listener server that accepted this connection ended; closing";
 /// The login the fake tailscale gives every node's user.
 const FAKE_LOGIN: &str = "owner@example.com";
+/// The daemon's refusals of a remote update on a host that has no installed
+/// copy, or whose daemon does not run from it (`NO_INSTALL` and
+/// `NOT_OWN_INSTALL` in `crates/daemon/src/server/update.rs`). A live daemon
+/// runs from `target/test-release`, so it answers one of them; which one
+/// depends on whether the machine running the spec has the app installed.
+const NO_INSTALL: &str = "No installed copy of rustling-tulip was found on this host.";
+const NOT_OWN_INSTALL: &str =
+    "This daemon doesn't run from the installed copy, so it can't update it.";
+/// The release the fake update feed offers, and its installer's name.
+const FEED_VERSION: &str = "9.9.9-alpha";
+const FEED_INSTALLER: &str = "rustling-tulip-9.9.9-alpha-setup.exe";
 
 /// Remote access comes up for the fake tailnet, and an unpaired device that
 /// dials it over TLS from loopback passes the owner rule, gets `Welcome` and
@@ -356,6 +372,162 @@ fn shutdown_and_remote_off_are_refused_from_the_tailnet_client(
         turned_off, None,
         "the host never heard remote access go off after the refusals"
     );
+}
+
+/// The fake update feed serves its release list, the installer's `.sha256`
+/// and the installer, records each path in order, and answers anything else
+/// with a 404.
+#[test]
+fn the_fake_update_feed_serves_its_release_and_installer() {
+    let feed = UpdateFeed::start(FEED_VERSION, b"fake installer");
+    let base = feed.base_url();
+    let list = "/repos/leftos/rustling-tulip/releases?per_page=100";
+    let sha = format!("/dl/{FEED_INSTALLER}.sha256");
+    let installer = format!("/dl/{FEED_INSTALLER}");
+
+    let (status, body) = http_get(&base, list);
+    assert!(status.contains(" 200 "), "the release list: {status}");
+    let releases: serde_json::Value =
+        serde_json::from_slice(&body).expect("the release list is JSON");
+    assert_eq!(releases[0]["tag_name"], "v9.9.9-alpha", "{releases}");
+    assert_eq!(
+        releases[0]["assets"].as_array().map(Vec::len),
+        Some(2),
+        "the release offers the installer and its .sha256: {releases}"
+    );
+
+    let hex = Sha256::digest(b"fake installer")
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+    let (status, body) = http_get(&base, &sha);
+    assert!(status.contains(" 200 "), "the .sha256: {status}");
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        format!("{hex}  {FEED_INSTALLER}\n"),
+        "the .sha256 names the installer's hash and file"
+    );
+
+    let (status, body) = http_get(&base, &installer);
+    assert!(status.contains(" 200 "), "the installer: {status}");
+    assert_eq!(body, b"fake installer", "the installer's bytes");
+    assert_eq!(
+        feed.requests(),
+        [list.to_owned(), sha, installer],
+        "the feed recorded each path in order"
+    );
+
+    let (status, _) = http_get(&base, "/nope");
+    assert!(status.contains(" 404 "), "an unknown path: {status}");
+}
+
+/// A paired tailnet device's remote update is refused by a live daemon,
+/// which runs from no install of its own, before it downloads anything;
+/// its request to update the connected clients is refused as local-only, and
+/// the daemon stays up with the device connected.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn a_remote_update_from_the_tailnet_is_refused_by_a_daemon_with_no_install_of_its_own(
+    host_cx: &mut TestAppContext,
+    device_cx: &mut TestAppContext,
+) {
+    let feed = UpdateFeed::start(FEED_VERSION, b"fake installer");
+    let daemon = LiveDaemon::start_remote_with_env(
+        "remote-update-refused",
+        &[("RUSTLING_TULIP_UPDATE_FEED", feed.base_url().into())],
+    );
+    let home = LiveDaemon::start("remote-update-refused-home");
+    let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
+    let port = serve_remote(&mut host, &host_client, &daemon);
+    let tokens = Arc::new(MemoryTokens::default());
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
+    wait_not_approved(&mut device, &device_client, 0);
+    pair(&mut host, &host_client, &mut device, &device_client);
+
+    let from = device_client.message_count();
+    device_client.send(ClientMessage::RemoteUpdate {
+        request_id: "ru-1".to_owned(),
+    });
+    device_client.send(ClientMessage::UpdateConnectedClients {
+        request_id: Some("ucc-1".to_owned()),
+    });
+    let local_only = |msg: &DaemonMessage| {
+        matches!(
+            msg,
+            DaemonMessage::Error { message, .. } if message == "updating connected clients is local-only"
+        )
+        .then_some(())
+    };
+    let mut refusal = None;
+    device.wait_until("the host to answer both requests", |_| {
+        refusal = device_client.find_message_from(from, |msg| update_refusal(msg, "ru-1"));
+        refusal.is_some() && device_client.find_message_from(from, local_only).is_some()
+    });
+    let (code, message) = refusal.expect("the wait just found it");
+    assert_no_install_refusal(code.as_deref(), &message);
+    assert_eq!(
+        feed.requests(),
+        Vec::<String>::new(),
+        "the refusal came before any download"
+    );
+
+    assert!(daemon.answers_health(), "the daemon is still up");
+    assert!(
+        device_client
+            .states()
+            .last()
+            .is_some_and(Connection::is_open),
+        "the device is still connected: {:?}",
+        device_client.footer_labels()
+    );
+}
+
+/// The code and message of the `Error` answering the request `request_id`.
+fn update_refusal(msg: &DaemonMessage, request_id: &str) -> Option<(Option<String>, String)> {
+    match msg {
+        DaemonMessage::Error {
+            request_id: Some(id),
+            message,
+            code,
+        } if id == request_id => Some((code.clone(), message.clone())),
+        _ => None,
+    }
+}
+
+/// Asserts a remote update was refused as needing an install of the daemon's
+/// own: code `update_refused` and one of the two texts for it.
+fn assert_no_install_refusal(code: Option<&str>, message: &str) {
+    assert_eq!(
+        code,
+        Some(protocol::error_codes::UPDATE_REFUSED),
+        "the refusal's code ({message:?})"
+    );
+    assert!(
+        [NO_INSTALL, NOT_OWN_INSTALL].contains(&message),
+        "the refusal is for a daemon with no install of its own: {message:?}"
+    );
+}
+
+/// The status line and body of `GET path` from the server at `base`
+/// (`http://host:port`), over one `Connection: close` request.
+fn http_get(base: &str, path: &str) -> (String, Vec<u8>) {
+    let authority = base.trim_start_matches("http://");
+    let mut stream = TcpStream::connect(authority).expect("connect to the feed");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .expect("send the request");
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).expect("read the answer");
+    let end = bytes
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("the answer has a head");
+    let head = String::from_utf8_lossy(&bytes[..end]);
+    let status = head.lines().next().unwrap_or_default().to_owned();
+    (status, bytes[end + 4..].to_vec())
 }
 
 /// Blocking a connected device closes its connection; its redial with the

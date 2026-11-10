@@ -98,6 +98,13 @@ impl LiveDaemon {
     /// Remote access stays off until a client sends `ConfigureRemote`; the
     /// daemon needs the `e2e-loopback-peers` build to admit a loopback dial.
     pub fn start_remote(test: &str) -> Self {
+        Self::start_remote_with_env(test, &[])
+    }
+
+    /// [`Self::start_remote`], with `extra` set on the daemon's process after
+    /// the isolation variables and the fake tailscale's state (so a row can
+    /// override one) and kept in [`Self::envs`].
+    pub fn start_remote_with_env(test: &str, extra: &[(&'static str, OsString)]) -> Self {
         let root = scratch_root(test);
         let fake = root.join("fake-tailscale");
         std::fs::create_dir_all(&fake).expect("create the fake tailscale's dir");
@@ -114,12 +121,9 @@ impl LiveDaemon {
         });
         let state_file = fake.join("state.json");
         std::fs::write(&state_file, state.to_string()).expect("write the fake tailscale's state");
-        Self::spawn_in(
-            root,
-            test,
-            &[(FAKE_TAILSCALE_STATE_ENV, state_file.into_os_string())],
-            Some(ca.der),
-        )
+        let mut envs = vec![(FAKE_TAILSCALE_STATE_ENV, state_file.into_os_string())];
+        envs.extend_from_slice(extra);
+        Self::spawn_in(root, test, &envs, Some(ca.der))
     }
 
     /// Starts the daemon over `root`, from [`scratch_root`], with the daemon

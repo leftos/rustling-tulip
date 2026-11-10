@@ -14,12 +14,13 @@ use crate::{DaemonSpec, LaunchError, TestShell};
 pub const STUB_MARKER: &str = "[rt-e2e agent stub]";
 
 /// The daemon's directories under the scratch root.
-const SCRATCH_DIRS: [&str; 7] = [
+const SCRATCH_DIRS: [&str; 8] = [
     "config",
     "binaries",
     "worktrees",
     "tailnet",
     "push",
+    "updates",
     "ui",
     "fake-bin",
 ];
@@ -81,6 +82,12 @@ pub(crate) fn isolated_envs(
         (
             "RUSTLING_TULIP_ACCOUNTS_DIR",
             root.join("accounts").into_os_string(),
+        ),
+        // The updates folder: the live tier never cleans or reads the user's
+        // real downloaded installers or `last-result.json`.
+        (
+            "RUSTLING_TULIP_UPDATES_DIR",
+            root.join("updates").into_os_string(),
         ),
         // A shell the daemon starts finds the agents' stubs before any real
         // CLI.
@@ -275,6 +282,24 @@ mod tests {
             env_value(&envs, "RUSTLING_TULIP_PUSH_DIR"),
             Some(root.join("push").into_os_string()),
             "the live tier never writes the user's real push keys"
+        );
+    }
+
+    #[test]
+    fn the_updates_dir_is_isolated_under_the_scratch_root() {
+        let root = std::env::temp_dir().join(format!("rt-updates-env-{}", std::process::id()));
+
+        let envs =
+            isolated_envs(&spec(root.clone())).expect("every registered agent has a fake CLI");
+
+        assert!(
+            SCRATCH_DIRS.contains(&"updates"),
+            "the scratch root makes an updates folder"
+        );
+        assert_eq!(
+            env_value(&envs, "RUSTLING_TULIP_UPDATES_DIR"),
+            Some(root.join("updates").into_os_string()),
+            "the live tier never cleans or reads the user's real updates folder"
         );
     }
 }
