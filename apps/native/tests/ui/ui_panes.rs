@@ -1443,6 +1443,28 @@ fn empty_pane_close_says_closed_empty_pane(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_long_undo_message_wraps_whole(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let label = format!("Label{}", "-and-then-some-more".repeat(30));
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(session("s1").label(&label).build()),
+    );
+    h.click_on("close-pane-p1");
+    h.click_on("pane-close-only");
+    let id = h
+        .root(|root, _| root.undo_entries().first().map(|entry| entry.id))
+        .expect("an undo entry");
+    let message = h.bounds(&format!("undo-entry-{id}-message"));
+    let undo = h.bounds(&format!("undo-action-{id}"));
+    assert!(
+        message.size.height > undo.size.height * 1.5,
+        "a long message wraps over several lines: message {message:?}, Undo {undo:?}"
+    );
+}
+
+#[gpui::test]
 fn undo_of_last_pane_close_sends_restore_tab(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));

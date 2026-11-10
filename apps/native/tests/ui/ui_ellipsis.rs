@@ -518,27 +518,7 @@ fn sidebar_view_leaf_subline_ends_in_an_ellipsis(cx: &mut TestAppContext) {
     assert_ellipsized("leaf-subline-s1-label", &branch);
 }
 
-// --- Undo shelf and footer -----------------------------------------------
-
-#[gpui::test]
-fn undo_view_message_ends_in_an_ellipsis(cx: &mut TestAppContext) {
-    let dir = probed();
-    let label = long("Label");
-    let mut h = Harness::with(
-        cx,
-        &dir,
-        &Fixture::single(session("s1").label(&label).build()),
-    );
-    h.click_on("close-pane-p1");
-    h.click_on("pane-close-only");
-    let id = h
-        .root(|root, _| root.undo_entries().first().map(|entry| entry.id))
-        .expect("an undo entry");
-    assert_ellipsized(
-        &format!("undo-entry-{id}-message"),
-        &format!("Closed pane \"{label}\""),
-    );
-}
+// --- Footer ------------------------------------------------------------
 
 #[gpui::test]
 fn footer_status_ends_in_an_ellipsis(cx: &mut TestAppContext) {
