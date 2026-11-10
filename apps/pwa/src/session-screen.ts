@@ -115,6 +115,8 @@ export interface SheetView {
   /** The prompt's id, so the view clears its box when another prompt shows. */
   readonly id: string;
   readonly title: string;
+  /** The plan text a plan prompt shows; null when the prompt carries none. */
+  readonly plan: string | null;
   readonly buttons: readonly SheetButtonView[];
   /** The keys the sheet offers, in order. */
   readonly keys: readonly string[];
@@ -166,6 +168,8 @@ export interface SessionScreenInput {
   readonly ended: boolean;
   /** The session runs an agent, which picks the Quick replies' groups. */
   readonly isAgent: boolean;
+  /** The plan text the session is waiting to approve; null when none. */
+  readonly plan: string | null;
   readonly chat: ChatState;
   readonly composer: ComposerModel;
   readonly sheet: SheetState;
@@ -197,6 +201,8 @@ export interface SessionLook {
   readonly isAgent: boolean;
   /** Home's model has loaded and no longer lists the session. */
   readonly ended: boolean;
+  /** The text of the plan approval the session is waiting on; null when none. */
+  readonly plan: string | null;
 }
 
 /**
@@ -219,14 +225,21 @@ export function parseRoute(pathname: string): Route {
 
 /**
  * The session's look in Home's model: its name and whether it runs an agent,
- * and whether it is gone once the model has loaded its session list.
+ * whether it is gone once the model has loaded its session list, and the text
+ * of the plan approval it is waiting on.
  */
 export function sessionLook(model: HomeModel, sessionId: string): SessionLook {
   const session = model.sessions.find((known) => known.id === sessionId) ?? null;
   if (session === null) {
-    return { title: "", isAgent: false, ended: model.loaded };
+    return { title: "", isAgent: false, ended: model.loaded, plan: null };
   }
-  return { title: displayLabel(session), isAgent: session.agent !== null, ended: false };
+  const pending = session.pending_input;
+  return {
+    title: displayLabel(session),
+    isAgent: session.agent !== null,
+    ended: false,
+    plan: pending?.kind === "plan_approval" ? (pending.plan ?? null) : null,
+  };
 }
 
 /**
@@ -311,7 +324,7 @@ export function sessionScreen(input: SessionScreenInput): SessionScreen {
     keys: [],
     composer: composerView(input.composer, input.offline),
     dock: dockView(input.dock, input.isAgent),
-    sheet: sheetView(input.sheet, chat.screen),
+    sheet: sheetView(input.sheet, chat.screen, input.plan),
   };
 }
 
@@ -511,17 +524,22 @@ function dockView(kind: DockKind | null, isAgent: boolean): DockView | null {
 }
 
 /** The sheet the prompt up on `look` raises; null when no prompt is up or it was put away. */
-function sheetView(state: SheetState, look: ChatScreen | null): SheetView | null {
+function sheetView(
+  state: SheetState,
+  look: ChatScreen | null,
+  plan: string | null,
+): SheetView | null {
   if (!isVisible(state, look)) {
     return null;
   }
-  const sheet = sheetFor(look);
+  const sheet = sheetFor(look, plan);
   if (sheet === null) {
     return null;
   }
   return {
     id: sheet.id,
     title: sheet.title,
+    plan: sheet.plan,
     buttons: sheet.buttons.map(buttonView),
     keys: SHEET_KEYS.map((key) => key.label),
     typing: sheet.buttons.some((button) => button.action.kind === "text"),

@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The Dashboard shows each subagent's model and effort level after its name, such as "Opus 5.5 · high".
 - Ctrl+clicking a file path in a terminal offers a menu: open it in its default app, open it in the viewer, or open its folder.
 - On the phone's Home, Launch last starts a repo's or workspace's last launch again; a dropped connection never starts it twice or reports a launch that started as failed.
+- The phone's answer sheet for a plan shows the plan itself above its buttons, scrolling on its own when it is long.
 
 ### Fixed
 

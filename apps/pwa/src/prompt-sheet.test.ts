@@ -92,15 +92,15 @@ function typedBytes(message: ClientMessage): string {
 }
 
 test("sheet_no_prompt_draws_nothing", () => {
-  expect(sheetFor(null)).toBeNull();
-  expect(sheetFor(screen(null))).toBeNull();
+  expect(sheetFor(null, null)).toBeNull();
+  expect(sheetFor(screen(null), null)).toBeNull();
 });
 
 test("sheet_titles_from_the_subject_and_falls_back_to_the_body", () => {
-  expect(sheetFor(screen(prompt("trust", [option(1, "Trust")])))?.title).toBe("The subject");
+  expect(sheetFor(screen(prompt("trust", [option(1, "Trust")])), null)?.title).toBe("The subject");
 
   const untitled = prompt("trust", [option(1, "Trust")], { subject: "  " });
-  expect(sheetFor(screen(untitled))?.title).toBe("The body");
+  expect(sheetFor(screen(untitled), null)?.title).toBe("The body");
 });
 
 test("sheet_permission_offers_each_option_and_the_text_answers", () => {
@@ -109,7 +109,7 @@ test("sheet_permission_offers_each_option_and_the_text_answers", () => {
     [option(1, "Allow once"), option(2, "Always allow"), option(3, "Deny")],
     { can_amend: true },
   );
-  const sheet = sheetFor(screen(p));
+  const sheet = sheetFor(screen(p), null);
 
   expect(sheet?.id).toBe("p1");
   expect(sheet?.kind).toBe("permission");
@@ -131,7 +131,7 @@ test("sheet_permission_offers_each_option_and_the_text_answers", () => {
 
 test("sheet_permission_without_an_amendment_offers_the_denial_text_only", () => {
   const p = prompt("permission", [option(1, "Allow once"), option(2, "Deny")]);
-  const sheet = sheetFor(screen(p));
+  const sheet = sheetFor(screen(p), null);
 
   expect(buttons(sheet).map((button) => button.label)).toEqual([
     "Allow once",
@@ -146,7 +146,7 @@ test("sheet_question_picks_one_option_and_types_its_own_text", () => {
     option(2, "Div", true),
     option(3, "Type something"),
   ]);
-  const sheet = sheetFor(screen(p));
+  const sheet = sheetFor(screen(p), null);
 
   expect(buttons(sheet).map((button) => [button.number, button.selected])).toEqual([
     [1, false],
@@ -168,7 +168,7 @@ test("sheet_question_multi_select_toggles_and_submits", () => {
       { label: "Q2", current: true },
     ],
   });
-  const sheet = sheetFor(screen(p));
+  const sheet = sheetFor(screen(p), null);
 
   expect(buttons(sheet).map((button) => [button.number, button.label, button.selected])).toEqual([
     [1, "Sub", true],
@@ -192,7 +192,7 @@ test("sheet_question_multi_select_shows_next_before_the_last_question", () => {
     questions: [{ label: "Q1", current: true }, { label: "Q2" }],
   });
 
-  expect(buttons(sheetFor(screen(p))).map((button) => button.label)).toEqual([
+  expect(buttons(sheetFor(screen(p), null)).map((button) => button.label)).toEqual([
     "Sub",
     "Back",
     "Skip",
@@ -206,13 +206,16 @@ test("sheet_question_with_one_question_offers_no_back_or_skip", () => {
     questions: [{ label: "Q1", current: true }],
   });
 
-  expect(buttons(sheetFor(screen(p))).map((button) => button.label)).toEqual(["Sub", "Submit"]);
+  expect(buttons(sheetFor(screen(p), null)).map((button) => button.label)).toEqual([
+    "Sub",
+    "Submit",
+  ]);
 });
 
 test("sheet_review_picks_submit_or_cancel", () => {
   const p = prompt("review", [option(1, "Submit"), option(2, "Cancel")]);
 
-  expect(answers(sheetFor(screen(p)))).toEqual([
+  expect(answers(sheetFor(screen(p), null))).toEqual([
     { kind: "option", number: 1 },
     { kind: "option", number: 2 },
   ]);
@@ -225,29 +228,48 @@ test("sheet_plan_approves_or_takes_the_change_text", () => {
     option(3, "Tell the agent what to change"),
   ]);
 
-  expect(answers(sheetFor(screen(p)))).toEqual([
+  expect(answers(sheetFor(screen(p), null))).toEqual([
     { kind: "option", number: 1 },
     { kind: "option", number: 2 },
     { kind: "type_something", text: TYPED },
   ]);
 });
 
+test("sheet_plan_carries_the_plan", () => {
+  const p = prompt("plan", [option(1, "Approve (auto)")]);
+
+  expect(sheetFor(screen(p), "1. Do the thing")?.plan).toBe("1. Do the thing");
+});
+
+test("sheet_blank_plan_is_no_plan", () => {
+  const p = prompt("plan", [option(1, "Approve (auto)")]);
+
+  expect(sheetFor(screen(p), "  ")?.plan).toBeNull();
+  expect(sheetFor(screen(p), null)?.plan).toBeNull();
+});
+
+test("sheet_another_kind_carries_no_plan", () => {
+  const p = prompt("permission", [option(1, "Allow once")]);
+
+  expect(sheetFor(screen(p), "1. Do the thing")?.plan).toBeNull();
+});
+
 test("sheet_trust_picks_an_option", () => {
   const p = prompt("trust", [option(1, "Trust this folder"), option(2, "Exit")]);
 
-  expect(answers(sheetFor(screen(p)))).toEqual([
+  expect(answers(sheetFor(screen(p), null))).toEqual([
     { kind: "option", number: 1 },
     { kind: "option", number: 2 },
   ]);
 });
 
 test("sheet_heads_up_offers_nothing_to_answer", () => {
-  expect(buttons(sheetFor(screen(prompt("heads_up"))))).toEqual([]);
+  expect(buttons(sheetFor(screen(prompt("heads_up")), null))).toEqual([]);
 });
 
 test("sheet_action_with_blank_text_sends_nothing", () => {
   const p = prompt("question", [option(1, "Type something")]);
-  const [typed] = buttons(sheetFor(screen(p)));
+  const [typed] = buttons(sheetFor(screen(p), null));
   if (typed === undefined) {
     throw new Error("expected a typed-text button");
   }

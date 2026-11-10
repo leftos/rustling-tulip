@@ -63,6 +63,18 @@ const PROMPT: ChatPrompt = {
 };
 const READY: ChatScreen = { composer: { state: "ready" } };
 const ASKING: ChatScreen = { composer: { state: "dialog" }, prompt: PROMPT };
+const PLAN: ChatPrompt = {
+  id: "p2",
+  kind: "plan",
+  subject: "Plan ready",
+  body: "",
+  options: [
+    { number: 1, label: "Approve (auto)" },
+    { number: 2, label: "Approve (manual edits)" },
+    { number: 3, label: "Tell the agent what to change" },
+  ],
+};
+const PLANNING: ChatScreen = { composer: { state: "dialog" }, prompt: PLAN };
 
 /** A chat the daemon answered, holding `entries`. */
 function loaded(entries: readonly ChatEntry[], hidden = 0, look: ChatScreen = READY): ChatState {
@@ -88,6 +100,7 @@ interface Overrides {
   readonly title?: string;
   readonly ended?: boolean;
   readonly isAgent?: boolean;
+  readonly plan?: string | null;
   readonly chat?: ChatState;
   readonly composer?: ComposerModel;
   readonly sheet?: SheetState;
@@ -112,6 +125,7 @@ function screen(overrides: Overrides = {}): SessionScreen {
     title: overrides.title ?? "Session",
     ended: overrides.ended ?? false,
     isAgent: overrides.isAgent ?? false,
+    plan: overrides.plan ?? null,
     chat: overrides.chat ?? loaded([]),
     composer: overrides.composer ?? INITIAL_COMPOSER,
     sheet: overrides.sheet ?? NO_SHEET,
@@ -203,14 +217,34 @@ test("sessionLook: a listed session gives its title and whether it runs an agent
     ...resetHome(),
     sessions: [session("s1", { label: "repo", user_label: "work" })],
   };
-  expect(sessionLook(home, "s1")).toEqual({ title: "work", isAgent: false, ended: false });
-  expect(sessionLook(home, "s2")).toEqual({ title: "", isAgent: false, ended: false });
+  expect(sessionLook(home, "s1")).toEqual({
+    title: "work",
+    isAgent: false,
+    ended: false,
+    plan: null,
+  });
+  expect(sessionLook(home, "s2")).toEqual({ title: "", isAgent: false, ended: false, plan: null });
 });
 
 test("sessionLook: a session missing once Home loaded has ended", () => {
   const home = { ...resetHome(), sessions: [session("s1")], loaded: true };
-  expect(sessionLook(home, "s2")).toEqual({ title: "", isAgent: false, ended: true });
+  expect(sessionLook(home, "s2")).toEqual({ title: "", isAgent: false, ended: true, plan: null });
   expect(sessionLook(home, "s1").ended).toBe(false);
+});
+
+test("sessionLook reads the plan from pending_input", () => {
+  const home = {
+    ...resetHome(),
+    sessions: [
+      session("s1", { pending_input: { kind: "plan_approval", plan: "1. Do the thing" } }),
+      session("s2", { pending_input: { kind: "plan_approval" } }),
+      session("s3", { pending_input: { kind: "question", questions: [] } }),
+    ],
+  };
+  expect(sessionLook(home, "s1").plan).toBe("1. Do the thing");
+  expect(sessionLook(home, "s2").plan).toBeNull();
+  expect(sessionLook(home, "s3").plan).toBeNull();
+  expect(sessionLook(home, "s4").plan).toBeNull();
 });
 
 test("a_plain_shell_opens_on_the_terminal", () => {
@@ -443,6 +477,28 @@ test("the sheet draws the prompt's options with key-caps, and a swipe puts it aw
   ).not.toBeNull();
 
   expect(screen({ chat: loaded([]) }).sheet).toBeNull();
+});
+
+test("the sheet shows the session's plan", () => {
+  const view = screen({ chat: loaded([], 0, PLANNING), plan: "1. Do the thing" });
+
+  expect(view.sheet?.plan).toBe("1. Do the thing");
+});
+
+test("a session with no plan approval shows no plan", () => {
+  const view = screen({ chat: loaded([], 0, PLANNING) });
+
+  expect(view.sheet?.plan).toBeNull();
+});
+
+test("a plan that arrives later fills the same sheet", () => {
+  const early = screen({ chat: loaded([], 0, PLANNING) });
+  const late = screen({ chat: loaded([], 0, PLANNING), plan: "1. Do the thing" });
+
+  expect(early.sheet?.id).toBe("p2");
+  expect(late.sheet?.id).toBe("p2");
+  expect(early.sheet?.plan).toBeNull();
+  expect(late.sheet?.plan).toBe("1. Do the thing");
 });
 
 test("a send the connection dropped shows Offline: not sent and keeps the draft", () => {

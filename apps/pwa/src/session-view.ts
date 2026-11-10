@@ -16,6 +16,7 @@ import type { ConnectedLatch } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
 import type { HomeModel } from "./home-model";
 import type { KeyTrayEntry } from "./keys";
+import { parseMarkdown } from "./markdown";
 import { renderMarkdown } from "./markdown-view";
 import {
   NO_SHEET,
@@ -121,6 +122,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   let drawnDock: DockView | null | undefined;
   let drawnSheetButtons: readonly SheetButtonView[] | undefined;
   let drawnSheetId: string | null = null;
+  let drawnSheetPlan: string | null = null;
   let timer: number | undefined;
   /** The running-work line's next re-tick, armed while the line shows. */
   let workTimer: number | undefined;
@@ -170,6 +172,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   composerEl.append(draft, errorEl, actions);
 
   const sheetTitle = element("h2", "session-sheet-title");
+  const sheetPlan = element("div", "session-sheet-plan session-md");
   const sheetButtons = element("div", "session-sheet-buttons");
   const sheetBox = document.createElement("textarea");
   sheetBox.className = "session-sheet-text";
@@ -188,7 +191,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     update();
   });
   const sheetEl = element("div", "session-sheet");
-  sheetEl.append(sheetTitle, sheetButtons, sheetBox, sheetKeys, sheetError, sheetHide);
+  sheetEl.append(sheetTitle, sheetPlan, sheetButtons, sheetBox, sheetKeys, sheetError, sheetHide);
 
   container.append(
     header,
@@ -245,6 +248,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       title: look.title,
       ended: look.ended,
       isAgent: look.isAgent,
+      plan: look.plan,
       chat,
       composer,
       sheet,
@@ -532,9 +536,15 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     sheetEl.hidden = view === null;
     if (view === null) {
       drawnSheetId = null;
+      drawnSheetPlan = null;
       return;
     }
     sheetTitle.textContent = view.title;
+    sheetPlan.hidden = view.plan === null;
+    if (view.plan !== null && drawnSheetPlan !== view.plan) {
+      drawnSheetPlan = view.plan;
+      sheetPlan.replaceChildren(renderMarkdown(document, parseMarkdown(view.plan)));
+    }
     sheetBox.hidden = !view.typing;
     showText(sheetError, view.error);
     sheetHide.textContent = view.hide;
