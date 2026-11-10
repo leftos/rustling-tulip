@@ -125,13 +125,51 @@ export interface HomeGroup {
 
 /** The rows grouped as the desktop's sidebar groups them, in its order. */
 export function homeGroups(model: HomeModel): readonly HomeGroup[] {
+  const members = memberRepoIds(model);
+  const build: GroupBuild = {
+    model,
+    bucketed: bucketSessions(model, members),
+    workspaces: new Map(model.workspaces.map((workspace) => [workspace.id, workspace])),
+    repos: new Map(
+      model.repos.filter((repo) => !members.has(repo.id)).map((repo) => [repo.id, repo]),
+    ),
+    groups: [],
+    trailing: [],
+  };
+  pushRemaining(build, pushManualOrder(build));
+  pushGroup(build.groups, "shell", "shell", "Shells", build.bucketed.shells);
+  pushGroup(build.groups, "folder", "folder", "Folders", build.bucketed.folders);
+  pushGroup(build.groups, "detached", "detached", "Detached", build.bucketed.detached);
+  const again = launchAgainGroup(build.trailing);
+  if (again !== null) {
+    build.groups.push(again);
+  }
+  return build.groups;
+}
+
+/** What one group list is built from, passed along to the helpers that fill it. */
+interface GroupBuild {
+  readonly model: HomeModel;
+  readonly bucketed: Buckets;
+  readonly workspaces: ReadonlyMap<string, WorkspaceEntry>;
+  readonly repos: ReadonlyMap<string, RepoEntry>;
+  readonly groups: HomeGroup[];
+  readonly trailing: LaunchContainer[];
+}
+
+/** Every repo a workspace holds, so its sessions stay in the workspace's group. */
+function memberRepoIds(model: HomeModel): Set<string> {
   const members = new Set<string>();
   for (const workspace of model.workspaces) {
     for (const id of workspace.member_repo_ids) {
       members.add(id);
     }
   }
+  return members;
+}
 
+/** Every session filed where the desktop's `build_containers` files it. */
+function bucketSessions(model: HomeModel, members: ReadonlySet<string>): Buckets {
   const bucketed: Buckets = {
     workspaces: new Map(),
     repos: new Map(),
@@ -142,60 +180,66 @@ export function homeGroups(model: HomeModel): readonly HomeGroup[] {
   for (const session of model.sessions) {
     place(session, model, members, bucketed);
   }
+  return bucketed;
+}
 
-  const groups: HomeGroup[] = [];
-  const trailing: LaunchContainer[] = [];
-  const workspaces = new Map(model.workspaces.map((workspace) => [workspace.id, workspace]));
-  const repos = new Map(
-    model.repos.filter((repo) => !members.has(repo.id)).map((repo) => [repo.id, repo]),
-  );
-
-  // The user's manual order first, workspaces and repos mixed; then the rest
-  // alphabetically, the desktops's two passes in `apply_container_order`.
+/**
+ * The user's manual order first, workspaces and repos mixed, the desktop's
+ * first pass in `apply_container_order`; returns every container it placed.
+ */
+function pushManualOrder(build: GroupBuild): Set<string> {
   const placed = new Set<string>();
-  for (const ref of model.containerOrder) {
+  for (const ref of build.model.containerOrder) {
     const key = `${ref.kind}:${ref.id}`;
     if (placed.has(key)) {
       continue;
     }
     if (ref.kind === "workspace") {
-      const workspace = workspaces.get(ref.id);
+      const workspace = build.workspaces.get(ref.id);
       if (workspace !== undefined) {
         placed.add(key);
-        pushWorkspaceGroup(groups, trailing, model, bucketed, workspace);
+        pushWorkspaceGroup(build, workspace);
       }
     } else {
-      const repo = repos.get(ref.id);
+      const repo = build.repos.get(ref.id);
       if (repo !== undefined) {
         placed.add(key);
-        pushRepoGroup(groups, trailing, model, bucketed, repo);
+        pushRepoGroup(build, repo);
       }
     }
   }
-  for (const workspace of [...workspaces.values()].sort((a, b) => compareNames(a.name, b.name))) {
+  return placed;
+}
+
+/** The containers the manual order did not name, alphabetically, the desktop's second pass. */
+function pushRemaining(build: GroupBuild, placed: ReadonlySet<string>): void {
+  const workspaces = [...build.workspaces.values()].sort((a, b) => compareNames(a.name, b.name));
+  for (const workspace of workspaces) {
     if (!placed.has(`workspace:${workspace.id}`)) {
-      pushWorkspaceGroup(groups, trailing, model, bucketed, workspace);
+      pushWorkspaceGroup(build, workspace);
     }
   }
-  for (const repo of [...repos.values()].sort((a, b) => compareNames(a.name, b.name))) {
+  const repos = [...build.repos.values()].sort((a, b) => compareNames(a.name, b.name));
+  for (const repo of repos) {
     if (!placed.has(`repo:${repo.id}`)) {
-      pushRepoGroup(groups, trailing, model, bucketed, repo);
+      pushRepoGroup(build, repo);
     }
   }
-  pushGroup(groups, "shell", "shell", "Shells", bucketed.shells);
-  pushGroup(groups, "folder", "folder", "Folders", bucketed.folders);
-  pushGroup(groups, "detached", "detached", "Detached", bucketed.detached);
-  if (trailing.length > 0) {
-    groups.push({
-      kind: "launch_again",
-      id: "launch_again",
-      name: LAUNCH_AGAIN,
-      rows: [],
-      launch: null,
-      containers: trailing,
-    });
+}
+
+/** The trailing group of containers with nothing running; null when there are none. */
+function launchAgainGroup(trailing: readonly LaunchContainer[]): HomeGroup | null {
+  if (trailing.length === 0) {
+    return null;
   }
-  return groups;
+  return {
+    kind: "launch_again",
+    id: "launch_again",
+    name: LAUNCH_AGAIN,
+    rows: [],
+    launch: null,
+    containers: trailing,
+  };
 }
 
 /** Where a group's rows are collected before the groups are built. */
@@ -251,34 +295,25 @@ function pushContainer(
   }
 }
 
-function pushWorkspaceGroup(
-  groups: HomeGroup[],
-  trailing: LaunchContainer[],
-  model: HomeModel,
-  bucketed: Buckets,
-  workspace: WorkspaceEntry,
-): void {
-  pushContainer(groups, trailing, {
+function pushWorkspaceGroup(build: GroupBuild, workspace: WorkspaceEntry): void {
+  pushContainer(build.groups, build.trailing, {
     kind: "workspace",
     id: workspace.id,
     name: workspace.name,
-    rows: ordered(bucketed.workspaces.get(workspace.id) ?? [], model.orders.get(workspace.id)),
+    rows: ordered(
+      build.bucketed.workspaces.get(workspace.id) ?? [],
+      build.model.orders.get(workspace.id),
+    ),
     launch: containerLaunch("workspace", workspace.id, workspace.last_spawn_config),
   });
 }
 
-function pushRepoGroup(
-  groups: HomeGroup[],
-  trailing: LaunchContainer[],
-  model: HomeModel,
-  bucketed: Buckets,
-  repo: RepoEntry,
-): void {
-  pushContainer(groups, trailing, {
+function pushRepoGroup(build: GroupBuild, repo: RepoEntry): void {
+  pushContainer(build.groups, build.trailing, {
     kind: "repo",
     id: repo.id,
     name: repo.name,
-    rows: ordered(bucketed.repos.get(repo.id) ?? [], model.orders.get(repo.id)),
+    rows: ordered(build.bucketed.repos.get(repo.id) ?? [], build.model.orders.get(repo.id)),
     launch: containerLaunch("repo", repo.id, repo.last_spawn_config),
   });
 }
