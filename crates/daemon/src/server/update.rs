@@ -42,7 +42,9 @@
 
 use super::connection::{AuthKind, ConnCtx};
 use super::{Hub, StateEvent};
-use crate::cli_apply_update::{CLIENT_EXE, ProcessList, RunningExe};
+use crate::cli_apply_update::{
+    CLIENT_EXE, HOST_REQUEST_FILE, HOST_RESULT_FILE, ProcessList, RunningExe,
+};
 use crate::sync::lock;
 use protocol::error_codes::{BUSY, INTERNAL, NOT_FOUND, UPDATE_CANCELED, UPDATE_REFUSED};
 use protocol::{ClientMessage, DaemonMessage};
@@ -241,9 +243,76 @@ pub(crate) struct HostUpdate {
     /// The countdown's phase. Every host update notice is published under
     /// this lock, and a snapshot is read and sent under it.
     phase: std::sync::Mutex<Countdown>,
-    /// The last update's outcome as a `HostUpdateResult`, read once from
-    /// the updates folder ([`HostUpdate::last_result`]).
-    last_result: std::sync::OnceLock<Option<DaemonMessage>>,
+    /// Held across one look for the host result and its delivery, so two
+    /// `Welcome`s at once deliver it once ([`HostUpdate::host_result_for`]).
+    delivery: std::sync::Mutex<()>,
+}
+
+/// The daemon's `host-update-request.json`: which client asked for the
+/// update it launched, from and to which version.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RequestRecord {
+    client_id: String,
+    from: String,
+    to: String,
+}
+
+/// The `delivery` lock, held. Every function that writes or deletes the
+/// request record or the host result takes one, so none runs without the
+/// lock ([`HostUpdate::delivering`]).
+/// It is the proof that every write and delete of the host files holds `delivery`.
+struct Delivering<'a>(
+    #[expect(dead_code, reason = "held only to keep the lock")] std::sync::MutexGuard<'a, ()>,
+);
+
+/// Whether `result` goes to the requester `record` names while this daemon
+/// runs `running`: the same `to`, and `running` is that `to` for an update
+/// that went in or the result's `from` for one that failed.
+fn deliverable(record: &RequestRecord, result: &update_core::LastResult, running: &str) -> bool {
+    let expected = if result.ok {
+        Some(result.to.as_str())
+    } else {
+        result.from.as_deref()
+    };
+    result.to == record.to && expected == Some(running)
+}
+
+/// Whether `result` is for a version this daemon, running `running`, is
+/// neither updating from nor to: no requester can still be told it.
+fn for_another_version(result: &update_core::LastResult, running: &str) -> bool {
+    result.to != running && result.from.as_deref() != Some(running)
+}
+
+/// Reads `path` as a `T`; `None` when it is missing or cannot be read
+/// (logged at warn and left), or does not parse, which deletes it with a
+/// warn naming it.
+fn read_host_file<T: serde::de::DeserializeOwned>(held: &Delivering<'_>, path: &Path) -> Option<T> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            warn!(file = %path.display(), "host update: could not read the file: {err}");
+            return None;
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            warn!(file = %path.display(), "host update: the file did not parse; deleting it: {err}");
+            remove_host_file(held, path);
+            None
+        }
+    }
+}
+
+/// Deletes `path`; a missing file is already gone, any other failure is
+/// logged at warn.
+fn remove_host_file(_held: &Delivering<'_>, path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => warn!(file = %path.display(), "host update: could not delete the file: {err}"),
+    }
 }
 
 /// Where the host update's countdown stands, and how the last one ended.
@@ -333,29 +402,66 @@ impl HostUpdate {
             app_quit_wait: APP_QUIT_WAIT,
             local_connections: Arc::default(),
             phase: std::sync::Mutex::default(),
-            last_result: std::sync::OnceLock::new(),
+            delivery: std::sync::Mutex::new(()),
         }
     }
 
-    /// How the last update of this host ended, read once from the updates
-    /// folder's `last-result.json` and kept; the file is left for the app.
-    pub(crate) fn last_result(&self) -> Option<DaemonMessage> {
-        self.last_result
-            .get_or_init(|| self.read_last_result())
-            .clone()
+    /// How the update `client_id` asked of this host ended, as a
+    /// `HostUpdateResult`, sent once: [`HostUpdate::host_result_at`] at the
+    /// version this daemon runs. A client that sent no `client_id` (the
+    /// legacy id) never gets one, since no request record names it.
+    pub(crate) fn host_result_for(&self, client_id: &str) -> Option<DaemonMessage> {
+        self.host_result_at(client_id, protocol::BUILD_VERSION)
     }
 
-    /// The updates folder's `last-result.json` as a `HostUpdateResult`;
-    /// `None` when there is none or it cannot be read.
-    fn read_last_result(&self) -> Option<DaemonMessage> {
+    /// The `delivery` lock, held until the value is dropped.
+    fn delivering(&self) -> Delivering<'_> {
+        Delivering(lock(&self.delivery))
+    }
+
+    /// The updates folder's `host-update-result.json` as a
+    /// `HostUpdateResult` for `client_id`, with this daemon running
+    /// `running`: only when `host-update-request.json` names `client_id`
+    /// and [`deliverable`] holds. Once it is handed back both files are
+    /// deleted. A result whose `to` and `from` both differ from `running`
+    /// is for another version: both files are dropped and nothing is sent.
+    /// Anything else hands back nothing and leaves the files (a record with
+    /// no result yet may still get one), but a file that does not parse,
+    /// which is deleted. Under the `delivery` lock, so two looks at once
+    /// deliver once and a launch's new record is never deleted by a look
+    /// that read the old one.
+    pub(crate) fn host_result_at(&self, client_id: &str, running: &str) -> Option<DaemonMessage> {
+        let held = self.delivering();
         let updates = match (self.seams.updates_dir)() {
             Ok(updates) => updates,
             Err(err) => {
-                warn!("host update: no updates folder to read the last result from: {err:#}");
+                warn!("host update: no updates folder to read the host result from: {err:#}");
                 return None;
             }
         };
-        let result = update_core::read_last_result(&updates.join("last-result.json"))?;
+        let record_file = updates.join(HOST_REQUEST_FILE);
+        let result_file = updates.join(HOST_RESULT_FILE);
+        let result = read_host_file::<update_core::LastResult>(&held, &result_file);
+        if let Some(stale) = result
+            .as_ref()
+            .filter(|found| for_another_version(found, running))
+        {
+            info!(to = %stale.to, %running, "host update: dropping a result for another version");
+            remove_host_file(&held, &result_file);
+            remove_host_file(&held, &record_file);
+            return None;
+        }
+        if client_id == crate::state::LEGACY_CLIENT_ID {
+            return None;
+        }
+        let record = read_host_file::<RequestRecord>(&held, &record_file)?;
+        let result = result?;
+        if record.client_id != client_id || !deliverable(&record, &result, running) {
+            return None;
+        }
+        remove_host_file(&held, &result_file);
+        remove_host_file(&held, &record_file);
+        info!(%client_id, to = %result.to, ok = result.ok, "host update: result sent to its requester");
         Some(DaemonMessage::HostUpdateResult {
             from: result.from,
             to: result.to,
@@ -570,17 +676,22 @@ impl HostUpdate {
         update
     }
 
-    /// A test hub's checks: no install, no processes, and no last update
-    /// result, so a test hub never reads this machine's updates folder.
+    /// A test hub's checks: no install, no processes, and no updates folder,
+    /// so a test hub never reads or deletes this machine's host update
+    /// files.
     #[cfg(test)]
     pub(crate) fn nothing_installed() -> Self {
-        let update = Self::nothing_installed_with(Seams::system());
-        let _ = update.last_result.set(None);
-        update
+        let seams = Seams {
+            updates_dir: Box::new(|| -> anyhow::Result<PathBuf> {
+                anyhow::bail!("a test hub has no updates folder")
+            }),
+            ..Seams::system()
+        };
+        Self::nothing_installed_with(seams)
     }
 
     /// [`HostUpdate::nothing_installed`] whose updates folder is `updates`,
-    /// read for the last update's result.
+    /// read for the host update's result.
     #[cfg(test)]
     pub(crate) fn nothing_installed_in(updates: PathBuf) -> Self {
         let seams = Seams {
@@ -647,6 +758,9 @@ enum Target {
 struct Requester {
     request_id: String,
     requested_by: String,
+    /// The requester's `Hello.client_id`, which the update's result is kept
+    /// for ([`HostUpdate::host_result_for`]).
+    client_id: String,
     out_tx: mpsc::UnboundedSender<DaemonMessage>,
 }
 
@@ -734,6 +848,7 @@ async fn request(hub: &Hub, request_id: String, ctx: &ConnCtx<'_>) {
     let requester = Requester {
         request_id,
         requested_by: requested_by(ctx.auth),
+        client_id: ctx.client_id.to_owned(),
         out_tx: ctx.out_tx.clone(),
     };
     let notices = Notices {
@@ -761,6 +876,7 @@ fn start(update: Arc<HostUpdate>, plan: Plan, requester: Requester, notices: Not
     let (decision_tx, decision_rx) = std::sync::mpsc::channel::<Decision>();
     update.update_in_flight.store(true, Ordering::SeqCst);
     let install = plan.install.clone();
+    let client_id = requester.client_id.clone();
     let worker = Arc::clone(&update);
     let spawned = std::thread::Builder::new()
         .name("remote-update".to_owned())
@@ -774,7 +890,7 @@ fn start(update: Arc<HostUpdate>, plan: Plan, requester: Requester, notices: Not
                 }
                 decision_rx.recv().unwrap_or(Decision::Cancel)
             };
-            let outcome = run(&worker, &plan, go);
+            let outcome = run(&worker, &plan, &client_id, go);
             if outcome.is_err() {
                 worker.finish();
             }
@@ -951,11 +1067,13 @@ fn runs_from(exe: &Path, folder: &str) -> bool {
 }
 
 /// The update, on its own thread: the mutex, old downloads cleared, the
-/// download, `go`'s word on the verified version, the launch. The version
-/// started, or why not.
+/// download, `go`'s word on the verified version, the request record for
+/// `client_id`, the launch, which removes the record when it fails. The
+/// version started, or why not.
 fn run(
     update: &HostUpdate,
     plan: &Plan,
+    client_id: &str,
     go: impl FnOnce(&semver::Version) -> Decision,
 ) -> Result<semver::Version, Refusal> {
     let seams = &update.seams;
@@ -973,13 +1091,53 @@ fn run(
             return Err((UPDATE_REFUSED, STOPPING));
         }
     };
-    launch(seams, &plan.target, &ready, app_running)?;
+    let record = record_request(&update.delivering(), plan, client_id, &ready.version);
+    if let Err(refusal) = launch(seams, &plan.target, &ready, app_running) {
+        remove_host_file(&update.delivering(), &record);
+        return Err(refusal);
+    }
     // The launched `apply-update` takes the mutex next; the verified file
     // stays open until the launch has started.
     drop(hold);
     let version = ready.version.clone();
     drop(ready);
     Ok(version)
+}
+
+/// Before a launch: deletes any old `host-update-result.json` and
+/// `host-update-request.json` in the updates folder, then writes the
+/// request record naming `client_id`, this host's version and `to`. A
+/// requester with no `client_id` (the legacy id) gets no record, so no
+/// result. A record that cannot be written is logged at warn, and the
+/// update goes ahead without a result for its requester. Run under the
+/// `delivery` lock `held`. The record's path.
+fn record_request(
+    held: &Delivering<'_>,
+    plan: &Plan,
+    client_id: &str,
+    to: &semver::Version,
+) -> PathBuf {
+    let record_file = plan.updates_root.join(HOST_REQUEST_FILE);
+    remove_host_file(held, &plan.updates_root.join(HOST_RESULT_FILE));
+    remove_host_file(held, &record_file);
+    if client_id == crate::state::LEGACY_CLIENT_ID {
+        return record_file;
+    }
+    let record = RequestRecord {
+        client_id: client_id.to_owned(),
+        from: plan.current.to_string(),
+        to: to.to_string(),
+    };
+    let written = serde_json::to_vec(&record)
+        .map_err(anyhow::Error::from)
+        .and_then(|bytes| {
+            std::fs::create_dir_all(&plan.updates_root)?;
+            crate::atomic_file::write_atomic(&record_file, &bytes)
+        });
+    if let Err(err) = written {
+        warn!(file = %record_file.display(), "remote update: could not write the request record: {err:#}");
+    }
+    record_file
 }
 
 /// The update mutex's hold, or why it can't be taken.
@@ -1806,38 +1964,226 @@ mod tests {
         hub.host_update.update_in_flight.load(Ordering::SeqCst)
     }
 
-    #[test]
-    fn last_result_is_read_once_and_the_file_is_kept() {
-        let rig = rig("update-last-result", Some(OWN), &[], SETUP);
+    /// The request record for client `c1`'s update from 0.1.0 to 0.2.0.
+    const RECORD_C1: &str = r#"{"client_id":"c1","from":"0.1.0","to":"0.2.0"}"#;
+
+    /// `apply-update`'s host result for the update from 0.1.0 to 0.2.0.
+    fn host_result_body(ok: bool) -> String {
+        serde_json::json!({
+            "from": "0.1.0",
+            "to": "0.2.0",
+            "ok": ok,
+            "message": if ok { "Updated to 0.2.0." } else { "The update failed." },
+        })
+        .to_string()
+    }
+
+    /// Writes `record` and `result`, each when given, as the rig's request
+    /// record and host result; the two files' paths.
+    fn host_files(rig: &Rig, record: Option<&str>, result: Option<&str>) -> (PathBuf, PathBuf) {
         let updates = rig.root.join("update-root");
         std::fs::create_dir_all(&updates).unwrap_or_else(|err| panic!("updates folder: {err}"));
-        let file = updates.join("last-result.json");
-        let body = r#"{"from":"0.98.0","to":"0.99.0","ok":true,"message":"Updated to 0.99.0."}"#;
-        std::fs::write(&file, body).unwrap_or_else(|err| panic!("last result: {err}"));
-
-        let first = rig.hub.host_update.last_result();
-        let second = rig.hub.host_update.last_result();
-
-        for result in [first, second] {
-            assert!(
-                matches!(
-                    &result,
-                    Some(DaemonMessage::HostUpdateResult { from, to, ok: true, message })
-                        if from.as_deref() == Some("0.98.0")
-                            && to == "0.99.0"
-                            && message == "Updated to 0.99.0."
-                ),
-                "{result:?}"
-            );
+        let record_file = updates.join(HOST_REQUEST_FILE);
+        let result_file = updates.join(HOST_RESULT_FILE);
+        for (file, body) in [(&record_file, record), (&result_file, result)] {
+            if let Some(body) = body {
+                std::fs::write(file, body).unwrap_or_else(|err| panic!("host file: {err}"));
+            }
         }
-        assert!(file.exists(), "the daemon leaves the file for the app");
+        (record_file, result_file)
+    }
+
+    #[test]
+    fn a_host_result_goes_to_its_requester_once() {
+        let rig = rig("update-host-result-once", Some(OWN), &[], SETUP);
+        let body = host_result_body(true);
+        let (record, result) = host_files(&rig, Some(RECORD_C1), Some(&body));
+
+        let first = rig.hub.host_update.host_result_at("c1", "0.2.0");
+        let second = rig.hub.host_update.host_result_at("c1", "0.2.0");
+
+        assert!(
+            matches!(
+                &first,
+                Some(DaemonMessage::HostUpdateResult { from, to, ok: true, message })
+                    if from.as_deref() == Some("0.1.0")
+                        && to == "0.2.0"
+                        && message == "Updated to 0.2.0."
+            ),
+            "{first:?}"
+        );
+        assert!(!record.exists(), "the request record is deleted once sent");
+        assert!(!result.exists(), "the host result is deleted once sent");
+        assert!(
+            second.is_none(),
+            "a second Welcome gets nothing: {second:?}"
+        );
+    }
+
+    #[test]
+    fn another_client_gets_no_host_result() {
+        let rig = rig("update-host-result-other", Some(OWN), &[], SETUP);
+        let body = host_result_body(true);
+        let (record, result) = host_files(&rig, Some(RECORD_C1), Some(&body));
+
+        let sent = rig.hub.host_update.host_result_at("c2", "0.2.0");
+
+        assert!(sent.is_none(), "{sent:?}");
+        assert!(record.exists(), "the record stays for its requester");
+        assert!(result.exists(), "the result stays for its requester");
+    }
+
+    #[test]
+    fn a_failed_update_is_reported_while_the_old_version_runs() {
+        let rig = rig("update-host-result-failed", Some(OWN), &[], SETUP);
+        let body = host_result_body(false);
+        host_files(&rig, Some(RECORD_C1), Some(&body));
+
+        let at_old = rig.hub.host_update.host_result_at("c1", "0.1.0");
+
+        assert!(
+            matches!(
+                &at_old,
+                Some(DaemonMessage::HostUpdateResult { ok: false, message, .. })
+                    if message == "The update failed."
+            ),
+            "{at_old:?}"
+        );
+
+        let (record, result) = host_files(&rig, Some(RECORD_C1), Some(&body));
+        let at_new = rig.hub.host_update.host_result_at("c1", "0.2.0");
+
+        assert!(at_new.is_none(), "{at_new:?}");
+        assert!(
+            record.exists() && result.exists(),
+            "nothing was sent or cleared"
+        );
+    }
+
+    #[test]
+    fn a_result_for_another_version_is_not_sent() {
+        let rig = rig("update-host-result-version", Some(OWN), &[], SETUP);
+        let body = host_result_body(true);
+        host_files(&rig, Some(RECORD_C1), Some(&body));
+
+        let sent = rig.hub.host_update.host_result_at("c1", "0.1.0");
+
+        assert!(sent.is_none(), "{sent:?}");
+    }
+
+    #[test]
+    fn a_result_without_a_record_is_not_sent() {
+        let rig = rig("update-host-result-no-record", Some(OWN), &[], SETUP);
+        let body = host_result_body(true);
+        host_files(&rig, None, Some(&body));
+
+        let sent = rig.hub.host_update.host_result_at("c1", "0.2.0");
+
+        assert!(sent.is_none(), "{sent:?}");
+    }
+
+    #[test]
+    fn a_result_whose_to_differs_from_the_record_is_not_sent() {
+        let rig = rig("update-host-result-other-to", Some(OWN), &[], SETUP);
+        let body = host_result_body(true);
+        let record = r#"{"client_id":"c1","from":"0.1.0","to":"0.3.0"}"#;
+        host_files(&rig, Some(record), Some(&body));
+
+        let sent = rig.hub.host_update.host_result_at("c1", "0.2.0");
+
+        assert!(sent.is_none(), "{sent:?}");
+    }
+
+    #[test]
+    fn a_host_result_for_a_third_version_is_dropped() {
+        let rig = rig("update-host-result-third", Some(OWN), &[], SETUP);
+        let body = host_result_body(true);
+        let (record, result) = host_files(&rig, Some(RECORD_C1), Some(&body));
+
+        let sent = rig.hub.host_update.host_result_at("c2", "0.3.0");
+
+        assert!(sent.is_none(), "{sent:?}");
+        assert!(
+            !record.exists(),
+            "the record for another version is dropped"
+        );
+        assert!(
+            !result.exists(),
+            "the result for another version is dropped"
+        );
+    }
+
+    #[test]
+    fn a_host_request_without_a_result_is_kept_while_its_from_runs() {
+        let rig = rig("update-host-request-kept", Some(OWN), &[], SETUP);
+        let (record, _) = host_files(&rig, Some(RECORD_C1), None);
+
+        let sent = rig.hub.host_update.host_result_at("c1", "0.1.0");
+
+        assert!(sent.is_none(), "{sent:?}");
+        assert!(record.exists(), "apply-update may still write the result");
+    }
+
+    #[test]
+    fn an_unreadable_record_is_deleted_and_nothing_is_sent() {
+        let rig = rig("update-host-result-bad-record", Some(OWN), &[], SETUP);
+        let body = host_result_body(true);
+        let (record, _) = host_files(&rig, Some("not a record"), Some(&body));
+
+        let sent = rig.hub.host_update.host_result_at("c1", "0.2.0");
+
+        assert!(sent.is_none(), "{sent:?}");
+        assert!(!record.exists(), "the unreadable record is deleted");
     }
 
     #[test]
     fn no_last_result_file_is_none() {
         let rig = rig("update-no-last-result", Some(OWN), &[], SETUP);
 
-        assert!(rig.hub.host_update.last_result().is_none());
+        assert!(rig.hub.host_update.host_result_for("c1").is_none());
+    }
+
+    #[tokio::test]
+    async fn launching_an_update_writes_the_request_and_clears_an_old_result() {
+        let rig = passing("update-writes-request", SETUP);
+        let body = host_result_body(true);
+        let (record, result) = host_files(&rig, None, Some(&body));
+
+        let reply = ask(&rig.hub).await;
+
+        assert!(
+            matches!(reply, DaemonMessage::RemoteUpdateStarted { .. }),
+            "{reply:?}"
+        );
+        assert!(!result.exists(), "the old host result is deleted");
+        let bytes = std::fs::read(&record).unwrap_or_else(|err| panic!("read the record: {err}"));
+        let written: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or_else(|err| panic!("parse the record: {err}"));
+        assert_eq!(
+            written,
+            serde_json::json!({
+                "client_id": "c1",
+                "from": protocol::BUILD_VERSION,
+                "to": "0.99.0",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_launch_removes_the_request() {
+        let rig = passing(
+            "update-failed-launch-request",
+            Setup {
+                launch_fails: true,
+                ..SETUP
+            },
+        );
+        let (record, _) = host_files(&rig, None, None);
+
+        let reply = refusal(ask(&rig.hub).await);
+
+        assert_eq!(reply, expected(UPDATE_REFUSED, NO_INSTALLER));
+        assert!(!record.exists(), "a launch that failed leaves no request");
     }
 
     #[tokio::test]

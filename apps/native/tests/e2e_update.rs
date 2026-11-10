@@ -60,6 +60,8 @@ const DEVICE_NAME: &str = "e2e-peer";
 const DOWNLOAD_FAILED: &str = "This host couldn't download the update; try again later.";
 /// The line the daemon logs when no local connection holds the update back.
 const LAUNCH_AT_ONCE: &str = "remote update: no local connection; launching at once";
+/// The message of the failed update the restarted host reports.
+const UPDATE_FAILED: &str = "could not stop the daemon: timed out; nothing was changed";
 /// The login the fake tailscale gives every node's user.
 const FAKE_LOGIN: &str = "owner@example.com";
 
@@ -85,19 +87,46 @@ type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
 /// launches at once: the sandbox records the installer under the updates
 /// dir, after the feed served the release list, the `.sha256` and the
 /// installer. Once the host restarts as the installer would leave it, the
-/// reconnected device is told the update's result after its `Welcome`.
+/// reconnected device is told the update's result after its `Welcome`. The
+/// result is a failed update, which the host reports while its old version
+/// runs: the sandboxed daemon cannot run the feed's version.
 #[gpui::test]
 #[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
 fn a_sandboxed_update_from_the_tailnet_launches_at_once_and_reports_after_restart(
     host_cx: &mut TestAppContext,
     device_cx: &mut TestAppContext,
 ) {
+    update_from_the_tailnet_and_report(host_cx, device_cx, "update-launch", false);
+}
+
+/// As [`a_sandboxed_update_from_the_tailnet_launches_at_once_and_reports_after_restart`],
+/// but the host's relaunched app takes and deletes `last-result.json` before
+/// the new daemon starts: the requesting device still gets the result.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn the_host_result_reaches_the_requester_when_the_host_app_took_its_own(
+    host_cx: &mut TestAppContext,
+    device_cx: &mut TestAppContext,
+) {
+    update_from_the_tailnet_and_report(host_cx, device_cx, "update-app-took", true);
+}
+
+/// A paired tailnet device's update of a host with no local connection,
+/// then the host's restart with a failed result, which the device is told
+/// after its reconnect's `Welcome`; `app_took_its_own` deletes
+/// `last-result.json` before the restart as the host's relaunched app does.
+fn update_from_the_tailnet_and_report(
+    host_cx: &mut TestAppContext,
+    device_cx: &mut TestAppContext,
+    tag: &str,
+    app_took_its_own: bool,
+) {
     // The home daemon starts first: the update host has no client until the
     // loopback one connects, and an idle exit before then would be replaced
     // by a daemon without the sandbox.
-    let home = LiveDaemon::start("update-launch-home");
+    let home = LiveDaemon::start(&format!("{tag}-home"));
     let feed = UpdateFeed::start(FEED_VERSION, INSTALLER);
-    let mut daemon = LiveDaemon::start_update_host("update-launch", &feed, None, true);
+    let mut daemon = LiveDaemon::start_update_host(tag, &feed, None, true);
     let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
     let port = serve_remote(&mut host, &host_client, &daemon);
     assert_same_daemon(&daemon);
@@ -150,23 +179,29 @@ fn a_sandboxed_update_from_the_tailnet_launches_at_once_and_reports_after_restar
     }
 
     let result = json!({
-        "from": "0.11.0-alpha",
+        "from": protocol::BUILD_VERSION,
         "to": FEED_VERSION,
-        "ok": true,
-        "message": "Updated to 9.9.9-alpha.",
+        "ok": false,
+        "message": UPDATE_FAILED,
     });
     let from = device_client.message_count();
-    daemon.restart_after_update(&result);
-    assert_eq!(
-        update_core::read_last_result(&daemon.updates_dir().join("last-result.json")),
-        Some(update_core::LastResult {
-            from: Some("0.11.0-alpha".to_owned()),
-            to: FEED_VERSION.to_owned(),
-            ok: true,
-            message: "Updated to 9.9.9-alpha.".to_owned(),
-        }),
-        "the fixture is what the updater writes"
-    );
+    let last_result = daemon.updates_dir().join("last-result.json");
+    if app_took_its_own {
+        daemon.restart_after_update_app_took_its_own(&result);
+        assert!(!last_result.exists(), "the host's app took its own result");
+    } else {
+        daemon.restart_after_update(&result);
+        assert_eq!(
+            update_core::read_last_result(&last_result),
+            Some(update_core::LastResult {
+                from: Some(protocol::BUILD_VERSION.to_owned()),
+                to: FEED_VERSION.to_owned(),
+                ok: false,
+                message: UPDATE_FAILED.to_owned(),
+            }),
+            "the fixture is what the updater writes"
+        );
+    }
     let mut reported = None;
     device.wait_until("the restarted host to report the result", |_| {
         reported = device_client.find_message_from(from, host_update_result);
@@ -175,10 +210,10 @@ fn a_sandboxed_update_from_the_tailnet_launches_at_once_and_reports_after_restar
     assert_eq!(
         reported,
         Some((
-            Some("0.11.0-alpha".to_owned()),
+            Some(protocol::BUILD_VERSION.to_owned()),
             FEED_VERSION.to_owned(),
-            true,
-            "Updated to 9.9.9-alpha.".to_owned()
+            false,
+            UPDATE_FAILED.to_owned()
         ))
     );
     let welcome = last_index(&device_client, from, |msg| {

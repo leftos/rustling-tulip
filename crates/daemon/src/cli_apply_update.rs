@@ -7,9 +7,10 @@
 //! anything is written, refuses while anything still runs from the install
 //! folder, swaps each file in through `<name>.new` and `<name>.old` and each
 //! folder [`STAGED_DIRS`] names whole by rename (the client last, every swap
-//! rolled back on a failure), records the outcome in `last-result.json` and,
-//! when asked, starts the client again, or the installed daemon when no client
-//! was started.
+//! rolled back on a failure), records the outcome in `last-result.json` (and,
+//! under `--restart-daemon`, in `host-update-result.json` for the daemon too)
+//! and, when asked, starts the client again, or the installed daemon when no
+//! client was started.
 //!
 //! When `--to` is an `.app` bundle the bundle replaces those files: the
 //! installed app is renamed to `<name>.app.old`, the staged app is renamed into
@@ -197,6 +198,19 @@ pub trait Launcher {
     fn launch(&self, program: &Path, args: &[OsString]) -> anyhow::Result<()>;
 }
 
+/// The outcome file in the updates folder that the host's app takes and
+/// deletes at its launch.
+pub const LAST_RESULT_FILE: &str = "last-result.json";
+
+/// The outcome file beside [`LAST_RESULT_FILE`] written only under
+/// `--restart-daemon`, an update a daemon asked for; only the daemon reads
+/// and deletes it.
+pub const HOST_RESULT_FILE: &str = "host-update-result.json";
+
+/// The daemon's record, beside [`HOST_RESULT_FILE`], of which client asked
+/// for the update it launched, and from and to which version.
+pub const HOST_REQUEST_FILE: &str = "host-update-request.json";
+
 /// Whatever keeps the update lock held until it is dropped.
 pub type LockHold = Box<dyn std::any::Any>;
 
@@ -221,7 +235,8 @@ pub struct Hooks<'a> {
 }
 
 /// Apply the update `request` describes, writing one line per event to `out`,
-/// record the outcome in `result_file` and return the exit code: `0` applied,
+/// record the outcome in `result_file` (and, under `--restart-daemon`, in
+/// [`HOST_RESULT_FILE`] beside it) and return the exit code: `0` applied,
 /// `2` the daemon did not stop, `3` something still runs from the install
 /// folder, `4` another update holds the lock, `5` a file or a staged folder
 /// could not be swapped (every swap was rolled back). When `to` is an `.app`
@@ -257,6 +272,17 @@ pub async fn run(
             &format!("could not write {}: {err:#}", result_file.display()),
         );
     }
+    // An update a daemon asked for: the same outcome for the daemon alone,
+    // which the host's app, taking its own file at launch, cannot take.
+    if request.restart_daemon {
+        let host_result = result_file.with_file_name(HOST_RESULT_FILE);
+        if let Err(err) = write_result(&host_result, request, &outcome) {
+            say(
+                out,
+                &format!("could not write {}: {err:#}", host_result.display()),
+            );
+        }
+    }
     restart(request, client_was_running, hooks.launcher, out);
     drop(hold);
     outcome.code
@@ -268,7 +294,7 @@ pub async fn run(
 pub async fn run_from_args(args: impl IntoIterator<Item = OsString>, out: &mut impl Write) -> u8 {
     let resolved = parse(args).and_then(|request| {
         let config_dir = daemon_client::config_dir()?;
-        let result_file = daemon_client::updates_dir()?.join("last-result.json");
+        let result_file = daemon_client::updates_dir()?.join(LAST_RESULT_FILE);
         Ok((request, config_dir, result_file))
     });
     let (request, config_dir, result_file) = match resolved {
@@ -1971,6 +1997,38 @@ mod tests {
                 "message": "could not stop the daemon: timed out; nothing was changed",
             })
         );
+    }
+
+    #[tokio::test]
+    async fn apply_update_writes_the_host_result_only_when_restarting_the_daemon() {
+        for restart_daemon in [true, false] {
+            let fixture = Fixture::new(&format!("apply-update-host-result-{restart_daemon}"));
+            let (code, out) = apply(
+                &fixture,
+                &fixture.request_with(false, restart_daemon),
+                &Processes(Vec::new()),
+                &Daemon::stopping(),
+                &Launches::default(),
+            )
+            .await;
+            assert_eq!(code, 0, "{out}");
+            let host_result = fixture.result.with_file_name(HOST_RESULT_FILE);
+            assert!(
+                fixture.result.is_file(),
+                "the app's result is always written"
+            );
+            if restart_daemon {
+                let bytes = std::fs::read(&host_result).expect("the host result is written");
+                let written: serde_json::Value =
+                    serde_json::from_slice(&bytes).expect("the host result is JSON");
+                assert_eq!(written, fixture.result_json(), "the same outcome");
+            } else {
+                assert!(
+                    !host_result.exists(),
+                    "no host result without a daemon restart"
+                );
+            }
+        }
     }
 
     #[tokio::test]

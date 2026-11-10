@@ -197,20 +197,38 @@ impl LiveDaemon {
     }
 
     /// Stops the daemon as the installer would, with `rustling-tulipd
-    /// shutdown`, writes `last_result` as the updater's
-    /// `<updates dir>/last-result.json`, and starts a new daemon on the same
-    /// directories and environment, waiting for its handshake and `/health`.
-    /// The daemon reads that file once per run, so only a new run sends it.
+    /// shutdown`, writes `last_result` as `apply-update --restart-daemon`
+    /// does, to both `<updates dir>/last-result.json` (the host app's) and
+    /// `<updates dir>/host-update-result.json` (the daemon's), and starts a
+    /// new daemon on the same directories and environment, waiting for its
+    /// handshake and `/health`.
+    pub fn restart_after_update(&mut self, last_result: &Value) {
+        self.restart_with_result(last_result, false);
+    }
+
+    /// [`Self::restart_after_update`], but `last-result.json` is deleted
+    /// before the new daemon starts, as the host's relaunched app takes it
+    /// before it starts the daemon.
+    pub fn restart_after_update_app_took_its_own(&mut self, last_result: &Value) {
+        self.restart_with_result(last_result, true);
+    }
+
     #[expect(
         clippy::panic,
         reason = "a daemon that does not start again fails the spec with the launcher's own message"
     )]
-    pub fn restart_after_update(&mut self, last_result: &Value) {
+    fn restart_with_result(&mut self, last_result: &Value, app_took_its_own: bool) {
         self.shut_down_by_cli();
         let updates = self.updates_dir();
         std::fs::create_dir_all(&updates).expect("create the updates dir");
-        std::fs::write(updates.join("last-result.json"), last_result.to_string())
-            .expect("write last-result.json");
+        for name in ["last-result.json", "host-update-result.json"] {
+            std::fs::write(updates.join(name), last_result.to_string())
+                .unwrap_or_else(|err| panic!("write {name}: {err}"));
+        }
+        if app_took_its_own {
+            std::fs::remove_file(updates.join("last-result.json"))
+                .expect("the app takes last-result.json");
+        }
         self.inner.respawn().unwrap_or_else(|err| panic!("{err}"));
     }
 

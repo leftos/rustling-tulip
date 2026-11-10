@@ -450,9 +450,9 @@ pub(super) fn push_initial_state(
         hub.host_update.send_phase(out_tx);
     }
     send_resume_report(hub, out_tx, client_id);
-    // Last: how the host's last update ended, sent to every connection,
-    // local and tailnet; a client acts on it only for an update it asked for.
-    if let Some(result) = hub.host_update.last_result() {
+    // Last: how the host update this client asked for ended, sent once and
+    // only to the client whose `client_id` asked, local, SSH or tailnet.
+    if let Some(result) = hub.host_update.host_result_for(client_id) {
         let _ = out_tx.send(result);
     }
 }
@@ -818,30 +818,58 @@ mod tests {
         sent
     }
 
+    /// Every message the initial state sends to a connection of `client_id`.
+    fn initial_state_of(hub: &Hub, client_id: &str, local: bool) -> Vec<DaemonMessage> {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        push_initial_state(hub, &out_tx, client_id, false, local);
+        let mut sent = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            sent.push(message);
+        }
+        sent
+    }
+
     #[test]
-    fn initial_state_ends_with_the_last_update_result() {
-        let (mut hub, scratch) = test_hub("last-update-result-initial");
+    fn initial_state_ends_with_the_host_result_for_its_requester_once() {
+        let (mut hub, scratch) = test_hub("host-update-result-initial");
         let updates = scratch.path().join("updates");
         std::fs::create_dir_all(&updates).expect("updates folder");
+        let running = protocol::BUILD_VERSION;
         std::fs::write(
-            updates.join("last-result.json"),
-            r#"{"to":"0.99.0","ok":false,"message":"The update failed."}"#,
+            updates.join("host-update-request.json"),
+            serde_json::json!({ "client_id": "c1", "from": running, "to": "99.0.0" }).to_string(),
         )
-        .expect("last result");
+        .expect("request record");
+        std::fs::write(
+            updates.join("host-update-result.json"),
+            serde_json::json!({
+                "from": running,
+                "to": "99.0.0",
+                "ok": false,
+                "message": "The update failed.",
+            })
+            .to_string(),
+        )
+        .expect("host result");
         hub.host_update =
             std::sync::Arc::new(crate::server::HostUpdate::nothing_installed_in(updates));
+        let is_result =
+            |message: &DaemonMessage| matches!(message, DaemonMessage::HostUpdateResult { .. });
 
-        for local in [true, false] {
-            let sent = initial_state(&hub, local);
-            assert!(
-                matches!(
-                    sent.last(),
-                    Some(DaemonMessage::HostUpdateResult { from: None, to, ok: false, message })
-                        if to == "0.99.0" && message == "The update failed."
-                ),
-                "local {local}: {sent:?}"
-            );
-        }
+        let other = initial_state_of(&hub, "c2", false);
+        let requester = initial_state_of(&hub, "c1", false);
+        let again = initial_state_of(&hub, "c1", true);
+
+        assert!(!other.iter().any(is_result), "another client: {other:?}");
+        assert!(
+            matches!(
+                requester.last(),
+                Some(DaemonMessage::HostUpdateResult { from: Some(from), to, ok: false, message })
+                    if from == running && to == "99.0.0" && message == "The update failed."
+            ),
+            "the requester: {requester:?}"
+        );
+        assert!(!again.iter().any(is_result), "sent once: {again:?}");
     }
 
     #[test]
