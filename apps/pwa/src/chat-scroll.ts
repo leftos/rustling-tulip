@@ -34,3 +34,22 @@ export function scrollAfterPaint(
   }
   return before.atBottom ? scrollHeight : null;
 }
+
+/**
+ * Where a chat scrolls to once its box may have changed height (a dock, the
+ * key bar, the composer or the keyboard came or went): `wasAtBottom` and
+ * `beforeHeight` are whether it sat at its bottom and its `clientHeight` just
+ * before. A chat at the bottom whose box changed height stays at the bottom;
+ * null, for no write, when it was scrolled up or its box kept its height.
+ */
+export function scrollAfterResize(
+  wasAtBottom: boolean,
+  beforeHeight: number,
+  scrollHeight: number,
+  clientHeight: number,
+): number | null {
+  if (!wasAtBottom || clientHeight === beforeHeight) {
+    return null;
+  }
+  return Math.max(0, scrollHeight - clientHeight);
+}

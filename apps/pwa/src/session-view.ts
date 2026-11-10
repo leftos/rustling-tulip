@@ -1,5 +1,5 @@
 import { INITIAL_CHAT, chatStep, latestPrompt, type ChatState } from "./chat-model";
-import { measureScroll, scrollAfterPaint, type ChatScroll } from "./chat-scroll";
+import { measureScroll, scrollAfterPaint, scrollAfterResize, type ChatScroll } from "./chat-scroll";
 import {
   INITIAL_COMPOSER,
   edit,
@@ -295,6 +295,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       }
       keptScroll = null;
     }
+    const beforeToggles = measureBox(chatEl);
     terminalEl.hidden = !screen.terminal;
     composerEl.hidden = screen.composer === null;
     keysEl.hidden = screen.keys.length === 0;
@@ -317,6 +318,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       paintDock(screen.dock);
     }
     paintSheet(screen.sheet);
+    keepAtBottom(chatEl, beforeToggles);
     if (!rowsSame) {
       drawnRows = screen.rows;
       drawnHidden = screen.hiddenLine;
@@ -751,7 +753,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   });
   apply(chatStep(chat, { type: "enter", sessionId }, newRequestId));
   update();
-  const stopViewport = trackViewport(container);
+  const stopViewport = trackViewport(container, chatEl);
 
   return () => {
     // Off the page first: nothing this view wired can fire again.
@@ -774,23 +776,19 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
  * Keeps `container` over the visual viewport while the screen is mounted, as
  * `--vv-top` and `--vv-height`, which `.session` is sized from, and marks it
  * `data-keyboard="open"` while the keyboard is up. A browser
- * without `visualViewport` keeps the screen at its full height. The returned
- * function removes the listeners and the variables.
+ * without `visualViewport` keeps the screen at its full height. A shown `chat`
+ * at its bottom stays at its bottom as the keyboard comes and goes. The
+ * returned function removes the listeners and the variables.
  */
-function trackViewport(container: HTMLElement): () => void {
+function trackViewport(container: HTMLElement, chat: HTMLElement): () => void {
   const viewport = window.visualViewport;
   if (viewport === null) {
     return () => {};
   }
   const place = (): void => {
-    const box = sessionBox(viewport, window.innerHeight);
-    container.style.setProperty("--vv-top", `${box.top}px`);
-    container.style.setProperty("--vv-height", `${box.height}px`);
-    if (box.keyboardOpen) {
-      container.dataset["keyboard"] = "open";
-    } else {
-      delete container.dataset["keyboard"];
-    }
+    const before = measureBox(chat);
+    placeOverViewport(container, viewport);
+    keepAtBottom(chat, before);
   };
   viewport.addEventListener("resize", place);
   viewport.addEventListener("scroll", place);
@@ -802,6 +800,48 @@ function trackViewport(container: HTMLElement): () => void {
     container.style.removeProperty("--vv-height");
     delete container.dataset["keyboard"];
   };
+}
+
+/** Whether a chat sits at its bottom, and its box's height, before a possible resize. */
+interface ChatBox {
+  readonly atBottom: boolean;
+  readonly height: number;
+}
+
+function measureBox(chat: HTMLElement): ChatBox {
+  return { atBottom: measureScroll(chat).atBottom, height: chat.clientHeight };
+}
+
+/**
+ * Keeps a shown `chat` at its bottom when it sat there in `before` and its box
+ * has since changed height; a hidden chat, one scrolled up and one whose box
+ * kept its height are not written to.
+ */
+function keepAtBottom(chat: HTMLElement, before: ChatBox): void {
+  if (chat.hidden) {
+    return;
+  }
+  const target = scrollAfterResize(
+    before.atBottom,
+    before.height,
+    chat.scrollHeight,
+    chat.clientHeight,
+  );
+  if (target !== null) {
+    chat.scrollTop = target;
+  }
+}
+
+/** Sets `container`'s `--vv-top`, `--vv-height` and keyboard mark from `viewport`. */
+function placeOverViewport(container: HTMLElement, viewport: VisualViewport): void {
+  const box = sessionBox(viewport, window.innerHeight);
+  container.style.setProperty("--vv-top", `${box.top}px`);
+  container.style.setProperty("--vv-height", `${box.height}px`);
+  if (box.keyboardOpen) {
+    container.dataset["keyboard"] = "open";
+  } else {
+    delete container.dataset["keyboard"];
+  }
 }
 
 function showText(node: HTMLElement, text: string | null): void {

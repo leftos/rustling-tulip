@@ -70,6 +70,29 @@ pub(crate) fn collapses(fit: &HeaderFit) -> bool {
     !fit.cluster.is_empty() && inline_width(fit) > fit.width
 }
 
+/// Whether the header's row holds every chip at its floor, `floor` or the
+/// chip's own width when that is less, beside the parts that never shrink:
+/// padding, glyph, the title shrunk to nothing, the spacer, the cluster or,
+/// when the header [`collapses`], the ⋯ button `overflow`, and Close, a
+/// [`GAP`] between each two items. When it does not, the chips shrink past
+/// their floor, as far as nothing.
+pub(crate) fn floors_fit(fit: &HeaderFit, floor: f32, overflow: f32) -> bool {
+    let mut items = Vec::with_capacity(fit.chips.len() + fit.cluster.len() + 4);
+    if fit.glyph > 0.0 {
+        items.push(fit.glyph);
+    }
+    items.push(0.0);
+    items.extend(fit.chips.iter().map(|chip| chip.min(floor)));
+    items.push(SPACER);
+    if collapses(fit) {
+        items.push(overflow);
+    } else {
+        items.extend(&fit.cluster);
+    }
+    items.push(fit.close);
+    PAD_LEFT + row_width(&items) + PAD_RIGHT <= fit.width
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

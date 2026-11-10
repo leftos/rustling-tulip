@@ -738,6 +738,147 @@ fn a_narrow_header_moves_its_buttons_then_gives_up_the_branch_chip_before_the_ti
     );
 }
 
+#[gpui::test]
+fn a_pane_too_narrow_for_the_chip_floor_keeps_close_inside(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let long = |id: &str| {
+        session(id)
+            .label("Petal footer polish")
+            .members(&[(
+                "rustling-tulip",
+                "feat/a-rather-long-branch-name",
+                "C:/wt/x/rustling-tulip",
+            )])
+            .build()
+    };
+    let fixture = Fixture {
+        sessions: vec![long("s1"), long("s2")],
+        tabs: vec![split_at(0.5)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let window = h.window_width();
+    let row = width_of(&mut h, "pane-frame-p1") / 0.5;
+
+    // A 190 px pane of the 1920 px window: its collapsed header holds the
+    // glyph, ⋯ and Close with the chips shrunk past their floor, not with
+    // the branch chip at 56 px.
+    h.send(DaemonMessage::TabUpdated {
+        tab: split_at(190.0 / row),
+    });
+    let frame = width_of(&mut h, "pane-frame-p1");
+    assert!(
+        p1_collapsed(&mut h),
+        "a {frame} px pane of a {window} px window collapses its header"
+    );
+    assert_inside_p1(&mut h, "pane-overflow-p1");
+    assert_inside_p1(&mut h, "close-pane-p1");
+}
+
+/// Tab `t1` in three panes: `p1` (showing `s1`) takes a third of the row,
+/// and `p2` (showing `s2`) takes `share` of the rest beside `p3` (`s3`).
+fn three_at(share: f32) -> TabEntry {
+    tab(
+        "t1",
+        &GridNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 1.0 / 3.0,
+            first: Box::new(pane("p1", Some("s1"))),
+            second: Box::new(GridNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: share,
+                first: Box::new(pane("p2", Some("s2"))),
+                second: Box::new(pane("p3", Some("s3"))),
+            }),
+        },
+    )
+}
+
+/// The least width a squeezed branch chip keeps, as the header draws it.
+const CHIP_FLOOR: f32 = 56.0;
+
+#[gpui::test]
+fn a_narrow_panes_branch_chip_keeps_its_floor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let long = session("s2")
+        .label("Petal footer polish")
+        .members(&[
+            (
+                "rustling-tulip",
+                "feat/a-rather-long-branch-name",
+                "C:/wt/x/rustling-tulip",
+            ),
+            ("petal", "main", "C:/wt/x/petal"),
+        ])
+        .build();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), long, session("s3").build()],
+        tabs: vec![three_at(0.95)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    // The harness's default window, 1920 px wide; the middle pane's share of
+    // it is what changes below, ending near 355 px.
+    let window = h.window_width();
+
+    // Most of two thirds of the window: the middle pane's chips and name are
+    // whole, its buttons inline or in ⋯.
+    let frame = width_of(&mut h, "pane-frame-p2");
+    let row = frame / 0.95;
+    let title = width_of(&mut h, "pane-title-p2");
+    let branch = width_of(&mut h, "pane-chip-p2-branch");
+    let more = width_of(&mut h, "pane-chip-p2-more");
+    assert!(
+        title > 40.0 && branch > CHIP_FLOOR + 20.0,
+        "a {frame} px pane of a {window} px window shows its chips and name whole: \
+         title {title}, branch {branch}"
+    );
+    assert!(
+        more > 0.0 && more < CHIP_FLOOR,
+        "the +1 chip is narrower than the floor: {more}"
+    );
+
+    // Short of half the branch chip: the buttons move into ⋯.
+    if !p2_collapsed(&mut h) {
+        let free = (h.bounds("split-right-p2").left() - h.bounds("pane-chip-p2-more").right())
+            / px(1.0)
+            - 2.0 * HEADER_GAP;
+        h.send(DaemonMessage::TabUpdated {
+            tab: three_at((frame - free - branch / 2.0) / row),
+        });
+    }
+    assert!(
+        p2_collapsed(&mut h),
+        "half a branch short: the buttons move into ⋯"
+    );
+
+    // Collapsed, leave the branch chip 20 px of its own: it keeps its floor
+    // and the title gives way instead, both still showing.
+    let frame = width_of(&mut h, "pane-frame-p2");
+    let free = (h.bounds("pane-overflow-p2").left() - h.bounds("pane-chip-p2-more").right())
+        / px(1.0)
+        - 2.0 * HEADER_GAP;
+    h.send(DaemonMessage::TabUpdated {
+        tab: three_at((frame - free - (branch - 20.0)) / row),
+    });
+    let narrow = width_of(&mut h, "pane-frame-p2");
+    let squeezed = width_of(&mut h, "pane-chip-p2-branch");
+    assert!(
+        squeezed >= CHIP_FLOOR - 0.5 && squeezed < branch - 1.0,
+        "a {narrow} px pane of a {window} px window keeps a {CHIP_FLOOR} px branch chip: {squeezed} of {branch}"
+    );
+    let cut = width_of(&mut h, "pane-title-p2");
+    assert!(
+        cut > 0.0 && cut < title - 1.0,
+        "the title still shows and gives way after the chip: {cut} of {title}"
+    );
+    let kept = width_of(&mut h, "pane-chip-p2-more");
+    assert!(
+        (kept - more).abs() < 0.5,
+        "a chip narrower than the floor keeps its own width: {kept} of {more}"
+    );
+}
+
 /// The width of the row a tab's two panes share: both cards and the gutter
 /// between them.
 fn pane_row(h: &mut Harness<'_>) -> f32 {
@@ -835,6 +976,10 @@ fn narrow_p1(h: &mut Harness<'_>, card: f32) {
 /// Whether `p1`'s header draws its buttons in the ⋯ menu.
 fn p1_collapsed(h: &mut Harness<'_>) -> bool {
     h.root(|root, cx| root.pane_header_collapsed("p1", cx))
+}
+
+fn p2_collapsed(h: &mut Harness<'_>) -> bool {
+    h.root(|root, cx| root.pane_header_collapsed("p2", cx))
 }
 
 /// The element tagged `selector` lies inside `p1`'s card.

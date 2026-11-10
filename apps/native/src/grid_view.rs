@@ -82,6 +82,11 @@ const CHIP_TEXT_SIZE: f32 = 11.0;
 /// A header chip's text shrink against the title's 1: large enough that the
 /// chip gives up nearly all its width before the title gives any.
 const BRANCH_CHIP_SHRINK: f32 = 1000.0;
+/// The least width a shrinking header chip keeps: a few characters and its
+/// `…`, so once a chip reaches it the title shrinks next. A chip narrower
+/// than this keeps its own width. A header too narrow to hold its chips at
+/// this floor ([`pane_header_fit::floors_fit`]) lets them shrink to nothing.
+const CHIP_MIN_WIDTH: f32 = 56.0;
 const HEADER_BUTTON_SIZE: f32 = 26.0;
 const HEADER_BUTTON_RADIUS: f32 = 6.0;
 /// The accent line down a pane header's left edge, below its top corner.
@@ -1935,7 +1940,7 @@ impl RootView {
             return popout_column(toolbar, note.into_any_element());
         };
         let parts = self.session_header_parts(host, session);
-        let title = header_title(&slot_id, Some(&parts), TipAt::Mouse, cx);
+        let title = header_title(&slot_id, Some(&parts), TipAt::Mouse, true, cx);
         let mut controls = self.header_stop(&slot_id, Some(session_id), StopPlace::Popout, cx);
         controls.push(Self::popout_close_window(&slot_id, cx));
         let toolbar = popout_toolbar_row(&slot_id, title, controls, cx);
@@ -2042,7 +2047,7 @@ impl RootView {
     ) -> AnyElement {
         let t = theme(cx);
         let parts = self.popout_header_parts(pane_id);
-        let mut title = header_title(pane_id, parts.as_ref(), TipAt::Mouse, cx);
+        let mut title = header_title(pane_id, parts.as_ref(), TipAt::Mouse, true, cx);
         if let Some(docked) = self.popout_docked_in(pane_id) {
             let name = format!("popout-tab-{pane_id}");
             let docked = div()
@@ -2096,6 +2101,7 @@ impl RootView {
         let root = cx.entity().downgrade();
         let drag_session = session_id.map(str::to_owned);
         let (controls, buttons) = self.header_right(target, cx);
+        let floors = self.chip_floors_fit(target, cx);
         let controls = (!controls.is_empty()).then(|| header_controls(cx).children(controls));
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
@@ -2151,7 +2157,7 @@ impl RootView {
             .when(at == TipAt::BelowRow, |row| {
                 row.child(header_row_probe(pane_id))
             })
-            .children(header_title(pane_id, parts, at, cx))
+            .children(header_title(pane_id, parts, at, floors, cx))
             .child(div().flex_1())
             .children(controls)
             .children(buttons)
@@ -2685,21 +2691,19 @@ impl RootView {
         cx: &App,
     ) -> Option<Point<Pixels>> {
         let card = self.pane_card(target.tab_id, target.pane_id, target.here)?;
-        let fit = pane_header_fit::HeaderFit {
-            // The card's border takes a pixel on each side.
-            width: card.width - 2.0 * CARD_BORDER,
-            glyph: target.parts.map_or(0.0, |_| GlyphSize::Leaf.px()),
-            chips: target.parts.map_or_else(Vec::new, |parts| {
-                parts
-                    .chips
-                    .iter()
-                    .map(|chip| chip_width(chip, cx))
-                    .collect()
-            }),
-            cluster: cluster_item_widths(cluster, cx),
-            close: HEADER_BUTTON_SIZE,
-        };
+        let fit = header_fit(card, target, cluster, cx);
         pane_header_fit::collapses(&fit).then(|| overflow_menu_anchor(card, cx))
+    }
+
+    /// Whether `target`'s header holds its chips at their floor, judged on
+    /// the same widths as its collapse; true before the grid is laid out.
+    fn chip_floors_fit(&self, target: &HeaderTarget<'_>, cx: &App) -> bool {
+        let Some(card) = self.pane_card(target.tab_id, target.pane_id, target.here) else {
+            return true;
+        };
+        let cluster = self.header_cluster(target.tab_id, target.pane_id, target.session_id, cx);
+        let fit = header_fit(card, target, &cluster, cx);
+        pane_header_fit::floors_fit(&fit, CHIP_MIN_WIDTH, HEADER_BUTTON_SIZE)
     }
 
     /// The session shown by pane `pane_id` of the tab on screen, with the
@@ -3118,11 +3122,13 @@ fn header_fade_stops(fill: u32, accent: u32) -> (gpui::LinearColorStop, gpui::Li
 }
 
 /// The header's left side: the status glyph, the name and the chips, or
-/// "Empty pane", each tipping `at`.
+/// "Empty pane", each tipping `at`. With `floors`, a text chip shrinks no
+/// further than [`CHIP_MIN_WIDTH`]; without, as far as nothing.
 fn header_title(
     pane_id: &str,
     parts: Option<&PaneHeaderParts>,
     at: TipAt,
+    floors: bool,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
     let t = theme(cx);
@@ -3171,7 +3177,7 @@ fn header_title(
         parts
             .chips
             .iter()
-            .map(|chip| header_chip(pane_id, chip, at, cx)),
+            .map(|chip| header_chip(pane_id, chip, at, floors, cx)),
     );
     out
 }
@@ -3182,6 +3188,7 @@ fn header_chip(
     pane_id: &str,
     chip: &HeaderChip,
     at: TipAt,
+    floors: bool,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let t = theme(cx);
@@ -3214,6 +3221,11 @@ fn header_chip(
         base.whitespace_nowrap()
     };
     let text = chip.text.clone();
+    let floor = if floors {
+        (chip_width(chip, cx) > CHIP_MIN_WIDTH).then_some(px(CHIP_MIN_WIDTH))
+    } else {
+        Some(px(0.0))
+    };
     match chip.kind {
         HeaderChipKind::Runtime => match &chip.icon {
             Some(icon) => base
@@ -3221,33 +3233,54 @@ fn header_chip(
                 .px(px(0.0))
                 .justify_center()
                 .child(runtime_icon_view(icon, ui_px(cx, 12.0), &name, &t)),
-            None => chip_text(&name, base, text),
+            None => chip_text(&name, base, text, floor),
         },
-        HeaderChipKind::Branch => branch_chip(&name, base, text, &t),
+        HeaderChipKind::Branch => branch_chip(&name, base, text, floor, &t),
         HeaderChipKind::More | HeaderChipKind::Provider | HeaderChipKind::Host => {
-            chip_text(&name, base, text)
+            chip_text(&name, base, text, floor)
         }
     }
     .into_any_element()
 }
 
 /// A text chip's label: it shrinks and truncates with `…` before the title
-/// does, its tooltip keeping the whole text. `name` names its text for the
-/// ellipsis probe.
-fn chip_text(name: &str, base: Stateful<Div>, text: String) -> Stateful<Div> {
-    let mut chip = base
-        .min_w(px(0.0))
+/// does, down to `floor`, its tooltip keeping the whole text. `name` names
+/// its text for the ellipsis probe.
+fn chip_text(
+    name: &str,
+    base: Stateful<Div>,
+    text: String,
+    floor: Option<Pixels>,
+) -> Stateful<Div> {
+    let chip = base
         .overflow_hidden()
         .child(truncating(name, StyledText::new(text)));
+    give_way(chip, floor)
+}
+
+/// `chip` shrinking before the title, down to `floor`; with no floor (a
+/// chip no wider than [`CHIP_MIN_WIDTH`]) it keeps its own width.
+fn give_way(chip: Stateful<Div>, floor: Option<Pixels>) -> Stateful<Div> {
+    let Some(floor) = floor else {
+        return chip;
+    };
+    let mut chip = chip.min_w(floor);
     chip.style().flex_shrink = Some(BRANCH_CHIP_SHRINK);
     chip
 }
 
 /// The repo:branch chip, its repo name bright and its colon subtle. It is
 /// the first part of a header to give way when the header runs short: it
-/// shrinks and truncates with `…` before the title does, its tooltip
-/// keeping the whole text. `id` names its text for the ellipsis probe.
-fn branch_chip(id: &str, base: Stateful<Div>, text: String, t: &UiTheme) -> Stateful<Div> {
+/// shrinks and truncates with `…` before the title does, down to `floor`,
+/// its tooltip keeping the whole text. `id` names its text for the ellipsis
+/// probe.
+fn branch_chip(
+    id: &str,
+    base: Stateful<Div>,
+    text: String,
+    floor: Option<Pixels>,
+    t: &UiTheme,
+) -> Stateful<Div> {
     let highlights = text.find(':').map(|colon| {
         let color = |token: u32| HighlightStyle {
             color: Some(gpui::rgb(token).into()),
@@ -3259,12 +3292,8 @@ fn branch_chip(id: &str, base: Stateful<Div>, text: String, t: &UiTheme) -> Stat
         ]
     });
     let label = StyledText::new(text).with_highlights(highlights.into_iter().flatten());
-    let mut chip = base
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .child(truncating(id, label));
-    chip.style().flex_shrink = Some(BRANCH_CHIP_SHRINK);
-    chip
+    let chip = base.overflow_hidden().child(truncating(id, label));
+    give_way(chip, floor)
 }
 
 /// A split's two children around their divider, the first sized by `ratio`.
@@ -3965,6 +3994,30 @@ fn text_width(
 
 /// The width `chip` takes in a header that has room for it: its icon's
 /// square, or its text with padding and border.
+/// What `target`'s header has to fit in `card`, with `cluster` as its
+/// buttons: what both its collapse and its chips' floor are judged on.
+fn header_fit(
+    card: tabs::Rect,
+    target: &HeaderTarget<'_>,
+    cluster: &HeaderCluster,
+    cx: &App,
+) -> pane_header_fit::HeaderFit {
+    pane_header_fit::HeaderFit {
+        // The card's border takes a pixel on each side.
+        width: card.width - 2.0 * CARD_BORDER,
+        glyph: target.parts.map_or(0.0, |_| GlyphSize::Leaf.px()),
+        chips: target.parts.map_or_else(Vec::new, |parts| {
+            parts
+                .chips
+                .iter()
+                .map(|chip| chip_width(chip, cx))
+                .collect()
+        }),
+        cluster: cluster_item_widths(cluster, cx),
+        close: HEADER_BUTTON_SIZE,
+    }
+}
+
 fn chip_width(chip: &HeaderChip, cx: &App) -> f32 {
     let square = ui_px(cx, CHIP_HEIGHT) / px(1.0);
     match chip.kind {

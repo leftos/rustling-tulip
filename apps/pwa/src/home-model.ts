@@ -18,9 +18,11 @@ const LAUNCH_AGAIN = "Launch again";
 
 /**
  * The phone's Home state, folded from the daemon's repo, workspace and
- * session messages. Sessions live in first-seen order, so a row keeps its
- * place whenever its state changes; it moves only when a container's manual
- * order says so.
+ * session messages. The first `sessions` list after a reset is sorted by
+ * label, case-insensitive, then id, as the desktop sidebar sorts; a session
+ * named after it, by an update or a later list, goes last. A row then keeps
+ * its place whenever its state changes; it moves only when a container's
+ * manual order says so.
  */
 export interface HomeModel {
   readonly repos: readonly RepoEntry[];
@@ -68,7 +70,13 @@ export function homeStep(model: HomeModel, message: DaemonMessage): HomeModel {
     case "workspaces":
       return { ...model, workspaces: message.workspaces };
     case "sessions":
-      return { ...model, sessions: [...message.sessions], loaded: true };
+      return {
+        ...model,
+        sessions: model.loaded
+          ? keptInPlace(model.sessions, message.sessions)
+          : byLabel(message.sessions),
+        loaded: true,
+      };
     case "session_updated":
       return { ...model, sessions: withSession(model.sessions, message.session) };
     case "session_removed": {
@@ -88,6 +96,40 @@ export function homeStep(model: HomeModel, message: DaemonMessage): HomeModel {
     default:
       return model;
   }
+}
+
+/**
+ * The daemon's first list sorted as the desktop sidebar sorts: by the label a
+ * row shows, case-insensitive, then by id. The daemon's own order is not
+ * stable across a relaunch.
+ */
+function byLabel(sessions: readonly SessionSnapshot[]): readonly SessionSnapshot[] {
+  return sessions
+    .slice()
+    .sort((a, b) => compareNames(displayLabel(a), displayLabel(b)) || compareIds(a.id, b.id));
+}
+
+/**
+ * A later full list (a resync, a re-listing) over the rows already drawn: a
+ * known session keeps its place with its new state, one the list no longer
+ * names leaves, and a new one goes last in the list's order.
+ */
+function keptInPlace(
+  known: readonly SessionSnapshot[],
+  listed: readonly SessionSnapshot[],
+): readonly SessionSnapshot[] {
+  const byId = new Map(listed.map((session) => [session.id, session]));
+  const kept = known.flatMap((session) => byId.get(session.id) ?? []);
+  const knownIds = new Set(known.map((session) => session.id));
+  return [...kept, ...listed.filter((session) => !knownIds.has(session.id))];
+}
+
+/** The plain order of two session ids. */
+function compareIds(a: string, b: string): number {
+  if (a < b) {
+    return -1;
+  }
+  return a > b ? 1 : 0;
 }
 
 /** `sessions` with `session` replacing its own row in place, or appended. */

@@ -18,6 +18,9 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- In a narrow pane, the branch name keeps a few characters before the session's name starts to shorten, instead of shrinking to a sliver.
+- On the phone, a chat scrolled to the bottom stays there when the keyboard, the key bar or the Keys and Quick docks open.
+- The phone's Home lists a group's sessions in the same order as the desktop each time it connects, instead of a new order after a relaunch.
 - Play in Settings › Notifications plays the sound you just picked, instead of the one saved before.
 - When resuming an abandoned session fails, the phone shows why on that session's row.
 - Keyboard shortcuts work in a window with no tabs before the first click, including right after choosing Start empty.
