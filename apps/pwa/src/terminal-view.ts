@@ -6,9 +6,6 @@ import type { ClientMessage } from "./protocol";
 import type { Connection } from "./socket";
 import { createTerminalPane, type TerminalLike, type TerminalPane } from "./terminal-pane";
 
-/** How often the pane's load timeout and retries advance. */
-const TICK_MS = 250;
-
 export interface TerminalViewOptions {
   readonly sessionId: string;
   readonly connection: Connection;
@@ -34,8 +31,8 @@ export interface TerminalView {
  * Draws one session's PTY stream into `container` with xterm.js (its DOM
  * renderer), fitted to the container, and wires it to the connection through
  * the pane controller: the terminal's data goes to the pane, every connection
- * notice reaches it, a resize of the container measures it again, and a timer
- * advances its load.
+ * notice reaches it, a resize of the container measures it again, and the
+ * load is advanced exactly when the pane asks to be woken.
  */
 export function mountTerminal(options: TerminalViewOptions): TerminalView {
   const { sessionId, connection, sendInput, container, newRequestId, reason, onInput } = options;
@@ -60,6 +57,25 @@ export function mountTerminal(options: TerminalViewOptions): TerminalView {
       term.write("\x1bc");
     },
   };
+  let timer: number | null = null;
+  /** Advances the load at `at`, or stops advancing it when `at` is null. */
+  function wake(at: number | null): void {
+    if (timer !== null) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+    if (at === null) {
+      return;
+    }
+    timer = window.setTimeout(
+      () => {
+        timer = null;
+        pane.tick();
+      },
+      Math.max(0, at - Date.now()),
+    );
+  }
+
   const pane = createTerminalPane({
     sessionId,
     terminal,
@@ -68,6 +84,7 @@ export function mountTerminal(options: TerminalViewOptions): TerminalView {
     status: () => connection.status(),
     now: () => Date.now(),
     newRequestId,
+    wake,
   });
   pane.open(term.cols, term.rows, reason);
 
@@ -83,7 +100,6 @@ export function mountTerminal(options: TerminalViewOptions): TerminalView {
     pane.measured(term.cols, term.rows, "measure");
   });
   observer.observe(container);
-  const timer = window.setInterval(() => pane.tick(), TICK_MS);
 
   let destroyed = false;
   return {
@@ -94,7 +110,10 @@ export function mountTerminal(options: TerminalViewOptions): TerminalView {
       }
       destroyed = true;
       unsubscribe();
-      window.clearInterval(timer);
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
       observer.disconnect();
       data.dispose();
       pane.close();

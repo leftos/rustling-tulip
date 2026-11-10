@@ -54,6 +54,11 @@ export interface TerminalPaneDeps {
   readonly status: () => ConnectionStateName;
   readonly now: () => number;
   readonly newRequestId: NewRequestId;
+  /**
+   * Asks the view to advance the load at `at` on `now`'s clock, or to stop
+   * advancing it when `null`; called after every model change.
+   */
+  readonly wake: (at: number | null) => void;
 }
 
 export interface TerminalPane {
@@ -119,6 +124,11 @@ export function createTerminalPane(deps: TerminalPaneDeps): TerminalPane {
     }
   }
 
+  /** Tells the view when the load needs advancing next; `null` once nothing is pending. */
+  function wake(): void {
+    deps.wake(model.phase === "loading" ? model.deadline : null);
+  }
+
   function apply(transition: TerminalTransition): void {
     const endsLoad = model.phase === "loading" && transition.state.phase !== "loading";
     model = transition.state;
@@ -132,6 +142,7 @@ export function createTerminalPane(deps: TerminalPaneDeps): TerminalPane {
     if (transition.resize) {
       sendSize(size.cols, size.rows, "load");
     }
+    wake();
   }
 
   /** A user input: its claimed size first when it arms one, then the input. */
@@ -240,6 +251,7 @@ export function createTerminalPane(deps: TerminalPaneDeps): TerminalPane {
       const left = detach(model);
       model = left.state;
       sendAll(left.messages);
+      wake();
     },
   };
 }
