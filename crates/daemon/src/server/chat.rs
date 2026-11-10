@@ -2183,6 +2183,26 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_chat_send_while_the_first_prompt_is_held_is_refused() {
+            let (fx, mut term) = Fixture::with_terminal("send-first-prompt-held", None, V176);
+            term.pty.set_first_prompt_held(true);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hello there").await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(
+                    BUSY,
+                    "This session's first prompt is still waiting to be typed."
+                )
+            );
+            assert_eq!(
+                term.typed_now(),
+                Vec::<Vec<u8>>::new(),
+                "nothing reaches the terminal ahead of the first prompt"
+            );
+        }
+
+        #[tokio::test]
         async fn a_ready_box_gets_the_paste_then_enter() {
             let (fx, mut term) = Fixture::with_terminal("send-ready", Some("conv-a"), V176);
             fx.append("conv-a", &[user(1)]);

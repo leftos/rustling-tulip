@@ -2035,7 +2035,7 @@ async fn spawn_interactive_session(
         let agent_up: Option<inject::AgentUp> = agent_in_shell.then(|| {
             let registry = Arc::clone(&hub.sessions);
             let id = session_id.clone();
-            Box::new(move || pty_state::agent_up(&registry, &id)) as inject::AgentUp
+            Box::new(move || pty_state::agent_reading(&registry, &id)) as inject::AgentUp
         });
         inject::run_chain(
             session_id.clone(),

@@ -44,6 +44,7 @@ use tracing::{debug, info, warn};
 
 use crate::chat_mirror::ChatMirror;
 use crate::pty::PtyHandle;
+use crate::pty_state::AgentReading;
 use crate::screen::SharedScreen;
 use crate::screen::dialogs::next_view_key;
 use crate::session::{SessionRecord, SessionRegistry};
@@ -106,20 +107,29 @@ pub fn run(session_id: String, pty: Arc<PtyHandle>, injector: PromptInjector, re
     run_chain(session_id, pty, vec![injector], None, ready);
 }
 
-/// Answers whether the agent a launch typed into its shell is up.
-pub type AgentUp = Box<dyn Fn() -> bool + Send + Sync>;
+/// Reads how far the agent a launch typed into its shell has come.
+pub type AgentUp = Box<dyn Fn() -> AgentReading + Send + Sync>;
 
-/// How often [`wait_for_agent`] asks whether the agent is up.
+/// An [`AgentUp`], borrowed.
+type ReadAgent = dyn Fn() -> AgentReading + Send + Sync;
+
+/// How often [`wait_for_agent`] reads how far the agent has come.
 const AGENT_UP_POLL: Duration = Duration::from_millis(100);
+
+/// The longest a first prompt is held once the agent has shown a dialog or
+/// its box, before it is dropped.
+const HOLD_CEILING: Duration = Duration::from_secs(600);
+
+/// The refusal of a chat send while the chain holds the first prompt.
+const FIRST_PROMPT_HELD: &str = "This session's first prompt is still waiting to be typed.";
 
 /// [`run`] for several injectors, one after another in one background task:
 /// each one's startup wait reads only the output printed after the one
 /// before it finished (a shell's prompt, then the agent's TUI it launched).
-/// With `agent_up`, every injector after the first waits for the agent to
-/// be up (see [`wait_for_agent`]); an agent not up within
-/// [`MIN_STARTUP_CAP`] drops the rest of the chain, so nothing meant for the
-/// agent is typed into its shell. `ready` is the spawned agent's plugin ready
-/// signal, which decides when its TUI counts as up.
+/// With `agent_up`, every injector after the first is held until the agent's
+/// box reads ready (see [`hold_then_type`]), so nothing meant for the agent
+/// is typed into its shell or into a dialog. `ready` is the spawned agent's
+/// plugin ready signal, which decides when its TUI counts as up.
 pub fn run_chain(
     session_id: String,
     pty: Arc<PtyHandle>,
@@ -136,45 +146,71 @@ pub fn run_chain(
     let mut output_rx = Some(pty.output.subscribe());
     let turn = pty.typing().try_take(Holder::Injector);
     tokio::spawn(async move {
-        let turn = if let Some(turn) = turn {
-            turn
-        } else {
-            warn!(
-                session_id = %session_id,
-                holder = ?pty.typing().holder(),
-                "another writer holds the typing lane; the injector waits"
-            );
-            match pty.typing().take(Holder::Injector, LANE_WAIT).await {
-                Ok(turn) => turn,
-                Err(holder) => {
-                    warn!(
-                        session_id = %session_id,
-                        ?holder,
-                        "the typing lane stayed taken; the injector's chain is dropped"
-                    );
-                    return;
-                }
-            }
+        let Some(turn) = first_turn(&session_id, &pty, turn).await else {
+            return;
+        };
+        let mut turn = Some(turn);
+        let chain = Chain {
+            session_id: &session_id,
+            pty: &pty,
+            ready,
         };
         for (index, injector) in injectors.into_iter().enumerate() {
-            if index > 0
-                && let Some(agent_up) = &agent_up
-                && !wait_for_agent(agent_up.as_ref(), MIN_STARTUP_CAP).await
-            {
-                warn!(
-                    session_id = %session_id,
-                    "the agent did not start; the initial prompt was not typed"
-                );
-                return;
+            if let Some(agent_up) = agent_up.as_deref().filter(|_| index > 0) {
+                if !hold_then_type(&chain, agent_up, &mut turn, &injector).await {
+                    return;
+                }
+                continue;
             }
+            // Only a hold gives the lane up, and it ends holding it.
+            let Some(held) = turn.as_ref() else {
+                return;
+            };
             let rx = output_rx.take().unwrap_or_else(|| pty.output.subscribe());
             let typist = Typist {
                 pty: &pty,
-                turn: &turn,
+                turn: held,
             };
             run_one(&session_id, typist, rx, injector, ready).await;
         }
     });
+}
+
+/// The typing lane for a chain's first key: `turn`, taken at the spawn, or
+/// once its holder gives it back within [`LANE_WAIT`]; `None`, logged, when
+/// it stays taken.
+async fn first_turn(
+    session_id: &str,
+    pty: &Arc<PtyHandle>,
+    turn: Option<TypingTurn>,
+) -> Option<TypingTurn> {
+    if turn.is_some() {
+        return turn;
+    }
+    warn!(
+        session_id = %session_id,
+        holder = ?pty.typing().holder(),
+        "another writer holds the typing lane; the injector waits"
+    );
+    match pty.typing().take(Holder::Injector, LANE_WAIT).await {
+        Ok(turn) => Some(turn),
+        Err(holder) => {
+            warn!(
+                session_id = %session_id,
+                ?holder,
+                "the typing lane stayed taken; the injector's chain is dropped"
+            );
+            None
+        }
+    }
+}
+
+/// What every injector of one chain shares: its session, its PTY and the
+/// agent's ready signal.
+struct Chain<'a> {
+    session_id: &'a str,
+    pty: &'a Arc<PtyHandle>,
+    ready: ReadySignal,
 }
 
 /// The session's PTY and the typing lane held for it: everything a chain
@@ -191,16 +227,191 @@ impl Typist<'_> {
     }
 }
 
-/// Wait until `agent_up` answers true, asking every [`AGENT_UP_POLL`], for at
-/// most `cap`; answers whether it did.
-async fn wait_for_agent(agent_up: &(dyn Fn() -> bool + Send + Sync), cap: Duration) -> bool {
-    let deadline = Instant::now() + cap;
+/// Marks a session's first prompt held for as long as it lives.
+struct HeldPrompt<'a>(&'a PtyHandle);
+
+impl<'a> HeldPrompt<'a> {
+    fn new(pty: &'a PtyHandle) -> Self {
+        pty.set_first_prompt_held(true);
+        Self(pty)
+    }
+}
+
+impl Drop for HeldPrompt<'_> {
+    fn drop(&mut self) {
+        self.0.set_first_prompt_held(false);
+    }
+}
+
+/// Hold `injector`, the agent's first prompt, until the agent's box reads
+/// ready, then type it under the chain's lane. While a dialog holds the keys
+/// the lane is given up, so a chat answer reaches the dialog, and a chat send
+/// is refused until the prompt is typed or dropped. On ready the lane is
+/// taken back and the injector's startup wait runs on fresh output; a reading
+/// no longer ready after it goes back to holding. Answers whether the prompt
+/// was typed; when it was not, the hold's end is logged.
+async fn hold_then_type(
+    chain: &Chain<'_>,
+    agent_up: &ReadAgent,
+    turn: &mut Option<TypingTurn>,
+    injector: &PromptInjector,
+) -> bool {
+    let _held = HeldPrompt::new(chain.pty);
+    let mut clock = HoldClock::new(MIN_STARTUP_CAP);
     loop {
-        if agent_up() {
-            return true;
-        }
-        if Instant::now() >= deadline {
+        let waited = wait_for_agent(agent_up, &mut clock, &mut || {
+            release_lane(chain.session_id, turn);
+        })
+        .await;
+        if let Err(dropped) = waited {
+            dropped.warn(chain.session_id);
             return false;
+        }
+        let mut rx = chain.pty.output.subscribe();
+        let cursor = startup_wait(chain.session_id, &mut rx, injector, chain.ready).await;
+        if turn.is_none() {
+            *turn = chain
+                .pty
+                .typing()
+                .take(Holder::Injector, LANE_WAIT)
+                .await
+                .ok();
+        }
+        let Some(held) = turn.as_ref() else {
+            continue;
+        };
+        if agent_up() != AgentReading::Ready {
+            *turn = None;
+            continue;
+        }
+        info!(session_id = %chain.session_id, "the first prompt is typed");
+        let typist = Typist {
+            pty: chain.pty,
+            turn: held,
+        };
+        type_steps(chain.session_id, typist, rx, injector, cursor).await;
+        return true;
+    }
+}
+
+/// Give up the chain's lane while a dialog holds the keys, so a chat answer
+/// reaches it.
+fn release_lane(session_id: &str, turn: &mut Option<TypingTurn>) {
+    if turn.take().is_some() {
+        info!(
+            session_id = %session_id,
+            "the first prompt waits behind a dialog"
+        );
+    }
+}
+
+/// Why a held first prompt was dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dropped {
+    /// The agent showed nothing within the startup cap.
+    NotStarted,
+    /// The shell's prompt came back after the agent was seen.
+    Exited,
+    /// The agent was seen but its box did not read ready within
+    /// [`HOLD_CEILING`].
+    Ceiling,
+}
+
+impl Dropped {
+    fn warn(self, session_id: &str) {
+        match self {
+            Self::NotStarted | Self::Exited => warn!(
+                session_id = %session_id,
+                agent_exited = self == Self::Exited,
+                "the agent did not start; the initial prompt was not typed"
+            ),
+            Self::Ceiling => warn!(
+                session_id = %session_id,
+                "the first prompt waited 10 minutes behind a dialog; it was not typed"
+            ),
+        }
+    }
+}
+
+/// The time a first prompt has been held: before the agent showed a dialog
+/// or its box, against `cap`; after, against [`HOLD_CEILING`].
+#[derive(Debug)]
+struct HoldClock {
+    cap: Duration,
+    starting: Duration,
+    held: Duration,
+    seen: bool,
+}
+
+impl HoldClock {
+    fn new(cap: Duration) -> Self {
+        Self {
+            cap,
+            starting: Duration::ZERO,
+            held: Duration::ZERO,
+            seen: false,
+        }
+    }
+
+    /// Charge `spent` to the budget `reading` falls under.
+    ///
+    /// # Errors
+    ///
+    /// The prompt is to be dropped: the budget is spent, or the shell's
+    /// prompt is back after the agent was seen.
+    fn charge(&mut self, reading: AgentReading, spent: Duration) -> Result<(), Dropped> {
+        match reading {
+            AgentReading::Starting { shell_prompt } if self.seen => {
+                if shell_prompt {
+                    return Err(Dropped::Exited);
+                }
+                self.charge_held(spent)
+            }
+            AgentReading::Starting { .. } => {
+                self.starting += spent;
+                if self.starting >= self.cap {
+                    return Err(Dropped::NotStarted);
+                }
+                Ok(())
+            }
+            AgentReading::Dialog | AgentReading::Ready => {
+                self.seen = true;
+                self.charge_held(spent)
+            }
+        }
+    }
+
+    fn charge_held(&mut self, spent: Duration) -> Result<(), Dropped> {
+        self.held += spent;
+        if self.held >= HOLD_CEILING {
+            return Err(Dropped::Ceiling);
+        }
+        Ok(())
+    }
+}
+
+/// Wait until `agent_up` reads ready, reading it every [`AGENT_UP_POLL`] and
+/// charging the time between readings to `clock`; `on_dialog` runs at each
+/// reading of a dialog.
+///
+/// # Errors
+///
+/// Why the prompt is to be dropped (see [`HoldClock::charge`]).
+async fn wait_for_agent(
+    agent_up: &ReadAgent,
+    clock: &mut HoldClock,
+    on_dialog: &mut (dyn FnMut() + Send),
+) -> Result<(), Dropped> {
+    let mut last = Instant::now();
+    loop {
+        let reading = agent_up();
+        let now = Instant::now();
+        clock.charge(reading, now.saturating_duration_since(last))?;
+        last = now;
+        match reading {
+            AgentReading::Ready => return Ok(()),
+            AgentReading::Dialog => on_dialog(),
+            AgentReading::Starting { .. } => {}
         }
         sleep(AGENT_UP_POLL).await;
     }
@@ -216,34 +427,55 @@ async fn run_one(
     ready: ReadySignal,
 ) {
     let mut output_rx = output_rx;
-    let steps = injector.steps;
-    let verify_marker = injector.verify_mode_marker;
-
     debug!(
         session_id = %session_id,
-        steps = steps.len(),
-        verify_marker = ?verify_marker.as_deref(),
+        steps = injector.steps.len(),
+        verify_marker = ?injector.verify_mode_marker.as_deref(),
         "injector starting"
     );
+    let cursor = startup_wait(session_id, &mut output_rx, &injector, ready).await;
+    type_steps(session_id, typist, output_rx, &injector, cursor).await;
+}
 
-    // Phase 1: startup wait — consume leading Delay as a quiescence-
-    // gated wait, not a literal sleep.
-    let mut cursor = 0;
-    if let Some(InjectorStep::Delay { ms }) = steps.first() {
-        let rule = StartupRule::of(injector.startup, ready);
-        let provided_cap = Duration::from_millis(u64::from(*ms));
-        let cap = provided_cap.max(rule.min_cap);
-        let waited = wait_until_ready_or_timeout(&mut output_rx, cap, &rule).await;
-        info!(
-            session_id = %session_id,
-            startup = ?injector.startup,
-            provided_cap_ms = u64::from(*ms),
-            effective_cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX),
-            waited_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
-            "injector startup wait done"
-        );
-        cursor = 1;
-    }
+/// Phase 1 of an injector: its leading `Delay`, if any, waited as a
+/// quiescence-gated startup wait on `output_rx`, not a literal sleep. The
+/// index of the first step after it.
+async fn startup_wait(
+    session_id: &str,
+    output_rx: &mut broadcast::Receiver<Vec<u8>>,
+    injector: &PromptInjector,
+    ready: ReadySignal,
+) -> usize {
+    let Some(InjectorStep::Delay { ms }) = injector.steps.first() else {
+        return 0;
+    };
+    let rule = StartupRule::of(injector.startup, ready);
+    let provided_cap = Duration::from_millis(u64::from(*ms));
+    let cap = provided_cap.max(rule.min_cap);
+    let waited = wait_until_ready_or_timeout(output_rx, cap, &rule).await;
+    info!(
+        session_id = %session_id,
+        startup = ?injector.startup,
+        provided_cap_ms = u64::from(*ms),
+        effective_cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX),
+        waited_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
+        "injector startup wait done"
+    );
+    1
+}
+
+/// Phases 2 to 4 of an injector: its steps from `cursor` on, with the mode
+/// marker verified between its pre-input and its prompt.
+async fn type_steps(
+    session_id: &str,
+    typist: Typist<'_>,
+    output_rx: broadcast::Receiver<Vec<u8>>,
+    injector: &PromptInjector,
+    cursor: usize,
+) {
+    let mut output_rx = output_rx;
+    let steps = &injector.steps;
+    let verify_marker = injector.verify_mode_marker.as_deref();
 
     // Locate the prompt boundary: the first `Text { newline: false }`
     // step after the startup delay. `build_injector` always emits
@@ -265,7 +497,7 @@ async fn run_one(
     // Only meaningful when there's an actual prompt boundary AND a
     // marker — verifying without a prompt boundary would re-send the
     // entire script.
-    if let (Some(marker), Some(_)) = (verify_marker.as_deref(), prompt_idx) {
+    if let (Some(marker), Some(_)) = (verify_marker, prompt_idx) {
         verify_and_retry(
             session_id,
             typist,
@@ -699,10 +931,18 @@ impl TypeRefusal {
 ///
 /// # Errors
 ///
-/// The lane is held by another writer ([`BUSY`]), or the terminal's state
+/// The session's first prompt is still held by its chain, or the lane is held
+/// by another writer ([`BUSY`]), or the terminal's state
 /// does not take the message, or changed under the send, or did not answer
 /// within [`SEND_CEILING`] ([`CHAT_REFUSED`]).
 pub async fn type_message(target: &TypeTarget, text: &str) -> Result<(), TypeRefusal> {
+    // A message typed now would reach the agent ahead of its first prompt.
+    if target.pty.first_prompt_held() {
+        return Err(TypeRefusal {
+            code: BUSY,
+            message: FIRST_PROMPT_HELD.to_owned(),
+        });
+    }
     let turn = take_lane(target, Holder::ChatSend).await?;
     let mut reader = screen_reader(target);
     let mut pasted = false;
@@ -1092,8 +1332,19 @@ mod tests {
             flag.store(true, Ordering::SeqCst);
         });
         let started = Instant::now();
-        let agent_up = move || up.load(Ordering::SeqCst);
-        assert!(wait_for_agent(&agent_up, MIN_STARTUP_CAP).await);
+        let agent_up = move || {
+            if up.load(Ordering::SeqCst) {
+                AgentReading::Ready
+            } else {
+                STARTING
+            }
+        };
+        let mut clock = HoldClock::new(MIN_STARTUP_CAP);
+        assert!(
+            wait_for_agent(&agent_up, &mut clock, &mut || {})
+                .await
+                .is_ok()
+        );
         let waited = started.elapsed();
         assert!(
             waited >= Duration::from_secs(5) && waited < Duration::from_secs(6),
@@ -1104,11 +1355,203 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_failed_agent_start_drops_the_initial_prompt() {
         let started = Instant::now();
+        let mut clock = HoldClock::new(MIN_STARTUP_CAP);
         assert!(
-            !wait_for_agent(&|| false, MIN_STARTUP_CAP).await,
+            wait_for_agent(&|| STARTING, &mut clock, &mut || {})
+                .await
+                .is_err(),
             "an agent that never starts never gets its prompt"
         );
         assert!(started.elapsed() >= MIN_STARTUP_CAP);
+    }
+
+    /// A reading that has not seen the agent.
+    const STARTING: AgentReading = AgentReading::Starting {
+        shell_prompt: false,
+    };
+
+    /// The reading a test sets, and the [`AgentUp`] that reads it.
+    fn scripted(first: AgentReading) -> (Arc<std::sync::Mutex<AgentReading>>, AgentUp) {
+        let reading = Arc::new(std::sync::Mutex::new(first));
+        let read = Arc::clone(&reading);
+        (reading, Box::new(move || *lock(&read)))
+    }
+
+    fn set(reading: &std::sync::Mutex<AgentReading>, to: AgentReading) {
+        *lock(reading) = to;
+    }
+
+    /// The launch line, then the agent's first prompt, as a spawn into a
+    /// shell chains them.
+    fn launch_then_prompt() -> Vec<PromptInjector> {
+        vec![
+            PromptInjector {
+                steps: vec![InjectorStep::Text {
+                    content: "claude".to_owned(),
+                    newline: true,
+                }],
+                verify_mode_marker: None,
+                startup: InjectorStartup::ShellPrompt,
+            },
+            PromptInjector {
+                steps: vec![
+                    InjectorStep::Delay { ms: 1000 },
+                    InjectorStep::Text {
+                        content: "hello".to_owned(),
+                        newline: false,
+                    },
+                    InjectorStep::Text {
+                        content: String::new(),
+                        newline: true,
+                    },
+                ],
+                verify_mode_marker: None,
+                startup: InjectorStartup::AgentTui,
+            },
+        ]
+    }
+
+    /// The writes typed and not yet read.
+    fn typed_now(input: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<Vec<u8>> {
+        let mut writes = Vec::new();
+        while let Ok(write) = input.try_recv() {
+            writes.push(write);
+        }
+        writes
+    }
+
+    /// The first prompt's writes: its text, then Enter.
+    fn prompt_writes() -> Vec<Vec<u8>> {
+        vec![b"hello".to_vec(), b"\r".to_vec()]
+    }
+
+    /// Long enough for the first prompt's startup wait, which no output
+    /// ends early here, to run to its cap.
+    const STARTUP_RUN: Duration = Duration::from_secs(16);
+
+    #[tokio::test(start_paused = true)]
+    async fn the_first_prompt_waits_behind_a_dialog_and_types_when_ready() {
+        let (pty, mut input, _exit) = crate::history::test_support::recording_pty();
+        let (reading, agent_up) = scripted(AgentReading::Dialog);
+        let chain = launch_then_prompt();
+        run_chain(
+            "s1".to_owned(),
+            Arc::clone(&pty),
+            chain,
+            Some(agent_up),
+            ReadySignal::default(),
+        );
+        sleep(Duration::from_millis(10)).await;
+        assert_eq!(typed_now(&mut input), [b"claude\r".to_vec()]);
+        sleep(Duration::from_secs(30)).await;
+        assert_eq!(
+            typed_now(&mut input),
+            Vec::<Vec<u8>>::new(),
+            "nothing is typed while a dialog holds the keys"
+        );
+        set(&reading, AgentReading::Ready);
+        sleep(STARTUP_RUN).await;
+        assert_eq!(typed_now(&mut input), prompt_writes(), "typed once ready");
+        sleep(STARTUP_RUN).await;
+        assert_eq!(typed_now(&mut input), Vec::<Vec<u8>>::new(), "typed once");
+        assert!(!pty.first_prompt_held());
+        assert_eq!(pty.typing().holder(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_chat_answer_goes_through_while_the_first_prompt_is_held() {
+        let (pty, mut input, _exit) = crate::history::test_support::recording_pty();
+        let (_reading, agent_up) = scripted(AgentReading::Dialog);
+        let chain = launch_then_prompt();
+        run_chain(
+            "s1".to_owned(),
+            Arc::clone(&pty),
+            chain,
+            Some(agent_up),
+            ReadySignal::default(),
+        );
+        sleep(Duration::from_secs(1)).await;
+        assert_eq!(typed_now(&mut input), [b"claude\r".to_vec()]);
+        assert!(pty.first_prompt_held(), "the first prompt is held");
+        let answer = pty.typing().try_take(Holder::ChatAnswer);
+        assert!(answer.is_some(), "the lane is free while a dialog is up");
+        if let Some(answer) = answer {
+            answer.press(&pty, b"1".to_vec());
+        }
+        assert_eq!(typed_now(&mut input), [b"1".to_vec()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_held_first_prompt_is_dropped_when_the_agent_exits() {
+        let (pty, mut input, _exit) = crate::history::test_support::recording_pty();
+        let (reading, agent_up) = scripted(AgentReading::Dialog);
+        let chain = launch_then_prompt();
+        run_chain(
+            "s1".to_owned(),
+            Arc::clone(&pty),
+            chain,
+            Some(agent_up),
+            ReadySignal::default(),
+        );
+        sleep(Duration::from_secs(5)).await;
+        set(&reading, AgentReading::Starting { shell_prompt: true });
+        sleep(Duration::from_secs(1)).await;
+        assert!(!pty.first_prompt_held(), "the prompt is dropped");
+        set(&reading, AgentReading::Ready);
+        sleep(STARTUP_RUN).await;
+        assert_eq!(
+            typed_now(&mut input),
+            [b"claude\r".to_vec()],
+            "the prompt is never typed into the shell"
+        );
+        assert_eq!(pty.typing().holder(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_held_first_prompt_is_dropped_after_ten_minutes() {
+        let (pty, mut input, _exit) = crate::history::test_support::recording_pty();
+        let (reading, agent_up) = scripted(AgentReading::Dialog);
+        let chain = launch_then_prompt();
+        run_chain(
+            "s1".to_owned(),
+            Arc::clone(&pty),
+            chain,
+            Some(agent_up),
+            ReadySignal::default(),
+        );
+        sleep(HOLD_CEILING.saturating_sub(Duration::from_secs(1))).await;
+        assert!(pty.first_prompt_held(), "still held before the ceiling");
+        sleep(Duration::from_secs(2)).await;
+        assert!(!pty.first_prompt_held(), "dropped at the ceiling");
+        set(&reading, AgentReading::Ready);
+        sleep(STARTUP_RUN).await;
+        assert_eq!(typed_now(&mut input), [b"claude\r".to_vec()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dialog_time_does_not_count_against_the_startup_cap() {
+        let (pty, mut input, _exit) = crate::history::test_support::recording_pty();
+        let (reading, agent_up) = scripted(STARTING);
+        let chain = launch_then_prompt();
+        run_chain(
+            "s1".to_owned(),
+            Arc::clone(&pty),
+            chain,
+            Some(agent_up),
+            ReadySignal::default(),
+        );
+        sleep(Duration::from_secs(10)).await;
+        set(&reading, AgentReading::Dialog);
+        sleep(Duration::from_secs(60)).await;
+        assert!(pty.first_prompt_held(), "still held behind the dialog");
+        assert_eq!(
+            typed_now(&mut input),
+            [b"claude\r".to_vec()],
+            "nothing but the launch line is typed while the dialog is up"
+        );
+        set(&reading, AgentReading::Ready);
+        sleep(STARTUP_RUN).await;
+        assert_eq!(typed_now(&mut input), prompt_writes());
     }
 
     #[tokio::test(start_paused = true)]

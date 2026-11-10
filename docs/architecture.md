@@ -68,7 +68,7 @@ One native window shows This PC and every saved tailnet and SSH host at once; th
 
   The pane stays a usable shell after Claude exits and the session ends only when the shell exits (a worktreeless one that exited by itself closes, one with a worktree shows the exited overlay).
 
-  The command line is the plugin's `interactive_args` with the absolute program path, quoted for the shell family (PowerShell, cmd, Nushell, fish, POSIX sh). The initial prompt or a preset's script is not on it: it is typed into Claude's TUI once Claude is up (hook-driven, or the screen reads Claude) and dropped after 15 s. The plugin's `EnvPlan` and the env rows apply to the shell, so commands run after Claude see them, a DeepSeek session's routing variables included.
+  The command line is the plugin's `interactive_args` with the absolute program path, quoted for the shell family (PowerShell, cmd, Nushell, fish, POSIX sh). The initial prompt or a preset's script is not on it: it is typed into Claude's TUI once Claude is up (hook-driven, or the screen reads Claude) and dropped after 15 s, except that a startup dialog (the folder-trust dialog) holds it until the composer reads ready (`session-runtime.md`). The plugin's `EnvPlan` and the env rows apply to the shell, so commands run after Claude see them, a DeepSeek session's routing variables included.
 
   The gate is the plugin's `AgentCaps.shell_resume` (Claude sets it). A plugin without it, a shell the daemon cannot type into safely (unknown, a cmd line with `%` or `!`, legacy PowerShell argument passing) and headless runs keep the direct spawn with the agent as the PTY child.
 

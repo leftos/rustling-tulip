@@ -33,7 +33,7 @@ use crate::session::{
 use crate::typing_lane::{Holder, TypingTurn};
 use crate::view_drive::{DRIVE_LIMIT, KEY_WAIT, ReturnAction, ViewReturn};
 use agent_api::ViewReading;
-use protocol::{AgentId, AttentionReason, ChatScreen, SessionStatus};
+use protocol::{AgentId, AttentionReason, ChatScreen, ComposerState, SessionStatus};
 use std::collections::VecDeque;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -1595,28 +1595,76 @@ fn agent_shown_in_shell(registry: &Arc<SessionRegistry>, session_id: &str) {
     crate::conversations::discovery::watch_promoted_shell(registry, session_id, shown_at, previous);
 }
 
-/// Whether the agent typed into session `session_id`'s shell is up: its hooks
-/// drive the session, or its screen shows the agent with no shell prompt
-/// under it, as the shell's watcher reads it with the screen rules of the
-/// record's agent.
-pub fn agent_up(registry: &SessionRegistry, session_id: &str) -> bool {
+/// How far the agent typed into a session's shell has come, for the chain
+/// that holds its first prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentReading {
+    /// No screen of the agent's that takes keys yet; `shell_prompt` when the
+    /// shell's prompt is on the last row, which is before the agent started
+    /// or after it exited.
+    Starting { shell_prompt: bool },
+    /// A dialog holds the keys: the rules read the screen as waiting for
+    /// input, or the composer reads a dialog or an overlay.
+    Dialog,
+    /// The composer reads ready: the agent's box is empty and takes text.
+    Ready,
+}
+
+/// How far the agent typed into session `session_id`'s shell has come, read
+/// from the record's screen with the screen rules and the composer reading of
+/// the record's agent. A record with no screen reads ready once its hooks
+/// drive it. A session that is gone, stopped or failed reads as the shell's
+/// prompt back, so a chain holding its first prompt drops it.
+pub fn agent_reading(registry: &SessionRegistry, session_id: &str) -> AgentReading {
+    let ended = AgentReading::Starting { shell_prompt: true };
     let Some(arc) = registry.get(session_id) else {
-        return false;
+        return ended;
     };
-    let (hooks, screen, agent) = {
+    let (status, hooks, screen, agent) = {
         let record = crate::sync::lock(&arc);
         (
+            record.status,
             record.hook_driven,
             record.screen.clone(),
             record.agent.clone(),
         )
     };
-    hooks
-        || screen.is_some_and(|screen| {
-            let rules = rules::rules_for(&agent);
-            let screen = crate::sync::lock(&screen);
-            shows_agent(&rules.read(&screen)) && !rules::last_row_is_shell_prompt(&screen)
-        })
+    if matches!(status, SessionStatus::Stopped | SessionStatus::Error) {
+        return ended;
+    }
+    match screen {
+        Some(screen) => read_screen(&agent, &crate::sync::lock(&screen)),
+        None if hooks => AgentReading::Ready,
+        None => AgentReading::Starting {
+            shell_prompt: false,
+        },
+    }
+}
+
+/// [`agent_reading`] of `screen`, as `agent`'s plugin reads it.
+fn read_screen(agent: &AgentId, screen: &crate::screen::Screen) -> AgentReading {
+    if rules::last_row_is_shell_prompt(screen) {
+        return AgentReading::Starting { shell_prompt: true };
+    }
+    let starting = AgentReading::Starting {
+        shell_prompt: false,
+    };
+    let rules = rules::rules_for(agent);
+    let reading = rules.read(screen);
+    let composer = crate::view_drive::Reading::of(agent, screen)
+        .chat
+        .map(|chat| chat.composer);
+    let dialog_composer = matches!(
+        composer,
+        Some(ComposerState::Dialog | ComposerState::Overlay { .. })
+    );
+    if (shows_agent(&reading) && reads_dialog(&reading)) || dialog_composer {
+        AgentReading::Dialog
+    } else if composer == Some(ComposerState::Ready) {
+        AgentReading::Ready
+    } else {
+        starting
+    }
 }
 
 /// What a spawn did to a plain shell just before its watcher starts.
@@ -2249,12 +2297,13 @@ mod tests {
 )]
 mod hysteresis_tests {
     use super::{
-        AgentStreams, CHECK_DEBOUNCE, CONFIRM_SPACING, FOREIGN_WRITE_HOLD, IDLE_WITHOUT_STOP,
-        LAUNCH_HOLD, SHELL_IDLE_AFTER, ScreenWrite, ShellLaunch, ShellStreams, State,
-        TITLE_QUIET_LIMIT, agent_up, apply_screen_status, hand_shell_back,
+        AgentReading, AgentStreams, CHECK_DEBOUNCE, CONFIRM_SPACING, FOREIGN_WRITE_HOLD,
+        IDLE_WITHOUT_STOP, LAUNCH_HOLD, SHELL_IDLE_AFTER, ScreenWrite, ShellLaunch, ShellStreams,
+        State, TITLE_QUIET_LIMIT, agent_reading, apply_screen_status, hand_shell_back,
         on_plain_shell_transition, record_status, watch, watch_plain_shell,
     };
     use crate::paths::Dirs;
+    use crate::screen::fixture_screen::screen_from;
     use crate::screen::rules::{CompiledRules, rules_for};
     use crate::screen::{Screen, SharedScreen};
     use crate::session::{SessionRecord, SessionRegistry};
@@ -2898,17 +2947,136 @@ mod hysteresis_tests {
         record.screen = Some(Arc::clone(&screen));
         registry.insert(record);
         screen.lock().expect("screen lock").feed(&idle_frame(&[]));
-        assert!(
-            agent_up(&registry, SESSION),
+        assert_eq!(
+            agent_reading(&registry, SESSION),
+            AgentReading::Ready,
             "Claude's idle prompt box did not count as the agent up"
         );
         screen
             .lock()
             .expect("screen lock")
             .feed(&box_frame(&[], &["PS C:\\work>"]));
-        assert!(
-            !agent_up(&registry, SESSION),
+        assert_eq!(
+            agent_reading(&registry, SESSION),
+            AgentReading::Starting { shell_prompt: true },
             "a shell prompt on the last row counted as the agent up"
+        );
+    }
+
+    /// The "New MCP server found" dialog Claude shows at start in a folder
+    /// whose `.mcp.json` names a server it has not been told about.
+    fn mcp_server_screen() -> String {
+        let rule = "─".repeat(120);
+        [
+            "PS C:\\work> claude",
+            "",
+            rule.as_str(),
+            "  New MCP server found in this project: rt-driver",
+            "",
+            "  MCP servers may execute code or access system resources. All tool calls require approval.",
+            "",
+            "    Use this MCP server",
+            "    Use this and all future MCP servers in this project",
+            "  ❯ Continue without using this MCP server",
+            "",
+            "  Enter to confirm · Esc to cancel",
+        ]
+        .join("\r\n")
+    }
+
+    /// The reading of a registry whose session shows `text`.
+    fn reading_of(tag: &str, text: &str) -> AgentReading {
+        let registry = SessionRegistry::new(scratch_dirs(tag));
+        let mut record = test_record(SESSION);
+        record.screen = Some(Arc::new(Mutex::new(screen_from(text))));
+        registry.insert(record);
+        agent_reading(&registry, SESSION)
+    }
+
+    /// A registry whose session shows Claude's folder-trust dialog.
+    fn trust_registry(tag: &str) -> Arc<SessionRegistry> {
+        let registry = SessionRegistry::new(scratch_dirs(tag));
+        let mut record = test_record(SESSION);
+        let trust = include_str!("screen/fixtures/claude--trust-prompt.txt");
+        record.screen = Some(Arc::new(Mutex::new(screen_from(trust))));
+        registry.insert(record);
+        registry
+    }
+
+    /// Start a chain on `pty` that types the launch line, then holds the
+    /// first prompt on `registry`'s reading of its session.
+    fn hold_first_prompt(registry: &Arc<SessionRegistry>, pty: &Arc<crate::pty::PtyHandle>) {
+        use protocol::{InjectorStartup, InjectorStep, PromptInjector};
+        let registry = Arc::clone(registry);
+        let agent_up: crate::inject::AgentUp = Box::new(move || agent_reading(&registry, SESSION));
+        let injector = |content: &str, startup| PromptInjector {
+            steps: vec![InjectorStep::Text {
+                content: content.to_owned(),
+                newline: true,
+            }],
+            verify_mode_marker: None,
+            startup,
+        };
+        let chain = vec![
+            injector("claude", InjectorStartup::ShellPrompt),
+            injector("hello", InjectorStartup::AgentTui),
+        ];
+        crate::inject::run_chain(
+            SESSION.to_owned(),
+            Arc::clone(pty),
+            chain,
+            Some(agent_up),
+            agent_api::ReadySignal::default(),
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_first_prompt_is_dropped_when_its_record_is_removed() {
+        let registry = trust_registry("held-removed");
+        let (pty, _input, _exit) = crate::history::test_support::recording_pty();
+        hold_first_prompt(&registry, &pty);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(pty.first_prompt_held(), "held behind the trust dialog");
+        registry.remove(SESSION);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !pty.first_prompt_held(),
+            "the prompt of a removed session was still held"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_first_prompt_is_dropped_when_its_session_stops() {
+        let registry = trust_registry("held-stopped");
+        let (pty, _input, _exit) = crate::history::test_support::recording_pty();
+        hold_first_prompt(&registry, &pty);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(pty.first_prompt_held(), "held behind the trust dialog");
+        registry.update(SESSION, |record| record.status = SessionStatus::Stopped);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !pty.first_prompt_held(),
+            "the prompt of a stopped session was still held"
+        );
+    }
+
+    #[test]
+    fn agent_up_is_false_while_a_startup_dialog_holds_the_keys() {
+        let trust = include_str!("screen/fixtures/claude--trust-prompt.txt");
+        assert_eq!(
+            reading_of("agent-up-trust", trust),
+            AgentReading::Dialog,
+            "the folder-trust dialog"
+        );
+        assert_eq!(
+            reading_of("agent-up-mcp", &mcp_server_screen()),
+            AgentReading::Dialog,
+            "the new MCP server dialog"
+        );
+        assert_eq!(
+            reading_of("agent-up-shell", "PS C:\\work> "),
+            AgentReading::Starting { shell_prompt: true },
+            "a shell prompt"
         );
     }
 
@@ -4812,16 +4980,18 @@ mod hysteresis_tests {
             .lock()
             .expect("screen lock")
             .feed(&marked_agent_start(FISH_PROMPT));
-        assert!(
-            agent_up(&registry, SESSION),
+        assert_eq!(
+            crate::pty_state::agent_reading(&registry, SESSION),
+            crate::pty_state::AgentReading::Ready,
             "Claude's idle prompt box after a marked command start did not count as the agent up"
         );
         screen
             .lock()
             .expect("screen lock")
             .feed(format!("\r\n\x1b]133;D;0\x07{FISH_PROMPT}").as_bytes());
-        assert!(
-            !agent_up(&registry, SESSION),
+        assert_eq!(
+            crate::pty_state::agent_reading(&registry, SESSION),
+            crate::pty_state::AgentReading::Starting { shell_prompt: true },
             "fish's marked prompt under the agent's leftover frame counted as the agent up"
         );
     }

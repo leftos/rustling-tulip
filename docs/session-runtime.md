@@ -164,6 +164,12 @@ Once the prompt is quiet the daemon clears the input line and types `<cd to the 
 
 The initial prompt or a preset's script is typed into Claude's TUI only after Claude is up (`wait_for_agent`, `pty_state::agent_up`), and dropped after 15 s with the warn "the agent did not start; the initial prompt was not typed".
 
+The first prompt of an interactive session reads the record's screen three ways: starting, dialog (a status rule says awaiting input, or the composer reads a dialog or overlay) or ready (the composer reads ready). While a startup dialog is up (Claude's folder-trust dialog, or "New MCP server found in this project") the prompt is held: the typing lane is released, so a chat answer from Chat or the phone goes through, the dialog's time does not count against the 15 s cap, and the prompt is typed once the composer reads ready. The info logs are "the first prompt waits behind a dialog" and "the first prompt is typed".
+
+A held prompt is dropped when the shell prompt returns or the session is removed, stopped or errored (the warn above, with `agent_exited=true`), or after 10 minutes held, with the warn "the first prompt waited 10 minutes behind a dialog; it was not typed". A chat send while the first prompt is held is refused `busy` with "This session's first prompt is still waiting to be typed."
+
+Claude shows its trust dialog in any folder it has not trusted, a fresh worktree and a bypass-permissions session included. It keys trust on the main repo root, so every worktree of a trusted repo is trusted afterwards.
+
 A shell outside pwsh, powershell, cmd, nu, fish, sh, bash, zsh, dash and ksh (WSL, including its bash, stays on the direct spawn until RT-956), a cmd line carrying `%` or `!`, and legacy PowerShell's argument passing host no agent: Claude is then the PTY child, as it is for a plugin without `shell_resume`.
 
 So does an agent that runs through cmd.exe (a `.cmd` or `.bat` shim, or cmd.exe itself) typed into pwsh, powershell, Nushell, fish or a POSIX shell when an argument holds `%`, `!`, `"`, `^`, `&`, `|`, `<`, `>`, CR or LF; the direct spawn then refuses any such argument with a `Couldn't start session` failure naming the character and the argument, before the tracer starts (`direct_args` in `server/spawn/shell.rs`).
