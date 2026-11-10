@@ -19,7 +19,7 @@ use crate::{
     tagged_text, tooltip,
 };
 
-/// The popover's width, in px.
+/// The popover's width, in px: a window-like cap; its text wraps inside it.
 const POPOVER_WIDTH: f32 = 540.0;
 /// The popover's gap from the window's right edge, in px.
 const POPOVER_RIGHT: f32 = 8.0;

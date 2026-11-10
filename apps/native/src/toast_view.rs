@@ -607,7 +607,8 @@ fn head_block(
         // (from a sibling's intrinsic pass) replaced it. The absolutely
         // placed copy is measured once, at the box's final width. The
         // margin, not a padding, keeps it clear of ×: an absolute child
-        // spans its box's padding.
+        // spans its box's padding. The title stays one line: it is context,
+        // not the question, and the card's height measures the body.
         .child(
             div()
                 .relative()

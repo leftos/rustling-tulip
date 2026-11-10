@@ -23,7 +23,7 @@ use crate::sidebar::ContainerKind;
 pub const COMPACT_EMPTY_TEXT: &str = "No agents running.";
 /// The view's text size, before the UI text-size offset.
 pub(crate) const TEXT_PX: f32 = 12.0;
-/// A session row's height, and the fold row's, before the offset.
+/// A session row's height, and the fold row's, before the offset; fixed so a block fits without scrolling.
 pub(crate) const ROW_H: f32 = 30.0;
 /// The repo cell's width on the left of a block.
 pub(crate) const REPO_W: f32 = 150.0;
@@ -33,13 +33,13 @@ pub(crate) const BODY_PAD_Y: f32 = 7.0;
 /// The gap between two blocks.
 pub(crate) const BLOCK_GAP: f32 = 5.0;
 /// A chip's height (before the offset), the gaps between chips and the chips
-/// cell's padding.
+/// cell's padding; fixed so every chip's row lines up.
 pub(crate) const CHIP_H: f32 = 22.0;
 pub(crate) const CHIP_GAP_X: f32 = 4.0;
 pub(crate) const CHIP_GAP_Y: f32 = 3.0;
 pub(crate) const CHIPS_PAD_X: f32 = 6.0;
 pub(crate) const CHIPS_PAD_Y: f32 = 3.0;
-/// The session cell's width at its widest and at its narrowest.
+/// The session cell's width at its widest and at its narrowest; capped so the view never scrolls.
 const SESSION_MAX_W: f32 = 642.0;
 const SESSION_MIN_W: f32 = 360.0;
 /// The room the session cell leaves the chips while it can.

@@ -40,7 +40,7 @@ use crate::text_input::{NavKey, TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, tagged_text, tooltip};
 
-/// The spawn dialog's width, as on the Spawn board.
+/// The spawn dialog's width, as on the Spawn board: a window-like cap; its text wraps and its height follows.
 const DIALOG_WIDTH: f32 = 640.0;
 /// The padding at the sides of a dialog's header, body and footer.
 const DIALOG_PAD_X: f32 = 18.0;
@@ -61,7 +61,7 @@ const CHECK_SIZE: f32 = 16.0;
 const CHECK_RADIUS: f32 = 4.0;
 /// The side of a chosen radio's dot.
 const RADIO_DOT: f32 = 7.0;
-/// The least outer height of a segment of a segmented control.
+/// The least outer height of a segment of a segmented control: fixed so every segment lines up.
 const SEGMENT_HEIGHT: f32 = 32.0;
 /// The corner radius of a segment, and of the control round the segments.
 pub(crate) const SEGMENT_RADIUS: f32 = 6.0;
@@ -1966,7 +1966,8 @@ pub(crate) fn now_unix() -> i64 {
 }
 
 /// A dialog's card, `width` wide and tagged `id`: the modal card, its
-/// header, body and footer bands drawn edge to edge.
+/// header, body and footer bands drawn edge to edge. Its width is a
+/// window-like cap; the text wraps and the card's height follows.
 pub(crate) fn dialog_card(offset: i8, id: &'static str, width: f32, t: &UiTheme) -> Stateful<Div> {
     modal_panel(offset, id, t)
         .driver_id(move || id.to_owned())
@@ -3217,7 +3218,7 @@ fn collision_box(
         .into_any_element()
 }
 
-/// One cell of the workspace preview table.
+/// One cell of the workspace preview table: fixed so the columns line up, and each cell's text wraps inside its column.
 fn table_cell(column: usize, t: &UiTheme) -> Div {
     let cell = div().min_w(px(0.0));
     match column {

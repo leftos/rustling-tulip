@@ -69,11 +69,13 @@ const PANE_SHELL_TIP: &str = "A plain shell in this pane, in the remembered fold
 pub(crate) const SPAWN_TIP: &str = "Spawn a new session";
 const OPEN_SHELL_TIP: &str = "A plain shell in a new tab, in the remembered folder";
 
+/// The pane header's height: a fixed strip in a splittable grid.
 const PANE_HEADER_HEIGHT: f32 = 36.0;
 /// The corner radius of a pane card and its header.
 const PANE_RADIUS: f32 = 8.0;
 /// The name's size in a pane header.
 const TITLE_TEXT_SIZE: f32 = 12.5;
+/// A header chip's height: one line inside the fixed header strip.
 const CHIP_HEIGHT: f32 = 20.0;
 const CHIP_RADIUS: f32 = 5.0;
 const CHIP_TEXT_SIZE: f32 = 11.0;

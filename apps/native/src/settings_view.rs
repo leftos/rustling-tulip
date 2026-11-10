@@ -63,9 +63,9 @@ use crate::ui_theme::{UiTheme, theme};
 use crate::window_title::compute_title;
 use crate::{FileFilter, Pick, RootView, tooltip};
 
-/// The tab list's width, its padding and edge included.
+/// The tab list's width, its padding and edge included; fixed so the tabs' column lines up.
 const TAB_LIST_WIDTH: f32 = 150.0;
-/// A tab row's height and corner radius, as on the Settings board.
+/// A tab row's height and corner radius, as on the Settings board; fixed so the tabs line up.
 const TAB_ROW_HEIGHT: f32 = 34.0;
 /// A section label's text size, above the rows of its group.
 const SECTION_LABEL_SIZE: f32 = 11.0;
@@ -90,7 +90,7 @@ const PANEL_WIDTH: f32 = TAB_LIST_WIDTH + CONTENT_WIDTH + 2.0 * CONTENT_PAD_X + 
 const PANEL_HEIGHT: f32 = 640.0;
 /// The size of a hint.
 const HINT_SIZE: f32 = 12.5;
-/// The width of a sound field, and of its list.
+/// The width of a sound field, and of its list: an input's width.
 const SOUND_FIELD_WIDTH: f32 = 280.0;
 /// The most height a sound list takes before it scrolls.
 const SOUND_LIST_MAX_HEIGHT: f32 = 240.0;
@@ -109,7 +109,7 @@ const REMOTE_RUN_HINT: &str =
 const AUTOSTART_HINT: &str = "So remote access works before you open this app.";
 /// The port field's placeholder: the daemon's default port.
 const DEFAULT_PORT_TEXT: &str = "8787";
-/// The port field's width.
+/// The port field's width: an input's width.
 const PORT_FIELD_WIDTH: f32 = 96.0;
 /// The Maximum chat width field's hint, placeholder and validation error.
 const CHAT_WIDTH_HINT: &str = "0 for no limit.";
@@ -7343,7 +7343,7 @@ const CAP_HINT: &str = "Summaries stop for the day once today's spend reaches th
 const TEST_HINT: &str = "Summarizes a fixed sample with the settings above.";
 const NEWER_DAEMON: &str =
     "This host's daemon is newer than this app; update the app to change these settings.";
-/// The widths of the Dashboard tab's key and variable fields.
+/// The widths of the Dashboard tab's key and variable fields: input widths.
 const KEY_FIELD_WIDTH: f32 = 280.0;
 const VARIABLE_FIELD_WIDTH: f32 = 220.0;
 

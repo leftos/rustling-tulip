@@ -50,6 +50,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, ContainerRef, SessionStatus};
 
+/// A row's height: one line of text, in a resizable pane or a table.
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
 pub(crate) const ROW_PADDING: f32 = 8.0;
 const LEAF_INDENT: f32 = 22.0;
@@ -64,7 +65,7 @@ const BODY_INSET_X: f32 = 8.0;
 const BODY_INSET_Y: f32 = 2.0;
 /// A leaf's left padding, before its glyph.
 const LEAF_PAD_LEFT: f32 = 12.0;
-/// A Compact leaf's one line.
+/// A Compact leaf's one line, in a pane that resizes.
 const COMPACT_LEAF_HEIGHT: f32 = 26.0;
 /// The subline's and chip row's indent under the label, past the glyph.
 const SUBLINE_INDENT: f32 = 20.0;
@@ -74,7 +75,7 @@ const SUBLINE_GAP: f32 = 8.0;
 /// The line the sessions body shows when the Active filter leaves no repo or
 /// workspace row.
 const NO_ACTIVE_REPOS: &str = "No active repos or workspaces";
-/// The widest a `T:<name>` chip grows before its name truncates.
+/// The widest a `T:<name>` chip grows before its name truncates; its tooltip carries the whole name.
 const PILL_MAX_WIDTH: f32 = 96.0;
 
 impl RootView {
@@ -899,7 +900,7 @@ impl HostHeaderState {
     }
 }
 
-/// A host header's height.
+/// A host header's height: one line above its rows.
 const HOST_HEADER_HEIGHT: f32 = 26.0;
 /// A host header's state dot, across.
 const HOST_DOT_SIZE: f32 = 6.0;

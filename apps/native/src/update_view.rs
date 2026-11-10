@@ -350,6 +350,7 @@ impl RootView {
             div()
                 .id("footer-version")
                 .flex_none()
+                // One line: the version is short fixed text, in the footer.
                 .whitespace_nowrap()
                 .child(tagged_text("footer-version", format!("v{CLIENT_VERSION}")))
                 .tooltip(crate::tooltip(tip))

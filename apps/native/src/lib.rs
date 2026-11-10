@@ -783,11 +783,11 @@ const UI_TEXT_SIZE: f32 = 12.0;
 /// How far a divider press must travel before it resizes the split; anything
 /// shorter is a click on the handle and sends nothing.
 const DIVIDER_DRAG_THRESHOLD: f32 = 3.0;
-/// The footer's height in logical pixels.
+/// The footer's height in logical pixels: a fixed strip at the window's edge.
 pub const FOOTER_HEIGHT: f32 = 28.0;
 /// Text size of the footer's counts and status text.
 const FOOTER_TEXT_SIZE: f32 = 11.5;
-/// The footer's daemon pill: its height and text size.
+/// The footer's daemon pill: its height and text size; it fits inside the fixed footer strip.
 const FOOTER_PILL_HEIGHT: f32 = 20.0;
 const FOOTER_PILL_TEXT_SIZE: f32 = 11.0;
 /// Space between the footer's pill and its counts, and between two counts.
@@ -6304,6 +6304,7 @@ impl RootView {
             .absolute()
             .left(px(PADDING))
             .bottom(ui_px(cx, FOOTER_HEIGHT) + px(4.0))
+            // Capped at a window-edge width; its rows wrap.
             .w(px(320.0))
             .flex()
             .flex_col()
@@ -6497,6 +6498,7 @@ fn connecting_overlay(
         .gap(px(16.0))
         .px(px(40.0))
         .py(px(32.0))
+        // A window-edge width; the overlay's text wraps.
         .min_w(px(280.0))
         .bg(gpui::rgb(t.modal))
         .border_1()

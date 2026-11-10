@@ -23,11 +23,11 @@ use crate::{RootView, is_quick_jump_key};
 const QUERY_PLACEHOLDER: &str = "Jump to a pane, tab, session or repo";
 /// The one row while the query matches nothing.
 const NO_MATCH: &str = "No matching pane, tab, session or repo";
-/// The panel's width.
+/// The panel's width: a window-like cap as a palette floating over the editor.
 const PANEL_WIDTH: f32 = 560.0;
 /// How far below the window's top the panel starts.
 const PANEL_TOP: f32 = 64.0;
-/// A row's height before the UI text offset.
+/// A row's height before the UI text offset; one line in the scrolling palette.
 const ROW_HEIGHT: f32 = 26.0;
 /// How many rows show before the list scrolls.
 const VISIBLE_ROWS: f32 = 12.0;

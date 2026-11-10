@@ -38,7 +38,7 @@ use crate::viewer_tab::{
 };
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
-/// The header's height, the diff tab's.
+/// The header's height, the diff tab's: a fixed strip above the scrolling text.
 const HEADER_HEIGHT: f32 = 42.0;
 const HEADER_PAD_LEFT: f32 = 14.0;
 const HEADER_PAD_RIGHT: f32 = 10.0;

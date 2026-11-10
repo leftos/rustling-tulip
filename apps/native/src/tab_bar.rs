@@ -33,7 +33,9 @@ use crate::undo;
 use crate::viewer_tab::display_name;
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
+/// The tab strip's height: a fixed bar at the window's edge.
 const TAB_BAR_HEIGHT: f32 = 38.0;
+/// The rename field's width: an input, sized to a tab's name.
 const RENAME_WIDTH: f32 = 140.0;
 /// The busy pill's height and text size.
 const BUSY_PILL_HEIGHT: f32 = 18.0;

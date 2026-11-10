@@ -38,7 +38,7 @@ use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 /// The grid's columns, as the mock sizes them; Now and Summary share what is
-/// left.
+/// left. Fixed: the columns of every row must line up.
 const GLYPH_W: f32 = 30.0;
 const SESSION_W: f32 = 232.0;
 const LINEAR_W: f32 = 248.0;

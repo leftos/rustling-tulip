@@ -45,7 +45,7 @@ const REMOVE_LABEL: &str = "Remove";
 /// The section headings.
 const TABLE_SECTION: &str = "Accounts";
 const AUTO_SECTION: &str = "Auto-switch";
-/// An alias field's width, in px.
+/// An alias field's width, in px: an input's width, fixed so the rows line up.
 const ALIAS_WIDTH: f32 = 130.0;
 /// A row bar's size, in px.
 const ROW_BAR: (f32, f32) = (120.0, 6.0);

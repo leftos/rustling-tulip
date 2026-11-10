@@ -45,11 +45,13 @@ pub const NO_REPOS_HINT: &str =
 /// The context line's tooltip when nothing focused names a repo.
 pub const NO_ACTIVE_PANE_TIP: &str = "No pane is focused right now — falling back to the first registered repo. Pick a session in the sidebar to follow it, or pin a repo from the picker above.";
 const REFRESH_TIP: &str = "Refresh status and history";
+/// The panel head's height: a fixed strip above the scrolling lists.
 const HEADER_HEIGHT: f32 = 44.0;
 /// The panel header's title size.
 const HEADER_TEXT_SIZE: f32 = 13.0;
 /// The panel header's padding left of its title.
 const HEADER_PAD_LEFT: f32 = 14.0;
+/// The picker's height: one line in the fixed head.
 const PICKER_HEIGHT: f32 = 20.0;
 const ROW_PADDING: f32 = 8.0;
 const REFRESH_ICON_SIZE: f32 = 14.0;

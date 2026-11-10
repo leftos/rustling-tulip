@@ -297,6 +297,7 @@ fn needs_you_row(
                         .child(row.container_name.clone()),
                 )
                 .child(div().flex_none().text_color(gpui::rgb(t.muted)).child("·"))
+                // One line: the label is identity, in a pane the user can widen.
                 .child(
                     truncating(&format!("{name}-label"), StyledText::new(row.label.clone()))
                         .debug_selector({

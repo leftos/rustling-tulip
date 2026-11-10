@@ -30,7 +30,9 @@ use crate::themes::{ContrastBadge, ThemeEditor, ThemeRow, ThemesDialog, badge_in
 use crate::ui_theme::{UiTheme, theme};
 use crate::{FileFilter, RootView};
 
+/// The modal's width: a fixed-size window-like cap; its lists scroll inside.
 const WIDTH: f32 = 860.0;
+/// The modal's height: a fixed-size window-like cap; its lists scroll inside.
 const HEIGHT: f32 = 600.0;
 const EDIT_WIDTH: f32 = 1040.0;
 const EDIT_HEIGHT: f32 = 680.0;

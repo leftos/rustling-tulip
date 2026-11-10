@@ -39,6 +39,7 @@ pub const STASH_LIST_CHANGED: &str = "Stash list changed";
 const STASH_LABEL: &str = "Stash";
 const STASHING_LABEL: &str = "Stashing…";
 const ROW_PADDING: f32 = 8.0;
+/// A stash row's height: one line in a scrolling list.
 const ROW_HEIGHT: f32 = 28.0;
 /// The size of a stash row's id.
 const ID_TEXT_SIZE: f32 = 11.0;

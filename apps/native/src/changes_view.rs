@@ -49,15 +49,17 @@ pub const COMMITTING_LABEL: &str = "Committing…";
 const COMMIT_MIN_ROWS: usize = 2;
 const COMMIT_MAX_ROWS: usize = 6;
 const ROW_PADDING: f32 = 8.0;
+/// A file row's height: one line in a scrolling list.
 const ROW_HEIGHT: f32 = 20.0;
 const INDENT_STEP: f32 = 12.0;
 const STATUS_WIDTH: f32 = 14.0;
 /// The size of a file's change letter.
 const STATUS_TEXT_SIZE: f32 = 11.0;
 const CARET_WIDTH: f32 = 10.0;
+/// The most a paths list grows before it scrolls.
 const PATHS_MAX_HEIGHT: f32 = 200.0;
 /// The height of a section head: a bucket's, the Stashes', History's and a
-/// repo section's.
+/// repo section's; a fixed strip above the scrolling rows.
 pub(crate) const HEAD_HEIGHT: f32 = 30.0;
 /// The size of a head's title and of its buttons' labels.
 const HEAD_TEXT_SIZE: f32 = 11.0;

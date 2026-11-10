@@ -37,7 +37,7 @@ use crate::{
 
 /// The header's title, before the machine's name.
 const TITLE: &str = "GATES";
-/// The header's height, as the Needs You panel's.
+/// The header's height, as the Needs You panel's: a fixed strip above the table.
 const HEADER_HEIGHT: f32 = 26.0;
 /// The repaint interval while some hold or wait reads in seconds.
 const FAST_REPAINT: Duration = Duration::from_secs(1);
@@ -52,7 +52,7 @@ const HIDDEN_HISTORY_INTERVAL: Duration = Duration::from_secs(60);
 const SMALL_TEXT: f32 = 11.5;
 /// A caps heading's text, in px.
 const CAPS_TEXT: f32 = 10.5;
-/// A slot name's fixed width (`heavy 0`), in px.
+/// A slot name's fixed width (`heavy 0`), in px, so every row's columns line up.
 const NAME_WIDTH: f32 = 48.0;
 /// A slot glyph's side, in px.
 const GLYPH: f32 = 11.0;
@@ -64,7 +64,7 @@ const LINE_TWO_INDENT: f32 = GLYPH_COLUMN + COLUMN_GAP + NAME_WIDTH + COLUMN_GAP
 /// The space between a pool header's heading, count and waiting text, in
 /// px.
 const HEADER_GAP: f32 = 7.0;
-/// The row menu's width, in px.
+/// The row menu's width, in px: fixed, in a dense table whose rows keep one line.
 const MENU_WIDTH: f32 = 200.0;
 /// The tip of a menu row whose value the gate did not report.
 const NOT_REPORTED: &str = "The gate did not report it";

@@ -48,7 +48,7 @@ const SSH_HOST_PLACEHOLDER: &str = "devbox or user@host";
 /// The room the panel leaves above and below it, so it never reaches the
 /// window's edge.
 const PANEL_MARGIN: f32 = 24.0;
-/// The width of the add form's field labels.
+/// The width of the add form's field labels, fixed so the fields line up in their column.
 const FIELD_LABEL_WIDTH: f32 = 104.0;
 /// A row's corner radius.
 const ROW_RADIUS: f32 = 8.0;
