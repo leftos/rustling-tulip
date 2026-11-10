@@ -13,7 +13,7 @@ use crate::hook_status::PluginLookup;
 use crate::orphan::OrphanMeta;
 use crate::paths::Dirs;
 use crate::screen::rules::rules_for;
-use crate::session::{SessionRecord, SessionRegistry, attach_lifecycle};
+use crate::session::{SessionRecord, SessionRegistry, UpdateOrigin, attach_lifecycle};
 use crate::{conversations, history, osc_title, pty_state, screen, tracer_client};
 use agent_api::{ConversationPlan, ResolvedRows};
 use anyhow::anyhow;
@@ -363,10 +363,23 @@ fn restart_discovery(sessions: &SessionRegistry, restart: DiscoveryRestart) -> b
 /// the id in each container's session order, so the resume lands in the slot
 /// it left.
 pub(super) async fn resume_abandoned(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
-    let spawn = move |req: SpawnRequest, busy_excluded: bool, extras: SpawnExtras| async move {
-        spawn_session_with_extras(hub, req, None, busy_excluded, extras)
-            .await
-            .map(|snap| snap.id)
+    resume_abandoned_for(hub, session_id, None).await
+}
+
+/// [`resume_abandoned`], the new session's first update carrying `origin`,
+/// the request that asked for the resume, when it named one.
+pub(super) async fn resume_abandoned_for(
+    hub: &Hub,
+    session_id: &str,
+    origin: Option<UpdateOrigin>,
+) -> anyhow::Result<()> {
+    let spawn = move |req: SpawnRequest, busy_excluded: bool, extras: SpawnExtras| {
+        let origin = origin.clone();
+        async move {
+            spawn_session_with_extras(hub, req, origin, busy_excluded, extras)
+                .await
+                .map(|snap| snap.id)
+        }
     };
     resume_abandoned_with(hub, session_id, spawn).await
 }
@@ -1599,6 +1612,39 @@ mod tests {
             request.initial_prompt.as_deref(),
             Some("first"),
             "the first prompt is replayed, as it was before"
+        );
+    }
+
+    /// A `ResumeSession` of an abandoned session takes the abandoned
+    /// resume, not a rerun, and a failure of it echoes the request id,
+    /// which a `ResumeAbandoned` cannot carry.
+    #[tokio::test]
+    async fn resume_session_resumes_an_abandoned_session_with_its_request_id() {
+        let (_home_lock, _home) = claude_home_scratch("resume-session-abandoned").await;
+        let (hub, scratch) = spawnless_test_hub("resume-session-abandoned");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        insert_abandoned_claude(&hub, "lost", standalone(&folder), None);
+
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::ResumeSession {
+                session_id: "lost".to_owned(),
+                request_id: Some("req-5".to_owned()),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { request_id: Some(id), code: Some(code), .. }
+                    if id == "req-5" && code == protocol::error_codes::RESUME_FAILED
+            ),
+            "the spawnless hub fails the abandoned resume: {reply:?}"
+        );
+        assert!(
+            is_abandoned(&hub, "lost"),
+            "a failed resume keeps the placeholder"
         );
     }
 

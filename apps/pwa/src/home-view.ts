@@ -22,7 +22,7 @@ import {
 import type { ConnectedLatch } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
 import { introLineShown } from "./installed";
-import type { ClientMessage } from "./protocol";
+import { FEATURE_RESUME_SESSION, type ClientMessage } from "./protocol";
 import type { Connection } from "./socket";
 
 /** The page's intro header, its install line, and whether the page runs from the Home Screen. */
@@ -260,7 +260,8 @@ export function mountHomeView(
       return;
     }
     actions = tappedElsewhere(actions);
-    const result = resume(actions, newRequestId, session);
+    const supportsResumeSession = connection.supports(FEATURE_RESUME_SESSION);
+    const result = resume(actions, newRequestId, session, supportsResumeSession);
     actions = result.state;
     if (result.message !== null) {
       send(result.message);

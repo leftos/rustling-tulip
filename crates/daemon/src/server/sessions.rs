@@ -1,7 +1,9 @@
 //! Live sessions: listing, duplicating, renaming and restyling them, their input and scrollback, the per-connection session event stream, and stopping, parking and discarding them.
 use super::connection::{ConnCtx, PtyLane};
 use super::git::{blocked_discard_message, probe_locking_processes, retry_worktree_cleanup};
-use super::recovery::{mark_history_recovered, record_end, recovery_conversation_exists};
+use super::recovery::{
+    mark_history_recovered, record_end, recovery_conversation_exists, resume_abandoned_for,
+};
 use super::spawn::{
     is_repo_folder, remove_hook_settings, send_spawn_failure, spawn_session, target_uses_worktree,
 };
@@ -58,6 +60,12 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                 same_checkout,
             };
             duplicate_session(hub, ask, connection, out_tx).await;
+        }
+        ClientMessage::ResumeSession {
+            session_id,
+            request_id,
+        } => {
+            resume_session(hub, &session_id, request_id, connection, out_tx).await;
         }
         ClientMessage::GetSpawnConfig { session_id } => {
             let config = hub
@@ -580,6 +588,95 @@ pub(super) fn request_origin(connection: u64, request_id: Option<String>) -> Opt
         connection,
         request_id,
     })
+}
+
+/// How a [`ClientMessage::ResumeSession`] resumes a session, by its state.
+#[derive(Debug, PartialEq, Eq)]
+enum ResumeRoute {
+    /// A parked or stopped session: rerun in its own checkout, as a Restart.
+    Rerun,
+    /// An abandoned session: resumed in place from its captured config.
+    Abandoned,
+}
+
+/// A refused request: its error code and the message the user reads.
+type Refusal = (&'static str, String);
+
+/// How `session_id` resumes: a parked session or a stopped one reruns, an
+/// abandoned one resumes in place; an unknown or running one is refused.
+fn resume_route(sessions: &SessionRegistry, session_id: &str) -> Result<ResumeRoute, Refusal> {
+    let rec = sessions.get(session_id).ok_or_else(|| {
+        (
+            protocol::error_codes::NOT_FOUND,
+            format!("unknown session: {session_id}"),
+        )
+    })?;
+    let rec = crate::sync::lock(&rec);
+    if rec.is_inactive {
+        Ok(ResumeRoute::Rerun)
+    } else if rec.is_abandoned {
+        Ok(ResumeRoute::Abandoned)
+    } else if matches!(
+        rec.status,
+        protocol::SessionStatus::Stopped | protocol::SessionStatus::Error
+    ) {
+        Ok(ResumeRoute::Rerun)
+    } else {
+        Err((
+            protocol::error_codes::INVALID_REQUEST,
+            format!("Session {session_id} is still running; stop it before resuming it."),
+        ))
+    }
+}
+
+/// The duplicate a Resume of a parked or stopped session asks for: a
+/// Restart's, keeping the session's busy exclusion and its checkout.
+fn resume_rerun_ask(session_id: &str, request_id: Option<String>) -> DuplicateAsk<'_> {
+    DuplicateAsk {
+        session_id,
+        request_id,
+        carry_busy_excluded: true,
+        same_checkout: true,
+    }
+}
+
+/// Resumes `session_id` as its state asks ([`resume_route`]). The new
+/// session's first broadcast carries `request_id` on connection
+/// `connection`; a refusal or a failure answers the requester directly,
+/// carrying it too.
+pub(super) async fn resume_session(
+    hub: &Hub,
+    session_id: &str,
+    request_id: Option<String>,
+    connection: u64,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    let refuse = |code: &str, message: String, request_id: Option<String>| {
+        let _ = out_tx.send(DaemonMessage::Error {
+            message,
+            request_id,
+            code: Some(code.to_owned()),
+        });
+    };
+    match resume_route(&hub.sessions, session_id) {
+        Err((code, message)) => refuse(code, message, request_id),
+        Ok(ResumeRoute::Rerun) => {
+            let ask = resume_rerun_ask(session_id, request_id);
+            duplicate_session(hub, ask, connection, out_tx).await;
+        }
+        Ok(ResumeRoute::Abandoned) => {
+            let origin = request_origin(connection, request_id.clone());
+            if let Err(err) = resume_abandoned_for(hub, session_id, origin).await {
+                warn!(
+                    session_id,
+                    ?err,
+                    "resume_session: the abandoned resume failed"
+                );
+                let code = protocol::error_codes::RESUME_FAILED;
+                refuse(code, err.to_string(), request_id);
+            }
+        }
+    }
 }
 
 /// The request that duplicates `session_id`. A worktree duplicate runs on
@@ -1427,10 +1524,10 @@ mod tests {
     use crate::server::dispatch;
     use crate::server::recovery::discard_abandoned;
     use crate::server::test_support::{
-        MemClient, appearance_registry, deepseek_options, deepseek_spawn, dispatch_all, env_spawn,
-        hello, idle_record, mem_session, messages_before_sentinel, next_message, only_update,
-        publish_sentinel, repo_entry, snapshot_of, spawnless_test_hub, test_hub, test_peer,
-        wait_until,
+        MemClient, appearance_registry, deepseek_options, deepseek_spawn, dispatch_all,
+        dispatch_one, env_spawn, hello, idle_record, mem_session, messages_before_sentinel,
+        next_message, only_update, publish_sentinel, repo_entry, snapshot_of, spawnless_test_hub,
+        test_hub, test_peer, wait_until,
     };
     use chrono::Utc;
     use protocol::SessionStatus;
@@ -3224,6 +3321,126 @@ mod tests {
         std::fs::write(project.join("conv-1.jsonl"), "{}\n").expect("write the transcript");
         assert_eq!(resumed(true).await.as_deref(), Some("conv-1"));
         assert_eq!(resumed(false).await, None, "a Duplicate starts fresh");
+    }
+
+    /// A standalone interactive source `id` in `folder`, recorded with
+    /// `env` as its stored extra env.
+    fn rerunnable_record(
+        id: &str,
+        folder: &str,
+        env: Vec<(String, String)>,
+    ) -> crate::session::SessionRecord {
+        let mut source = idle_record(id);
+        source.spawn_config = Some(protocol::SpawnConfig::from_request(&env_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(folder.to_owned()),
+                add_dirs: Vec::new(),
+            },
+            SessionMode::Interactive,
+            env,
+            None,
+        )));
+        source
+    }
+
+    /// Whether `reply` is the spawn's failure for `request_id`, which a
+    /// spawnless hub answers a rerun with: the request reached the spawn.
+    fn is_spawn_failure_for(reply: &DaemonMessage, request_id: &str) -> bool {
+        matches!(
+            reply,
+            DaemonMessage::ActionFailed { request_id: Some(id), .. } if id == request_id
+        )
+    }
+
+    fn resume_message(session_id: &str, request_id: &str) -> ClientMessage {
+        ClientMessage::ResumeSession {
+            session_id: session_id.to_owned(),
+            request_id: Some(request_id.to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_session_duplicates_a_parked_session_continuing_its_conversation() {
+        let (hub, scratch) = spawnless_test_hub("resume-session-parked");
+        let folder = scratch.path().join("work").to_string_lossy().into_owned();
+        let home = scratch.path().join("claude-home");
+        let env = vec![("CLAUDE_CONFIG_DIR".to_owned(), home.display().to_string())];
+        let mut source = rerunnable_record("src", &folder, env);
+        source.conversation_id = Some("conv-1".to_owned());
+        source.is_inactive = true;
+        source.status = SessionStatus::Stopped;
+        source.busy_excluded = true;
+        hub.sessions.insert(source);
+        let project = home
+            .join("projects")
+            .join(agent_claude::encode_project_dir(&folder));
+        std::fs::create_dir_all(&project).expect("create the transcript folder");
+        std::fs::write(project.join("conv-1.jsonl"), "{}\n").expect("write the transcript");
+
+        assert_eq!(resume_route(&hub.sessions, "src"), Ok(ResumeRoute::Rerun));
+        let ask = resume_rerun_ask("src", Some("req-1".to_owned()));
+        assert!(
+            ask.carry_busy_excluded && ask.same_checkout,
+            "a Restart's rerun"
+        );
+        assert!(carried_busy_excluded(
+            &hub.sessions,
+            "src",
+            ask.carry_busy_excluded
+        ));
+        let request = duplicate_request(&hub, ask.session_id, ask.same_checkout)
+            .await
+            .expect("src can be rerun");
+        assert_eq!(request.resume_conversation.as_deref(), Some("conv-1"));
+
+        let reply = dispatch_one(&hub, resume_message("src", "req-1")).await;
+        assert!(is_spawn_failure_for(&reply, "req-1"), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn resume_session_duplicates_a_stopped_session() {
+        let (hub, scratch) = spawnless_test_hub("resume-session-stopped");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        let mut source = rerunnable_record("src", &folder, Vec::new());
+        source.status = SessionStatus::Error;
+        hub.sessions.insert(source);
+
+        assert_eq!(resume_route(&hub.sessions, "src"), Ok(ResumeRoute::Rerun));
+        let reply = dispatch_one(&hub, resume_message("src", "req-2")).await;
+        assert!(is_spawn_failure_for(&reply, "req-2"), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn resume_session_of_a_running_session_is_refused_with_its_request_id() {
+        let (hub, scratch) = spawnless_test_hub("resume-session-running");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        hub.sessions
+            .insert(rerunnable_record("live", &folder, Vec::new()));
+
+        let reply = dispatch_one(&hub, resume_message("live", "req-3")).await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { request_id: Some(id), code: Some(code), .. }
+                    if id == "req-3" && code == protocol::error_codes::INVALID_REQUEST
+            ),
+            "{reply:?}"
+        );
+        assert!(hub.sessions.get("live").is_some(), "nothing was rerun");
+    }
+
+    #[tokio::test]
+    async fn resume_session_of_an_unknown_session_is_refused() {
+        let (hub, _scratch) = spawnless_test_hub("resume-session-unknown");
+        let reply = dispatch_one(&hub, resume_message("ghost", "req-4")).await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { request_id: Some(id), code: Some(code), .. }
+                    if id == "req-4" && code == protocol::error_codes::NOT_FOUND
+            ),
+            "{reply:?}"
+        );
     }
 
     fn accent(color: &str) -> AppearanceOverrides {

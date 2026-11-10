@@ -2291,8 +2291,9 @@ impl RootView {
             Some(self.prefills.request(pending))
         } else {
             let request_id = crate::new_request_id();
+            let resume_session = self.supports_resume_session(&host);
             self.duplicates
-                .request(&host, session_id, request_id, target)
+                .request(&host, session_id, request_id, target, resume_session)
         };
         if let Some(request) = request {
             self.send_duplicate(&host, request, cx);
@@ -2310,11 +2311,22 @@ impl RootView {
         if let ClientMessage::DuplicateSession {
             request_id: Some(request_id),
             ..
+        }
+        | ClientMessage::ResumeSession {
+            request_id: Some(request_id),
+            ..
         } = &request
         {
             self.duplicates.fail(request_id);
         }
         self.push_offline_toast(host, cx);
+    }
+
+    /// Whether `host` resumes a session from one `ResumeSession`; an older
+    /// host gets the duplicate recipe instead.
+    fn supports_resume_session(&self, host: &HostKey) -> bool {
+        self.conn_of(host)
+            .is_some_and(|conn| conn.supports(protocol::FEATURE_RESUME_SESSION))
     }
 
     /// The spawn config a Shift-duplicate asked for arrived: the dialog
@@ -2487,7 +2499,9 @@ impl RootView {
         }
         cx.notify();
         self.confirm.disarm();
-        match plan(action, &session, self.is_shown(host, session_id)) {
+        let resume_session = self.supports_resume_session(host);
+        let shown = self.is_shown(host, session_id);
+        match plan(action, &session, shown, resume_session) {
             Step::ConfirmWorktreeDelete => {
                 self.close_session_menu(window, cx);
                 self.open_delete_dialog_on(host, session_id, ConfirmOwner::Menu, window, cx);
@@ -2508,9 +2522,9 @@ impl RootView {
                 } else {
                     DuplicateTarget::Restart
                 };
-                if let Some(request) = self
-                    .duplicates
-                    .request(&host, session_id, request_id, target)
+                if let Some(request) =
+                    self.duplicates
+                        .request(&host, session_id, request_id, target, resume_session)
                 {
                     self.send_duplicate(&host, request, cx);
                     self.close_session_menu(window, cx);

@@ -669,9 +669,9 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
 
   A submenu swaps the rows for `‹ Back`, `New tab` and the grid tabs. Duplicate ▸ keeps the original, places the copy by pane target and brings that tab forward with the copy focused; a headless session's row, and its Restart, are dimmed with the tip `Headless runs aren't supported in this client`.
 
-  Move to ▸ lists grid tabs not already showing the session, moves the right-clicked pane when opened from a pane header (else the first one showing it), and a move into a tab can be undone; Restart and Resume rerun the session in its own worktree and branch, continuing a Claude session's conversation while its transcript exists, then replace the original's panes and discard it (keeping the worktree).
+  Move to ▸ lists grid tabs not already showing the session, moves the right-clicked pane when opened from a pane header (else the first one showing it), and a move into a tab can be undone; Restart and Resume rerun the session in its own worktree and branch, continuing a Claude session's conversation while its transcript exists, then replace the original's panes and discard it (keeping the worktree). To a host that lists `resume_session` Restart and Resume send one `ResumeSession` and the host chooses how; to an older host they send the `DuplicateSession` recipe. Placing the new session and discarding the original stay with the client.
 
-  A Resume of an abandoned session keeps the old session's name and accent, and the new session takes the old one's place in the sidebar.
+  A Resume of an abandoned session keeps the old session's name and accent, and the new session takes the old one's place in the sidebar. It sends `ResumeSession` to a host that lists `resume_session`, else `ResumeAbandoned`; Resume all abandoned sends `ResumeAllAbandoned`.
 
   Shift on a Duplicate ▸ choice asks the daemon for the source's stored spawn config (`GetSpawnConfig`) and opens the spawn dialog on its reply, locked on the source's repo or workspace, prefilled after the agent's Settings values so the source's runtime, run mode, its own agent's options (Bypass permissions among them), model, env rows, base and worktree toggle win, with Open in set to the clicked target.
 

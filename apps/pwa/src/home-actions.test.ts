@@ -121,7 +121,7 @@ test("home_resume_for_a_stopped_session_is_a_duplicate", () => {
   ];
 
   for (const target of stopped) {
-    const result = resume(NO_ACTIONS, counter(), target);
+    const result = resume(NO_ACTIONS, counter(), target, false);
     expect(result.message).toEqual({
       type: "duplicate_session",
       session_id: target.id,
@@ -130,7 +130,7 @@ test("home_resume_for_a_stopped_session_is_a_duplicate", () => {
       same_checkout: true,
     });
     expect(result.state.pending).toEqual([
-      { requestId: "req-1", sessionId: target.id, action: "resume" },
+      { requestId: "req-1", sessionId: target.id, action: "resume", discardsOriginal: true },
     ]);
   }
 });
@@ -140,18 +140,95 @@ test("home_resume_for_an_abandoned_session_resumes_it", () => {
     NO_ACTIONS,
     counter(),
     session("s1", { status: "stopped", is_abandoned: true }),
+    false,
   );
 
   expect(result.message).toEqual({ type: "resume_abandoned", session_id: "s1" });
   // No request id on the wire, so the record is keyed by the session alone.
-  expect(result.state.pending).toEqual([{ requestId: null, sessionId: "s1", action: "resume" }]);
+  expect(result.state.pending).toEqual([
+    { requestId: null, sessionId: "s1", action: "resume", discardsOriginal: false },
+  ]);
+});
+
+test("resume sends resume_session when the host supports it", () => {
+  const stopped = [
+    session("s1", { status: "stopped" }),
+    session("s2", { status: "error" }),
+    session("s3", { is_inactive: true }),
+  ];
+
+  for (const target of stopped) {
+    const sent = resume(NO_ACTIONS, counter(), target, true);
+    expect(sent.message).toEqual({
+      type: "resume_session",
+      session_id: target.id,
+      request_id: "req-1",
+    });
+
+    // The phone still discards the original once the rerun lands.
+    const landed = foldReply(sent.state, {
+      type: "session_updated",
+      request_id: "req-1",
+      session: session(`${target.id}-copy`, { status: "spawning" }),
+    });
+    expect(landed.effects).toEqual([
+      { type: "discard_session", session_id: target.id, cleanup: [] },
+    ]);
+    expect(landed.state.pending).toEqual([]);
+  }
+
+  const running = resume(NO_ACTIONS, unused(), session("s4", { status: "working" }), true);
+  expect(running.message).toBeNull();
+});
+
+test("resume falls back to duplicate_session on an older host", () => {
+  const result = resume(NO_ACTIONS, counter(), session("s1", { is_inactive: true }), false);
+
+  expect(result.message).toEqual({
+    type: "duplicate_session",
+    session_id: "s1",
+    request_id: "req-1",
+    carry_busy_excluded: true,
+    same_checkout: true,
+  });
+});
+
+test("an abandoned resume sends resume_session with a request id", () => {
+  const abandoned = session("s1", { status: "stopped", is_abandoned: true });
+  const sent = resume(NO_ACTIONS, counter(), abandoned, true);
+
+  expect(sent.message).toEqual({ type: "resume_session", session_id: "s1", request_id: "req-1" });
+
+  // Its failure now names the request, so the row shows the refusal.
+  const failed = foldReply(sent.state, {
+    type: "error",
+    request_id: "req-1",
+    code: "resume_failed",
+    message: "the captured config is gone",
+  });
+  expect(errorFor(failed.state, "s1")).toBe("the captured config is gone");
+  expect(failed.state.pending).toEqual([]);
+});
+
+test("an abandoned resume_session echo discards nothing", () => {
+  const abandoned = session("s1", { status: "stopped", is_abandoned: true });
+  const sent = resume(NO_ACTIONS, counter(), abandoned, true);
+
+  const landed = foldReply(sent.state, {
+    type: "session_updated",
+    request_id: "req-1",
+    session: session("s1-resumed", { status: "spawning" }),
+  });
+
+  expect(landed.effects).toEqual([]);
+  expect(landed.state.pending).toEqual([]);
 });
 
 test("home_abandoned_resume_waits_for_its_session", () => {
   const abandoned = session("s1", { status: "stopped", is_abandoned: true });
-  const sent = resume(NO_ACTIONS, unused(), abandoned);
+  const sent = resume(NO_ACTIONS, unused(), abandoned, false);
 
-  const again = resume(sent.state, unused(), abandoned);
+  const again = resume(sent.state, unused(), abandoned, false);
   expect(again.message).toBeNull();
   expect(again.state).toBe(sent.state);
 
@@ -170,7 +247,7 @@ test("home_resume_is_not_offered_for_a_headless_session", () => {
   ];
 
   for (const target of headless) {
-    const result = resume(NO_ACTIONS, unused(), target);
+    const result = resume(NO_ACTIONS, unused(), target, false);
     expect(result.message).toBeNull();
     expect(result.state).toBe(NO_ACTIONS);
   }
@@ -180,7 +257,7 @@ test("home_resume_is_not_offered_for_a_running_session", () => {
   const running: SessionSnapshot["status"][] = ["spawning", "idle", "working", "awaiting_input"];
 
   for (const status of running) {
-    const result = resume(NO_ACTIONS, unused(), session(`s-${status}`, { status }));
+    const result = resume(NO_ACTIONS, unused(), session(`s-${status}`, { status }), false);
     expect(result.message).toBeNull();
     expect(result.state).toBe(NO_ACTIONS);
   }
@@ -215,7 +292,7 @@ test("home_a_landed_answer_unblocks_the_card_on_the_next_session_update", () => 
 });
 
 test("home_a_failed_resume_shows_the_daemon_message", () => {
-  const sent = resume(NO_ACTIONS, counter(), session("s1", { status: "stopped" }));
+  const sent = resume(NO_ACTIONS, counter(), session("s1", { status: "stopped" }), false);
 
   const failed = foldReply(sent.state, {
     type: "action_failed",
@@ -231,7 +308,7 @@ test("home_a_failed_resume_shows_the_daemon_message", () => {
 });
 
 test("home_a_landed_resume_discards_the_original_once", () => {
-  const sent = resume(NO_ACTIONS, counter(), session("s1", { status: "stopped" }));
+  const sent = resume(NO_ACTIONS, counter(), session("s1", { status: "stopped" }), false);
 
   const update = {
     type: "session_updated",
@@ -278,9 +355,9 @@ test("home_repeat_tap_while_pending_sends_nothing", () => {
 
 test("home_repeat_resume_while_pending_sends_nothing", () => {
   const stopped = session("s1", { status: "stopped" });
-  const sent = resume(NO_ACTIONS, counter(), stopped);
+  const sent = resume(NO_ACTIONS, counter(), stopped, false);
 
-  const again = resume(sent.state, unused(), stopped);
+  const again = resume(sent.state, unused(), stopped, false);
   expect(again.message).toBeNull();
   expect(again.state).toBe(sent.state);
 });

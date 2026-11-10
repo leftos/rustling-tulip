@@ -144,6 +144,16 @@ export const FEATURE_CLIENT_PRESENCE = "client_presence";
 export const FEATURE_TYPED_PROMPT_ANSWERS = "typed_prompt_answers";
 
 /**
+ * `Welcome.features` entry: the daemon resumes a session from one
+ * [`ClientMessage::ResumeSession`], choosing by the session's state how. A
+ * client talking to a daemon without it sends the older recipe:
+ * [`ClientMessage::DuplicateSession`] with `carry_busy_excluded` and
+ * `same_checkout` for a parked or stopped session, and
+ * [`ClientMessage::ResumeAbandoned`] for an abandoned one.
+ */
+export const FEATURE_RESUME_SESSION = "resume_session";
+
+/**
  * The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
  * right after `Welcome` when its `Hello` carried no valid device token: the
  * connection stays open as a pairing connection. The daemon also answers it
@@ -3218,8 +3228,10 @@ export type ClientMessage =
    * Clone an existing session: daemon reads its stored [`SpawnConfig`]
    * and spawns a new session with the same agent, mode, target, model,
    * permission mode, sandbox, skip-perms flag, and extra env vars. The
-   * new session gets a freshly generated label and no initial prompt —
-   * it's a fresh process with the same config, not a continuation.
+   * new session gets a freshly generated label and no initial prompt.
+   * A Duplicate is a fresh process with the same config; a Restart or a
+   * Resume (`same_checkout`) continues the source's agent conversation
+   * while its transcript exists.
    *
    * A duplicate of a *worktree* session lands on a fresh branch the daemon
    * picks (and refuses any leftover under that name) rather than the
@@ -3242,6 +3254,21 @@ export type ClientMessage =
    * of a parked one, whose source no longer holds the checkout.
    */
   | { type: "duplicate_session"; session_id: string; request_id?: string | null; carry_busy_excluded?: boolean; same_checkout?: boolean }
+  /**
+   * Resume a session that is not running; the daemon picks how by its
+   * state. A parked or stopped session is rerun as a Restart is (a
+   * [`ClientMessage::DuplicateSession`] with `carry_busy_excluded` and
+   * `same_checkout`), and the client still places the new session and
+   * discards the original; an abandoned one is resumed in place as
+   * [`ClientMessage::ResumeAbandoned`] does. Success is the new session's
+   * [`DaemonMessage::SessionUpdated`] echoing `request_id`; a refusal is a
+   * [`DaemonMessage::Error`] or [`DaemonMessage::ActionFailed`] carrying
+   * it. Sent only to a daemon listing [`FEATURE_RESUME_SESSION`].
+   *
+   * `request_id`: Echoed on the requester's [`DaemonMessage::SessionUpdated`] for
+   * the new session and on a refusal.
+   */
+  | { type: "resume_session"; session_id: string; request_id?: string | null }
   /**
    * Fetch the persisted [`SpawnConfig`] for a session so the spawn
    * dialog can pre-fill all fields with the source's values. Replied

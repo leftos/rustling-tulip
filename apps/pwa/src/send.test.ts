@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import {
+  FEATURE_RESUME_SESSION,
   PROTOCOL_VERSION,
   SUPPORTED_PROTOCOL_VERSIONS,
   type ClientMessage,
@@ -236,6 +237,22 @@ test("paired_is_true_only_on_a_ready_connection_that_presented_a_token", async (
     const reached = await reach();
     expect(reached.connection.paired(), state).toBe(false);
   }
+});
+
+test("supports_is_true_only_on_a_ready_connection_whose_host_lists_the_feature", async () => {
+  for (const [state, reach] of NOT_READY) {
+    const reached = await reach();
+    expect(reached.connection.supports(FEATURE_RESUME_SESSION), state).toBe(false);
+  }
+
+  const without = await reachReady();
+  expect(lastStatus(without.notices)).toBe("ready");
+  expect(without.connection.supports(FEATURE_RESUME_SESSION)).toBe(false);
+
+  const listing = await reachHandshaking();
+  listing.socket.receive({ ...WELCOME, features: [FEATURE_RESUME_SESSION] });
+  expect(lastStatus(listing.notices)).toBe("ready");
+  expect(listing.connection.supports(FEATURE_RESUME_SESSION)).toBe(true);
 });
 
 test("send_while_ready_writes_the_frame_and_answers_true", async () => {

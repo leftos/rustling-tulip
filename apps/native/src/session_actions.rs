@@ -758,8 +758,15 @@ pub(crate) fn rename_message(session_id: &str, text: &str) -> ClientMessage {
 /// A stop that leaves no pane behind also parks the session when it has a
 /// worktree to keep, else discards it, as `SessionContextMenu.tsx`'s
 /// `sendStop` does. Deleting a worktree goes through the delete-worktree
-/// confirm.
-pub(crate) fn plan(action: SessionAction, session: &SessionSnapshot, shown: bool) -> Step {
+/// confirm. An abandoned session's Resume is a `ResumeSession` with a
+/// request id of its own to a host listing `resume_session`, else a
+/// `ResumeAbandoned`; either way the host rebinds its panes.
+pub(crate) fn plan(
+    action: SessionAction,
+    session: &SessionSnapshot,
+    shown: bool,
+    resume_session: bool,
+) -> Step {
     let id = session.id.clone();
     let stop = || ClientMessage::StopSession {
         session_id: id.clone(),
@@ -783,6 +790,10 @@ pub(crate) fn plan(action: SessionAction, session: &SessionSnapshot, shown: bool
         SessionAction::StopKeepWorktree => vec![stop(), discard()],
         SessionAction::Park => vec![park()],
         SessionAction::RemovePane | SessionAction::RemoveFromSidebar => vec![discard()],
+        SessionAction::ResumeAbandoned if resume_session => vec![ClientMessage::ResumeSession {
+            session_id: id.clone(),
+            request_id: Some(crate::new_request_id()),
+        }],
         SessionAction::ResumeAbandoned => vec![ClientMessage::ResumeAbandoned {
             session_id: id.clone(),
         }],
@@ -898,13 +909,16 @@ impl Duplicates {
     /// `request_id` and returns the request to send to `host`; `None` for a
     /// restart while one of the session is on the way. A restart or resume
     /// keeps the session's "Don't count as busy" and its checkout; a copy
-    /// starts counted, on a fresh branch.
+    /// starts counted, on a fresh branch. To a host that lists
+    /// `resume_session` a restart or resume is one `ResumeSession`, the host
+    /// choosing how; to an older host it is that duplicate.
     pub(crate) fn request(
         &mut self,
         host: &HostKey,
         session_id: &str,
         request_id: String,
         target: DuplicateTarget,
+        resume_session: bool,
     ) -> Option<ClientMessage> {
         let restart = target.is_restart();
         if restart && self.is_pending(host, session_id) {
@@ -918,6 +932,12 @@ impl Duplicates {
                 host: host.clone(),
             },
         );
+        if restart && resume_session {
+            return Some(ClientMessage::ResumeSession {
+                session_id: session_id.to_owned(),
+                request_id: Some(request_id),
+            });
+        }
         Some(ClientMessage::DuplicateSession {
             session_id: session_id.to_owned(),
             request_id: Some(request_id),
@@ -1153,7 +1173,7 @@ mod tests {
     /// Whether a duplicate of `s1` to `target` carries the busy exclusion.
     fn carries_busy_exclusion(target: DuplicateTarget) -> bool {
         let mut dups = Duplicates::default();
-        match dups.request(&HostKey::Local, "s1", "req-1".to_owned(), target) {
+        match dups.request(&HostKey::Local, "s1", "req-1".to_owned(), target, false) {
             Some(ClientMessage::DuplicateSession {
                 carry_busy_excluded,
                 ..
@@ -1166,7 +1186,10 @@ mod tests {
     fn restart_and_resume_carry_the_busy_exclusion() {
         for action in [A::Restart, A::Resume] {
             assert!(
-                matches!(plan(action, &session("stopped"), true), Step::Duplicate),
+                matches!(
+                    plan(action, &session("stopped"), true, false),
+                    Step::Duplicate
+                ),
                 "{action:?} duplicates in the original's place"
             );
         }
@@ -1177,7 +1200,7 @@ mod tests {
     fn restart_request_keeps_the_checkout() {
         let same_checkout = |target: DuplicateTarget| {
             let mut dups = Duplicates::default();
-            match dups.request(&HostKey::Local, "s1", "req-1".to_owned(), target) {
+            match dups.request(&HostKey::Local, "s1", "req-1".to_owned(), target, false) {
                 Some(ClientMessage::DuplicateSession { same_checkout, .. }) => same_checkout,
                 other => panic!("expected a DuplicateSession, got {other:?}"),
             }
@@ -1475,6 +1498,7 @@ mod tests {
             A::StopKeepWorktree,
             &with_worktree(session("idle")),
             true,
+            false,
         ));
         assert!(
             matches!(shown.as_slice(), [stop] if is_stop(stop)),
@@ -1485,13 +1509,14 @@ mod tests {
             A::StopKeepWorktree,
             &with_worktree(session("idle")),
             false,
+            false,
         ));
         assert!(
             matches!(parked.as_slice(), [stop, ClientMessage::ParkSession { session_id }] if is_stop(stop) && session_id == "s1"),
             "{parked:?}"
         );
 
-        let discarded = sent(plan(A::StopKeepWorktree, &session("idle"), false));
+        let discarded = sent(plan(A::StopKeepWorktree, &session("idle"), false, false));
         assert!(
             matches!(discarded.as_slice(), [stop, discard] if is_stop(stop) && is_discard(discard, &[])),
             "{discarded:?}"
@@ -1502,7 +1527,7 @@ mod tests {
     fn actions_worktree_deletes_go_through_the_confirm() {
         let running = with_worktree(session("idle"));
         assert!(matches!(
-            plan(A::StopDeleteWorktree, &running, true),
+            plan(A::StopDeleteWorktree, &running, true, false),
             Step::ConfirmWorktreeDelete
         ));
         let stopped = with_worktree(session("stopped"));
@@ -1512,19 +1537,22 @@ mod tests {
         ] {
             for shown in [true, false] {
                 assert!(
-                    matches!(plan(action, &stopped, shown), Step::ConfirmWorktreeDelete),
+                    matches!(
+                        plan(action, &stopped, shown, false),
+                        Step::ConfirmWorktreeDelete
+                    ),
                     "{action:?} never deletes in one click"
                 );
             }
         }
         for action in [A::RemovePane, A::RemoveFromSidebar] {
-            let msgs = sent(plan(action, &stopped, false));
+            let msgs = sent(plan(action, &stopped, false, false));
             assert!(
                 matches!(msgs.as_slice(), [d] if is_discard(d, &[])),
                 "{msgs:?}"
             );
         }
-        let park = sent(plan(A::Park, &stopped, true));
+        let park = sent(plan(A::Park, &stopped, true, false));
         assert!(
             matches!(park.as_slice(), [ClientMessage::ParkSession { session_id }] if session_id == "s1")
         );
@@ -1532,12 +1560,12 @@ mod tests {
 
     #[test]
     fn actions_abandoned_resume_and_dismiss_use_the_abandoned_messages() {
-        let resume = sent(plan(A::ResumeAbandoned, &abandoned(), true));
+        let resume = sent(plan(A::ResumeAbandoned, &abandoned(), true, false));
         assert!(
             matches!(resume.as_slice(), [ClientMessage::ResumeAbandoned { session_id }] if session_id == "s1"),
             "{resume:?}"
         );
-        let dismiss = sent(plan(A::DismissAbandoned, &abandoned(), true));
+        let dismiss = sent(plan(A::DismissAbandoned, &abandoned(), true, false));
         assert!(
             matches!(dismiss.as_slice(), [ClientMessage::DiscardAbandoned { session_id }] if session_id == "s1"),
             "{dismiss:?}"
@@ -1548,12 +1576,12 @@ mod tests {
     fn actions_rename_restart_and_resume_are_not_plain_sends() {
         let s = session("stopped");
         assert!(matches!(
-            plan(A::Rename, &session("idle"), true),
+            plan(A::Rename, &session("idle"), true, false),
             Step::EditName
         ));
-        assert!(matches!(plan(A::Restart, &s, true), Step::Duplicate));
+        assert!(matches!(plan(A::Restart, &s, true, false), Step::Duplicate));
         assert!(matches!(
-            plan(A::Resume, &inactive(s), false),
+            plan(A::Resume, &inactive(s), false, false),
             Step::Duplicate
         ));
     }
@@ -2091,6 +2119,7 @@ mod tests {
             "s1",
             "req-1".to_owned(),
             DuplicateTarget::NewTab,
+            false,
         );
         assert!(matches!(
             request,
@@ -2124,7 +2153,7 @@ mod tests {
         ]);
         let place = |target: DuplicateTarget| {
             let mut dups = Duplicates::default();
-            dups.request(&HostKey::Local, "s1", "req".to_owned(), target);
+            dups.request(&HostKey::Local, "s1", "req".to_owned(), target, false);
             dups.place("req", HostedSession::local(&named("s2")), &tabs, &[])
                 .expect("placed")
         };
@@ -2176,6 +2205,7 @@ mod tests {
             "s1",
             "req".to_owned(),
             DuplicateTarget::Tab("t2".to_owned()),
+            false,
         );
 
         let placed = dups
@@ -2201,13 +2231,15 @@ mod tests {
             "s1",
             "copy".to_owned(),
             DuplicateTarget::NewTab,
+            false,
         );
         assert!(
             dups.request(
                 &HostKey::Local,
                 "s1",
                 "restart".to_owned(),
-                DuplicateTarget::Restart
+                DuplicateTarget::Restart,
+                false
             )
             .is_some(),
             "a copy on the way does not hold up a restart"
@@ -2218,7 +2250,8 @@ mod tests {
                 &HostKey::Local,
                 "s1",
                 "again".to_owned(),
-                DuplicateTarget::Restart
+                DuplicateTarget::Restart,
+                false
             )
             .is_none()
         );
@@ -2227,7 +2260,8 @@ mod tests {
                 &HostKey::Local,
                 "s1",
                 "copy-2".to_owned(),
-                DuplicateTarget::NewTab
+                DuplicateTarget::NewTab,
+                false
             )
             .is_some(),
             "copies are not held up by the restart"
@@ -2260,6 +2294,7 @@ mod tests {
             "s1",
             "req-1".to_owned(),
             DuplicateTarget::Restart,
+            false,
         );
         assert!(matches!(
             request,
@@ -2316,6 +2351,7 @@ mod tests {
             "s1",
             "req-1".to_owned(),
             DuplicateTarget::Restart,
+            false,
         );
         let tabs = model_with(&[tab("t1", &pane("p1", None))]);
         let placed = dups
@@ -2341,6 +2377,7 @@ mod tests {
             "s1",
             "req-1".to_owned(),
             DuplicateTarget::Restart,
+            false,
         );
         let tabs = model_with(&[tab(
             "t1",
@@ -2375,25 +2412,25 @@ mod tests {
         let restart = || DuplicateTarget::Restart;
         let mut dups = Duplicates::default();
         assert!(
-            dups.request(&HostKey::Local, "s1", "req-1".to_owned(), restart())
+            dups.request(&HostKey::Local, "s1", "req-1".to_owned(), restart(), false)
                 .is_some()
         );
         assert!(dups.is_pending(&HostKey::Local, "s1"));
         assert!(dups.has_request("req-1"));
         assert!(
-            dups.request(&HostKey::Local, "s1", "req-2".to_owned(), restart())
+            dups.request(&HostKey::Local, "s1", "req-2".to_owned(), restart(), false)
                 .is_none(),
             "a second restart of s1 while the first is on the way"
         );
         assert!(
-            dups.request(&HostKey::Local, "s2", "req-3".to_owned(), restart())
+            dups.request(&HostKey::Local, "s2", "req-3".to_owned(), restart(), false)
                 .is_some()
         );
         assert!(!dups.fail("unknown"));
         assert!(dups.fail("req-1"));
         assert!(!dups.is_pending(&HostKey::Local, "s1"));
         assert!(
-            dups.request(&HostKey::Local, "s1", "req-4".to_owned(), restart())
+            dups.request(&HostKey::Local, "s1", "req-4".to_owned(), restart(), false)
                 .is_some()
         );
         assert!(dups.drop_host(&HostKey::Local));

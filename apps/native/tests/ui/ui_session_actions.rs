@@ -245,6 +245,78 @@ fn resume_carries_the_busy_exclusion(cx: &mut TestAppContext) {
     );
 }
 
+/// The harness over `fixture`, This PC's daemon listing `resume_session`;
+/// nothing sent is left unread.
+fn resuming_daemon<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    fixture: &Fixture,
+) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_RESUME_SESSION]);
+    h.load(fixture);
+    h.sent();
+    h
+}
+
+/// A parked `s1` in the sidebar and one tab with an empty pane.
+fn parked_unplaced() -> Fixture {
+    Fixture {
+        sessions: vec![session("s1").worktree("r1").inactive().build()],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    }
+}
+
+#[gpui::test]
+fn resume_sends_resume_session_when_the_daemon_supports_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = resuming_daemon(cx, &dir, &parked_unplaced());
+
+    h.right_click_on("leaf-s1");
+    h.click_on("menu-resume");
+    let sent = h.sent();
+    let id = match sent.as_slice() {
+        [
+            ClientMessage::ResumeSession {
+                session_id,
+                request_id: Some(id),
+            },
+        ] if session_id == "s1" => id.clone(),
+        other => panic!("expected one ResumeSession of s1 with an id, sent {other:?}"),
+    };
+
+    h.send(updated(session("s2").build(), Some(&id)));
+    let placed = h.sent();
+    assert!(
+        matches!(placed.as_slice(), [
+            ClientMessage::CreateTab { initial_session_id: Some(new), .. },
+            discard,
+        ] if new == "s2" && is_discard(discard, "s1", &[])),
+        "the desktop still places the copy and discards the original: sent {placed:?}"
+    );
+}
+
+#[gpui::test]
+fn resume_falls_back_to_duplicate_session_on_an_older_daemon(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &parked_unplaced());
+    h.sent();
+
+    h.right_click_on("leaf-s1");
+    h.click_on("menu-resume");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::DuplicateSession {
+            session_id,
+            request_id: Some(_),
+            carry_busy_excluded: true,
+            same_checkout: true,
+        }] if session_id == "s1"),
+        "a daemon without resume_session gets the duplicate recipe: sent {sent:?}"
+    );
+}
+
 #[gpui::test]
 fn menu_stop_keep_worktree_sends_stop_session(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -661,6 +733,21 @@ fn abandoned_pane_shows_overlay_with_last_prompt(cx: &mut TestAppContext) {
     let sent = h.sent();
     assert!(
         matches!(sent.as_slice(), [ClientMessage::DiscardAbandoned { session_id }] if session_id == "s1"),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn an_abandoned_resume_sends_resume_session_with_a_request_id(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture::single(session("s1").abandoned().build());
+    let mut h = resuming_daemon(cx, &dir, &fixture);
+
+    h.click_on("abandoned-resume-p1");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::ResumeSession { session_id, request_id: Some(_) }]
+            if session_id == "s1"),
         "sent {sent:?}"
     );
 }

@@ -115,6 +115,14 @@ pub const FEATURE_CLIENT_PRESENCE: &str = "client_presence";
 /// the connected daemon lists it.
 pub const FEATURE_TYPED_PROMPT_ANSWERS: &str = "typed_prompt_answers";
 
+/// `Welcome.features` entry: the daemon resumes a session from one
+/// [`ClientMessage::ResumeSession`], choosing by the session's state how. A
+/// client talking to a daemon without it sends the older recipe:
+/// [`ClientMessage::DuplicateSession`] with `carry_busy_excluded` and
+/// `same_checkout` for a parked or stopped session, and
+/// [`ClientMessage::ResumeAbandoned`] for an abandoned one.
+pub const FEATURE_RESUME_SESSION: &str = "resume_session";
+
 /// The most file bytes one [`ClientMessage::UploadFile`] carries, checked by
 /// the client before sending and by the daemon.
 pub const UPLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -4194,8 +4202,10 @@ pub enum ClientMessage {
     /// Clone an existing session: daemon reads its stored [`SpawnConfig`]
     /// and spawns a new session with the same agent, mode, target, model,
     /// permission mode, sandbox, skip-perms flag, and extra env vars. The
-    /// new session gets a freshly generated label and no initial prompt —
-    /// it's a fresh process with the same config, not a continuation.
+    /// new session gets a freshly generated label and no initial prompt.
+    /// A Duplicate is a fresh process with the same config; a Restart or a
+    /// Resume (`same_checkout`) continues the source's agent conversation
+    /// while its transcript exists.
     ///
     /// A duplicate of a *worktree* session lands on a fresh branch the daemon
     /// picks (and refuses any leftover under that name) rather than the
@@ -4221,6 +4231,22 @@ pub enum ClientMessage {
         /// of a parked one, whose source no longer holds the checkout.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         same_checkout: bool,
+    },
+    /// Resume a session that is not running; the daemon picks how by its
+    /// state. A parked or stopped session is rerun as a Restart is (a
+    /// [`ClientMessage::DuplicateSession`] with `carry_busy_excluded` and
+    /// `same_checkout`), and the client still places the new session and
+    /// discards the original; an abandoned one is resumed in place as
+    /// [`ClientMessage::ResumeAbandoned`] does. Success is the new session's
+    /// [`DaemonMessage::SessionUpdated`] echoing `request_id`; a refusal is a
+    /// [`DaemonMessage::Error`] or [`DaemonMessage::ActionFailed`] carrying
+    /// it. Sent only to a daemon listing [`FEATURE_RESUME_SESSION`].
+    ResumeSession {
+        session_id: String,
+        /// Echoed on the requester's [`DaemonMessage::SessionUpdated`] for
+        /// the new session and on a refusal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Fetch the persisted [`SpawnConfig`] for a session so the spawn
     /// dialog can pre-fill all fields with the source's values. Replied
@@ -12652,6 +12678,39 @@ mod tests {
             ),
             "{decoded:?}"
         );
+    }
+
+    #[test]
+    fn resume_session_round_trips() {
+        let old: ClientMessage =
+            serde_json::from_str(r#"{"type":"resume_session","session_id":"s1"}"#)
+                .expect("a message without request_id decodes");
+        assert!(
+            matches!(
+                &old,
+                ClientMessage::ResumeSession { session_id, request_id: None } if session_id == "s1"
+            ),
+            "{old:?}"
+        );
+        let msg = ClientMessage::ResumeSession {
+            session_id: "s1".to_string(),
+            request_id: Some("req-3".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"resume_session","session_id":"s1","request_id":"req-3"}"#
+        );
+        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(
+                &decoded,
+                ClientMessage::ResumeSession { session_id, request_id: Some(id) }
+                    if session_id == "s1" && id == "req-3"
+            ),
+            "{decoded:?}"
+        );
+        assert_eq!(FEATURE_RESUME_SESSION, "resume_session");
     }
 
     #[test]

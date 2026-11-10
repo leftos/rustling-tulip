@@ -95,6 +95,11 @@ export interface Connection {
    * presented none lands on.
    */
   paired(): boolean;
+  /**
+   * Whether the connection is ready and the host listed `feature` in its
+   * `Welcome`; false in every other state.
+   */
+  supports(feature: string): boolean;
   /** The state the connection is in right now. */
   status(): ConnectionStateName;
 }
@@ -411,6 +416,10 @@ export function createConnection(deps: ConnectionDeps): Connection {
     return state.name === "ready" && state.unpaired !== true;
   }
 
+  function supports(feature: string): boolean {
+    return state.name === "ready" && state.features.has(feature);
+  }
+
   return {
     start,
     stop,
@@ -422,6 +431,7 @@ export function createConnection(deps: ConnectionDeps): Connection {
     forget,
     pairingState: () => pairing,
     paired,
+    supports,
     status: () => state.name,
   };
 }

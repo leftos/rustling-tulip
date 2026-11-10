@@ -964,6 +964,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::GetFileSnapshot { .. }) => git::handle(hub, m, ctx).await?,
         m @ (ClientMessage::ListSessions
         | ClientMessage::DuplicateSession { .. }
+        | ClientMessage::ResumeSession { .. }
         | ClientMessage::GetSpawnConfig { .. }
         | ClientMessage::RenameSession { .. }
         | ClientMessage::SetSessionBusyExcluded { .. }

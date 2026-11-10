@@ -9,6 +9,13 @@ export interface PendingRequest {
   readonly requestId: string | null;
   readonly sessionId: string;
   readonly action: ActionKind;
+  /**
+   * A resume whose landing leaves the original for the phone to discard: a
+   * parked or stopped session's rerun. An abandoned session's resume
+   * replaces it on the host, so there is nothing to discard. Absent on
+   * answers.
+   */
+  readonly discardsOriginal?: boolean;
 }
 
 /**
@@ -99,17 +106,33 @@ export function disarm(state: HomeActions): HomeActions {
  * is never rerun, a running one has nothing to resume, and a tap while a
  * resume is still pending sends nothing. An abandoned session resumes from
  * the config the daemon captured; a stopped or parked one reruns in its own
- * checkout, keeping its "don't count as busy".
+ * checkout, keeping its "don't count as busy". A host listing
+ * `resume_session` gets one `ResumeSession` for either and picks how; an
+ * older host gets `ResumeAbandoned` or the duplicate recipe.
  */
 export function resume(
   state: HomeActions,
   newRequestId: NewRequestId,
   session: SessionSnapshot,
+  supportsResumeSession: boolean,
 ): ActionResult {
   if (session.mode === "headless" || isPending(state, session.id, "resume")) {
     return { message: null, state };
   }
-  if (session.is_abandoned === true) {
+  const abandoned = session.is_abandoned === true;
+  if (supportsResumeSession && (abandoned || isStopped(session))) {
+    const requestId = newRequestId();
+    return {
+      message: { type: "resume_session", session_id: session.id, request_id: requestId },
+      state: withPending(clearError(state, session.id), {
+        requestId,
+        sessionId: session.id,
+        action: "resume",
+        discardsOriginal: !abandoned,
+      }),
+    };
+  }
+  if (abandoned) {
     // `ResumeAbandoned` carries no request id, so a failure naming none cannot
     // be matched to this session; the record clears on the session's next
     // update or on `reset`.
@@ -119,6 +142,7 @@ export function resume(
         requestId: null,
         sessionId: session.id,
         action: "resume",
+        discardsOriginal: false,
       }),
     };
   }
@@ -138,6 +162,7 @@ export function resume(
       requestId,
       sessionId: session.id,
       action: "resume",
+      discardsOriginal: true,
     }),
   };
 }
@@ -198,7 +223,7 @@ function onSessionUpdated(
   const done = requestId === null ? state : forgetRequest(state, requestId);
   const idle = forgetSessionRequests(done, session.id);
   const discardOriginal =
-    landed?.action === "resume" && landed.requestId !== null
+    landed?.action === "resume" && landed.discardsOriginal === true
       ? [{ type: "discard_session" as const, session_id: landed.sessionId, cleanup: [] }]
       : [];
   return { state: clearError(idle, session.id), effects: discardOriginal };
