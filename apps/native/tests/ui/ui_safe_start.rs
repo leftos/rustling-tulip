@@ -15,12 +15,13 @@ use gpui::TestAppContext;
 use protocol::{ClientMessage, DaemonMessage, GridNode, SplitDirection, TabEntry};
 use rustling_tulip_native::start_guard::{
     GUARD_FILE, LAYOUT_COPY_PREFIX, PROMPT_TITLE, STABLE_AFTER, STARTED_WITHOUT_TITLE, StartMode,
-    UI_RESET_TITLE, is_stable, record_panic, stable_without_tabs,
+    UI_RESET_TITLE, begin, is_stable, record_panic, stable_without_tabs,
 };
 use rustling_tulip_native::target::Target;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::Duration;
-use support::{Fixture, Harness, REMOTE, TestDir, pane, session, tab};
+use support::{Fixture, Harness, REMOTE, TestDir, UpdaterRecorder, pane, session, tab};
 
 fn kind_tab(id: &str, kind: &str) -> TabEntry {
     serde_json::from_value(json!({
@@ -567,8 +568,9 @@ fn the_stable_window_starts_at_the_choice(cx: &mut TestAppContext) {
 
     h.advance(STABLE_AFTER + Duration::from_secs(1));
 
-    assert!(
-        !guard.exists(),
+    assert_eq!(
+        saved_guard(&guard),
+        stable_guard(),
         "the start is stable once its window passed"
     );
     assert!(is_stable());
@@ -721,7 +723,128 @@ fn the_start_is_stable_after_the_window(cx: &mut TestAppContext) {
 
     h.advance(STABLE_AFTER);
 
-    assert!(!guard.exists(), "gone once the window has passed");
+    assert_eq!(
+        saved_guard(&guard),
+        stable_guard(),
+        "marked stable once the window has passed"
+    );
+}
+
+fn saved_guard(guard: &std::path::Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(guard).expect("the guard stays"))
+        .expect("valid JSON")
+}
+
+/// The guard of a run of this process that reached stable.
+fn stable_guard() -> Value {
+    json!({
+        "failed_starts": 0,
+        "last_panic": null,
+        "ui_set_aside": false,
+        "run": { "state": "stable", "pid": std::process::id() },
+    })
+}
+
+/// One working session in one tab, so a close asks what to do with it.
+fn working_session() -> Fixture {
+    Fixture {
+        sessions: vec![session("s1").in_repo("r1").status("working").build()],
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+        ..Fixture::default()
+    }
+}
+
+#[gpui::test]
+fn a_quit_through_the_exit_dialog_clears_the_run_marker(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let guard = dir.path().join(GUARD_FILE);
+    assert_eq!(begin(dir.path()), StartMode::Normal);
+    assert!(guard.exists(), "the start marked its run");
+    let mut h = Harness::with(cx, &dir, &working_session());
+    h.sent();
+    let _ = h.cx.simulate_close();
+    h.cx.run_until_parked();
+    assert!(h.root(|root, _| root.exit_dialog_open()), "the close asks");
+
+    h.click_on("exit-keep-running");
+
+    assert_eq!(h.quit_requests(), 1);
+    assert!(!guard.exists(), "a clean quit leaves nothing to ask about");
+}
+
+#[gpui::test]
+fn restart_to_update_clears_the_run_marker(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let guard = dir.path().join(GUARD_FILE);
+    let installer = dir.path().join("rustling-tulip-0.99.0-setup.exe");
+    std::fs::write(&installer, b"stand-in installer").expect("write the stand-in installer");
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.offer("0.99.0", &installer);
+    assert_eq!(begin(dir.path()), StartMode::Normal);
+    let mut h = Harness::open_with_updater(cx, &dir, None, Arc::clone(&updater));
+    h.load(&working_session());
+    h.answer_scrollback("s1", b"");
+    h.cx.run_until_parked();
+
+    h.click_on("footer-update");
+
+    assert_eq!(updater.installs(), [installer]);
+    assert_eq!(h.quit_requests(), 1, "the client quits");
+    assert!(!guard.exists(), "an update's quit is a clean end");
+}
+
+#[gpui::test]
+fn quitting_with_the_prompt_up_keeps_the_run_marker(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let guard = seed_guard(&dir);
+    let mode = begin(dir.path());
+    assert_eq!(mode, StartMode::Ask);
+    let mut h = Harness::open_in_mode(cx, &dir, mode);
+    h.send(DaemonMessage::Tabs { tabs: two_tabs() });
+    assert!(prompt_open(&mut h));
+
+    quit(&mut h);
+
+    assert_eq!(h.quit_requests(), 1, "the close quits at once");
+    assert_eq!(
+        saved_guard(&guard),
+        json!({
+            "failed_starts": 2,
+            "last_panic": "x",
+            "ui_set_aside": false,
+            "run": { "state": "asking", "pid": std::process::id() },
+        }),
+        "the next start asks again, counting nothing"
+    );
+}
+
+#[gpui::test]
+fn a_start_after_a_stable_run_was_killed_asks(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let guard = dir.path().join(GUARD_FILE);
+    std::fs::write(
+        &guard,
+        json!({
+            "failed_starts": 0,
+            "last_panic": null,
+            "ui_set_aside": false,
+            "run": { "state": "stable", "pid": u32::MAX },
+        })
+        .to_string(),
+    )
+    .expect("seed the guard");
+
+    let mode = begin(dir.path());
+    assert_eq!(mode, StartMode::Ask);
+    let mut h = Harness::open_in_mode(cx, &dir, mode);
+    h.send(DaemonMessage::Tabs { tabs: two_tabs() });
+
+    assert!(prompt_open(&mut h), "the start asks about the tabs");
+    assert_eq!(
+        saved_count(&guard),
+        json!(0),
+        "a stable run's kill counts nothing"
+    );
 }
 
 fn ratio_split(ratio: f32, first: GridNode, second: GridNode) -> GridNode {

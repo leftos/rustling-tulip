@@ -139,6 +139,8 @@ mod scrollback_load;
 mod scrollbar;
 mod section;
 mod session_actions;
+#[cfg(windows)]
+mod session_end;
 mod session_menu;
 mod settings_search;
 mod settings_view;
@@ -544,6 +546,8 @@ pub fn open_main_window(
             if offscreen {
                 offscreen::show_cloaked(window, WINDOW_SIZE);
             }
+            #[cfg(windows)]
+            session_end::install(window);
             let root = cx.new(|cx| RootView::new(wanted_session, start_mode, window, cx));
             if drive {
                 start_driver(window, &root, cx);
@@ -553,6 +557,7 @@ pub fn open_main_window(
     );
     if let Err(err) = opened {
         tracing::error!("opening window: {err:#}");
+        start_guard::note_window_failed();
         cx.quit();
         return;
     }

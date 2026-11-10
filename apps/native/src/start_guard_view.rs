@@ -41,15 +41,17 @@ pub(crate) fn drop_restored_views(ui: &mut UiState) {
     ui.dashboard.view = defaults.dashboard.view;
 }
 
-/// `quit`, first forgetting the failed starts in `dir`: a clean quit means the
-/// start was good. A safe start that has not acted yet keeps its count, since
-/// the next start still has to carry it out.
+/// `quit`, first forgetting the failed starts in `dir` and clearing the run's
+/// mark: a clean quit means the start was good, and nothing crashed. A safe
+/// start that has not acted yet keeps its count and marks the run as asking,
+/// since the next start still has to carry it out.
 pub(crate) fn stable_on_quit(quit: QuitFn, dir: Option<PathBuf>) -> QuitFn {
     Box::new(move |cx: &mut App| {
-        if let Some(dir) = &dir
-            && !start_guard::safe_start_pending()
-        {
-            start_guard::mark_stable(dir);
+        if let Some(dir) = &dir {
+            if !start_guard::safe_start_pending() {
+                start_guard::mark_stable(dir);
+            }
+            start_guard::mark_clean_end(dir);
         }
         quit(cx);
     })

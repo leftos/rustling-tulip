@@ -141,19 +141,32 @@ fn install_panic_hook(config: Option<PathBuf>) {
 }
 
 /// Counts a run with no tab list from its daemon stable after its own window,
-/// so a panic hours in is not read as a failed start. The thread holds no lock
-/// and dies with the process.
-fn spawn_no_tabs_timer() {
-    let wait = start_guard::no_tabs_stable_after(offscreen::requested());
-    match std::thread::Builder::new()
-        .name("start-guard-no-tabs".to_owned())
-        .spawn(move || {
-            std::thread::sleep(wait);
-            start_guard::stable_without_tabs();
-        }) {
-        Ok(_) => {}
-        Err(err) => tracing::warn!("starting the no-tabs timer: {err}"),
-    }
+/// so a panic hours in is not read as a failed start, and marks it stable in
+/// the start guard in `dir`, so a kill from then on counts nothing. The timer
+/// runs on the app's main thread, where the guard's other writes happen.
+fn start_no_tabs_timer(dir: Option<PathBuf>, cx: &mut App) {
+    let timer = cx
+        .background_executor()
+        .timer(start_guard::no_tabs_stable_after(offscreen::requested()));
+    cx.spawn(async move |_| {
+        timer.await;
+        match &dir {
+            Some(dir) => start_guard::mark_stable_without_tabs(dir),
+            None => start_guard::stable_without_tabs(),
+        }
+    })
+    .detach();
+}
+
+/// Clears the run's mark in the start guard in `dir` when the app quits by a
+/// way that skips the in-app quit, such as Cmd+Q on macOS; a safe start still
+/// waiting on its prompt marks the run as asking instead.
+fn clear_run_mark_on_quit(dir: PathBuf, cx: &mut App) {
+    cx.on_app_quit(move |_| {
+        start_guard::mark_clean_end(&dir);
+        async {}
+    })
+    .detach();
 }
 
 /// Splits `--updated-from <version>`, which the installer's relaunch adds,
@@ -211,8 +224,8 @@ fn main() {
         .inspect_err(|err| tracing::warn!("no config dir for the start guard: {err:#}"))
         .ok();
     let start_mode = config.as_deref().map_or_else(StartMode::default, open_mode);
+    let guard_dir = config.clone();
     install_panic_hook(config);
-    spawn_no_tabs_timer();
     // Bring the login launch up to date: an entry already naming this install's
     // daemon is rewritten in its current `--detach` form. An entry naming any
     // other path, or none at all, is left alone. The cloaked smoke window
@@ -239,6 +252,10 @@ fn main() {
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
+            if let Some(dir) = guard_dir.clone() {
+                clear_run_mark_on_quit(dir, cx);
+            }
+            start_no_tabs_timer(guard_dir, cx);
             rustling_tulip_native::open_main_window(wanted_session, drive, start_mode, cx);
         });
 }

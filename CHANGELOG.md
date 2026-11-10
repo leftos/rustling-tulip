@@ -42,7 +42,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Changed
 
-- After a start that crashed, the client asks before opening anything whether to open your saved tabs or start without them, instead of closing them after two crashes.
+- After the client crashes, is ended from Task Manager or loses power, the next start asks whether to open your saved tabs or start without them.
 - The Trusted checkbox is gone: choose Bypass permissions instead, and Launch last relaunches it without asking you to confirm; saved trusted launches carry over.
 
 ## v0.11.2-alpha
