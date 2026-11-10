@@ -32,9 +32,11 @@ import {
 } from "./prompt-sheet";
 import type { ClientMessage, DaemonMessage } from "./protocol";
 import type { QuickReplyGroup } from "./quick";
+import { planRows, syncChildren, type DrawnRow } from "./row-reuse";
 import {
   OFFLINE_NOT_SENT,
   samePart,
+  sameRow,
   sameRows,
   sameScreen,
   sessionLook,
@@ -105,6 +107,11 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   let drawn: SessionScreen | null = null;
   let drawnRows: readonly ChatRow[] | null = null;
   let drawnHidden: string | null = null;
+  /** The nodes the chat's rows are drawn with, by row id, reused while a row holds. */
+  let drawnChat = new Map<string, DrawnRow<ChatRow, HTMLElement>>();
+  /** The hidden-rows line's node, kept until its text changes. */
+  let hiddenNode: HTMLElement | null = null;
+  let hiddenNodeText: string | null = null;
   /** The chat's position when it last hid, applied once it shows again. */
   let keptScroll: ChatScroll | null = null;
   let drawnKeys: readonly KeyTrayEntry[] | undefined;
@@ -305,19 +312,26 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     syncTerminal(screen);
   }
 
-  /** Rebuilds the chat rows, keeping the newest row in view only when it was. */
+  /**
+   * Draws the chat's rows, rebuilding only the ones whose row changed so an
+   * earlier answer keeps its own scroll and selection, and keeps the newest row
+   * in view only when it was.
+   */
   function paintChat(screen: SessionScreen): void {
     const before = measureScroll(chatEl);
-    const nodes: HTMLElement[] = [];
-    if (screen.hiddenLine !== null) {
-      const line = element("p", "session-hidden");
-      line.textContent = screen.hiddenLine;
-      nodes.push(line);
+    if (hiddenNodeText !== screen.hiddenLine) {
+      hiddenNode = null;
+      hiddenNodeText = screen.hiddenLine;
+      if (screen.hiddenLine !== null) {
+        const line = element("p", "session-hidden");
+        line.textContent = screen.hiddenLine;
+        hiddenNode = line;
+      }
     }
-    for (const row of screen.rows) {
-      nodes.push(rowNode(row));
-    }
-    chatEl.replaceChildren(...nodes);
+    const plan = planRows(drawnChat, screen.rows, sameRow, rowNode);
+    drawnChat = new Map(plan.map((entry) => [entry.row.id, entry]));
+    const nodes = plan.map((entry) => entry.node);
+    syncChildren(chatEl, hiddenNode === null ? nodes : [hiddenNode, ...nodes]);
     if (!chatEl.hidden) {
       const target = scrollAfterPaint(keptScroll, before, chatEl.scrollHeight);
       if (target !== null) {

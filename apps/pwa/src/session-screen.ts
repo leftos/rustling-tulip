@@ -316,6 +316,11 @@ export function sameRows(
   return sameValue(left, right);
 }
 
+/** Whether two rows draw the same thing, so the node drawn for one can be reused. */
+export function sameRow(left: ChatRow, right: ChatRow): boolean {
+  return sameValue(left, right);
+}
+
 /** Whether two of the screen's parts are equal, so that part need not be rebuilt. */
 export function samePart(left: unknown, right: unknown): boolean {
   return sameValue(left, right);

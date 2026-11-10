@@ -23,6 +23,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Keys typed into the phone's terminal while it can't send now show Offline on the session bar, as a chat send does.
 - A phone app put away just as its host refused its pairing waits until it is opened again before it reconnects.
 - Switching the phone's session screen to Terminal and back keeps the chat where you had scrolled it, instead of jumping to the newest row.
+- While a reply streams on the phone, earlier answers keep their sideways scroll and any text you selected in them.
 - A session left open in the phone's terminal no longer wakes the phone four times a second once it has loaded.
 - The phone's Notifications switch no longer spins forever when the app's service worker never started; it says to reopen the app.
 - The phone app opened offline right after installing it now loads styled and working, instead of as a bare page.
