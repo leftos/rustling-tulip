@@ -2554,6 +2554,12 @@ impl SidebarModel {
             })
     }
 
+    /// Drops what restores views (the active tab, pop-outs, session views and
+    /// the Dashboard's view), keeping every other setting.
+    pub(crate) fn drop_restored_views(&mut self) {
+        crate::start_guard_view::drop_restored_views(&mut self.ui);
+    }
+
     /// Hands over the saved pop-outs, leaving none saved.
     pub fn take_saved_popouts(&mut self) -> Vec<SavedPopout> {
         std::mem::take(&mut self.ui.popouts)

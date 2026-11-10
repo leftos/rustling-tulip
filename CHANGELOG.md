@@ -18,7 +18,6 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The What's new window shows a scrollbar when its notes run longer than it can show.
 - A damaged settings file no longer copies its contents, which could include a secret, into the log.
 - A click that focuses a pane or the window, or dismisses the jump palette, no longer reaches the program, so it can't answer a question.
-- After opening with your tabs closed, a reconnect no longer brings them back, and quitting before that happens no longer skips it next time.
 - A settings file that isn't valid text keeps a copy instead of being overwritten, and a failed reset of your settings is tried again.
 - A tap in the phone's terminal no longer drops a session out of Needs you while its question is still up.
 - Keys typed into the phone's terminal while it can't send now show Offline on the session bar, as a chat send does.
@@ -40,6 +39,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Changed
 
+- After a start that crashed, the client asks before opening anything whether to open your saved tabs or start without them, instead of closing them after two crashes.
 - The Trusted checkbox is gone: choose Bypass permissions instead, and Launch last relaunches it without asking you to confirm; saved trusted launches carry over.
 
 ## v0.11.1-alpha

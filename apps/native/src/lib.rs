@@ -1204,8 +1204,9 @@ pub struct RootView {
     /// The mode a safe start still has to act on, until This PC's first tab
     /// list or layout question comes.
     pending_safe_start: start_guard::StartMode,
-    /// The notice a safe start raised, until it is dismissed.
-    start_notice: Option<start_guard::StartNotice>,
+    /// The prompt a start after a crashed one raised, and the tab list it
+    /// holds undrawn, until the user chooses.
+    start_notice: Option<start_guard_view::HeldStart>,
     start_notice_focus: FocusHandle,
     stable_timer_started: bool,
     /// The tabs a safe start closed, until the daemon has no record of them.
@@ -1535,9 +1536,6 @@ impl RootView {
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
         start_guard::set_safe_start_pending(start_mode != start_guard::StartMode::Normal);
-        if start_mode != start_guard::StartMode::Normal {
-            start_guard_view::drop_restored_views(&mut ui);
-        }
         if ui.general.detailed_logging {
             let outcome = crate::logging::set_detailed(true);
             crate::logging::log_outcome(outcome, true);

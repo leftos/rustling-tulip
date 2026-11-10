@@ -37,7 +37,8 @@
 //! with Allow and Deny, and a Finished card, as
 //! the app's own toasts draw them. `open-shell` shows the Open a shell
 //! dialog with a folder path longer than its field, the caret at its end.
-//! `safe-start` shows the notice a start after two crashed ones raises.
+//! `safe-start` shows the prompt a start after a crashed one raises, asking
+//! whether to open the two tabs it holds or start without them.
 //! `panes-accent` shows a 2x2 grid of four panes with the Theme pane
 //! focused, and `panes-accent-chosen` the same grid with the Periwinkle
 //! pane focused.
@@ -397,7 +398,7 @@ impl View {
             // The Gates panel over the fake daemon's gate state.
             Self::Gates => root.shown_activity() == Activity::Gates,
             Self::OpenShell => root.shell_dialog_open(),
-            Self::SafeStart => root.start_notice_open(),
+            Self::SafeStart => root.start_prompt_open(),
             Self::Main | Self::MainCompact | Self::MainNarrow => {
                 !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
             }
@@ -974,7 +975,7 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
     });
     RootDeps {
         start_mode: if view == View::SafeStart {
-            rustling_tulip_native::start_guard::StartMode::CloseTabs
+            rustling_tulip_native::start_guard::StartMode::Ask
         } else {
             rustling_tulip_native::start_guard::StartMode::Normal
         },

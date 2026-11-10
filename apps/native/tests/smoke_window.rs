@@ -1463,11 +1463,7 @@ mod driven {
 
     #[test]
     #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
-    #[expect(
-        clippy::panic,
-        reason = "a client that exits now fails the spec at once"
-    )]
-    fn two_panics_at_start_close_the_tabs_on_the_next_start() {
+    fn two_panics_at_start_ask_about_the_tabs_on_the_next_start() {
         let mut daemon = LiveDaemon::start("smoke-safe-start");
         let (client_id, tab_id) = seed_dashboard_tab(&mut daemon);
         let config = daemon.config_dir();
@@ -1501,13 +1497,10 @@ mod driven {
         let mut retried = launch_driven_client(&daemon);
         let mut retried_driver = Driver::connect(retried.0.id());
         retried_driver.ok("ping", &json!({}));
-        retried_driver.wait(
-            &json!({"state": "tabs.0.id", "equals": tab_id.as_str()}),
-            "the retried start shows the saved tab",
-        );
+        wait_start_prompt(&mut retried_driver, &mut retried);
         assert!(
             !layout_is_empty(&config, &client_id),
-            "the retried start keeps the tab"
+            "the retried start keeps the tab while it asks"
         );
         assert!(
             layout_copies(&config).is_empty(),
@@ -1527,20 +1520,53 @@ mod driven {
         assert_eq!(guard["failed_starts"], json!(2), "{guard}");
 
         let mut third = launch_driven_client(&daemon);
+        let mut third_driver = Driver::connect(third.0.id());
+        third_driver.ok("ping", &json!({}));
+        wait_start_prompt(&mut third_driver, &mut third);
+        assert!(
+            !layout_is_empty(&config, &client_id),
+            "nothing is closed before the user chooses"
+        );
+        assert!(
+            std::fs::read_to_string(config.join("state.json"))
+                .expect("read state.json")
+                .contains(&tab_id),
+            "the saved layout still holds the seeded tab"
+        );
+        assert!(
+            layout_copies(&config).is_empty(),
+            "nothing is set aside before the user chooses"
+        );
+    }
+
+    /// Waits until the start-after-a-crash prompt is painted, then checks
+    /// that no tab draws behind it.
+    #[expect(
+        clippy::panic,
+        reason = "a client that exits now fails the spec at once"
+    )]
+    fn wait_start_prompt(driver: &mut Driver, client: &mut Client) {
         let deadline = Instant::now() + SAFE_START_TIMEOUT;
-        while !layout_is_empty(&config, &client_id) {
-            if let Some(status) = third.0.try_wait().expect("poll the client") {
-                panic!("the client exited during the safe start: {status}");
+        loop {
+            let found = driver.ok("find", &json!({"prefix": "start-prompt-without"}));
+            let shown = found.as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["name"] == json!("start-prompt-without"))
+            });
+            if shown {
+                break;
+            }
+            if let Some(status) = client.0.try_wait().expect("poll the client") {
+                panic!("the client exited before it asked about the tabs: {status}");
             }
             assert!(
                 Instant::now() < deadline,
-                "hung: the layout still holds tabs {SAFE_START_TIMEOUT:?} into the safe start"
+                "hung: no prompt {SAFE_START_TIMEOUT:?} into the start"
             );
             std::thread::sleep(Duration::from_millis(100));
         }
-        let copies = layout_copies(&config);
-        assert_eq!(copies.len(), 1, "{copies:?}");
-        assert!(copies[0].contains(&tab_id), "{copies:?}");
+        let state = driver.ok("state", &json!({}));
+        assert_eq!(state["tabs"], json!([]), "no tab draws behind the prompt");
     }
 
     fn number(value: &Value) -> f64 {

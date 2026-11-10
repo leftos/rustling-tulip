@@ -55,10 +55,16 @@ pub fn no_tabs_stable_after(cloaked: bool) -> Duration {
 pub const UI_COPY_PREFIX: &str = "native-ui.json.corrupt-";
 /// The prefix of a kept copy of the tab list a safe start closed.
 pub const LAYOUT_COPY_PREFIX: &str = "layout-set-aside-";
-/// The safe-start notice's title.
-pub const NOTICE_TITLE: &str = "Opened with your tabs closed";
-/// The safe-start notice's one button.
-pub const NOTICE_BUTTON: &str = "OK";
+/// The title of the prompt a start after a crashed one raises.
+pub const PROMPT_TITLE: &str = "The last start crashed";
+/// The prompt's button that opens the tabs as they were.
+pub const PROMPT_OPEN: &str = "Open tabs";
+/// The prompt's button that closes the tabs, keeping a copy.
+pub const PROMPT_WITHOUT: &str = "Start without tabs";
+/// The toast's title once a start went on without the tabs.
+pub const STARTED_WITHOUT_TITLE: &str = "Started without your tabs";
+/// The toast's title when a start with no tabs to ask about reset the UI.
+pub const UI_RESET_TITLE: &str = "Window and sidebar settings were reset";
 
 /// How many copies of one prefix are kept; the older ones go.
 const KEPT_COPIES: usize = 3;
@@ -77,38 +83,43 @@ static TABS_SEEN: AtomicBool = AtomicBool::new(false);
 static SAFE_START_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// How a start opens, from how many starts before it panicked: normally after
-/// one failed start at most, with the saved tabs closed after two, and with
-/// `native-ui.json` set aside after three or more.
+/// none, asking whether to open the saved tabs after one or more, and with
+/// `native-ui.json` set aside too after three or more.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum StartMode {
     /// Open the saved layout as it is.
     #[default]
     Normal,
-    /// Close the saved tabs, keeping a copy of the layout first.
-    CloseTabs,
+    /// Ask whether to open the saved tabs or start without them.
+    Ask,
     /// Also sets `native-ui.json` aside; `kept_ui` is the copy made of it.
-    CloseTabsAndResetUi { kept_ui: Option<PathBuf> },
+    AskAndResetUi { kept_ui: Option<PathBuf> },
 }
 
-/// What the app says on a safe start, once This PC's tab list has come.
+impl StartMode {
+    /// The copy this start made of `native-ui.json`, if it made one.
+    #[must_use]
+    pub fn kept_ui(&self) -> Option<&Path> {
+        match self {
+            Self::AskAndResetUi { kept_ui } => kept_ui.as_deref(),
+            Self::Normal | Self::Ask => None,
+        }
+    }
+}
+
+/// What the prompt says on a start after a crashed one, once This PC's tab
+/// list has come.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StartNotice {
-    layout_copy: Option<PathBuf>,
+pub struct StartPrompt {
     kept_ui: Option<PathBuf>,
 }
 
-impl StartNotice {
-    /// The notice for a start in `mode`, whose closed tabs were saved to
-    /// `layout_copy`.
+impl StartPrompt {
+    /// The prompt for a start in `mode`.
     #[must_use]
-    pub fn new(mode: &StartMode, layout_copy: Option<PathBuf>) -> Self {
-        let kept_ui = match mode {
-            StartMode::CloseTabsAndResetUi { kept_ui } => kept_ui.clone(),
-            StartMode::Normal | StartMode::CloseTabs => None,
-        };
+    pub fn new(mode: &StartMode) -> Self {
         Self {
-            layout_copy,
-            kept_ui,
+            kept_ui: mode.kept_ui().map(Path::to_path_buf),
         }
     }
 
@@ -116,16 +127,10 @@ impl StartNotice {
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![
-            "The last start crashed, so Rustling Tulip did not restore your tabs. Your sessions \
-             are still running: pick one in the sidebar to show it in a pane."
+            "Open your tabs as they were, or start without them? Your sessions keep running \
+             either way, and starting without them keeps a copy of the layout."
                 .to_owned(),
         ];
-        if let Some(path) = &self.layout_copy {
-            lines.push(format!(
-                "A copy of the old layout is in {}.",
-                path.display()
-            ));
-        }
         if let Some(path) = &self.kept_ui {
             lines.push(format!(
                 "Your window and sidebar settings went back to their defaults too. A copy is in \
@@ -135,6 +140,22 @@ impl StartNotice {
         }
         lines
     }
+}
+
+/// The detail of the toast a start without the tabs shows, naming `copy`.
+#[must_use]
+pub fn started_without_detail(copy: &Path) -> String {
+    format!("A copy of the layout is in {}.", copy.display())
+}
+
+/// The detail of the toast a start with no tabs to ask about shows when it
+/// set `native-ui.json` aside to `copy`.
+#[must_use]
+pub fn ui_reset_detail(copy: &Path) -> String {
+    format!(
+        "The last starts crashed. A copy of your settings is in {}.",
+        copy.display()
+    )
 }
 
 /// The ids of the tabs a safe start closed, so they are never drawn again
@@ -218,19 +239,19 @@ fn write_guard(dir: &Path, guard: &Guard) {
 }
 
 /// Reads the guard in `dir`, writes back that this start is under way, and
-/// says how to open: normally after one failed start at most, with the tabs
-/// closed after two, and with `native-ui.json` set aside after three. A later
-/// start leaves the file alone, since the safe start has saved defaults there
-/// by then.
+/// says how to open: normally after no failed start, asking about the tabs
+/// after one or two, and with `native-ui.json` set aside too after three. A
+/// later start leaves the file alone, since the safe start has saved defaults
+/// there by then.
 #[must_use]
 pub fn begin(dir: &Path) -> StartMode {
     let guard = read_guard(dir);
     write_guard(dir, &guard);
     match guard.failed_starts {
-        0 | 1 => StartMode::Normal,
-        2 => StartMode::CloseTabs,
+        0 => StartMode::Normal,
+        1 | 2 => StartMode::Ask,
         3 => reset_ui_once(dir, guard),
-        _ => StartMode::CloseTabsAndResetUi { kept_ui: None },
+        _ => StartMode::AskAndResetUi { kept_ui: None },
     }
 }
 
@@ -238,7 +259,7 @@ pub fn begin(dir: &Path) -> StartMode {
 /// no later start sets the defaults it saved aside again.
 fn reset_ui_once(dir: &Path, guard: Guard) -> StartMode {
     if guard.ui_set_aside {
-        return StartMode::CloseTabsAndResetUi { kept_ui: None };
+        return StartMode::AskAndResetUi { kept_ui: None };
     }
     let kept_ui = set_aside_ui_file(dir);
     // A set-aside that failed leaves the file in place, and marking the reset
@@ -252,7 +273,7 @@ fn reset_ui_once(dir: &Path, guard: Guard) -> StartMode {
             },
         );
     }
-    StartMode::CloseTabsAndResetUi { kept_ui }
+    StartMode::AskAndResetUi { kept_ui }
 }
 
 /// Moves `native-ui.json` in `dir` aside, returning its copy; a file that is
@@ -357,12 +378,10 @@ pub fn claim_panic_box() -> bool {
 /// What the next start does after a panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NextStart {
-    /// Open the saved layout as it is.
-    OpensNormally,
-    /// Open with the saved tabs closed.
-    ClosesTabs,
-    /// Open with the saved tabs closed and `native-ui.json` set aside.
-    ClosesTabsAndResetsUi,
+    /// Ask whether to open the saved tabs.
+    AsksAboutTabs,
+    /// Ask about the saved tabs, with `native-ui.json` set aside.
+    AsksAndResetsUi,
     /// The panic changes nothing about the next start.
     Unaffected,
 }
@@ -375,9 +394,8 @@ pub fn next_start_after(during_start: bool, failed_starts: u32) -> NextStart {
         return NextStart::Unaffected;
     }
     match failed_starts {
-        0 | 1 => NextStart::OpensNormally,
-        3 => NextStart::ClosesTabsAndResetsUi,
-        _ => NextStart::ClosesTabs,
+        3 => NextStart::AsksAndResetsUi,
+        _ => NextStart::AsksAboutTabs,
     }
 }
 
@@ -387,19 +405,15 @@ pub fn panic_text(message: &str, next: NextStart, log_path: &Path) -> String {
     let message: String = message.chars().take(PANIC_MESSAGE_CAP).collect();
     let log = log_path.display();
     match next {
-        NextStart::OpensNormally => format!(
-            "Rustling Tulip crashed while starting.\n\n{message}\n\nYour sessions keep running. \
-             Start Rustling Tulip again to carry on; if it crashes again, it opens with your tabs \
-             closed. The log is at {log}."
+        NextStart::AsksAboutTabs => format!(
+            "Rustling Tulip crashed while starting.\n\n{message}\n\nStart Rustling Tulip again \
+             to carry on. The next start asks whether to open your tabs. Your sessions keep \
+             running. The log is at {log}."
         ),
-        NextStart::ClosesTabs => format!(
-            "Rustling Tulip crashed while starting.\n\n{message}\n\nThe next start opens with \
-             your tabs closed, and your sessions keep running. The log is at {log}."
-        ),
-        NextStart::ClosesTabsAndResetsUi => format!(
-            "Rustling Tulip crashed while starting.\n\n{message}\n\nThe next start opens with your \
-             tabs closed and your window and sidebar settings back at their defaults, with a copy \
-             of them kept. Your sessions keep running. The log is at {log}."
+        NextStart::AsksAndResetsUi => format!(
+            "Rustling Tulip crashed while starting.\n\n{message}\n\nThe next start asks whether \
+             to open your tabs, and your window and sidebar settings go back to their defaults, \
+             with a copy of them kept. Your sessions keep running. The log is at {log}."
         ),
         NextStart::Unaffected => format!(
             "Rustling Tulip crashed.\n\n{message}\n\nYour sessions keep running. Start Rustling \
@@ -621,19 +635,19 @@ mod tests {
     }
 
     #[test]
-    fn one_failed_start_opens_normally() {
+    fn one_failed_start_asks_about_the_tabs() {
         let dir = seeded("one", 1);
-        assert_eq!(begin(&dir.0), StartMode::Normal);
+        assert_eq!(begin(&dir.0), StartMode::Ask);
         assert_eq!(dir.guard()["failed_starts"], json!(1));
     }
 
     #[test]
-    fn two_failed_starts_close_the_tabs() {
+    fn two_failed_starts_ask_about_the_tabs() {
         let dir = seeded("two", 2);
         let ui = dir.0.join(UI_FILE);
         std::fs::write(&ui, r#"{"a":1}"#).expect("seed native-ui.json");
 
-        assert_eq!(begin(&dir.0), StartMode::CloseTabs);
+        assert_eq!(begin(&dir.0), StartMode::Ask);
 
         assert_eq!(
             dir.names(UI_COPY_PREFIX),
@@ -660,7 +674,7 @@ mod tests {
         let copy = dir.0.join(&names[0]);
         assert_eq!(
             mode,
-            StartMode::CloseTabsAndResetUi {
+            StartMode::AskAndResetUi {
                 kept_ui: Some(copy.clone())
             }
         );
@@ -674,10 +688,7 @@ mod tests {
     #[test]
     fn a_reset_with_no_ui_file_keeps_nothing() {
         let dir = seeded("nofile", 3);
-        assert_eq!(
-            begin(&dir.0),
-            StartMode::CloseTabsAndResetUi { kept_ui: None }
-        );
+        assert_eq!(begin(&dir.0), StartMode::AskAndResetUi { kept_ui: None });
         assert_eq!(dir.names(UI_COPY_PREFIX), Vec::<String>::new());
     }
 
@@ -694,7 +705,7 @@ mod tests {
         let copy = dir.0.join(&names[0]);
         assert_eq!(
             first,
-            StartMode::CloseTabsAndResetUi {
+            StartMode::AskAndResetUi {
                 kept_ui: Some(copy.clone())
             }
         );
@@ -705,7 +716,7 @@ mod tests {
 
         assert_eq!(
             later,
-            StartMode::CloseTabsAndResetUi { kept_ui: None },
+            StartMode::AskAndResetUi { kept_ui: None },
             "the fourth start sets nothing aside"
         );
         assert_eq!(dir.names(UI_COPY_PREFIX), names, "still the one copy");
@@ -733,7 +744,7 @@ mod tests {
         let copy = dir.0.join(&names[0]);
         assert_eq!(
             first,
-            StartMode::CloseTabsAndResetUi {
+            StartMode::AskAndResetUi {
                 kept_ui: Some(copy.clone())
             }
         );
@@ -745,7 +756,7 @@ mod tests {
         std::fs::write(&ui, "defaults").expect("the defaults the reset saved");
         assert_eq!(
             begin(&dir.0),
-            StartMode::CloseTabsAndResetUi { kept_ui: None },
+            StartMode::AskAndResetUi { kept_ui: None },
             "the second start at three sets nothing aside"
         );
         assert_eq!(
@@ -764,7 +775,7 @@ mod tests {
 
         let mode = begin(&dir.0);
 
-        assert_eq!(mode, StartMode::CloseTabsAndResetUi { kept_ui: None });
+        assert_eq!(mode, StartMode::AskAndResetUi { kept_ui: None });
         assert!(
             !read_guard(&dir.0).ui_set_aside,
             "a reset that did not happen is not marked done"
@@ -777,10 +788,7 @@ mod tests {
         let dir = seeded("many", 9);
         let ui = dir.0.join(UI_FILE);
         std::fs::write(&ui, r#"{"a":1}"#).expect("seed native-ui.json");
-        assert_eq!(
-            begin(&dir.0),
-            StartMode::CloseTabsAndResetUi { kept_ui: None }
-        );
+        assert_eq!(begin(&dir.0), StartMode::AskAndResetUi { kept_ui: None });
         assert_eq!(dir.names(UI_COPY_PREFIX), Vec::<String>::new());
         assert_eq!(
             std::fs::read_to_string(&ui).expect("read the file"),
@@ -814,7 +822,7 @@ mod tests {
         assert_eq!(names.len(), 1, "{names:?}");
         assert_eq!(
             mode,
-            StartMode::CloseTabsAndResetUi {
+            StartMode::AskAndResetUi {
                 kept_ui: Some(dir.0.join(&names[0]))
             }
         );
@@ -910,14 +918,34 @@ mod tests {
     }
 
     #[test]
-    fn next_start_after_cases() {
+    fn a_panic_after_the_start_changes_nothing() {
         assert_eq!(next_start_after(false, 5), NextStart::Unaffected);
-        assert_eq!(next_start_after(true, 0), NextStart::OpensNormally);
-        assert_eq!(next_start_after(true, 1), NextStart::OpensNormally);
-        assert_eq!(next_start_after(true, 2), NextStart::ClosesTabs);
-        assert_eq!(next_start_after(true, 3), NextStart::ClosesTabsAndResetsUi);
-        assert_eq!(next_start_after(true, 4), NextStart::ClosesTabs);
-        assert_eq!(next_start_after(true, 9), NextStart::ClosesTabs);
+    }
+
+    #[test]
+    fn a_first_failed_start_asks_next_time() {
+        assert_eq!(next_start_after(true, 1), NextStart::AsksAboutTabs);
+    }
+
+    #[test]
+    fn a_second_failed_start_asks_next_time() {
+        assert_eq!(next_start_after(true, 2), NextStart::AsksAboutTabs);
+    }
+
+    #[test]
+    fn a_third_failed_start_asks_and_resets_the_ui_next_time() {
+        assert_eq!(next_start_after(true, 3), NextStart::AsksAndResetsUi);
+    }
+
+    #[test]
+    fn later_failed_starts_ask_next_time() {
+        assert_eq!(next_start_after(true, 4), NextStart::AsksAboutTabs);
+        assert_eq!(next_start_after(true, 9), NextStart::AsksAboutTabs);
+    }
+
+    #[test]
+    fn an_uncounted_failed_start_still_asks_next_time() {
+        assert_eq!(next_start_after(true, 0), NextStart::AsksAboutTabs);
     }
 
     #[test]
@@ -963,43 +991,31 @@ mod tests {
     }
 
     #[test]
-    fn panic_text_says_the_next_start_opens_normally() {
-        assert_eq!(
-            panic_text(
-                "boom",
-                NextStart::OpensNormally,
-                Path::new("C:/logs/native.log")
-            ),
-            "Rustling Tulip crashed while starting.\n\nboom\n\nYour sessions keep running. Start \
-             Rustling Tulip again to carry on; if it crashes again, it opens with your tabs \
-             closed. The log is at C:/logs/native.log."
-        );
-    }
-
-    #[test]
     fn panic_text_says_the_settings_reset_too() {
         assert_eq!(
             panic_text(
                 "boom",
-                NextStart::ClosesTabsAndResetsUi,
+                NextStart::AsksAndResetsUi,
                 Path::new("C:/logs/native.log")
             ),
-            "Rustling Tulip crashed while starting.\n\nboom\n\nThe next start opens with your \
-             tabs closed and your window and sidebar settings back at their defaults, with a \
-             copy of them kept. Your sessions keep running. The log is at C:/logs/native.log."
+            "Rustling Tulip crashed while starting.\n\nboom\n\nThe next start asks whether to \
+             open your tabs, and your window and sidebar settings go back to their defaults, \
+             with a copy of them kept. Your sessions keep running. The log is at \
+             C:/logs/native.log."
         );
     }
 
     #[test]
-    fn panic_text_during_start_says_the_tabs_close() {
+    fn panic_text_during_start_says_the_next_start_asks() {
         assert_eq!(
             panic_text(
                 "boom",
-                NextStart::ClosesTabs,
+                NextStart::AsksAboutTabs,
                 Path::new("C:/logs/native.log")
             ),
-            "Rustling Tulip crashed while starting.\n\nboom\n\nThe next start opens with your \
-             tabs closed, and your sessions keep running. The log is at C:/logs/native.log."
+            "Rustling Tulip crashed while starting.\n\nboom\n\nStart Rustling Tulip again to \
+             carry on. The next start asks whether to open your tabs. Your sessions keep \
+             running. The log is at C:/logs/native.log."
         );
     }
 
@@ -1064,28 +1080,42 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_says_only_what_happened() {
-        let plain = StartNotice::new(&StartMode::CloseTabs, None);
+    fn the_prompt_says_only_what_happened() {
+        let question = "Open your tabs as they were, or start without them? Your sessions keep \
+                        running either way, and starting without them keeps a copy of the \
+                        layout.";
+        assert_eq!(StartPrompt::new(&StartMode::Ask).lines(), [question]);
         assert_eq!(
-            plain.lines(),
-            [
-                "The last start crashed, so Rustling Tulip did not restore your tabs. Your \
-                 sessions are still running: pick one in the sidebar to show it in a pane."
-            ]
+            StartPrompt::new(&StartMode::AskAndResetUi { kept_ui: None }).lines(),
+            [question]
         );
-        let full = StartNotice::new(
-            &StartMode::CloseTabsAndResetUi {
-                kept_ui: Some(PathBuf::from("ui-copy")),
-            },
-            Some(PathBuf::from("layout-copy")),
-        );
+        let full = StartPrompt::new(&StartMode::AskAndResetUi {
+            kept_ui: Some(PathBuf::from("ui-copy")),
+        });
         assert_eq!(
-            full.lines()[1..],
+            full.lines(),
             [
-                "A copy of the old layout is in layout-copy.",
+                question,
                 "Your window and sidebar settings went back to their defaults too. A copy is in \
                  ui-copy.",
             ]
+        );
+        assert_eq!(PROMPT_TITLE, "The last start crashed");
+        assert_eq!(PROMPT_OPEN, "Open tabs");
+        assert_eq!(PROMPT_WITHOUT, "Start without tabs");
+    }
+
+    #[test]
+    fn the_toasts_name_the_copies() {
+        assert_eq!(STARTED_WITHOUT_TITLE, "Started without your tabs");
+        assert_eq!(
+            started_without_detail(Path::new("layout-copy")),
+            "A copy of the layout is in layout-copy."
+        );
+        assert_eq!(UI_RESET_TITLE, "Window and sidebar settings were reset");
+        assert_eq!(
+            ui_reset_detail(Path::new("ui-copy")),
+            "The last starts crashed. A copy of your settings is in ui-copy."
         );
     }
 }

@@ -318,15 +318,16 @@ On a remote host the path field stays enabled with the hint "Created on {host} i
 
 ## Start guard
 
-The client always opens, whatever its saved state holds. `start_guard.rs` counts starts that panicked on the main thread before the run was stable, in `start-guard.json` (`{"failed_starts", "last_panic"}`, [on-disk.md](on-disk.md)). A run is stable 60 s after its first tab list from This PC, or on a clean quit; a cloaked run waits an hour, so a stalled machine never lets a driven spec's panic land after it. `main` reads the guard first (`start_guard::begin`) and passes the resulting `StartMode` to `open_main_window`.
+The client always opens, whatever its saved state holds. `start_guard.rs` counts starts that panicked on the main thread before the run was stable, in `start-guard.json` (`{"failed_starts", "last_panic"}`, [on-disk.md](on-disk.md)). A run is stable 60 s after the user's choice at the prompt below (on a start that asks nothing, after the first tab list from This PC), or on a clean quit; a cloaked run waits an hour, so a stalled machine never lets a driven spec's panic land after it. `main` reads the guard first (`start_guard::begin`) and passes the resulting `StartMode` to `open_main_window`.
 
-- **One failed start** retries: the next start opens normally, since a crash can be temporary, and reaching stable clears the count. Closing tabs is the last resort.
-- **Two failed starts in a row** close the tabs (a safe start). On the first tab list from This PC, `RootView::on_safe_start_message` saves the list to `layout-set-aside-<UTC stamp>`, sends `CloseTab` per tab, and draws no restored tab. Sessions keep running. Restored views (`active_tab_id`, pop-outs, session views, the Dashboard's view) are dropped too; other settings stay.
+- **One failed start or more** make the next start ask before it opens any tab (`StartMode::Ask`): the user knows better than a count whether the saved layout caused the crash. Reaching stable clears the count.
+- **The prompt** holds This PC's first tab list undrawn (`start_guard_view::HeldStart`) and offers Open tabs or Start without tabs; Enter and Esc mean Start without, the safe answer. Pop-out windows are held until the choice. Open tabs draws the saved layout with its saved views and pop-outs and closes nothing. Start without tabs (the safe start) saves the held list to `layout-set-aside-<UTC stamp>`, sends `CloseTab` per tab, drops the restored views (`active_tab_id`, pop-outs, session views, the Dashboard's view; other settings stay) and clears the saved pop-outs, then shows a "Started without your tabs" toast naming the copy. Sessions keep running either way.
 
-  The closed tabs stay remembered (`start_guard::ClosedTabs`) until the daemon no longer lists them: a reconnect's tab list has them taken out and `CloseTab` sent again, and a `TabUpdated` in flight for one draws nothing. Quitting before the first tab list keeps the count, so the next start still carries out the safe start.
+  A newer tab list arriving while the prompt is up replaces the held one. After Start without tabs the closed tabs stay remembered (`start_guard::ClosedTabs`) until the daemon no longer lists them: a reconnect's tab list has them taken out and `CloseTab` sent again, and a `TabUpdated` in flight for one draws nothing. Quitting with the prompt up keeps the count, so the next start asks again.
 - **Exactly three failed starts** also move `native-ui.json` to `native-ui.json.corrupt-<UTC stamp>`, once only: `start-guard.json` records it as `ui_set_aside` when the file has gone, so a kill during that start does not repeat it, and a move that failed is tried again. Later failed starts touch no file. Three newest copies are kept per prefix.
-- **A run that never gets a tab list** stops counting as starting after 10 minutes (2 hours cloaked), keeping the count: a panic then reads as an ordinary crash. A first tab list arriving later starts the 60 s window again.
-- **The notice** is a modal titled "Opened with your tabs closed" (`start_guard_view.rs`), dismissed by OK, Enter or Esc.
+- **The stable window starts at the choice**, not at the first tab list, so a crash while the prompt is up still counts.
+- **A run that never gets a tab list** (no tabs, or the layout chooser) shows no prompt and stops counting as starting after 10 minutes (2 hours cloaked), keeping the count: a panic then reads as an ordinary crash. A first tab list arriving later starts the 60 s window again. With no tabs to ask about, the third failed start's settings reset is told in a "Window and sidebar settings were reset" toast.
+- **The prompt's look** is a modal titled "The last start crashed" (`start_guard_view.rs`) over a backdrop that takes every click; it also says so when the settings went back to their defaults, with the copy's path.
 - **A main-thread panic** shows a message box from a helper thread (`MessageBoxW` on Windows, `osascript` on macOS), at most once per process, and none in a cloaked run. A background thread's panic stays log-only, since the process carries on.
 - **A `native-ui.json` that does not parse** keeps a copy, keeps each top-level field that still reads, and is saved back (`sidebar.rs` `load_ui_state`). The daemon makes a loaded tab list safe in the same spirit (`sanitize_loaded_tabs`), and the client clamps a split ratio when drawing (`drawn_ratio`).
 
@@ -336,7 +337,7 @@ Decisions and rejected alternatives:
 - The message box runs on a helper thread. A modal loop on the panicking thread was rejected: it would re-enter GPUI's window procedure.
 - The panic is not caught around the draw. It aborts through a Win32 callback, so unwinding cannot be relied on there; the panic hook is the one place that sees it.
 
-Specs: `ui_safe_start.rs`; `native-smoke` holds `two_panics_at_start_close_the_tabs_on_the_next_start`, which uses the driver's `panic` method; `native-shot safe-start` draws the notice.
+Specs: `ui_safe_start.rs`; `native-smoke` holds `two_panics_at_start_ask_about_the_tabs_on_the_next_start`, which uses the driver's `panic` method, panics with the prompt up and expects the count to be 2; `native-shot safe-start` draws the prompt.
 
 ## Tab layouts
 

@@ -117,7 +117,7 @@ The views:
 - `multi-host`: the sidebar grouped by host: This PC, "box" online with a repo and a session in the first tab's second pane, and "lab" offline.
 - `spawn-hosts`: the spawn dialog over those two hosts with its closed Target field.
 - `open-shell`: the Open a shell dialog with a folder path too long for its field, scrolled to the caret at its end.
-- `safe-start`: the modal a start after two crashed ones raises, "Opened with your tabs closed", over the window with no tab drawn.
+- `safe-start`: the prompt a start after a crashed one raises, "The last start crashed" with Open tabs and Start without tabs, over the window with no tab drawn.
 - `panes-accent`: four panes in a 2x2 grid, the Theme pane focused, beside the Rose, Periwinkle and Lilac panes a chosen colour stores an accent and a frame for.
 - `panes-accent-chosen`: the same grid with the Periwinkle pane focused.
 - `settings-hosts`: Settings on the Claude page with the host selector showing This PC.
