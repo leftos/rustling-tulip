@@ -347,7 +347,7 @@ pub fn card_buttons(prompt: &ChatPrompt, agent: &str) -> Vec<CardButton> {
             Some(2),
         ),
         ChatPromptKind::Trust => positional(prompt, &["Trust this folder", "Exit"], None),
-        ChatPromptKind::HeadsUp => positional(prompt, &[], None),
+        ChatPromptKind::McpServer | ChatPromptKind::HeadsUp => positional(prompt, &[], None),
         ChatPromptKind::Unknown => Vec::new(),
     }
 }
@@ -1296,6 +1296,43 @@ mod tests {
         );
         let unknown = prompt_with(ChatPromptKind::Unknown, &[(1, "a")]);
         assert_eq!(card_buttons(&unknown, "Claude"), []);
+    }
+
+    #[test]
+    fn an_mcp_server_card_takes_the_screens_labels() {
+        let mcp_server = prompt_with(
+            ChatPromptKind::McpServer,
+            &[
+                (1, "Use this MCP server"),
+                (2, "Use this and all future MCP servers in this project"),
+                (3, "Continue without using this MCP server"),
+            ],
+        );
+        assert_eq!(
+            fixed(&card_buttons(&mcp_server, "Claude")),
+            [
+                row("1", "Use this MCP server", opt(1)),
+                row(
+                    "2",
+                    "Use this and all future MCP servers in this project",
+                    opt(2)
+                ),
+                row("3", "Continue without using this MCP server", opt(3)),
+            ]
+        );
+        let at = Instant::now();
+        assert_eq!(
+            key_action(
+                &stack(mcp_server, at),
+                false,
+                CardKey::Escape,
+                "",
+                false,
+                at
+            ),
+            KeyAction::Pass,
+            "Esc has no button on the card"
+        );
     }
 
     #[test]

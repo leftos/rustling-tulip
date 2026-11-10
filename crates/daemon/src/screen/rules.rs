@@ -1044,7 +1044,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 38] = [
+        let cases: [(&str, &str, Verdict); 39] = [
             (
                 "v03-ready",
                 include_str!("fixtures/v03-ready.txt"),
@@ -1194,6 +1194,11 @@ mod tests {
             (
                 "claude--trust-prompt",
                 include_str!("fixtures/claude--trust-prompt.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--mcp-server-prompt",
+                include_str!("fixtures/claude--mcp-server-prompt.txt"),
                 State(AwaitingInput),
             ),
             ("v95-rewind", include_str!("fixtures/v95-rewind.txt"), Keep),

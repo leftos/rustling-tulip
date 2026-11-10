@@ -2543,6 +2543,11 @@ export type ChatPromptKind =
   | "plan"
   /** A trust prompt for a folder the agent has not run in. */
   | "trust"
+  /**
+   * A new MCP server the project names, waiting to be used or passed
+   * over.
+   */
+  | "mcp_server"
   /** A heads-up notice the agent raised. */
   | "heads_up";
 

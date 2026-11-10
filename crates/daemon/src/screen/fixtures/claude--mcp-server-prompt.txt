@@ -1,0 +1,32 @@
+PS X:\dev\rustling-tulip\.tmp\rt-1427\worktrees\wt.wt-eager-marten\repo-d> Set-Location -LiteralPath 'X:\dev\rustling-tu
+lip\.tmp\rt-1427\worktrees\wt.wt-eager-marten\repo-d'; & 'C:\Users\lefto\.local\bin\claude.exe' '--settings' 'X:\dev\rus
+tling-tulip\.tmp\rt-1427\config\sessions\7015abbe-9d51-4336-9339-626684e23335\hook-settings.json' '--session-id' 'ef6e06
+51-f07a-4dbd-8bb0-e11e9532abbd'
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  New MCP server found in this project: rt-driver
+
+  MCP servers may execute code or access system resources. All tool calls require approval. Learn more in the MCP
+  documentation.
+
+    Use this MCP server
+    Use this and all future MCP servers in this project
+  ❯ Continue without using this MCP server
+
+  Enter to confirm · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -263,6 +263,26 @@ test("sheet_trust_picks_an_option", () => {
   ]);
 });
 
+test("sheet_mcp_server_offers_the_screens_options", () => {
+  const p = prompt("mcp_server", [
+    option(1, "Use this MCP server"),
+    option(2, "Use this and all future MCP servers in this project"),
+    option(3, "Continue without using this MCP server"),
+  ]);
+  const sheet = sheetFor(screen(p), null);
+
+  expect(buttons(sheet).map((button) => button.label)).toEqual([
+    "Use this MCP server",
+    "Use this and all future MCP servers in this project",
+    "Continue without using this MCP server",
+  ]);
+  expect(answers(sheet)).toEqual([
+    { kind: "option", number: 1 },
+    { kind: "option", number: 2 },
+    { kind: "option", number: 3 },
+  ]);
+});
+
 test("sheet_heads_up_offers_nothing_to_answer", () => {
   expect(buttons(sheetFor(screen(prompt("heads_up")), null))).toEqual([]);
 });

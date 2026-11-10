@@ -2652,6 +2652,8 @@ mod tests {
             use protocol::{ChatAnswerKind, SessionStatus};
 
             const V01: &str = include_str!("../screen/fixtures/v01-start.txt");
+            const MCP_SERVER: &str =
+                include_str!("../screen/fixtures/claude--mcp-server-prompt.txt");
             const V21: &str = include_str!("../screen/fixtures/v21-perm-bash.txt");
             const V22: &str = include_str!("../screen/fixtures/v22-perm-bash.txt");
             const V23: &str = include_str!("../screen/fixtures/v23-amend-open.txt");
@@ -2880,6 +2882,28 @@ mod tests {
                     " ❯ Yes, I trust this folder",
                 );
                 a.term.show(&on_yes).await;
+                a.typed(ENTER, "then Enter").await;
+                a.waits("the Enter");
+                a.term.show(C32).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn mcp_server_moves_its_cursor_then_enters() {
+                let mut a = answer_on("answer-mcp-server", MCP_SERVER, option(1)).await;
+                a.typed(UP, "Up to the second row").await;
+                a.typed(UP, "Up to the first row").await;
+                a.waits("the Ups");
+                let on_use = edited(
+                    &edited(
+                        MCP_SERVER,
+                        "  ❯ Continue without using this MCP server",
+                        "    Continue without using this MCP server",
+                    ),
+                    "    Use this MCP server",
+                    "  ❯ Use this MCP server",
+                );
+                a.term.show(&on_use).await;
                 a.typed(ENTER, "then Enter").await;
                 a.waits("the Enter");
                 a.term.show(C32).await;

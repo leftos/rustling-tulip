@@ -262,6 +262,7 @@ function buttonsFor(prompt: ChatPrompt): SheetButton[] {
       return planButtons(prompt);
     case "review":
     case "trust":
+    case "mcp_server":
     case "heads_up":
       return (prompt.options ?? []).map((choice) =>
         optionButton(choice, optionAction(choice.number)),

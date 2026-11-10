@@ -120,6 +120,7 @@ pub(crate) fn read(rows: &[String]) -> ChatScreen {
     let dialog = parse_permission(rows, start)
         .or_else(|| parse_plan(rows, start))
         .or_else(|| parse_trust(rows, start))
+        .or_else(|| parse_mcp_server(rows, start))
         .or_else(|| parse_question(rows));
     match dialog {
         Some(Parsed::Prompt(prompt)) => ChatScreen {
@@ -287,14 +288,7 @@ fn parse_trust(rows: &[String], start: usize) -> Option<Parsed> {
     let Some(footer) = footer else {
         return Some(Parsed::HalfDrawn);
     };
-    let block_end = (start..footer)
-        .rev()
-        .find(|&index| !rows[index].trim().is_empty())
-        .map_or(footer, |index| index + 1);
-    let block_start = (start..block_end)
-        .rev()
-        .find(|&index| rows[index].trim().is_empty())
-        .map_or(start, |index| index + 1);
+    let (block_start, block_end) = options_block(rows, start, footer);
     let options = trust_options(&rows[block_start..block_end]);
     if options.is_empty() {
         return Some(Parsed::HalfDrawn);
@@ -308,8 +302,61 @@ fn parse_trust(rows: &[String], start: usize) -> Option<Parsed> {
     )))
 }
 
-/// The options of a trust dialog: a printed number when the build numbers
-/// them, else the row's 1-based position.
+/// The row that opens a new-MCP-server dialog, the server's name after it.
+const MCP_SERVER_ANCHOR: &str = "New MCP server found in this project:";
+
+/// A new-MCP-server dialog: `New MCP server found in this project:` and
+/// the server's name, the notice, the unnumbered options and the `Enter to
+/// confirm · Esc to cancel` footer.
+fn parse_mcp_server(rows: &[String], start: usize) -> Option<Parsed> {
+    let anchor = find(rows, start, |row| {
+        row.trim_start().starts_with(MCP_SERVER_ANCHOR)
+    })?;
+    let Some(footer) = find(rows, anchor + 1, |row| {
+        row.contains("Enter to confirm · Esc to cancel")
+    }) else {
+        return Some(Parsed::HalfDrawn);
+    };
+    let (block_start, block_end) = options_block(rows, anchor + 1, footer);
+    let options = trust_options(&rows[block_start..block_end]);
+    if options.is_empty() {
+        return Some(Parsed::HalfDrawn);
+    }
+    let name = rows[anchor]
+        .trim()
+        .strip_prefix(MCP_SERVER_ANCHOR)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let notice: Vec<&str> = rows[anchor + 1..block_start]
+        .iter()
+        .map(String::as_str)
+        .collect();
+    Some(Parsed::Prompt(prompt(
+        ChatPromptKind::McpServer,
+        name,
+        text_block(&notice, indent_of(&rows[anchor])),
+        options,
+    )))
+}
+
+/// The bounds of the options block over a dialog's `footer`: the run of
+/// non-blank rows that ends nearest above it, starting no higher than
+/// `from`.
+fn options_block(rows: &[String], from: usize, footer: usize) -> (usize, usize) {
+    let block_end = (from..footer)
+        .rev()
+        .find(|&index| !rows[index].trim().is_empty())
+        .map_or(footer, |index| index + 1);
+    let block_start = (from..block_end)
+        .rev()
+        .find(|&index| rows[index].trim().is_empty())
+        .map_or(from, |index| index + 1);
+    (block_start, block_end)
+}
+
+/// The options of a trust or new-MCP-server dialog: a printed number when
+/// the build numbers them, else the row's 1-based position.
 fn trust_options(rows: &[String]) -> Vec<ChatOption> {
     rows.iter()
         .zip(1..)
@@ -1030,6 +1077,7 @@ pub(crate) fn recipe(
         ChatPromptKind::Permission
         | ChatPromptKind::Plan
         | ChatPromptKind::Trust
+        | ChatPromptKind::McpServer
         | ChatPromptKind::HeadsUp => {}
         ChatPromptKind::Unknown => return Err(AnswerRefusal::Unsupported),
     }
@@ -1116,10 +1164,13 @@ fn digit_for(prompt: &ChatPrompt, number: u32) -> Result<Key, AnswerRefusal> {
     Key::digit(number).ok_or(AnswerRefusal::TooManyOptions)
 }
 
-/// Choosing option `number`: its digit, or on a trust dialog, where digits
-/// do nothing, the arrows to it and Enter.
+/// Choosing option `number`: its digit, or on a trust or new-MCP-server
+/// dialog, whose options carry no digit, the arrows to it and Enter.
 fn option_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, AnswerRefusal> {
-    if prompt.kind == ChatPromptKind::Trust {
+    if matches!(
+        prompt.kind,
+        ChatPromptKind::Trust | ChatPromptKind::McpServer
+    ) {
         return trust_recipe(prompt, number);
     }
     if feedback_option(prompt) == Some(number) {
@@ -1133,8 +1184,8 @@ fn option_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, Answe
     Ok(one_step(vec![digit_for(prompt, number)?], expect))
 }
 
-/// Moving the trust dialog's cursor from where the reading shows it to
-/// option `number`, then Enter.
+/// Moving a trust or new-MCP-server dialog's cursor from where the reading
+/// shows it to option `number`, then Enter.
 fn trust_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, AnswerRefusal> {
     let mut steps: Vec<RecipeStep> = cursor_move(prompt, number)?.into_iter().collect();
     steps.push(RecipeStep {
@@ -1895,6 +1946,117 @@ mod tests {
             "   Yes, I trust this folder",
         ]));
         assert_eq!(read(&trust), half);
+    }
+
+    /// A new-MCP-server dialog naming `rt-driver`, the cursor on its third
+    /// option.
+    fn mcp_server_dialog() -> Vec<String> {
+        let mut screen = vec![rule()];
+        screen.extend(rows(&[
+            "  New MCP server found in this project: rt-driver",
+            "",
+            "  MCP servers may execute code.",
+            "",
+            "    Use this MCP server",
+            "    Use this and all future MCP servers in this project",
+            "  ❯ Continue without using this MCP server",
+            "",
+            "  Enter to confirm · Esc to cancel",
+        ]));
+        screen
+    }
+
+    #[test]
+    fn an_mcp_server_dialog_reads_its_name_options_and_cursor() {
+        let screen = read(&mcp_server_dialog());
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        assert_eq!(
+            labels(&screen),
+            [
+                (1, "Use this MCP server".to_owned()),
+                (
+                    2,
+                    "Use this and all future MCP servers in this project".to_owned()
+                ),
+                (3, "Continue without using this MCP server".to_owned()),
+            ]
+        );
+        let prompt = screen.prompt.expect("an MCP server prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::McpServer);
+        assert_eq!(prompt.subject, "rt-driver");
+        assert_eq!(prompt.body, "MCP servers may execute code.");
+        assert_eq!(prompt.cursor, Some(3));
+    }
+
+    #[test]
+    fn an_mcp_server_option_moves_the_cursor_then_enters() {
+        let prompt = read(&mcp_server_dialog()).prompt.expect("a prompt");
+        let pick = |number| recipe(&prompt, &ChatAnswerKind::Option { number }).map(|r| r.steps);
+        assert_eq!(
+            pick(1),
+            Ok(vec![
+                RecipeStep {
+                    keys: vec![Key::Up, Key::Up],
+                    expect: ScreenExpect::OptionSelected(1),
+                },
+                RecipeStep {
+                    keys: vec![Key::Enter],
+                    expect: ScreenExpect::DialogGone,
+                },
+            ])
+        );
+        assert_eq!(
+            pick(3),
+            Ok(vec![RecipeStep {
+                keys: vec![Key::Enter],
+                expect: ScreenExpect::DialogGone,
+            }])
+        );
+    }
+
+    #[test]
+    fn a_trust_dialog_still_reads_as_trust_beside_the_mcp_parser() {
+        let mut screen = vec![rule()];
+        screen.extend(rows(&[
+            " Accessing workspace:",
+            "",
+            " C:\\proj",
+            "",
+            " ❯ 1. Yes, I trust this folder",
+            "   2. No, exit",
+            "",
+            " Enter to confirm · Esc to cancel",
+        ]));
+        let prompt = read(&screen).prompt.expect("a trust prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::Trust);
+        assert_eq!(prompt.subject, "C:\\proj");
+    }
+
+    #[test]
+    fn mcp_named_elsewhere_is_no_mcp_server_dialog() {
+        let transcript = boxed(
+            &[
+                "● The MCP server rt-driver is set up.",
+                "  New MCP server found in this project: rt-driver",
+            ],
+            &["> "],
+        );
+        let screen = read(&transcript);
+        assert_eq!(screen.prompt, None, "a transcript row is no dialog");
+        assert_ne!(screen.composer, ComposerState::Dialog);
+    }
+
+    #[test]
+    fn an_mcp_server_dialog_without_its_footer_is_half_drawn() {
+        let mut screen = mcp_server_dialog();
+        screen.truncate(screen.len() - 2);
+        assert_eq!(
+            read(&screen),
+            ChatScreen {
+                composer: ComposerState::Dialog,
+                prompt: None,
+            }
+        );
     }
 
     #[test]

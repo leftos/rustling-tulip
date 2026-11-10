@@ -3403,6 +3403,9 @@ pub enum ChatPromptKind {
     Plan,
     /// A trust prompt for a folder the agent has not run in.
     Trust,
+    /// A new MCP server the project names, waiting to be used or passed
+    /// over.
+    McpServer,
     /// A heads-up notice the agent raised.
     HeadsUp,
     /// Forward-compat fallback: a kind the current build doesn't know.
@@ -15801,6 +15804,14 @@ mod tests {
         assert_eq!(kind, ChatPromptKind::Unknown);
         let known: ChatPromptKind = serde_json::from_str(r#""heads_up""#).expect("decode");
         assert_eq!(known, ChatPromptKind::HeadsUp);
+    }
+
+    #[test]
+    fn chat_prompt_kind_mcp_server_round_trips() {
+        let json = serde_json::to_string(&ChatPromptKind::McpServer).expect("encode");
+        assert_eq!(json, r#""mcp_server""#);
+        let kind: ChatPromptKind = serde_json::from_str(&json).expect("decode");
+        assert_eq!(kind, ChatPromptKind::McpServer);
     }
 
     #[test]

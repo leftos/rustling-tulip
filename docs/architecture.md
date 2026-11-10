@@ -125,7 +125,7 @@ One native window shows This PC and every saved tailnet and SSH host at once; th
 
   Session state, the composer state and the open dialog with its numbered options come from the status watcher's screen grid, read by the plugin's rules and dialog parsers, since options exist only on the screen and several prompt ends fire no hook.
 
-  That a prompt is pending, and its structured text, is hook `pending_input`; a card is drawn from the parser's reading, and the hook's kind only checks the answers against it. The one text the card takes from the hook is a Plan card's body when the screen's is empty (the plan box scrolled off): the hook's plan text, with its first non-blank line as the subject when that is empty too, filled in after the prompt id is computed. A dialog with no hook (folder trust) still gets a card, and a `pending_input` with no dialog on the screen gets none.
+  That a prompt is pending, and its structured text, is hook `pending_input`; a card is drawn from the parser's reading, and the hook's kind only checks the answers against it. The one text the card takes from the hook is a Plan card's body when the screen's is empty (the plan box scrolled off): the hook's plan text, with its first non-blank line as the subject when that is empty too, filled in after the prompt id is computed. A dialog with no hook (folder trust, a new MCP server) still gets a card, and a `pending_input` with no dialog on the screen gets none.
 
   Live answer text comes from the MessageDisplay hook; thinking duration, Interrupted, the Heads up notice, overlays and the mid-turn subagent and shell counts come from the screen, which the transcript lacks.
 

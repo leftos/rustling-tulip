@@ -1426,6 +1426,26 @@ fn each_permission_button_sends_its_chat_answer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_mcp_server_card_offers_its_three_options_and_sends_the_pick(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let options = [
+        (1, "Use this MCP server"),
+        (2, "Use this and all future MCP servers in this project"),
+        (3, "Continue without using this MCP server"),
+    ];
+    for (id, button) in [
+        ("m1", "chat-card-1"),
+        ("m2", "chat-card-2"),
+        ("m3", "chat-card-3"),
+    ] {
+        show(&mut h, prompt(id, ChatPromptKind::McpServer, &options));
+        h.click_on(button);
+    }
+    assert_eq!(answer_kinds(&mut h), [opt(1), opt(2), opt(3)]);
+}
+
+#[gpui::test]
 fn question_review_plan_trust_and_heads_up_cards_send_their_answers(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);
