@@ -505,7 +505,7 @@ A Trusted launch default an older release saved in `native-ui.json` (`spawn.trus
 
 The move logs `settings: moving the saved trusted-launch default into the agents' bypass choice` (field `host`), and records the host in `spawn.trusted_moved` (`@local` for This PC), so each host takes it once. A host whose agents name no bypass choice (an older daemon) is not recorded, and is tried again on its next connect. Any change this client sends to a host's agent Settings records that host too, so the old default never lands on top of what the user chose there.
 
-An agent page's first section, titled with the descriptor's label (Claude's reads "Claude"), draws one row per descriptor field marked `settings: true`, in descriptor order, with the descriptor's choice labels (Claude: "Permission mode", then "Provider").
+An agent page's first section, titled with the descriptor's label (Claude's reads "Claude"), draws one row per descriptor field marked `settings: true`, in descriptor order, with the descriptor's choice labels (Claude: "Permission mode", then "Provider", then "Effort", which hides while the provider is DeepSeek).
 
 A Toggle is a checkbox row, a Choice a segmented row, and a Text or Model field an input whose edit pends until OK or Apply; a field of a kind this client does not know shows the note "Update the client to change this". The model is not a Settings field for Claude; it is chosen per spawn. A text field's placeholder follows the page's values.
 
