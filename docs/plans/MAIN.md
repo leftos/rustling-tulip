@@ -9,8 +9,9 @@
 ## Remote update
 
 - [ ] RT-1303 Let a host update itself when a client asks (sub-issue of RT-1298) · release vNext
-  - [ ] RT-1330 Count down a host update on the host's own app, with Cancel · release vNext
   - [ ] RT-1331 Let a macOS host update itself when a client asks · release vNext
+  - [ ] RT-1350 Take the host-update countdown away when This PC's connection drops
+  - [ ] RT-1351 Abort a host update when the daemon stops while it waits for the app to quit
 - [ ] RT-1304 Offer a host's update from the client, with its confirm dialog and result (sub-issue of RT-1298) · release vNext
 - [ ] RT-1305 Mark in a release what it breaks, and warn before a remote update (sub-issue of RT-1298) · release vNext
 - [ ] RT-1306 Update connected clients from the host (sub-issue of RT-1298) · release vNext
@@ -51,7 +52,6 @@
   - [ ] RT-1103 Confirm before removing a saved Claude account in Settings › Accounts
 - [ ] RT-526 Show a scrollbar on every scrolling area of the native client
 - [ ] RT-753 Stitch a hard-wrapped terminal path whose continuation row is indented
-- [ ] RT-1168 Let fixed-size controls grow to fit their contents across the native client · release vNext
 - [ ] RT-544 Take the bind and cert files off the tailnet listener's paused-clock schedule tests
 - [ ] RT-676 Let a manual install over a running client finish when the close dialog takes over 30 s
 - [ ] RT-690 Cut a dimmed headless Last row's summary with an ellipsis in the Spawn submenu
@@ -61,7 +61,6 @@
 - [ ] RT-921 Default shell: move the save check off the runtime, and detect WSL that is really installed
 - [ ] RT-959 Default shell: verify Nushell raw-string programs, give the resume the launch's .cmd checks, and skip a familyless Automatic shell
 - [ ] RT-1086 Open a Ctrl+clicked path that ends in a ?query or #fragment, reading #L4 as a line
-- [ ] RT-1255 Offer a menu on Ctrl+click of a file path: default app, internal viewer or containing folder · release vNext
 - [ ] RT-1282 Restore a saved layout from the safe-start notice · release vNext
 - [ ] RT-1315 Keep a click that brings the window forward from pressing a toast, Dashboard or chat card answer
 - [ ] RT-1317 Split the terminal's mouse-down handler into one method per press kind
@@ -587,7 +586,6 @@
 - [ ] RT-1193 Keep alacritty_terminal's types inside term.rs and screen.rs
 - [ ] RT-1194 Try the daemon's screen on libghostty-vt behind a feature and measure it
 - [ ] RT-1223 Wake a parked accounts driver when a client connects as another leaves
-- [ ] RT-1225 Count keys typed into the phone's terminal as refused sends while offline · release vNext
 - [ ] RT-1226 End a turn's live answers in Chat when its prompt line had no prompt id
 - [ ] RT-1227 Order live and confirmed Chat rows the same on an append and on a reload
 - [ ] RT-1228 Keep unchanged chat rows' DOM on the phone while a reply streams · release vNext
@@ -621,6 +619,10 @@
 - [ ] RT-1327 Read a quoted question footer above a bash-mode input box as no dialog
 - [ ] RT-1332 Relaunch the app when an update loses the update lock
 - [ ] RT-1333 Keep a second installer from clearing the first one's staged files
+- [ ] RT-1347 Treat the phone terminal's private cursor-position reply as an automatic reply
+- [ ] RT-1348 Close every open menu, in any window, when another menu opens
+- [ ] RT-1349 Split the native client's key and pane-event chains under the complexity limit
+- [ ] RT-1352 Cap a saved theme's file name so any theme name can be saved
 
 ## Design files
 
@@ -646,7 +648,7 @@
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, RT-1111, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
 - [remote-access.md](remote-access.md) — Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
-- [remote-update.md](remote-update.md) — RT-1303, RT-1304, RT-1305, RT-1306, RT-1307, RT-1308, RT-1330, RT-1331, Remote update
+- [remote-update.md](remote-update.md) — RT-1303, RT-1304, RT-1305, RT-1306, RT-1307, RT-1308, RT-1331, Remote update
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792
 - [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406
