@@ -1,7 +1,27 @@
 import { expect, test } from "vitest";
 
-import { answer, NO_ACTIONS, launchLast, stop, type HomeActions } from "./home-actions";
+import {
+  answer,
+  NO_ACTIONS,
+  launchLast,
+  launchPreset,
+  presetKey,
+  stop,
+  UNSUPPORTED_PRESET_RESEND,
+  forgetPresetError,
+  type HomeActions,
+  type PendingPresetLaunch,
+} from "./home-actions";
 import { reset, type HomeModel } from "./home-model";
+import {
+  NO_PRESETS,
+  answeredPresetKey,
+  foldPresets,
+  reconnectPresets,
+  togglePresets,
+  trackJob,
+  type HomePresets,
+} from "./home-presets";
 import {
   homeScreen,
   homeVisible,
@@ -11,7 +31,11 @@ import {
   type HomeState,
 } from "./home-screen";
 import type {
+  DaemonMessage,
   PendingInput,
+  PresetEntry,
+  PresetLaunchJobSnapshot,
+  PresetLaunchJobStatus,
   RepoEntry,
   SessionSnapshot,
   SessionStatus,
@@ -462,6 +486,288 @@ test("home_screen_leaves_out_launch_again_on_a_host_that_cannot_launch", () => {
 
   const screen = homeScreen(idle, NO_ACTIONS, view({ supportsLaunchLast: false }));
   expect(screen.groups).toEqual([]);
+});
+
+/** A preset of repo `a` that launches from the phone: its folder source needs no input. */
+const FOLDER_PRESET: PresetEntry = {
+  id: "plans",
+  name: "Plans",
+  source_repo_id: "a",
+  prompt_sources: [{ kind: "folder", relative_path: "docs/plans" }],
+  prompt_template: "{prompt}",
+  branch_template: "plan-{index}",
+  tab_grouping: { kind: "none" },
+  injector: { steps: [] },
+} as unknown as PresetEntry;
+
+/** A preset that needs the desktop: its one source is a file the user picks. */
+const FILE_PRESET: PresetEntry = {
+  ...FOLDER_PRESET,
+  id: "file",
+  name: "From a file",
+  prompt_sources: [{ kind: "file" }],
+};
+
+const ALPHA_REF = { kind: "repo", id: "a" } as const;
+
+/** Repo `a`'s presets list opened and answered with `entries`. */
+function listed(entries: readonly PresetEntry[]): HomePresets {
+  const opened = togglePresets(NO_PRESETS, ALPHA_REF, () => "list-1").state;
+  return foldPresets(opened, {
+    type: "presets",
+    target: { kind: "repo", repo_id: "a" },
+    entries: [...entries],
+    request_id: "list-1",
+  });
+}
+
+/** The folder preset's launch `job-1`, first sent at clock 0. */
+const JOB_LAUNCH: PendingPresetLaunch = {
+  jobId: "job-1",
+  presetId: "plans",
+  target: ALPHA_REF,
+  source: { kind: "folder", path: "C:\\dev\\alpha\\docs\\plans" },
+  sentAt: 0,
+  lastSentAt: 0,
+};
+
+/** `job-1`'s update carrying `snapshot`. */
+function jobUpdate(snapshot: Partial<PresetLaunchJobSnapshot>): DaemonMessage {
+  return {
+    type: "preset_launch_job_updated",
+    job: {
+      job_id: "job-1",
+      preset_id: "plans",
+      target: { kind: "repo", repo_id: "a" },
+      ...snapshot,
+    },
+  };
+}
+
+/** `state` after the job `job-1` of the folder preset reports `snapshot`. */
+function jobAt(state: HomePresets, snapshot: Partial<PresetLaunchJobSnapshot>): HomePresets {
+  return foldPresets(trackJob(state, JOB_LAUNCH), jobUpdate(snapshot));
+}
+
+/** `state` after a reconnect at `now`, its open list answered again with the folder preset. */
+function reconnected(state: HomePresets, supportsRepeat: boolean, now: number) {
+  const ids = ["list-2"];
+  const back = reconnectPresets(state, () => ids.shift() ?? "spare", supportsRepeat, now);
+  const relisted = foldPresets(back.state, {
+    type: "presets",
+    target: { kind: "repo", repo_id: "a" },
+    entries: [FOLDER_PRESET],
+    request_id: "list-2",
+  });
+  return { messages: back.messages, state: relisted };
+}
+
+function presetsOf(presets: HomePresets, actions: HomeActions = NO_ACTIONS) {
+  const running = repoModel([session("s1", { status: "working" })]);
+  return homeScreen(running, actions, view(), presets).groups[0]?.presets;
+}
+
+const LOST = "Lost track of this launch; check the desktop for its sessions.";
+const MINUTE = 60 * 1000;
+
+test("home_screen_resends_a_running_job_on_reconnect_and_its_snapshot_ends_the_row", () => {
+  const running = jobAt(listed([FOLDER_PRESET]), { status: "resolving", launched: 0, total: 2 });
+
+  const back = reconnected(running, true, 5 * MINUTE);
+  expect(back.messages.filter((message) => message.type === "launch_preset")).toEqual([
+    {
+      type: "launch_preset",
+      job_id: "job-1",
+      target: { kind: "repo", repo_id: "a" },
+      preset_id: "plans",
+      source: { kind: "folder", path: "C:\\dev\\alpha\\docs\\plans" },
+      variable_values: [],
+      use_worktree_override: null,
+      max_panes_per_tab_override: null,
+    },
+  ]);
+  // Until the stored snapshot answers, the row keeps its last counts.
+  expect(presetsOf(back.state)?.rows[0]?.progress).toBe("Launching 0/2");
+
+  const done = foldPresets(back.state, jobUpdate({ status: "completed", launched: 2, total: 2 }));
+  const row = presetsOf(done)?.rows[0];
+  expect(row?.progress).toBeNull();
+  expect(row?.launch?.enabled).toBe(true);
+  expect(row?.note).toBeNull();
+});
+
+test("home_screen_ends_a_running_job_locally_on_a_host_that_does_not_repeat", () => {
+  const running = jobAt(listed([FOLDER_PRESET]), { status: "resolving", launched: 0, total: 2 });
+
+  const back = reconnected(running, false, 5 * MINUTE);
+  expect(back.messages.filter((message) => message.type === "launch_preset")).toEqual([]);
+  const row = presetsOf(back.state)?.rows[0];
+  expect(row?.progress).toBeNull();
+  expect(row?.cancel).toBeNull();
+  expect(row?.launch?.enabled).toBe(true);
+  expect(row?.note).toBe(LOST);
+});
+
+test("home_screen_ends_a_running_job_locally_past_nine_minutes_even_on_a_host_that_repeats", () => {
+  const running = jobAt(listed([FOLDER_PRESET]), { status: "spawning", launched: 1, total: 2 });
+
+  const back = reconnected(running, true, 9 * MINUTE);
+  expect(back.messages.filter((message) => message.type === "launch_preset")).toEqual([]);
+  const row = presetsOf(back.state)?.rows[0];
+  expect(row?.progress).toBeNull();
+  expect(row?.launch?.enabled).toBe(true);
+  expect(row?.note).toBe(LOST);
+});
+
+test("home_screen_lets_a_job_s_later_outcome_replace_a_dropped_launch_note", () => {
+  const pending = trackJob(listed([FOLDER_PRESET]), JOB_LAUNCH);
+  let actions: HomeActions = {
+    ...NO_ACTIONS,
+    presetErrors: new Map([[presetKey(ALPHA_REF, "plans"), UNSUPPORTED_PRESET_RESEND]]),
+  };
+  expect(presetsOf(pending, actions)?.rows[0]?.note).toBe(UNSUPPORTED_PRESET_RESEND);
+
+  // Each update of the phone's job is folded as Home folds it: the presets
+  // state first, then the note of the preset it answered is cleared.
+  const fold = (state: HomePresets, message: DaemonMessage): HomePresets => {
+    actions = forgetPresetError(actions, answeredPresetKey(state, message));
+    return foldPresets(state, message);
+  };
+  const failed = fold(pending, jobUpdate({ status: "failed", error: "no prompts to launch" }));
+  expect(presetsOf(failed, actions)?.rows[0]?.note).toBe("no prompts to launch");
+
+  const completed = fold(failed, jobUpdate({ status: "completed" }));
+  expect(presetsOf(completed, actions)?.rows[0]?.note).toBeNull();
+});
+
+test("home_screen_shows_a_closed_presets_toggle_on_a_repo_group", () => {
+  expect(presetsOf(NO_PRESETS)).toEqual({
+    target: ALPHA_REF,
+    label: "Presets",
+    open: false,
+    enabled: true,
+    error: null,
+    rows: [],
+  });
+  // A group that is no repo or workspace offers none.
+  expect(homeScreen(model([session("s1")]), NO_ACTIONS, view()).groups[0]?.presets).toBeNull();
+});
+
+test("home_screen_offers_launch_for_a_no_input_preset_and_sends_the_rest_to_the_desktop", () => {
+  expect(presetsOf(listed([FOLDER_PRESET, FILE_PRESET]))?.rows).toEqual([
+    {
+      presetId: "plans",
+      name: "Plans",
+      launch: {
+        label: "Launch",
+        enabled: true,
+        source: { kind: "folder", path: "C:\\dev\\alpha\\docs\\plans" },
+      },
+      progress: null,
+      cancel: null,
+      note: null,
+    },
+    {
+      presetId: "file",
+      name: "From a file",
+      launch: { label: "Needs the desktop", enabled: false, source: null },
+      progress: null,
+      cancel: null,
+      note: null,
+    },
+  ]);
+});
+
+test("home_screen_disables_launch_while_the_preset_launch_is_pending", () => {
+  const pending = launchPreset(
+    NO_ACTIONS,
+    { target: ALPHA_REF, presetId: "plans", source: { kind: "inline", prompts: ["Plans"] } },
+    () => "req-1",
+    0,
+  ).state;
+
+  expect(presetsOf(listed([FOLDER_PRESET]), pending)?.rows[0]?.launch?.enabled).toBe(false);
+});
+
+test("home_screen_shows_a_running_job_as_progress_with_cancel", () => {
+  const row = presetsOf(
+    jobAt(listed([FOLDER_PRESET]), { status: "spawning", launched: 1, total: 3 }),
+  )?.rows[0];
+
+  expect(row?.progress).toBe("Launching 1/3");
+  expect(row?.cancel).toBe("job-1");
+  expect(row?.launch).toBeNull();
+});
+
+test("home_screen_shows_the_last_count_for_a_job_status_it_does_not_know", () => {
+  const later = jobAt(listed([FOLDER_PRESET]), { status: "spawning", launched: 2, total: 4 });
+  const unknown = foldPresets(later, {
+    type: "preset_launch_job_updated",
+    job: {
+      job_id: "job-1",
+      preset_id: "plans",
+      target: { kind: "repo", repo_id: "a" },
+      status: "paused_for_later" as unknown as PresetLaunchJobStatus,
+    },
+  });
+
+  expect(presetsOf(unknown)?.rows[0]?.progress).toBe("Launching 2/4");
+});
+
+test("home_screen_shows_a_failed_job_s_error_verbatim", () => {
+  const failed = jobAt(listed([FOLDER_PRESET]), {
+    status: "failed",
+    error: "no prompts to launch",
+  });
+  const row = presetsOf(failed)?.rows[0];
+
+  expect(row?.note).toBe("no prompts to launch");
+  expect(row?.progress).toBeNull();
+  expect(row?.launch?.label).toBe("Launch");
+});
+
+test("home_screen_shows_a_cancelled_job_as_cancelled", () => {
+  expect(presetsOf(jobAt(listed([FOLDER_PRESET]), { status: "cancelled" }))?.rows[0]?.note).toBe(
+    "Cancelled",
+  );
+});
+
+test("home_screen_returns_a_completed_job_to_its_launch_button", () => {
+  const row = presetsOf(
+    jobAt(listed([FOLDER_PRESET]), { status: "completed", launched: 3, total: 3 }),
+  )?.rows[0];
+
+  expect(row?.launch).toEqual({
+    label: "Launch",
+    enabled: true,
+    source: { kind: "folder", path: "C:\\dev\\alpha\\docs\\plans" },
+  });
+  expect(row?.progress).toBeNull();
+  expect(row?.note).toBeNull();
+});
+
+test("home_screen_shows_a_dropped_preset_launch_s_text_on_its_row", () => {
+  const dropped: HomeActions = {
+    ...NO_ACTIONS,
+    presetErrors: new Map([[presetKey(ALPHA_REF, "plans"), UNSUPPORTED_PRESET_RESEND]]),
+  };
+
+  expect(presetsOf(listed([FOLDER_PRESET]), dropped)?.rows[0]?.note).toBe(
+    "This host can't resend a preset launch; check the desktop.",
+  );
+});
+
+test("home_screen_shows_a_refused_presets_list_s_message", () => {
+  const opened = togglePresets(NO_PRESETS, ALPHA_REF, () => "list-1").state;
+  const refused = foldPresets(opened, {
+    type: "error",
+    request_id: "list-1",
+    code: "not_found",
+    message: "No such repo or workspace.",
+  });
+
+  expect(presetsOf(refused)?.error).toBe("No such repo or workspace.");
+  expect(presetsOf(refused)?.rows).toEqual([]);
 });
 
 test("home_screen_says_no_sessions_when_only_hidden_launches_would_show", () => {

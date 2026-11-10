@@ -56,6 +56,16 @@ A launch tapped while the phone is offline is kept and sent again each time the 
 
 A launch that waits a minute with no answer, or comes back after nine minutes, is dropped with `This launch may have started a session. Check the list before launching again.`, since the PC no longer remembers its request by then. A PC too old to launch from the phone drops it with `This host can't launch from the phone.` Closing or reloading the app forgets a launch that was still waiting.
 
+## Presets
+
+Each repo or workspace group header on Home has a `Presets` button that opens and closes the group's list of presets. The first open asks the PC for them, and an open list is asked again when the connection comes back. A refused list shows the PC's own error inside the open list.
+
+Each row shows the preset's name and a `Launch` button, or a disabled `Needs the desktop` button. A preset can launch from the phone when it needs no input: one of its prompt sources is a folder or inline text with no `{prompt}` in its template, and it has no ask-at-launch, script or unknown variable and no bypass agent option. Any other preset is launched from the desktop.
+
+While a launch runs the row reads `Launching <launched>/<total>` with a `Cancel` button. A failed launch shows its error under the row, and a cancelled one shows `Cancelled`.
+
+A launch the phone sent again after a reconnect keeps its job, so a flaky link starts one batch: an unanswered launch, or a running one under nine minutes old, is resent only to a PC that offers it. An older PC shows `This host can't resend a preset launch; check the desktop.`. A launch that waited too long shows `This launch may have started a session. Check the list before launching again.`, and one the PC no longer knows shows `Lost track of this launch; check the desktop for its sessions.`
+
 ## When something is off
 
 **The phone asks to pair again.** iOS can evict the app's storage, and the PC refuses a phone it has blocked or forgotten. Settings → Remote access on the PC lists the phone under `Devices`: when it shows `Blocked`, press `Forget`; when it is not listed, there is nothing to forget. Then tap `Ask to pair` and approve again as above.

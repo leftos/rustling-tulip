@@ -6,6 +6,7 @@ import type {
   ClientMessage,
   DaemonMessage,
   PendingInput,
+  PresetEntry,
   RepoEntry,
   SessionSnapshot,
   SpawnConfig,
@@ -260,6 +261,127 @@ test("a session that needs input draws a card whose choice tap sends the answer"
       request_id: expect.any(String),
     },
   ]);
+  h.unmount();
+});
+
+/** A preset of repo `a` that launches from the phone: its folder source needs no input. */
+const FOLDER_PRESET = {
+  id: "plans",
+  name: "Plans",
+  source_repo_id: "a",
+  prompt_sources: [{ kind: "folder", relative_path: "docs/plans" }],
+  prompt_template: "{prompt}",
+  branch_template: "plan-{index}",
+  tab_grouping: { kind: "none" },
+  injector: { steps: [] },
+} as unknown as PresetEntry;
+
+function sentOf(h: Harness, type: ClientMessage["type"]): ClientMessage[] {
+  return h.sent.filter((message) => message.type === type);
+}
+
+/** The `request_id` of the latest `list_presets` Home sent. */
+function listRequestId(h: Harness): string {
+  const list = sentOf(h, "list_presets").at(-1);
+  return list?.type === "list_presets" ? (list.request_id ?? "") : "";
+}
+
+function togglePresetsOf(h: Harness): void {
+  h.container.pick("button", "home-group-presets")?.fire("click");
+}
+
+test("a presets toggle sends one list_presets per container per connection", () => {
+  const h = launched();
+  expect(h.container.pick("button", "home-group-presets")?.textContent).toBe("Presets");
+
+  togglePresetsOf(h);
+  togglePresetsOf(h);
+  togglePresetsOf(h);
+  expect(sentOf(h, "list_presets")).toEqual([
+    {
+      type: "list_presets",
+      target: { kind: "repo", repo_id: "a" },
+      request_id: expect.any(String),
+    },
+  ]);
+
+  // A fresh connection lists the open container again.
+  h.notice({ kind: "status", state: "ready" });
+  expect(sentOf(h, "list_presets")).toHaveLength(2);
+  h.unmount();
+});
+
+test("a listed preset launches from its button and cancels from its progress row", () => {
+  const h = launched();
+  togglePresetsOf(h);
+  h.notice({
+    kind: "message",
+    message: {
+      type: "presets",
+      target: { kind: "repo", repo_id: "a" },
+      entries: [FOLDER_PRESET],
+      request_id: listRequestId(h),
+    },
+  });
+
+  const launch = h.container.pick("button", "home-preset-launch");
+  expect(launch?.textContent).toBe("Launch");
+  launch?.fire("click");
+  const sent = sentOf(h, "launch_preset")[0];
+  expect(sent).toEqual({
+    type: "launch_preset",
+    job_id: expect.stringMatching(/^phone-/),
+    target: { kind: "repo", repo_id: "a" },
+    preset_id: "plans",
+    source: { kind: "folder", path: "C:\\dev\\alpha\\docs\\plans" },
+    variable_values: [],
+    use_worktree_override: null,
+    max_panes_per_tab_override: null,
+  });
+  const jobId = sent?.type === "launch_preset" ? (sent.job_id ?? "") : "";
+
+  h.notice({
+    kind: "message",
+    message: {
+      type: "preset_launch_job_updated",
+      job: {
+        job_id: jobId,
+        preset_id: "plans",
+        target: { kind: "repo", repo_id: "a" },
+        status: "spawning",
+        launched: 0,
+        total: 2,
+      },
+    },
+  });
+  const presets = h.container.pick("div", "home-presets");
+  expect(presets?.pick("span", "home-row-status")?.textContent).toBe("Launching 0/2");
+  const cancel = presets?.pick("button", "home-preset-cancel");
+  expect(cancel?.textContent).toBe("Cancel");
+  cancel?.fire("click");
+  expect(sentOf(h, "cancel_preset_launch")).toEqual([
+    { type: "cancel_preset_launch", job_id: jobId },
+  ]);
+  h.unmount();
+});
+
+test("a refused presets list shows the daemon's message in the group", () => {
+  const h = launched();
+  togglePresetsOf(h);
+  h.notice({
+    kind: "message",
+    message: {
+      type: "error",
+      request_id: listRequestId(h),
+      code: "not_found",
+      message: "No such repo or workspace.",
+    },
+  });
+
+  const presets = h.container.pick("div", "home-presets");
+  expect(presets?.pick("p", "home-row-error")?.textContent).toBe("No such repo or workspace.");
+  // The rest of Home still draws.
+  expect(h.container.pick("button", "home-group-launch")?.textContent).toBe("Launch last");
   h.unmount();
 });
 

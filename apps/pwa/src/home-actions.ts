@@ -2,6 +2,8 @@ import type {
   ClientMessage,
   ContainerRef,
   DaemonMessage,
+  LaunchPresetSource,
+  PresetTarget,
   PromptChoice,
   SessionSnapshot,
 } from "./protocol";
@@ -29,6 +31,25 @@ export interface PendingLaunch {
   readonly requestId: string;
   readonly target: ContainerRef;
   /** When the request's first send went out, ms since the epoch: the daemon's journal clock. */
+  readonly sentAt: number;
+  /** When the latest send, the first or a resend, went out: the answer clock. */
+  readonly lastSentAt: number;
+}
+
+/** A preset launch the phone asks for: the preset, its container, and the source it fills. */
+export interface PresetLaunchRequest {
+  readonly target: ContainerRef;
+  readonly presetId: string;
+  readonly source: LaunchPresetSource;
+}
+
+/**
+ * A preset launch on its way: one per preset per container, kept until the
+ * job's first update answers it. Its job id is its journal key on the host.
+ */
+export interface PendingPresetLaunch extends PresetLaunchRequest {
+  readonly jobId: string;
+  /** When the launch's first send went out, ms since the epoch: the journal clock. */
   readonly sentAt: number;
   /** When the latest send, the first or a resend, went out: the answer clock. */
   readonly lastSentAt: number;
@@ -66,6 +87,10 @@ export interface HomeActions {
   readonly launches: readonly PendingLaunch[];
   /** The daemon's refusal text per container, keyed by `containerKey`. */
   readonly launchErrors: ReadonlyMap<string, string>;
+  /** The preset launches waiting for their job's first update, one per preset per container. */
+  readonly presetLaunches: readonly PendingPresetLaunch[];
+  /** Why a preset's launch was dropped, keyed by `presetKey`. */
+  readonly presetErrors: ReadonlyMap<string, string>;
 }
 
 /** The state before any tap: what `reset` returns. */
@@ -75,14 +100,32 @@ export const NO_ACTIONS: HomeActions = {
   errors: new Map(),
   launches: [],
   launchErrors: new Map(),
+  presetLaunches: [],
+  presetErrors: new Map(),
 };
 
 /** What the phone says when the host no longer lists `launch_last`. */
 export const UNSUPPORTED_LAUNCH = "This host can't launch from the phone.";
 
+/** What a preset says when its unanswered launch cannot be resent: the host lacks `preset_job_repeat`. */
+export const UNSUPPORTED_PRESET_RESEND =
+  "This host can't resend a preset launch; check the desktop.";
+
+/** The key a preset's pending launch and its dropped-launch text are filed under. */
+export function presetKey(target: ContainerRef, presetId: string): string {
+  return `${containerKey(target)}/${presetId}`;
+}
+
 /** The key a launch's pending record and its refusal text are filed under. */
 export function containerKey(target: ContainerRef): string {
   return `${target.kind}:${target.id}`;
+}
+
+/** A container as the preset messages name it. */
+export function presetTarget(target: ContainerRef): PresetTarget {
+  return target.kind === "repo"
+    ? { kind: "repo", repo_id: target.id }
+    : { kind: "workspace", workspace_id: target.id };
 }
 
 /** The state a screen starts from on every `ready`, since no reply is coming. */
@@ -255,7 +298,122 @@ export function launchLast(
  * are gone, but a pending launch still waits for an answer and is resent.
  */
 export function keepLaunches(old: HomeActions): HomeActions {
-  return { ...NO_ACTIONS, launches: old.launches };
+  return { ...NO_ACTIONS, launches: old.launches, presetLaunches: old.presetLaunches };
+}
+
+/**
+ * Launch a preset, or nothing while its earlier launch from this container
+ * still waits for its job's first update. The phone mints the job id, and
+ * records the launch before the send, so a tap that reaches no daemon is
+ * resent on the next reconnect.
+ */
+export function launchPreset(
+  state: HomeActions,
+  request: PresetLaunchRequest,
+  newRequestId: NewRequestId,
+  now: number,
+): ActionResult {
+  const key = presetKey(request.target, request.presetId);
+  if (state.presetLaunches.some((launch) => presetKey(launch.target, launch.presetId) === key)) {
+    return { message: null, state };
+  }
+  const launch: PendingPresetLaunch = {
+    ...request,
+    jobId: `phone-${newRequestId()}`,
+    sentAt: now,
+    lastSentAt: now,
+  };
+  return {
+    message: presetLaunchMessage(launch),
+    state: {
+      ...state,
+      presetLaunches: [...state.presetLaunches, launch],
+      presetErrors: withoutLaunchError(state.presetErrors, key),
+    },
+  };
+}
+
+/**
+ * The `launch_preset` for a launch under its job id: no variable values, the
+ * preset's own worktree and tab settings, and no client id, so its tabs land
+ * in the daemon's default layout.
+ */
+export function presetLaunchMessage(
+  launch: PresetLaunchRequest & { readonly jobId: string },
+): ClientMessage {
+  return {
+    type: "launch_preset",
+    job_id: launch.jobId,
+    target: presetTarget(launch.target),
+    preset_id: launch.presetId,
+    source: launch.source,
+    variable_values: [],
+    use_worktree_override: null,
+    max_panes_per_tab_override: null,
+  };
+}
+
+/**
+ * The messages a reconnect sends for the preset launches still waiting. A
+ * host listing `preset_job_repeat` gets each one again with its job id, so
+ * its journal starts one job: a launch older than the journal is dropped
+ * instead. Any other host gets nothing, and each preset says why.
+ */
+export function resendPresetLaunches(
+  state: HomeActions,
+  supportsRepeat: boolean,
+  now: number,
+): LaunchResend {
+  if (state.presetLaunches.length === 0) {
+    return { messages: [], state };
+  }
+  const presetErrors = new Map(state.presetErrors);
+  const messages: ClientMessage[] = [];
+  const presetLaunches: PendingPresetLaunch[] = [];
+  for (const launch of state.presetLaunches) {
+    const key = presetKey(launch.target, launch.presetId);
+    if (!supportsRepeat) {
+      presetErrors.set(key, UNSUPPORTED_PRESET_RESEND);
+    } else if (now - launch.sentAt >= LAUNCH_RESEND_LIMIT_MS) {
+      presetErrors.set(key, LAUNCH_MAYBE_STARTED);
+    } else {
+      const resent = { ...launch, lastSentAt: now };
+      presetLaunches.push(resent);
+      messages.push(presetLaunchMessage(resent));
+    }
+  }
+  return { messages, state: { ...state, presetLaunches, presetErrors } };
+}
+
+/**
+ * Drops the preset launches whose job never answered, a minute after their
+ * latest send, each preset saying it may have started sessions anyway;
+ * returns the state itself when every launch is still waiting.
+ */
+export function expirePresetLaunches(state: HomeActions, now: number): HomeActions {
+  if (state.presetLaunches.length === 0) {
+    return state;
+  }
+  const presetErrors = new Map(state.presetErrors);
+  const presetLaunches: PendingPresetLaunch[] = [];
+  for (const launch of state.presetLaunches) {
+    if (now - launch.lastSentAt >= LAUNCH_ANSWER_LIMIT_MS) {
+      presetErrors.set(presetKey(launch.target, launch.presetId), LAUNCH_MAYBE_STARTED);
+    } else {
+      presetLaunches.push(launch);
+    }
+  }
+  return presetLaunches.length === state.presetLaunches.length
+    ? state
+    : { ...state, presetLaunches, presetErrors };
+}
+
+/** The state once a job has answered: its pending launch is gone; the state itself for any other job. */
+function answerPresetLaunch(state: HomeActions, jobId: string | undefined): FoldResult {
+  const presetLaunches = state.presetLaunches.filter((launch) => launch.jobId !== jobId);
+  return presetLaunches.length === state.presetLaunches.length
+    ? { state, effects: [] }
+    : { state: { ...state, presetLaunches }, effects: [] };
 }
 
 /** What a reconnect leaves to send: the pending launches, each with its id. */
@@ -336,6 +494,10 @@ export function foldReply(state: HomeActions, message: DaemonMessage): FoldResul
       return refuse(state, message.request_id ?? null, message.detail);
     case "session_updated":
       return onSessionUpdated(state, message.session, message.request_id ?? null);
+    case "preset_launch_job_updated":
+      return answerPresetLaunch(state, message.job.job_id);
+    case "preset_launch_failed":
+      return answerPresetLaunch(state, message.job_id);
     default:
       return { state, effects: [] };
   }
@@ -419,6 +581,17 @@ function withoutLaunch(state: HomeActions, requestId: string): readonly PendingL
 function forgetLaunch(state: HomeActions, requestId: string): HomeActions {
   const launches = withoutLaunch(state, requestId);
   return launches.length === state.launches.length ? state : { ...state, launches };
+}
+
+/**
+ * Drops a preset's dropped-launch note once its job has answered, so the
+ * job's own outcome shows; `key` null, or a key with no note, returns the state itself.
+ */
+export function forgetPresetError(state: HomeActions, key: string | null): HomeActions {
+  if (key === null || !state.presetErrors.has(key)) {
+    return state;
+  }
+  return { ...state, presetErrors: withoutLaunchError(state.presetErrors, key) };
 }
 
 function withoutLaunchError(

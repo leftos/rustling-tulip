@@ -1,11 +1,15 @@
-import type {
-  CardButton,
-  CardView,
-  GroupView,
-  HomeScreen,
-  LaunchRowView,
-  LaunchView,
-  RowView,
+import type { PresetLaunchRequest } from "./home-actions";
+import {
+  CANCEL,
+  type CardButton,
+  type CardView,
+  type GroupView,
+  type HomeScreen,
+  type LaunchRowView,
+  type LaunchView,
+  type PresetRowView,
+  type PresetsView,
+  type RowView,
 } from "./home-screen";
 import type { ContainerRef } from "./protocol";
 
@@ -19,6 +23,9 @@ import type { ContainerRef } from "./protocol";
 export interface HomeHandlers {
   choose(card: CardView, choice: CardButton): void;
   launch(target: ContainerRef): void;
+  togglePresets(target: ContainerRef): void;
+  launchPreset(request: PresetLaunchRequest): void;
+  cancelPreset(jobId: string): void;
   stop(sessionId: string): void;
   resume(sessionId: string): void;
   move(sessionId: string | null): void;
@@ -120,12 +127,23 @@ function groupSection(group: GroupView, handlers: HomeHandlers): HTMLElement {
   const name = element("h2", "home-group-name");
   name.textContent = group.name;
   header.append(name);
+  if (group.presets !== null) {
+    const presets = group.presets;
+    header.append(
+      button("home-group-presets", presets.label, presets.enabled, () => {
+        handlers.togglePresets(presets.target);
+      }),
+    );
+  }
   if (group.launch !== null) {
     header.append(launchButton(group.launch, handlers));
   }
   section.append(header);
   if (group.launchError !== null) {
     section.append(errorLine(group.launchError));
+  }
+  if (group.presets?.open === true) {
+    section.append(presetsList(group.presets, handlers));
   }
   for (const row of group.rows) {
     section.append(rowPanel(row, handlers));
@@ -154,6 +172,53 @@ function launchRow(row: LaunchRowView, handlers: HomeHandlers): HTMLElement {
   node.append(line);
   if (row.launchError !== null) {
     node.append(errorLine(row.launchError));
+  }
+  return node;
+}
+
+/** An open presets list: the daemon's refusal, or one row per preset. */
+function presetsList(presets: PresetsView, handlers: HomeHandlers): HTMLElement {
+  const list = element("div", "home-presets");
+  if (presets.error !== null) {
+    list.append(errorLine(presets.error));
+  }
+  for (const row of presets.rows) {
+    list.append(presetRow(presets, row, handlers));
+  }
+  return list;
+}
+
+function presetRow(presets: PresetsView, row: PresetRowView, handlers: HomeHandlers): HTMLElement {
+  const target = presets.target;
+  const node = element("div", "home-row");
+  const line = element("div", "home-row-main");
+  const name = element("span", "home-row-label");
+  name.textContent = row.name;
+  line.append(name);
+  if (row.progress !== null) {
+    const progress = element("span", "home-row-status");
+    progress.textContent = row.progress;
+    line.append(progress);
+  }
+  const launch = row.launch;
+  if (launch !== null) {
+    line.append(
+      button("home-preset-launch", launch.label, launch.enabled, () => {
+        if (launch.source !== null) {
+          handlers.launchPreset({ target, presetId: row.presetId, source: launch.source });
+        }
+      }),
+    );
+  }
+  const jobId = row.cancel;
+  if (jobId !== null) {
+    line.append(
+      button("home-preset-cancel", CANCEL, presets.enabled, () => handlers.cancelPreset(jobId)),
+    );
+  }
+  node.append(line);
+  if (row.note !== null) {
+    node.append(errorLine(row.note));
   }
   return node;
 }

@@ -7,16 +7,22 @@ import {
   disarm,
   errorFor,
   expireLaunches,
+  expirePresetLaunches,
   foldReply,
   keepLaunches,
   launchLast,
+  launchPreset,
+  presetKey,
   reset,
   resendLaunches,
+  resendPresetLaunches,
   resume,
   stop,
+  type FoldResult,
   type HomeActions,
+  type PresetLaunchRequest,
 } from "./home-actions";
-import type { ContainerRef, SessionSnapshot } from "./protocol";
+import type { ClientMessage, ContainerRef, SessionSnapshot } from "./protocol";
 
 const SINCE = "2026-11-06T12:00:00Z";
 
@@ -599,4 +605,107 @@ test("home_a_resend_restarts_the_answer_wait", () => {
   expect(expired.launchErrors.get(containerKey(REPO))).toBe(
     "This launch may have started a session. Check the list before launching again.",
   );
+});
+
+/** A preset launch of `p1` from `REPO`, filling its folder source. */
+const PRESET_LAUNCH: PresetLaunchRequest = {
+  target: REPO,
+  presetId: "p1",
+  source: { kind: "folder", path: "C:\\dev\\alpha\\docs\\plans" },
+};
+
+/** The `launch_preset` the phone sends for `PRESET_LAUNCH` under `jobId`. */
+function presetMessage(jobId: string): ClientMessage {
+  return {
+    type: "launch_preset",
+    job_id: jobId,
+    target: { kind: "repo", repo_id: "a" },
+    preset_id: "p1",
+    source: { kind: "folder", path: "C:\\dev\\alpha\\docs\\plans" },
+    variable_values: [],
+    use_worktree_override: null,
+    max_panes_per_tab_override: null,
+  };
+}
+
+const PRESET_KEY = presetKey(REPO, "p1");
+
+const RESEND_REFUSED = "This host can't resend a preset launch; check the desktop.";
+const MAYBE_STARTED =
+  "This launch may have started a session. Check the list before launching again.";
+
+test("home_a_preset_launch_is_kept_pending_from_its_send", () => {
+  const sent = launchPreset(NO_ACTIONS, PRESET_LAUNCH, counter(), NOW);
+
+  expect(sent.message).toEqual(presetMessage("phone-req-1"));
+  expect(sent.state.presetLaunches).toEqual([
+    { ...PRESET_LAUNCH, jobId: "phone-req-1", sentAt: NOW, lastSentAt: NOW },
+  ]);
+  // The Launch last list is the other kind's, and stays empty.
+  expect(sent.state.launches).toEqual([]);
+});
+
+test("home_a_second_launch_of_a_pending_preset_sends_nothing", () => {
+  const sent = launchPreset(NO_ACTIONS, PRESET_LAUNCH, counter(), NOW);
+
+  const again = launchPreset(sent.state, PRESET_LAUNCH, unused(), NOW + 1);
+  expect(again.message).toBeNull();
+  expect(again.state).toBe(sent.state);
+});
+
+test("home_a_pending_preset_is_resent_with_its_job_id_on_a_host_that_repeats", () => {
+  const sent = launchPreset(NO_ACTIONS, PRESET_LAUNCH, counter(), NOW);
+
+  const resent = resendPresetLaunches(keepLaunches(sent.state), true, NOW + 5_000);
+  expect(resent.messages).toEqual([presetMessage("phone-req-1")]);
+  expect(resent.state.presetLaunches.map((launch) => [launch.sentAt, launch.lastSentAt])).toEqual([
+    [NOW, NOW + 5_000],
+  ]);
+});
+
+test("home_a_pending_preset_is_dropped_with_the_resend_text_on_a_host_that_does_not_repeat", () => {
+  const sent = launchPreset(NO_ACTIONS, PRESET_LAUNCH, counter(), NOW);
+
+  const resent = resendPresetLaunches(sent.state, false, NOW + 5_000);
+  expect(resent.messages).toEqual([]);
+  expect(resent.state.presetLaunches).toEqual([]);
+  expect(resent.state.presetErrors.get(PRESET_KEY)).toBe(RESEND_REFUSED);
+  expect(resendPresetLaunches(NO_ACTIONS, false, NOW).state).toBe(NO_ACTIONS);
+});
+
+test("home_a_pending_preset_past_nine_minutes_is_dropped_not_resent", () => {
+  const sent = launchPreset(NO_ACTIONS, PRESET_LAUNCH, counter(), NOW);
+
+  const resent = resendPresetLaunches(sent.state, true, NOW + 9 * MINUTE);
+  expect(resent.messages).toEqual([]);
+  expect(resent.state.presetLaunches).toEqual([]);
+  expect(resent.state.presetErrors.get(PRESET_KEY)).toBe(MAYBE_STARTED);
+});
+
+test("home_a_preset_launch_without_a_job_update_for_a_minute_expires", () => {
+  const sent = launchPreset(NO_ACTIONS, PRESET_LAUNCH, counter(), NOW);
+
+  expect(expirePresetLaunches(sent.state, NOW + MINUTE - 1000)).toBe(sent.state);
+
+  const expired = expirePresetLaunches(sent.state, NOW + MINUTE);
+  expect(expired.presetLaunches).toEqual([]);
+  expect(expired.presetErrors.get(PRESET_KEY)).toBe(MAYBE_STARTED);
+  expect(expirePresetLaunches(NO_ACTIONS, NOW)).toBe(NO_ACTIONS);
+});
+
+test("home_the_first_job_update_clears_the_pending_preset", () => {
+  const sent = launchPreset(NO_ACTIONS, PRESET_LAUNCH, counter(), NOW);
+  const update = (jobId: string): FoldResult =>
+    foldReply(sent.state, {
+      type: "preset_launch_job_updated",
+      job: {
+        job_id: jobId,
+        preset_id: "p1",
+        target: { kind: "repo", repo_id: "a" },
+        status: "resolving",
+      },
+    });
+
+  expect(update("phone-req-1").state.presetLaunches).toEqual([]);
+  expect(update("someone-else").state).toBe(sent.state);
 });

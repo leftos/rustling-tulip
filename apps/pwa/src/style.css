@@ -200,7 +200,10 @@ p {
 .home-card-next,
 .home-row-stop,
 .home-row-resume,
-.home-group-launch {
+.home-group-launch,
+.home-group-presets,
+.home-preset-launch,
+.home-preset-cancel {
   min-height: 44px;
   box-sizing: border-box;
   border: 1px solid #45475a;
@@ -225,7 +228,10 @@ p {
 .home-row-label:disabled,
 .home-row-stop:disabled,
 .home-row-resume:disabled,
-.home-group-launch:disabled {
+.home-group-launch:disabled,
+.home-group-presets:disabled,
+.home-preset-launch:disabled,
+.home-preset-cancel:disabled {
   opacity: 0.5;
 }
 
@@ -267,6 +273,13 @@ p {
 
 .home-row {
   border-bottom: 1px solid #313244;
+}
+
+/* A group's open presets list: its rows sit indented under the header. */
+.home-presets {
+  margin: 0 0 8px;
+  padding-left: 12px;
+  border-left: 1px solid #313244;
 }
 
 .home-row-main {

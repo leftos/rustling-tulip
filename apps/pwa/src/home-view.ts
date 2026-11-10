@@ -1,16 +1,30 @@
 import {
   answer,
   expireLaunches,
+  expirePresetLaunches,
   foldReply,
+  forgetPresetError,
   keepLaunches,
   launchLast,
+  launchPreset,
   reset as resetActions,
   resendLaunches,
+  resendPresetLaunches,
   resume as requestResume,
   stop as requestStop,
   type HomeActions,
+  type PresetLaunchRequest,
 } from "./home-actions";
 import { homeStep, reset as resetModel, type HomeModel } from "./home-model";
+import {
+  NO_PRESETS,
+  answeredPresetKey,
+  foldPresets,
+  reconnectPresets,
+  togglePresets,
+  trackJob,
+  type HomePresets,
+} from "./home-presets";
 import { homeNodes, type HomeHandlers } from "./home-render";
 import {
   homeScreen,
@@ -27,6 +41,7 @@ import type { ConnectionStateName } from "./connection-machine";
 import { introLineShown } from "./installed";
 import {
   FEATURE_LAUNCH_LAST,
+  FEATURE_PRESET_JOB_REPEAT,
   FEATURE_RESUME_SESSION,
   type ClientMessage,
   type ContainerRef,
@@ -48,6 +63,7 @@ const LAUNCH_EXPIRY_TICK_MS = 5_000;
 interface HomeView {
   model: HomeModel;
   actions: HomeActions;
+  presets: HomePresets;
   status: ConnectionStateName;
   cardId: string | null;
   lastIndex: number;
@@ -96,6 +112,7 @@ export function mountHomeView(
   const view: HomeView = {
     model: resetModel(),
     actions: resetActions(),
+    presets: NO_PRESETS,
     status: "idle",
     cardId: null,
     lastIndex: 0,
@@ -141,23 +158,35 @@ function onStatus(
   state: ConnectionStateName,
 ): void {
   view.status = state;
-  // Every `ready` is a fresh start: the daemon resends its whole state,
-  // so nothing from the old connection is kept, save a launch still
-  // waiting for its answer, which is resent with its id.
   if (view.status === "ready") {
-    view.model = resetModel();
-    view.actions = keepLaunches(view.actions);
-    view.lastSupportsLaunchLast = context.connection.supports(FEATURE_LAUNCH_LAST);
-    view.cardId = null;
-    view.lastIndex = 0;
-    view.offline = false;
-    const resent = resendLaunches(view.actions, view.lastSupportsLaunchLast, Date.now());
-    view.actions = resent.state;
-    for (const message of resent.messages) {
-      paint.send(message);
-    }
+    onReady(context, view, paint);
   }
   paint.update(handlers);
+}
+
+/**
+ * Every `ready` is a fresh start: the daemon resends its whole state, so
+ * nothing from the old connection is kept, save a launch still waiting for
+ * its answer, which is resent with its id, and the open presets lists, which
+ * are listed again.
+ */
+function onReady(context: HomeContext, view: HomeView, paint: HomePaint): void {
+  view.model = resetModel();
+  view.actions = keepLaunches(view.actions);
+  view.lastSupportsLaunchLast = context.connection.supports(FEATURE_LAUNCH_LAST);
+  view.cardId = null;
+  view.lastIndex = 0;
+  view.offline = false;
+  const now = Date.now();
+  const resent = resendLaunches(view.actions, view.lastSupportsLaunchLast, now);
+  const supportsRepeat = context.connection.supports(FEATURE_PRESET_JOB_REPEAT);
+  const presetsResent = resendPresetLaunches(resent.state, supportsRepeat, now);
+  const relisted = reconnectPresets(view.presets, paint.newRequestId, supportsRepeat, now);
+  view.actions = presetsResent.state;
+  view.presets = relisted.state;
+  for (const message of [...resent.messages, ...presetsResent.messages, ...relisted.messages]) {
+    paint.send(message);
+  }
 }
 
 /** One daemon message folded into the model and the actions state, then painted. */
@@ -168,6 +197,9 @@ function onMessage(
   message: DaemonMessage,
 ): void {
   view.model = homeStep(view.model, message);
+  // An update of the phone's job is newer than its preset's dropped-launch note.
+  view.actions = forgetPresetError(view.actions, answeredPresetKey(view.presets, message));
+  view.presets = foldPresets(view.presets, message);
   const folded = foldReply(view.actions, message);
   view.actions = folded.state;
   if (message.type === "session_updated") {
@@ -196,7 +228,7 @@ function createHomePaint(context: HomeContext, view: HomeView): HomePaint {
   }
 
   function syncExpiry(handlers: HomeHandlers): void {
-    const waiting = view.actions.launches.length > 0;
+    const waiting = view.actions.launches.length > 0 || view.actions.presetLaunches.length > 0;
     if (waiting && view.expiry === null) {
       view.expiry = setInterval(() => expire(handlers), LAUNCH_EXPIRY_TICK_MS);
     } else if (!waiting && view.expiry !== null) {
@@ -206,7 +238,8 @@ function createHomePaint(context: HomeContext, view: HomeView): HomePaint {
   }
 
   function expire(handlers: HomeHandlers): void {
-    const next = expireLaunches(view.actions, Date.now());
+    const now = Date.now();
+    const next = expirePresetLaunches(expireLaunches(view.actions, now), now);
     if (next === view.actions) {
       return;
     }
@@ -226,7 +259,7 @@ function createHomePaint(context: HomeContext, view: HomeView): HomePaint {
       offline: view.offline,
       supportsLaunchLast: view.lastSupportsLaunchLast,
     };
-    const screen = homeScreen(view.model, view.actions, state);
+    const screen = homeScreen(view.model, view.actions, state, view.presets);
     if (screen.visible) {
       context.connectedOnce.mark();
     }
@@ -282,6 +315,7 @@ function createHomeActions(context: HomeContext, view: HomeView, paint: HomePain
       }
       paint.update(handlers);
     },
+    ...createPresetActions(view, paint, () => handlers),
     stop(sessionId: string): void {
       const result = requestStop(view.actions, sessionId);
       view.actions = result.state;
@@ -324,4 +358,43 @@ function createHomeActions(context: HomeContext, view: HomeView, paint: HomePain
     },
   };
   return handlers;
+}
+
+/** What a tap on a group's presets toggle or a preset row asks the daemon to do. */
+type PresetHandlers = Pick<HomeHandlers, "togglePresets" | "launchPreset" | "cancelPreset">;
+
+/** The preset half of Home's actions; `handlers` hands back the whole set for the repaint. */
+function createPresetActions(
+  view: HomeView,
+  paint: HomePaint,
+  handlers: () => HomeHandlers,
+): PresetHandlers {
+  return {
+    togglePresets(target: ContainerRef): void {
+      view.actions = tappedElsewhere(view.actions);
+      const result = togglePresets(view.presets, target, paint.newRequestId);
+      view.presets = result.state;
+      if (result.message !== null) {
+        paint.send(result.message);
+      }
+      paint.update(handlers());
+    },
+    launchPreset(request: PresetLaunchRequest): void {
+      view.actions = tappedElsewhere(view.actions);
+      const result = launchPreset(view.actions, request, paint.newRequestId, Date.now());
+      view.actions = result.state;
+      // A launch that went out is the newest pending record: its job is followed from here.
+      const launched = result.state.presetLaunches.at(-1);
+      if (result.message !== null && launched !== undefined) {
+        view.presets = trackJob(view.presets, launched);
+        paint.send(result.message);
+      }
+      paint.update(handlers());
+    },
+    cancelPreset(jobId: string): void {
+      view.actions = tappedElsewhere(view.actions);
+      paint.send({ type: "cancel_preset_launch", job_id: jobId });
+      paint.update(handlers());
+    },
+  };
 }
