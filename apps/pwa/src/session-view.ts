@@ -55,6 +55,7 @@ import {
 import type { Connection } from "./socket";
 import { mountTerminal, type TerminalView } from "./terminal-view";
 import { sessionBox } from "./viewport";
+import { NO_WORK, nextRepaint } from "./work-line";
 
 /** What a session screen is mounted over. */
 export interface SessionViewOptions {
@@ -121,6 +122,8 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   let drawnSheetButtons: readonly SheetButtonView[] | undefined;
   let drawnSheetId: string | null = null;
   let timer: number | undefined;
+  /** The running-work line's next re-tick, armed while the line shows. */
+  let workTimer: number | undefined;
   const expanded = new Set<string>();
   /** Each answer's parsed Markdown, so the live answer is parsed only when its text grows. */
   const answers: AnswerCache = new Map();
@@ -141,6 +144,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   const header = element("div", "session-header");
   header.append(back, title, toggle);
   const barEl = element("p", "session-bar");
+  const workEl = element("p", "session-work");
 
   const ended = element("p", "session-ended");
   const chatEl = element("div", "session-chat");
@@ -189,6 +193,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   container.append(
     header,
     barEl,
+    workEl,
     ended,
     chatEl,
     notice,
@@ -235,6 +240,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       mirrorRefused = true;
     }
     const look = sessionLook(readHome(), sessionId);
+    const now = Date.now();
     const screen = sessionScreen({
       title: look.title,
       ended: look.ended,
@@ -251,7 +257,9 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       sendRefused,
       connectedOnce: connectedOnce.connected(),
       answers,
+      now,
     });
+    syncWorkTimer(screen, now);
     if (drawn !== null && sameScreen(drawn, screen)) {
       return;
     }
@@ -268,6 +276,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     toggle.hidden = screen.toggle === null;
     toggle.textContent = screen.toggle ?? "";
     showText(barEl, screen.bar);
+    showText(workEl, screen.work);
     showText(ended, screen.endText);
     showText(notice, screen.notice);
     const rowsSame = sameRows(drawnRows, screen.rows) && drawnHidden === screen.hiddenLine;
@@ -633,6 +642,29 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     }
   }
 
+  /**
+   * Re-ticks the running-work line while it shows, so its ages and
+   * countdowns move: every build clears the last tick and arms the next one
+   * when the line is up.
+   */
+  function syncWorkTimer(screen: SessionScreen, now: number): void {
+    clearWorkTimer();
+    const delay = screen.work === null ? null : nextRepaint(chat.work ?? NO_WORK, now);
+    if (delay !== null) {
+      workTimer = window.setTimeout(() => {
+        workTimer = undefined;
+        update();
+      }, delay);
+    }
+  }
+
+  function clearWorkTimer(): void {
+    if (workTimer !== undefined) {
+      window.clearTimeout(workTimer);
+      workTimer = undefined;
+    }
+  }
+
   /** Whether the pairing screen owns the page right now. */
   function pairingOwnsPage(): boolean {
     return status === "pairing" || status === "notApproved";
@@ -723,6 +755,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       window.clearInterval(timer);
       timer = undefined;
     }
+    clearWorkTimer();
     apply(chatStep(chat, { type: "leave" }, newRequestId));
   };
 }

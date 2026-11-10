@@ -601,7 +601,7 @@ impl SessionRecord {
         } else {
             Vec::new()
         };
-        SessionSnapshot {
+        let mut snapshot = SessionSnapshot {
             id: self.id.clone(),
             label: self.label.clone(),
             user_label: self.user_label.clone(),
@@ -646,7 +646,10 @@ impl SessionRecord {
             background: self.background,
             resumed_from: self.resumed_from.clone(),
             role: self.role,
-        }
+            status_label: protocol::StatusLabel::Unknown,
+        };
+        snapshot.status_label = protocol::status_label(&snapshot);
+        snapshot
     }
 
     /// Put `line` at the front of the summary ring, replacing a provisional
@@ -3285,6 +3288,20 @@ mod tests {
         assert!(!rec.snapshot().busy_excluded, "a record starts counted");
         rec.busy_excluded = true;
         assert!(rec.snapshot().busy_excluded);
+    }
+
+    #[test]
+    fn an_idle_snapshot_with_background_work_is_labelled_background() {
+        use crate::history::test_support::fake_pty;
+        let (pty, _exit) = fake_pty();
+        let mut rec = record("s1");
+        rec.pty = Some(pty);
+        assert_eq!(rec.snapshot().status_label, protocol::StatusLabel::Idle);
+        rec.background = true;
+        assert_eq!(
+            rec.snapshot().status_label,
+            protocol::StatusLabel::Background
+        );
     }
 
     #[test]

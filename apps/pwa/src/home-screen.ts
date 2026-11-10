@@ -198,8 +198,39 @@ export function sameScreen(left: HomeScreen, right: HomeScreen): boolean {
   return sameValue(left, right);
 }
 
-/** The status word a row shows; an unknown status shows as the daemon sent it. */
-export function statusWord(status: SessionStatus): string {
+/**
+ * The status word a row shows, from the label the daemon computed; a daemon
+ * that sent no label, or one this build does not know, words the status.
+ */
+export function statusWord(session: SessionSnapshot): string {
+  switch (session.status_label) {
+    case "inactive":
+      return "Inactive";
+    case "abandoned":
+      return "Abandoned";
+    case "orphan":
+      return "Orphaned";
+    case "starting":
+      return "Starting";
+    case "awaiting_input":
+      return "Needs you";
+    case "working":
+      return "Working";
+    case "background":
+      return "Working in the background";
+    case "idle":
+      return "Idle";
+    case "error":
+      return "Error";
+    case "stopped":
+      return "Stopped";
+    default:
+      return statusOnlyWord(session.status);
+  }
+}
+
+/** The word for a status alone; an unknown status shows as the daemon sent it. */
+function statusOnlyWord(status: SessionStatus): string {
   switch (status) {
     case "working":
       return "Working";
@@ -211,6 +242,8 @@ export function statusWord(status: SessionStatus): string {
       return "Stopped";
     case "error":
       return "Error";
+    case "spawning":
+      return "Starting";
     default:
       return status;
   }
@@ -258,7 +291,7 @@ function rowView(session: SessionSnapshot, actions: HomeActions, actionsEnabled:
   return {
     sessionId: session.id,
     label: displayLabel(session),
-    status: statusWord(session.status),
+    status: statusWord(session),
     stop: stop ? (actions.armed === session.id ? STOP_ARMED : STOP) : null,
     resume: resumeOffered(session),
     enabled: actionsEnabled,

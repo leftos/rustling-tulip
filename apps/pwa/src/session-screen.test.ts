@@ -24,7 +24,14 @@ import {
   type DockKind,
   type SessionScreen,
 } from "./session-screen";
-import type { ChatEntry, ChatPrompt, ChatScreen, SessionMode, SessionSnapshot } from "./protocol";
+import type {
+  ChatEntry,
+  ChatPrompt,
+  ChatScreen,
+  DaemonMessage,
+  SessionMode,
+  SessionSnapshot,
+} from "./protocol";
 
 const USER: ChatEntry = { kind: "user", id: "u1", text: "Add the reset on a target switch" };
 const ANSWER: ChatEntry = { kind: "answer", id: "a1", text: "Added reset_for_target." };
@@ -93,7 +100,11 @@ interface Overrides {
   readonly sendRefused?: boolean;
   readonly connectedOnce?: boolean;
   readonly answers?: AnswerCache;
+  readonly now?: number;
 }
+
+/** The clock the running-work line reads in these tests. */
+const NOW = Date.parse("2026-10-30T12:00:00Z");
 
 /** The screen over the brief's defaults. */
 function screen(overrides: Overrides = {}): SessionScreen {
@@ -113,6 +124,7 @@ function screen(overrides: Overrides = {}): SessionScreen {
     sendRefused: overrides.sendRefused ?? false,
     connectedOnce: overrides.connectedOnce ?? true,
     answers: overrides.answers ?? new Map(),
+    now: overrides.now ?? NOW,
   });
 }
 
@@ -483,4 +495,43 @@ test("a refusal and a sheet error show their text verbatim", () => {
     error: { promptId: "p1", text: "That prompt is gone." },
   };
   expect(screen({ chat: loaded([], 0, ASKING), sheet }).sheet?.error).toBe("That prompt is gone.");
+});
+
+/** A loaded chat the daemon then sent `chat_work` for. */
+function working(work: Omit<Extract<DaemonMessage, { type: "chat_work" }>, "type" | "session_id">) {
+  return chatStep(
+    loaded([]),
+    { type: "message", message: { type: "chat_work", session_id: "s1", ...work } },
+    () => "req-3",
+  ).state;
+}
+
+test("the session screen shows the running-work line from ChatWork", () => {
+  const chat = working({
+    subagents: [{ id: "a1", description: "Sleeper A" }],
+    shells: [
+      {
+        id: "b1",
+        description: "",
+        command: "cargo test",
+        since: new Date(NOW - 3 * 60_000).toISOString(),
+      },
+    ],
+    wakeup_at: new Date(NOW + 4 * 60_000).toISOString(),
+  });
+  expect(screen({ chat }).work).toBe(
+    "1 subagent · 1 background shell (cargo test, 3m) · wakeup in 4m",
+  );
+  // The ages and countdowns read the clock the screen is built at.
+  expect(screen({ chat, now: NOW + 60_000 }).work).toBe(
+    "1 subagent · 1 background shell (cargo test, 4m) · wakeup in 3m",
+  );
+  // The terminal and the ended screen draw no chat, so no line either.
+  expect(screen({ chat, terminal: true }).work).toBeNull();
+  expect(screen({ chat, ended: true }).work).toBeNull();
+});
+
+test("no line when ChatWork is empty", () => {
+  expect(screen().work).toBeNull();
+  expect(screen({ chat: working({ subagents: [], shells: [] }) }).work).toBeNull();
 });

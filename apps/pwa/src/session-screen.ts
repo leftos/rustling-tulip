@@ -16,6 +16,7 @@ import {
 } from "./prompt-sheet";
 import { quickRepliesFor, type QuickReplyGroup } from "./quick";
 import type { ChatEntry, ChatScreen, SessionMode } from "./protocol";
+import { NO_WORK, workLine } from "./work-line";
 
 /**
  * What the session screen draws: the chat rows, the composer, the dock one of
@@ -130,6 +131,12 @@ export interface SessionScreen {
   readonly title: string;
   /** The connection bar under the header, as Home draws it; null when the connection is fine. */
   readonly bar: string | null;
+  /**
+   * The work still running beside the chat, worded as the desktop's strip,
+   * under the header and the bar; null when nothing runs, and on the ended
+   * and terminal screens.
+   */
+  readonly work: string | null;
   /** The whole screen's text when the session is gone; null otherwise. */
   readonly endText: string | null;
   /** Whether the terminal pane is shown: the toggle is on, or the chat was refused. */
@@ -178,6 +185,8 @@ export interface SessionScreenInput {
   readonly connectedOnce: boolean;
   /** The view's parse cache for answer rows, which each build refreshes to the chat's answers. */
   readonly answers: AnswerCache;
+  /** The clock the running-work line's ages and countdowns read, in ms since the epoch. */
+  readonly now: number;
 }
 
 /** What the screen knows of its session from Home's model. */
@@ -246,6 +255,7 @@ export function sessionScreen(input: SessionScreenInput): SessionScreen {
       back: BACK,
       title: input.title,
       bar,
+      work: null,
       endText: ENDED_TEXT,
       terminal: false,
       toggle: null,
@@ -271,6 +281,7 @@ export function sessionScreen(input: SessionScreenInput): SessionScreen {
       back: BACK,
       title: input.title,
       bar,
+      work: null,
       endText: null,
       terminal: true,
       toggle,
@@ -289,6 +300,7 @@ export function sessionScreen(input: SessionScreenInput): SessionScreen {
     back: BACK,
     title: input.title,
     bar,
+    work: workLine(chat.work ?? NO_WORK, input.now),
     endText: null,
     terminal: false,
     toggle,

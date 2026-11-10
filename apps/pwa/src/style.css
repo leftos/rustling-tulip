@@ -457,7 +457,8 @@ body[data-route="session"] #notifications {
 }
 
 .session-hidden,
-.session-muted {
+.session-muted,
+.session-work {
   margin: 0;
   color: #a6adc8;
   font-size: 0.9rem;

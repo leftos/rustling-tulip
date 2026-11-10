@@ -806,7 +806,38 @@ export interface SessionSnapshot {
    * a role this build does not know, both read as [`SessionRole::Normal`].
    */
   role?: SessionRole;
+  /**
+   * The one word for the session's state, as the daemon computes it with
+   * [`status_label`] from this snapshot's own fields; each client words it
+   * its own way. A daemon that predates the field, and a label this build
+   * does not know, both read as [`StatusLabel::Unknown`], and a client
+   * then words `status` itself.
+   */
+  status_label?: StatusLabel;
 }
+
+/**
+ * A session's state as one label: its lifecycle (parked, abandoned,
+ * orphaned) first, then its status, with an idle session that has
+ * background work apart from a plain idle one.
+ */
+export type StatusLabel =
+  /** Parked: the process stopped and the worktree is kept for a resume. */
+  | "inactive"
+  /** The previous daemon died mid-run and the agent process is gone. */
+  | "abandoned"
+  /** Still running, but reattached without its stdio. */
+  | "orphan"
+  /** Status [`SessionStatus::Spawning`]. */
+  | "starting"
+  | "awaiting_input"
+  | "working"
+  /** Idle, with a background shell, subagent or wakeup still pending. */
+  | "background"
+  | "idle"
+  | "error"
+  /** Status [`SessionStatus::Stopped`], whatever its exit code. */
+  | "stopped";
 
 /**
  * What a session was spawned for. A role is fixed for the life of the

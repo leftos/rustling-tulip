@@ -10,7 +10,7 @@ import {
   updatedSession,
   type HomeState,
 } from "./home-screen";
-import type { PendingInput, SessionSnapshot, SessionStatus } from "./protocol";
+import type { PendingInput, SessionSnapshot, SessionStatus, StatusLabel } from "./protocol";
 
 const SINCE = "2026-11-06T12:00:00Z";
 
@@ -246,7 +246,7 @@ test("home_screen_resume_appears_only_when_offered", () => {
 
 test("home_screen_shows_the_status_words", () => {
   const words: Record<SessionStatus, string> = {
-    spawning: "spawning",
+    spawning: "Starting",
     idle: "Idle",
     working: "Working",
     awaiting_input: "Needs you",
@@ -309,4 +309,40 @@ test("home_screen_stays_up_while_the_connection_reconnects", () => {
   // Ready and paired: Home, and no bar.
   expect(homeScreen(model([]), NO_ACTIONS, view()).visible).toBe(true);
   expect(homeScreen(model([]), NO_ACTIONS, view()).bar).toBeNull();
+});
+
+/** The status word Home's row shows for `snapshot`. */
+function rowWord(snapshot: SessionSnapshot): string | undefined {
+  return firstRow(homeScreen(model([snapshot]), NO_ACTIONS, view()))?.status;
+}
+
+for (const [label, word] of [
+  ["inactive", "Inactive"],
+  ["abandoned", "Abandoned"],
+  ["orphan", "Orphaned"],
+  ["starting", "Starting"],
+  ["awaiting_input", "Needs you"],
+  ["working", "Working"],
+  ["background", "Working in the background"],
+  ["idle", "Idle"],
+  ["error", "Error"],
+  ["stopped", "Stopped"],
+] as const) {
+  test(`the ${label} label reads ${word}`, () => {
+    // The label wins over the status it was computed beside.
+    expect(rowWord(session("s1", { status: "idle", status_label: label }))).toBe(word);
+  });
+}
+
+test("an unknown label falls back to the status word", () => {
+  // The wire types leave out `unknown` (the Rust fallback), so these labels come in as raw JSON would.
+  const unknown = "unknown" as unknown as StatusLabel;
+  expect(rowWord(session("s1", { status: "working", status_label: unknown }))).toBe("Working");
+  expect(rowWord(session("s1", { status: "awaiting_input" }))).toBe("Needs you");
+  const future = "some_future_label" as unknown as StatusLabel;
+  expect(rowWord(session("s1", { status: "stopped", status_label: future }))).toBe("Stopped");
+});
+
+test("a spawning status without a label reads Starting", () => {
+  expect(rowWord(session("s1", { status: "spawning" }))).toBe("Starting");
 });

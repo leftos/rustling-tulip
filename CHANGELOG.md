@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- A session's screen on the phone shows its running subagents, background shells and next wake-up, as the desktop's strip does.
 - A tab you haven't named shows the repos and workspaces of the sessions in it, everywhere its name appears; a tab you renamed keeps its name.
 - An account's Fable 7-day limit shows beside its overall 7-day one in Accounts and Settings, whenever it is in use.
 - The Dashboard shows each subagent's model and effort level after its name, such as "Opus 5.5 · high".
@@ -13,6 +14,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- The phone shows a session with subagents or background shells running as Working in the background instead of Idle, and a starting, inactive, abandoned or orphaned session by name.
 - A session you place in a pane takes that pane's size at once, instead of keeping its old size until the pointer moves over it.
 - A session whose task name is too long for its pane no longer reads as finished mid-turn, so no false Finished notice fires.
 - A question whose answers have previews no longer offers answer buttons in a toast or on the Dashboard that could only fail; it offers Go to pane.

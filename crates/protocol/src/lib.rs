@@ -1035,6 +1035,67 @@ pub struct SessionSnapshot {
     /// a role this build does not know, both read as [`SessionRole::Normal`].
     #[serde(default)]
     pub role: SessionRole,
+    /// The one word for the session's state, as the daemon computes it with
+    /// [`status_label`] from this snapshot's own fields; each client words it
+    /// its own way. A daemon that predates the field, and a label this build
+    /// does not know, both read as [`StatusLabel::Unknown`], and a client
+    /// then words `status` itself.
+    #[serde(default)]
+    pub status_label: StatusLabel,
+}
+
+/// A session's state as one label: its lifecycle (parked, abandoned,
+/// orphaned) first, then its status, with an idle session that has
+/// background work apart from a plain idle one.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusLabel {
+    /// Parked: the process stopped and the worktree is kept for a resume.
+    Inactive,
+    /// The previous daemon died mid-run and the agent process is gone.
+    Abandoned,
+    /// Still running, but reattached without its stdio.
+    Orphan,
+    /// Status [`SessionStatus::Spawning`].
+    Starting,
+    AwaitingInput,
+    Working,
+    /// Idle, with a background shell, subagent or wakeup still pending.
+    Background,
+    Idle,
+    Error,
+    /// Status [`SessionStatus::Stopped`], whatever its exit code.
+    Stopped,
+    /// From a daemon that predates the field, or a label this build does
+    /// not know: the client words the status itself.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// The label `snapshot`'s own fields give, first match wins: parked,
+/// abandoned, orphaned, then the status, with an idle session that has
+/// background work labelled [`StatusLabel::Background`].
+#[must_use]
+pub fn status_label(snapshot: &SessionSnapshot) -> StatusLabel {
+    if snapshot.is_inactive {
+        return StatusLabel::Inactive;
+    }
+    if snapshot.is_abandoned {
+        return StatusLabel::Abandoned;
+    }
+    if snapshot.is_orphan {
+        return StatusLabel::Orphan;
+    }
+    match snapshot.status {
+        SessionStatus::Spawning => StatusLabel::Starting,
+        SessionStatus::AwaitingInput => StatusLabel::AwaitingInput,
+        SessionStatus::Working => StatusLabel::Working,
+        SessionStatus::Idle if snapshot.background => StatusLabel::Background,
+        SessionStatus::Idle => StatusLabel::Idle,
+        SessionStatus::Error => StatusLabel::Error,
+        SessionStatus::Stopped => StatusLabel::Stopped,
+    }
 }
 
 /// What a session was spawned for. A role is fixed for the life of the
@@ -13482,6 +13543,147 @@ mod tests {
             serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
         assert_eq!(snapshot.status_since, None, "an absent stamp reads as None");
         assert_eq!(snapshot.status_seq, 0, "an absent sequence reads as 0");
+    }
+
+    #[test]
+    fn session_snapshot_without_status_label_decodes() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        assert_eq!(snapshot.status_label, StatusLabel::Unknown);
+        let json = serde_json::to_value(SessionSnapshot {
+            status_label: StatusLabel::AwaitingInput,
+            ..snapshot
+        })
+        .expect("encode");
+        assert_eq!(
+            json.get("status_label"),
+            Some(&serde_json::json!("awaiting_input"))
+        );
+        let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
+        assert_eq!(
+            back.status_label,
+            StatusLabel::AwaitingInput,
+            "the label round-trips"
+        );
+    }
+
+    #[test]
+    fn an_unknown_status_label_decodes_as_unknown() {
+        let json = SNAPSHOT_WITHOUT_STATUS_SINCE.replace(
+            r#""agent":"claude""#,
+            r#""agent":"claude","status_label":"some_future_label""#,
+        );
+        let snapshot: SessionSnapshot = serde_json::from_str(&json).expect("decodes");
+        assert_eq!(snapshot.status_label, StatusLabel::Unknown);
+    }
+
+    /// The fixture snapshot with `status`, every lifecycle flag off and no
+    /// background work.
+    fn labelled(status: SessionStatus) -> SessionSnapshot {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        SessionSnapshot { status, ..snapshot }
+    }
+
+    #[test]
+    fn status_label_inactive_wins_over_everything() {
+        let snapshot = SessionSnapshot {
+            is_inactive: true,
+            is_abandoned: true,
+            is_orphan: true,
+            ..labelled(SessionStatus::Working)
+        };
+        assert_eq!(status_label(&snapshot), StatusLabel::Inactive);
+    }
+
+    #[test]
+    fn status_label_abandoned_over_orphan() {
+        let snapshot = SessionSnapshot {
+            is_abandoned: true,
+            is_orphan: true,
+            ..labelled(SessionStatus::Working)
+        };
+        assert_eq!(status_label(&snapshot), StatusLabel::Abandoned);
+    }
+
+    #[test]
+    fn status_label_orphan_over_status() {
+        let snapshot = SessionSnapshot {
+            is_orphan: true,
+            ..labelled(SessionStatus::Idle)
+        };
+        assert_eq!(status_label(&snapshot), StatusLabel::Orphan);
+    }
+
+    #[test]
+    fn status_label_spawning_is_starting() {
+        assert_eq!(
+            status_label(&labelled(SessionStatus::Spawning)),
+            StatusLabel::Starting
+        );
+    }
+
+    #[test]
+    fn status_label_awaiting_input() {
+        assert_eq!(
+            status_label(&labelled(SessionStatus::AwaitingInput)),
+            StatusLabel::AwaitingInput
+        );
+    }
+
+    #[test]
+    fn status_label_working() {
+        for background in [false, true] {
+            let snapshot = SessionSnapshot {
+                background,
+                ..labelled(SessionStatus::Working)
+            };
+            assert_eq!(
+                status_label(&snapshot),
+                StatusLabel::Working,
+                "background {background}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_label_idle_with_background_work() {
+        let snapshot = SessionSnapshot {
+            background: true,
+            ..labelled(SessionStatus::Idle)
+        };
+        assert_eq!(status_label(&snapshot), StatusLabel::Background);
+    }
+
+    #[test]
+    fn status_label_idle() {
+        assert_eq!(
+            status_label(&labelled(SessionStatus::Idle)),
+            StatusLabel::Idle
+        );
+    }
+
+    #[test]
+    fn status_label_error() {
+        assert_eq!(
+            status_label(&labelled(SessionStatus::Error)),
+            StatusLabel::Error
+        );
+    }
+
+    #[test]
+    fn status_label_stopped_with_and_without_exit_code() {
+        for exit_code in [Some(0), Some(3), None] {
+            let snapshot = SessionSnapshot {
+                exit_code,
+                ..labelled(SessionStatus::Stopped)
+            };
+            assert_eq!(
+                status_label(&snapshot),
+                StatusLabel::Stopped,
+                "exit {exit_code:?}"
+            );
+        }
     }
 
     #[test]
