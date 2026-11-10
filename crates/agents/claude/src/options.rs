@@ -48,3 +48,33 @@ impl PermissionMode {
         }
     }
 }
+
+/// Claude's `--effort` levels, the ones `claude --help` lists.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+    /// A level from a newer daemon or client.
+    #[serde(other)]
+    Unknown,
+}
+
+impl Effort {
+    /// CLI flag value as expected by `claude --effort <X>`; `None` for
+    /// [`Effort::Unknown`], which passes no flag.
+    #[must_use]
+    pub fn as_cli_arg(self) -> Option<&'static str> {
+        match self {
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::Xhigh => Some("xhigh"),
+            Self::Max => Some("max"),
+            Self::Unknown => None,
+        }
+    }
+}

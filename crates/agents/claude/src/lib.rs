@@ -34,7 +34,7 @@ use agent_api::{
     SummarizerSpec, TracerRun, TranscriptLineFacts, UserHooksState, ViewGoal, ViewReading,
     ViewStep, hook_vocabulary, workspace_prelude,
 };
-use options::{ClaudeProvider, PermissionMode};
+use options::{ClaudeProvider, Effort, PermissionMode};
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, BypassChoice, CharRange,
     ChatAnswerKind, ChatEntry, ChatPrompt, ChatScreen, ChipRule, Choice, ChoiceStyle, FieldKind,
@@ -76,6 +76,9 @@ pub struct ClaudeOptions {
     /// Claude's `--model <value>`; `None` passes the provider's default model
     /// (see [`default_model`]), or no flag when it has none.
     pub model: Option<String>,
+    /// Claude's `--effort <level>`; `None` passes none, leaving the CLI's
+    /// default.
+    pub effort: Option<Effort>,
 }
 
 pub struct ClaudePlugin;
@@ -114,7 +117,12 @@ fn claude_descriptor() -> AgentDescriptor {
             shell_resume_label: "Shell running claude --resume".to_string(),
             no_conversation: "no conversation found".to_string(),
         },
-        fields: vec![permission_mode_field(), provider_field(), model_field()],
+        fields: vec![
+            permission_mode_field(),
+            provider_field(),
+            model_field(),
+            effort_field(),
+        ],
         chips: vec![ChipRule {
             field: "provider".to_string(),
             hide_when: OptionValue::Text("anthropic".to_string()),
@@ -229,7 +237,43 @@ fn model_field() -> OptionField {
             "Model",
             FieldKind::Model {
                 placeholder: None,
-                suggestions: ["opus", "sonnet", "haiku"].map(str::to_string).to_vec(),
+                suggestions: ["fable", "opus", "sonnet", "haiku"]
+                    .map(str::to_string)
+                    .to_vec(),
+            },
+            OptionValue::Null,
+        )
+    }
+}
+
+/// The effort level, in the spawn dialog's Advanced section and on the
+/// Settings page as a host default: no value is the CLI's default; each
+/// choice is an [`Effort`]'s serde name. `DeepSeek` takes no effort level, so
+/// the field hides there.
+fn effort_field() -> OptionField {
+    OptionField {
+        spawn: SpawnPlacement::Advanced,
+        when: vec![FieldRule {
+            if_field: "provider".to_string(),
+            equals: OptionValue::Text("deepseek".to_string()),
+            then: FieldOverride {
+                hidden: Some(true),
+                placeholder: None,
+                suggestions: None,
+            },
+        }],
+        ..main_field(
+            "effort",
+            "Effort",
+            FieldKind::Choice {
+                choices: choices(&[
+                    ("low", "Low"),
+                    ("medium", "Medium"),
+                    ("high", "High"),
+                    ("xhigh", "Extra high"),
+                    ("max", "Max"),
+                ]),
+                style: ChoiceStyle::Dropdown,
             },
             OptionValue::Null,
         )
@@ -322,6 +366,7 @@ impl Agent for ClaudePlugin {
             "--session-id",
             "--model",
             "--permission-mode",
+            "--effort",
             "--dangerously-skip-permissions",
             "--add-dir",
             "--append-system-prompt",
@@ -696,9 +741,11 @@ pub fn default_model(provider: ClaudeProvider) -> Option<&'static str> {
     }
 }
 
-/// Append claude's `--model` and `--permission-mode` args. A spawn that names
-/// no model on a provider with a default model (see [`default_model`]) passes
-/// that one. Bypass permissions passes `--permission-mode bypassPermissions`.
+/// Append claude's `--model`, `--permission-mode` and `--effort` args. A spawn
+/// that names no model on a provider with a default model (see
+/// [`default_model`]) passes that one. Bypass permissions passes
+/// `--permission-mode bypassPermissions`. `DeepSeek` takes no effort level,
+/// and an [`Effort::Unknown`] passes none.
 fn extend_common(args: &mut Vec<String>, opts: &ClaudeOptions) {
     if let Some(model) = opts
         .model
@@ -711,6 +758,12 @@ fn extend_common(args: &mut Vec<String>, opts: &ClaudeOptions) {
     if let Some(mode) = opts.permission_mode {
         args.push("--permission-mode".to_string());
         args.push(mode.as_cli_arg().to_string());
+    }
+    if opts.provider != ClaudeProvider::Deepseek
+        && let Some(level) = opts.effort.and_then(Effort::as_cli_arg)
+    {
+        args.push("--effort".to_string());
+        args.push(level.to_string());
     }
 }
 
@@ -866,6 +919,7 @@ mod tests {
             permission_mode,
             provider: ClaudeProvider::Anthropic,
             model: model.map(str::to_string),
+            effort: None,
         }
     }
 
@@ -917,8 +971,149 @@ mod tests {
             .collect();
         assert_eq!(
             settings,
-            ["permission_mode", "provider"],
-            "the model is chosen per spawn, not on the Settings page"
+            ["permission_mode", "provider", "effort"],
+            "the model is chosen per spawn, not on the Settings page; effort has a host default"
+        );
+    }
+
+    fn field(id: &str) -> OptionField {
+        ClaudePlugin
+            .descriptor()
+            .fields
+            .iter()
+            .find(|field| field.id == id)
+            .cloned()
+            .expect("Claude's descriptor has the field")
+    }
+
+    #[test]
+    fn the_model_suggestions_offer_fable_first() {
+        assert_eq!(
+            field("model").kind,
+            FieldKind::Model {
+                placeholder: None,
+                suggestions: ["fable", "opus", "sonnet", "haiku"]
+                    .map(str::to_string)
+                    .to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_effort_field_hides_on_deepseek() {
+        let effort = field("effort");
+        assert_eq!(effort.spawn, SpawnPlacement::Advanced);
+        assert_eq!(effort.default, OptionValue::Null);
+        assert_eq!(
+            effort.when,
+            vec![FieldRule {
+                if_field: "provider".to_string(),
+                equals: OptionValue::Text("deepseek".to_string()),
+                then: FieldOverride {
+                    hidden: Some(true),
+                    placeholder: None,
+                    suggestions: None,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn effort_is_reserved() {
+        assert!(ClaudePlugin.reserved_args().contains(&"--effort"));
+    }
+
+    fn passes_effort(args: &[String]) -> bool {
+        args.iter().any(|arg| arg == "--effort")
+    }
+
+    #[test]
+    fn effort_passes_its_level_on_anthropic() {
+        let m = members(&["X:/dev/a"]);
+        let opts = ClaudeOptions {
+            effort: Some(Effort::High),
+            ..options(Some(PermissionMode::Plan), Some("opus"))
+        };
+        let args = interactive(&opts, &with_session_id(false), &m, None);
+        assert_eq!(
+            args,
+            vec![
+                "--model",
+                "opus",
+                "--permission-mode",
+                "plan",
+                "--effort",
+                "high",
+                "--session-id",
+                SESSION_ID,
+            ]
+        );
+        let xhigh = ClaudeOptions {
+            effort: Some(Effort::Xhigh),
+            ..options(None, None)
+        };
+        let args = interactive(&xhigh, &with_session_id(false), &m, None);
+        assert_eq!(args, vec!["--effort", "xhigh", "--session-id", SESSION_ID]);
+    }
+
+    #[test]
+    fn no_effort_passes_no_flag() {
+        let m = members(&["X:/dev/a"]);
+        let opts = ClaudeOptions::default();
+        assert!(!passes_effort(&interactive(
+            &opts,
+            &common(false),
+            &m,
+            None
+        )));
+        assert!(!passes_effort(&headless(&opts, &common(false), &m, "hi")));
+    }
+
+    #[test]
+    fn effort_is_not_passed_to_deepseek() {
+        let m = members(&["X:/dev/a"]);
+        let opts = ClaudeOptions {
+            provider: ClaudeProvider::Deepseek,
+            effort: Some(Effort::Max),
+            ..options(None, None)
+        };
+        assert!(!passes_effort(&interactive(
+            &opts,
+            &common(false),
+            &m,
+            None
+        )));
+        assert!(!passes_effort(&headless(&opts, &common(false), &m, "hi")));
+    }
+
+    #[test]
+    fn an_unknown_effort_passes_no_flag() {
+        let m = members(&["X:/dev/a"]);
+        let opts: ClaudeOptions =
+            serde_json::from_str(r#"{"effort":"turbo"}"#).expect("options decode");
+        assert_eq!(opts.effort, Some(Effort::Unknown));
+        assert!(!passes_effort(&interactive(
+            &opts,
+            &common(false),
+            &m,
+            None
+        )));
+    }
+
+    #[test]
+    fn options_saved_without_effort_read_as_none() {
+        let opts: ClaudeOptions = serde_json::from_str(
+            r#"{"permission_mode":"plan","provider":"anthropic","model":"opus"}"#,
+        )
+        .expect("options decode");
+        assert_eq!(
+            opts,
+            ClaudeOptions {
+                permission_mode: Some(PermissionMode::Plan),
+                provider: ClaudeProvider::Anthropic,
+                model: Some("opus".to_string()),
+                effort: None,
+            }
         );
     }
 
@@ -1037,6 +1232,7 @@ mod tests {
                 permission_mode: Some(PermissionMode::Plan),
                 provider: ClaudeProvider::Deepseek,
                 model: Some("deepseek-pro".to_string()),
+                effort: None,
             }
         );
     }
@@ -1130,6 +1326,7 @@ mod tests {
                 "--session-id",
                 "--model",
                 "--permission-mode",
+                "--effort",
                 "--dangerously-skip-permissions",
                 "--add-dir",
                 "--append-system-prompt",

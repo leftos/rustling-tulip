@@ -3883,6 +3883,7 @@ mod tests {
                 protocol::OptionValue::Text("anthropic".to_owned()),
             ),
             ("model".to_owned(), protocol::OptionValue::Null),
+            ("effort".to_owned(), protocol::OptionValue::Null),
         ])
     }
 

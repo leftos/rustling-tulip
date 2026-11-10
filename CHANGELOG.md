@@ -13,6 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Ctrl+clicking a file path in a terminal offers a menu: open it in its default app, open it in the viewer, or open its folder.
 - On the phone's Home, Launch last starts a repo's or workspace's last launch again; a dropped connection never starts it twice or reports a launch that started as failed.
 - The phone's answer sheet for a plan shows the plan itself above its buttons, scrolling on its own when it is long.
+- Choose Claude's effort level, from Low to Max, when starting a session or as a default in Settings; Fable is offered among Claude's models.
 - On the phone's Home, Presets lists a repo's or workspace's presets and launches those that need no typing, showing each launch's progress.
 
 ### Fixed

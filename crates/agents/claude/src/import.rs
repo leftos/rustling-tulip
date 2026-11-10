@@ -1,7 +1,7 @@
 //! Reading a Claude session back from the tracer log of a run the app did
 //! not record.
 
-use crate::options::{ClaudeProvider, PermissionMode};
+use crate::options::{ClaudeProvider, Effort, PermissionMode};
 use crate::{ClaudeOptions, provider_for_model};
 use agent_api::{ImportedRun, TracerRun};
 use std::path::Path;
@@ -15,7 +15,8 @@ pub(crate) const IMPORT_REV: u32 = 3;
 /// model and the provider whose table names that model, and its last
 /// `--permission-mode <value>` its permission mode (an unknown value none);
 /// `--dangerously-skip-permissions` makes it Bypass permissions whatever
-/// `--permission-mode` says.
+/// `--permission-mode` says. Its last `--effort <level>` is its effort (an
+/// unknown level [`Effort::Unknown`]).
 pub(crate) fn import_tracer_run(run: &TracerRun<'_>) -> Option<ImportedRun<ClaudeOptions>> {
     if !program_stem(run.program)?.starts_with("claude") {
         return None;
@@ -37,8 +38,20 @@ pub(crate) fn import_tracer_run(run: &TracerRun<'_>) -> Option<ImportedRun<Claud
             permission_mode,
             provider: imported_provider(model.as_deref()),
             model,
+            effort: effort_arg(run.args),
         },
     })
+}
+
+/// The level of the last `--effort <level>` in `args`, read through
+/// [`Effort`]'s serde names; a level no build knows is [`Effort::Unknown`].
+fn effort_arg(args: &[String]) -> Option<Effort> {
+    let value = args
+        .windows(2)
+        .filter(|pair| pair[0] == "--effort")
+        .map(|pair| pair[1].clone())
+        .next_back()?;
+    serde_json::from_value(serde_json::Value::String(value)).ok()
 }
 
 /// The mode of the last `--permission-mode <value>` in `args`, read back
@@ -101,7 +114,7 @@ fn model_arg(args: &[String]) -> Option<String> {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use crate::options::{ClaudeProvider, PermissionMode};
+    use crate::options::{ClaudeProvider, Effort, PermissionMode};
     use crate::{ClaudeOptions, ClaudePlugin};
     use agent_api::{Agent, ImportedRun, TracerRun};
 
@@ -142,6 +155,7 @@ mod tests {
                     permission_mode: Some(PermissionMode::BypassPermissions),
                     provider: ClaudeProvider::Anthropic,
                     model: Some("opus".to_string()),
+                    effort: None,
                 },
             }
         );
@@ -187,6 +201,22 @@ mod tests {
             Some(PermissionMode::BypassPermissions),
             "the skip flag wins"
         );
+    }
+
+    #[test]
+    fn import_reads_the_effort() {
+        let effort = |list: &[&str]| {
+            import("claude", list)
+                .expect("claude imports")
+                .options
+                .effort
+        };
+        assert_eq!(
+            effort(&["--model", "opus", "--effort", "high"]),
+            Some(Effort::High)
+        );
+        assert_eq!(effort(&["--effort", "turbo"]), Some(Effort::Unknown));
+        assert_eq!(effort(&[]), None);
     }
 
     #[test]
