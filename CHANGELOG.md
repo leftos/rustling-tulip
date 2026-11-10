@@ -4,6 +4,9 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- Ctrl+clicking a path written in parentheses before a colon, such as `(X:\dev\page.html):`, opens the file instead of failing to find it.
 ## v0.11.1-alpha
 
 ### Fixed
