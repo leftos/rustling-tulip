@@ -65,6 +65,9 @@ const CLIENT_WAIT: Duration = Duration::from_secs(30);
 /// How often the client wait looks at the process list again.
 const CLIENT_POLL: Duration = Duration::from_millis(250);
 
+/// How long to wait for bridges to leave after the daemon stopped.
+const BRIDGE_WAIT: Duration = Duration::from_secs(30);
+
 /// The daemon stop must finish inside this, as for `shutdown`.
 const STOP_TIMEOUT: Duration = Duration::from_secs(25);
 
@@ -329,6 +332,7 @@ async fn apply(request: &Request, hooks: &Hooks<'_>, out: &mut impl Write) -> Ou
             format!("could not stop the daemon: {reason}; nothing was changed"),
         );
     }
+    wait_for_bridges(&installed, hooks).await;
     if let Some(busy) = running_from(&installed, hooks.processes).first() {
         let name = busy.exe.file_name().unwrap_or(busy.exe.as_os_str());
         return Outcome::failed(
@@ -379,6 +383,21 @@ async fn wait_for_clients(to: &Path, hooks: &Hooks<'_>) {
     }
 }
 
+/// Wait until no daemon exe runs directly from `to` (a bridge, which leaves
+/// once the daemon closed its socket), or until [`BRIDGE_WAIT`] ends. The
+/// deadline is tokio's clock, which a paused test runtime moves with the
+/// polls the wait sleeps on.
+async fn wait_for_bridges(to: &Path, hooks: &Hooks<'_>) {
+    let deadline = tokio::time::Instant::now() + BRIDGE_WAIT;
+    while running_from(to, hooks.processes)
+        .iter()
+        .any(|process| is_daemon(process.exe.file_name()))
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(CLIENT_POLL).await;
+    }
+}
+
 /// The processes, this one aside, whose exe lies directly in `folder`.
 fn running_from(folder: &Path, processes: &dyn ProcessList) -> Vec<RunningExe> {
     let folder = crate::normalize_process_path(folder);
@@ -398,6 +417,10 @@ fn running_from(folder: &Path, processes: &dyn ProcessList) -> Vec<RunningExe> {
 
 fn is_client(name: Option<&OsStr>) -> bool {
     name.is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(CLIENT_EXE))
+}
+
+fn is_daemon(name: Option<&OsStr>) -> bool {
+    name.is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(DAEMON_EXE))
 }
 
 /// One entry put in place: the installed path, and where its old copy went
@@ -983,7 +1006,7 @@ mod tests {
     use crate::server::test_support::ScratchDir;
     use std::cell::{Cell, RefCell};
 
-    const DAEMON: &str = "rustling-tulipd.exe";
+    const DAEMON: &str = DAEMON_EXE;
     const TRACER: &str = "rt-tracer.exe";
     const SCRIPT: &str = "user-path.ps1";
 
@@ -998,6 +1021,8 @@ mod tests {
     struct Daemon {
         result: Result<(), String>,
         stops: Cell<usize>,
+        /// Whether a stop was asked for, which the leaving bridge reads.
+        stopped: Cell<bool>,
     }
 
     impl Daemon {
@@ -1005,6 +1030,7 @@ mod tests {
             Self {
                 result: Ok(()),
                 stops: Cell::new(0),
+                stopped: Cell::new(false),
             }
         }
 
@@ -1012,6 +1038,7 @@ mod tests {
             Self {
                 result: Err(reason.to_string()),
                 stops: Cell::new(0),
+                stopped: Cell::new(false),
             }
         }
     }
@@ -1019,7 +1046,32 @@ mod tests {
     impl DaemonStop for Daemon {
         fn stop(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + '_>> {
             self.stops.set(self.stops.get() + 1);
+            self.stopped.set(true);
             Box::pin(std::future::ready(self.result.clone()))
+        }
+    }
+
+    /// A bridge that leaves as the daemon stops: the first two looks after the
+    /// stop still find it, and every later one does not.
+    struct BridgeLeavingOnStop<'a> {
+        daemon: &'a Daemon,
+        looks: Cell<usize>,
+        exe: PathBuf,
+    }
+
+    impl ProcessList for BridgeLeavingOnStop<'_> {
+        fn running(&self) -> Vec<RunningExe> {
+            if self.daemon.stopped.get() {
+                let look = self.looks.get() + 1;
+                self.looks.set(look);
+                if look <= 2 {
+                    return vec![RunningExe {
+                        pid: 4242,
+                        exe: self.exe.clone(),
+                    }];
+                }
+            }
+            Vec::new()
         }
     }
 
@@ -1163,7 +1215,7 @@ mod tests {
     }
 
     fn hooks<'a>(
-        processes: &'a Processes,
+        processes: &'a dyn ProcessList,
         daemon: &'a Daemon,
         launches: &'a dyn Launcher,
         lock: &'a dyn UpdateLock,
@@ -1180,7 +1232,7 @@ mod tests {
     async fn apply(
         fixture: &Fixture,
         request: &Request,
-        processes: &Processes,
+        processes: &dyn ProcessList,
         daemon: &Daemon,
         launches: &dyn Launcher,
     ) -> (u8, String) {
@@ -1190,7 +1242,7 @@ mod tests {
     async fn apply_to(
         result: &Path,
         request: &Request,
-        processes: &Processes,
+        processes: &dyn ProcessList,
         daemon: &Daemon,
         launches: &dyn Launcher,
     ) -> (u8, String) {
@@ -1360,10 +1412,11 @@ mod tests {
         assert_eq!(fixture.result_json()["message"], message);
     }
 
-    #[tokio::test]
-    async fn a_bridge_running_from_the_install_folder_changes_nothing() {
+    #[tokio::test(start_paused = true)]
+    async fn a_bridge_that_never_leaves_still_changes_nothing() {
         let fixture = Fixture::new("apply-update-bridge");
 
+        let start = tokio::time::Instant::now();
         let (code, out) = apply(
             &fixture,
             &fixture.request(false),
@@ -1374,12 +1427,48 @@ mod tests {
         .await;
 
         assert_eq!(code, 3, "{out}");
+        assert!(
+            start.elapsed() >= BRIDGE_WAIT,
+            "the wait gave the bridge its whole window"
+        );
         let message = format!(
             "{DAEMON} is still running from the install folder (pid 4242); nothing was changed"
         );
         assert_eq!(out, format!("apply-update: {message}\n"));
         fixture.assert_unchanged();
         assert_eq!(fixture.result_json()["message"], message.as_str());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bridge_that_leaves_after_the_daemon_stops_lets_the_swap_run() {
+        let fixture = Fixture::new("apply-update-bridge-leaves");
+        let daemon = Daemon::stopping();
+        let processes = BridgeLeavingOnStop {
+            daemon: &daemon,
+            looks: Cell::new(0),
+            exe: fixture.to.join(DAEMON),
+        };
+
+        let start = tokio::time::Instant::now();
+        let (code, out) = apply(
+            &fixture,
+            &fixture.request(false),
+            &processes,
+            &daemon,
+            &Launches::default(),
+        )
+        .await;
+
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            start.elapsed() >= CLIENT_POLL,
+            "the wait polled again for the leaving bridge"
+        );
+        assert_eq!(
+            fixture.installed(CLIENT_EXE).as_deref(),
+            Some(format!("new {CLIENT_EXE}").as_str()),
+            "the client was swapped"
+        );
     }
 
     #[tokio::test]
@@ -1934,7 +2023,10 @@ mod tests {
         let (code, _) = apply(
             &fixture,
             &fixture.request(true),
-            &bridge_in(&fixture.to),
+            &Processes(vec![RunningExe {
+                pid: 4242,
+                exe: fixture.to.join(TRACER),
+            }]),
             &Daemon::stopping(),
             &launches,
         )

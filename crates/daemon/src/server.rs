@@ -45,6 +45,9 @@ mod summarizer;
 mod tail;
 mod update;
 pub(crate) use self::update::HostUpdate;
+/// What a bridge reads to refuse starting while an update is being applied.
+#[cfg(windows)]
+pub(crate) use self::update::{SystemProcesses, staged_update_running};
 mod upload;
 pub(crate) use self::recovery::RecoveryClaims;
 

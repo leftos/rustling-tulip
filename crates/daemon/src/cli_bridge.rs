@@ -8,13 +8,19 @@
 //! `Hello` itself, so the token never leaves the host, and nothing but protocol
 //! lines ever reaches stdout.
 
+#[cfg(windows)]
+use crate::cli_apply_update::{ProcessList as _, RunningExe};
 use crate::cli_pair::not_proven_reason;
+#[cfg(windows)]
+use crate::server::{SystemProcesses, staged_update_running};
 use anyhow::anyhow;
 use daemon_client::ProvenConnectError;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{DaemonHandshake, SUPPORTED_PROTOCOL_VERSIONS};
 use std::ffi::OsString;
+#[cfg(windows)]
+use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_tungstenite::tungstenite::{self, Message};
@@ -39,6 +45,19 @@ struct Budgets {
     drain: Duration,
 }
 
+/// Refused while an update is being applied to `install`: a bridge starting
+/// then would start a daemon the update is about to replace. The staged
+/// `apply-update` runs in the updater's session, which a bridge in the SSH
+/// logon's session 0 cannot see through a named mutex, but a process list
+/// sees every session.
+#[cfg(windows)]
+fn refuse_while_updating(install: &Path, running: &[RunningExe]) -> anyhow::Result<()> {
+    if staged_update_running(install, running) {
+        anyhow::bail!("an update is running on this host; try again in a minute");
+    }
+    Ok(())
+}
+
 /// True when the daemon's arguments ask for `bridge`: the first argument is
 /// exactly `bridge`.
 pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
@@ -48,6 +67,13 @@ pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
 /// Start the daemon if none runs and relay this process's stdin and stdout to
 /// it until either end closes.
 pub async fn run() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if let Some(install) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        refuse_while_updating(&install, &SystemProcesses.running())?;
+    }
     run_with(
         async || {
             daemon_client::ensure_running_for_bridge(
@@ -306,6 +332,41 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_bridge_refuses_while_apply_update_runs_from_staging() {
+        let install = Path::new(r"C:\Program Files\rustling-tulip");
+        let running = [RunningExe {
+            pid: 4242,
+            exe: install.join(".staging").join("rustling-tulipd.exe"),
+        }];
+
+        let err = refuse_while_updating(install, &running)
+            .expect_err("a staged update refuses the bridge");
+        assert_eq!(
+            err.to_string(),
+            "an update is running on this host; try again in a minute"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_bridge_starts_with_nothing_staged() {
+        let install = Path::new(r"C:\Program Files\rustling-tulip");
+        let running = [
+            RunningExe {
+                pid: 4241,
+                exe: install.join("rustling-tulip-native.exe"),
+            },
+            RunningExe {
+                pid: 4242,
+                exe: install.join("rustling-tulipd.exe"),
+            },
+        ];
+
+        refuse_while_updating(install, &running).expect("nothing staged lets the bridge start");
     }
 
     fn handshake_for(port: u16) -> DaemonHandshake {

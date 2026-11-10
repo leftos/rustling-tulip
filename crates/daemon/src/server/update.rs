@@ -1109,29 +1109,47 @@ fn own_install_refusal(install: &Path, own: Option<&Path>) -> Option<Refusal> {
 }
 
 /// Busy while a process other than this one runs from `install`'s staging
-/// folder or from under `updates`; refused while anything but the app runs
-/// from `install` itself.
+/// folder or from under `updates`; refused while anything but the app or a
+/// bridge runs from `install` itself.
 fn process_refusal(install: &Path, running: &[RunningExe], updates: &Path) -> Option<Refusal> {
     let own_pid = std::process::id();
     let others = || running.iter().filter(move |process| process.pid != own_pid);
-    let staging = install.join(STAGING_DIR);
-    let updating = others().any(|process| {
-        crate::path_is_under(&process.exe, &staging) || crate::path_is_under(&process.exe, updates)
-    });
+    let updating = staged_update_running(install, running)
+        || others().any(|process| crate::path_is_under(&process.exe, updates));
     if updating {
         return Some((BUSY, ANOTHER_UPDATE));
     }
-    // The app is asked to quit before the launch, so it refuses nothing.
+    // The app is asked to quit before the launch, and a bridge leaves once
+    // the daemon closes its socket, so neither refuses.
     let folder = crate::normalize_process_path(install);
-    let blocking =
-        others().any(|process| !is_client(&process.exe) && runs_from(&process.exe, &folder));
+    let blocking = others().any(|process| {
+        !is_client(&process.exe) && !is_daemon(&process.exe) && runs_from(&process.exe, &folder)
+    });
     blocking.then_some((UPDATE_REFUSED, SOMETHING_RUNS))
+}
+
+/// Whether a process other than this one runs from `install`'s staging
+/// folder: an update is past its launch and is being applied. A bridge reads
+/// this too, since its own session cannot see the updater's session.
+pub(crate) fn staged_update_running(install: &Path, running: &[RunningExe]) -> bool {
+    let own_pid = std::process::id();
+    let staging = install.join(STAGING_DIR);
+    running
+        .iter()
+        .filter(|process| process.pid != own_pid)
+        .any(|process| crate::path_is_under(&process.exe, &staging))
 }
 
 /// Whether `exe` is the app, which the launch waits for to quit.
 fn is_client(exe: &Path) -> bool {
     exe.file_name()
         .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(CLIENT_EXE))
+}
+
+/// Whether `exe` is the daemon: a bridge, or another of its CLI verbs.
+fn is_daemon(exe: &Path) -> bool {
+    exe.file_name()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(DAEMON_EXE))
 }
 
 /// The installer's named update mutex.
@@ -1325,7 +1343,7 @@ mod registry {
 }
 
 /// This machine's processes, read through sysinfo.
-struct SystemProcesses;
+pub(crate) struct SystemProcesses;
 
 impl ProcessList for SystemProcesses {
     fn running(&self) -> Vec<RunningExe> {
@@ -1791,7 +1809,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_update_refuses_while_a_bridge_runs_from_the_install() {
+    async fn remote_update_is_offered_while_a_bridge_runs_from_the_install() {
         let rig = rig(
             "update-bridge",
             Some(OWN),
@@ -1799,9 +1817,13 @@ mod tests {
             SETUP,
         );
 
-        let reply = refusal(ask(&rig.hub).await);
+        let reply = ask(&rig.hub).await;
 
-        assert_eq!(reply, expected(UPDATE_REFUSED, SOMETHING_RUNS));
+        assert!(
+            matches!(reply, DaemonMessage::RemoteUpdateStarted { .. }),
+            "{reply:?}"
+        );
+        assert_eq!(lock(&rig.launches).len(), 1, "launched once");
     }
 
     #[tokio::test]
@@ -1854,6 +1876,51 @@ mod tests {
             "a refusal before the guard takes none"
         );
         assert!(lock(&other.launches).is_empty(), "nothing launched");
+    }
+
+    /// A running process whose exe is `exe`.
+    fn process(exe: PathBuf) -> RunningExe {
+        RunningExe { pid: 4242, exe }
+    }
+
+    /// The install folder the process refusals are read for.
+    fn install() -> PathBuf {
+        Path::new(r"C:\Program Files\rustling-tulip\install").to_path_buf()
+    }
+
+    /// The updates folder, which stands apart from the install folder.
+    fn updates() -> PathBuf {
+        Path::new(r"C:\Users\me\AppData\Local\rustling-tulip\updates").to_path_buf()
+    }
+
+    #[test]
+    fn a_bridge_in_the_install_folder_does_not_refuse_the_update() {
+        let install = install();
+        let running = [process(install.join(DAEMON_EXE))];
+
+        assert_eq!(process_refusal(&install, &running, &updates()), None);
+    }
+
+    #[test]
+    fn another_exe_in_the_install_folder_still_refuses() {
+        let install = install();
+        let running = [process(install.join("other.exe"))];
+
+        assert_eq!(
+            process_refusal(&install, &running, &updates()),
+            Some((UPDATE_REFUSED, SOMETHING_RUNS))
+        );
+    }
+
+    #[test]
+    fn a_staged_daemon_still_refuses_as_another_update() {
+        let install = install();
+        let running = [process(install.join(STAGING_DIR).join(DAEMON_EXE))];
+
+        assert_eq!(
+            process_refusal(&install, &running, &updates()),
+            Some((BUSY, ANOTHER_UPDATE))
+        );
     }
 
     /// Sends the request on a requester's outbox of its own and returns the

@@ -671,12 +671,12 @@ pub fn offers_reconnect(facts: &RowFacts) -> bool {
         && facts.live != Some(LiveState::Open)
 }
 
-/// Whether the row draws Update host: a saved tailnet host the window holds
-/// open, that can update itself on request and runs an older release than
-/// this client. This PC and SSH hosts are never offered it.
+/// Whether the row draws Update host: a saved tailnet or SSH host the window
+/// holds open, that can update itself on request and runs an older release
+/// than this client. This PC is never offered it.
 #[must_use]
 pub fn offers_update(facts: &RowFacts) -> bool {
-    facts.host == RowHost::Tailnet
+    matches!(facts.host, RowHost::Tailnet | RowHost::Ssh)
         && facts.held
         && facts.live == Some(LiveState::Open)
         && facts.remote_update
@@ -1590,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn offers_update_only_for_a_connected_tailnet_host_that_is_behind_and_supports_it() {
+    fn offers_update_for_a_connected_tailnet_or_ssh_host_that_is_behind_and_supports_it() {
         let all = |host| RowFacts {
             held: true,
             live: Some(LiveState::Open),
@@ -1603,7 +1603,7 @@ mod tests {
             "every condition holds"
         );
         assert!(!offers_update(&all(RowHost::ThisPc)), "This PC");
-        assert!(!offers_update(&all(RowHost::Ssh)), "an SSH host");
+        assert!(offers_update(&all(RowHost::Ssh)), "an SSH host");
         assert!(!offers_update(&all(RowHost::Peer)), "a peer");
         let offline = RowFacts {
             live: Some(LiveState::Down {

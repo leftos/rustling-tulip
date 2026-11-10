@@ -8,7 +8,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Connections and Settings show the release each host runs, and mark a host on an older release than this app as Behind.
 - When another device updates this PC, the app counts down 10 seconds, says who asked, offers Cancel, then reopens after the update.
-- Update a computer on an older release from the Connections dialog: confirm, and a notice follows the update until it comes back.
+- Update a computer on an older release, over the tailnet or SSH, from the Connections dialog: confirm, and a notice follows it until it returns.
 - From This PC's row in Connections, tell every connected client to update: each counts down 10 seconds with Cancel, and phones reload.
 
 ### Fixed

@@ -820,7 +820,9 @@ fn a_host_that_never_returns_says_so_after_the_bound(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_update_action_is_hidden_for_this_pc_ssh_and_an_up_to_date_host(cx: &mut TestAppContext) {
+fn the_update_action_is_offered_for_a_behind_ssh_host_and_hidden_for_this_pc_and_an_up_to_date_host(
+    cx: &mut TestAppContext,
+) {
     let dir = TestDir::new();
     seed_ui(
         &dir,
@@ -839,8 +841,8 @@ fn the_update_action_is_hidden_for_this_pc_ssh_and_an_up_to_date_host(cx: &mut T
 
     assert!(!drawn(&mut h, "connections-row-This PC-update"), "This PC");
     assert!(
-        !drawn(&mut h, "connections-row-ssh:me@devbox-update"),
-        "an SSH host, even behind"
+        drawn(&mut h, "connections-row-ssh:me@devbox-update"),
+        "an SSH host that is behind"
     );
     assert!(
         detail(&mut h, "ssh:me@devbox").is_some_and(|detail| detail.behind),

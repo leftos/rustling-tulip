@@ -15,7 +15,7 @@ The check is the one the client's updater makes: the release's `.sha256`, from t
 - **Who may ask:** any paired tailnet device or an SSH client.
 - **Consent:** the requester confirms in a dialog listing the host's running sessions. The host's own client, if open, shows who asked. No approval at the host and no host setting.
 - **App open on the host:** it restarts itself after a 10-second countdown with Cancel, which the daemon runs and the app shows; Restart to update has no countdown.
-- **SSH hosts:** a detached helper started over a second SSH command runs on after the channel drops, and the client reads the result on reconnect. Tailnet hosts are built first.
+- **SSH hosts:** a detached helper started over a second SSH command runs on after the channel drops, and the client reads the result on reconnect. Tailnet hosts are built first. (The mechanism is replaced by the orchestrator decision below.)
 - **Host to client:** the same power both ways. From the host, "Update connected clients" gives each native client the same countdown with Cancel, and it updates itself by the same rule. Phone apps just reload.
 - **A release that breaks sessions or the protocol:** the release carries a machine-readable flag. The confirm dialog says what will end and lets it go ahead, and the host goes first, the requesting client updating itself right after.
 - **Branch:** `feat/remote-update`, merged when the feature works end to end.
@@ -27,9 +27,13 @@ The check is the one the client's updater makes: the release's `.sha256`, from t
 - **Failure:** the new daemon sends the requester the result from `last-result.json` after it starts. A requester whose host does not come back on the new version in a bounded time says so.
 - **Refusals:** the new messages are allowed to a tailnet device on purpose. `host_only_refusal` stays a deny-list, so the review checks that this is deliberate rather than a gap.
 
+- **SSH hosts:** the host daemon is the detached helper. The client sends the existing `RemoteUpdate` over the SSH bridge exactly as to a tailnet host, and the daemon downloads, verifies and launches the installer detached from itself, so the update runs on after the channel drops and the result reaches the client on reconnect (`HostUpdateResult` on every `Welcome`). There is no second SSH command and no new subcommand: a helper started from the SSH logon would restart the daemon in session 0 (elevated for an administrator), which the logon task exists to avoid.
+- **Bridges:** a `rustling-tulipd` running directly from the install folder is a bridge or CLI verb, and a remote update no longer refuses because of one. `apply-update` waits up to 30 s after stopping the daemon for them to leave, then exits 3 as before if one is still there. On Windows a bridge that finds a process running from the install folder's `.staging` folder (the update mutex is per session, so a bridge in the SSH logon's session cannot see it) exits 1 with `rustling-tulipd bridge: an update is running on this host; try again in a minute` and starts no daemon.
+- **Client:** the Connections dialog offers `Update host` on SSH rows as on tailnet rows. An SSH request reads "a connection on this PC" on the host and always gets the host's 10 s countdown (RT-1397). An administrator's daemon on a host reached only over SSH runs elevated and refuses ("This host's daemon runs elevated").
+
 ## What the code does not do yet
 
-- A running `bridge` blocks the swap with exit 3, since it runs from the install folder.
+- Off Windows a bridge does not check whether an update is running (RT-1034).
 - macOS has no cross-process update lock, so a client's own update and a daemon's remote update can race; each stages into its own folder and `apply-update` refuses an in-use bundle.
 - Leftover cleanup of the headless-daemon path is open as RT-1353.
 - A host has no per-connection record of its clients, and no addressed send to one.
@@ -45,7 +49,7 @@ Each part lands on `feat/remote-update`, and each is a sub-issue of RT-1298.
 - [x] **Client to host, in the client.** The update action per host, the confirm dialog listing that host's sessions, progress, reconnect, and the result or failure shown to the requester.
 - [ ] **The breaking flag.** A machine-readable note in each release of what it breaks, read by the confirm dialog, and the requester updating itself right after the host. `docs/release.md` says when to set it.
 - [x] **Host to client.** A per-connection record on the host, an addressed message, "Update connected clients", and the client's countdown with Cancel.
-- [ ] **SSH hosts.** The detached helper over a second SSH command, surviving the bridge's exit, with the result read on reconnect.
+- [x] **SSH hosts.** The host's daemon launches the installer detached, surviving the bridge's exit, with the result read on reconnect; the Connections dialog offers `Update host` on SSH rows.
 - [ ] **Proof.** A live spec against a fake release feed, and a real update on a second machine (`docs/release.md` smoke test), both directions, on Windows and macOS.
 
 ## Trust and safety checks for each brief
