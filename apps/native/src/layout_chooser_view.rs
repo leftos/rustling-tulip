@@ -22,15 +22,6 @@ const INTRO: &str = "This is a new client. Sessions are shared with every connec
 const LAYOUT_LABEL: &str = "Layout";
 const MAX_LABEL: &str = "Max sessions per tab";
 
-/// A host's `LayoutInitRequired` waiting while another host's chooser
-/// shows; it shows once that one is answered or gone.
-pub(crate) struct LayoutQuestion {
-    host: HostKey,
-    has_legacy: bool,
-    active_session_count: u32,
-    clonable: Vec<ClonableLayout>,
-}
-
 impl RootView {
     /// Whether the first-connect layout chooser is open.
     #[must_use]
@@ -56,9 +47,9 @@ impl RootView {
     /// `host`'s daemon's `LayoutInitRequired`: the chooser opens on Start
     /// empty and the client waits for a choice, which goes to `host`. A
     /// question with nothing but Start empty to offer is answered at once,
-    /// since asking would offer no choice. While another host's chooser
-    /// shows, the question waits its turn, a later one from the same host
-    /// replacing it.
+    /// since asking would offer no choice; a remote host's question always is
+    /// one of those, its layout not being this window's to draw. A question
+    /// arriving while the chooser shows replaces it.
     pub(crate) fn open_layout_chooser(
         &mut self,
         host: &HostKey,
@@ -76,7 +67,8 @@ impl RootView {
             "first connect for this client: asking how to lay it out"
         );
         let count = usize::try_from(active_session_count).unwrap_or(usize::MAX);
-        if LayoutChooser::new(has_legacy, count, clonable.clone()).only_start_empty() {
+        let remote = *host != HostKey::Local;
+        if LayoutChooser::new(remote, has_legacy, count, clonable.clone()).only_start_empty() {
             tracing::info!(
                 ?host,
                 "layout chooser: only Start empty is offered, taking it"
@@ -89,41 +81,16 @@ impl RootView {
             );
             return;
         }
-        if self.layout_chooser.is_some() && self.layout_chooser_host != *host {
-            self.layout_questions
-                .retain(|question| question.host != *host);
-            self.layout_questions.push(LayoutQuestion {
-                host: host.clone(),
-                has_legacy,
-                active_session_count,
-                clonable,
-            });
-            return;
-        }
-        self.layout_chooser = Some(LayoutChooser::new(has_legacy, count, clonable));
-        self.layout_chooser_host = host.clone();
+        self.layout_chooser = Some(LayoutChooser::new(remote, has_legacy, count, clonable));
         if self.exit.is_none() {
             self.chooser_focus.focus(window);
         }
         cx.notify();
     }
 
-    /// Closes the chooser, when it is open, and shows the next host's
-    /// waiting question, or with none hands the keyboard back.
+    /// Closes the chooser, when it is open, and hands the keyboard back.
     pub(crate) fn close_layout_chooser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.layout_chooser.take().is_none() {
-            return;
-        }
-        if !self.layout_questions.is_empty() {
-            let next = self.layout_questions.remove(0);
-            self.open_layout_chooser(
-                &next.host,
-                next.has_legacy,
-                next.active_session_count,
-                next.clonable,
-                window,
-                cx,
-            );
             return;
         }
         if self.exit.is_none() {
@@ -132,18 +99,15 @@ impl RootView {
         cx.notify();
     }
 
-    /// `host`'s question is over (its tab list came, or its connection
-    /// ended): its waiting question goes, and its chooser closes when it is
-    /// the one showing. Another host's chooser stays.
+    /// This PC's question is over (its tab list came, or its window reset):
+    /// its chooser closes. A remote host never shows one to close.
     pub(crate) fn close_layout_chooser_of(
         &mut self,
         host: &HostKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.layout_questions
-            .retain(|question| question.host != *host);
-        if self.layout_chooser.is_some() && self.layout_chooser_host == *host {
+        if *host == HostKey::Local && self.layout_chooser.is_some() {
             self.close_layout_chooser(window, cx);
         }
     }
@@ -175,9 +139,7 @@ impl RootView {
     }
 
     /// Presses `control`; a choice goes to the daemon and closes the
-    /// chooser, keeping This PC's arrangement for its daemon's answer. A
-    /// remote host's tab list is not this window's layout, so an arrangement
-    /// chosen for a remote host is dropped.
+    /// chooser, keeping This PC's arrangement for its daemon's answer.
     fn press_layout_control(
         &mut self,
         control: &Control,
@@ -189,26 +151,17 @@ impl RootView {
             return;
         };
         if let Some((kind, arrangement)) = chooser.press(control, aspect) {
-            let host = self.layout_chooser_host.clone();
+            let host = HostKey::Local;
             tracing::info!(?host, ?kind, ?arrangement, "layout chooser: chosen");
             self.send_to(&host, ClientMessage::InitLayout { kind });
-            if host == HostKey::Local {
-                self.pending_arrangement = arrangement;
-            } else if arrangement.is_some() {
-                tracing::info!(
-                    ?host,
-                    "layout chooser: a remote host's tabs are not arranged"
-                );
-            }
+            self.pending_arrangement = arrangement;
             self.close_layout_chooser(window, cx);
         }
         cx.notify();
     }
 
-    /// This PC's whole tab list: its chooser closes (a remote host's stays
-    /// until that host's own tab list, which `lib.rs` routes to
-    /// [`Self::close_layout_chooser_of`]), and the arrangement it chose, if
-    /// any, lays the first tab's panes out once.
+    /// This PC's whole tab list: its chooser closes, and the arrangement it
+    /// chose, if any, lays the first tab's panes out once.
     pub(crate) fn on_tab_list(
         &mut self,
         tabs: &[TabEntry],

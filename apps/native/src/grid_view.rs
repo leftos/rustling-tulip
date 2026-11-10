@@ -1192,19 +1192,23 @@ impl RootView {
     /// Gives the keyboard to the active tab: its focused pane, or a diff or
     /// viewer tab's body. A popped focused pane takes nothing; a popped tab's
     /// card holds no focus, so the main window keeps the keyboard to itself.
+    /// With no tab or no pane to take it, the window's own focus does, so the
+    /// app's shortcuts keep working.
     pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &Context<Self>) {
         if self.focus_active_diff_tab(window, cx) || self.focus_active_viewer_tab(window) {
             return;
         }
         let Some(tab_id) = self.tabs.active_id() else {
+            self.root_focus.focus(window);
             return;
         };
         if self.is_tab_popped(tab_id) && self.is_main_window(window) {
             self.root_focus.focus(window);
             return;
         }
-        if let Some(pane_id) = self.tabs.focused_pane(tab_id) {
-            self.focus_pane_view(&pane_id, window, cx);
+        match self.tabs.focused_pane(tab_id) {
+            Some(pane_id) => self.focus_pane_view(&pane_id, window, cx),
+            None => self.root_focus.focus(window),
         }
     }
 

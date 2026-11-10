@@ -463,3 +463,14 @@ fn escape_is_ignored_where_designed(cx: &mut TestAppContext) {
         "and returns to the menu's rows"
     );
 }
+
+#[gpui::test]
+fn ctrl_shift_p_opens_the_jump_palette_before_any_click(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    h.keys("ctrl-shift-p");
+    assert!(
+        h.root(|root, _| root.quick_jump_open()),
+        "the window's own shortcuts work before anything has clicked in it"
+    );
+}

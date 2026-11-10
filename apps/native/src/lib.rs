@@ -1193,11 +1193,6 @@ pub struct RootView {
     quit_focus: FocusHandle,
     /// The first-connect layout chooser, while open.
     layout_chooser: Option<layout_chooser::LayoutChooser>,
-    /// The host whose daemon asked for the open layout chooser's answer.
-    layout_chooser_host: HostKey,
-    /// Other hosts' layout questions waiting while one host's chooser shows,
-    /// in arrival order.
-    layout_questions: Vec<layout_chooser_view::LayoutQuestion>,
     /// The layout chooser's keyboard focus.
     chooser_focus: FocusHandle,
     /// The arrangement the chooser picked, applied to the daemon's next tab
@@ -1717,8 +1712,6 @@ impl RootView {
             exit: None,
             quit_focus: cx.focus_handle(),
             layout_chooser: None,
-            layout_chooser_host: HostKey::Local,
-            layout_questions: Vec::new(),
             chooser_focus: cx.focus_handle(),
             pending_arrangement: None,
             cleanup_failed: cleanup_failed::CleanupQueue::default(),
@@ -1808,6 +1801,10 @@ impl RootView {
         view.watch_presence(window, cx);
         view.connect_saved_hosts(window, cx);
         view.watch_taskbar_button(window, cx);
+        // A window nothing has clicked in has no focused element, and the
+        // app's shortcuts are capture listeners under the root: the root
+        // takes the keyboard so they run until a pane or a dialog does.
+        view.root_focus.focus(window);
         view
     }
 
@@ -4818,14 +4815,12 @@ impl RootView {
         if self.on_vscode_message(host, &msg, window, cx) {
             return;
         }
-        // Tabs are This PC's layout: a remote host's tab list only ends its
-        // own layout question.
-        if let DaemonMessage::Tabs { tabs } = &msg {
-            if *host == HostKey::Local {
-                self.on_tab_list(tabs, window, cx);
-            } else {
-                self.close_layout_chooser_of(host, window, cx);
-            }
+        // Tabs are This PC's layout: a remote host's tab list draws nothing
+        // here.
+        if let DaemonMessage::Tabs { tabs } = &msg
+            && *host == HostKey::Local
+        {
+            self.on_tab_list(tabs, window, cx);
         }
         if self.fold_tabs_and_drop_stale_menus(host, &msg, window, cx) {
             return;

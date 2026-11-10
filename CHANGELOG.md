@@ -16,6 +16,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - When resuming an abandoned session fails, the phone shows why on that session's row.
+- Keyboard shortcuts work in a window with no tabs before the first click, including right after choosing Start empty.
+- Connecting to another computer no longer offers a layout choice that opened nothing; its sessions start in an empty layout.
 - The phone shows a session with subagents or background shells running as Working in the background instead of Idle, and a starting, inactive, abandoned or orphaned session by name.
 - A session you place in a pane takes that pane's size at once, instead of keeping its old size until the pointer moves over it.
 - A session whose task name is too long for its pane no longer reads as finished mid-turn, so no false Finished notice fires.

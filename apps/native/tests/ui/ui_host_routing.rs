@@ -161,23 +161,17 @@ fn an_ssh_host_whose_name_holds_double_colons_owns_its_rows(cx: &mut TestAppCont
 fn a_remote_hosts_layout_question_is_answered_to_that_host(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
-    let mut host = h.host(&remote());
-    host.connect();
-    host.send(DaemonMessage::LayoutInitRequired {
+    h.host(&remote()).connect();
+    h.sent();
+    h.host(&remote()).send(DaemonMessage::LayoutInitRequired {
         has_legacy: false,
         active_session_count: 1,
         clonable: Vec::new(),
     });
-    h.sent();
-    let start_empty = h.root(|root, _| {
-        root.layout_chooser_controls()
-            .into_iter()
-            .find(|(_, label)| label == "Start empty")
-            .map(|(selector, _)| selector)
-            .expect("the chooser offers Start empty")
-    });
-
-    h.click_on(&start_empty);
+    assert!(
+        !h.root(|root, _| root.layout_chooser_open()),
+        "a remote host's layout is not this window's to draw, so nothing is asked"
+    );
 
     let inits = |sent: Vec<ClientMessage>| -> usize {
         sent.iter()
@@ -659,63 +653,6 @@ fn close_host(h: &mut Harness<'_>, target: &Target) {
     h.host(target).event(NetEvent::State(closed));
 }
 
-#[gpui::test]
-fn a_remote_hosts_layout_chooser_closes_with_its_connection(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
-    h.host(&remote()).connect();
-    h.host(&remote()).send(layout_question(1));
-    assert!(h.root(|root, _| root.layout_chooser_open()));
-
-    close_host(&mut h, &remote());
-
-    assert!(
-        !h.root(|root, _| root.layout_chooser_open()),
-        "the chooser goes with its host's connection"
-    );
-}
-
-#[gpui::test]
-fn two_hosts_layout_questions_are_each_answered(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
-    h.host(&remote()).connect();
-    h.send(layout_question(1));
-    h.host(&remote()).send(layout_question(1));
-    h.sent();
-    h.host(&remote()).sent();
-
-    h.click_on("layout-choose-empty");
-    assert!(
-        h.root(|root, _| root.layout_chooser_open()),
-        "the second host's question shows once the first is answered"
-    );
-    h.click_on("layout-choose-empty");
-
-    assert_eq!(init_count(&h.sent()), 1, "This PC is answered once");
-    assert_eq!(
-        init_count(&h.host(&remote()).sent()),
-        1,
-        "the remote host is answered once"
-    );
-    assert!(!h.root(|root, _| root.layout_chooser_open()));
-}
-
-#[gpui::test]
-fn this_pcs_tab_list_leaves_a_remote_hosts_chooser_open(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
-    h.host(&remote()).connect();
-    h.host(&remote()).send(layout_question(1));
-
-    h.send(DaemonMessage::Tabs { tabs: Vec::new() });
-
-    assert!(
-        h.root(|root, _| root.layout_chooser_open()),
-        "only the remote host's own answer closes its chooser"
-    );
-}
-
 /// A failed cleanup of session `id`, one worktree left on disk.
 fn cleanup_failure(id: &str) -> DaemonMessage {
     DaemonMessage::WorktreeCleanupFailed {
@@ -806,23 +743,6 @@ fn this_pcs_reset_leaves_the_keyboard_on_a_remote_hosts_cleanup_failure(cx: &mut
 }
 
 #[gpui::test]
-fn a_remote_hosts_tab_list_closes_its_chooser(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
-    h.host(&remote()).connect();
-    h.host(&remote()).send(layout_question(1));
-    assert!(h.root(|root, _| root.layout_chooser_open()));
-
-    h.host(&remote())
-        .send(DaemonMessage::Tabs { tabs: Vec::new() });
-
-    assert!(
-        !h.root(|root, _| root.layout_chooser_open()),
-        "the remote host's tab list ends its question"
-    );
-}
-
-#[gpui::test]
 fn a_remote_hosts_tab_list_leaves_this_pcs_question(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
@@ -836,44 +756,14 @@ fn a_remote_hosts_tab_list_leaves_this_pcs_question(cx: &mut TestAppContext) {
         .send(DaemonMessage::Tabs { tabs: Vec::new() });
     assert!(
         h.root(|root, _| root.layout_chooser_open()),
-        "This PC's question still shows"
+        "This PC's chooser survives a remote host's tab list"
     );
     h.click_on("layout-choose-empty");
 
     assert_eq!(init_count(&h.sent()), 1, "This PC is answered once");
     assert!(
         !h.root(|root, _| root.layout_chooser_open()),
-        "the remote host's question went with its tab list"
-    );
-}
-
-#[gpui::test]
-fn a_layout_picked_for_a_remote_host_is_not_laid_over_this_pcs_tabs(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    // No session of This PC's, so its tab list owes it nothing else.
-    let mut h = Harness::with(cx, &dir, &Fixture::default());
-    h.host(&remote()).connect();
-    h.host(&remote()).send(layout_question(5));
-    h.sent();
-    h.click_on("layout-choose-all");
-    h.click_on("chooser-grid-shape-2");
-    h.click_on("chooser-confirm-all");
-    assert_eq!(
-        init_count(&h.host(&remote()).sent()),
-        1,
-        "the choice goes to the remote host"
-    );
-
-    let row = |a: &str, b: &str| split(SplitDirection::Horizontal, pane(a, None), pane(b, None));
-    let grid = split(SplitDirection::Vertical, row("p1", "p2"), row("p3", "p4"));
-    h.send(DaemonMessage::Tabs {
-        tabs: vec![tab("t1", &grid)],
-    });
-
-    let sent = h.sent();
-    assert!(
-        sent.is_empty(),
-        "no arrangement goes to This PC: sent {sent:?}"
+        "This PC's own answer closes its chooser"
     );
 }
 

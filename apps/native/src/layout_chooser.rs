@@ -83,6 +83,9 @@ pub(crate) struct GridShape {
 /// The open chooser.
 #[derive(Debug, Clone)]
 pub(crate) struct LayoutChooser {
+    /// Whether the question came from another host, whose tab layout this
+    /// window does not draw.
+    remote: bool,
     has_legacy: bool,
     count: usize,
     clonable: Vec<ClonableLayout>,
@@ -95,14 +98,17 @@ pub(crate) struct LayoutChooser {
 }
 
 impl LayoutChooser {
-    /// The chooser for the daemon's `LayoutInitRequired`, focused on Start
-    /// empty.
+    /// The chooser for a host's `LayoutInitRequired`, focused on Start
+    /// empty. `remote` is whether that host is another machine: its layout is
+    /// not this window's to draw, so it offers nothing to choose.
     pub(crate) fn new(
+        remote: bool,
         has_legacy: bool,
         active_session_count: usize,
         clonable: Vec<ClonableLayout>,
     ) -> Self {
         Self {
+            remote,
             has_legacy,
             count: active_session_count,
             clonable,
@@ -114,9 +120,14 @@ impl LayoutChooser {
         }
     }
 
-    /// Every control shown, in the order Tab walks them.
+    /// Every control shown, in the order Tab walks them; a remote host
+    /// offers Start empty alone, since the tab it would open is not one this
+    /// window draws.
     pub(crate) fn controls(&self) -> Vec<Control> {
         let mut out = vec![Control::StartEmpty];
+        if self.remote {
+            return out;
+        }
         if self.count > 0 {
             out.push(Control::OpenAll);
             if self.expanded {
@@ -398,7 +409,7 @@ mod tests {
     }
 
     fn chooser(count: usize) -> LayoutChooser {
-        LayoutChooser::new(false, count, Vec::new())
+        LayoutChooser::new(false, false, count, Vec::new())
     }
 
     fn confirm_label(model: &LayoutChooser) -> String {
@@ -432,19 +443,33 @@ mod tests {
         assert!(chooser(0).only_start_empty(), "no options");
         assert!(!chooser(1).only_start_empty(), "one active session");
         assert!(
-            !LayoutChooser::new(true, 0, Vec::new()).only_start_empty(),
+            !LayoutChooser::new(false, true, 0, Vec::new()).only_start_empty(),
             "a legacy layout"
         );
         assert!(
-            !LayoutChooser::new(false, 0, vec![clonable("abc", None)]).only_start_empty(),
+            !LayoutChooser::new(false, false, 0, vec![clonable("abc", None)]).only_start_empty(),
             "a clonable layout"
+        );
+    }
+
+    #[test]
+    fn a_remote_hosts_chooser_offers_only_start_empty() {
+        let remote = LayoutChooser::new(true, true, 3, vec![clonable("c1", None)]);
+        assert_eq!(
+            remote.controls(),
+            [Control::StartEmpty],
+            "no Open all, no picker, no Adopt legacy and no Clone"
+        );
+        assert!(
+            remote.only_start_empty(),
+            "a remote host's question is answered without asking"
         );
     }
 
     #[test]
     fn adopt_previous_only_with_legacy() {
         assert!(!chooser(1).controls().contains(&Control::AdoptLegacy));
-        let mut legacy = LayoutChooser::new(true, 1, Vec::new());
+        let mut legacy = LayoutChooser::new(false, true, 1, Vec::new());
         assert!(legacy.controls().contains(&Control::AdoptLegacy));
         assert_eq!(
             legacy.label(&Control::AdoptLegacy, ASPECT),
@@ -460,6 +485,7 @@ mod tests {
     #[test]
     fn nameless_clonable_shows_short_id() {
         let mut model = LayoutChooser::new(
+            false,
             false,
             0,
             vec![
@@ -656,7 +682,7 @@ mod tests {
 
     #[test]
     fn tab_cycles_visible_controls_and_wraps() {
-        let mut model = LayoutChooser::new(true, 3, vec![clonable("c1", None)]);
+        let mut model = LayoutChooser::new(false, true, 3, vec![clonable("c1", None)]);
         let collapsed = vec![
             Control::StartEmpty,
             Control::OpenAll,
