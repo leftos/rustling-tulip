@@ -16,6 +16,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Play in Settings › Notifications plays the sound you just picked, instead of the one saved before.
 - When resuming an abandoned session fails, the phone shows why on that session's row.
 - Keyboard shortcuts work in a window with no tabs before the first click, including right after choosing Start empty.
 - Connecting to another computer no longer offers a layout choice that opened nothing; its sessions start in an empty layout.

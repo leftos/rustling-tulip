@@ -3524,11 +3524,23 @@ impl RootView {
             SettingsControl::NeedsYouSoundField => {
                 self.toggle_sound_list(NotifyKind::NeedsYou, cx);
             }
-            SettingsControl::NeedsYouSoundPlay => self.play_needs_you_sound(cx),
+            SettingsControl::NeedsYouSoundPlay => {
+                self.preview_sound(
+                    self.sound_of(NotifyKind::NeedsYou),
+                    NotifyKind::NeedsYou,
+                    cx,
+                );
+            }
             SettingsControl::FinishedSoundField => {
                 self.toggle_sound_list(NotifyKind::Finished, cx);
             }
-            SettingsControl::FinishedSoundPlay => self.play_finished_sound(cx),
+            SettingsControl::FinishedSoundPlay => {
+                self.preview_sound(
+                    self.sound_of(NotifyKind::Finished),
+                    NotifyKind::Finished,
+                    cx,
+                );
+            }
             SettingsControl::DefaultShell => self.toggle_shell_list(cx),
             SettingsControl::AgentChoice {
                 field,
