@@ -463,17 +463,6 @@ fn needs_you_view_row_label_ends_in_an_ellipsis(cx: &mut TestAppContext) {
     assert_ellipsized("needs-you-row-s1-label", &title);
 }
 
-#[gpui::test]
-fn needs_you_view_row_detail_ends_in_an_ellipsis(cx: &mut TestAppContext) {
-    let dir = probed();
-    let title = long("Title");
-    let _h = asking(cx, &dir, &title);
-    assert_ellipsized(
-        "needs-you-row-s1-detail",
-        &format!("Waiting for input · {title}"),
-    );
-}
-
 // --- Sidebar -------------------------------------------------------------
 
 #[gpui::test]

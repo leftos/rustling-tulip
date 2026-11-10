@@ -954,7 +954,7 @@ Rows run longest wait first by the snapshot's `status_since` (the daemon's stamp
 
 A row shows the status glyph, the container name in its accent, the session's label and the time waited.
 
-Line two says what an Asking session wants, from the prompt its hooks reported (`pending_input`): a question's header and text ("Migration: keep newest, merge oldest, or skip?", with "+N more" for several), "Allow <tool>: <what it runs>", "Approve plan: " and the plan's first line, or the notification's message, on one line with an ellipsis and in full in the tooltip; with no prompt it reads "Waiting for input" (with the terminal title, minus the agent's title glyph, when it has one).
+Line two says what an Asking session wants, from the prompt its hooks reported (`pending_input`): a question's header and text ("Migration: keep newest, merge oldest, or skip?", with "+N more" for several), "Allow <tool>: <what it runs>", "Approve plan: " and the plan's first line, or the notification's message, wrapping to show it whole, and in full in the tooltip; with no prompt it reads "Waiting for input" (with the terminal title, minus the agent's title glyph, when it has one).
 
 An Ended row reads "Error", "Exited with code N" or "Stopped".
 

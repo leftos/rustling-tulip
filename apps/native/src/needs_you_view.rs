@@ -15,7 +15,7 @@ use protocol::{DaemonMessage, SessionMode, SessionStatus};
 
 use crate::activity_bar::badge_text;
 use crate::driver_id::DriverId as _;
-use crate::ellipsis::{ellipsized, truncating};
+use crate::ellipsis::truncating;
 use crate::fonts::{ui_px, ui_px_at};
 use crate::needs_you::{self, NeedsYouRow, Reason};
 use crate::sidebar::Activity;
@@ -299,6 +299,10 @@ fn needs_you_row(
                 .child(div().flex_none().text_color(gpui::rgb(t.muted)).child("·"))
                 .child(
                     truncating(&format!("{name}-label"), StyledText::new(row.label.clone()))
+                        .debug_selector({
+                            let selector = format!("{name}-label");
+                            move || selector
+                        })
                         .flex_1(),
                 ),
         )
@@ -313,14 +317,12 @@ fn needs_you_row(
     let second = div()
         .relative()
         .min_w(px(0.0))
-        .overflow_hidden()
-        .whitespace_nowrap()
         .text_color(gpui::rgb(t.muted))
-        .children(ellipsized(
-            &format!("{name}-detail"),
-            SharedString::from(row.detail.clone()),
-            StyledText::new(row.detail.clone()),
-        ));
+        .debug_selector({
+            let selector = format!("{name}-detail");
+            move || selector
+        })
+        .child(StyledText::new(row.detail.clone()));
     div()
         .id(SharedString::from(name.clone()))
         .driver_id(|| name)
