@@ -36,8 +36,8 @@
 //! (`HostUpdateCanceled` to every local connection, `update_canceled` to the
 //! requester). At its end every local connection is told
 //! `HostUpdateLaunched`, and the launch waits a while for the app to leave
-//! the install folder. A daemon shutting down during the countdown refuses
-//! the update. The phase is read and published under one lock, so a
+//! the install folder. A daemon shutting down during the countdown or that
+//! wait refuses the update. The phase is read and published under one lock, so a
 //! connection that connects or lags is sent the current one.
 
 use super::connection::{AuthKind, ConnCtx};
@@ -719,8 +719,8 @@ fn start(update: Arc<HostUpdate>, plan: Plan, requester: Requester, notices: Not
 /// The go-ahead for the verified `version`: at once with no local
 /// connection attached, probing once for the app; else the countdown, a
 /// cancel or a shutdown ending it, then the look for the app before
-/// `HostUpdateLaunched` goes out and the wait for it to leave. The decision,
-/// and the id the countdown ran under.
+/// `HostUpdateLaunched` goes out and the wait for it to leave, which a
+/// shutdown ends too. The decision, and the id the countdown ran under.
 async fn decide(
     update: &Arc<HostUpdate>,
     install: &Path,
@@ -760,17 +760,29 @@ async fn decide(
     if !update.start_launching(&notices.events, &update_id) {
         return (Decision::Cancel, Some(update_id));
     }
-    let app_running = wait_for_app(update, install, seen).await;
+    let Some(app_running) = wait_for_app(update, install, &mut notices.shutdown, seen).await else {
+        info!(
+            %update_id,
+            "remote update: the daemon is stopping while the app quits; update refused"
+        );
+        return (Decision::Stopping, Some(update_id));
+    };
     (Decision::Launch { app_running }, Some(update_id))
 }
 
 /// Waits until the app no longer runs from `install`, looking every
 /// [`APP_POLL`], for at most the update's app-quit wait; the launch goes
-/// ahead either way. Whether the app ran from `install` as the launch began,
+/// ahead either way. `None` when the daemon starts stopping during the wait,
+/// which ends it. Whether the app ran from `install` as the launch began,
 /// `seen` being the look taken before `HostUpdateLaunched` went out.
-async fn wait_for_app(update: &Arc<HostUpdate>, install: &Path, mut open: bool) -> bool {
+async fn wait_for_app(
+    update: &Arc<HostUpdate>,
+    install: &Path,
+    shutdown: &mut watch::Receiver<bool>,
+    mut open: bool,
+) -> Option<bool> {
     if !open {
-        return false;
+        return Some(false);
     }
     let deadline = Instant::now() + update.app_quit_wait;
     while open {
@@ -779,10 +791,18 @@ async fn wait_for_app(update: &Arc<HostUpdate>, install: &Path, mut open: bool) 
             info!("remote update: the app is still open; launching anyway");
             break;
         }
-        tokio::time::sleep(APP_POLL.min(deadline - now)).await;
+        // A stopping daemon wins a tie with the app leaving.
+        tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|stopping| *stopping) => {
+                info!("remote update: the daemon is stopping; the app wait ends");
+                return None;
+            }
+            () = tokio::time::sleep(APP_POLL.min(deadline - now)) => {}
+        }
         open = probe_app(update, install).await;
     }
-    true
+    Some(true)
 }
 
 /// Whether the app runs from `install` right now.
@@ -2034,6 +2054,38 @@ mod tests {
             "{reply:?}"
         );
         assert_eq!(lock(&rig.launches).len(), 1, "launched once the app left");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_daemon_stopping_while_the_app_quits_refuses_with_why() {
+        let rig = rig(
+            "update-app-stopping",
+            Some(OWN),
+            &["install/rustling-tulip-native.exe"],
+            SETUP,
+        );
+        let _local = rig.hub.host_update.attach_local();
+        let mut events = rig.hub.state_events.subscribe();
+        let mut replies = send_request(&rig.hub).await;
+        let _scheduled = next_notice(&mut events).await;
+        let _launched = next_notice(&mut events).await;
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        rig.hub.shutdown_tx.send_replace(true);
+
+        let reply = refusal(answer(&mut replies).await);
+        assert_eq!(
+            reply,
+            expected(
+                UPDATE_REFUSED,
+                "The host's daemon is stopping; try again once it is back.",
+            )
+        );
+        lock(&rig.processes.running).clear();
+        tokio::time::sleep(rig.hub.host_update.app_quit_wait + Duration::from_secs(1)).await;
+        assert!(lock(&rig.launches).is_empty(), "nothing launched");
+        assert!(!guard_set(&rig.hub), "the guard is released");
+        assert!(!held_off(&rig.hub), "idle exit is no longer held off");
     }
 
     #[tokio::test(start_paused = true)]
