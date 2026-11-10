@@ -1534,7 +1534,7 @@ impl RootView {
                 TabContent::Grid { .. } | TabContent::Diff { .. }
                     if self.is_tab_popped(&tab.id) =>
                 {
-                    Self::popped_tab_card(tab, cx)
+                    Self::popped_tab_card(tab, self.sidebar.tab_display_name(tab), cx)
                 }
                 TabContent::Diff { .. } => self.diff_tab_element(&tab.id).unwrap_or_else(|| {
                     muted_note(crate::fonts::ui_text_size(cx), DIFF_LOADING_TEXT, &t)
@@ -1801,7 +1801,8 @@ impl RootView {
     /// The card a popped-out tab leaves in the main window in place of its
     /// grid: the tab's name, the popped-out note, Focus window and Dock
     /// back. It holds no focus, so keys typed while it shows go nowhere.
-    fn popped_tab_card(tab: &TabEntry, cx: &mut Context<Self>) -> AnyElement {
+    /// `name` is the name the tab shows.
+    fn popped_tab_card(tab: &TabEntry, name: String, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let key = PopoutKey::Tab {
             tab_id: tab.id.clone(),
@@ -1831,7 +1832,7 @@ impl RootView {
             crate::fonts::ui_text_size(cx),
             crate::fonts::ui_weight_shift(cx),
             names,
-            tab.name.clone(),
+            name,
             [focus, dock],
             &t,
         )
@@ -1888,7 +1889,7 @@ impl RootView {
             .whitespace_nowrap()
             .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
             .text_color(gpui::rgb(t.text))
-            .child(tab.name.clone())
+            .child(self.sidebar.tab_display_name(tab))
             .into_any_element();
         let dock = Self::popout_tab_dock_back(tab_id, cx);
         let toolbar = popout_toolbar_row(&format!("tab-{tab_id}"), vec![title], vec![dock], cx);
@@ -2822,7 +2823,7 @@ impl RootView {
         let name = self
             .tabs
             .tab(tab_id)
-            .map_or(tab_id.as_str(), |tab| tab.name.as_str());
+            .map_or_else(|| tab_id.clone(), |tab| self.sidebar.tab_display_name(tab));
         Some(format!("in {name}"))
     }
 

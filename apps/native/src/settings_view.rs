@@ -5107,10 +5107,11 @@ impl RootView {
     /// The title the window should show now: the active tab's name as the
     /// App title settings shape it.
     fn wanted_window_title(&self) -> String {
-        compute_title(
-            self.tabs.active_tab().map(|tab| tab.name.as_str()),
-            &self.sidebar.ui_state().title,
-        )
+        let name = self
+            .tabs
+            .active_tab()
+            .map(|tab| self.sidebar.tab_display_name(tab));
+        compute_title(name.as_deref(), &self.sidebar.ui_state().title)
     }
 
     /// Sets the window title [`TITLE_DEBOUNCE`] after it last changed; a

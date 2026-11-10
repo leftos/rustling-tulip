@@ -9,7 +9,7 @@
 
 use crate::support;
 
-use rustling_tulip_native::{RootView, TabBadge};
+use rustling_tulip_native::{PopoutKey, RootView, TabBadge};
 
 use gpui::{Modifiers, MouseButton, TestAppContext, point, px, size};
 use protocol::{
@@ -616,6 +616,127 @@ fn menu_rename_starts_inline_rename(cx: &mut TestAppContext) {
     assert!(
         matches!(sent.as_slice(), [ClientMessage::RenameTab { tab_id, name }] if tab_id == "t2" && name == "x"),
         "sent {sent:?}"
+    );
+}
+
+/// Tab `t1`, named `Tab` as the daemon names a tab nobody named, holding
+/// a session of `repo-a` and one of `repo-b`.
+fn unnamed_tab_of_two_repos() -> Fixture {
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let mut unnamed = tab("t1", &grid);
+    "Tab".clone_into(&mut unnamed.name);
+    Fixture {
+        sessions: vec![
+            session("s1").in_repo("repo-a").build(),
+            session("s2").in_repo("repo-b").build(),
+        ],
+        tabs: vec![unnamed],
+        ..Fixture::default()
+    }
+}
+
+#[gpui::test]
+fn an_unnamed_tab_shows_its_sessions_repo_names(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &unnamed_tab_of_two_repos());
+    assert_eq!(
+        h.root(|root, _| root.tab_pill_label("t1")).as_deref(),
+        Some("repo-a, repo-b")
+    );
+}
+
+#[gpui::test]
+fn a_renamed_tab_keeps_its_name(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &unnamed_tab_of_two_repos());
+    h.sent();
+    let pill = h.center("tab-t1");
+
+    h.double_click(pill);
+    h.keys("enter");
+    let renames = |sent: &[ClientMessage]| {
+        sent.iter()
+            .filter(|m| matches!(m, ClientMessage::RenameTab { .. }))
+            .count()
+    };
+    assert_eq!(
+        renames(&h.sent()),
+        0,
+        "the box starts from the shown name, so Enter on it renames nothing"
+    );
+
+    h.double_click(pill);
+    h.cx.simulate_input("work");
+    h.keys("enter");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RenameTab { tab_id, name }] if tab_id == "t1" && name == "work"),
+        "sent {sent:?}"
+    );
+    let mut renamed = unnamed_tab_of_two_repos().tabs.remove(0);
+    "work".clone_into(&mut renamed.name);
+    h.send(DaemonMessage::TabUpdated { tab: renamed });
+    assert_eq!(
+        h.root(|root, _| root.tab_pill_label("t1")).as_deref(),
+        Some("work")
+    );
+}
+
+#[gpui::test]
+fn a_popped_out_unnamed_tab_titles_its_window_with_the_shown_name(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &unnamed_tab_of_two_repos());
+    let key = PopoutKey::Tab {
+        tab_id: "t1".to_owned(),
+    };
+    h.root_update(move |root, window, cx| root.open_popout(key, window, cx));
+    let mut popout = h.popout_window();
+    assert_eq!(popout.window_title().as_deref(), Some("repo-a, repo-b"));
+
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "s2".to_owned(),
+    });
+    popout.run_until_parked();
+    assert_eq!(
+        popout.window_title().as_deref(),
+        Some("repo-a"),
+        "the title follows the shown name when a session goes"
+    );
+}
+
+#[gpui::test]
+fn renaming_while_the_shown_name_changes_stores_nothing_unchanged(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = unnamed_tab_of_two_repos();
+    fixture.sessions[1] = session("s2").in_repo("repo-c").build();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(
+        h.root(|root, _| root.tab_pill_label("t1")).as_deref(),
+        Some("repo-a, repo-c")
+    );
+    h.sent();
+
+    let pill = h.center("tab-t1");
+    h.double_click(pill);
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "s2".to_owned(),
+    });
+    assert_eq!(
+        h.root(|root, _| root.tab_pill_label("t1")).as_deref(),
+        Some("repo-a"),
+        "the shown name changed while the box is open"
+    );
+    h.keys("enter");
+    let sent = h.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, ClientMessage::RenameTab { .. })),
+        "an untouched box stores nothing: sent {sent:?}"
     );
 }
 

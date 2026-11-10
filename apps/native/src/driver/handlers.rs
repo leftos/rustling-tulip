@@ -622,7 +622,7 @@ impl RootView {
         self.tabs
             .tabs()
             .iter()
-            .map(|tab| json!({ "id": tab.id, "title": tab.name }))
+            .map(|tab| json!({ "id": tab.id, "title": self.sidebar.tab_display_name(tab) }))
             .collect()
     }
 

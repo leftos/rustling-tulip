@@ -732,7 +732,10 @@ impl RootView {
             focused: focused
                 .as_ref()
                 .map(|(host, session)| (host.clone(), session)),
-            tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
+            tabs: TabChoices::from_tabs(
+                &self.sidebar.shown_tabs(self.tabs.tabs()),
+                self.tabs.active_id(),
+            ),
             lock,
             preselected,
         };
@@ -1654,7 +1657,10 @@ impl RootView {
     /// The tabs changed: Open in follows them.
     pub(crate) fn refresh_spawn_tabs(&mut self) {
         if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
-            let tabs = TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id());
+            let tabs = TabChoices::from_tabs(
+                &self.sidebar.shown_tabs(self.tabs.tabs()),
+                self.tabs.active_id(),
+            );
             dialog.form.set_tabs(tabs);
         }
     }

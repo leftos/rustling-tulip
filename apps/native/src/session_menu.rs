@@ -1007,14 +1007,14 @@ impl RootView {
     fn duplicate_menu_lines(&self) -> Option<Vec<SubmenuLine<DuplicateTarget>>> {
         self.actions_menu()
             .filter(|menu| menu.submenu == Submenu::Duplicate)
-            .map(|_| duplicate_lines(self.tabs.tabs()))
+            .map(|_| duplicate_lines(&self.sidebar.shown_tabs(self.tabs.tabs())))
     }
 
     /// The Move to submenu's lines while it is open.
     fn move_menu_lines(&self) -> Option<Vec<SubmenuLine<MoveTarget>>> {
         self.actions_menu()
             .filter(|menu| menu.submenu == Submenu::MoveTo)
-            .map(|menu| move_lines(self.tabs.tabs(), &menu.session_id))
+            .map(|menu| move_lines(&self.sidebar.shown_tabs(self.tabs.tabs()), &menu.session_id))
     }
 
     /// The selectors of the menu's rows as shown now, in the groups its
@@ -1490,7 +1490,7 @@ impl RootView {
             .filter(|tab| tab.grid().is_some())
             .map(|tab| SubmenuLine::Choice {
                 selector: format!("{CONTAINER_LAUNCH_LAST_TAB_PREFIX}{}", tab.id),
-                label: tab.name.clone(),
+                label: self.sidebar.tab_display_name(tab),
                 choice: ContainerLaunch::Placement(launch_last::Placement::Tab(tab.id.clone())),
             })
             .collect();
@@ -1732,7 +1732,10 @@ impl RootView {
         };
         let host = container.host();
         self.close_container_menu(window, cx);
-        let tabs = TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id());
+        let tabs = TabChoices::from_tabs(
+            &self.sidebar.shown_tabs(self.tabs.tabs()),
+            self.tabs.active_id(),
+        );
         let open_in = current_tab_open_in(&tabs);
         self.spawn_on(&host, standalone_shell_request(Some(folder)), open_in, cx);
     }

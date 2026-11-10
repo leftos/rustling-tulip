@@ -169,6 +169,7 @@ mod summary_view;
 pub mod syntax;
 mod tab_bar;
 mod tab_menu;
+mod tab_name;
 mod tabs;
 pub mod target;
 mod taskbar_badge;
@@ -2357,7 +2358,7 @@ impl RootView {
         };
         popouts::title(
             key,
-            self.tabs.tabs(),
+            &self.sidebar.shown_tabs(self.tabs.tabs()),
             self.sidebar.sessions_of(&host),
             self.sidebar.label_agents(&host),
         )
@@ -2612,7 +2613,7 @@ impl RootView {
     /// The tab pill of each sidebar leaf, by host and session id: the panes
     /// that show that host's session.
     pub(crate) fn leaf_pills(&self) -> HashMap<SessionRef, TabPill> {
-        tab_pills(self.tabs.tabs())
+        tab_pills(&self.sidebar.shown_tabs(self.tabs.tabs()))
     }
 
     /// Groups the sessions panel by `view`, saving the choice when it
@@ -3472,7 +3473,7 @@ impl RootView {
                 .iter()
                 .map(|tab| quick_jump::TabInput {
                     id: tab.id.clone(),
-                    label: crate::tab_bar::pill_label(tab),
+                    label: crate::tab_bar::pill_label(tab, &self.sidebar.tab_display_name(tab)),
                     host_name: local_name.clone(),
                 })
                 .collect(),

@@ -103,7 +103,7 @@ impl RootView {
                     .collect()
             })
             .unwrap_or_default();
-        let model = MovePanes::new(tab_id, &tab.name, panes);
+        let model = MovePanes::new(tab_id, &self.sidebar.tab_display_name(tab), panes);
         let name = cx.new(|cx| TextInput::new("", NAME_PLACEHOLDER, cx));
         let events = cx.subscribe_in(
             &name,

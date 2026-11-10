@@ -71,6 +71,24 @@ fn sc_panel<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     h
 }
 
+// --- Tab strip -----------------------------------------------------------
+
+#[gpui::test]
+fn a_long_shown_name_ends_in_an_ellipsis(cx: &mut TestAppContext) {
+    let dir = probed();
+    let name = long("repo");
+    let mut fixture = Fixture::single(session("s1").in_repo(&name).build());
+    "Tab".clone_into(&mut fixture.tabs[0].name);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.cx.run_until_parked();
+    assert_eq!(
+        h.root(|root, _| root.tab_pill_label("t1")).as_deref(),
+        Some(name.as_str()),
+        "the unnamed tab shows its repo's name"
+    );
+    assert_ellipsized("tab-label-t1", &name);
+}
+
 // --- Changes -------------------------------------------------------------
 
 #[gpui::test]

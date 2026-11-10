@@ -22,7 +22,8 @@ use crate::launch_last;
 use crate::popouts::{PopoutKey, SavedPopout};
 use crate::runtime_icon::{RuntimeIcon, runtime_icon};
 use crate::source_control::{Part, ScKey, ScUiState};
-use crate::tabs::collect_panes;
+use crate::tab_name;
+use crate::tabs::{SessionRef, collect_panes};
 use crate::target::{HostKey, Target};
 use crate::window_state::WindowState;
 
@@ -1494,6 +1495,51 @@ impl HostSlice {
     fn has_registry(&self) -> bool {
         self.repos_loaded && !(self.repos.is_empty() && self.workspaces.is_empty())
     }
+
+    /// The registered workspace or repo the repos view files `s` under;
+    /// `None` when it files it under a Shell, Dir or Detached container.
+    fn filed_group_name(&self, s: &SessionSnapshot) -> Option<String> {
+        let collapsed = BTreeSet::new();
+        let inputs = self.tree_inputs(&collapsed);
+        let members: HashSet<&str> = self
+            .workspaces
+            .iter()
+            .flat_map(|w| w.member_repo_ids.iter().map(String::as_str))
+            .collect();
+        let mut groups = Groups::default();
+        groups.place(s, &inputs, &members);
+        if let Some(id) = groups.workspaces.keys().next() {
+            return self
+                .workspaces
+                .iter()
+                .find(|w| w.id == *id)
+                .map(|w| w.name.clone());
+        }
+        let id = groups.repos.keys().next()?;
+        self.repos
+            .iter()
+            .find(|r| r.id == *id)
+            .map(|r| r.name.clone())
+    }
+
+    /// The name an unnamed tab reads for session `id` of this slice: a
+    /// workspace session's workspace, a repo or worktree session's repo, a
+    /// plain shell's filed repo or workspace; `None` for a session the slice
+    /// does not list.
+    fn session_group_name(&self, id: &str) -> Option<String> {
+        let s = self.session(id)?;
+        if s.mode == SessionMode::PlainShell {
+            return self.filed_group_name(s);
+        }
+        if let Some(workspace_id) = s.workspace_id.as_deref() {
+            return self
+                .workspaces
+                .iter()
+                .find(|w| w.id == workspace_id)
+                .map(|w| w.name.clone());
+        }
+        s.members.first().map(|m| m.repo_name.clone())
+    }
 }
 
 /// The key a container of `host` folds by: This PC's keeps the plain `key`,
@@ -1889,6 +1935,45 @@ impl SidebarModel {
         })
     }
 
+    /// The repo or workspace name an unnamed tab reads for `session`, plain,
+    /// without its host; `None` when its host does not list it or it adds no
+    /// name (a shell filed under no repo or workspace).
+    #[must_use]
+    pub fn session_group_name(&self, session: &SessionRef) -> Option<String> {
+        self.slice(&session.host)?.session_group_name(&session.id)
+    }
+
+    /// The name `tab` shows: its stored name, or for a tab nobody named the
+    /// repos and workspaces of its sessions in pane order
+    /// ([`tab_name::display_name`]).
+    #[must_use]
+    pub fn tab_display_name(&self, tab: &TabEntry) -> String {
+        if !tab_name::is_default_tab_name(&tab.name) {
+            return tab.name.clone();
+        }
+        let names: Vec<Option<String>> = tab
+            .grid()
+            .map(collect_panes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|pane| pane.session.map(|id| SessionRef::new(pane.host, id)))
+            .map(|session| self.session_group_name(&session))
+            .collect();
+        tab_name::display_name(&tab.name, names.iter().map(Option::as_deref))
+    }
+
+    /// `tabs` with each one's name replaced by the name it shows, for the
+    /// lists that offer tabs by name.
+    #[must_use]
+    pub fn shown_tabs(&self, tabs: &[TabEntry]) -> Vec<TabEntry> {
+        tabs.iter()
+            .map(|tab| TabEntry {
+                name: self.tab_display_name(tab),
+                ..tab.clone()
+            })
+            .collect()
+    }
+
     /// Every host's containers, This PC's first, then each remote host's in
     /// order, a remote host's keys carrying its host key
     /// ([`host_container_key`]).
@@ -1988,7 +2073,7 @@ impl SidebarModel {
     pub fn tab_containers(&self, tabs: &[TabEntry]) -> Vec<Container> {
         let local = &self.local;
         build_tab_containers(
-            tabs,
+            &self.shown_tabs(tabs),
             &local.sessions,
             local.label_agents(),
             &TabRollups {
@@ -8334,6 +8419,82 @@ pub(crate) mod tests {
         );
         let tree = tab_view(&[tab("t1", &grid)], &[session("s1"), session("s2")]);
         assert_eq!(leaf_ids(&tree, "tab:t1"), ["s2", "s1"]);
+    }
+
+    #[test]
+    fn tab_display_name_reads_repo_workspace_and_filed_shell() {
+        let local = crate::target::HostKey::Local;
+        let mut model = SidebarModel::default();
+        model.apply(
+            &local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "D:\\r1")],
+            },
+        );
+        let mut ws = workspace("w1", &[]);
+        "ws-one".clone_into(&mut ws.name);
+        model.apply(
+            &local,
+            &DaemonMessage::Workspaces {
+                workspaces: vec![ws],
+            },
+        );
+        let mut worktree = in_repo("s-wt", "repo-b");
+        worktree.members[0].branch = "wt/x".to_owned();
+        worktree.members[0].worktree_path = "C:/wt/x".to_owned();
+        let mut in_ws = in_repo("s-ws", "r1");
+        in_ws.kind = SessionKind::Workspace;
+        in_ws.workspace_id = Some("w1".to_owned());
+        let sessions = vec![
+            in_repo("s-repo", "repo-a"),
+            worktree,
+            in_ws,
+            shell("s-shell-in", Some("D:\\r1\\src"), SessionKind::Standalone),
+            shell(
+                "s-shell-out",
+                Some("D:\\elsewhere"),
+                SessionKind::Standalone,
+            ),
+        ];
+        model.apply(&local, &DaemonMessage::Sessions { sessions });
+        model.apply(
+            &remote_host("box"),
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("s-remote", "repo-c")],
+            },
+        );
+        let at = |host: &crate::target::HostKey, id: &str| {
+            model.session_group_name(&SessionRef::new(host.clone(), id))
+        };
+        assert_eq!(at(&local, "s-shell-out"), None, "a shell in no repo");
+        assert_eq!(at(&local, "gone"), None, "a session not listed yet");
+        assert_eq!(
+            at(&remote_host("box"), "s-remote").as_deref(),
+            Some("repo-c")
+        );
+
+        let grid = split2(
+            split2(pane("p1", Some("s-repo")), pane("p2", Some("s-wt"))),
+            split2(
+                split2(pane("p3", Some("s-ws")), pane("p4", Some("s-shell-in"))),
+                split2(
+                    split2(pane("p5", Some("s-shell-out")), pane("p6", Some("gone"))),
+                    split2(
+                        crate::tabs::tests::pane_on("p7", Some("s-remote"), "box"),
+                        pane("p8", Some("s-repo")),
+                    ),
+                ),
+            ),
+        );
+        let unnamed = named_tab("t1", "Tab 2", &grid);
+        assert_eq!(
+            model.tab_display_name(&unnamed),
+            "repo-a, repo-b, ws-one, r1, repo-c"
+        );
+        let renamed = named_tab("t1", "work", &grid);
+        assert_eq!(model.tab_display_name(&renamed), "work");
+        let empty = named_tab("t2", "Tab 3", &pane("p9", Some("s-shell-out")));
+        assert_eq!(model.tab_display_name(&empty), "Tab 3");
     }
 
     #[test]
