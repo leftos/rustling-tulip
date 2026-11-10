@@ -13,7 +13,6 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - A session you place in a pane takes that pane's size at once, instead of keeping its old size until the pointer moves over it.
-- Ctrl+clicking a path written in parentheses before a colon, such as `(X:\dev\page.html):`, opens the file instead of failing to find it.
 - A session whose task name is too long for its pane no longer reads as finished mid-turn, so no false Finished notice fires.
 - A question whose answers have previews no longer offers answer buttons in a toast or on the Dashboard that could only fail; it offers Go to pane.
 - The What's new window shows a scrollbar when its notes run longer than it can show.
@@ -42,6 +41,12 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - After a start that crashed, the client asks before opening anything whether to open your saved tabs or start without them, instead of closing them after two crashes.
 - The Trusted checkbox is gone: choose Bypass permissions instead, and Launch last relaunches it without asking you to confirm; saved trusted launches carry over.
+
+## v0.11.2-alpha
+
+### Fixed
+
+- Ctrl+clicking a path written in parentheses before a colon, such as `(X:\dev\page.html):`, opens the file instead of failing to find it.
 
 ## v0.11.1-alpha
 
