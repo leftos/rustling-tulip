@@ -15,19 +15,27 @@
 #[expect(dead_code, reason = "each spec file uses its own share of the helper")]
 mod support;
 
+use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use daemon_client::device_tokens::{DeviceTokenStore as _, MemoryTokens};
 use gpui::TestAppContext;
 use protocol::error_codes::{BUSY, UPDATE_CANCELED, UPDATE_REFUSED};
-use protocol::{ClientMessage, DaemonMessage, RemoteState};
+use protocol::{ClientKind, ClientMessage, DaemonMessage, RemoteState};
 use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{Connection, NetCommand};
+use rustling_tulip_native::{
+    Connection, NATIVE_PROTOCOL_VERSIONS, NetCommand, Toast, toast_action_selector,
+};
 use serde_json::{Value, json};
 use support::Harness;
-use support::live::{LiveClient, LiveDaemon, LiveHostSpec, LiveHosts, REMOTE_HOST, free_port};
+use support::live::{
+    HANG_GUARD, LiveClient, LiveDaemon, LiveHostSpec, LiveHosts, REMOTE_HOST, free_port,
+};
 use support::update_feed::UpdateFeed;
+use tokio_tungstenite::tungstenite::stream::MaybeTlsStream;
+use tokio_tungstenite::tungstenite::{self, Message, WebSocket};
 
 /// The release the fake feed offers: newer than the build's `0.11.0-alpha`.
 const FEED_VERSION: &str = "9.9.9-alpha";
@@ -55,9 +63,23 @@ const LAUNCH_AT_ONCE: &str = "remote update: no local connection; launching at o
 /// The login the fake tailscale gives every node's user.
 const FAKE_LOGIN: &str = "owner@example.com";
 
+/// The client id of the test's raw socket that connects as a phone.
+const PHONE_ID: &str = "rt-e2e-phone";
+/// The client id of the test's raw socket that connects as a native client
+/// without the `update_yourself` capability, as an older build does.
+const OLD_NATIVE_ID: &str = "rt-e2e-old-native";
+/// The self-update countdown toast's title, before its seconds
+/// (`update_yourself_counts_down_naming_the_host` in `tests/ui/ui_update.rs`).
+const SELF_UPDATE_TITLE: &str = "Updating this app in ";
+/// The self-update countdown toast's Cancel button.
+const CLIENT_UPDATE_CANCEL: &str = "client-update-cancel";
+
 /// A request's answer: the version a `RemoteUpdateStarted` names, or an
 /// `Error`'s code and message.
 type Answer = Result<String, (Option<String>, String)>;
+
+/// A raw socket of the test's own on a daemon's local port.
+type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
 
 /// With no local connection on the host, a paired tailnet device's update
 /// launches at once: the sandbox records the installer under the updates
@@ -313,6 +335,182 @@ fn a_hash_mismatch_refuses_the_update(cx: &mut TestAppContext) {
         );
     }
     assert_eq!(launch_record(&daemon), None, "no installer was recorded");
+}
+
+/// A host's `UpdateConnectedClients` reaches each connected client by its
+/// kind: the paired tailnet device, a native client that updates itself, is
+/// told `UpdateYourself` and counts down; a phone is told `ReloadApp`; a
+/// native client without the capability is counted as too old and told
+/// nothing; and the requester hears the three counts. The device's Cancel
+/// ends its countdown, so nothing installs, and the host stays up.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn a_host_tells_its_connected_clients_to_update_each_by_its_kind(
+    host_cx: &mut TestAppContext,
+    device_cx: &mut TestAppContext,
+) {
+    // The home daemon starts first: the update host has no client until the
+    // loopback one connects, and an idle exit before then would be replaced
+    // by a daemon without the sandbox.
+    let home = LiveDaemon::start("update-clients-home");
+    let feed = UpdateFeed::start(FEED_VERSION, INSTALLER);
+    let daemon = LiveDaemon::start_update_host("update-clients", &feed, None, true);
+    let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
+    let port = serve_remote(&mut host, &host_client, &daemon);
+    assert_same_daemon(&daemon);
+    let tokens = Arc::new(MemoryTokens::default());
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
+    wait_not_approved(&mut device, &device_client, 0);
+    pair(&mut host, &host_client, &mut device, &device_client);
+    let mut phone = connect_as(&daemon, PHONE_ID, ClientKind::Phone);
+    let mut old_native = connect_as(&daemon, OLD_NATIVE_ID, ClientKind::Native);
+
+    let from = host_client.message_count();
+    host_client.send(ClientMessage::UpdateConnectedClients {
+        request_id: Some("ucc-1".to_owned()),
+    });
+    let mut counts = None;
+    host.wait_until("the host to answer ucc-1", |_| {
+        counts = host_client.find_message_from(from, |msg| notified(msg, "ucc-1"));
+        counts.is_some()
+    });
+    let (native, phones, too_old) = counts.expect("the wait just found it");
+    assert_eq!(native, 1, "the paired device updates itself");
+    assert_eq!(phones, 1, "the phone socket");
+    assert_eq!(too_old, 1, "the old native socket");
+
+    let frames = read_until(&mut phone, "\"type\":\"reload_app\"");
+    let last: Value = serde_json::from_str(frames.last().expect("read_until returns the match"))
+        .expect("a JSON daemon message");
+    assert_eq!(last["type"], "reload_app", "the phone is told to reload");
+
+    // The daemon queues each connection's UpdateYourself before it answers
+    // the requester, and a socket's messages arrive in order, so the answer
+    // to a request sent now comes after any UpdateYourself.
+    send(&mut old_native, &ClientMessage::ListSessions);
+    let frames = read_until(&mut old_native, "\"type\":\"sessions\"");
+    assert!(
+        !frames
+            .iter()
+            .any(|text| text.contains("\"type\":\"update_yourself\"")),
+        "the old native client is not told to update itself: {frames:?}"
+    );
+
+    cancel_self_update(&mut device);
+    assert!(daemon.answers_health(), "the host is still up");
+    let _ = phone.close(None);
+    let _ = old_native.close(None);
+}
+
+/// A `ConnectedClientsNotified` answering `request_id`: its native, phone and
+/// too-old counts.
+fn notified(msg: &DaemonMessage, request_id: &str) -> Option<(u32, u32, u32)> {
+    match msg {
+        DaemonMessage::ConnectedClientsNotified {
+            request_id: Some(id),
+            native,
+            phones,
+            too_old,
+        } if id == request_id => Some((*native, *phones, *too_old)),
+        _ => None,
+    }
+}
+
+/// Waits for `device`'s self-update countdown toast, clicks its Cancel and
+/// waits for the toast to go.
+fn cancel_self_update(device: &mut Harness<'_>) {
+    let mut id = None;
+    device.wait_until("the device to count its own update down", |h| {
+        id = self_update_toasts(h)
+            .iter()
+            .find(|toast| toast.title.starts_with(SELF_UPDATE_TITLE))
+            .map(|toast| toast.id);
+        id.is_some()
+    });
+    let id = id.expect("the wait just found it");
+    device.click_on(&toast_action_selector(id, CLIENT_UPDATE_CANCEL));
+    device.wait_until("the self-update countdown to go", |h| {
+        self_update_toasts(h).is_empty()
+    });
+}
+
+/// The self-update countdown toasts that show.
+fn self_update_toasts(h: &mut Harness<'_>) -> Vec<Toast> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .filter(|toast| {
+                toast
+                    .key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with("client-update-"))
+            })
+            .cloned()
+            .collect()
+    })
+}
+
+/// A socket of the test's own on `daemon`'s local port, saying it is a
+/// `kind` client with no features, read past its handshake and the initial
+/// session list: the daemon queues that list after it registers the
+/// connection, so a request sent once it is read counts this socket, and a
+/// later `sessions` frame is the answer to the test's own `ListSessions`.
+/// Its read timeout is a hang guard only.
+fn connect_as(daemon: &LiveDaemon, client_id: &str, kind: ClientKind) -> Socket {
+    let handshake = daemon.handshake();
+    let url = format!("ws://127.0.0.1:{}/ws", handshake.port);
+    let (mut ws, _) = tungstenite::connect(url).expect("open a socket to the daemon");
+    if let MaybeTlsStream::Plain(stream) = ws.get_ref() {
+        TcpStream::set_read_timeout(stream, Some(HANG_GUARD)).expect("set the socket's timeout");
+    }
+    send(
+        &mut ws,
+        &ClientMessage::Hello {
+            protocol_version: NATIVE_PROTOCOL_VERSIONS[0],
+            protocol_versions: NATIVE_PROTOCOL_VERSIONS.to_vec(),
+            auth_token: handshake.auth_token.clone(),
+            client_id: Some(client_id.to_owned()),
+            client_name: None,
+            client_version: None,
+            client_kind: Some(kind),
+            client_features: Vec::new(),
+        },
+    );
+    read_until(&mut ws, "\"type\":\"sessions\"");
+    ws
+}
+
+/// Sends `msg` on the test's socket.
+fn send(ws: &mut Socket, msg: &ClientMessage) {
+    let text = serde_json::to_string(msg).expect("encode a client message");
+    ws.send(Message::Text(text.into()))
+        .expect("write to the test's socket");
+}
+
+/// Reads text frames until one contains `needle`; returns every text frame
+/// read, the match last. The daemon's broadcasts keep the socket busy, so
+/// the wait has its own hang guard besides the socket's read timeout.
+fn read_until(ws: &mut Socket, needle: &str) -> Vec<String> {
+    let deadline = Instant::now() + HANG_GUARD;
+    let mut frames = Vec::new();
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "hung: waited {HANG_GUARD:?} for a daemon message containing {needle:?}"
+        );
+        let frame = ws
+            .read()
+            .map_err(|err| format!("hung or closed waiting for {needle:?}: {err}"))
+            .expect("the daemon answers the test's socket");
+        if let Message::Text(text) = frame {
+            let text = text.as_str().to_owned();
+            let found = text.contains(needle);
+            frames.push(text);
+            if found {
+                return frames;
+            }
+        }
+    }
 }
 
 /// A host with a 600 s countdown, its loopback client attached, and a paired
