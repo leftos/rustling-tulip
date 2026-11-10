@@ -651,6 +651,8 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
 
   `truncating(id, text)` (wrap on, `text_ellipsis`, `line_clamp(1)`) is for a `flex_1` or block row outside the pane grid (panel rows, heads, the footer), where the width is definite once flex settles; a site whose spec shows `truncating` drawing whole text in a narrow box uses the pair instead (the source-control picker went the other way: the pair drew whole there). Text that runs past its box by about a pixel now ends in `…` where the old clip hid the sliver.
 
+  Under a `whitespace_nowrap` parent (a jump palette row), `truncating` inherits the no-wrap and draws its text whole, so the call adds `.whitespace_normal()`.
+
   A re-measure through `truncating` is what exposed gpui's stale runs: a narrow measure shortened the text element's one `runs` list, and the next, wider measure shaped the whole text with the short list, which panicked when the stale length fell inside a character. The rule now: each measure truncates its own copy of the runs, in the vendored gpui (`vendor/gpui`, `VENDORED.md`), and `truncating` keeps wrapping on because the wrap width is what makes the measure definite. `apps/native/tests/ellipsis_real_text.rs` guards it on the real text system (`docs/testing.md`).
 
   The source-control section head is two lines, repo then branch, each cut on its own. The in-process harness's fake text layout hides the cause, so specs read the drawn text: in debug builds each helper records its `TextLayout` under its id once a test calls `ellipsis::enable_probe()`, and `ellipsis::drawn_text(id)` returns it; `tests/ui/ui_ellipsis.rs` holds one spec per site.

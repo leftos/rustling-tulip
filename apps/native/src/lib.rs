@@ -6251,12 +6251,15 @@ impl RootView {
                     .into_iter()
                     .map(|span| footer_count(span, &theme(cx))),
             )
-            .child(
-                ellipsis::truncating("footer-status", StyledText::new(self.footer_status()))
+            .child({
+                let status = self.footer_status();
+                ellipsis::truncating("footer-status", StyledText::new(status.clone()))
+                    .id("footer-status")
                     .driver_id(|| "footer-status".to_owned())
                     .flex_1()
-                    .text_right(),
-            )
+                    .text_right()
+                    .when(!status.is_empty(), |line| line.tooltip(tooltip(status)))
+            })
             .children(self.accounts_chip(cx))
             .children(self.update_footer(cx))
             .children(self.version_footer())

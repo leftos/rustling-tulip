@@ -5,7 +5,7 @@
 
 use gpui::{
     AnyElement, Context, ElementId, Entity, Focusable as _, Keystroke, MouseButton, MouseDownEvent,
-    ScrollHandle, SharedString, Subscription, Window, div, prelude::*, px,
+    ScrollHandle, SharedString, StyledText, Subscription, Window, div, prelude::*, px,
 };
 
 use crate::buttons::{Layer, field_frame};
@@ -328,6 +328,7 @@ fn quick_jump_row(
 ) -> AnyElement {
     let t = theme(cx);
     let name = format!("quick-jump-row-{at}");
+    let primary_id = format!("{name}-primary");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .driver_id(move || name)
@@ -348,12 +349,11 @@ fn quick_jump_row(
                 .text_color(gpui::rgb(t.muted))
                 .child(entry.kind.tag()),
         )
+        // The row's nowrap would reach the text, which `truncating` needs
+        // wrapping on to measure at its narrowed width.
         .child(
-            div()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(entry.primary.clone()),
+            crate::ellipsis::truncating(&primary_id, StyledText::new(entry.primary.clone()))
+                .whitespace_normal(),
         )
         .when_some(elsewhere, |row, host| {
             row.child(

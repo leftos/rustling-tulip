@@ -26,6 +26,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Accounts and Settings › Accounts show an account's whole email and reset times, wrapping them, instead of cutting them off.
 - The undo shelf shows its whole message, wrapping it, instead of cutting it to one line.
 - The Dashboard shows the whole of what a session is doing or waiting on, wrapping it, instead of cutting it to one line.
+- A long footer status shows in full on hover, and long names in the jump palette and Themes end in "…" instead of cutting mid-letter.
 - Unfocused panes dim alike whether their accent comes from the theme or a chosen colour, and each pane's header carries a fade of its accent.
 - A question too tall for its pane can be answered from a toast or the Dashboard instead of being refused, and its Chat card shows the whole question.
 - The Connections dialog's rows and headings no longer run together when the Add host form leaves them little room; the list scrolls instead.
