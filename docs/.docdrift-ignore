@@ -10,6 +10,8 @@ day-ledger.json
 # The account store's auto-switch state and engine lease, under the accounts dir
 autoswitch_state.json
 engine_lease.json
+# The native client's start guard, under the config dir
+start-guard.json
 # The updater's result file under the updates dir
 last-result.json
 updates/last-result.json
