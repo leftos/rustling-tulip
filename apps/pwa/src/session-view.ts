@@ -1,4 +1,5 @@
 import { INITIAL_CHAT, chatStep, latestPrompt, type ChatState } from "./chat-model";
+import { measureScroll, scrollAfterPaint, type ChatScroll } from "./chat-scroll";
 import {
   INITIAL_COMPOSER,
   edit,
@@ -104,6 +105,8 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   let drawn: SessionScreen | null = null;
   let drawnRows: readonly ChatRow[] | null = null;
   let drawnHidden: string | null = null;
+  /** The chat's position when it last hid, applied once it shows again. */
+  let keptScroll: ChatScroll | null = null;
   let drawnKeys: readonly KeyTrayEntry[] | undefined;
   let drawnKeyBar: KeyBarView | null | undefined;
   let drawnComposer: ComposerView | null | undefined;
@@ -260,7 +263,18 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     showText(barEl, screen.bar);
     showText(ended, screen.endText);
     showText(notice, screen.notice);
+    const rowsSame = sameRows(drawnRows, screen.rows) && drawnHidden === screen.hiddenLine;
+    if (!chatEl.hidden && (screen.endText !== null || screen.terminal)) {
+      keptScroll = measureScroll(chatEl);
+    }
     chatEl.hidden = screen.endText !== null || screen.terminal;
+    if (!chatEl.hidden && keptScroll !== null && rowsSame) {
+      const target = scrollAfterPaint(keptScroll, measureScroll(chatEl), chatEl.scrollHeight);
+      if (target !== null) {
+        chatEl.scrollTop = target;
+      }
+      keptScroll = null;
+    }
     terminalEl.hidden = !screen.terminal;
     composerEl.hidden = screen.composer === null;
     keysEl.hidden = screen.keys.length === 0;
@@ -283,7 +297,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       paintDock(screen.dock);
     }
     paintSheet(screen.sheet);
-    if (!sameRows(drawnRows, screen.rows) || drawnHidden !== screen.hiddenLine) {
+    if (!rowsSame) {
       drawnRows = screen.rows;
       drawnHidden = screen.hiddenLine;
       paintChat(screen);
@@ -293,7 +307,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
 
   /** Rebuilds the chat rows, keeping the newest row in view only when it was. */
   function paintChat(screen: SessionScreen): void {
-    const atBottom = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 8;
+    const before = measureScroll(chatEl);
     const nodes: HTMLElement[] = [];
     if (screen.hiddenLine !== null) {
       const line = element("p", "session-hidden");
@@ -304,8 +318,12 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       nodes.push(rowNode(row));
     }
     chatEl.replaceChildren(...nodes);
-    if (atBottom) {
-      chatEl.scrollTop = chatEl.scrollHeight;
+    if (!chatEl.hidden) {
+      const target = scrollAfterPaint(keptScroll, before, chatEl.scrollHeight);
+      if (target !== null) {
+        chatEl.scrollTop = target;
+      }
+      keptScroll = null;
     }
   }
 
