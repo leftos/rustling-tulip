@@ -11,7 +11,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - An account's Fable 7-day limit shows beside its overall 7-day one in Accounts and Settings, whenever it is in use.
 - The Dashboard shows each subagent's model and effort level after its name, such as "Opus 5.5 · high".
 - Ctrl+clicking a file path in a terminal offers a menu: open it in its default app, open it in the viewer, or open its folder.
-- On the phone's Home, Launch last starts a repo's or workspace's last launch again, and a dropped connection never makes it start twice.
+- On the phone's Home, Launch last starts a repo's or workspace's last launch again; a dropped connection never starts it twice or reports a launch that started as failed.
 
 ### Fixed
 

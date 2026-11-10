@@ -7,16 +7,6 @@ use protocol::SpawnTarget;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-/// Whether a spawn target runs in a daemon-managed worktree. A standalone
-/// shell has no repo and never does.
-pub(in crate::server) fn target_uses_worktree(target: &protocol::SpawnTarget) -> bool {
-    match target {
-        protocol::SpawnTarget::Single { use_worktree, .. }
-        | protocol::SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
-        protocol::SpawnTarget::Standalone { .. } => false,
-    }
-}
-
 /// Derive the on-disk worktree paths from a `SpawnConfig` + the session's
 /// `SessionMember` list. Returns the per-member `worktree_path` strings when
 /// the config used `use_worktree = true`, or an empty vec for in-place

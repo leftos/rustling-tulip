@@ -10,7 +10,7 @@ pub(crate) use self::shell::resolve_agent_program;
 pub(super) use self::shell::{
     HostOs, ShellProbe, detect_shells, is_known_shell_id, split_custom_command,
 };
-pub(super) use self::worktree::{is_repo_folder, target_uses_worktree};
+pub(super) use self::worktree::is_repo_folder;
 
 use self::hook_settings::{HookSettings, write_hook_files, write_hook_settings};
 use self::shell::{
@@ -146,13 +146,7 @@ async fn handle_spawn_session(
     req: SpawnRequest,
     ctx: &ConnCtx<'_>,
 ) -> anyhow::Result<()> {
-    let ConnCtx {
-        out_tx,
-        client_id,
-        auth,
-        connection,
-        ..
-    } = *ctx;
+    let out_tx = ctx.out_tx;
     // A request `check_spawn_request` refuses is refused before the user is
     // asked to confirm a checkout it would never make.
     if let Err(failure) = check_spawn_request(&req) {
@@ -163,9 +157,22 @@ async fn handle_spawn_session(
         let _ = out_tx.send(confirm);
         return Ok(());
     }
+    journalled_spawn(hub, req, ctx).await
+}
+
+/// Journal `req` by the device that sent it and run it. A repeat of a request
+/// this device already sent is answered from the journal and only a new one
+/// reaches the spawn, and every connection that repeated the request while it
+/// ran is answered with what it came to.
+async fn journalled_spawn(hub: &Hub, req: SpawnRequest, ctx: &ConnCtx<'_>) -> anyhow::Result<()> {
+    let ConnCtx {
+        out_tx,
+        client_id,
+        auth,
+        connection,
+        ..
+    } = *ctx;
     let request_id = req.request_id.clone();
-    // A repeat of a request this device already sent is answered from the
-    // journal; only a new one reaches the spawn.
     let journalled = request_id
         .as_deref()
         .zip(device_key(auth, client_id))
@@ -173,7 +180,7 @@ async fn handle_spawn_session(
     if let Some((device, id)) = &journalled
         && let Begin::Repeat(outcome) =
             hub.spawn_journal
-                .begin(device, id, std::time::Instant::now())
+                .begin(device, id, std::time::Instant::now(), out_tx)
     {
         send_journalled_outcome(hub, out_tx, &outcome, request_id.as_deref());
         return Ok(());
@@ -183,38 +190,46 @@ async fn handle_spawn_session(
     let origin = request_origin(connection, request_id.clone());
     match spawn_session(hub, req, origin, false).await {
         Ok(snapshot) => {
-            finish_journal(
-                hub,
-                journalled,
-                Outcome::Spawned {
-                    session_id: snapshot.id.clone(),
-                },
-            );
+            let outcome = Outcome::Spawned {
+                session_id: snapshot.id.clone(),
+            };
+            let waiters = finish_journal(hub, journalled, outcome.clone());
+            answer_waiters(hub, &waiters, &outcome, request_id.as_deref());
         }
         Err(err) => {
-            finish_journal(
-                hub,
-                journalled,
-                Outcome::Failed {
-                    error: Arc::new(journalled_error(&err)),
-                },
-            );
+            let outcome = Outcome::Failed {
+                error: Arc::new(journalled_error(&err)),
+            };
+            let waiters = finish_journal(hub, journalled, outcome.clone());
             send_spawn_failure(out_tx, &err, request_id.as_deref());
+            answer_waiters(hub, &waiters, &outcome, request_id.as_deref());
         }
     }
     Ok(())
 }
 
-/// Handle a `LaunchLast`: find the container's stored spawn config, refuse
-/// what cannot be replayed from here, and hand the request to
-/// [`handle_spawn_session`], so it shares that message's journal, echo and
-/// failure path.
+/// Handle a `LaunchLast`: answer a repeat from the journal before anything
+/// else, then find the container's stored spawn config, refuse what cannot be
+/// replayed from here, check the request and run its one checkout preflight,
+/// and hand it to [`journalled_spawn`], so it shares that path's journal, echo
+/// and failure answers.
 async fn handle_launch_last(
     hub: &Hub,
     target: &ContainerRef,
     request_id: Option<String>,
     ctx: &ConnCtx<'_>,
 ) -> anyhow::Result<()> {
+    // A resend hears its first send's outcome even once the config it was
+    // replayed from is gone, and a repeat that arrives while the first spawn
+    // still runs is answered when that spawn finishes.
+    if let (Some(id), Some(device)) = (request_id.as_deref(), device_key(ctx.auth, ctx.client_id))
+        && let Some(outcome) =
+            hub.spawn_journal
+                .peek(&device, id, std::time::Instant::now(), ctx.out_tx)
+    {
+        send_journalled_outcome(hub, ctx.out_tx, &outcome, request_id.as_deref());
+        return Ok(());
+    }
     let (repos, workspaces) = hub
         .state
         .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
@@ -244,6 +259,12 @@ async fn handle_launch_last(
     };
     let mut req = config.to_replay_request(&repos, fresh);
     req.request_id = request_id.clone();
+    // An invalid replay is refused for its own reason, before a checkout
+    // preflight whose answer the caller may have no way to give.
+    if let Err(failure) = check_spawn_request(&req) {
+        send_spawn_failure(ctx.out_tx, &failure.into(), req.request_id.as_deref());
+        return Ok(());
+    }
     if in_place_checkout_confirm(hub, &req).await.is_some() {
         let message = format!(
             "{name} has uncommitted changes, so its last launch can't switch branches here. \
@@ -258,7 +279,7 @@ async fn handle_launch_last(
         return Ok(());
     }
     info!(container = ?target, "launch_last: spawning");
-    handle_spawn_session(hub, req, ctx).await
+    journalled_spawn(hub, req, ctx).await
 }
 
 /// The name and stored spawn config a `LaunchLast` replays, or the code and
@@ -324,13 +345,31 @@ fn send_launch_last_refusal(
 }
 
 /// Record `outcome` for the request `journalled` names, if it was a
-/// journalled one.
-fn finish_journal(hub: &Hub, journalled: Option<(String, String)>, outcome: Outcome) {
+/// journalled one, and hand back the connections that repeated it while it
+/// ran, to be answered with that outcome.
+fn finish_journal(
+    hub: &Hub,
+    journalled: Option<(String, String)>,
+    outcome: Outcome,
+) -> Vec<mpsc::UnboundedSender<DaemonMessage>> {
     let Some((device, request_id)) = journalled else {
-        return;
+        return Vec::new();
     };
     hub.spawn_journal
-        .finish(&device, &request_id, outcome, std::time::Instant::now());
+        .finish(&device, &request_id, outcome, std::time::Instant::now())
+}
+
+/// Answer every connection that repeated a request while its first send still
+/// ran with what that send came to.
+fn answer_waiters(
+    hub: &Hub,
+    waiters: &[mpsc::UnboundedSender<DaemonMessage>],
+    outcome: &Outcome,
+    request_id: Option<&str>,
+) {
+    for waiter in waiters {
+        send_journalled_outcome(hub, waiter, outcome, request_id);
+    }
 }
 
 /// The journalling key for a connection's device: a tailnet peer is its
@@ -345,8 +384,11 @@ fn device_key(auth: &AuthKind, client_id: &str) -> Option<String> {
     }
 }
 
-/// Answer a repeated request with what its first send came to: nothing while
-/// it runs, its session, or the failure it was answered with.
+/// Answer a repeated request with what its first send came to: its session or
+/// the failure it was answered with. A repeat that arrives while the first
+/// send still runs is answered with nothing here; its connection waits on the
+/// journal entry and is answered through [`answer_waiters`] when the spawn
+/// finishes.
 fn send_journalled_outcome(
     hub: &Hub,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
@@ -5909,11 +5951,48 @@ mod tests {
         first
     }
 
+    /// Dispatch `msg` over a fresh local connection of `client_id` and hand
+    /// back that connection's sender and reply channel, for a request whose
+    /// reply arrives later rather than within the dispatch. The caller keeps
+    /// the sender alive, as a live connection's task does.
+    async fn dispatch_keeping_rx(
+        hub: &Hub,
+        msg: ClientMessage,
+    ) -> (
+        mpsc::UnboundedSender<DaemonMessage>,
+        mpsc::UnboundedReceiver<DaemonMessage>,
+    ) {
+        let (out_tx, out_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::channel(1);
+        let pty_lane: Arc<PtyLane> = Arc::default();
+        let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+        let auth = AuthKind::Local;
+        let ctx = ConnCtx {
+            out_tx: &out_tx,
+            file_tx: &file_tx,
+            pty_lane: &pty_lane,
+            fetches: &fetches,
+            tails: &Arc::default(),
+            client_id: "c1",
+            client_name: None,
+            connection: 1,
+            auth: &auth,
+        };
+        dispatch(hub, msg, &ctx)
+            .await
+            .expect("a failed read is reported on the wire, not returned from dispatch");
+        (out_tx, out_rx)
+    }
+
     /// Record `device`'s request `request_id` as having spawned `session_id`.
     fn journal_spawned(hub: &Hub, device: &str, request_id: &str, session_id: &str) {
         let now = std::time::Instant::now();
+        let (tx, _rx) = mpsc::unbounded_channel();
         assert!(
-            matches!(hub.spawn_journal.begin(device, request_id, now), Begin::New),
+            matches!(
+                hub.spawn_journal.begin(device, request_id, now, &tx),
+                Begin::New
+            ),
             "the entry is new"
         );
         hub.spawn_journal.finish(
@@ -6066,6 +6145,98 @@ mod tests {
         };
         assert_eq!(session.id, "s1");
         assert_eq!(request_id.as_deref(), Some("rq-ll1"));
+        assert_eq!(hub.sessions.snapshots().len(), 1, "no second session");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_resent_launch_last_is_answered_from_the_journal_after_its_config_is_gone() {
+        let (hub, _scratch) = hub_with_stored_launch("launch-last-resent-no-config", None);
+        hub.sessions.insert(idle_record("s1"));
+        let device = device_key(&AuthKind::Local, "c1").expect("a local connection is journalled");
+        journal_spawned(&hub, &device, "rq-ll2", "s1");
+        let reply = launch_last_of_r1(&hub, Some("rq-ll2")).await;
+        let DaemonMessage::SessionUpdated {
+            session,
+            request_id,
+        } = reply
+        else {
+            panic!("a repeat is answered from the journal, got {reply:?}");
+        };
+        assert_eq!(session.id, "s1");
+        assert_eq!(request_id.as_deref(), Some("rq-ll2"));
+        assert_eq!(hub.sessions.snapshots().len(), 1, "no second session");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_launch_last_over_a_dirty_tree_is_refused_for_its_real_reason() {
+        let (hub, _scratch, repo) = env_ref_repo_hub("launch-last-invalid-dirty");
+        let config = SpawnConfig::from_request(&env_spawn(
+            single_target(false, None),
+            SessionMode::Interactive,
+            env(&[("K", UNSET_REF)]),
+            None,
+        ));
+        hub.state
+            .mutate(|s| s.repos[0].last_spawn_config = Some(config))
+            .expect("store the last spawn config");
+        std::fs::write(repo.join("dirty.txt"), "x\n").expect("dirty the tree");
+        let reply = launch_last_of_r1(&hub, Some("rq-ll3")).await;
+        assert_unset_refusal(reply, "rq-ll3");
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_launch_last_repeat_while_pending_hears_the_spawn_when_it_finishes() {
+        let (hub, _scratch) = hub_with_stored_launch(
+            "launch-last-pending",
+            Some(stored_config(
+                single_target(false, None),
+                SessionMode::PlainShell,
+            )),
+        );
+        hub.sessions.insert(idle_record("s1"));
+        let device = device_key(&AuthKind::Local, "c1").expect("a local connection is journalled");
+        let now = std::time::Instant::now();
+        let (first_tx, _first_rx) = mpsc::unbounded_channel();
+        assert!(
+            matches!(
+                hub.spawn_journal.begin(&device, "rq-ll4", now, &first_tx),
+                Begin::New
+            ),
+            "the first send recorded the entry"
+        );
+        let (_out_tx, mut out_rx) = dispatch_keeping_rx(
+            &hub,
+            ClientMessage::LaunchLast {
+                target: ContainerRef::Repo("r1".to_string()),
+                request_id: Some("rq-ll4".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            out_rx.try_recv().is_err(),
+            "a repeat of a running spawn is answered when it finishes"
+        );
+        let outcome = Outcome::Spawned {
+            session_id: "s1".to_string(),
+        };
+        let waiters = hub
+            .spawn_journal
+            .finish(&device, "rq-ll4", outcome.clone(), now);
+        assert_eq!(waiters.len(), 1, "the repeat waits on the outcome");
+        answer_waiters(&hub, &waiters, &outcome, Some("rq-ll4"));
+        let reply = out_rx.try_recv().expect("the waiter hears the spawn");
+        let DaemonMessage::SessionUpdated {
+            session,
+            request_id,
+        } = reply
+        else {
+            panic!("a waiter is answered with the journalled session, got {reply:?}");
+        };
+        assert_eq!(session.id, "s1");
+        assert_eq!(request_id.as_deref(), Some("rq-ll4"));
         assert_eq!(hub.sessions.snapshots().len(), 1, "no second session");
     }
 

@@ -4,9 +4,7 @@ use super::git::{blocked_discard_message, probe_locking_processes, retry_worktre
 use super::recovery::{
     mark_history_recovered, record_end, recovery_conversation_exists, resume_abandoned_for,
 };
-use super::spawn::{
-    is_repo_folder, remove_hook_settings, send_spawn_failure, spawn_session, target_uses_worktree,
-};
+use super::spawn::{is_repo_folder, remove_hook_settings, send_spawn_failure, spawn_session};
 use super::tabs::close_session_panes;
 use super::{Hub, StateEvent};
 use crate::branch_fate::{FateInput, SessionBase};
@@ -697,7 +695,7 @@ async fn duplicate_request(
     }
     let (stored, _) = source_config(hub, session_id)?;
     let fresh = match stored.target.suggest_target() {
-        Some(target) if target_uses_worktree(&stored.target) => {
+        Some(target) if stored.target.uses_worktree() => {
             Some(branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), &target).await?)
         }
         _ => None,
@@ -740,7 +738,7 @@ pub(super) async fn rerun_request(hub: &Hub, session_id: &str) -> anyhow::Result
         .and_then(|rec| resumable_conversation(&crate::sync::lock(&rec)));
     let mut req = stored.to_duplicate_request(None);
     let mut unpinned = false;
-    if target_uses_worktree(&req.target) {
+    if req.target.uses_worktree() {
         let (repos, workspaces) = hub
             .state
             .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
