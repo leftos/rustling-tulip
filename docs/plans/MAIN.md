@@ -8,10 +8,6 @@
 
 ## Remote update
 
-- [ ] RT-1303 Let a host update itself when a client asks (sub-issue of RT-1298) · release vNext
-  - [ ] RT-1331 Let a macOS host update itself when a client asks · release vNext
-  - [ ] RT-1350 Take the host-update countdown away when This PC's connection drops
-  - [ ] RT-1351 Abort a host update when the daemon stops while it waits for the app to quit
 - [ ] RT-1304 Offer a host's update from the client, with its confirm dialog and result (sub-issue of RT-1298) · release vNext
 - [ ] RT-1305 Mark in a release what it breaks, and warn before a remote update (sub-issue of RT-1298) · release vNext
 - [ ] RT-1306 Update connected clients from the host (sub-issue of RT-1298) · release vNext
@@ -61,9 +57,14 @@
 - [ ] RT-921 Default shell: move the save check off the runtime, and detect WSL that is really installed
 - [ ] RT-959 Default shell: verify Nushell raw-string programs, give the resume the launch's .cmd checks, and skip a familyless Automatic shell
 - [ ] RT-1086 Open a Ctrl+clicked path that ends in a ?query or #fragment, reading #L4 as a line
-- [ ] RT-1282 Restore a saved layout from the safe-start notice · release vNext
+- [/] RT-1282 Restore a saved layout from the safe-start notice · release vNext
 - [ ] RT-1315 Keep a click that brings the window forward from pressing a toast, Dashboard or chat card answer
 - [ ] RT-1317 Split the terminal's mouse-down handler into one method per press kind
+- [/] RT-1356 Size a session to its pane as soon as it is bound, not on the next hover · release vNext
+- [ ] RT-1357 Open and lay out all of a machine's unbound sessions at once · release vNext+1
+  - [ ] RT-1358 Build tabs for a list of sessions in one daemon request · release vNext+1
+  - [ ] RT-1359 Offer opening a machine's unbound sessions from the sidebar and the jump palette · release vNext+1
+- [ ] RT-1369 Name an unnamed tab after the repos and workspaces it shows · release vNext
 
 ## Wave 2b — Hook status
 
@@ -86,7 +87,6 @@
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge · release vNext
   - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys · release vNext
   - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
-- [ ] RT-1126 Precache the phone app's hashed assets so its first offline open is complete · release vNext
 - [ ] RT-1266 Plan the GPUI phone app: phases from the spike's go · release vNext
 
 ## Wave 5 — Attention feed on the desktop
@@ -127,6 +127,12 @@
 - [ ] RT-903 Stop a root folder fetch from deleting other worktrees' fetched copies
 - [ ] RT-923 Folder fetch link toasts: dismiss the early toast on a lost connection, and say not-on-host only for Missing
 - [ ] RT-1073 Say why a tailnet host refused the connection in Connections instead of flickering back to disconnected
+- [ ] RT-1360 Browse each machine's files in its own paths with a built-in file manager · release vNext+1
+  - [ ] RT-1361 Tell clients each host's OS and roots, and list a host folder by its native path · release vNext+1
+  - [ ] RT-1362 Fetch a file or folder by its absolute host path · release vNext+1
+  - [ ] RT-1363 Open a file-manager tab on any machine · release vNext+1
+  - [ ] RT-1364 Dock a file tree for each machine in the sidebar · release vNext+1
+  - [ ] RT-1365 Open a terminal path's folder in the file manager from Ctrl+click · release vNext+1
 
 ## Wave 7 — Pop-out windows
 
@@ -289,6 +295,7 @@
 - [ ] RT-1292 Fix doc drift around the safe start and control sizing
 - [ ] RT-1338 Repoint three issues that cite the deleted reboot-resume design
 - [ ] RT-1339 Re-read docs/tracer-abi.md against its named files' changes since 2026-11-03
+- [ ] RT-1354 Document RUSTLING_TULIP_BIN_TEMPLATES in the environment variables table
 
 ## Build tooling
 
@@ -567,16 +574,12 @@
 - [ ] RT-1131 Make Finished toasts and every status marker use the agent-up rule, and cache it per session
 - [ ] RT-1132 Treat an all-folder workspace like a folder in the spawn dialog and launch last, and stop fetching folder members
 - [ ] RT-1133 Tag registered folders DIR in the compact Dashboard and drop Source Control's stale pinned host
-- [ ] RT-1138 Honour a hide while the phone app forgets a refused token · release vNext
-- [ ] RT-1162 Tick the phone terminal's load timer only while a load is pending · release vNext
-- [ ] RT-1170 Keep the phone chat's scroll position across the Terminal toggle · release vNext
 - [ ] RT-1171 Anchor a multi-line nu prompt's gutter mark on its first line under ConPTY
 - [ ] RT-1172 Find why a click on a This PC pane keeps focus on a remote pane after This PC reconnects
 - [ ] RT-1174 Stop a pane header flickering for one frame on each resize step
 - [ ] RT-1175 Measure pane header fit once per tab render instead of per pane per frame
 - [ ] RT-1176 Measure a toast's height with font fallback so emoji or CJK text is not clipped
 - [ ] RT-1177 Keep the push handler's file I/O out from under the device lock
-- [ ] RT-1182 Stop the phone's Notifications panel waiting forever when the service worker never registers · release vNext
 - [ ] RT-1183 Send a push round's targets concurrently so one slow push service holds no other device
 - [ ] RT-1187 Don't count or push a session removed before the push trigger reads its update
 - [ ] RT-1188 Give pane_header_fit.rs a test-map row so rt.ps1 test -Validate passes
@@ -588,7 +591,6 @@
 - [ ] RT-1223 Wake a parked accounts driver when a client connects as another leaves
 - [ ] RT-1226 End a turn's live answers in Chat when its prompt line had no prompt id
 - [ ] RT-1227 Order live and confirmed Chat rows the same on an append and on a reload
-- [ ] RT-1228 Keep unchanged chat rows' DOM on the phone while a reply streams · release vNext
 - [ ] RT-1229 Resend the device list when a loopback connection's state events lag
 - [ ] RT-1230 Tell a session's own name from a subagent's when the screen has no title yet
 - [ ] RT-1231 Clear a pending Chat send whose transcript text does not match it
@@ -623,6 +625,10 @@
 - [ ] RT-1348 Close every open menu, in any window, when another menu opens
 - [ ] RT-1349 Split the native client's key and pane-event chains under the complexity limit
 - [ ] RT-1352 Cap a saved theme's file name so any theme name can be saved
+- [ ] RT-1353 Clean a macOS host's update leftovers when only its daemon runs
+- [ ] RT-1355 Keep a Mac's app launch from deleting a running host update's download and staging
+- [ ] RT-1366 Rename, delete and make folders on a host from the file manager
+- [ ] RT-1367 Upload files from this machine to a host folder in the file manager
 
 ## Design files
 
@@ -641,14 +647,16 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-367, RT-369, RT-881, RT-1126, RT-1266, Wave 4 — Mobile app (iPhone PWA over Tailscale)
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-367, RT-369, RT-881, RT-1266, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, RT-1111, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
+- [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
 - [remote-access.md](remote-access.md) — Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
-- [remote-update.md](remote-update.md) — RT-1303, RT-1304, RT-1305, RT-1306, RT-1307, RT-1308, RT-1331, Remote update
+- [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1361, RT-1362, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
+- [remote-update.md](remote-update.md) — RT-1304, RT-1305, RT-1306, RT-1307, RT-1308, RT-1353, RT-1355, Remote update
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792
 - [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406
