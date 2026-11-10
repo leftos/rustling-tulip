@@ -437,6 +437,11 @@ pub(super) fn push_initial_state(
         hub.host_update.send_phase(out_tx);
     }
     send_resume_report(hub, out_tx, client_id);
+    // Every connection, local and tailnet, last: how the host's last update
+    // ended, for a client that asked for it.
+    if let Some(result) = hub.host_update.last_result() {
+        let _ = out_tx.send(result);
+    }
 }
 
 /// Tells `client_id` how the start-up resume went, when there is something to
@@ -774,6 +779,60 @@ mod tests {
             }
         }
         sent
+    }
+
+    /// Every message the initial state sends to a connection.
+    fn initial_state(hub: &Hub, local: bool) -> Vec<DaemonMessage> {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        push_initial_state(hub, &out_tx, "c1", false, local);
+        let mut sent = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            sent.push(message);
+        }
+        sent
+    }
+
+    #[test]
+    fn initial_state_ends_with_the_last_update_result() {
+        let (mut hub, scratch) = test_hub("last-update-result-initial");
+        let updates = scratch.path().join("updates");
+        std::fs::create_dir_all(&updates).expect("updates folder");
+        std::fs::write(
+            updates.join("last-result.json"),
+            r#"{"to":"0.99.0","ok":false,"message":"The update failed."}"#,
+        )
+        .expect("last result");
+        hub.host_update =
+            std::sync::Arc::new(crate::server::HostUpdate::nothing_installed_in(updates));
+
+        for local in [true, false] {
+            let sent = initial_state(&hub, local);
+            assert!(
+                matches!(
+                    sent.last(),
+                    Some(DaemonMessage::HostUpdateResult { from: None, to, ok: false, message })
+                        if to == "0.99.0" && message == "The update failed."
+                ),
+                "local {local}: {sent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn initial_state_sends_no_update_result_without_one() {
+        let (mut hub, scratch) = test_hub("no-update-result-initial");
+        let updates = scratch.path().join("updates");
+        hub.host_update =
+            std::sync::Arc::new(crate::server::HostUpdate::nothing_installed_in(updates));
+
+        let sent = initial_state(&hub, true);
+
+        assert!(
+            !sent
+                .iter()
+                .any(|message| matches!(message, DaemonMessage::HostUpdateResult { .. })),
+            "{sent:?}"
+        );
     }
 
     #[test]

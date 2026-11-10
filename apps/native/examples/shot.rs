@@ -231,10 +231,11 @@ enum View {
     Gates,
     OpenShell,
     SafeStart,
+    UpdateHost,
 }
 
 impl View {
-    const ALL: [Self; 36] = [
+    const ALL: [Self; 37] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -271,6 +272,7 @@ impl View {
         Self::Toast,
         Self::OpenShell,
         Self::SafeStart,
+        Self::UpdateHost,
     ];
 
     fn name(self) -> &'static str {
@@ -310,6 +312,7 @@ impl View {
             Self::Gates => "gates",
             Self::OpenShell => "open-shell",
             Self::SafeStart => "safe-start",
+            Self::UpdateHost => "update-host",
             Self::Toast => "toast",
         }
     }
@@ -371,7 +374,7 @@ impl View {
     fn on_hosts(self) -> bool {
         matches!(
             self,
-            Self::MultiHost | Self::SpawnHosts | Self::SettingsHosts
+            Self::MultiHost | Self::SpawnHosts | Self::SettingsHosts | Self::UpdateHost
         )
     }
 
@@ -390,6 +393,10 @@ impl View {
             Self::Gates => root.shown_activity() == Activity::Gates,
             Self::OpenShell => root.shell_dialog_open(),
             Self::SafeStart => root.start_notice_open(),
+            // The Update host confirm over "box", listing its two sessions.
+            Self::UpdateHost => root
+                .host_update_dialog()
+                .is_some_and(|dialog| dialog.sessions.len() == 2),
             Self::Main | Self::MainCompact | Self::MainNarrow => {
                 !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
             }
@@ -578,6 +585,7 @@ impl Shot {
             | View::Gates
             | View::OpenShell
             | View::SafeStart
+            | View::UpdateHost
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -599,7 +607,9 @@ impl Shot {
             View::Connections | View::ConnectionsSsh | View::ConnectionsScanError => {
                 connections_ui_state()
             }
-            View::MultiHost | View::SpawnHosts | View::SettingsHosts => multi_host_ui_state(),
+            View::MultiHost | View::SpawnHosts | View::SettingsHosts | View::UpdateHost => {
+                multi_host_ui_state()
+            }
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -781,6 +791,20 @@ fn open_picker(window: &mut Window, cx: &mut App) -> Result<()> {
     open_picker_over(Arc::new(ShotPeers), window, cx)
 }
 
+/// Opens the Update host confirm over "box", as its Connections row's
+/// Update host does.
+fn open_update_host(window: &mut Window, cx: &mut App) -> Result<()> {
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    root.update(cx, |root, cx| {
+        let host = HostKey::Remote(SHOT_TAILNET_HOST.to_owned());
+        root.open_host_update_dialog(host, SHOT_TAILNET_HOST.to_owned(), window, cx);
+    });
+    Ok(())
+}
+
 /// Opens the Connections picker over `peers` and the shot's `ssh`.
 fn open_picker_over(
     peers: Arc<dyn PeerSource + Send + Sync>,
@@ -845,7 +869,7 @@ fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Res
     let fixture = Fixture::build(shot.view, now)?;
     let failure = Arc::new(Mutex::new(None));
     let remote = if shot.view.on_hosts() {
-        Some(start_box_daemon(now, &failure)?)
+        Some(start_box_daemon(shot.view, now, &failure)?)
     } else {
         None
     };
@@ -880,19 +904,20 @@ fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Res
 /// events it reads.
 type HostPair = (UnboundedSender<NetCommand>, UnboundedReceiver<NetEvent>);
 
-/// Starts the fake daemon the `multi-host` shot's "box" answers with, on a
-/// thread of its own, and returns the channels the window's connection to
-/// "box" uses.
+/// Starts the fake daemon the `multi-host` shot's "box" answers with in
+/// `view`, on a thread of its own, and returns the channels the window's
+/// connection to "box" uses.
 fn start_box_daemon(
+    view: View,
     now: DateTime<Utc>,
     failure: &Arc<Mutex<Option<anyhow::Error>>>,
 ) -> Result<HostPair> {
-    let fixture = RemoteFixture::build(now)?;
+    let fixture = RemoteFixture::build(view, now)?;
     let (cmd_tx, cmd_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
     let daemon = FakeDaemon {
         events: event_tx,
-        view: View::MultiHost,
+        view,
         now,
         failure: Arc::clone(failure),
     };
@@ -1332,6 +1357,7 @@ fn drive(
             Ok(())
         }
         View::Connections => open_picker(window, cx),
+        View::UpdateHost => open_update_host(window, cx),
         View::ConnectionsScanError => open_picker_over(Arc::new(ShotPeersFailed), window, cx),
         View::Themes => drive_themes(step, window, cx),
         View::ThemesEdit => drive_themes_edit(step, window, cx),
@@ -1863,14 +1889,15 @@ fn tulip_grid(view: View) -> GridNode {
 /// client's, so its rows show their version and the "Behind" tag.
 const REMOTE_BUILD_VERSION: &str = "0.9.0";
 
-/// What the `multi-host` shot's "box" lists: one repo and its session.
+/// What the `multi-host` shot's "box" lists: one repo and its session, and
+/// in the `update-host` shot a second, idle one.
 struct RemoteFixture {
     repos: DaemonMessage,
     sessions: Vec<SessionSnapshot>,
 }
 
 impl RemoteFixture {
-    fn build(now: DateTime<Utc>) -> Result<Self> {
+    fn build(view: View, now: DateTime<Utc>) -> Result<Self> {
         let repos = parse_message(json!({
             "type": "repos",
             "repos": [
@@ -1887,10 +1914,21 @@ impl RemoteFixture {
             extra: json!({}),
         }
         .snapshot(now)?;
-        Ok(Self {
-            repos,
-            sessions: vec![session],
-        })
+        let mut sessions = vec![session];
+        if view == View::UpdateHost {
+            sessions.push(
+                Row {
+                    id: "b-docs",
+                    label: "Docs pass",
+                    status: "idle",
+                    members: json!([member(BOX_REPO, "main", BOX_REPO_PATH)]),
+                    minutes: 12,
+                    extra: json!({}),
+                }
+                .snapshot(now)?,
+            );
+        }
+        Ok(Self { repos, sessions })
     }
 }
 
@@ -2202,13 +2240,19 @@ impl FakeDaemon {
         let mut conn = Connection::for_target(target.clone());
         conn.on_connecting();
         conn.on_socket_open(8787);
-        conn.on_welcome(version, Vec::new(), None);
+        // Only the update-host shot's "box" can update on request.
+        let features = if self.view == View::UpdateHost {
+            vec![protocol::FEATURE_REMOTE_UPDATE.to_owned()]
+        } else {
+            Vec::new()
+        };
+        conn.on_welcome(version, features.clone(), None);
         conn.set_build_version(Some(REMOTE_BUILD_VERSION.to_owned()));
         self.event(NetEvent::State(conn))?;
         self.send(DaemonMessage::Welcome {
             protocol_version: version,
             supported_versions: vec![version],
-            features: Vec::new(),
+            features,
             daemon_id: None,
             origin: None,
             build_version: Some(REMOTE_BUILD_VERSION.to_owned()),

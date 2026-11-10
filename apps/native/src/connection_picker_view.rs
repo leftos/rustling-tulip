@@ -25,7 +25,7 @@ use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_f
 use crate::connection_picker::{
     AddButton, AddField, AddMode, ConnectionPicker, HostKind, LiveState, PeerSource, PickerSection,
     Row, RowDetail, RowFacts, RowHost, RowKind, RowState, SCAN_PENDING, SavedHost, Section,
-    SshTest, SshTester, TypedHostError, offers_pair, offers_reconnect, row_detail,
+    SshTest, SshTester, TypedHostError, offers_pair, offers_reconnect, offers_update, row_detail,
     typed_ssh_target, typed_target,
 };
 use crate::driver_id::DriverId as _;
@@ -68,6 +68,8 @@ enum PickerControl {
     Pair(usize),
     /// The Reconnect now button of the row at this index.
     Reconnect(usize),
+    /// The Update host button of the row at this index.
+    UpdateHost(usize),
     /// The Open shell button of the row at this index.
     OpenShell(usize),
     /// `+ Add host`: opens the add form.
@@ -98,6 +100,7 @@ impl PickerControl {
             Self::Switch(index) => format!("connections-row-{}-enabled", key(index)),
             Self::Pair(index) => format!("connections-row-{}-pair", key(index)),
             Self::Reconnect(index) => format!("connections-row-{}-reconnect", key(index)),
+            Self::UpdateHost(index) => format!("connections-row-{}-update", key(index)),
             Self::OpenShell(index) => format!("connections-row-{}-shell", key(index)),
             Self::AddHost => "connections-add-host".to_owned(),
             Self::ModeTailnet => "connections-add-mode-tailnet".to_owned(),
@@ -140,8 +143,9 @@ impl PickerControl {
 }
 
 /// The controls a row draws beside itself, each after the row in Tab
-/// order: a saved host's switch, Pair and Reconnect now while they apply,
-/// Open shell while its host is online, and a saved host's Forget.
+/// order: a saved host's switch, Pair, Reconnect now and Update host while
+/// they apply, Open shell while its host is online, and a saved host's
+/// Forget.
 #[derive(Debug, Clone, Copy, Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -152,17 +156,21 @@ struct RowControls {
     saved: bool,
     pair: bool,
     reconnect: bool,
+    /// The host can be asked to update, and no update of it is pending.
+    update: bool,
     /// The host's connection is open, so a shell can open on it.
     open_shell: bool,
 }
 
 impl RowControls {
-    /// The controls `row` draws, by what the picker knows about it.
-    fn of(row: &Row, facts: &RowFacts) -> Self {
+    /// The controls `row` draws, by what the picker knows about it and
+    /// whether an update of its host is `update_pending`.
+    fn of(row: &Row, facts: &RowFacts, update_pending: bool) -> Self {
         Self {
             saved: row.kind == RowKind::Saved,
             pair: offers_pair(facts),
             reconnect: offers_reconnect(facts),
+            update: offers_update(facts) && !update_pending,
             open_shell: offers_open_shell(facts),
         }
     }
@@ -173,6 +181,7 @@ impl RowControls {
             (self.saved, PickerControl::Switch(index)),
             (self.pair, PickerControl::Pair(index)),
             (self.reconnect, PickerControl::Reconnect(index)),
+            (self.update, PickerControl::UpdateHost(index)),
             (self.open_shell, PickerControl::OpenShell(index)),
             (self.saved, PickerControl::Forget(index)),
         ]
@@ -404,6 +413,7 @@ impl RootView {
             build_version: conn
                 .and_then(crate::Connection::build_version)
                 .map(str::to_owned),
+            remote_update: conn.is_some_and(|conn| conn.supports(protocol::FEATURE_REMOTE_UPDATE)),
         }
     }
 
@@ -425,7 +435,11 @@ impl RootView {
             .picker
             .rows()
             .iter()
-            .map(|row| RowControls::of(row, &self.row_facts(dialog, row)))
+            .map(|row| {
+                let pending =
+                    row_host(row).is_some_and(|host| self.remote_updates.is_pending(&host));
+                RowControls::of(row, &self.row_facts(dialog, row), pending)
+            })
             .collect()
     }
 
@@ -674,6 +688,7 @@ impl RootView {
             PickerControl::Switch(index) => self.toggle_connection_row(index, window, cx),
             PickerControl::Pair(index) => self.pair_connection_row(index, window, cx),
             PickerControl::Reconnect(index) => self.reconnect_connection_row(index),
+            PickerControl::UpdateHost(index) => self.update_connection_row(index, window, cx),
             PickerControl::OpenShell(index) => {
                 self.open_shell_connection_row(index, window, cx);
             }
@@ -971,6 +986,23 @@ impl RootView {
 
     /// Open shell on the row at `index`: the picker closes and a plain shell
     /// opens on that host, as a host header's `+ Shell` opens one.
+    /// Update host: the picker closes and the confirm dialog opens over the
+    /// row's host, while the row still offers it.
+    fn update_connection_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.picker_row(index) else {
+            return;
+        };
+        let host = HostKey::of(&row.target);
+        let offered = self.connection_picker.as_ref().is_some_and(|dialog| {
+            offers_update(&self.row_facts(dialog, &row)) && !self.remote_updates.is_pending(&host)
+        });
+        if !offered {
+            return;
+        }
+        self.close_connection_picker(window, cx);
+        self.open_host_update_dialog(host, row.label, window, cx);
+    }
+
     fn open_shell_connection_row(
         &mut self,
         index: usize,
@@ -1097,8 +1129,10 @@ impl RootView {
         let t = theme(cx);
         let dialog = self.connection_picker.as_ref()?;
         let rows = dialog.picker.rows();
+        let controls = self.picker_row_controls(dialog);
         let draw = Draw {
             rows: &rows,
+            controls: &controls,
             focus: dialog.focus,
         };
         let scan_failed = dialog.picker.scan_error().is_some();
@@ -1162,6 +1196,8 @@ impl RootView {
 /// What every part of the picker draws against: its rows and its focus.
 struct Draw<'a> {
     rows: &'a [Row],
+    /// Each row's own controls, in row order.
+    controls: &'a [RowControls],
     focus: PickerControl,
 }
 
@@ -1313,7 +1349,7 @@ fn host_row(
     let selector = control.selector(draw.rows);
     let group = SharedString::from(format!("connections-row-group-{index}"));
     let detail = row_detail(facts);
-    let controls = RowControls::of(row, facts);
+    let controls = draw.controls.get(index).copied().unwrap_or_default();
     let saved = row.kind == RowKind::Saved;
     let forget_shown = forget_focused(draw.focus, index);
     let chip = div()
@@ -1403,15 +1439,16 @@ fn host_row(
         }))
 }
 
-/// A host's third line under its detail line: Pair and Reconnect now,
-/// while either applies, and Open shell while the host is online.
+/// A host's third line under its detail line: Pair, Reconnect now and
+/// Update host, while each applies, and Open shell while the host is
+/// online.
 fn row_actions(
     index: usize,
     controls: RowControls,
     draw: &Draw<'_>,
     cx: &mut Context<RootView>,
 ) -> Option<Div> {
-    if !controls.pair && !controls.reconnect && !controls.open_shell {
+    if !controls.pair && !controls.reconnect && !controls.update && !controls.open_shell {
         return None;
     }
     let pair = controls.pair.then(|| {
@@ -1433,6 +1470,16 @@ fn row_actions(
             cx,
         )
         .child("Reconnect now")
+    });
+    let update = controls.update.then(|| {
+        control_button(
+            PickerControl::UpdateHost(index),
+            ButtonKind::Outlined,
+            ButtonSize::Compact,
+            draw,
+            cx,
+        )
+        .child("Update host")
     });
     let open_shell = controls.open_shell.then(|| {
         let name = draw
@@ -1457,6 +1504,7 @@ fn row_actions(
             .mt(px(6.0))
             .children(pair)
             .children(reconnect)
+            .children(update)
             .children(open_shell),
     )
 }

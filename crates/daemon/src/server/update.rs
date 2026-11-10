@@ -239,6 +239,9 @@ pub(crate) struct HostUpdate {
     /// The countdown's phase. Every host update notice is published under
     /// this lock, and a snapshot is read and sent under it.
     phase: std::sync::Mutex<Countdown>,
+    /// The last update's outcome as a `HostUpdateResult`, read once from
+    /// the updates folder ([`HostUpdate::last_result`]).
+    last_result: std::sync::OnceLock<Option<DaemonMessage>>,
 }
 
 /// Where the host update's countdown stands, and how the last one ended.
@@ -328,7 +331,35 @@ impl HostUpdate {
             app_quit_wait: APP_QUIT_WAIT,
             local_connections: Arc::default(),
             phase: std::sync::Mutex::default(),
+            last_result: std::sync::OnceLock::new(),
         }
+    }
+
+    /// How the last update of this host ended, read once from the updates
+    /// folder's `last-result.json` and kept; the file is left for the app.
+    pub(crate) fn last_result(&self) -> Option<DaemonMessage> {
+        self.last_result
+            .get_or_init(|| self.read_last_result())
+            .clone()
+    }
+
+    /// The updates folder's `last-result.json` as a `HostUpdateResult`;
+    /// `None` when there is none or it cannot be read.
+    fn read_last_result(&self) -> Option<DaemonMessage> {
+        let updates = match (self.seams.updates_dir)() {
+            Ok(updates) => updates,
+            Err(err) => {
+                warn!("host update: no updates folder to read the last result from: {err:#}");
+                return None;
+            }
+        };
+        let result = update_core::read_last_result(&updates.join("last-result.json"))?;
+        Some(DaemonMessage::HostUpdateResult {
+            from: result.from,
+            to: result.to,
+            ok: result.ok,
+            message: result.message,
+        })
     }
 
     /// Counts a local connection as attached until the hold is dropped.
@@ -475,9 +506,29 @@ impl HostUpdate {
         Self::new(system_install(), Box::new(SystemProcesses), Seams::system())
     }
 
-    /// A test hub's checks: no install, no processes.
+    /// A test hub's checks: no install, no processes, and no last update
+    /// result, so a test hub never reads this machine's updates folder.
     #[cfg(test)]
     pub(crate) fn nothing_installed() -> Self {
+        let update = Self::nothing_installed_with(Seams::system());
+        let _ = update.last_result.set(None);
+        update
+    }
+
+    /// [`HostUpdate::nothing_installed`] whose updates folder is `updates`,
+    /// read for the last update's result.
+    #[cfg(test)]
+    pub(crate) fn nothing_installed_in(updates: PathBuf) -> Self {
+        let seams = Seams {
+            updates_dir: Box::new(move || Ok(updates.clone())),
+            ..Seams::system()
+        };
+        Self::nothing_installed_with(seams)
+    }
+
+    /// No install and no processes, updating through `seams`.
+    #[cfg(test)]
+    fn nothing_installed_with(seams: Seams) -> Self {
         struct Nothing;
         impl InstallLocator for Nothing {
             fn install_folder(&self) -> Option<PathBuf> {
@@ -489,7 +540,7 @@ impl HostUpdate {
                 Vec::new()
             }
         }
-        Self::new(Box::new(Nothing), Box::new(Nothing), Seams::system())
+        Self::new(Box::new(Nothing), Box::new(Nothing), seams)
     }
 
     /// Claims the guard: false when an update already holds it.
@@ -1671,6 +1722,40 @@ mod tests {
     /// Whether the idle-exit hold-off for an update is set.
     fn held_off(hub: &Hub) -> bool {
         hub.host_update.update_in_flight.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn last_result_is_read_once_and_the_file_is_kept() {
+        let rig = rig("update-last-result", Some(OWN), &[], SETUP);
+        let updates = rig.root.join("update-root");
+        std::fs::create_dir_all(&updates).unwrap_or_else(|err| panic!("updates folder: {err}"));
+        let file = updates.join("last-result.json");
+        let body = r#"{"from":"0.98.0","to":"0.99.0","ok":true,"message":"Updated to 0.99.0."}"#;
+        std::fs::write(&file, body).unwrap_or_else(|err| panic!("last result: {err}"));
+
+        let first = rig.hub.host_update.last_result();
+        let second = rig.hub.host_update.last_result();
+
+        for result in [first, second] {
+            assert!(
+                matches!(
+                    &result,
+                    Some(DaemonMessage::HostUpdateResult { from, to, ok: true, message })
+                        if from.as_deref() == Some("0.98.0")
+                            && to == "0.99.0"
+                            && message == "Updated to 0.99.0."
+                ),
+                "{result:?}"
+            );
+        }
+        assert!(file.exists(), "the daemon leaves the file for the app");
+    }
+
+    #[test]
+    fn no_last_result_file_is_none() {
+        let rig = rig("update-no-last-result", Some(OWN), &[], SETUP);
+
+        assert!(rig.hub.host_update.last_result().is_none());
     }
 
     #[tokio::test]

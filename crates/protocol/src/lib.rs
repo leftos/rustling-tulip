@@ -6367,6 +6367,20 @@ pub enum DaemonMessage {
         request_id: String,
         version: String,
     },
+    /// How the last update of this host ended, from what the updater
+    /// recorded; sent to every connection after its `Welcome` while the
+    /// daemon holds one.
+    HostUpdateResult {
+        /// The version replaced; `None` on a first install.
+        #[serde(default)]
+        from: Option<String>,
+        /// The version the update installs.
+        to: String,
+        /// Whether the update is in place.
+        ok: bool,
+        /// The line that says what happened.
+        message: String,
+    },
     /// A host update was asked for and will go ahead in `seconds` unless a
     /// local connection sends [`ClientMessage::CancelHostUpdate`] with this
     /// `update_id`. Sent only to local connections: to each one attached
@@ -8012,6 +8026,43 @@ mod tests {
                     if request_id == "req-1" && version == "0.9.0"
             ),
             "{json}"
+        );
+    }
+
+    #[test]
+    fn host_update_result_round_trips() {
+        let msg = DaemonMessage::HostUpdateResult {
+            from: Some("0.8.0".to_owned()),
+            to: "0.9.0".to_owned(),
+            ok: true,
+            message: "Updated to 0.9.0.".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"host_update_result""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::HostUpdateResult { from, to, ok, message }
+                    if from.as_deref() == Some("0.8.0")
+                        && to == "0.9.0"
+                        && *ok
+                        && message == "Updated to 0.9.0."
+            ),
+            "{json}"
+        );
+
+        let first_install =
+            r#"{"type":"host_update_result","to":"0.9.0","ok":false,"message":"Failed."}"#;
+        let back: DaemonMessage =
+            serde_json::from_str(first_install).expect("decodes without from");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::HostUpdateResult { from: None, to, ok: false, message }
+                    if to == "0.9.0" && message == "Failed."
+            ),
+            "{back:?}"
         );
     }
 

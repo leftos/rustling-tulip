@@ -83,6 +83,7 @@ mod history_view;
 mod host_path_prompt;
 mod host_path_prompt_view;
 mod host_update;
+mod host_update_dialog;
 mod hosts;
 mod html_media;
 mod keys;
@@ -128,6 +129,7 @@ mod recover;
 mod recover_view;
 pub mod remote_access;
 pub(crate) mod remote_mode;
+pub mod remote_update;
 mod repo_add;
 mod repo_remove;
 mod repo_remove_view;
@@ -322,6 +324,7 @@ pub use crate::history::{
     CommitDetailView, CommitRow, DetailFile, DetailPane, ForgeButton, HistoryBlock, HistoryBody,
     MoreRow,
 };
+pub use crate::host_update_dialog::{HostUpdateDialogView, HostUpdateSession};
 pub use crate::needs_you_view::NeedsYouEntry;
 pub use crate::net::{
     EnsureFuture, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetDeps, NetEvent,
@@ -1140,6 +1143,13 @@ pub struct RootView {
     /// Wakes the view when the countdown's next second is up; the one timer
     /// the update on screen ticks with.
     host_update_timer: Option<Task<()>>,
+    /// The remote hosts' updates this client asked for, while pending.
+    remote_updates: remote_update::RemoteUpdates,
+    /// The Update host confirm dialog, while open.
+    host_update_dialog: Option<host_update_dialog::HostUpdateDialog>,
+    /// Checks the pending remote updates' bounds every second while any is
+    /// pending.
+    remote_update_timer: Option<Task<()>>,
     /// The modal notices' keyboard focus.
     notice_focus: FocusHandle,
     /// What a close or a move can be taken back with, newest first.
@@ -1694,6 +1704,9 @@ impl RootView {
             host_update: None,
             host_update_ended: None,
             host_update_timer: None,
+            remote_updates: remote_update::RemoteUpdates::default(),
+            host_update_dialog: None,
+            remote_update_timer: None,
             notice_focus: cx.focus_handle(),
             undo: UndoShelf::default(),
             undo_timer: None,
@@ -2762,6 +2775,7 @@ impl RootView {
             || self.changes.discard.is_some()
             || self.changes.file_menu.is_some()
             || self.stash.drop.is_some()
+            || self.host_update_dialog.is_some()
             || self.run_confirm.is_some()
             || self.notices.has_modal()
             || self.layout_chooser.is_some()
@@ -4606,6 +4620,7 @@ impl RootView {
         // last stood. What went with the connection goes.
         if !conn.is_open() {
             self.on_host_closed(host, window, cx);
+            self.remote_update_dropped(host, window, cx);
         }
         if !conn.is_open() && *host == HostKey::Local {
             self.agent_tabs.forget_applies(&HostKey::Local);
@@ -4820,6 +4835,7 @@ impl RootView {
         self.on_accounts_message(host, &msg, cx);
         self.on_gates_message(host, &msg, cx);
         self.on_host_update_message(host, &msg, cx);
+        self.on_remote_update_message(host, &msg, cx);
         self.on_shell_message(host, &msg, window, cx);
         if self.on_panel_message(host, &msg, window, cx) {
             return;
@@ -5045,6 +5061,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(id) = failure.request_id
+            && self.on_remote_update_refused(host, id, &failure.message, cx)
+        {
+            return;
+        }
         if let Some(id) = failure.request_id {
             let _ = self.launch_last.take_request(id);
         }
@@ -5543,7 +5564,8 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
-        if self.on_stash_drop_key(ks, window, cx) {
+        if self.on_stash_drop_key(ks, window, cx) || self.on_host_update_dialog_key(ks, window, cx)
+        {
             cx.stop_propagation();
             return;
         }
@@ -6150,6 +6172,7 @@ impl Render for RootView {
             .children(vscode_prompt_layer)
             .children(self.discard_confirm_layer(cx))
             .children(self.stash_drop_layer(cx))
+            .children(self.host_update_dialog_layer(cx))
             .children(self.notice_layers(cx))
             .children(self.toast_layer(here, cx))
             .children(self.undo_layer(window, cx))

@@ -629,18 +629,38 @@ pub struct LastResult {
 /// `None`, and any other failure is logged at warn.
 #[must_use]
 pub fn take_last_result(path: &Path) -> Option<LastResult> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(err) => {
-            warn!(path = %path.display(), "update: could not read the last result: {err}");
-            return None;
-        }
-    };
+    let bytes = read_last_result_bytes(path)?;
     if let Err(err) = std::fs::remove_file(path) {
         warn!(path = %path.display(), "update: could not delete the last result: {err}");
     }
-    match serde_json::from_slice(&bytes) {
+    decode_last_result(path, &bytes)
+}
+
+/// Reads `path` as a [`LastResult`] and leaves the file in place; a missing
+/// file is `None`, and any other failure is logged at warn.
+#[must_use]
+pub fn read_last_result(path: &Path) -> Option<LastResult> {
+    let bytes = read_last_result_bytes(path)?;
+    decode_last_result(path, &bytes)
+}
+
+/// The bytes of `path`; a missing file is `None`, and any other read
+/// failure is logged at warn.
+fn read_last_result_bytes(path: &Path) -> Option<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            warn!(path = %path.display(), "update: could not read the last result: {err}");
+            None
+        }
+    }
+}
+
+/// `bytes`, read from `path`, as a [`LastResult`]; a decode failure is
+/// logged at warn.
+fn decode_last_result(path: &Path, bytes: &[u8]) -> Option<LastResult> {
+    match serde_json::from_slice(bytes) {
         Ok(result) => Some(result),
         Err(err) => {
             warn!(path = %path.display(), "update: the last result did not decode: {err}");
@@ -770,8 +790,9 @@ impl Drop for OwnedMutex {
 )]
 mod tests {
     use super::{
-        FEED_PATH, HASH_MISMATCH, Platform, Ready, asset_name, check_and_download, fetch_changelog,
-        parse_changelog, parse_releases_for, parse_sha256,
+        FEED_PATH, HASH_MISMATCH, LastResult, Platform, Ready, asset_name, check_and_download,
+        fetch_changelog, parse_changelog, parse_releases_for, parse_sha256, read_last_result,
+        take_last_result,
     };
     use serde_json::{Value, json};
     use sha2::{Digest as _, Sha256};
@@ -1186,6 +1207,55 @@ mod tests {
         if let Err(err) = std::fs::remove_dir_all(root) {
             tracing::warn!("could not remove {}: {err}", root.display());
         }
+    }
+
+    /// A fresh scratch folder holding a `last-result.json` of an update from
+    /// 0.5.0 to 0.6.0; returns the folder and the file.
+    fn last_result_file(name: &str) -> (PathBuf, PathBuf) {
+        let root = scratch(name);
+        std::fs::create_dir_all(&root).expect("create the scratch folder");
+        let file = root.join("last-result.json");
+        let body = json!({"from": "0.5.0", "to": "0.6.0", "ok": true, "message": "Updated."});
+        std::fs::write(&file, body.to_string()).expect("write the last result");
+        (root, file)
+    }
+
+    fn expected_last_result() -> LastResult {
+        LastResult {
+            from: Some("0.5.0".to_owned()),
+            to: "0.6.0".to_owned(),
+            ok: true,
+            message: "Updated.".to_owned(),
+        }
+    }
+
+    #[test]
+    fn read_last_result_leaves_the_file() {
+        let (root, file) = last_result_file("read-last");
+
+        let result = read_last_result(&file);
+
+        assert_eq!(result, Some(expected_last_result()));
+        assert!(file.exists(), "the read leaves the file for the app");
+        remove(&root);
+    }
+
+    #[test]
+    fn take_last_result_deletes_the_file() {
+        let (root, file) = last_result_file("take-last");
+
+        let result = take_last_result(&file);
+
+        assert_eq!(result, Some(expected_last_result()));
+        assert!(!file.exists(), "the take deletes the file");
+        remove(&root);
+    }
+
+    #[test]
+    fn read_last_result_of_a_missing_file_is_none() {
+        let root = scratch("missing-last");
+
+        assert_eq!(read_last_result(&root.join("last-result.json")), None);
     }
 
     #[test]

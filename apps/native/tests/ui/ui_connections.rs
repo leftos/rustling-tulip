@@ -20,6 +20,7 @@ use daemon_client::device_tokens::DeviceTokenStore as _;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use gpui::{Modifiers, TestAppContext, point, px};
+use protocol::ClientMessage;
 use protocol::{DaemonMessage, WorktreeCleanupFailure};
 use rustling_tulip_native::connection_picker::{
     AddMode, PeerSource, RowDetail, RowState, SshTestCancel, SshTester,
@@ -27,7 +28,7 @@ use rustling_tulip_native::connection_picker::{
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
 use rustling_tulip_native::{Connection, NetCommand, NetEvent, RootView};
 use serde_json::{Value, json};
-use support::{Fixture, Harness, PROTOCOL, TestDir, shell_spawns};
+use support::{Fixture, Harness, PROTOCOL, TestDir, session, shell_spawns};
 use tailnet::{PeerStatus, Status, TailnetError};
 
 const HOST: &str = "box.tail1234.ts.net";
@@ -549,6 +550,306 @@ fn reconnect_now_restarts_only_that_host(cx: &mut TestAppContext) {
     assert_eq!(restarts, 1, "the host's network thread redials");
     assert!(h.host(&tailnet(DEN)).commands().is_empty());
     assert!(h.commands().is_empty(), "This PC is not restarted");
+}
+
+/// A release older than this client's.
+const OLD_RELEASE: &str = "0.0.1";
+/// What a host says when it will not update.
+const REFUSAL: &str = "This host is already on the newest release.";
+
+/// Connects `target` on release `version`, its daemon listing
+/// `remote_update`, and drains what the client sent on `Welcome`.
+fn connect_updatable(h: &mut Harness<'_>, target: &Target, version: &str) {
+    let mut features = support::daemon_features();
+    features.push(protocol::FEATURE_REMOTE_UPDATE.to_owned());
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_welcome(PROTOCOL, features.clone(), None);
+    conn.set_build_version(Some(version.to_owned()));
+    let mut host = h.host(target);
+    host.event(NetEvent::State(conn));
+    host.send(DaemonMessage::Welcome {
+        protocol_version: PROTOCOL,
+        supported_versions: vec![PROTOCOL],
+        features,
+        daemon_id: None,
+        origin: None,
+        build_version: Some(version.to_owned()),
+    });
+    host.sent();
+}
+
+/// A window holding `HOST` on an older release that can update on request,
+/// running a working and an idle session, with the picker open.
+fn updatable_host<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, dir, &Fixture::default());
+    h.tokens().set(HOST, "t1").expect("seed a token");
+    connect_updatable(&mut h, &tailnet(HOST), OLD_RELEASE);
+    h.host(&tailnet(HOST)).send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("b1").status("working").build(),
+            session("b2").build(),
+        ],
+    });
+    h.sent();
+    open_picker(&mut h, tailnet_with(&[]));
+    h
+}
+
+/// The `RemoteUpdate` requests among `sent`, by id.
+fn remote_updates(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::RemoteUpdate { request_id } => Some(request_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every toast's title and detail, oldest first.
+fn toasts(h: &mut Harness<'_>) -> Vec<(String, Option<String>)> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .map(|toast| (toast.title.clone(), toast.detail.clone()))
+            .collect()
+    })
+}
+
+/// Opens the dialog from `HOST`'s row and presses Update: the id the
+/// request went with.
+fn ask_update(h: &mut Harness<'_>) -> String {
+    h.click_on(&format!("connections-row-{HOST}-update"));
+    h.click_on("host-update-confirm");
+    let ids = remote_updates(&h.host(&tailnet(HOST)).sent());
+    ids.into_iter()
+        .next()
+        .expect("one RemoteUpdate went to the host")
+}
+
+#[gpui::test]
+fn update_host_confirms_listing_the_hosts_sessions_then_sends_remote_update(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    assert!(
+        drawn(&mut h, &format!("connections-row-{HOST}-update")),
+        "the row of a host on an older release offers Update host"
+    );
+
+    h.click_on(&format!("connections-row-{HOST}-update"));
+
+    assert!(!is_open(&mut h), "the picker gives way to the dialog");
+    let dialog = h
+        .root(|root, _| root.host_update_dialog())
+        .expect("the confirm dialog is open");
+    assert_eq!(
+        dialog.title,
+        format!("Update {HOST} to the newest release?")
+    );
+    assert_eq!(
+        dialog.body,
+        format!(
+            "{HOST} will download and check the newest official release itself, then restart its \
+             daemon. Its sessions keep running."
+        )
+    );
+    assert_eq!(
+        dialog
+            .sessions
+            .iter()
+            .map(|line| (line.title.as_str(), line.status, line.working))
+            .collect::<Vec<_>>(),
+        [("b1", "working", true), ("b2", "idle", false)],
+        "each session with its status, the working one marked"
+    );
+    assert_eq!(dialog.no_sessions, None);
+    assert_eq!(dialog.warnings, Vec::<String>::new());
+    assert_eq!(dialog.confirm, format!("Update {HOST}"));
+    assert!(drawn(&mut h, "host-update-session-0"));
+    h.keys("enter");
+    assert!(
+        h.root(|root, _| root.host_update_dialog()).is_some(),
+        "Enter does not update"
+    );
+    assert_eq!(
+        remote_updates(&h.host(&tailnet(HOST)).sent()),
+        Vec::<String>::new()
+    );
+    h.sent();
+
+    h.click_on("host-update-confirm");
+
+    assert!(h.root(|root, _| root.host_update_dialog()).is_none());
+    assert_eq!(
+        remote_updates(&h.host(&tailnet(HOST)).sent()).len(),
+        1,
+        "exactly one request goes to the host"
+    );
+    assert!(
+        remote_updates(&h.sent()).is_empty(),
+        "This PC is asked nothing"
+    );
+    assert!(
+        toasts(&mut h).contains(&(format!("Asking {HOST} to update…"), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+    h.root_update(RootView::open_connection_picker);
+    assert!(is_open(&mut h), "the picker opens again");
+    // The row's controls, as Tab walks them: the drawn ones.
+    let ring = tab_walk(&mut h, 5);
+    assert!(
+        !ring.contains(&format!("connections-row-{HOST}-update")),
+        "a host with an update pending is not offered another: {ring:?}"
+    );
+}
+
+#[gpui::test]
+fn cancel_in_the_update_dialog_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    h.click_on(&format!("connections-row-{HOST}-update"));
+    h.click_on("host-update-cancel");
+    assert!(h.root(|root, _| root.host_update_dialog()).is_none());
+
+    h.click_on("footer-connections");
+    h.click_on(&format!("connections-row-{HOST}-update"));
+    h.keys("escape");
+    assert!(
+        h.root(|root, _| root.host_update_dialog()).is_none(),
+        "Esc cancels"
+    );
+
+    assert_eq!(
+        remote_updates(&h.host(&tailnet(HOST)).sent()),
+        Vec::<String>::new()
+    );
+    assert!(
+        !toasts(&mut h)
+            .iter()
+            .any(|(title, _)| title.starts_with("Asking")),
+        "no request, no toast"
+    );
+}
+
+#[gpui::test]
+fn a_refused_remote_update_shows_the_hosts_message_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    let id = ask_update(&mut h);
+
+    h.host(&tailnet(HOST)).send(DaemonMessage::Error {
+        message: REFUSAL.to_owned(),
+        request_id: Some(id),
+        code: Some("update_refused".to_owned()),
+    });
+
+    let shown = toasts(&mut h);
+    assert_eq!(
+        shown
+            .iter()
+            .filter(|(title, detail)| title.contains(REFUSAL) || detail.as_deref() == Some(REFUSAL))
+            .collect::<Vec<_>>(),
+        [&(format!("{HOST} didn't update"), Some(REFUSAL.to_owned()))],
+        "one toast carries the host's text: {shown:?}"
+    );
+}
+
+#[gpui::test]
+fn a_host_back_on_the_new_version_shows_updated(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    let id = ask_update(&mut h);
+    let version = protocol::BUILD_VERSION;
+    h.host(&tailnet(HOST))
+        .send(DaemonMessage::RemoteUpdateStarted {
+            request_id: id,
+            version: version.to_owned(),
+        });
+    assert!(
+        toasts(&mut h).contains(&(format!("{HOST} is updating to {version}…"), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+
+    h.host(&tailnet(HOST))
+        .event(NetEvent::State(closed(tailnet(HOST))));
+    connect_updatable(&mut h, &tailnet(HOST), version);
+
+    let shown = toasts(&mut h);
+    assert!(
+        shown.contains(&(format!("{HOST} updated to {version}"), None)),
+        "{shown:?}"
+    );
+    assert!(
+        !shown.iter().any(|(title, _)| title.contains("is updating")),
+        "the progress toast became the outcome: {shown:?}"
+    );
+}
+
+#[gpui::test]
+fn a_host_that_never_returns_says_so_after_the_bound(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = updatable_host(cx, &dir);
+    let id = ask_update(&mut h);
+    h.host(&tailnet(HOST))
+        .send(DaemonMessage::RemoteUpdateStarted {
+            request_id: id,
+            version: protocol::BUILD_VERSION.to_owned(),
+        });
+    h.host(&tailnet(HOST))
+        .event(NetEvent::State(closed(tailnet(HOST))));
+    let gone = format!("{HOST} hasn't come back; it may still be updating.");
+
+    h.advance(Duration::from_secs(110));
+    assert!(!toasts(&mut h).iter().any(|(title, _)| *title == gone));
+
+    h.advance(Duration::from_secs(11));
+    assert!(
+        toasts(&mut h).contains(&(gone, None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn the_update_action_is_hidden_for_this_pc_ssh_and_an_up_to_date_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [
+            { "name": HOST, "port": 8787 },
+            { "kind": "ssh", "name": "me@devbox" },
+        ] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.tokens().set(HOST, "t1").expect("seed a token");
+    let ssh_box = Target::parse_ssh("me@devbox", None).expect("an SSH host string");
+    connect_updatable(&mut h, &tailnet(HOST), protocol::BUILD_VERSION);
+    connect_updatable(&mut h, &ssh_box, OLD_RELEASE);
+
+    open_picker(&mut h, tailnet_with(&[]));
+
+    assert!(!drawn(&mut h, "connections-row-This PC-update"), "This PC");
+    assert!(
+        !drawn(&mut h, "connections-row-ssh:me@devbox-update"),
+        "an SSH host, even behind"
+    );
+    assert!(
+        detail(&mut h, "ssh:me@devbox").is_some_and(|detail| detail.behind),
+        "the SSH host is behind"
+    );
+    assert!(
+        !drawn(&mut h, &format!("connections-row-{HOST}-update")),
+        "a host on this client's release"
+    );
 }
 
 #[gpui::test]

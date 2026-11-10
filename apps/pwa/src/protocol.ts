@@ -5097,6 +5097,20 @@ export type DaemonMessage =
    */
   | { type: "remote_update_started"; request_id: string; version: string }
   /**
+   * How the last update of this host ended, from what the updater
+   * recorded; sent to every connection after its `Welcome` while the
+   * daemon holds one.
+   *
+   * `from`: The version replaced; `None` on a first install.
+   *
+   * `to`: The version the update installs.
+   *
+   * `ok`: Whether the update is in place.
+   *
+   * `message`: The line that says what happened.
+   */
+  | { type: "host_update_result"; from?: string | null; to: string; ok: boolean; message: string }
+  /**
    * A host update was asked for and will go ahead in `seconds` unless a
    * local connection sends [`ClientMessage::CancelHostUpdate`] with this
    * `update_id`. Sent only to local connections: to each one attached

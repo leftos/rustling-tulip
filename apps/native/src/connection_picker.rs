@@ -602,6 +602,10 @@ impl RowState {
 /// What the picker knows about one row when it draws its second line,
 /// state chip and buttons.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about a row, not a state machine"
+)]
 pub struct RowFacts {
     /// What kind of host the row offers.
     pub host: RowHost,
@@ -629,6 +633,9 @@ pub struct RowFacts {
     /// The build version the row's host reported in its `Welcome`, while the
     /// window holds its connection; `None` from an older host.
     pub build_version: Option<String>,
+    /// Whether the row's host lists [`protocol::FEATURE_REMOTE_UPDATE`] on
+    /// the window's open connection to it.
+    pub remote_update: bool,
 }
 
 /// The version a row shows for its host, and whether the host is older than
@@ -658,6 +665,18 @@ pub fn offers_reconnect(facts: &RowFacts) -> bool {
     matches!(facts.host, RowHost::Tailnet | RowHost::Ssh)
         && facts.held
         && facts.live != Some(LiveState::Open)
+}
+
+/// Whether the row draws Update host: a saved tailnet host the window holds
+/// open, that can update itself on request and runs an older release than
+/// this client. This PC and SSH hosts are never offered it.
+#[must_use]
+pub fn offers_update(facts: &RowFacts) -> bool {
+    facts.host == RowHost::Tailnet
+        && facts.held
+        && facts.live == Some(LiveState::Open)
+        && facts.remote_update
+        && row_detail(facts).behind
 }
 
 /// A row's second line and the chip at its trail.
@@ -1046,7 +1065,8 @@ mod tests {
     use super::{
         AddButton, AddMode, ConnectionPicker, HostKind, LiveState, PeerSource, Row, RowFacts,
         RowHost, RowKind, RowState, SCAN_PENDING, SSH_TESTING, SavedHost, Section, SshTest,
-        offers_pair, offers_reconnect, row_detail, typed_ssh_target, typed_target, version_against,
+        offers_pair, offers_reconnect, offers_update, row_detail, typed_ssh_target, typed_target,
+        version_against,
     };
     use crate::target::{DEFAULT_TAILNET_PORT, Target};
     use tailnet::{PeerStatus, Status, TailnetError};
@@ -1553,7 +1573,57 @@ mod tests {
             sessions_last_time: None,
             live_sessions: None,
             build_version: None,
+            remote_update: false,
         }
+    }
+
+    #[test]
+    fn offers_update_only_for_a_connected_tailnet_host_that_is_behind_and_supports_it() {
+        let all = |host| RowFacts {
+            held: true,
+            live: Some(LiveState::Open),
+            build_version: Some("0.0.1".to_owned()),
+            remote_update: true,
+            ..facts(host)
+        };
+        assert!(
+            offers_update(&all(RowHost::Tailnet)),
+            "every condition holds"
+        );
+        assert!(!offers_update(&all(RowHost::ThisPc)), "This PC");
+        assert!(!offers_update(&all(RowHost::Ssh)), "an SSH host");
+        assert!(!offers_update(&all(RowHost::Peer)), "a peer");
+        let offline = RowFacts {
+            live: Some(LiveState::Down {
+                reason: "connection refused".to_owned(),
+            }),
+            ..all(RowHost::Tailnet)
+        };
+        assert!(!offers_update(&offline), "an offline host");
+        let not_held = RowFacts {
+            held: false,
+            live: None,
+            ..all(RowHost::Tailnet)
+        };
+        assert!(!offers_update(&not_held), "a host the window does not hold");
+        let current = RowFacts {
+            build_version: Some(protocol::BUILD_VERSION.to_owned()),
+            ..all(RowHost::Tailnet)
+        };
+        assert!(!offers_update(&current), "a host that is not behind");
+        let unknown = RowFacts {
+            build_version: None,
+            ..all(RowHost::Tailnet)
+        };
+        assert!(!offers_update(&unknown), "a host that reports no version");
+        let no_feature = RowFacts {
+            remote_update: false,
+            ..all(RowHost::Tailnet)
+        };
+        assert!(
+            !offers_update(&no_feature),
+            "a host that cannot update on request"
+        );
     }
 
     #[test]
