@@ -161,6 +161,69 @@ async fn spawn_prints_the_new_session() {
 }
 
 #[tokio::test]
+async fn spawn_refuses_a_repo_that_belongs_to_a_workspace() {
+    let (hub, scratch) = test_hub("cli-drive-spawn-member");
+    let hub_port = serve_loopback(&hub).await;
+    let repo: protocol::RepoEntry = serde_json::from_value(serde_json::json!({
+        "id": "repo-app",
+        "name": "app",
+        "path": "C:\\dev\\app",
+        "default_branch": "main",
+    }))
+    .expect("repo fixture");
+    let workspace: protocol::WorkspaceEntry = serde_json::from_value(serde_json::json!({
+        "id": "workspace-suite",
+        "name": "suite",
+        "member_repo_ids": ["repo-app"],
+    }))
+    .expect("workspace fixture");
+    let opening = vec![
+        welcome(&[]),
+        DaemonMessage::Repos { repos: vec![repo] },
+        DaemonMessage::Workspaces {
+            workspaces: vec![workspace],
+        },
+        DaemonMessage::Sessions {
+            sessions: Vec::new(),
+        },
+    ];
+    let (port, script) = scripted_daemon(hub_port, opening.clone(), None).await;
+
+    let refused = run_verb(&handshake_file(&scratch, port), &["spawn", "--repo", "app"]).await;
+
+    assert_eq!(refused.exit, EXIT_FAILED);
+    assert_eq!(
+        refused.err,
+        "rustling-tulipd spawn: app is a member of workspace suite; its sessions belong to the \
+         workspace. Spawn in the workspace from the app.\n"
+    );
+    let read = script.await.expect("the script finished");
+    assert_eq!(
+        read.len(),
+        1,
+        "no ListBranches and no SpawnSession were sent: {read:?}"
+    );
+
+    let (port, _script) = scripted_daemon(hub_port, opening, None).await;
+    let json = run_verb(
+        &handshake_file(&scratch, port),
+        &["spawn", "--repo", "app", "--json"],
+    )
+    .await;
+    assert_eq!(json.exit, EXIT_FAILED);
+    let value: serde_json::Value = serde_json::from_str(&json.out).expect("valid JSON");
+    assert_eq!(
+        value["error"]["code"],
+        protocol::error_codes::INVALID_REQUEST
+    );
+    assert_eq!(
+        value["error"]["message"],
+        "app is a member of workspace suite; its sessions belong to the workspace. \
+         Spawn in the workspace from the app."
+    );
+}
+
+#[tokio::test]
 async fn spawn_refuses_an_unknown_agent() {
     let (hub, scratch) = test_hub("cli-drive-spawn-agent");
     let port = serve_loopback(&hub).await;
