@@ -21,6 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A settings file that isn't valid text keeps a copy instead of being overwritten, and a failed reset of your settings is tried again.
 - A tap in the phone's terminal no longer drops a session out of Needs you while its question is still up.
 - Keys typed into the phone's terminal while it can't send now show Offline on the session bar, as a chat send does.
+- The phone app opened offline right after installing it now loads styled and working, instead of as a bare page.
 - A permission toast shows its whole command, wrapping it and growing to fit, instead of cutting it to one line.
 - The Needs you list shows a session's whole question, wrapping it, instead of cutting it to one line.
 - Accounts and Settings › Accounts show an account's whole email and reset times, wrapping them, instead of cutting them off.
