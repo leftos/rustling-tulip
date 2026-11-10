@@ -2,6 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 
 import type { NewRequestId } from "./home-actions";
+import type { ClientMessage } from "./protocol";
 import type { Connection } from "./socket";
 import { createTerminalPane, type TerminalLike, type TerminalPane } from "./terminal-pane";
 
@@ -11,6 +12,8 @@ const TICK_MS = 250;
 export interface TerminalViewOptions {
   readonly sessionId: string;
   readonly connection: Connection;
+  /** Sends the user's own input; the session screen counts its refusals. */
+  readonly sendInput: (message: ClientMessage) => boolean;
   /** The element xterm draws into; the view sizes the terminal to it. */
   readonly container: HTMLElement;
   readonly newRequestId: NewRequestId;
@@ -35,7 +38,7 @@ export interface TerminalView {
  * advances its load.
  */
 export function mountTerminal(options: TerminalViewOptions): TerminalView {
-  const { sessionId, connection, container, newRequestId, reason, onInput } = options;
+  const { sessionId, connection, sendInput, container, newRequestId, reason, onInput } = options;
   const term = new Terminal({
     fontFamily: "ui-monospace, Menlo, Consolas, monospace",
     fontSize: 13,
@@ -61,6 +64,7 @@ export function mountTerminal(options: TerminalViewOptions): TerminalView {
     sessionId,
     terminal,
     send: (message) => connection.send(message),
+    sendInput,
     status: () => connection.status(),
     now: () => Date.now(),
     newRequestId,

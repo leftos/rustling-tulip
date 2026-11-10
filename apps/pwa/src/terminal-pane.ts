@@ -48,6 +48,8 @@ export interface TerminalPaneDeps {
   readonly terminal: TerminalLike;
   /** `Connection.send`: false when the connection is not ready. */
   readonly send: (message: ClientMessage) => boolean;
+  /** Sends the user's own input (typing, a Keys or Quick tap, and its size claim); false when not ready. */
+  readonly sendInput: (message: ClientMessage) => boolean;
   /** `Connection.status`: the state `open` takes as the last one seen. */
   readonly status: () => ConnectionStateName;
   readonly now: () => number;
@@ -90,10 +92,11 @@ type PaneLife = "new" | "open" | "closed";
  * replay the same way. Text the terminal reports in the shape of its own
  * answer to the child (`isTerminalReply`) goes out as an automatic reply,
  * never as typing. Every user input sends the size claim it arms ahead of
- * itself.
+ * itself. The user's inputs go through `sendInput`; the pane's own messages
+ * and the terminal's replies go through `send`.
  */
 export function createTerminalPane(deps: TerminalPaneDeps): TerminalPane {
-  const { sessionId, terminal, send } = deps;
+  const { sessionId, terminal, send, sendInput } = deps;
   let life: PaneLife = "new";
   let model: TerminalState = INITIAL_TERMINAL;
   let size: SizeState = sessionSize(sessionId);
@@ -141,9 +144,9 @@ export function createTerminalPane(deps: TerminalPaneDeps): TerminalPane {
     const noted = noteInput(size, deps.now());
     size = noted.state;
     if (noted.message !== null) {
-      send(noted.message);
+      sendInput(noted.message);
     }
-    send(message);
+    sendInput(message);
   }
 
   function onStatus(state: ConnectionStateName): void {

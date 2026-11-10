@@ -99,9 +99,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   let offline: string | null = null;
   /** A send has been refused since the last `ready`, which the bar shows as `Offline`. */
   let sendRefused = false;
-  /** A key bar or terminal-dock tap is being typed into the pane right now. */
-  let userTerminalInput = false;
-  /** That tap's send was refused. */
+  /** `sendUser` refused a send; `terminalInput` clears it before a key bar or dock tap and reads it after. */
   let terminalRefused = false;
   let drawn: SessionScreen | null = null;
   let drawnRows: readonly ChatRow[] | null = null;
@@ -206,16 +204,6 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     }
     return sent;
   }
-
-  /**
-   * The terminal's connection: a send made while a key bar or terminal-dock
-   * tap is typed into the pane is the user's, so its refusal counts; the
-   * pane's own replies and keys typed into xterm go straight through.
-   */
-  const terminalConnection: Connection = {
-    ...connection,
-    send: (message) => (userTerminalInput ? sendUser(message) : connection.send(message)),
-  };
 
   /**
    * The terminal toggle follows the session's snapshot: a plain shell opens on
@@ -431,7 +419,8 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     }
     terminalView = mountTerminal({
       sessionId,
-      connection: terminalConnection,
+      connection,
+      sendInput: sendUser,
       container: terminalEl,
       newRequestId,
       reason: terminalOn ? "toggle" : "attach",
@@ -593,12 +582,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       return;
     }
     terminalRefused = false;
-    userTerminalInput = true;
-    try {
-      act();
-    } finally {
-      userTerminalInput = false;
-    }
+    act();
     offline = terminalRefused ? OFFLINE_NOT_SENT : null;
     ctrlArmed = terminalView.pane.ctrlArmed();
     update();

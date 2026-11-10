@@ -19,6 +19,8 @@ interface Harness {
   readonly log: TerminalCall[];
   /** Every message the pane sent, in order. */
   readonly sent: ClientMessage[];
+  /** Every message the pane sent through `sendInput`, in order. */
+  readonly inputs: ClientMessage[];
   /** Runs every write's `done` still held, in order. */
   finishWrites(): void;
   /** Sets the clock to `ms`. */
@@ -33,6 +35,7 @@ interface Harness {
 function harness(): Harness {
   const log: TerminalCall[] = [];
   const sent: ClientMessage[] = [];
+  const inputs: ClientMessage[] = [];
   const pending: (() => void)[] = [];
   let clock = T0;
   let current: ConnectionStateName = "ready";
@@ -54,6 +57,11 @@ function harness(): Harness {
       sent.push(message);
       return current === "ready";
     },
+    sendInput: (message) => {
+      inputs.push(message);
+      sent.push(message);
+      return current === "ready";
+    },
     status: () => current,
     now: () => clock,
     newRequestId: () => {
@@ -65,6 +73,7 @@ function harness(): Harness {
     pane,
     log,
     sent,
+    inputs,
     finishWrites() {
       for (const done of pending.splice(0)) {
         done();
@@ -231,6 +240,49 @@ test("pane_tray_and_quick_take_the_claim_first_path_and_ctrl_chords_a_letter", (
   h.pane.key({ label: "C", bytes: "c" });
   expect(h.fresh()).toEqual([typed(ctrl("c"))]);
   expect(h.pane.ctrlArmed()).toBe(false);
+});
+
+test("pane_typed_text_goes_out_through_sendInput_with_its_size_claim", () => {
+  const h = harness();
+  h.pane.open(80, 24, "attach");
+  h.fresh();
+
+  h.pane.typed("a");
+  expect(h.inputs).toEqual([resize(80, 24, true), typed("a")]);
+});
+
+test("pane_a_terminal_reply_goes_out_through_send_not_sendInput", () => {
+  const h = harness();
+  h.pane.open(80, 24, "attach");
+  h.pane.notice(scrollback("\x1b[6n", "r1"));
+  h.fresh();
+
+  h.pane.typed("\x1b[12;40R");
+  expect(h.inputs).toEqual([]);
+  expect(h.fresh()).toEqual([{ ...typed("\x1b[12;40R"), automatic: true }]);
+});
+
+test("pane_a_keys_tap_and_a_quick_reply_go_out_through_sendInput", () => {
+  const h = harness();
+  h.pane.open(80, 24, "attach");
+  h.fresh();
+
+  h.pane.key({ label: "Esc", bytes: "\x1b" });
+  h.at(T0 + 6_000);
+  h.pane.quick("yes");
+  expect(h.inputs).toEqual([
+    resize(80, 24, true),
+    typed("\x1b"),
+    resize(80, 24, true),
+    typed(quickReplyBytes("yes")),
+  ]);
+});
+
+test("pane_its_own_attach_and_size_messages_never_go_through_sendInput", () => {
+  const h = harness();
+  h.pane.open(80, 24, "attach");
+  expect(h.inputs).toEqual([]);
+  expect(h.sent).not.toEqual([]);
 });
 
 test("pane_an_unchanged_measure_sends_nothing_and_a_pane_resize_claims", () => {
