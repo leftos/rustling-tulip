@@ -166,7 +166,7 @@ fn accounts_base_url_override(read: impl Fn(&str) -> Option<String>) -> Option<S
         reason = "only an e2e-loopback-peers build reads the override"
     )
 )]
-fn is_loopback_origin(value: &str) -> bool {
+pub(crate) fn is_loopback_origin(value: &str) -> bool {
     let Some(authority) = value
         .strip_prefix("http://")
         .or_else(|| value.strip_prefix("https://"))

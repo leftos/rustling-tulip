@@ -637,7 +637,7 @@ pub async fn run(
                 crate::gate_state::live_history_source(),
             )
         }),
-        host_update: Arc::new(HostUpdate::system()),
+        host_update: Arc::new(HostUpdate::for_this_daemon()?),
     };
     start_hub_tasks(&hub, client_count_rx);
     let resume_ids = start_logins(&hub, &login_hub, resume_ids).await;

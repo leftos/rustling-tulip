@@ -137,6 +137,8 @@ Files the native client fetches from a remote host live in a fourth machine-loca
 
 Auto-update downloads live in a machine-local root beside the others, `%LOCALAPPDATA%\leftos\rustling-tulip\data\updates\` on Windows (overridable with `RUSTLING_TULIP_UPDATES_DIR`): one `<version>-<random>\` folder per download, holding the verified installer, and `last-result.json` (`{from, message, ok, to}`), which `rustling-tulipd apply-update` writes and the client reads once after the restart. On a Windows host, a daemon asked to update itself (`RemoteUpdate`) writes its download folders here too, clearing old ones first, and finds the install folder by reading `InstallLocation` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\rustling-tulip` (`crates/daemon/src/server/update.rs`, `docs/auto-update.md`).
 
+A daemon in the host-update sandbox (`RUSTLING_TULIP_E2E_HOST_UPDATE=1`, test builds only) writes `e2e-host-update-launch.json` in its config dir, `{"program": …, "args": […]}`, atomically, in place of starting the installer it verified; nothing else reads it.
+
 On macOS the folder holds the verified zip, and Restart to update unpacks it into a hidden `.rustling-tulip-update-<version>-<8 hex>/` folder beside the installed `rustling-tulip.app` (not under `updates`, so the rename into place stays on one volume); `apply-update` leaves the replaced bundle as `rustling-tulip.app.old` beside it.
 
 Older folders and the `.old` files an update left in the install folder are deleted at the next launch; on macOS the launch also deletes `rustling-tulip.app.old` and every `.rustling-tulip-update-*` folder beside the running bundle (`apps/native/src/update.rs` `clean_at_launch`, `crates/update-core`, `docs/auto-update.md`).

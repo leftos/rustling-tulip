@@ -57,6 +57,8 @@ use tracing::{debug, info, warn};
 use update_core::Platform;
 use update_core::macos_stage;
 
+mod sandbox;
+
 /// How long a host update counts down on the host before it goes ahead.
 const COUNTDOWN: Duration = Duration::from_secs(10);
 
@@ -504,6 +506,68 @@ impl HostUpdate {
     /// processes, and updates through its seams.
     pub(crate) fn system() -> Self {
         Self::new(system_install(), Box::new(SystemProcesses), Seams::system())
+    }
+
+    /// The hub's host update: [`HostUpdate::system`], or in an
+    /// `e2e-loopback-peers` build started with `RUSTLING_TULIP_E2E_HOST_UPDATE=1`
+    /// the sandbox ([`sandbox::request`]), in which no installer runs.
+    ///
+    /// # Errors
+    ///
+    /// The sandbox's refusal to start: a switch of another value, or a daemon
+    /// that is not isolated.
+    #[cfg_attr(
+        not(feature = "e2e-loopback-peers"),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "only an e2e-loopback-peers build can refuse to start"
+        )
+    )]
+    pub(crate) fn for_this_daemon() -> anyhow::Result<Self> {
+        #[cfg(feature = "e2e-loopback-peers")]
+        if let Some(plan) = sandbox::request(|name| std::env::var_os(name))? {
+            warn!(
+                install = %plan.install.display(),
+                record = %plan.record.display(),
+                "built with e2e-loopback-peers: RUSTLING_TULIP_E2E_HOST_UPDATE=1 sandboxes remote update (no installer runs); never ship this build"
+            );
+            return Ok(Self::sandboxed(plan));
+        }
+        Ok(Self::system())
+    }
+
+    /// A host update through `plan`'s sandbox: its install folder, a launch
+    /// recorded and never started, its own update lock and, when the plan
+    /// overrides it, its countdown; everything else this machine's.
+    #[cfg_attr(
+        not(feature = "e2e-loopback-peers"),
+        expect(
+            dead_code,
+            reason = "only an e2e-loopback-peers build sandboxes the update"
+        )
+    )]
+    fn sandboxed(plan: sandbox::SandboxPlan) -> Self {
+        let seams = Seams {
+            lock: Box::new(sandbox::NamedLock {
+                name: plan.lock_name,
+            }),
+            source: Box::new(ReleaseFeed),
+            launcher: Box::new(sandbox::RecordLaunch { file: plan.record }),
+            updates_dir: Box::new(daemon_client::updates_dir),
+            platform: Platform::current(),
+            stager: Box::new(BundleStage),
+        };
+        let mut update = Self::new(
+            Box::new(sandbox::SandboxInstall {
+                folder: plan.install,
+            }),
+            Box::new(SystemProcesses),
+            seams,
+        );
+        if let Some(countdown) = plan.countdown {
+            update.countdown = countdown;
+        }
+        update
     }
 
     /// A test hub's checks: no install, no processes, and no last update
@@ -2372,6 +2436,55 @@ mod tests {
             .map(OsString::from)
             .collect();
         assert_eq!(*lock(&rig.launches), vec![(rig.installer.clone(), args)]);
+        assert!(guard_set(&rig.hub), "a launched update keeps its guard");
+        assert!(held_off(&rig.hub), "a launched update holds off idle exit");
+    }
+
+    #[tokio::test]
+    async fn a_sandboxed_update_records_the_installer_and_answers_started() {
+        let mut rig = passing("update-sandboxed", SETUP);
+        let record = rig.root.join("e2e-host-update-launch.json");
+        let updates_root = rig.root.join("update-root");
+        let seams = Seams {
+            lock: Box::new(FakeLock { held: false }),
+            source: Box::new(FakeSource {
+                feed: Feed::Release,
+                installer: rig.installer.clone(),
+                fetches: Arc::default(),
+            }),
+            launcher: Box::new(sandbox::RecordLaunch {
+                file: record.clone(),
+            }),
+            updates_dir: Box::new(move || Ok(updates_root.clone())),
+            platform: Some(update_core::Platform::Windows),
+            stager: Box::new(BundleStage),
+        };
+        rig.hub.host_update = Arc::new(HostUpdate::new(
+            Box::new(FakeInstall(Some(rig.root.join(OWN)))),
+            Box::new(FakeProcesses::default()),
+            seams,
+        ));
+
+        let reply = ask(&rig.hub).await;
+
+        let DaemonMessage::RemoteUpdateStarted {
+            request_id,
+            version,
+        } = reply
+        else {
+            panic!("expected the update to start, got {reply:?}");
+        };
+        assert_eq!((request_id.as_str(), version.as_str()), ("u1", "0.99.0"));
+        let bytes = std::fs::read(&record).unwrap_or_else(|err| panic!("read the record: {err}"));
+        let recorded: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or_else(|err| panic!("parse the record: {err}"));
+        assert_eq!(
+            recorded,
+            serde_json::json!({
+                "program": rig.installer.display().to_string(),
+                "args": ["/S", "/UPDATE", "/RESTARTDAEMON"],
+            })
+        );
         assert!(guard_set(&rig.hub), "a launched update keeps its guard");
         assert!(held_off(&rig.hub), "a launched update holds off idle exit");
     }
