@@ -91,13 +91,24 @@ pub fn agent_home_var(program_env_var: &str) -> Option<&'static str> {
         .and_then(|fake| fake.home_env)
 }
 
-/// The variables an isolated daemon must not inherit from its parent, so a
-/// `Default` spec's shell really comes from the daemon's own setting.
+/// The variables an isolated daemon must not inherit from its parent: the
+/// host-update sandbox's switch and countdown, which only a spec's own
+/// `daemon_only_env` hands a daemon (the removal runs before the spawn
+/// environment is set), and for a `Default` spec the shell variables, so its
+/// shell really comes from the daemon's own setting.
 #[must_use]
 pub fn removed_envs(spec: &DaemonSpec) -> &'static [&'static str] {
     match spec.shell {
-        TestShell::Cmd => &[],
-        TestShell::Default => &["RUSTLING_TULIP_SHELL", "RUSTLING_TULIP_SHELL_INTEGRATION"],
+        TestShell::Cmd => &[
+            "RUSTLING_TULIP_E2E_HOST_UPDATE",
+            "RUSTLING_TULIP_E2E_HOST_UPDATE_COUNTDOWN_SECS",
+        ],
+        TestShell::Default => &[
+            "RUSTLING_TULIP_SHELL",
+            "RUSTLING_TULIP_SHELL_INTEGRATION",
+            "RUSTLING_TULIP_E2E_HOST_UPDATE",
+            "RUSTLING_TULIP_E2E_HOST_UPDATE_COUNTDOWN_SECS",
+        ],
     }
 }
 
@@ -582,12 +593,64 @@ mod tests {
         default.shell = TestShell::Default;
         assert_eq!(
             removed_envs(&default).to_vec(),
-            vec!["RUSTLING_TULIP_SHELL", "RUSTLING_TULIP_SHELL_INTEGRATION"]
+            vec![
+                "RUSTLING_TULIP_SHELL",
+                "RUSTLING_TULIP_SHELL_INTEGRATION",
+                "RUSTLING_TULIP_E2E_HOST_UPDATE",
+                "RUSTLING_TULIP_E2E_HOST_UPDATE_COUNTDOWN_SECS",
+            ]
         );
         let cmd = spec(scratch("removed-cmd"));
-        assert!(
-            removed_envs(&cmd).is_empty(),
-            "a Cmd spec keeps the inherited variables"
+        assert_eq!(
+            removed_envs(&cmd).to_vec(),
+            vec![
+                "RUSTLING_TULIP_E2E_HOST_UPDATE",
+                "RUSTLING_TULIP_E2E_HOST_UPDATE_COUNTDOWN_SECS",
+            ],
+            "a Cmd spec keeps the inherited shell variables"
+        );
+    }
+
+    /// The host-update sandbox's switch and countdown never reach a daemon
+    /// from the parent's environment, while a spec that sets them as
+    /// daemon-only rows hands them to its daemon alone: `spawn_daemon`
+    /// removes the names before it sets the spawn environment.
+    #[test]
+    fn the_host_update_switch_is_removed_from_a_daemon_that_does_not_set_it() {
+        let switch_vars = [
+            "RUSTLING_TULIP_E2E_HOST_UPDATE",
+            "RUSTLING_TULIP_E2E_HOST_UPDATE_COUNTDOWN_SECS",
+        ];
+        let scratch = |name: &str| {
+            repo_root()
+                .join(".tmp")
+                .join("dev-daemon-unit")
+                .join(format!("{name}-{}", std::process::id()))
+        };
+        let mut default = spec(scratch("switch-default"));
+        default.shell = TestShell::Default;
+        let cmd = spec(scratch("switch-cmd"));
+        for spec in [&default, &cmd] {
+            for name in switch_vars {
+                assert!(
+                    removed_envs(spec).contains(&name),
+                    "{name} is removed from a {:?} spec's daemon",
+                    spec.shell
+                );
+            }
+        }
+        let mut sandboxed = spec(scratch("switch-set"));
+        sandboxed.daemon_only_env = vec![(switch_vars[0], OsString::from("1"))];
+        let envs = spawn_envs(&sandboxed).expect("every registered agent has a fake CLI");
+        assert_eq!(
+            env::env_value(&envs.daemon, switch_vars[0]),
+            Some(OsString::from("1")),
+            "a daemon-only switch reaches the daemon"
+        );
+        assert_eq!(
+            env::env_value(&envs.shared, switch_vars[0]),
+            None,
+            "a daemon-only switch never reaches what clients copy"
         );
     }
 

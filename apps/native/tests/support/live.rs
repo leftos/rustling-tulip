@@ -33,6 +33,7 @@ use serde_json::{Value, json};
 
 pub use dev_daemon::{kill_process, processes_under};
 
+use super::update_feed::UpdateFeed;
 use super::{
     Harness, NotifyRecorder, OpenRecorder, Outbox, PickRecorder, SoundRecorder, TestClock,
 };
@@ -88,7 +89,64 @@ impl LiveDaemon {
     /// isolation variables (so a row can override one) and kept in
     /// [`Self::envs`].
     pub fn start_with_env(test: &str, extra: &[(&'static str, OsString)]) -> Self {
-        Self::spawn_in(scratch_root(test), test, extra, None)
+        Self::spawn_in(
+            DaemonSetup::target(scratch_root(test), test),
+            extra,
+            None,
+            Vec::new(),
+        )
+    }
+
+    /// A daemon run from a scratch install of its own, in the host-update
+    /// sandbox: `rustling-tulipd` and `rt-tracer` are copied from
+    /// [`target_bin_dir`] into `<scratch root>/install`, which the daemon
+    /// runs from, and its daemon-only environment (never in [`Self::envs`],
+    /// so no bridge or CLI verb sees it) sets `RUSTLING_TULIP_E2E_HOST_UPDATE=1`,
+    /// `feed` as its release feed and, when given, the countdown in
+    /// seconds. `remote` sets up the fake tailnet as [`Self::start_remote`]
+    /// does. The daemon needs the `e2e-loopback-peers` build.
+    #[expect(
+        clippy::panic,
+        reason = "a scratch install that cannot be made fails the spec with the copy's own error"
+    )]
+    pub fn start_update_host(
+        test: &str,
+        feed: &UpdateFeed,
+        countdown_secs: Option<u32>,
+        remote: bool,
+    ) -> Self {
+        let root = scratch_root(test);
+        let install = root.join("install");
+        std::fs::create_dir_all(&install).expect("create the scratch install");
+        let source = target_bin_dir();
+        for name in ["rustling-tulipd", "rt-tracer"] {
+            let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+            std::fs::copy(source.join(&file), install.join(&file))
+                .unwrap_or_else(|err| panic!("copy {file} into the scratch install: {err}"));
+        }
+        let mut daemon_only = vec![
+            ("RUSTLING_TULIP_E2E_HOST_UPDATE", OsString::from("1")),
+            (
+                "RUSTLING_TULIP_UPDATE_FEED",
+                OsString::from(feed.base_url()),
+            ),
+        ];
+        if let Some(secs) = countdown_secs {
+            daemon_only.push((
+                "RUSTLING_TULIP_E2E_HOST_UPDATE_COUNTDOWN_SECS",
+                OsString::from(secs.to_string()),
+            ));
+        }
+        let setup = DaemonSetup {
+            root,
+            test,
+            bin_dir: install,
+        };
+        if !remote {
+            return Self::spawn_in(setup, &[], None, daemon_only);
+        }
+        let (envs, ca) = fake_tailnet(&setup.root);
+        Self::spawn_in(setup, &envs, Some(ca), daemon_only)
     }
 
     /// [`Self::start`] for remote access: the daemon's `tailscale` is
@@ -105,51 +163,65 @@ impl LiveDaemon {
     /// the isolation variables and the fake tailscale's state (so a row can
     /// override one) and kept in [`Self::envs`].
     pub fn start_remote_with_env(test: &str, extra: &[(&'static str, OsString)]) -> Self {
-        let root = scratch_root(test);
-        let fake = root.join("fake-tailscale");
-        std::fs::create_dir_all(&fake).expect("create the fake tailscale's dir");
-        let ca = TestCa::new();
-        let (cert_pem, key_pem) = ca.leaf();
-        let cert_file = fake.join("leaf.crt");
-        let key_file = fake.join("leaf.key");
-        std::fs::write(&cert_file, cert_pem).expect("write the test leaf");
-        std::fs::write(&key_file, key_pem).expect("write the test leaf's key");
-        let state = json!({
-            "user_id": OWNER_USER_ID,
-            "cert_file": cert_file,
-            "key_file": key_file,
-        });
-        let state_file = fake.join("state.json");
-        std::fs::write(&state_file, state.to_string()).expect("write the fake tailscale's state");
-        let mut envs = vec![(FAKE_TAILSCALE_STATE_ENV, state_file.into_os_string())];
+        let setup = DaemonSetup::target(scratch_root(test), test);
+        let (mut envs, ca) = fake_tailnet(&setup.root);
         envs.extend_from_slice(extra);
-        Self::spawn_in(root, test, &envs, Some(ca.der))
+        Self::spawn_in(setup, &envs, Some(ca), Vec::new())
     }
 
-    /// Starts the daemon over `root`, from [`scratch_root`], with the daemon
-    /// and tracer beside the test binary, and waits for its handshake and
-    /// `/health`.
+    /// Starts the daemon over `setup`'s root, from [`scratch_root`], with the
+    /// daemon and tracer in its `bin_dir`, `extra` kept in [`Self::envs`] and
+    /// `daemon_only` set on the daemon's process alone, and waits for its
+    /// handshake and `/health`.
     #[expect(
         clippy::panic,
         reason = "a daemon that does not start fails the spec with the launcher's own message"
     )]
     fn spawn_in(
-        root: PathBuf,
-        test: &str,
+        setup: DaemonSetup<'_>,
         extra: &[(&'static str, OsString)],
         tailnet_ca: Option<Vec<u8>>,
+        daemon_only: Vec<(&'static str, OsString)>,
     ) -> Self {
         let spec = DaemonSpec {
-            name: test.to_owned(),
-            scratch_root: root,
+            name: setup.test.to_owned(),
+            scratch_root: setup.root,
             repo_root: repo_root(),
-            bin_dir: target_bin_dir(),
+            bin_dir: setup.bin_dir,
             extra_env: extra.to_vec(),
-            daemon_only_env: Vec::new(),
+            daemon_only_env: daemon_only,
             shell: TestShell::Cmd,
         };
         let inner = IsolatedDaemon::start(spec).unwrap_or_else(|err| panic!("{err}"));
         Self { inner, tailnet_ca }
+    }
+
+    /// Stops the daemon as the installer would, with `rustling-tulipd
+    /// shutdown`, writes `last_result` as the updater's
+    /// `<updates dir>/last-result.json`, and starts a new daemon on the same
+    /// directories and environment, waiting for its handshake and `/health`.
+    /// The daemon reads that file once per run, so only a new run sends it.
+    #[expect(
+        clippy::panic,
+        reason = "a daemon that does not start again fails the spec with the launcher's own message"
+    )]
+    pub fn restart_after_update(&mut self, last_result: &Value) {
+        self.shut_down_by_cli();
+        let updates = self.updates_dir();
+        std::fs::create_dir_all(&updates).expect("create the updates dir");
+        std::fs::write(updates.join("last-result.json"), last_result.to_string())
+            .expect("write last-result.json");
+        self.inner.respawn().unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// The daemon's `RUSTLING_TULIP_UPDATES_DIR`, from [`Self::envs`].
+    pub fn updates_dir(&self) -> PathBuf {
+        self.envs()
+            .iter()
+            .rev()
+            .find(|(key, _)| *key == "RUSTLING_TULIP_UPDATES_DIR")
+            .map(|(_, value)| PathBuf::from(value))
+            .expect("an isolated daemon has an updates dir")
     }
 
     /// Makes the fake tailscale's `whois` answer that every peer belongs to
@@ -529,6 +601,48 @@ pub const REMOTE_HOST: &str = "localhost";
 const OWNER_USER_ID: i64 = 2;
 /// The variable naming the fake tailscale's state file.
 const FAKE_TAILSCALE_STATE_ENV: &str = "RUSTLING_TULIP_FAKE_TAILSCALE_STATE";
+
+/// Where [`LiveDaemon::spawn_in`] starts a daemon: its scratch root, the
+/// test's name and the folder it runs from.
+struct DaemonSetup<'a> {
+    root: PathBuf,
+    test: &'a str,
+    bin_dir: PathBuf,
+}
+
+impl<'a> DaemonSetup<'a> {
+    /// `root` for `test`, the daemon run from beside the test binary.
+    fn target(root: PathBuf, test: &'a str) -> Self {
+        Self {
+            root,
+            test,
+            bin_dir: target_bin_dir(),
+        }
+    }
+}
+
+/// Sets up `tools/e2e/fake-tailscale` under `root`: a test CA and its leaf
+/// for [`REMOTE_HOST`], and the shim's state naming every peer the host's
+/// owner. The daemon's variable for that state, and the CA's DER.
+fn fake_tailnet(root: &Path) -> (Vec<(&'static str, OsString)>, Vec<u8>) {
+    let fake = root.join("fake-tailscale");
+    std::fs::create_dir_all(&fake).expect("create the fake tailscale's dir");
+    let ca = TestCa::new();
+    let (cert_pem, key_pem) = ca.leaf();
+    let cert_file = fake.join("leaf.crt");
+    let key_file = fake.join("leaf.key");
+    std::fs::write(&cert_file, cert_pem).expect("write the test leaf");
+    std::fs::write(&key_file, key_pem).expect("write the test leaf's key");
+    let state = json!({
+        "user_id": OWNER_USER_ID,
+        "cert_file": cert_file,
+        "key_file": key_file,
+    });
+    let state_file = fake.join("state.json");
+    std::fs::write(&state_file, state.to_string()).expect("write the fake tailscale's state");
+    let envs = vec![(FAKE_TAILSCALE_STATE_ENV, state_file.into_os_string())];
+    (envs, ca.der)
+}
 
 /// `<repo>/.tmp/native-e2e/<test>-<pid>/`, emptied; [`IsolatedDaemon::start`]
 /// makes the daemon's directories, each registered agent's home folder and

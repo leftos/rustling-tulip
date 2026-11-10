@@ -56,7 +56,7 @@
       native-e2e Build the daemon (with the `e2e-loopback-peers` feature)
                  and tracer, then run the native client's end-to-end specs
                  (`e2e_live`, `e2e_recover`, `e2e_remote`, `e2e_ssh`,
-                 `e2e_multi_host`, under
+                 `e2e_multi_host`, `e2e_update`, under
                  nextest `--run-ignored only`, test-release profile) against
                  a real daemon isolated under `.tmp\native-e2e\`. The agents'
                  fake CLIs (crates\agents\claude\fake), fake-tailscale and
@@ -180,7 +180,7 @@ param(
     [switch]$Validate,
 
     # `native-e2e`: the spec files to run (e2e_live, e2e_recover, e2e_remote,
-    # e2e_ssh, e2e_multi_host; comma-separated). Default: all of them.
+    # e2e_ssh, e2e_multi_host, e2e_update; comma-separated). Default: all of them.
     [string[]]$Test,
 
     # `native-e2e`: a nextest filterset narrowing the specs (passed as `-E`).
@@ -1380,7 +1380,7 @@ function Invoke-NativeE2e {
 function Get-E2eTestFile {
     [OutputType([string[]])]
     param()
-    $valid = @('e2e_live', 'e2e_recover', 'e2e_remote', 'e2e_ssh', 'e2e_multi_host')
+    $valid = @('e2e_live', 'e2e_recover', 'e2e_remote', 'e2e_ssh', 'e2e_multi_host', 'e2e_update')
     if (-not $Test) { return $valid }
     $names = @($Test | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $unknown = @($names | Where-Object { $_ -notin $valid })
@@ -1503,10 +1503,10 @@ Commands:
   native-e2e [-Test <file>[,<file>]] [-Filter <filterset>]
              Build daemon (with e2e-loopback-peers) + tracer, then run
              the native client's end-to-end specs (e2e_live, e2e_recover,
-             e2e_remote, e2e_ssh, e2e_multi_host) against an isolated daemon
-             (needs `node`), as one gate call that may run in a builder's
+             e2e_remote, e2e_ssh, e2e_multi_host, e2e_update) against an isolated
+             daemon (needs `node`), as one gate call that may run in a builder's
              console session. Test-release only: refuses -Release.
-             -Test: only these spec files (default all five; an unknown
+             -Test: only these spec files (default all six; an unknown
              name fails before anything builds). -Filter: a nextest
              filterset, passed as `-E`.
   native-smoke

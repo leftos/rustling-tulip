@@ -37,6 +37,19 @@ impl UpdateFeed {
     /// Serves one prerelease, `v{version}`, offering the Windows installer
     /// `installer` and its `.sha256`.
     pub fn start(version: &str, installer: &[u8]) -> Self {
+        Self::serve_release(version, installer, &sha256_hex(installer))
+    }
+
+    /// [`Self::start`], whose `.sha256` names a hash that is not the
+    /// installer's, so a verifying download refuses it.
+    pub fn start_with_wrong_hash(version: &str, installer: &[u8]) -> Self {
+        let mut other = installer.to_vec();
+        other.push(0);
+        Self::serve_release(version, installer, &sha256_hex(&other))
+    }
+
+    /// Serves `v{version}` with `installer`, its `.sha256` holding `hash`.
+    fn serve_release(version: &str, installer: &[u8], hash: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port can be bound");
         let addr = listener.local_addr().expect("the listener has an address");
         let stop = Arc::new(AtomicBool::new(false));
@@ -45,6 +58,7 @@ impl UpdateFeed {
             &format!("http://127.0.0.1:{}", addr.port()),
             version,
             installer,
+            hash,
         );
         let thread = {
             let stop = Arc::clone(&stop);
@@ -84,9 +98,9 @@ impl Drop for UpdateFeed {
 /// Each path the feed answers, with its body.
 type Routes = Vec<(String, Vec<u8>)>;
 
-/// The release list, the `.sha256` and the installer of `v{version}`, their
-/// download URLs under `base`.
-fn routes(base: &str, version: &str, installer: &[u8]) -> Routes {
+/// The release list, the `.sha256` (naming `hash`) and the installer of
+/// `v{version}`, their download URLs under `base`.
+fn routes(base: &str, version: &str, installer: &[u8], hash: &str) -> Routes {
     let name = format!("rustling-tulip-{version}-setup.exe");
     let release = json!([{
         "tag_name": format!("v{version}"),
@@ -102,7 +116,7 @@ fn routes(base: &str, version: &str, installer: &[u8]) -> Routes {
         (FEED_PATH.to_owned(), release.to_string().into_bytes()),
         (
             format!("/dl/{name}.sha256"),
-            format!("{}  {name}\n", sha256_hex(installer)).into_bytes(),
+            format!("{hash}  {name}\n").into_bytes(),
         ),
         (format!("/dl/{name}"), installer.to_vec()),
     ]

@@ -1667,6 +1667,12 @@
     },
     {
       "paths": [
+        "apps/native/tests/e2e_update.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::e2e_update)"
+    },
+    {
+      "paths": [
         "apps/native/tests/e2e_multi_host.rs"
       ],
       "filter": "binary_id(rustling-tulip-native::e2e_multi_host)"
