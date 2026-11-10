@@ -272,6 +272,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_RESUME_SESSION,
     protocol::FEATURE_LAUNCH_LAST,
     protocol::FEATURE_PRESET_JOB_REPEAT,
+    protocol::FEATURE_NEW_SESSION,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
@@ -695,6 +696,19 @@ mod tests {
                 &welcome,
                 DaemonMessage::Welcome { features, .. }
                     if features.iter().any(|f| f == protocol::FEATURE_LAUNCH_LAST)
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_new_session() {
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_NEW_SESSION)
             ),
             "{welcome:?}"
         );

@@ -943,7 +943,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::PreviewWorkspaceSpawn { .. }
         | ClientMessage::PreviewSpawn { .. }
         | ClientMessage::SpawnSession { .. }
-        | ClientMessage::LaunchLast { .. }) => spawn::handle(hub, m, ctx).await?,
+        | ClientMessage::LaunchLast { .. }
+        | ClientMessage::NewSession { .. }) => spawn::handle(hub, m, ctx).await?,
         m @ (ClientMessage::FetchRepo { .. }
         | ClientMessage::ListBranches { .. }
         | ClientMessage::ListWorktrees { .. }

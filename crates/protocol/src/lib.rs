@@ -127,6 +127,10 @@ pub const FEATURE_RESUME_SESSION: &str = "resume_session";
 /// spawn config from one [`ClientMessage::LaunchLast`].
 pub const FEATURE_LAUNCH_LAST: &str = "launch_last";
 
+/// `Welcome.features` entry: the daemon starts an interactive session in a
+/// repo or workspace from one [`ClientMessage::NewSession`].
+pub const FEATURE_NEW_SESSION: &str = "new_session";
+
 /// `Welcome.features` entry: the daemon answers a [`ClientMessage::LaunchPreset`]
 /// whose `job_id` names a job it still holds a snapshot of with that job's latest
 /// [`DaemonMessage::PresetLaunchJobUpdated`], to the sender only, and starts no
@@ -250,6 +254,25 @@ impl AgentDescriptor {
             bypass.field.clone(),
             OptionValue::Text(bypass.value.clone()),
         );
+        true
+    }
+
+    /// Clear the agent's bypass choice from `options`.
+    ///
+    /// Args:
+    ///     options: The agent's option values, changed in place.
+    ///
+    /// Returns:
+    ///     True when `options` held the bypass choice and its field was removed; false when they
+    ///     did not or the agent has none.
+    pub fn clear_bypass(&self, options: &mut OptionValues) -> bool {
+        let Some(bypass) = &self.bypass else {
+            return false;
+        };
+        if !self.bypasses(options) {
+            return false;
+        }
+        options.remove(&bypass.field);
         true
     }
 }
@@ -1886,8 +1909,8 @@ pub struct SpawnRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_env_keys: Vec<String>,
     /// Optional scripted PTY input fed to the child after the PTY comes up.
-    /// When set on `SessionMode::Interactive`, the daemon omits the positional
-    /// prompt arg (the injector is expected to deliver the prompt instead).
+    /// When set on `SessionMode::Interactive`, the daemon does not pass the
+    /// prompt on the command line (the injector is expected to deliver it).
     /// A plain shell runs it as typed input. Ignored for headless sessions.
     #[serde(default)]
     pub prompt_injector: Option<PromptInjector>,
@@ -4332,6 +4355,19 @@ pub enum ClientMessage {
     /// repository in place. Journalled by `request_id` like `SpawnSession`.
     LaunchLast {
         target: ContainerRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Start an interactive session in `target` from its last agent and
+    /// options, never bypassing permission prompts, in a worktree on a fresh
+    /// branch name (a folder that is no git repository in place), with
+    /// `initial_prompt` as its first prompt. Journalled by `request_id` like
+    /// `SpawnSession`. A daemon lists [`FEATURE_NEW_SESSION`] in
+    /// `Welcome.features` when it handles it.
+    NewSession {
+        target: ContainerRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initial_prompt: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -12930,6 +12966,46 @@ mod tests {
     }
 
     #[test]
+    fn new_session_round_trips() {
+        let wire = r#"{"type":"new_session","target":{"kind":"repo","id":"r1"},"initial_prompt":"/nextup","request_id":"q1"}"#;
+        let msg: ClientMessage = serde_json::from_str(wire).expect("the message decodes");
+        assert!(
+            matches!(
+                &msg,
+                ClientMessage::NewSession {
+                    target: ContainerRef::Repo(id),
+                    initial_prompt: Some(prompt),
+                    request_id: Some(request),
+                } if id == "r1" && prompt == "/nextup" && request == "q1"
+            ),
+            "{msg:?}"
+        );
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(json, wire);
+        let bare: ClientMessage = serde_json::from_str(
+            r#"{"type":"new_session","target":{"kind":"workspace","id":"w1"}}"#,
+        )
+        .expect("a message without a prompt or request_id decodes");
+        assert!(
+            matches!(
+                &bare,
+                ClientMessage::NewSession {
+                    target: ContainerRef::Workspace(id),
+                    initial_prompt: None,
+                    request_id: None,
+                } if id == "w1"
+            ),
+            "{bare:?}"
+        );
+        let json = serde_json::to_string(&bare).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"new_session","target":{"kind":"workspace","id":"w1"}}"#
+        );
+        assert_eq!(FEATURE_NEW_SESSION, "new_session");
+    }
+
+    #[test]
     fn preview_spawn_request_id_round_trips() {
         let msg = ClientMessage::PreviewSpawn {
             repo_id: "r1".to_string(),
@@ -14424,6 +14500,32 @@ mod tests {
             }),
             ..sample_descriptor()
         }
+    }
+
+    #[test]
+    fn clear_bypass_removes_only_the_bypass_choice() {
+        let descriptor = bypass_descriptor();
+        let mut bypass = option_values(&[
+            ("permission_mode", text("bypass_permissions")),
+            ("model", text("opus")),
+        ]);
+        assert!(descriptor.clear_bypass(&mut bypass));
+        assert_eq!(bypass, option_values(&[("model", text("opus"))]));
+
+        let mut plan = option_values(&[("permission_mode", text("plan"))]);
+        assert!(!descriptor.clear_bypass(&mut plan));
+        assert_eq!(plan, option_values(&[("permission_mode", text("plan"))]));
+
+        let without = AgentDescriptor {
+            bypass: None,
+            ..bypass_descriptor()
+        };
+        let mut held = option_values(&[("permission_mode", text("bypass_permissions"))]);
+        assert!(!without.clear_bypass(&mut held));
+        assert_eq!(
+            held,
+            option_values(&[("permission_mode", text("bypass_permissions"))])
+        );
     }
 
     #[test]

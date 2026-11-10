@@ -160,6 +160,12 @@ export const FEATURE_RESUME_SESSION = "resume_session";
 export const FEATURE_LAUNCH_LAST = "launch_last";
 
 /**
+ * `Welcome.features` entry: the daemon starts an interactive session in a
+ * repo or workspace from one [`ClientMessage::NewSession`].
+ */
+export const FEATURE_NEW_SESSION = "new_session";
+
+/**
  * `Welcome.features` entry: the daemon answers a [`ClientMessage::LaunchPreset`]
  * whose `job_id` names a job it still holds a snapshot of with that job's latest
  * [`DaemonMessage::PresetLaunchJobUpdated`], to the sender only, and starts no
@@ -1491,8 +1497,8 @@ export interface SpawnRequest {
   secret_env_keys?: string[];
   /**
    * Optional scripted PTY input fed to the child after the PTY comes up.
-   * When set on `SessionMode::Interactive`, the daemon omits the positional
-   * prompt arg (the injector is expected to deliver the prompt instead).
+   * When set on `SessionMode::Interactive`, the daemon does not pass the
+   * prompt on the command line (the injector is expected to deliver it).
    * A plain shell runs it as typed input. Ignored for headless sessions.
    */
   prompt_injector?: PromptInjector | null;
@@ -3289,6 +3295,15 @@ export type ClientMessage =
    * repository in place. Journalled by `request_id` like `SpawnSession`.
    */
   | { type: "launch_last"; target: ContainerRef; request_id?: string | null }
+  /**
+   * Start an interactive session in `target` from its last agent and
+   * options, never bypassing permission prompts, in a worktree on a fresh
+   * branch name (a folder that is no git repository in place), with
+   * `initial_prompt` as its first prompt. Journalled by `request_id` like
+   * `SpawnSession`. A daemon lists [`FEATURE_NEW_SESSION`] in
+   * `Welcome.features` when it handles it.
+   */
+  | { type: "new_session"; target: ContainerRef; initial_prompt?: string | null; request_id?: string | null }
   /**
    * Fetch the persisted [`SpawnConfig`] for a session so the spawn
    * dialog can pre-fill all fields with the source's values. Replied

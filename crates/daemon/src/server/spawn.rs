@@ -54,8 +54,9 @@ use directories::UserDirs;
 use protocol::{
     AgentId, AppearanceOverrides, ClientMessage, ContainerRef, DaemonMessage, OptionValues,
     RepoEntry, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionRole, SessionStatus,
-    SpawnConfig, SpawnRequest, SpawnTarget, WorkspaceEntry,
+    SpawnConfig, SpawnRequest, SpawnTarget, SuggestTarget, WorkspaceEntry,
 };
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -132,6 +133,14 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
         ClientMessage::SpawnSession(req) => return handle_spawn_session(hub, req, ctx).await,
         ClientMessage::LaunchLast { target, request_id } => {
             return handle_launch_last(hub, &target, request_id, ctx).await;
+        }
+        ClientMessage::NewSession {
+            target,
+            initial_prompt,
+            request_id,
+        } => {
+            return handle_new_session(hub, &target, initial_prompt.as_deref(), request_id, ctx)
+                .await;
         }
         _ => warn!("spawn::handle: dispatch routed a message this module does not handle"),
     }
@@ -282,6 +291,91 @@ async fn handle_launch_last(
     journalled_spawn(hub, req, ctx).await
 }
 
+/// Handle a `NewSession`: answer a repeat from the journal before anything
+/// else, then check the container and prompt, suggest the branch, build the
+/// interactive spawn from the container's last agent and options, check it
+/// and run its one checkout preflight, and hand it to [`journalled_spawn`].
+async fn handle_new_session(
+    hub: &Hub,
+    target: &ContainerRef,
+    initial_prompt: Option<&str>,
+    request_id: Option<String>,
+    ctx: &ConnCtx<'_>,
+) -> anyhow::Result<()> {
+    if let (Some(id), Some(device)) = (request_id.as_deref(), device_key(ctx.auth, ctx.client_id))
+        && let Some(outcome) =
+            hub.spawn_journal
+                .peek(&device, id, std::time::Instant::now(), ctx.out_tx)
+    {
+        send_journalled_outcome(hub, ctx.out_tx, &outcome, request_id.as_deref());
+        return Ok(());
+    }
+    let (repos, workspaces) = hub
+        .state
+        .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
+    let settings = hub.state.agent_settings();
+    let inputs = NewSessionInputs {
+        repos: &repos,
+        workspaces: &workspaces,
+        settings: &settings,
+    };
+    let plan = match plan_new_session(&inputs, target, initial_prompt) {
+        Ok(plan) => plan,
+        Err((code, message)) => {
+            send_launch_last_refusal(ctx.out_tx, message, request_id, code);
+            return Ok(());
+        }
+    };
+    let fresh = match new_session_branch(hub, plan.suggest.as_ref()).await {
+        Ok(fresh) => fresh,
+        Err(message) => {
+            send_launch_last_refusal(
+                ctx.out_tx,
+                message,
+                request_id,
+                protocol::error_codes::SPAWN_REFUSED,
+            );
+            return Ok(());
+        }
+    };
+    let req = new_session_request(&inputs, &plan, fresh, request_id.clone());
+    if let Err(failure) = check_spawn_request(&req) {
+        send_spawn_failure(ctx.out_tx, &failure.into(), req.request_id.as_deref());
+        return Ok(());
+    }
+    if in_place_checkout_confirm(hub, &req).await.is_some() {
+        let name = &plan.name;
+        let message = format!(
+            "{name} has uncommitted changes, so a new session can't switch branches here. \
+             Start it from the desktop."
+        );
+        send_launch_last_refusal(
+            ctx.out_tx,
+            message,
+            request_id,
+            protocol::error_codes::SPAWN_REFUSED,
+        );
+        return Ok(());
+    }
+    info!(container = ?target, "new_session: spawning");
+    journalled_spawn(hub, req, ctx).await
+}
+
+/// The branch name a `NewSession` suggests for `suggest`, `None` when it
+/// needs none, or the suggestion's error text.
+async fn new_session_branch(
+    hub: &Hub,
+    suggest: Option<&SuggestTarget>,
+) -> Result<Option<String>, String> {
+    let Some(suggest) = suggest else {
+        return Ok(None);
+    };
+    branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), suggest)
+        .await
+        .map(Some)
+        .map_err(|err| err.to_string())
+}
+
 /// The name and stored spawn config a `LaunchLast` replays, or the code and
 /// message refusing it: an unknown container, one that never launched, a
 /// headless launch the desktop has to make, or a standalone config with no
@@ -327,6 +421,240 @@ fn stored_launch_config(
         ));
     }
     Ok((name, config.clone()))
+}
+
+/// What a `NewSession` is built from: the persisted repos and workspaces and
+/// the host's Settings values for each agent.
+struct NewSessionInputs<'a> {
+    repos: &'a [RepoEntry],
+    workspaces: &'a [WorkspaceEntry],
+    settings: &'a BTreeMap<AgentId, OptionValues>,
+}
+
+/// The repo or workspace a `NewSession` starts in.
+enum NewSessionContainer<'a> {
+    Repo(&'a RepoEntry),
+    Workspace(&'a WorkspaceEntry),
+}
+
+impl NewSessionContainer<'_> {
+    fn last_spawn_config(&self) -> Option<&SpawnConfig> {
+        match self {
+            Self::Repo(repo) => repo.last_spawn_config.as_ref(),
+            Self::Workspace(workspace) => workspace.last_spawn_config.as_ref(),
+        }
+    }
+}
+
+/// A `NewSession` that passed its checks: where it starts, its trimmed first
+/// prompt and the branch-name suggestion it needs, if any.
+struct NewSessionPlan<'a> {
+    name: String,
+    container: NewSessionContainer<'a>,
+    prompt: String,
+    suggest: Option<SuggestTarget>,
+}
+
+/// Check a `NewSession` of `target` against the persisted state.
+///
+/// Args:
+///     inputs: The persisted repos, workspaces and Settings values.
+///     target: The repo or workspace to start the session in.
+///     prompt: The first prompt as the client sent it.
+///
+/// Returns:
+///     The plan to build the request from, or the code and message refusing an unknown
+///     container, a blank or multi-line prompt, or a workspace with no git member.
+fn plan_new_session<'a>(
+    inputs: &NewSessionInputs<'a>,
+    target: &ContainerRef,
+    prompt: Option<&str>,
+) -> Result<NewSessionPlan<'a>, (&'static str, String)> {
+    let container = match target {
+        ContainerRef::Repo(id) => inputs
+            .repos
+            .iter()
+            .find(|repo| repo.id == *id)
+            .map(NewSessionContainer::Repo),
+        ContainerRef::Workspace(id) => inputs
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == *id)
+            .map(NewSessionContainer::Workspace),
+    }
+    .ok_or_else(|| {
+        (
+            protocol::error_codes::NOT_FOUND,
+            "No such repo or workspace.".to_string(),
+        )
+    })?;
+    let prompt = new_session_prompt(prompt)?;
+    let (name, suggest) = match &container {
+        NewSessionContainer::Repo(repo) => (
+            repo.name.clone(),
+            repo.is_git.then(|| SuggestTarget::Repo {
+                repo_id: repo.id.clone(),
+            }),
+        ),
+        NewSessionContainer::Workspace(workspace) => {
+            let has_git_member = workspace.member_repo_ids.iter().any(|id| {
+                inputs
+                    .repos
+                    .iter()
+                    .any(|repo| repo.id == *id && repo.is_git)
+            });
+            if !has_git_member {
+                return Err((
+                    protocol::error_codes::SPAWN_REFUSED,
+                    format!(
+                        "{} has no git repo to start a worktree in; start it from the desktop.",
+                        workspace.name
+                    ),
+                ));
+            }
+            (
+                workspace.name.clone(),
+                Some(SuggestTarget::Workspace {
+                    workspace_id: workspace.id.clone(),
+                }),
+            )
+        }
+    };
+    Ok(NewSessionPlan {
+        name,
+        container,
+        prompt,
+        suggest,
+    })
+}
+
+/// The trimmed first prompt of a `NewSession`, or the refusal of a blank or
+/// multi-line one.
+fn new_session_prompt(prompt: Option<&str>) -> Result<String, (&'static str, String)> {
+    let trimmed = prompt.map(str::trim).unwrap_or_default();
+    if trimmed.is_empty() {
+        return Err((
+            protocol::error_codes::INVALID_REQUEST,
+            "A new session needs a first prompt.".to_string(),
+        ));
+    }
+    if trimmed.contains(['\n', '\r']) {
+        return Err((
+            protocol::error_codes::INVALID_REQUEST,
+            "A new session's first prompt must be one line.".to_string(),
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// The agent a `NewSession` in `container` runs: its last spawn config's
+/// agent, else the repo's last agent, else for a workspace the last agent of
+/// its first member that has one, else the default agent.
+fn new_session_chosen_agent(repos: &[RepoEntry], container: &NewSessionContainer<'_>) -> AgentId {
+    let configured = container
+        .last_spawn_config()
+        .and_then(|config| config.agent.as_ref())
+        .map(|selection| selection.agent.clone());
+    configured
+        .or_else(|| match container {
+            NewSessionContainer::Repo(repo) => repo.last_agent.clone(),
+            NewSessionContainer::Workspace(workspace) => {
+                workspace.member_repo_ids.iter().find_map(|id| {
+                    repos
+                        .iter()
+                        .find(|repo| repo.id == *id)
+                        .and_then(|repo| repo.last_agent.clone())
+                })
+            }
+        })
+        .unwrap_or_else(agent_registry::default_agent)
+}
+
+/// The agent and options a `NewSession` in `container` runs with: the chosen
+/// agent's options from the last spawn config when it ran that agent, else its
+/// Settings values, else none, with the bypass choice cleared. An agent with
+/// no registered plugin gives way to the default agent with no options.
+fn new_session_selection(
+    inputs: &NewSessionInputs<'_>,
+    container: &NewSessionContainer<'_>,
+) -> protocol::AgentSelection {
+    let agent = new_session_chosen_agent(inputs.repos, container);
+    let Some(plugin) = agent_registry::plugin(&agent) else {
+        return protocol::AgentSelection {
+            agent: agent_registry::default_agent(),
+            options: OptionValues::new(),
+        };
+    };
+    let mut options = container
+        .last_spawn_config()
+        .and_then(|config| config.agent.as_ref())
+        .filter(|selection| selection.agent == agent)
+        .map(|selection| selection.options.clone())
+        .or_else(|| inputs.settings.get(&agent).cloned())
+        .unwrap_or_default();
+    plugin.descriptor().clear_bypass(&mut options);
+    protocol::AgentSelection { agent, options }
+}
+
+/// Build the interactive spawn a checked `NewSession` runs.
+///
+/// Args:
+///     inputs: The persisted repos, workspaces and Settings values.
+///     plan: The checked `NewSession`.
+///     fresh: The suggested branch name; `None` for a folder that is no git repository.
+///     `request_id`: The client's request id, echoed and journalled.
+///
+/// Returns:
+///     A worktree spawn on `fresh` for a git repo or a workspace, an in-place one for a plain
+///     folder, never bypassing permission prompts.
+fn new_session_request(
+    inputs: &NewSessionInputs<'_>,
+    plan: &NewSessionPlan<'_>,
+    fresh: Option<String>,
+    request_id: Option<String>,
+) -> SpawnRequest {
+    let branch_name = fresh.unwrap_or_default();
+    let target = match plan.container {
+        NewSessionContainer::Repo(repo) if repo.is_git => SpawnTarget::Single {
+            repo_id: repo.id.clone(),
+            branch_name,
+            base_branch: None,
+            use_worktree: true,
+            checkout_strategy: None,
+            worktree_reuse: protocol::WorktreeReusePolicy::RefuseLeftover,
+            existing_worktree: None,
+        },
+        NewSessionContainer::Repo(repo) => SpawnTarget::Single {
+            repo_id: repo.id.clone(),
+            branch_name: String::new(),
+            base_branch: None,
+            use_worktree: false,
+            checkout_strategy: None,
+            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+            existing_worktree: None,
+        },
+        NewSessionContainer::Workspace(workspace) => SpawnTarget::Workspace {
+            workspace_id: workspace.id.clone(),
+            branch_name,
+            base_branch: None,
+            use_worktree: true,
+            worktree_reuse: protocol::WorktreeReusePolicy::RefuseLeftover,
+            existing_worktrees: Vec::new(),
+        },
+    };
+    SpawnRequest {
+        label: None,
+        target,
+        mode: SessionMode::Interactive,
+        initial_prompt: Some(plan.prompt.clone()),
+        dangerously_skip_permissions: false,
+        agent: Some(new_session_selection(inputs, &plan.container)),
+        extra_env: Vec::new(),
+        secret_env_keys: Vec::new(),
+        prompt_injector: None,
+        request_id,
+        resume_conversation: None,
+    }
 }
 
 /// Answer a `LaunchLast` the daemon will not launch with an `Error` carrying
@@ -6238,6 +6566,541 @@ mod tests {
         assert_eq!(session.id, "s1");
         assert_eq!(request_id.as_deref(), Some("rq-ll4"));
         assert_eq!(hub.sessions.snapshots().len(), 1, "no second session");
+    }
+
+    /// `pairs` as option values, each a text value.
+    fn text_options(pairs: &[(&str, &str)]) -> OptionValues {
+        pairs
+            .iter()
+            .map(|(field, value)| {
+                (
+                    (*field).to_owned(),
+                    protocol::OptionValue::Text((*value).to_owned()),
+                )
+            })
+            .collect()
+    }
+
+    /// The default agent's bypass choice as option values, beside `extra`.
+    fn bypass_options(extra: &[(&str, &str)]) -> OptionValues {
+        let plugin = agent_registry::plugin(&agent_registry::default_agent())
+            .expect("the default agent is registered");
+        let bypass = plugin
+            .descriptor()
+            .bypass
+            .clone()
+            .expect("the default agent has a bypass choice");
+        let mut options = text_options(extra);
+        options.insert(bypass.field, protocol::OptionValue::Text(bypass.value));
+        options
+    }
+
+    /// Settings holding `options` for the default agent.
+    fn default_settings(options: OptionValues) -> BTreeMap<AgentId, OptionValues> {
+        BTreeMap::from([(agent_registry::default_agent(), options)])
+    }
+
+    /// A stored interactive config on `target` running `agent` with `options`.
+    fn agent_config(target: SpawnTarget, agent: AgentId, options: OptionValues) -> SpawnConfig {
+        let mut config = stored_config(target, SessionMode::Interactive);
+        config.agent = Some(protocol::AgentSelection { agent, options });
+        config
+    }
+
+    /// Plan a `NewSession` of `target` and build its request with `fresh`
+    /// as the suggested branch, handing back the plan's suggestion too.
+    fn build_new_session(
+        inputs: &NewSessionInputs<'_>,
+        target: &ContainerRef,
+        prompt: Option<&str>,
+        fresh: Option<&str>,
+    ) -> Result<(Option<SuggestTarget>, SpawnRequest), (&'static str, String)> {
+        let plan = plan_new_session(inputs, target, prompt)?;
+        let req = new_session_request(
+            inputs,
+            &plan,
+            fresh.map(str::to_owned),
+            Some("rq-ns".to_owned()),
+        );
+        Ok((plan.suggest.clone(), req))
+    }
+
+    /// The agent selection a built `NewSession` request carries.
+    fn new_session_selection_of(
+        inputs: &NewSessionInputs<'_>,
+        target: &ContainerRef,
+    ) -> protocol::AgentSelection {
+        let (_, req) = build_new_session(inputs, target, Some("/nextup"), Some("wt/fresh"))
+            .expect("the new session is built");
+        req.agent.expect("a new session runs an agent")
+    }
+
+    fn r1() -> ContainerRef {
+        ContainerRef::Repo("r1".to_owned())
+    }
+
+    fn w1() -> ContainerRef {
+        ContainerRef::Workspace("w1".to_owned())
+    }
+
+    #[test]
+    fn new_session_uses_the_last_configs_agent_and_options() {
+        let mut repo = repo_entry("r1", "r1", Path::new("/r1"));
+        repo.last_agent = Some(AgentId("agent-other".to_owned()));
+        repo.last_spawn_config = Some(agent_config(
+            single_target(true, None),
+            agent_registry::default_agent(),
+            text_options(&[("model", "opus")]),
+        ));
+        let repos = [repo];
+        let settings = default_settings(text_options(&[("model", "sonnet")]));
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &settings,
+        };
+        let selection = new_session_selection_of(&inputs, &r1());
+        assert_eq!(selection.agent, agent_registry::default_agent());
+        assert_eq!(selection.options, text_options(&[("model", "opus")]));
+    }
+
+    #[test]
+    fn new_session_uses_the_repos_last_agent_when_its_config_has_none() {
+        let mut repo = repo_entry("r1", "r1", Path::new("/r1"));
+        repo.last_agent = Some(AgentId("agent-r".to_owned()));
+        repo.last_spawn_config = Some(stored_config(
+            single_target(true, None),
+            SessionMode::PlainShell,
+        ));
+        let chosen = new_session_chosen_agent(&[], &NewSessionContainer::Repo(&repo));
+        assert_eq!(chosen, AgentId("agent-r".to_owned()));
+
+        repo.last_agent = Some(agent_registry::default_agent());
+        let repos = [repo];
+        let settings = default_settings(text_options(&[("model", "opus")]));
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &settings,
+        };
+        let selection = new_session_selection_of(&inputs, &r1());
+        assert_eq!(selection.agent, agent_registry::default_agent());
+        assert_eq!(
+            selection.options,
+            text_options(&[("model", "opus")]),
+            "the Settings values for the repo's last agent"
+        );
+    }
+
+    #[test]
+    fn new_session_uses_the_first_workspace_member_with_a_last_agent() {
+        let a = repo_entry("a", "a", Path::new("/a"));
+        let mut b = repo_entry("b", "b", Path::new("/b"));
+        b.last_agent = Some(AgentId("agent-b".to_owned()));
+        let mut c = repo_entry("c", "c", Path::new("/c"));
+        c.last_agent = Some(AgentId("agent-c".to_owned()));
+        let repos = [c, a, b];
+        let workspace = workspace_entry("w1", "w1", &["gone", "a", "b", "c"]);
+        let chosen = new_session_chosen_agent(&repos, &NewSessionContainer::Workspace(&workspace));
+        assert_eq!(chosen, AgentId("agent-b".to_owned()));
+    }
+
+    #[test]
+    fn new_session_uses_the_default_agent_when_none_is_known() {
+        let repo = repo_entry("r1", "r1", Path::new("/r1"));
+        assert_eq!(
+            new_session_chosen_agent(&[], &NewSessionContainer::Repo(&repo)),
+            agent_registry::default_agent()
+        );
+        let repos = [repo];
+        let settings = default_settings(text_options(&[("model", "opus")]));
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &settings,
+        };
+        let selection = new_session_selection_of(&inputs, &r1());
+        assert_eq!(selection.agent, agent_registry::default_agent());
+        assert_eq!(selection.options, text_options(&[("model", "opus")]));
+    }
+
+    #[test]
+    fn new_session_drops_the_config_options_of_an_agent_it_cannot_run() {
+        let mut repo = repo_entry("r1", "r1", Path::new("/r1"));
+        repo.last_spawn_config = Some(agent_config(
+            single_target(true, None),
+            AgentId("agent-unregistered".to_owned()),
+            text_options(&[("model", "opus")]),
+        ));
+        let repos = [repo];
+        let settings = default_settings(text_options(&[("model", "sonnet")]));
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &settings,
+        };
+        let selection = new_session_selection_of(&inputs, &r1());
+        assert_eq!(selection.agent, agent_registry::default_agent());
+        assert_eq!(selection.options, OptionValues::new());
+    }
+
+    #[test]
+    fn new_session_clears_the_bypass_choice() {
+        let mut repo = repo_entry("r1", "r1", Path::new("/r1"));
+        repo.last_spawn_config = Some(agent_config(
+            single_target(true, None),
+            agent_registry::default_agent(),
+            bypass_options(&[("model", "opus")]),
+        ));
+        let repos = [repo];
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &BTreeMap::new(),
+        };
+        let (_, req) = build_new_session(&inputs, &r1(), Some("/nextup"), Some("wt/fresh"))
+            .expect("the new session is built");
+        assert!(!req.dangerously_skip_permissions);
+        let selection = req.agent.expect("a new session runs an agent");
+        assert_eq!(
+            selection.options,
+            text_options(&[("model", "opus")]),
+            "from the config"
+        );
+
+        let repos = [repo_entry("r1", "r1", Path::new("/r1"))];
+        let settings = default_settings(bypass_options(&[]));
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &settings,
+        };
+        let selection = new_session_selection_of(&inputs, &r1());
+        assert_eq!(selection.options, OptionValues::new(), "from Settings");
+    }
+
+    #[test]
+    fn new_session_of_a_plain_folder_runs_in_place() {
+        let repos = [repo_entry_plain("r1", "r1", Path::new("/r1"))];
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &BTreeMap::new(),
+        };
+        let (suggest, req) = build_new_session(&inputs, &r1(), Some("/nextup"), None)
+            .expect("the new session is built");
+        assert_eq!(suggest, None, "a plain folder needs no branch name");
+        assert_eq!(
+            req.target,
+            SpawnTarget::Single {
+                repo_id: "r1".to_owned(),
+                branch_name: String::new(),
+                base_branch: None,
+                use_worktree: false,
+                checkout_strategy: None,
+                worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+                existing_worktree: None,
+            }
+        );
+    }
+
+    #[test]
+    fn new_session_of_a_git_repo_gets_a_fresh_worktree() {
+        let mut repo = repo_entry("r1", "r1", Path::new("/r1"));
+        repo.default_use_worktree = false;
+        let repos = [repo];
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &BTreeMap::new(),
+        };
+        let (suggest, req) = build_new_session(&inputs, &r1(), Some("/nextup"), Some("wt/fresh"))
+            .expect("the new session is built");
+        assert_eq!(
+            suggest,
+            Some(SuggestTarget::Repo {
+                repo_id: "r1".to_owned()
+            })
+        );
+        assert_eq!(
+            req.target,
+            SpawnTarget::Single {
+                repo_id: "r1".to_owned(),
+                branch_name: "wt/fresh".to_owned(),
+                base_branch: None,
+                use_worktree: true,
+                checkout_strategy: None,
+                worktree_reuse: protocol::WorktreeReusePolicy::RefuseLeftover,
+                existing_worktree: None,
+            }
+        );
+        assert_eq!(req.mode, SessionMode::Interactive);
+        assert_eq!(req.label, None);
+        assert_eq!(req.prompt_injector, None);
+        assert_eq!(req.resume_conversation, None);
+        assert_eq!(req.request_id.as_deref(), Some("rq-ns"));
+        assert!(req.extra_env.is_empty() && req.secret_env_keys.is_empty());
+    }
+
+    #[test]
+    fn new_session_of_a_workspace_gets_a_fresh_worktree_group() {
+        let repos = [
+            repo_entry_plain("p", "p", Path::new("/p")),
+            repo_entry("g", "g", Path::new("/g")),
+        ];
+        let workspaces = [workspace_entry("w1", "w1", &["p", "g"])];
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &workspaces,
+            settings: &BTreeMap::new(),
+        };
+        let (suggest, req) = build_new_session(&inputs, &w1(), Some("/nextup"), Some("wt/fresh"))
+            .expect("the new session is built");
+        assert_eq!(
+            suggest,
+            Some(SuggestTarget::Workspace {
+                workspace_id: "w1".to_owned()
+            })
+        );
+        assert_eq!(
+            req.target,
+            SpawnTarget::Workspace {
+                workspace_id: "w1".to_owned(),
+                branch_name: "wt/fresh".to_owned(),
+                base_branch: None,
+                use_worktree: true,
+                worktree_reuse: protocol::WorktreeReusePolicy::RefuseLeftover,
+                existing_worktrees: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn new_session_of_a_workspace_with_no_git_member_is_refused() {
+        let repos = [repo_entry_plain("p", "p", Path::new("/p"))];
+        let workspaces = [workspace_entry("w1", "Docs", &["p", "gone"])];
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &workspaces,
+            settings: &BTreeMap::new(),
+        };
+        let refusal = build_new_session(&inputs, &w1(), Some("/nextup"), None)
+            .expect_err("a workspace with no git member is refused");
+        assert_eq!(
+            refusal,
+            (
+                protocol::error_codes::SPAWN_REFUSED,
+                "Docs has no git repo to start a worktree in; start it from the desktop."
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn new_session_with_a_blank_prompt_is_refused() {
+        let repos = [repo_entry("r1", "r1", Path::new("/r1"))];
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &BTreeMap::new(),
+        };
+        for prompt in [None, Some(""), Some("  \t ")] {
+            let refusal = build_new_session(&inputs, &r1(), prompt, Some("wt/fresh"))
+                .expect_err("a blank prompt is refused");
+            assert_eq!(
+                refusal,
+                (
+                    protocol::error_codes::INVALID_REQUEST,
+                    "A new session needs a first prompt.".to_owned()
+                ),
+                "{prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_session_with_a_two_line_prompt_is_refused() {
+        let repos = [repo_entry("r1", "r1", Path::new("/r1"))];
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &BTreeMap::new(),
+        };
+        for prompt in ["/nextup\nmore", "/nextup\rmore"] {
+            let refusal = build_new_session(&inputs, &r1(), Some(prompt), Some("wt/fresh"))
+                .expect_err("a two-line prompt is refused");
+            assert_eq!(
+                refusal,
+                (
+                    protocol::error_codes::INVALID_REQUEST,
+                    "A new session's first prompt must be one line.".to_owned()
+                ),
+                "{prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_session_prompt_is_trimmed() {
+        let repos = [repo_entry("r1", "r1", Path::new("/r1"))];
+        let inputs = NewSessionInputs {
+            repos: &repos,
+            workspaces: &[],
+            settings: &BTreeMap::new(),
+        };
+        let (_, req) = build_new_session(&inputs, &r1(), Some("  /nextup \n"), Some("wt/fresh"))
+            .expect("the new session is built");
+        assert_eq!(req.initial_prompt.as_deref(), Some("/nextup"));
+    }
+
+    #[test]
+    fn new_session_plan_of_an_unknown_container_is_not_found() {
+        let inputs = NewSessionInputs {
+            repos: &[],
+            workspaces: &[],
+            settings: &BTreeMap::new(),
+        };
+        for target in [r1(), w1()] {
+            let refusal = build_new_session(&inputs, &target, None, None)
+                .expect_err("an unknown container is refused");
+            assert_eq!(
+                refusal,
+                (
+                    protocol::error_codes::NOT_FOUND,
+                    "No such repo or workspace.".to_owned()
+                ),
+                "{target:?}"
+            );
+        }
+    }
+
+    /// The reply a `NewSession` of repo `r1` with `prompt` gets.
+    async fn new_session_of_r1(
+        hub: &Hub,
+        prompt: Option<&str>,
+        request_id: Option<&str>,
+    ) -> DaemonMessage {
+        dispatch_one(
+            hub,
+            ClientMessage::NewSession {
+                target: r1(),
+                initial_prompt: prompt.map(str::to_owned),
+                request_id: request_id.map(str::to_owned),
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn new_session_of_an_unknown_container_is_not_found() {
+        let (hub, _scratch) = spawnless_test_hub("new-session-unknown");
+        let reply = new_session_of_r1(&hub, Some("/nextup"), Some("q-ns1")).await;
+        let DaemonMessage::Error {
+            message,
+            request_id,
+            code,
+        } = reply
+        else {
+            panic!("an unknown container is refused, got {reply:?}");
+        };
+        assert_eq!(code.as_deref(), Some(protocol::error_codes::NOT_FOUND));
+        assert_eq!(message, "No such repo or workspace.");
+        assert_eq!(request_id.as_deref(), Some("q-ns1"));
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn new_session_without_a_prompt_is_refused() {
+        let (hub, _scratch) = hub_with_stored_launch("new-session-no-prompt", None);
+        let reply = new_session_of_r1(&hub, None, Some("q-ns2")).await;
+        let DaemonMessage::Error {
+            message,
+            request_id,
+            code,
+        } = reply
+        else {
+            panic!("a new session without a prompt is refused, got {reply:?}");
+        };
+        assert_eq!(
+            code.as_deref(),
+            Some(protocol::error_codes::INVALID_REQUEST)
+        );
+        assert_eq!(message, "A new session needs a first prompt.");
+        assert_eq!(
+            request_id.as_deref(),
+            Some("q-ns2"),
+            "the refusal echoes the id"
+        );
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_resent_new_session_answers_with_the_journalled_session() {
+        let (hub, _scratch) = hub_with_stored_launch("new-session-resent", None);
+        hub.sessions.insert(idle_record("s1"));
+        let device = device_key(&AuthKind::Local, "c1").expect("a local connection is journalled");
+        journal_spawned(&hub, &device, "rq-ns1", "s1");
+        let reply = new_session_of_r1(&hub, Some("/nextup"), Some("rq-ns1")).await;
+        let DaemonMessage::SessionUpdated {
+            session,
+            request_id,
+        } = reply
+        else {
+            panic!("a repeat is answered with the journalled session, got {reply:?}");
+        };
+        assert_eq!(session.id, "s1");
+        assert_eq!(request_id.as_deref(), Some("rq-ns1"));
+        assert_eq!(hub.sessions.snapshots().len(), 1, "no second session");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_resent_new_session_is_answered_from_the_journal_before_its_checks() {
+        let (gone, _gone_scratch) = spawnless_test_hub("new-session-resent-gone");
+        let (blank, _blank_scratch) = hub_with_stored_launch("new-session-resent-blank", None);
+        for (hub, prompt) in [(&gone, Some("/nextup")), (&blank, None)] {
+            hub.sessions.insert(idle_record("s1"));
+            let device =
+                device_key(&AuthKind::Local, "c1").expect("a local connection is journalled");
+            journal_spawned(hub, &device, "rq-ns1", "s1");
+            let reply = new_session_of_r1(hub, prompt, Some("rq-ns1")).await;
+            let DaemonMessage::SessionUpdated {
+                session,
+                request_id,
+            } = reply
+            else {
+                panic!("a repeat is answered from the journal ({prompt:?}), got {reply:?}");
+            };
+            assert_eq!(session.id, "s1", "{prompt:?}");
+            assert_eq!(request_id.as_deref(), Some("rq-ns1"), "{prompt:?}");
+            assert_eq!(hub.sessions.snapshots().len(), 1, "no second session");
+        }
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_new_session_without_a_request_id_is_not_journalled() {
+        let (hub, scratch) = spawnless_test_hub("new-session-no-id");
+        let folder = scratch.path().join("folder");
+        std::fs::create_dir_all(&folder).expect("create the folder");
+        hub.state
+            .mutate(|s| s.repos.push(repo_entry_plain("r1", "r1", &folder)))
+            .expect("register the folder");
+        for _ in 0..2 {
+            let reply = new_session_of_r1(&hub, Some("/nextup"), None).await;
+            let DaemonMessage::ActionFailed { .. } = reply else {
+                panic!("each send reaches the spawn, got {reply:?}");
+            };
+        }
+        assert_eq!(
+            hub.spawn_journal.entry_count(
+                &device_key(&AuthKind::Local, "c1").expect("a local connection is journalled")
+            ),
+            0,
+            "a request with no id leaves no entry"
+        );
     }
 
     #[tokio::test]
