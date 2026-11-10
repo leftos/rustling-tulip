@@ -1051,7 +1051,16 @@ fn now_cell(offset: i8, shift: i8, cells: &RowCells, shape: Shape, name: &str, t
     two_lines(
         offset,
         first,
-        Some(line_text(&format!("{name}-now"), &cells.now).text_color(gpui::rgb(t.text_2))),
+        Some(
+            div()
+                .min_w(px(0.0))
+                .debug_selector({
+                    let selector = format!("{name}-now");
+                    move || selector
+                })
+                .text_color(gpui::rgb(t.text_2))
+                .child(StyledText::new(cells.now.clone())),
+        ),
     )
 }
 

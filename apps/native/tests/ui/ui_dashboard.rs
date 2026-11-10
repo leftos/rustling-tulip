@@ -425,6 +425,40 @@ fn each_column_shows_its_field(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_long_now_line_wraps_whole(cx: &mut TestAppContext) {
+    let fixture = on_dashboard(vec![
+        session("w1")
+            .members(&[("r1", "feat/x", "")])
+            .status("working")
+            .build(),
+        session("w2")
+            .members(&[("r1", "feat/y", "")])
+            .status("working")
+            .build(),
+    ]);
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    let long = format!(
+        "Running Bash · 1m: {}",
+        "cargo nextest run --workspace ".repeat(12)
+    );
+    h.send(facts_message(vec![
+        facts("w1").now("running_tool", &long).build(),
+        facts("w2")
+            .now("running_tool", "Running Bash · 1m: cargo test")
+            .build(),
+    ]));
+
+    let long_now = h.bounds("dashboard-row-w1-now");
+    let short_now = h.bounds("dashboard-row-w2-now");
+    assert!(
+        long_now.size.height > short_now.size.height * 1.5,
+        "a long Now line wraps: long {long_now:?}, short {short_now:?}"
+    );
+}
+
+#[gpui::test]
 fn a_hot_context_draws_in_the_danger_colour_past_80(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(
