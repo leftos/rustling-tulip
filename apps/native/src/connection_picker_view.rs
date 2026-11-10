@@ -25,8 +25,8 @@ use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_f
 use crate::connection_picker::{
     AddButton, AddField, AddMode, ConnectionPicker, HostKind, LiveState, PeerSource, PickerSection,
     Row, RowDetail, RowFacts, RowHost, RowKind, RowState, SCAN_PENDING, SavedHost, Section,
-    SshTest, SshTester, TypedHostError, offers_pair, offers_reconnect, offers_update, row_detail,
-    typed_ssh_target, typed_target,
+    SshTest, SshTester, TypedHostError, offers_client_update, offers_pair, offers_reconnect,
+    offers_update, row_detail, typed_ssh_target, typed_target,
 };
 use crate::driver_id::DriverId as _;
 use crate::fonts::DEFAULT_FAMILY;
@@ -43,6 +43,8 @@ use crate::tooltip;
 use crate::ui_theme::{UiTheme, theme};
 
 const TITLE: &str = "Connections";
+/// This PC's button that tells every other client to update itself.
+const CLIENT_UPDATE_LABEL: &str = "Update connected clients";
 const NAME_PLACEHOLDER: &str = "box.tail1234.ts.net";
 const SSH_HOST_PLACEHOLDER: &str = "devbox or user@host";
 /// The room the panel leaves above and below it, so it never reaches the
@@ -70,6 +72,8 @@ enum PickerControl {
     Reconnect(usize),
     /// The Update host button of the row at this index.
     UpdateHost(usize),
+    /// The Update connected clients button of the row at this index.
+    UpdateClients(usize),
     /// The Open shell button of the row at this index.
     OpenShell(usize),
     /// `+ Add host`: opens the add form.
@@ -101,6 +105,9 @@ impl PickerControl {
             Self::Pair(index) => format!("connections-row-{}-pair", key(index)),
             Self::Reconnect(index) => format!("connections-row-{}-reconnect", key(index)),
             Self::UpdateHost(index) => format!("connections-row-{}-update", key(index)),
+            Self::UpdateClients(index) => {
+                format!("connections-row-{}-update-clients", key(index))
+            }
             Self::OpenShell(index) => format!("connections-row-{}-shell", key(index)),
             Self::AddHost => "connections-add-host".to_owned(),
             Self::ModeTailnet => "connections-add-mode-tailnet".to_owned(),
@@ -144,8 +151,8 @@ impl PickerControl {
 
 /// The controls a row draws beside itself, each after the row in Tab
 /// order: a saved host's switch, Pair, Reconnect now and Update host while
-/// they apply, Open shell while its host is online, and a saved host's
-/// Forget.
+/// they apply, Update connected clients on This PC while its daemon can,
+/// Open shell while its host is online, and a saved host's Forget.
 #[derive(Debug, Clone, Copy, Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -158,6 +165,8 @@ struct RowControls {
     reconnect: bool,
     /// The host can be asked to update, and no update of it is pending.
     update: bool,
+    /// The host can tell its own clients to update themselves.
+    client_update: bool,
     /// The host's connection is open, so a shell can open on it.
     open_shell: bool,
 }
@@ -171,6 +180,7 @@ impl RowControls {
             pair: offers_pair(facts),
             reconnect: offers_reconnect(facts),
             update: offers_update(facts) && !update_pending,
+            client_update: offers_client_update(facts),
             open_shell: offers_open_shell(facts),
         }
     }
@@ -182,6 +192,7 @@ impl RowControls {
             (self.pair, PickerControl::Pair(index)),
             (self.reconnect, PickerControl::Reconnect(index)),
             (self.update, PickerControl::UpdateHost(index)),
+            (self.client_update, PickerControl::UpdateClients(index)),
             (self.open_shell, PickerControl::OpenShell(index)),
             (self.saved, PickerControl::Forget(index)),
         ]
@@ -414,12 +425,13 @@ impl RootView {
                 .and_then(crate::Connection::build_version)
                 .map(str::to_owned),
             remote_update: conn.is_some_and(|conn| conn.supports(protocol::FEATURE_REMOTE_UPDATE)),
+            client_update: conn.is_some_and(|conn| conn.supports(protocol::FEATURE_CLIENT_UPDATE)),
         }
     }
 
     /// `host`'s name in another row's "Same daemon as" chip: This PC, else
     /// the short name of the target the window holds it on.
-    fn host_label(&self, host: &HostKey) -> String {
+    pub(crate) fn host_label(&self, host: &HostKey) -> String {
         match host {
             HostKey::Local => "This PC".to_owned(),
             HostKey::Remote(name) => self
@@ -689,6 +701,9 @@ impl RootView {
             PickerControl::Pair(index) => self.pair_connection_row(index, window, cx),
             PickerControl::Reconnect(index) => self.reconnect_connection_row(index),
             PickerControl::UpdateHost(index) => self.update_connection_row(index, window, cx),
+            PickerControl::UpdateClients(index) => {
+                self.update_connected_clients(index, window, cx);
+            }
             PickerControl::OpenShell(index) => {
                 self.open_shell_connection_row(index, window, cx);
             }
@@ -1001,6 +1016,34 @@ impl RootView {
         }
         self.close_connection_picker(window, cx);
         self.open_host_update_dialog(host, row.label, window, cx);
+    }
+
+    /// Update connected clients on the row at `index`: the picker closes and
+    /// This PC's daemon tells every other client to update itself.
+    fn update_connected_clients(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row) = self.picker_row(index) else {
+            return;
+        };
+        let offered = self
+            .connection_picker
+            .as_ref()
+            .is_some_and(|dialog| offers_client_update(&self.row_facts(dialog, &row)));
+        if !offered {
+            return;
+        }
+        self.close_connection_picker(window, cx);
+        tracing::info!("update: asking this PC's daemon to update its clients");
+        self.send_to(
+            &HostKey::Local,
+            protocol::ClientMessage::UpdateConnectedClients {
+                request_id: Some(crate::new_request_id()),
+            },
+        );
     }
 
     fn open_shell_connection_row(
@@ -1439,16 +1482,21 @@ fn host_row(
         }))
 }
 
-/// A host's third line under its detail line: Pair, Reconnect now and
-/// Update host, while each applies, and Open shell while the host is
-/// online.
+/// A host's third line under its detail line: Pair, Reconnect now, Update
+/// host and Update connected clients, while each applies, and Open shell
+/// while the host is online.
 fn row_actions(
     index: usize,
     controls: RowControls,
     draw: &Draw<'_>,
     cx: &mut Context<RootView>,
 ) -> Option<Div> {
-    if !controls.pair && !controls.reconnect && !controls.update && !controls.open_shell {
+    if !controls.pair
+        && !controls.reconnect
+        && !controls.update
+        && !controls.client_update
+        && !controls.open_shell
+    {
         return None;
     }
     let pair = controls.pair.then(|| {
@@ -1481,6 +1529,16 @@ fn row_actions(
         )
         .child("Update host")
     });
+    let update_clients = controls.client_update.then(|| {
+        control_button(
+            PickerControl::UpdateClients(index),
+            ButtonKind::Outlined,
+            ButtonSize::Compact,
+            draw,
+            cx,
+        )
+        .child(CLIENT_UPDATE_LABEL)
+    });
     let open_shell = controls.open_shell.then(|| {
         let name = draw
             .rows
@@ -1505,6 +1563,7 @@ fn row_actions(
             .children(pair)
             .children(reconnect)
             .children(update)
+            .children(update_clients)
             .children(open_shell),
     )
 }

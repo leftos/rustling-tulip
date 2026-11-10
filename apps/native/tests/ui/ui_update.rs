@@ -810,6 +810,36 @@ fn countdown_toasts(h: &mut Harness<'_>) -> Vec<Toast> {
     })
 }
 
+/// The self-update countdown toast's Cancel button.
+const CLIENT_UPDATE_CANCEL: &str = "client-update-cancel";
+const SELF_UPDATE_BODY: &str = "This PC asked this app to update. It downloads the newest release and reopens; your sessions keep running.";
+const REMOTE_SELF_UPDATE_BODY: &str = "box asked this app to update. It downloads the newest release and reopens; your sessions keep running.";
+const ALREADY_NEWEST: &str = "This app is already on the newest release.";
+const CANNOT_UPDATE: &str = "This build can't update itself.";
+
+fn update_yourself(update_id: &str) -> DaemonMessage {
+    DaemonMessage::UpdateYourself {
+        update_id: update_id.to_owned(),
+        requested_by: "a connection on this PC".to_owned(),
+    }
+}
+
+/// The self-update countdown toasts that show.
+fn self_update_toasts(h: &mut Harness<'_>) -> Vec<Toast> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .filter(|toast| {
+                toast
+                    .key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with("client-update-"))
+            })
+            .cloned()
+            .collect()
+    })
+}
+
 #[gpui::test]
 fn a_host_update_countdown_shows_who_asked_and_counts_down(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -983,4 +1013,204 @@ fn a_remote_hosts_host_update_messages_are_ignored(cx: &mut TestAppContext) {
             update_id: "u1".to_owned(),
         });
     assert_eq!(h.quit_requests(), 0, "a remote host's update does not quit");
+}
+
+#[gpui::test]
+fn update_yourself_counts_down_naming_the_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+
+    h.send(update_yourself("c1"));
+    assert!(
+        toasts(&mut h).contains(&(
+            "Updating this app in 10 s".to_owned(),
+            Some(SELF_UPDATE_BODY.to_owned())
+        )),
+        "{:?}",
+        toasts(&mut h)
+    );
+
+    h.advance(Duration::from_secs(3));
+    assert!(
+        toasts(&mut h).contains(&(
+            "Updating this app in 7 s".to_owned(),
+            Some(SELF_UPDATE_BODY.to_owned())
+        )),
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(
+        self_update_toasts(&mut h).len(),
+        1,
+        "one toast, updated in place"
+    );
+}
+
+#[gpui::test]
+fn cancel_ends_the_self_update_countdown_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.send(update_yourself("c1"));
+    h.sent();
+
+    let id = self_update_toasts(&mut h)
+        .first()
+        .expect("the countdown toast shows")
+        .id;
+    h.click_on(&toast_action_selector(id, CLIENT_UPDATE_CANCEL));
+    h.cx.run_until_parked();
+
+    assert_eq!(self_update_toasts(&mut h), [], "the countdown goes");
+    assert!(h.sent().is_empty(), "Cancel stays here");
+    h.advance(Duration::from_secs(12));
+    assert!(
+        self_update_toasts(&mut h).is_empty(),
+        "the tick does not bring it back"
+    );
+    assert_eq!(updater.checks(), 1, "a cancelled countdown checks nothing");
+    assert_eq!(h.quit_requests(), 0);
+}
+
+#[gpui::test]
+fn the_self_update_countdown_restarts_into_a_ready_update(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = ready_update(cx, &dir, &updater);
+
+    h.send(update_yourself("c1"));
+    h.advance(Duration::from_secs(10));
+
+    assert_eq!(updater.installs().len(), 1, "the ready update starts");
+    assert_eq!(h.quit_requests(), 1, "the client quits to install");
+    assert_eq!(self_update_toasts(&mut h), [], "the countdown toast goes");
+}
+
+#[gpui::test]
+fn the_self_update_countdown_checks_then_restarts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    assert_eq!(updater.checks(), 1, "the launch check found nothing");
+
+    updater.offer("0.99.0", &installer(&dir));
+    h.send(update_yourself("c1"));
+    h.advance(Duration::from_secs(10));
+    h.cx.run_until_parked();
+
+    assert_eq!(updater.checks(), 2, "the countdown runs its own check");
+    assert_eq!(updater.installs().len(), 1, "the release it found starts");
+    assert_eq!(h.quit_requests(), 1, "the client quits to install");
+}
+
+#[gpui::test]
+fn the_self_update_says_already_newest_when_nothing_is_newer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+
+    h.send(update_yourself("c1"));
+    h.advance(Duration::from_secs(10));
+    h.cx.run_until_parked();
+
+    assert_eq!(updater.checks(), 2, "the countdown runs its own check");
+    assert!(
+        toasts(&mut h).contains(&(ALREADY_NEWEST.to_owned(), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(updater.installs().len(), 0, "nothing starts");
+    assert_eq!(h.quit_requests(), 0, "the client stays");
+}
+
+#[gpui::test]
+fn a_dev_build_says_it_cant_update_itself(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_inactive();
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    let checks = updater.checks();
+
+    h.send(update_yourself("c1"));
+    h.advance(Duration::from_secs(10));
+    h.cx.run_until_parked();
+
+    assert_eq!(updater.checks(), checks, "a dev build checks nothing");
+    assert!(
+        toasts(&mut h).contains(&(CANNOT_UPDATE.to_owned(), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(h.quit_requests(), 0, "the client stays");
+}
+
+#[gpui::test]
+fn a_repeated_update_yourself_counts_down_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.send(update_yourself("c1"));
+    h.advance(Duration::from_secs(3));
+
+    h.send(update_yourself("c1"));
+    assert!(
+        toasts(&mut h).contains(&(
+            "Updating this app in 7 s".to_owned(),
+            Some(SELF_UPDATE_BODY.to_owned())
+        )),
+        "the same id does not restart the countdown: {:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(self_update_toasts(&mut h).len(), 1);
+
+    h.send(update_yourself("c2"));
+    assert!(
+        toasts(&mut h).contains(&(
+            "Updating this app in 10 s".to_owned(),
+            Some(SELF_UPDATE_BODY.to_owned())
+        )),
+        "a new id restarts it: {:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(
+        self_update_toasts(&mut h).len(),
+        1,
+        "one toast, replaced in place"
+    );
+}
+
+#[gpui::test]
+fn closing_this_pc_keeps_a_remote_hosts_countdown(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::saved_remote_over(cx, &dir, &support::two_tab_fixture(), &["b1", "b2"]);
+    h.host(&support::saved_remote()).send(update_yourself("c1"));
+
+    assert!(
+        toasts(&mut h).contains(&(
+            "Updating this app in 10 s".to_owned(),
+            Some(REMOTE_SELF_UPDATE_BODY.to_owned())
+        )),
+        "{:?}",
+        toasts(&mut h)
+    );
+
+    h.lose_connection();
+    assert_eq!(
+        self_update_toasts(&mut h).len(),
+        1,
+        "This PC's close drops only its own countdown"
+    );
+    h.advance(Duration::from_secs(2));
+    assert!(
+        toasts(&mut h).contains(&(
+            "Updating this app in 8 s".to_owned(),
+            Some(REMOTE_SELF_UPDATE_BODY.to_owned())
+        )),
+        "the countdown still ticks: {:?}",
+        toasts(&mut h)
+    );
 }

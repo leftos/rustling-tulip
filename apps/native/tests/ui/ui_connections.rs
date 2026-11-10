@@ -853,6 +853,95 @@ fn the_update_action_is_hidden_for_this_pc_ssh_and_an_up_to_date_host(cx: &mut T
 }
 
 #[gpui::test]
+fn update_connected_clients_is_offered_on_this_pc_when_supported(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.reconnect_with_features(&[protocol::FEATURE_CLIENT_UPDATE]);
+
+    open_picker(&mut h, tailnet_with(&[]));
+
+    assert!(
+        drawn(&mut h, "connections-row-This PC-update-clients"),
+        "This PC's daemon can tell its clients to update"
+    );
+}
+
+#[gpui::test]
+fn pressing_it_sends_update_connected_clients_and_shows_the_counts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.reconnect_with_features(&[protocol::FEATURE_CLIENT_UPDATE]);
+    open_picker(&mut h, tailnet_with(&[]));
+    h.sent();
+
+    h.click_on("connections-row-This PC-update-clients");
+
+    assert!(!is_open(&mut h), "the dialog closes");
+    let sent = h.sent();
+    let ids: Vec<String> = sent
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::UpdateConnectedClients { request_id } => request_id.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids.len(), 1, "one request, for This PC: {sent:?}");
+    assert!(!ids[0].is_empty(), "a fresh request id");
+
+    h.send(DaemonMessage::ConnectedClientsNotified {
+        request_id: Some(ids[0].clone()),
+        native: 2,
+        phones: 1,
+        too_old: 1,
+    });
+    assert!(
+        toasts(&mut h).contains(&(
+            "Told 2 clients to update; 1 phones reload; 1 too old to update this way".to_owned(),
+            None
+        )),
+        "{:?}",
+        toasts(&mut h)
+    );
+
+    h.send(DaemonMessage::ConnectedClientsNotified {
+        request_id: Some(ids[0].clone()),
+        native: 1,
+        phones: 0,
+        too_old: 0,
+    });
+    assert!(
+        toasts(&mut h).contains(&("Told 1 client to update".to_owned(), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+
+    h.send(DaemonMessage::ConnectedClientsNotified {
+        request_id: Some(ids[0].clone()),
+        native: 0,
+        phones: 0,
+        too_old: 0,
+    });
+    assert!(
+        toasts(&mut h).contains(&("No other clients are connected.".to_owned(), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn it_is_not_offered_without_the_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+
+    open_picker(&mut h, tailnet_with(&[]));
+
+    assert!(
+        !drawn(&mut h, "connections-row-This PC-update-clients"),
+        "a daemon that cannot tell its clients offers no such action"
+    );
+}
+
+#[gpui::test]
 fn open_shell_on_a_connections_row_spawns_there(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     seed_ui(

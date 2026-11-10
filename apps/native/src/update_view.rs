@@ -16,7 +16,10 @@ use gpui::{AnyElement, ClickEvent, Context, Task, Window, div, prelude::*, px};
 use protocol::{ClientMessage, DaemonMessage};
 
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
-use crate::host_update::{HOST_UPDATE_CANCEL, HostUpdateCountdown, toast_key};
+use crate::host_update::{
+    CLIENT_UPDATE_CANCEL, ClientUpdateCountdown, HOST_UPDATE_CANCEL, HostUpdateCountdown,
+    client_update_toast_key, toast_key,
+};
 use crate::notices::{ToastAction, ToastKind, ToastSpec};
 use crate::target::HostKey;
 use crate::ui_theme::theme;
@@ -46,6 +49,15 @@ pub(crate) const WHATS_NEW_ACTION: &str = "whats-new";
 const CANCEL_LABEL: &str = "Cancel";
 /// How often the host update's countdown redraws its title.
 const HOST_UPDATE_TICK: Duration = Duration::from_secs(1);
+/// How many seconds this app counts down before it updates itself, when a
+/// host asked it to.
+const CLIENT_UPDATE_SECONDS: u32 = 10;
+/// What the toast says when the countdown's check finds nothing newer.
+const ALREADY_NEWEST_TITLE: &str = "This app is already on the newest release.";
+/// What the toast says when the build cannot update itself at all.
+const CANNOT_UPDATE_TITLE: &str = "This build can't update itself.";
+/// What the toast says when a host's request reached no other client.
+const NO_OTHER_CLIENTS_TITLE: &str = "No other clients are connected.";
 
 /// What the last check found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +97,44 @@ impl UpdateUi {
             installed_range: None,
         }
     }
+}
+
+/// This app's own update while a host's request drives it: the countdown on
+/// screen, then the check for a release once it ends.
+pub(crate) struct ClientUpdate {
+    countdown: ClientUpdateCountdown,
+    /// The countdown ended and the app waits on its update check: the
+    /// check's answer restarts onto the release, or says the app is newest.
+    awaiting_check: bool,
+    /// Wakes the view when the countdown's next second is up; dropping it
+    /// stops the countdown.
+    timer: Option<Task<()>>,
+}
+
+impl ClientUpdate {
+    fn new(countdown: ClientUpdateCountdown) -> Self {
+        Self {
+            countdown,
+            awaiting_check: false,
+            timer: None,
+        }
+    }
+}
+
+/// The toast that says how many clients `Update connected clients` reached.
+fn told_title(native: u32, phones: u32, too_old: u32) -> String {
+    if native == 0 && phones == 0 && too_old == 0 {
+        return NO_OTHER_CLIENTS_TITLE.to_owned();
+    }
+    let clients = if native == 1 { "client" } else { "clients" };
+    let mut title = format!("Told {native} {clients} to update");
+    if phones > 0 {
+        title = format!("{title}; {phones} phones reload");
+    }
+    if too_old > 0 {
+        title = format!("{title}; {too_old} too old to update this way");
+    }
+    title
 }
 
 impl RootView {
@@ -292,6 +342,7 @@ impl RootView {
                 LastCheck::Failed(format!("{err:#}"))
             }
         };
+        self.client_update_checked(cx);
         cx.notify();
     }
 
@@ -505,6 +556,194 @@ impl RootView {
             &HostKey::Local,
             ClientMessage::CancelHostUpdate { update_id },
         );
+    }
+
+    /// This app's own update, counting down because `host` asked it to
+    /// update itself: its toast counts down, its Cancel ends the countdown
+    /// here, and the countdown's end restarts onto a ready update or checks
+    /// for one. The `Update connected clients` answer shows as a toast too.
+    pub(crate) fn on_client_update_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
+        match msg {
+            DaemonMessage::UpdateYourself { update_id, .. } => {
+                self.client_update_scheduled(host, update_id, cx);
+            }
+            DaemonMessage::ConnectedClientsNotified {
+                native,
+                phones,
+                too_old,
+                ..
+            } => {
+                let title = told_title(*native, *phones, *too_old);
+                self.push_toast(ToastKind::Info, &title, None, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// `host` asked this app to update itself: `update_id` counts down, in
+    /// place of any countdown already running. A repeat of the id already
+    /// counting down is ignored.
+    fn client_update_scheduled(&mut self, host: &HostKey, update_id: &str, cx: &mut Context<Self>) {
+        if self
+            .client_update
+            .as_ref()
+            .is_some_and(|update| update.countdown.update_id == update_id)
+        {
+            tracing::debug!(
+                update_id,
+                "update: a repeat of this app's countdown is ignored"
+            );
+            return;
+        }
+        if let Some(old) = self.client_update.take() {
+            self.dismiss_toast_key(&client_update_toast_key(&old.countdown.update_id), cx);
+        }
+        let asked_by = self.host_label(host);
+        tracing::info!(
+            update_id,
+            asked_by,
+            "update: a host asked this app to update"
+        );
+        let countdown = ClientUpdateCountdown::scheduled(
+            update_id.to_owned(),
+            asked_by,
+            CLIENT_UPDATE_SECONDS,
+            (self.now)(),
+        );
+        self.client_update = Some(ClientUpdate::new(countdown));
+        self.show_client_update(cx);
+        if let Some(update) = &mut self.client_update {
+            update.timer = Some(Self::tick_client_update(update_id.to_owned(), cx));
+        }
+    }
+
+    /// The countdown's toast, its title read off the clock.
+    fn show_client_update(&mut self, cx: &mut Context<Self>) {
+        let Some(update) = &self.client_update else {
+            return;
+        };
+        let spec = ToastSpec {
+            kind: ToastKind::Info,
+            title: update.countdown.title((self.now)()),
+            detail: Some(update.countdown.body()),
+            key: Some(client_update_toast_key(&update.countdown.update_id)),
+            sticky: true,
+            actions: vec![ToastAction {
+                id: CLIENT_UPDATE_CANCEL,
+                label: CANCEL_LABEL,
+                danger: false,
+            }],
+        };
+        self.push_toast_spec(spec, cx);
+    }
+
+    /// Redraws the countdown's title every second until update `update_id`
+    /// ends; dropping the task stops it.
+    fn tick_client_update(update_id: String, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(HOST_UPDATE_TICK).await;
+                // Fails only when the view is gone, and the countdown with it.
+                let counting = this
+                    .update(cx, |root, cx| root.client_update_ticked(&update_id, cx))
+                    .unwrap_or(false);
+                if !counting {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// A second went by on update `update_id`: the toast, while it shows,
+    /// takes the new title, and the countdown ends when nothing is left of
+    /// it. Returns whether it still counts down.
+    fn client_update_ticked(&mut self, update_id: &str, cx: &mut Context<Self>) -> bool {
+        let left = self
+            .client_update
+            .as_ref()
+            .filter(|update| update.countdown.update_id == update_id)
+            .map(|update| update.countdown.seconds_left((self.now)()));
+        let Some(left) = left else {
+            return false;
+        };
+        if left == 0 {
+            self.end_client_update(cx);
+            return false;
+        }
+        // The × closes the countdown's toast for good.
+        let key = client_update_toast_key(update_id);
+        let shown = self
+            .notices
+            .toasts()
+            .iter()
+            .any(|toast| toast.key.as_deref() == Some(key.as_str()));
+        if shown {
+            self.show_client_update(cx);
+        }
+        true
+    }
+
+    /// The countdown ended: its toast goes, and this app restarts onto a
+    /// ready update, or checks for one and restarts when the check answers
+    /// with a release. A build that cannot update itself says so.
+    fn end_client_update(&mut self, cx: &mut Context<Self>) {
+        let Some(update) = &mut self.client_update else {
+            return;
+        };
+        update.timer = None;
+        update.awaiting_check = true;
+        let update_id = update.countdown.update_id.clone();
+        self.dismiss_toast_key(&client_update_toast_key(&update_id), cx);
+        tracing::info!(update_id = %update_id, "update: this app's countdown ended");
+        if !self.update.updater.is_active() {
+            self.client_update = None;
+            self.push_toast(ToastKind::Warning, CANNOT_UPDATE_TITLE, None, cx);
+            return;
+        }
+        if self.update.ready.is_some() {
+            self.client_update = None;
+            self.restart_to_update(cx);
+            return;
+        }
+        self.run_update_check(cx);
+    }
+
+    /// An update check answered: a countdown that ended waiting on it
+    /// restarts onto the release, or says this app is already the newest.
+    /// Any other check leaves the countdown alone.
+    fn client_update_checked(&mut self, cx: &mut Context<Self>) {
+        if !self
+            .client_update
+            .as_ref()
+            .is_some_and(|update| update.awaiting_check)
+        {
+            return;
+        }
+        let up_to_date = self.update.last == LastCheck::UpToDate;
+        self.client_update = None;
+        if self.update.ready.is_some() {
+            self.restart_to_update(cx);
+        } else if up_to_date {
+            self.push_toast(ToastKind::Info, ALREADY_NEWEST_TITLE, None, cx);
+        }
+    }
+
+    /// The self-update countdown's Cancel: it ends here, and nothing is
+    /// sent, since the countdown asked no one for anything.
+    pub(crate) fn cancel_client_update(&mut self, cx: &mut Context<Self>) {
+        let Some(update) = self.client_update.take() else {
+            return;
+        };
+        tracing::info!(
+            update_id = %update.countdown.update_id,
+            "update: this app's update was cancelled"
+        );
+        self.dismiss_toast_key(&client_update_toast_key(&update.countdown.update_id), cx);
     }
 
     /// The footer's notice, `Update {version} ready`, once a check found one.

@@ -688,7 +688,7 @@ impl Net {
                 .and_then(|id| id.client_name.clone()),
             client_version: Some(protocol::BUILD_VERSION.to_owned()),
             client_kind: Some(protocol::ClientKind::Native),
-            client_features: Vec::new(),
+            client_features: vec![protocol::CLIENT_FEATURE_UPDATE_YOURSELF.to_owned()],
         }
     }
 
@@ -1853,6 +1853,37 @@ mod tests {
             "{json}"
         );
         assert!(json.contains(r#""client_kind":"native""#), "{json}");
+    }
+
+    #[test]
+    fn native_hello_lists_update_yourself() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build a test runtime");
+        let hello = runtime.block_on(async {
+            let (_commands_tx, commands) = unbounded();
+            let (events, _events_rx) = unbounded();
+            let net = Net::new(
+                commands,
+                events,
+                deps(ensure_silent_server),
+                Target::Local,
+                WELCOME_TIMEOUT,
+            );
+            net.hello("test-token".to_owned())
+        });
+        let ClientMessage::Hello {
+            client_features, ..
+        } = &hello
+        else {
+            unreachable!("hello() builds a Hello, got {hello:?}");
+        };
+        assert_eq!(
+            client_features,
+            &[protocol::CLIENT_FEATURE_UPDATE_YOURSELF.to_owned()],
+            "the host may ask this client to update itself"
+        );
     }
 
     #[test]

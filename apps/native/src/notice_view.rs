@@ -280,6 +280,10 @@ impl RootView {
             && action == crate::host_update::HOST_UPDATE_CANCEL
         {
             self.cancel_host_update();
+        } else if key.starts_with(crate::host_update::CLIENT_UPDATE_TOAST_PREFIX)
+            && action == crate::host_update::CLIENT_UPDATE_CANCEL
+        {
+            self.cancel_client_update(cx);
         } else if action == crate::file_fetch_view::FETCH_CANCEL.id {
             // A finishing fetch is not cancelled, and its toast stays; a
             // key no fetch holds any more only dismisses its toast.

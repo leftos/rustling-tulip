@@ -1143,6 +1143,9 @@ pub struct RootView {
     /// Wakes the view when the countdown's next second is up; the one timer
     /// the update on screen ticks with.
     host_update_timer: Option<Task<()>>,
+    /// This app's own update, while a host's request drives it: the
+    /// countdown, its toast and the check that follows it.
+    client_update: Option<update_view::ClientUpdate>,
     /// The remote hosts' updates this client asked for, while pending.
     remote_updates: remote_update::RemoteUpdates,
     /// The Update host confirm dialog, while open.
@@ -1704,6 +1707,7 @@ impl RootView {
             host_update: None,
             host_update_ended: None,
             host_update_timer: None,
+            client_update: None,
             remote_updates: remote_update::RemoteUpdates::default(),
             host_update_dialog: None,
             remote_update_timer: None,
@@ -4835,6 +4839,7 @@ impl RootView {
         self.on_accounts_message(host, &msg, cx);
         self.on_gates_message(host, &msg, cx);
         self.on_host_update_message(host, &msg, cx);
+        self.on_client_update_message(host, &msg, cx);
         self.on_remote_update_message(host, &msg, cx);
         self.on_shell_message(host, &msg, window, cx);
         if self.on_panel_message(host, &msg, window, cx) {

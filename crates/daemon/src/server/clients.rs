@@ -14,9 +14,6 @@ static NEXT_CLIENT_UPDATE: AtomicU64 = AtomicU64::new(1);
 /// Who asked, for a request that came from this PC.
 const THIS_PC: &str = "a connection on this PC";
 
-/// How many characters of a tailnet peer's name `requested_by` keeps.
-const REQUESTER_CHARS: usize = 64;
-
 /// What the daemon knows about one served connection.
 #[derive(Clone, Debug)]
 pub(crate) struct ClientEntry {
@@ -154,21 +151,12 @@ fn can_update(features: &[String]) -> bool {
         .any(|feature| feature == protocol::CLIENT_FEATURE_UPDATE_YOURSELF)
 }
 
-/// Who asked, as display text: the client's own name if it sent one, else a
-/// tailnet device's name (bounded, control characters dropped), else this PC.
+/// Who asked, as display text: the client's own name if it sent one, else
+/// this PC, since a tailnet connection is refused this message before it
+/// reaches here.
 fn requested_by(ctx: &ConnCtx<'_>) -> String {
-    if let Some(name) = ctx.client_name {
-        return name.to_owned();
-    }
-    match ctx.auth {
-        AuthKind::Local => THIS_PC.to_owned(),
-        AuthKind::Tailnet(peer) => peer
-            .name
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(REQUESTER_CHARS)
-            .collect(),
-    }
+    ctx.client_name
+        .map_or_else(|| THIS_PC.to_owned(), str::to_owned)
 }
 
 /// A fresh client update id: unique in this daemon run, and carrying the

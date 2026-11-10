@@ -636,6 +636,10 @@ pub struct RowFacts {
     /// Whether the row's host lists [`protocol::FEATURE_REMOTE_UPDATE`] on
     /// the window's open connection to it.
     pub remote_update: bool,
+    /// Whether the row's host lists [`protocol::FEATURE_CLIENT_UPDATE`] on
+    /// the window's open connection to it: it can tell its clients to update
+    /// themselves.
+    pub client_update: bool,
 }
 
 /// The version a row shows for its host, and whether the host is older than
@@ -677,6 +681,13 @@ pub fn offers_update(facts: &RowFacts) -> bool {
         && facts.live == Some(LiveState::Open)
         && facts.remote_update
         && row_detail(facts).behind
+}
+
+/// Whether the row draws Update connected clients: This PC, whose daemon
+/// can tell its clients to update themselves.
+#[must_use]
+pub fn offers_client_update(facts: &RowFacts) -> bool {
+    facts.host == RowHost::ThisPc && facts.live == Some(LiveState::Open) && facts.client_update
 }
 
 /// A row's second line and the chip at its trail.
@@ -1574,6 +1585,7 @@ mod tests {
             live_sessions: None,
             build_version: None,
             remote_update: false,
+            client_update: false,
         }
     }
 
