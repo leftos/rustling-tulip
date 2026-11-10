@@ -459,7 +459,7 @@ pub(crate) fn config_dir() -> anyhow::Result<PathBuf> {
 /// when the variable is unset or empty — the tracer lookup then falls back to
 /// the sibling of the daemon's exe. An elevated daemon looks the tracer up
 /// only once, when it pins it at start.
-fn resolve_bin_templates_dir() -> Option<PathBuf> {
+pub(crate) fn resolve_bin_templates_dir() -> Option<PathBuf> {
     std::env::var_os("RUSTLING_TULIP_BIN_TEMPLATES")
         .filter(|value| !value.as_os_str().is_empty())
         .map(PathBuf::from)

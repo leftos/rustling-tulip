@@ -7,11 +7,7 @@
 use anyhow::{Context as _, anyhow};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
-
-#[cfg(target_os = "macos")]
-use anyhow::bail;
-#[cfg(target_os = "macos")]
-use std::time::Duration;
+use update_core::macos_stage::{STAGING_PREFIX, bundle_of};
 
 pub use update_core::{
     DEFAULT_FEED_BASE, FEED_BASE_VAR, HASH_MISMATCH, LastResult, Offer, Platform, Ready,
@@ -19,10 +15,6 @@ pub use update_core::{
     clean_old, feed_base, fetch_changelog, parse_changelog, parse_releases, parse_releases_for,
     parse_sha256, take_last_result,
 };
-
-/// The prefix of the hidden folder a macOS update unpacks the downloaded app
-/// into, beside the installed bundle: the next launch removes it.
-const STAGING_PREFIX: &str = ".rustling-tulip-update-";
 
 /// The arguments the installer runs with for an update.
 #[cfg(windows)]
@@ -242,30 +234,6 @@ pub fn clean_at_launch(updates_root: anyhow::Result<PathBuf>) {
     }
 }
 
-/// The app bundle `exe` runs from, for a client at
-/// `<bundle>/Contents/MacOS/<exe>`; `None` for any other layout. Pure path
-/// logic: nothing is read from disk and nothing is canonicalized, so a
-/// translocated bundle's path stays as the system gave it.
-fn bundle_of(exe: &Path) -> Option<PathBuf> {
-    let macos = exe.parent()?;
-    if macos.file_name()? != std::ffi::OsStr::new("MacOS") {
-        return None;
-    }
-    let contents = macos.parent()?;
-    if contents.file_name()? != std::ffi::OsStr::new("Contents") {
-        return None;
-    }
-    let bundle = contents.parent()?;
-    let is_app = Path::new(bundle.file_name()?)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("app"));
-    if is_app {
-        Some(bundle.to_path_buf())
-    } else {
-        None
-    }
-}
-
 /// Deletes what an earlier bundle update left beside `bundle`: the replaced
 /// `{bundle}.old` folder and any [`STAGING_PREFIX`] folder. Everything else in
 /// the folder is left alone; each failure is logged at warn and the walk goes
@@ -324,193 +292,28 @@ fn remove_old_files(folder: &Path) {
 #[cfg(target_os = "macos")]
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The system's zip tool: it keeps the bundle's symlinks and permissions.
-#[cfg(target_os = "macos")]
-const DITTO: &str = "/usr/bin/ditto";
-
-/// A bound on unpacking the downloaded bundle.
-#[cfg(target_os = "macos")]
-const DITTO_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// The folder the downloaded zip holds at its top level.
-#[cfg(target_os = "macos")]
-const BUNDLE_NAME: &str = "rustling-tulip.app";
-
-/// The probe file a start writes into the bundle's folder and removes again.
-#[cfg(target_os = "macos")]
-const UPDATE_PROBE: &str = ".rustling-tulip-update-probe";
-
-/// What a start refuses with when the bundle's place cannot be replaced.
-#[cfg(target_os = "macos")]
-const UPDATE_REFUSED: &str = "rustling-tulip.app runs from a place the update cannot replace; \
-                              move it to Applications and update again; nothing was changed";
-
 /// Stages `ready`'s zip beside `bundle` and hands the swap to the staged
 /// daemon's `apply-update`, which waits for this client to exit. Returns as
 /// soon as the hand-off started: anything staged is removed on failure, and
 /// what a successful hand-off leaves is removed by [`clean_at_launch`].
 #[cfg(target_os = "macos")]
 fn start_macos_update(ready: &Ready, bundle: &Path) -> anyhow::Result<()> {
-    check_update_place(bundle)?;
-    let staging = fresh_staging_folder(bundle, &ready.version)?;
-    match stage_update(ready, bundle, &staging) {
-        Ok(()) => {
-            info!(
-                version = %ready.version,
-                bundle = %bundle.display(),
-                "update: handed over to apply-update"
-            );
-            Ok(())
+    use update_core::macos_stage;
+    let staged_app = macos_stage::stage(&ready.path, bundle, &ready.version)?;
+    let args = macos_stage::apply_update_args(&staged_app, bundle, CLIENT_VERSION, false, true);
+    if let Err(err) = update_core::launch_detached(&macos_stage::staged_daemon(&staged_app), &args)
+    {
+        if let Some(staging) = staged_app.parent() {
+            macos_stage::remove_staging(staging);
         }
-        Err(err) => {
-            if let Err(cleanup) = std::fs::remove_dir_all(&staging) {
-                warn!(
-                    folder = %staging.display(),
-                    "update: could not delete the staging folder: {cleanup}"
-                );
-            }
-            Err(err)
-        }
+        return Err(err);
     }
-}
-
-/// Refuses a bundle the update cannot replace: one the system runs
-/// translocated, or one whose folder this process cannot write a probe file
-/// in.
-#[cfg(target_os = "macos")]
-fn check_update_place(bundle: &Path) -> anyhow::Result<()> {
-    let translocated = bundle
-        .components()
-        .any(|part| part.as_os_str() == std::ffi::OsStr::new("AppTranslocation"));
-    if translocated {
-        bail!("{UPDATE_REFUSED}");
-    }
-    let Some(folder) = bundle.parent() else {
-        bail!("{UPDATE_REFUSED}");
-    };
-    let probe = folder.join(UPDATE_PROBE);
-    let writable = match std::fs::write(&probe, b"") {
-        Ok(()) => true,
-        Err(err) => {
-            warn!(
-                path = %probe.display(),
-                "update: cannot write beside the app bundle: {err}"
-            );
-            false
-        }
-    };
-    if let Err(err) = std::fs::remove_file(&probe) {
-        warn!(path = %probe.display(), "update: could not remove the probe file: {err}");
-    }
-    if writable {
-        Ok(())
-    } else {
-        bail!("{UPDATE_REFUSED}")
-    }
-}
-
-/// A new, empty staging folder beside `bundle`, on the same volume so
-/// `apply-update` can rename the staged app into place.
-#[cfg(target_os = "macos")]
-fn fresh_staging_folder(bundle: &Path, version: &semver::Version) -> anyhow::Result<PathBuf> {
-    let folder = bundle
-        .parent()
-        .ok_or_else(|| anyhow!("{} is not inside a folder", bundle.display()))?;
-    for _ in 0..8 {
-        let random: String = uuid::Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(8)
-            .collect();
-        let staging = folder.join(format!("{STAGING_PREFIX}{version}-{random}"));
-        match std::fs::create_dir(&staging) {
-            Ok(()) => return Ok(staging),
-            // Another update took this suffix: draw a new one.
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(err) => {
-                return Err(err).with_context(|| format!("creating {}", staging.display()));
-            }
-        }
-    }
-    bail!("could not create a staging folder in {}", folder.display())
-}
-
-/// Unpacks `ready`'s zip into `staging` and starts the staged daemon's
-/// `apply-update` on the swap.
-#[cfg(target_os = "macos")]
-fn stage_update(ready: &Ready, bundle: &Path, staging: &Path) -> anyhow::Result<()> {
-    let mut ditto = std::process::Command::new(DITTO);
-    ditto.arg("-x").arg("-k").arg(&ready.path).arg(staging);
-    run_bounded(&mut ditto, DITTO_TIMEOUT).context("unpacking the update")?;
-    let staged_app = staging.join(BUNDLE_NAME);
-    let staged_daemon = staged_app.join("Contents/MacOS/rustling-tulipd");
-    if !staged_daemon.is_file() {
-        bail!("the update archive holds no rustling-tulip.app");
-    }
-    update_core::launch_detached(
-        &staged_daemon,
-        &apply_update_args(&staged_app, bundle, CLIENT_VERSION),
-    )
-}
-
-/// The arguments the staged daemon runs: swap `staged_app` for `bundle`, and
-/// relaunch the client once this one has exited.
-#[cfg(any(test, target_os = "macos"))]
-fn apply_update_args(staged_app: &Path, bundle: &Path, version: &str) -> Vec<std::ffi::OsString> {
-    vec![
-        "apply-update".into(),
-        "--from".into(),
-        staged_app.into(),
-        "--to".into(),
-        bundle.into(),
-        "--old-version".into(),
-        version.into(),
-        "--update".into(),
-        "--relaunch".into(),
-    ]
-}
-
-/// Runs `command` to its own exit, killing it once `timeout` passes.
-#[cfg(target_os = "macos")]
-fn run_bounded(command: &mut std::process::Command, timeout: Duration) -> anyhow::Result<()> {
-    const POLL: Duration = Duration::from_millis(20);
-    let program = command.get_program().to_string_lossy().into_owned();
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("starting {program}"))?;
-    let started = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => bail!("{program} failed: {status}"),
-            Ok(None) => {}
-            Err(err) => {
-                stop_child(&mut child, &program);
-                return Err(err).with_context(|| format!("waiting on {program}"));
-            }
-        }
-        if started.elapsed() >= timeout {
-            stop_child(&mut child, &program);
-            bail!("{program} did not finish within {} s", timeout.as_secs());
-        }
-        std::thread::sleep(POLL);
-    }
-}
-
-/// Kills `child`, logging a kill that fails; its exit is then reaped.
-#[cfg(target_os = "macos")]
-fn stop_child(child: &mut std::process::Child, program: &str) {
-    if let Err(err) = child.kill() {
-        warn!("update: could not stop {program}: {err}");
-    }
-    if let Err(err) = child.wait() {
-        warn!("update: could not reap {program}: {err}");
-    }
+    info!(
+        version = %ready.version,
+        bundle = %bundle.display(),
+        "update: handed over to apply-update"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -520,14 +323,13 @@ fn stop_child(child: &mut std::process::Child, program: &str) {
 )]
 mod tests {
     #[cfg(target_os = "macos")]
-    use super::{
-        BUNDLE_NAME, CLIENT_VERSION, Ready, UPDATE_PROBE, UPDATE_REFUSED, run_bounded,
-        start_macos_update,
-    };
-    use super::{STAGING_PREFIX, apply_update_args, bundle_of, remove_bundle_leftovers};
+    use super::{CLIENT_VERSION, Ready, start_macos_update};
+    use super::{STAGING_PREFIX, remove_bundle_leftovers};
     use std::path::{Path, PathBuf};
     #[cfg(target_os = "macos")]
     use std::time::Duration;
+    #[cfg(target_os = "macos")]
+    use update_core::macos_stage::{BUNDLE_NAME, apply_update_args};
 
     /// Only a hang guard: no test asserts how long anything took.
     #[cfg(target_os = "macos")]
@@ -550,58 +352,6 @@ mod tests {
         if let Err(err) = std::fs::remove_dir_all(root) {
             tracing::warn!("could not remove {}: {err}", root.display());
         }
-    }
-
-    #[test]
-    fn the_client_exes_bundle_is_the_app_three_folders_up() {
-        assert_eq!(
-            bundle_of(Path::new(
-                "/Applications/rustling-tulip.app/Contents/MacOS/rustling-tulip-native"
-            )),
-            Some(PathBuf::from("/Applications/rustling-tulip.app"))
-        );
-        assert_eq!(
-            bundle_of(Path::new("target/test-release/rustling-tulip-native")),
-            None
-        );
-        assert_eq!(
-            bundle_of(Path::new(
-                r"C:\Program Files\rustling-tulip\rustling-tulip-native.exe"
-            )),
-            None
-        );
-        assert_eq!(
-            bundle_of(Path::new(
-                "/Applications/rustling-tulip/Contents/MacOS/rustling-tulip-native"
-            )),
-            None
-        );
-    }
-
-    #[test]
-    fn the_hand_off_runs_apply_update_on_the_staged_app() {
-        let staged = Path::new(
-            "/Applications/.rustling-tulip-update-0.9.1-alpha-0123abcd/rustling-tulip.app",
-        );
-        let installed = Path::new("/Applications/rustling-tulip.app");
-
-        let args = apply_update_args(staged, installed, "0.9.1-alpha");
-
-        let expected: Vec<std::ffi::OsString> = [
-            "apply-update",
-            "--from",
-            "/Applications/.rustling-tulip-update-0.9.1-alpha-0123abcd/rustling-tulip.app",
-            "--to",
-            "/Applications/rustling-tulip.app",
-            "--old-version",
-            "0.9.1-alpha",
-            "--update",
-            "--relaunch",
-        ]
-        .iter()
-        .map(Into::into)
-        .collect();
-        assert_eq!(args, expected);
     }
 
     #[test]
@@ -722,31 +472,6 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn run_bounded_kills_a_child_that_overruns_its_bound() {
-        let mut command = std::process::Command::new("/bin/sleep");
-        command.arg("30");
-
-        let err =
-            run_bounded(&mut command, Duration::from_secs(1)).expect_err("a child past its bound");
-
-        assert!(err.to_string().contains("did not finish"), "{err:#}");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn run_bounded_reports_the_childs_outcome() {
-        let mut ok = std::process::Command::new("/usr/bin/true");
-        run_bounded(&mut ok, HANG_GUARD).expect("a successful child succeeds");
-        let mut bad = std::process::Command::new("/usr/bin/false");
-
-        assert!(
-            run_bounded(&mut bad, HANG_GUARD).is_err(),
-            "a failing child fails the run"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
     fn a_mac_update_stages_the_app_and_hands_over() {
         let root = scratch("mac-hand-off");
         let source = root.join("src").join(BUNDLE_NAME);
@@ -768,62 +493,17 @@ mod tests {
             staging.join(BUNDLE_NAME).is_dir(),
             "the staged app is not there"
         );
-        let expected: Vec<String> =
-            apply_update_args(&staging.join(BUNDLE_NAME), &installed, CLIENT_VERSION)
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect();
+        let expected: Vec<String> = apply_update_args(
+            &staging.join(BUNDLE_NAME),
+            &installed,
+            CLIENT_VERSION,
+            false,
+            true,
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
         assert_eq!(got, format!("{}\n", expected.join("\n")));
-        remove(&root);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_zip_without_the_app_is_refused_and_leaves_no_staging_folder() {
-        let root = scratch("mac-no-app");
-        let junk = root.join("junk");
-        std::fs::create_dir_all(&junk).expect("a folder to zip");
-        std::fs::write(junk.join("file"), b"junk").expect("a file to zip");
-        let zip = root.join("bad.zip");
-        zipped(&junk, &zip);
-        let install = root.join("Applications");
-        let installed = install.join(BUNDLE_NAME);
-        std::fs::create_dir_all(&installed).expect("the installed bundle");
-        let ready = ready_at(&zip);
-
-        let err = start_macos_update(&ready, &installed)
-            .expect_err("a zip without the app cannot be staged");
-
-        assert!(
-            format!("{err:#}").contains("holds no rustling-tulip.app"),
-            "{err:#}"
-        );
-        let left = staging_folders(&install);
-        assert!(left.is_empty(), "left behind: {left:?}");
-        remove(&root);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_translocated_bundle_is_refused_before_anything_is_staged() {
-        let root = scratch("mac-translocated");
-        let install = root.join("AppTranslocation");
-        let installed = install.join(BUNDLE_NAME);
-        std::fs::create_dir_all(&installed).expect("the installed bundle");
-        let zip = root.join("u.zip");
-        std::fs::write(&zip, b"never read").expect("the zip's place");
-        let ready = ready_at(&zip);
-
-        let err = start_macos_update(&ready, &installed)
-            .expect_err("a translocated bundle cannot be replaced");
-
-        assert_eq!(format!("{err:#}"), UPDATE_REFUSED);
-        let staged = staging_folders(&install);
-        assert!(staged.is_empty(), "staged anyway: {staged:?}");
-        assert!(
-            !install.join(UPDATE_PROBE).exists(),
-            "the probe file stayed"
-        );
         remove(&root);
     }
 }

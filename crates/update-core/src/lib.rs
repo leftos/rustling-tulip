@@ -14,6 +14,8 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt as _;
 use tracing::{info, warn};
 
+pub mod macos_stage;
+
 /// The release feed's base URL when [`FEED_BASE_VAR`] is unset.
 pub const DEFAULT_FEED_BASE: &str = "https://api.github.com";
 /// The variable that points the release feed at another base URL.

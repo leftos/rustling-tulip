@@ -3,23 +3,32 @@
 //! in a fixed order, that it can update the install it runs from, and answers
 //! an `Error` carrying the request's id with the first reason it cannot.
 //!
-//! The checks, first that applies: not Windows, a dev build, an elevated
-//! daemon, no install found, no updates folder, an install that is not this
-//! daemon's own, a process other than the app that would block the swap,
-//! another update already running in this daemon. The checks run on a
-//! blocking thread, since the process list and the registry read are slow.
-//! The app being open refuses nothing: it is asked to quit instead.
+//! The checks, first that applies: a system the feed publishes no update
+//! for (only Windows and Apple-silicon macOS update), a dev build, an
+//! elevated daemon, no install found, no updates folder, an install that is
+//! not this daemon's own, a process other than the app that would block the
+//! swap, on macOS an app bundle the update cannot replace, another update
+//! already running in this daemon. The checks run on a blocking thread,
+//! since the process list and the registry read are slow. The app being
+//! open refuses nothing: it is asked to quit instead.
+//!
+//! The install folder is the one holding the daemon: on Windows the
+//! installer's `InstallLocation`, on macOS the bundle's `Contents/MacOS`,
+//! the folder `RUSTLING_TULIP_BIN_TEMPLATES` names.
 //!
 //! When every check passes, the update runs on a plain thread of its own (a
 //! blocking task would hold up the daemon's exit for a long download): it
 //! takes the update mutex, clears old downloads, downloads and verifies the
-//! release, waits for the go-ahead, and starts its installer with fixed
-//! arguments: the plain set, or the set that also relaunches the app when it
-//! still ran from the install folder as the launch began. The mutex is
-//! taken, held and dropped on that one thread, and
-//! the verified file stays open until the installer has started. The answer
-//! is `RemoteUpdateStarted` once the installer runs, else an `Error`;
-//! exactly one per request.
+//! release, waits for the go-ahead, and launches it. On Windows that starts
+//! its installer with fixed arguments: the plain set, or the set that also
+//! relaunches the app when it still ran from the install folder as the
+//! launch began. On macOS it unpacks the zip into a staging folder beside
+//! the bundle and starts the staged daemon's `apply-update`, which restarts
+//! the daemon and, under the same condition, relaunches the app. The mutex
+//! is taken, held and dropped on that one thread, and the verified file
+//! stays open until the launch has started. The answer is
+//! `RemoteUpdateStarted` once the launch runs, else an `Error`; exactly one
+//! per request.
 //!
 //! The go-ahead: with no local connection attached, at once. Otherwise every
 //! local connection is told `HostUpdateScheduled` and the update counts down
@@ -45,6 +54,8 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
+use update_core::Platform;
+use update_core::macos_stage;
 
 /// How long a host update counts down on the host before it goes ahead.
 const COUNTDOWN: Duration = Duration::from_secs(10);
@@ -82,7 +93,8 @@ const INSTALLER_ARGS: [&str; 3] = ["/S", "/UPDATE", "/RESTARTDAEMON"];
 /// again after the swap. Nothing in them comes from the request.
 const INSTALLER_ARGS_RELAUNCH: [&str; 4] = ["/S", "/UPDATE", "/RELAUNCH", "/RESTARTDAEMON"];
 
-const NOT_WINDOWS: &str = "This host can't update itself remotely yet on this system.";
+/// What a host on a system the feed publishes no update for refuses with.
+const NO_PLATFORM: &str = "This host can't update itself remotely yet on this system.";
 const DEV_BUILD: &str = "This host runs a development build, which doesn't update itself.";
 const ELEVATED: &str = "This host's daemon runs elevated; update it from the host.";
 const NO_INSTALL: &str = "No installed copy of rustling-tulip was found on this host.";
@@ -97,7 +109,13 @@ const ALREADY_NEWEST: &str = "This host already runs the newest release.";
 const DOWNLOAD_FAILED: &str = "This host couldn't download the update; try again later.";
 const CANCELED: &str = "The update was cancelled on the host.";
 const STOPPING: &str = "The host's daemon is stopping; try again once it is back.";
+/// What a launch that did not start refuses with: the installer on Windows,
+/// the staged daemon's `apply-update` on macOS.
 const NO_INSTALLER: &str = "This host couldn't start the installer.";
+/// What a macOS app bundle the update cannot replace refuses with.
+const CANNOT_REPLACE: &str = "This host's app runs from a place the update can't replace; move it to Applications and try again.";
+/// What a macOS update whose zip did not unpack refuses with.
+const NO_STAGE: &str = "This host couldn't unpack the update.";
 const STARTED: &str = "The update has already started on this host.";
 const NO_COUNTDOWN: &str = "No host update with that id is counting down.";
 
@@ -137,7 +155,8 @@ pub(crate) trait UpdateSource: Send + Sync {
     ) -> anyhow::Result<Option<update_core::Ready>>;
 }
 
-/// Starts the verified installer.
+/// Starts the verified installer, or on macOS the staged daemon's
+/// `apply-update`.
 pub(crate) trait Launch: Send + Sync {
     /// Starts `program` with `args`, detached from this daemon.
     ///
@@ -147,24 +166,53 @@ pub(crate) trait Launch: Send + Sync {
     fn launch(&self, program: &Path, args: &[OsString]) -> anyhow::Result<()>;
 }
 
-/// The update's own seams: the mutex, the release source, the installer
-/// launch, and the updates folder downloads go under.
+/// A macOS update's staging beside the installed app bundle.
+pub(crate) trait Stage: Send + Sync {
+    /// Refuses a bundle the update cannot replace.
+    ///
+    /// # Errors
+    ///
+    /// Why the update cannot replace `bundle`.
+    fn check(&self, bundle: &Path) -> anyhow::Result<()>;
+
+    /// Unpacks the downloaded `zip` of `version` beside `bundle`; the staged
+    /// app's path.
+    ///
+    /// # Errors
+    ///
+    /// Why the zip could not be staged; nothing staged is left behind.
+    fn stage(
+        &self,
+        zip: &Path,
+        bundle: &Path,
+        version: &semver::Version,
+    ) -> anyhow::Result<PathBuf>;
+}
+
+/// The update's own seams: the mutex, the release source, the launch, the
+/// updates folder downloads go under, the platform the launch is for, and
+/// the macOS staging.
 pub(crate) struct Seams {
     pub(crate) lock: Box<dyn UpdateLock>,
     pub(crate) source: Box<dyn UpdateSource>,
     pub(crate) launcher: Box<dyn Launch>,
     pub(crate) updates_dir: Box<dyn Fn() -> anyhow::Result<PathBuf> + Send + Sync>,
+    /// `None` on a system the feed publishes no update for.
+    pub(crate) platform: Option<Platform>,
+    pub(crate) stager: Box<dyn Stage>,
 }
 
 impl Seams {
-    /// This machine's: the named mutex, the release feed, a detached launch
-    /// and the client's updates folder.
+    /// This machine's: the named mutex, the release feed, a detached launch,
+    /// the client's updates folder, this platform and the bundle staging.
     pub(crate) fn system() -> Self {
         Self {
             lock: Box::new(NamedMutex),
             source: Box::new(ReleaseFeed),
             launcher: Box::new(DetachedLaunch),
             updates_dir: Box::new(daemon_client::updates_dir),
+            platform: Platform::current(),
+            stager: Box::new(BundleStage),
         }
     }
 }
@@ -420,14 +468,11 @@ impl HostUpdate {
         }
     }
 
-    /// Checks against this machine, the installer's registry entry and the
-    /// running processes, and updates through its seams.
+    /// Checks against this machine, its install (the installer's registry
+    /// entry, or on macOS the bundle this daemon runs from) and the running
+    /// processes, and updates through its seams.
     pub(crate) fn system() -> Self {
-        Self::new(
-            Box::new(RegistryInstall),
-            Box::new(SystemProcesses),
-            Seams::system(),
-        )
+        Self::new(system_install(), Box::new(SystemProcesses), Seams::system())
     }
 
     /// A test hub's checks: no install, no processes.
@@ -465,11 +510,22 @@ impl HostUpdate {
 }
 
 /// What the checks hand the update: the version this host runs, the
-/// updates folder, and the install folder the app runs from.
+/// updates folder, the install folder the app runs from, and what the
+/// launch starts.
 struct Plan {
     current: semver::Version,
     updates_root: PathBuf,
     install: PathBuf,
+    target: Target,
+}
+
+/// What an update's launch starts.
+enum Target {
+    /// Windows: the downloaded installer.
+    Installer,
+    /// macOS: the staged daemon's `apply-update`, swapping the app bundle at
+    /// this path.
+    Bundle(PathBuf),
 }
 
 /// Who asked for an update, and where its answer goes.
@@ -782,9 +838,9 @@ fn run(
             return Err((UPDATE_REFUSED, STOPPING));
         }
     };
-    launch(seams.launcher.as_ref(), &ready, app_running)?;
-    // The installer's `apply-update` takes the mutex next; the verified file
-    // stays open until the installer has started.
+    launch(seams, &plan.target, &ready, app_running)?;
+    // The launched `apply-update` takes the mutex next; the verified file
+    // stays open until the launch has started.
     drop(hold);
     let version = ready.version.clone();
     drop(ready);
@@ -816,10 +872,64 @@ fn download(source: &dyn UpdateSource, plan: &Plan) -> Result<update_core::Ready
     }
 }
 
+/// Launches `ready` as `target` says: its installer on Windows, or on macOS
+/// the staged daemon's `apply-update`.
+fn launch(
+    seams: &Seams,
+    target: &Target,
+    ready: &update_core::Ready,
+    app_running: bool,
+) -> Result<(), Refusal> {
+    match target {
+        Target::Installer => launch_installer(seams.launcher.as_ref(), ready, app_running),
+        Target::Bundle(bundle) => launch_staged(seams, bundle, ready, app_running),
+    }
+}
+
+/// Stages `ready`'s zip beside `bundle` and starts the staged daemon's
+/// `apply-update`, restarting the daemon after the swap, and relaunching the
+/// app too when it ran from the install folder as the launch began. A
+/// launch that does not start removes the staging folder.
+fn launch_staged(
+    seams: &Seams,
+    bundle: &Path,
+    ready: &update_core::Ready,
+    app_running: bool,
+) -> Result<(), Refusal> {
+    let staged_app = seams
+        .stager
+        .stage(&ready.path, bundle, &ready.version)
+        .map_err(|err| {
+            warn!(error = %format!("{err:#}"), "remote update: staging the update failed");
+            (UPDATE_REFUSED, NO_STAGE)
+        })?;
+    let args = macos_stage::apply_update_args(
+        &staged_app,
+        bundle,
+        protocol::BUILD_VERSION,
+        true,
+        app_running,
+    );
+    let daemon = macos_stage::staged_daemon(&staged_app);
+    let Err(err) = seams.launcher.launch(&daemon, &args) else {
+        return Ok(());
+    };
+    warn!(error = %format!("{err:#}"), "remote update: the staged apply-update didn't start");
+    if let Some(staging) = staged_app.parent()
+        && let Err(cleanup) = std::fs::remove_dir_all(staging)
+    {
+        warn!(
+            folder = %staging.display(),
+            "remote update: could not delete the staging folder: {cleanup}"
+        );
+    }
+    Err((UPDATE_REFUSED, NO_INSTALLER))
+}
+
 /// Starts `ready`'s installer with [`INSTALLER_ARGS`], or with
 /// [`INSTALLER_ARGS_RELAUNCH`] when the app ran from the install folder as
 /// the launch began.
-fn launch(
+fn launch_installer(
     launcher: &dyn Launch,
     ready: &update_core::Ready,
     app_running: bool,
@@ -854,15 +964,13 @@ fn send(out_tx: &mpsc::UnboundedSender<DaemonMessage>, reply: DaemonMessage) {
 /// The first check that refuses this host's update; the plan when every
 /// check passes.
 fn host_check(hub: &Hub) -> Result<Plan, Refusal> {
-    if let Some(refusal) = platform_refusal()
-        .or_else(dev_build_refusal)
-        .or_else(|| elevated_refusal(hub))
-    {
+    let update = &hub.host_update;
+    let platform = platform_refusal(update.seams.platform)?;
+    if let Some(refusal) = dev_build_refusal().or_else(|| elevated_refusal(hub)) {
         return Err(refusal);
     }
     let current =
         semver::Version::parse(protocol::BUILD_VERSION).map_err(|_| (UPDATE_REFUSED, DEV_BUILD))?;
-    let update = &hub.host_update;
     let Some(install) = update.install.install_folder() else {
         return Err((UPDATE_REFUSED, NO_INSTALL));
     };
@@ -875,15 +983,41 @@ fn host_check(hub: &Hub) -> Result<Plan, Refusal> {
     {
         return Err(refusal);
     }
+    let target = launch_target(update, platform, &install)?;
     Ok(Plan {
         current,
         updates_root,
         install,
+        target,
     })
 }
 
-fn platform_refusal() -> Option<Refusal> {
-    (!cfg!(windows)).then_some((UPDATE_REFUSED, NOT_WINDOWS))
+/// The platform the update is for; refused on a system the feed publishes
+/// no update for.
+fn platform_refusal(platform: Option<Platform>) -> Result<Platform, Refusal> {
+    platform.ok_or((UPDATE_REFUSED, NO_PLATFORM))
+}
+
+/// What the launch starts on `platform`: the installer on Windows; on macOS
+/// the bundle holding `install`, once the stager says the update can
+/// replace it.
+fn launch_target(
+    update: &HostUpdate,
+    platform: Platform,
+    install: &Path,
+) -> Result<Target, Refusal> {
+    match platform {
+        Platform::Windows => Ok(Target::Installer),
+        Platform::MacArm64 => {
+            let bundle = macos_stage::bundle_of(&install.join(DAEMON_EXE))
+                .ok_or((UPDATE_REFUSED, NO_INSTALL))?;
+            update.seams.stager.check(&bundle).map_err(|err| {
+                warn!(error = %format!("{err:#}"), "remote update: the app bundle can't be replaced");
+                (UPDATE_REFUSED, CANNOT_REPLACE)
+            })?;
+            Ok(Target::Bundle(bundle))
+        }
+    }
 }
 
 fn dev_build_refusal() -> Option<Refusal> {
@@ -969,10 +1103,81 @@ impl Launch for DetachedLaunch {
     }
 }
 
+/// The real macOS staging: update-core's beside the bundle; none on any
+/// other system.
+struct BundleStage;
+
+impl Stage for BundleStage {
+    #[cfg(target_os = "macos")]
+    fn check(&self, bundle: &Path) -> anyhow::Result<()> {
+        macos_stage::check_update_place(bundle)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn stage(
+        &self,
+        zip: &Path,
+        bundle: &Path,
+        version: &semver::Version,
+    ) -> anyhow::Result<PathBuf> {
+        macos_stage::stage(zip, bundle, version)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn check(&self, _bundle: &Path) -> anyhow::Result<()> {
+        anyhow::bail!("no app bundle staging on this system")
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn stage(
+        &self,
+        _zip: &Path,
+        _bundle: &Path,
+        _version: &semver::Version,
+    ) -> anyhow::Result<PathBuf> {
+        anyhow::bail!("no app bundle staging on this system")
+    }
+}
+
+/// This system's install locator: the bundle this daemon runs from on
+/// macOS.
+#[cfg(target_os = "macos")]
+fn system_install() -> Box<dyn InstallLocator + Send + Sync> {
+    Box::new(BundleInstall {
+        folder: crate::paths::resolve_bin_templates_dir(),
+    })
+}
+
+/// This system's install locator: the installer's registry entry.
+#[cfg(not(target_os = "macos"))]
+fn system_install() -> Box<dyn InstallLocator + Send + Sync> {
+    Box::new(RegistryInstall)
+}
+
+/// A macOS install: the bundle's `Contents/MacOS` that
+/// `RUSTLING_TULIP_BIN_TEMPLATES` names, never the running exe's folder,
+/// since a daemon can run from the binaries cache.
+#[cfg(any(test, target_os = "macos"))]
+struct BundleInstall {
+    folder: Option<PathBuf>,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl InstallLocator for BundleInstall {
+    /// The folder, when it holds the daemon inside a `.app` bundle.
+    fn install_folder(&self) -> Option<PathBuf> {
+        let folder = self.folder.clone()?;
+        let daemon = folder.join(macos_stage::BUNDLE_DAEMON);
+        (daemon.is_file() && macos_stage::bundle_of(&daemon).is_some()).then_some(folder)
+    }
+}
+
 /// The installer's uninstall entry: its `InstallLocation`, when the folder
 /// holds the daemon.
+#[cfg(not(target_os = "macos"))]
 struct RegistryInstall;
 
+#[cfg(not(target_os = "macos"))]
 impl InstallLocator for RegistryInstall {
     fn install_folder(&self) -> Option<PathBuf> {
         let folder = PathBuf::from(registry::install_location()?);
@@ -1040,7 +1245,7 @@ mod registry {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod registry {
     /// No installer registry off Windows.
     pub(super) fn install_location() -> Option<String> {
@@ -1161,6 +1366,8 @@ mod tests {
         feed: Feed,
         /// The verified installer a release hands back.
         installer: PathBuf,
+        /// How many times the feed was asked.
+        fetches: Arc<AtomicUsize>,
     }
 
     impl UpdateSource for FakeSource {
@@ -1169,6 +1376,7 @@ mod tests {
             _current: &semver::Version,
             _root: &Path,
         ) -> anyhow::Result<Option<update_core::Ready>> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
             match self.feed {
                 Feed::Newest => Ok(None),
                 Feed::Failing => anyhow::bail!("{DOWNLOAD_ERROR}"),
@@ -1214,26 +1422,128 @@ mod tests {
         launch_fails: false,
     };
 
+    /// Every staging call: `check <bundle>` or `stage <zip> <bundle> <version>`.
+    type Stagings = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// How the fake stager answers.
+    #[derive(Clone, Copy)]
+    struct StagerSetup {
+        check_fails: bool,
+        stage_fails: bool,
+        /// Whether `stage` makes the staged app's folder for real.
+        makes_folder: bool,
+    }
+
+    const STAGER: StagerSetup = StagerSetup {
+        check_fails: false,
+        stage_fails: false,
+        makes_folder: false,
+    };
+
+    /// The staging folder the fake stager answers, under the scratch dir.
+    const STAGING: &str = ".rustling-tulip-update-0.99.0-abcd1234";
+
+    struct FakeStager {
+        setup: StagerSetup,
+        /// The staged app `stage` answers.
+        staged_app: PathBuf,
+        seen: Stagings,
+    }
+
+    impl Stage for FakeStager {
+        fn check(&self, bundle: &Path) -> anyhow::Result<()> {
+            lock(&self.seen).push(format!("check {}", bundle.display()));
+            if self.setup.check_fails {
+                anyhow::bail!("the bundle runs translocated");
+            }
+            Ok(())
+        }
+
+        fn stage(
+            &self,
+            zip: &Path,
+            bundle: &Path,
+            version: &semver::Version,
+        ) -> anyhow::Result<PathBuf> {
+            let call = format!("stage {} {} {version}", zip.display(), bundle.display());
+            lock(&self.seen).push(call);
+            if self.setup.stage_fails {
+                anyhow::bail!("ditto failed");
+            }
+            if self.setup.makes_folder {
+                std::fs::create_dir_all(&self.staged_app)?;
+            }
+            Ok(self.staged_app.clone())
+        }
+    }
+
+    /// The host a rig's daemon runs on: the folder under the scratch dir it
+    /// runs from, its platform, and how its stager answers.
+    #[derive(Clone, Copy)]
+    struct Host {
+        own: &'static str,
+        platform: Option<update_core::Platform>,
+        stager: StagerSetup,
+    }
+
+    const WINDOWS: Host = Host {
+        own: OWN,
+        platform: Some(update_core::Platform::Windows),
+        stager: STAGER,
+    };
+
+    /// The executables folder of the bundle a Mac rig's daemon runs from.
+    const MAC_OWN: &str = r"rustling-tulip.app\Contents\MacOS";
+
+    /// The app, running from a Mac rig's bundle.
+    const MAC_APP: &str = r"rustling-tulip.app\Contents\MacOS\rustling-tulip-native.exe";
+
     /// A hub over the fakes, and what its launcher saw.
     struct Rig {
         hub: Hub,
         _scratch: ScratchDir,
+        root: PathBuf,
         launches: Launches,
         installer: PathBuf,
         processes: FakeProcesses,
+        fetches: Arc<AtomicUsize>,
+        stagings: Stagings,
     }
 
-    /// A hub whose daemon runs from `<scratch>/install`, the locator finding
-    /// `<scratch>/<install>`, other processes running the exes at
-    /// `<scratch>/<running>`, and the update seams answering as `setup` says.
+    /// A Windows host's rig: [`rig_on`] with [`WINDOWS`].
     fn rig(tag: &str, install: Option<&str>, running: &[&str], setup: Setup) -> Rig {
+        rig_on(tag, install, running, setup, WINDOWS)
+    }
+
+    /// An Apple-silicon Mac's rig whose every check passes: its daemon runs
+    /// from `<scratch>/rustling-tulip.app/Contents/MacOS`, which holds
+    /// `rustling-tulipd`, and its stager answers as `stager` says.
+    fn mac_rig(tag: &str, running: &[&str], setup: Setup, stager: StagerSetup) -> Rig {
+        let host = Host {
+            own: MAC_OWN,
+            platform: Some(update_core::Platform::MacArm64),
+            stager,
+        };
+        let rig = rig_on(tag, Some(MAC_OWN), running, setup, host);
+        let folder = rig.root.join(MAC_OWN);
+        std::fs::create_dir_all(&folder).unwrap_or_else(|err| panic!("bundle folder: {err}"));
+        std::fs::write(folder.join("rustling-tulipd"), b"daemon")
+            .unwrap_or_else(|err| panic!("bundle daemon: {err}"));
+        rig
+    }
+
+    /// A hub whose daemon runs from `<scratch>/<host.own>` on `host`'s
+    /// platform, the locator finding `<scratch>/<install>`, other processes
+    /// running the exes at `<scratch>/<running>`, and the update seams
+    /// answering as `setup` says.
+    fn rig_on(tag: &str, install: Option<&str>, running: &[&str], setup: Setup, host: Host) -> Rig {
         let scratch = ScratchDir::new(tag);
         let root = scratch.path().to_path_buf();
         let downloads = root.join("downloads");
         std::fs::create_dir_all(&downloads).unwrap_or_else(|err| panic!("downloads folder: {err}"));
         let installer = downloads.join("rustling-tulip-0.99.0-setup.exe");
         std::fs::write(&installer, b"installer").unwrap_or_else(|err| panic!("installer: {err}"));
-        let (mut hub, scratch) = test_hub_in(scratch, Some(root.join(OWN)));
+        let (mut hub, scratch) = test_hub_in(scratch, Some(root.join(host.own)));
         let other = std::process::id().wrapping_add(1);
         let processes = FakeProcesses::default();
         *lock(&processes.running) = running
@@ -1244,6 +1554,8 @@ mod tests {
             })
             .collect();
         let launches = Launches::default();
+        let fetches = Arc::<AtomicUsize>::default();
+        let stagings = Stagings::default();
         let updates_root = root.join("update-root");
         let seams = Seams {
             lock: Box::new(FakeLock {
@@ -1252,12 +1564,19 @@ mod tests {
             source: Box::new(FakeSource {
                 feed: setup.feed,
                 installer: installer.clone(),
+                fetches: Arc::clone(&fetches),
             }),
             launcher: Box::new(FakeLauncher {
                 fails: setup.launch_fails,
                 seen: Arc::clone(&launches),
             }),
             updates_dir: Box::new(move || Ok(updates_root.clone())),
+            platform: host.platform,
+            stager: Box::new(FakeStager {
+                setup: host.stager,
+                staged_app: root.join(STAGING).join("rustling-tulip.app"),
+                seen: Arc::clone(&stagings),
+            }),
         };
         let update = Arc::new(HostUpdate::new(
             Box::new(FakeInstall(install.map(|folder| root.join(folder)))),
@@ -1269,9 +1588,12 @@ mod tests {
         Rig {
             hub,
             _scratch: scratch,
+            root,
             launches,
             installer,
             processes,
+            fetches,
+            stagings,
         }
     }
 
@@ -1971,5 +2293,203 @@ mod tests {
             SETUP,
         );
         let _reply = ask(&refused.hub).await;
+    }
+
+    /// A Mac rig's staged app and the bundle it replaces.
+    fn mac_paths(rig: &Rig) -> (PathBuf, PathBuf) {
+        (
+            rig.root.join(STAGING).join("rustling-tulip.app"),
+            rig.root.join("rustling-tulip.app"),
+        )
+    }
+
+    /// The staged `apply-update`'s arguments swapping `staged` for `bundle`,
+    /// then `extra`.
+    fn mac_args(staged: &Path, bundle: &Path, extra: &[&str]) -> Vec<OsString> {
+        let mut args: Vec<OsString> = vec![
+            "apply-update".into(),
+            "--from".into(),
+            staged.into(),
+            "--to".into(),
+            bundle.into(),
+            "--old-version".into(),
+            protocol::BUILD_VERSION.into(),
+            "--update".into(),
+        ];
+        args.extend(extra.iter().map(OsString::from));
+        args
+    }
+
+    /// The staged daemon in `staged`.
+    fn staged_daemon_in(staged: &Path) -> PathBuf {
+        staged
+            .join("Contents")
+            .join("MacOS")
+            .join("rustling-tulipd")
+    }
+
+    #[tokio::test]
+    async fn a_mac_host_launches_the_staged_apps_apply_update() {
+        let rig = mac_rig("update-mac-launch", &[], SETUP, STAGER);
+
+        let reply = ask(&rig.hub).await;
+
+        assert!(
+            matches!(reply, DaemonMessage::RemoteUpdateStarted { .. }),
+            "{reply:?}"
+        );
+        let (staged, bundle) = mac_paths(&rig);
+        let args = mac_args(&staged, &bundle, &["--restart-daemon"]);
+        assert_eq!(
+            *lock(&rig.launches),
+            vec![(staged_daemon_in(&staged), args)]
+        );
+        let stagings = vec![
+            format!("check {}", bundle.display()),
+            format!(
+                "stage {} {} 0.99.0",
+                rig.installer.display(),
+                bundle.display()
+            ),
+        ];
+        assert_eq!(*lock(&rig.stagings), stagings);
+    }
+
+    #[tokio::test]
+    async fn a_mac_host_with_the_app_running_relaunches_it_too() {
+        let rig = mac_rig("update-mac-relaunch", &[MAC_APP], SETUP, STAGER);
+
+        let reply = ask(&rig.hub).await;
+
+        assert!(
+            matches!(reply, DaemonMessage::RemoteUpdateStarted { .. }),
+            "{reply:?}"
+        );
+        let (staged, bundle) = mac_paths(&rig);
+        let args = mac_args(&staged, &bundle, &["--restart-daemon", "--relaunch"]);
+        assert_eq!(
+            *lock(&rig.launches),
+            vec![(staged_daemon_in(&staged), args)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mac_bundle_the_update_cannot_replace_is_refused_before_the_download() {
+        let stager = StagerSetup {
+            check_fails: true,
+            ..STAGER
+        };
+        let rig = mac_rig("update-mac-cannot-replace", &[], SETUP, stager);
+        let _local = rig.hub.host_update.attach_local();
+        let mut events = rig.hub.state_events.subscribe();
+
+        let reply = refusal(ask(&rig.hub).await);
+
+        assert_eq!(reply, expected(UPDATE_REFUSED, CANNOT_REPLACE));
+        assert_eq!(rig.fetches.load(Ordering::SeqCst), 0, "the feed was asked");
+        assert!(lock(&rig.launches).is_empty(), "nothing launched");
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event, StateEvent::HostUpdate(_)),
+                "no countdown for a refused update: {event:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mac_stage_failure_is_refused_and_launches_nothing() {
+        let stager = StagerSetup {
+            stage_fails: true,
+            ..STAGER
+        };
+        let rig = mac_rig("update-mac-stage-fails", &[], SETUP, stager);
+
+        let reply = refusal(ask(&rig.hub).await);
+
+        assert_eq!(reply, expected(UPDATE_REFUSED, NO_STAGE));
+        assert!(lock(&rig.launches).is_empty(), "nothing launched");
+    }
+
+    #[tokio::test]
+    async fn a_mac_launch_failure_removes_the_staging_folder() {
+        let stager = StagerSetup {
+            makes_folder: true,
+            ..STAGER
+        };
+        let setup = Setup {
+            launch_fails: true,
+            ..SETUP
+        };
+        let rig = mac_rig("update-mac-launch-fails", &[], setup, stager);
+
+        let reply = refusal(ask(&rig.hub).await);
+
+        assert_eq!(reply, expected(UPDATE_REFUSED, NO_INSTALLER));
+        assert_eq!(lock(&rig.launches).len(), 1, "the launch was tried");
+        assert!(
+            !rig.root.join(STAGING).exists(),
+            "the staging folder is still there"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_on_no_supported_platform_is_refused() {
+        let host = Host {
+            platform: None,
+            ..WINDOWS
+        };
+        let rig = rig_on("update-no-platform", Some(OWN), &[], SETUP, host);
+
+        let reply = refusal(ask(&rig.hub).await);
+
+        assert_eq!(
+            reply,
+            expected(
+                UPDATE_REFUSED,
+                "This host can't update itself remotely yet on this system."
+            )
+        );
+        assert!(lock(&rig.launches).is_empty(), "nothing launched");
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod mac_install {
+    use super::super::test_support::ScratchDir;
+    use super::{BundleInstall, InstallLocator};
+
+    #[test]
+    fn the_mac_install_is_the_bundles_executables_folder() {
+        let scratch = ScratchDir::new("update-mac-install");
+        let folder = scratch
+            .path()
+            .join("x")
+            .join("rustling-tulip.app")
+            .join("Contents")
+            .join("MacOS");
+        std::fs::create_dir_all(&folder).expect("the bundle's executables folder");
+        let without_daemon = BundleInstall {
+            folder: Some(folder.clone()),
+        };
+        assert_eq!(without_daemon.install_folder(), None, "no daemon in it");
+
+        std::fs::write(folder.join("rustling-tulipd"), b"daemon").expect("the bundle's daemon");
+        let bundled = BundleInstall {
+            folder: Some(folder.clone()),
+        };
+        assert_eq!(bundled.install_folder(), Some(folder));
+
+        let loose = scratch.path().join("loose");
+        std::fs::create_dir_all(&loose).expect("a folder outside any bundle");
+        std::fs::write(loose.join("rustling-tulipd"), b"daemon").expect("a loose daemon");
+        let outside = BundleInstall {
+            folder: Some(loose),
+        };
+        assert_eq!(outside.install_folder(), None, "not in a bundle");
+        assert_eq!(BundleInstall { folder: None }.install_folder(), None);
     }
 }

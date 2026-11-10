@@ -22,7 +22,7 @@ The check is the one the client's updater makes: the release's `.sha256`, from t
 
 ## Orchestrator decisions
 
-- **Another OS:** the host picks its own asset. A host with no asset for its OS (Linux, Intel macOS) or with no install (a dev build) answers with why, and the requester shows that instead of offering an update.
+- **Another OS:** the host picks its own asset. A host with no asset for its OS (only Linux and Intel macOS now; macOS on Apple silicon updates by staging the app bundle and running the staged daemon's `apply-update`) or with no install (a dev build) answers with why, and the requester shows that instead of offering an update.
 - **Version and kind on the wire:** `Welcome` gains the daemon's build version, and `Hello` gains the client's version and kind, all additive, so each side can see who is behind and a phone is told apart from a native client. The PWA sends its kind too.
 - **Failure:** the new daemon sends the requester the result from `last-result.json` after it starts. A requester whose host does not come back on the new version in a bounded time says so.
 - **Refusals:** the new messages are allowed to a tailnet device on purpose. `host_only_refusal` stays a deny-list, so the review checks that this is deliberate rather than a gap.
@@ -30,6 +30,8 @@ The check is the one the client's updater makes: the release's `.sha256`, from t
 ## What the code does not do yet
 
 - A running `bridge` blocks the swap with exit 3, since it runs from the install folder.
+- macOS has no cross-process update lock, so a client's own update and a daemon's remote update can race; each stages into its own folder and `apply-update` refuses an in-use bundle.
+- Leftover cleanup of the headless-daemon path is open as RT-1353.
 - A host has no per-connection record of its clients, and no addressed send to one.
 - A release carries no machine-readable note of what it breaks.
 
@@ -39,7 +41,7 @@ Each part lands on `feat/remote-update`, and each is a sub-issue of RT-1298.
 
 - [x] **Versions on the wire.** `Welcome.build_version`, `Hello.client_version` and `client_kind`, the host's version and "behind" state in the Connections dialog and Settings > Hosts. Regenerate `apps/pwa/src/protocol.ts`.
 - [x] **The shared updater core.** Move finding, downloading and verifying a release out of `apps/native/src/update.rs` into a crate both the client and the daemon link, with no behaviour change.
-- [x] **A host updates itself on request.** A new client message, a `remote_update` feature string listed once a host can honour it, the daemon fetching and verifying its own asset and running the swap detached from itself, restarting the daemon afterwards when no client will, and answering with why when it cannot. The host's own app restarts on a countdown with Cancel.
+- [x] **A host updates itself on request.** A new client message, a `remote_update` feature string listed once a host can honour it, the daemon fetching and verifying its own asset and running the swap detached from itself, restarting the daemon afterwards when no client will, and answering with why when it cannot. The host's own app restarts on a countdown with Cancel. Windows and macOS (Apple silicon) are both done.
 - [ ] **Client to host, in the client.** The update action per host, the confirm dialog listing that host's sessions, progress, reconnect, and the result or failure shown to the requester.
 - [ ] **The breaking flag.** A machine-readable note in each release of what it breaks, read by the confirm dialog, and the requester updating itself right after the host. `docs/release.md` says when to set it.
 - [ ] **Host to client.** A per-connection record on the host, an addressed message, "Update connected clients", and the client's countdown with Cancel.
