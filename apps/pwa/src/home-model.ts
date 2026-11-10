@@ -6,11 +6,15 @@ import type {
   PromptChoice,
   RepoEntry,
   SessionSnapshot,
+  SpawnConfig,
   WorkspaceEntry,
 } from "./protocol";
 
-/** What a group of Home rows is: the desktop sidebar's container kinds. */
-export type HomeGroupKind = "workspace" | "repo" | "shell" | "folder" | "detached";
+/** What a group of Home rows is: the desktop sidebar's container kinds, and the launches waiting for a session. */
+export type HomeGroupKind = "workspace" | "repo" | "shell" | "folder" | "detached" | "launch_again";
+
+/** What the trailing group of containers with nothing running is called. */
+const LAUNCH_AGAIN = "Launch again";
 
 /**
  * The phone's Home state, folded from the daemon's repo, workspace and
@@ -100,6 +104,12 @@ function withSession(
   return next;
 }
 
+/** One container a group offers to launch again, for the trailing group. */
+export interface LaunchContainer {
+  readonly name: string;
+  readonly launch: ContainerRef;
+}
+
 /** One group of rows: a workspace, a repo, or one of the single buckets. */
 export interface HomeGroup {
   readonly kind: HomeGroupKind;
@@ -107,6 +117,10 @@ export interface HomeGroup {
   readonly id: string;
   readonly name: string;
   readonly rows: readonly SessionSnapshot[];
+  /** The container's stored last launch; null when it has none to replay. */
+  readonly launch: ContainerRef | null;
+  /** The containers the Launch again group lists; absent for every other group. */
+  readonly containers?: readonly LaunchContainer[];
 }
 
 /** The rows grouped as the desktop's sidebar groups them, in its order. */
@@ -130,6 +144,7 @@ export function homeGroups(model: HomeModel): readonly HomeGroup[] {
   }
 
   const groups: HomeGroup[] = [];
+  const trailing: LaunchContainer[] = [];
   const workspaces = new Map(model.workspaces.map((workspace) => [workspace.id, workspace]));
   const repos = new Map(
     model.repos.filter((repo) => !members.has(repo.id)).map((repo) => [repo.id, repo]),
@@ -147,29 +162,39 @@ export function homeGroups(model: HomeModel): readonly HomeGroup[] {
       const workspace = workspaces.get(ref.id);
       if (workspace !== undefined) {
         placed.add(key);
-        pushWorkspaceGroup(groups, model, bucketed, workspace);
+        pushWorkspaceGroup(groups, trailing, model, bucketed, workspace);
       }
     } else {
       const repo = repos.get(ref.id);
       if (repo !== undefined) {
         placed.add(key);
-        pushRepoGroup(groups, model, bucketed, repo);
+        pushRepoGroup(groups, trailing, model, bucketed, repo);
       }
     }
   }
   for (const workspace of [...workspaces.values()].sort((a, b) => compareNames(a.name, b.name))) {
     if (!placed.has(`workspace:${workspace.id}`)) {
-      pushWorkspaceGroup(groups, model, bucketed, workspace);
+      pushWorkspaceGroup(groups, trailing, model, bucketed, workspace);
     }
   }
   for (const repo of [...repos.values()].sort((a, b) => compareNames(a.name, b.name))) {
     if (!placed.has(`repo:${repo.id}`)) {
-      pushRepoGroup(groups, model, bucketed, repo);
+      pushRepoGroup(groups, trailing, model, bucketed, repo);
     }
   }
   pushGroup(groups, "shell", "shell", "Shells", bucketed.shells);
   pushGroup(groups, "folder", "folder", "Folders", bucketed.folders);
   pushGroup(groups, "detached", "detached", "Detached", bucketed.detached);
+  if (trailing.length > 0) {
+    groups.push({
+      kind: "launch_again",
+      id: "launch_again",
+      name: LAUNCH_AGAIN,
+      rows: [],
+      launch: null,
+      containers: trailing,
+    });
+  }
   return groups;
 }
 
@@ -191,28 +216,83 @@ function pushGroup(
   rows: readonly SessionSnapshot[],
 ): void {
   if (rows.length > 0) {
-    groups.push({ kind, id, name, rows });
+    groups.push({ kind, id, name, rows, launch: null });
+  }
+}
+
+/** One workspace or repo group before the trailing group is decided. */
+interface ContainerGroup {
+  readonly kind: "workspace" | "repo";
+  readonly id: string;
+  readonly name: string;
+  readonly rows: readonly SessionSnapshot[];
+  readonly launch: ContainerRef | null;
+}
+
+/**
+ * A workspace or repo group, or, when it has no rows, its place in the
+ * trailing Launch again group if it has a launch to offer.
+ */
+function pushContainer(
+  groups: HomeGroup[],
+  trailing: LaunchContainer[],
+  entry: ContainerGroup,
+): void {
+  if (entry.rows.length > 0) {
+    groups.push({
+      kind: entry.kind,
+      id: entry.id,
+      name: entry.name,
+      rows: entry.rows,
+      launch: entry.launch,
+    });
+  } else if (entry.launch !== null) {
+    trailing.push({ name: entry.name, launch: entry.launch });
   }
 }
 
 function pushWorkspaceGroup(
   groups: HomeGroup[],
+  trailing: LaunchContainer[],
   model: HomeModel,
   bucketed: Buckets,
   workspace: WorkspaceEntry,
 ): void {
-  const rows = ordered(bucketed.workspaces.get(workspace.id) ?? [], model.orders.get(workspace.id));
-  pushGroup(groups, "workspace", workspace.id, workspace.name, rows);
+  pushContainer(groups, trailing, {
+    kind: "workspace",
+    id: workspace.id,
+    name: workspace.name,
+    rows: ordered(bucketed.workspaces.get(workspace.id) ?? [], model.orders.get(workspace.id)),
+    launch: containerLaunch("workspace", workspace.id, workspace.last_spawn_config),
+  });
 }
 
 function pushRepoGroup(
   groups: HomeGroup[],
+  trailing: LaunchContainer[],
   model: HomeModel,
   bucketed: Buckets,
   repo: RepoEntry,
 ): void {
-  const rows = ordered(bucketed.repos.get(repo.id) ?? [], model.orders.get(repo.id));
-  pushGroup(groups, "repo", repo.id, repo.name, rows);
+  pushContainer(groups, trailing, {
+    kind: "repo",
+    id: repo.id,
+    name: repo.name,
+    rows: ordered(bucketed.repos.get(repo.id) ?? [], model.orders.get(repo.id)),
+    launch: containerLaunch("repo", repo.id, repo.last_spawn_config),
+  });
+}
+
+/** The launch a container's stored config offers; a missing or headless one offers none. */
+function containerLaunch(
+  kind: "repo" | "workspace",
+  id: string,
+  config: SpawnConfig | null | undefined,
+): ContainerRef | null {
+  if (config === null || config === undefined || config.mode === "headless") {
+    return null;
+  }
+  return { kind, id };
 }
 
 /** Rows reordered by `order`; a row it does not name keeps its first-seen place after the named ones. */

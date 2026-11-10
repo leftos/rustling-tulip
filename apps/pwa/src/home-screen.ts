@@ -1,8 +1,8 @@
 import { RECONNECTING_BAR, connectionBar } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
-import { disarm, errorFor, type HomeActions } from "./home-actions";
+import { containerKey, disarm, errorFor, type HomeActions } from "./home-actions";
 import { homeGroups, needsYou, type HomeGroup, type HomeModel, type TrayCard } from "./home-model";
-import type { PromptChoice, SessionSnapshot, SessionStatus } from "./protocol";
+import type { ContainerRef, PromptChoice, SessionSnapshot, SessionStatus } from "./protocol";
 
 /**
  * What Home draws: a pure view model over the Home model, the actions state
@@ -25,6 +25,24 @@ export const NO_SESSIONS = "No sessions";
 
 /** What a card says while its answer is on its way to the daemon. */
 export const SENDING = "Sending…";
+
+/** What a group's Launch last button says, before and while its launch waits. */
+export const LAUNCH_LAST = "Launch last";
+export const LAUNCHING = "Launching…";
+
+/** One Launch last button, as a group header or a Launch again row shows it. */
+export interface LaunchView {
+  readonly target: ContainerRef;
+  readonly label: "Launch last" | "Launching…";
+  readonly enabled: boolean;
+}
+
+/** One row of the Launch again group: a container with nothing running. */
+export interface LaunchRowView {
+  readonly name: string;
+  readonly launch: LaunchView | null;
+  readonly launchError: string | null;
+}
 
 /** One answer button of a Needs you card. */
 export interface CardButton {
@@ -80,6 +98,12 @@ export interface RowView {
 export interface GroupView {
   readonly name: string;
   readonly rows: readonly RowView[];
+  /** The header's Launch last button; null when the group offers none. */
+  readonly launch: LaunchView | null;
+  /** The daemon's refusal text for this group's launch, when it refused one. */
+  readonly launchError: string | null;
+  /** The containers a Launch again group lists; empty for every other group. */
+  readonly launches: readonly LaunchRowView[];
 }
 
 /** What Home knows about the connection and where the tray stands. */
@@ -95,6 +119,8 @@ export interface HomeState {
   readonly index: number;
   /** A send has been refused since the last `ready`. */
   readonly offline: boolean;
+  /** The host's `Welcome.features` lists `launch_last`. */
+  readonly supportsLaunchLast: boolean;
 }
 
 /** Everything Home draws. */
@@ -180,7 +206,10 @@ export function homeScreen(model: HomeModel, actions: HomeActions, state: HomeSt
   const cards = needsYou(model);
   const at = cardIndex(cards, state.card, state.index);
   const shown = cards[at];
-  const groups = homeGroups(model).map((group) => groupView(group, actions, actionsEnabled));
+  const supportsLaunchLast = state.supportsLaunchLast;
+  const groups = homeGroups(model)
+    .filter((group) => supportsLaunchLast || group.kind !== "launch_again")
+    .map((group) => groupView(group, actions, actionsEnabled, supportsLaunchLast));
   return {
     visible: homeVisible(state.status, state.shown, state.paired),
     bar,
@@ -188,7 +217,8 @@ export function homeScreen(model: HomeModel, actions: HomeActions, state: HomeSt
     index: at,
     card: shown === undefined ? null : cardView(shown, cards, at, actions, actionsEnabled),
     groups,
-    // Before the first list the model is empty too, so only a loaded one says so.
+    // Before the first list the model is empty too, so only a loaded one says
+    // so; a Launch again group the host cannot show is no content either.
     empty: model.loaded && groups.length === 0 && shown === undefined ? NO_SESSIONS : null,
   };
 }
@@ -279,11 +309,50 @@ function cardView(
   };
 }
 
-function groupView(group: HomeGroup, actions: HomeActions, actionsEnabled: boolean): GroupView {
+function groupView(
+  group: HomeGroup,
+  actions: HomeActions,
+  actionsEnabled: boolean,
+  supportsLaunchLast: boolean,
+): GroupView {
   return {
     name: group.name,
     rows: group.rows.map((session) => rowView(session, actions, actionsEnabled)),
+    launch: launchView(group.launch, actions, actionsEnabled, supportsLaunchLast),
+    launchError: group.launch === null ? null : launchErrorFor(actions, group.launch),
+    launches: (group.containers ?? []).map((container) => ({
+      name: container.name,
+      launch: launchView(container.launch, actions, actionsEnabled, supportsLaunchLast),
+      launchError: launchErrorFor(actions, container.launch),
+    })),
   };
+}
+
+/** The Launch last button a container offers; null when the host cannot launch. */
+function launchView(
+  target: ContainerRef | null,
+  actions: HomeActions,
+  actionsEnabled: boolean,
+  supportsLaunchLast: boolean,
+): LaunchView | null {
+  if (target === null || !supportsLaunchLast) {
+    return null;
+  }
+  const pending = isLaunchPending(actions, target);
+  return {
+    target,
+    label: pending ? LAUNCHING : LAUNCH_LAST,
+    enabled: actionsEnabled && !pending,
+  };
+}
+
+function isLaunchPending(actions: HomeActions, target: ContainerRef): boolean {
+  const key = containerKey(target);
+  return actions.launches.some((launch) => containerKey(launch.target) === key);
+}
+
+function launchErrorFor(actions: HomeActions, target: ContainerRef): string | null {
+  return actions.launchErrors.get(containerKey(target)) ?? null;
 }
 
 function rowView(session: SessionSnapshot, actions: HomeActions, actionsEnabled: boolean): RowView {

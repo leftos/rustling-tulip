@@ -46,6 +46,16 @@ The three switches appear once notifications are on, and all start on. The panel
 
 The Home Screen icon carries a badge: the number of sessions that need you. It clears when none does.
 
+## Launch last
+
+A repo or workspace whose last launch on the PC was not headless shows a `Launch last` button at the right of its group header on Home, when the PC's daemon is new enough to offer it. Tap it to start that launch again; the button reads `Launching…` and is disabled until the PC answers, and while the bar says `Reconnecting…`.
+
+A refusal shows the PC's own text in red under the group header. A repo or workspace with a stored launch and no sessions is listed in a `Launch again` group at the end, each row with the same button. The phone stays on Home after a launch.
+
+A launch tapped while the phone is offline is kept and sent again each time the connection comes back, with the same request, so a flaky link starts one session.
+
+A launch that waits a minute with no answer, or comes back after nine minutes, is dropped with `This launch may have started a session. Check the list before launching again.`, since the PC no longer remembers its request by then. A PC too old to launch from the phone drops it with `This host can't launch from the phone.` Closing or reloading the app forgets a launch that was still waiting.
+
 ## When something is off
 
 **The phone asks to pair again.** iOS can evict the app's storage, and the PC refuses a phone it has blocked or forgotten. Settings → Remote access on the PC lists the phone under `Devices`: when it shows `Blocked`, press `Forget`; when it is not listed, there is nothing to forget. Then tap `Ask to pair` and approve again as above.

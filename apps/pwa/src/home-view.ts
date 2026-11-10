@@ -1,7 +1,11 @@
 import {
   answer,
+  expireLaunches,
   foldReply,
+  keepLaunches,
+  launchLast,
   reset as resetActions,
+  resendLaunches,
   resume,
   stop,
   type HomeActions,
@@ -17,12 +21,19 @@ import {
   type GroupView,
   type HomeScreen,
   type HomeState,
+  type LaunchRowView,
+  type LaunchView,
   type RowView,
 } from "./home-screen";
 import type { ConnectedLatch } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
 import { introLineShown } from "./installed";
-import { FEATURE_RESUME_SESSION, type ClientMessage } from "./protocol";
+import {
+  FEATURE_LAUNCH_LAST,
+  FEATURE_RESUME_SESSION,
+  type ClientMessage,
+  type ContainerRef,
+} from "./protocol";
 import type { Connection } from "./socket";
 
 /** The page's intro header, its install line, and whether the page runs from the Home Screen. */
@@ -31,6 +42,9 @@ export interface Intro {
   readonly line: HTMLElement | null;
   readonly installed: boolean;
 }
+
+/** How often Home checks whether an unanswered launch has waited too long. */
+const LAUNCH_EXPIRY_TICK_MS = 5_000;
 
 /**
  * Home over one connection: it folds the notices into the model and the
@@ -56,7 +70,9 @@ export function mountHomeView(
   let cardId: string | null = null;
   let lastIndex = 0;
   let offline = false;
+  let lastSupportsLaunchLast = false;
   let drawn: HomeScreen | null = null;
+  let expiry: ReturnType<typeof setInterval> | null = null;
 
   function newRequestId(): string {
     return crypto.randomUUID();
@@ -68,8 +84,28 @@ export function mountHomeView(
     }
   }
 
+  function syncExpiry(): void {
+    const waiting = actions.launches.length > 0;
+    if (waiting && expiry === null) {
+      expiry = setInterval(expire, LAUNCH_EXPIRY_TICK_MS);
+    } else if (!waiting && expiry !== null) {
+      clearInterval(expiry);
+      expiry = null;
+    }
+  }
+
+  function expire(): void {
+    const next = expireLaunches(actions, Date.now());
+    if (next === actions) {
+      return;
+    }
+    actions = next;
+    update();
+  }
+
   function update(): void {
     onModel(model);
+    syncExpiry();
     const state: HomeState = {
       status,
       paired: connection.paired(),
@@ -77,6 +113,7 @@ export function mountHomeView(
       card: cardId,
       index: lastIndex,
       offline,
+      supportsLaunchLast: lastSupportsLaunchLast,
     };
     const screen = homeScreen(model, actions, state);
     if (screen.visible) {
@@ -187,13 +224,52 @@ export function mountHomeView(
 
   function groupSection(group: GroupView): HTMLElement {
     const section = element("section", "home-group");
+    const header = element("div", "home-group-header");
     const name = element("h2", "home-group-name");
     name.textContent = group.name;
-    section.append(name);
+    header.append(name);
+    if (group.launch !== null) {
+      header.append(launchButton(group.launch));
+    }
+    section.append(header);
+    if (group.launchError !== null) {
+      section.append(errorLine(group.launchError));
+    }
     for (const row of group.rows) {
       section.append(rowPanel(row));
     }
+    for (const launch of group.launches) {
+      section.append(launchRow(launch));
+    }
     return section;
+  }
+
+  function launchButton(launch: LaunchView): HTMLElement {
+    return button("home-group-launch", launch.label, launch.enabled, () => {
+      launchContainer(launch.target);
+    });
+  }
+
+  function launchRow(row: LaunchRowView): HTMLElement {
+    const node = element("div", "home-row");
+    const line = element("div", "home-row-main");
+    const name = element("span", "home-row-label");
+    name.textContent = row.name;
+    line.append(name);
+    if (row.launch !== null) {
+      line.append(launchButton(row.launch));
+    }
+    node.append(line);
+    if (row.launchError !== null) {
+      node.append(errorLine(row.launchError));
+    }
+    return node;
+  }
+
+  function errorLine(text: string): HTMLElement {
+    const error = element("p", "home-row-error");
+    error.textContent = text;
+    return error;
   }
 
   function rowPanel(row: RowView): HTMLElement {
@@ -225,9 +301,7 @@ export function mountHomeView(
     }
     node.append(line);
     if (row.error !== null) {
-      const error = element("p", "home-row-error");
-      error.textContent = row.error;
-      node.append(error);
+      node.append(errorLine(row.error));
     }
     return node;
   }
@@ -238,6 +312,16 @@ export function mountHomeView(
     }
     actions = tappedElsewhere(actions);
     const result = answer(actions, newRequestId, card.sessionId, card.since, choice.choice);
+    actions = result.state;
+    if (result.message !== null) {
+      send(result.message);
+    }
+    update();
+  }
+
+  function launchContainer(target: ContainerRef): void {
+    actions = tappedElsewhere(actions);
+    const result = launchLast(actions, target, newRequestId, Date.now());
     actions = result.state;
     if (result.message !== null) {
       send(result.message);
@@ -316,13 +400,20 @@ export function mountHomeView(
     if (notice.kind === "status") {
       status = notice.state;
       // Every `ready` is a fresh start: the daemon resends its whole state,
-      // so nothing from the old connection is kept.
+      // so nothing from the old connection is kept, save a launch still
+      // waiting for its answer, which is resent with its id.
       if (status === "ready") {
         model = resetModel();
-        actions = resetActions();
+        actions = keepLaunches(actions);
+        lastSupportsLaunchLast = connection.supports(FEATURE_LAUNCH_LAST);
         cardId = null;
         lastIndex = 0;
         offline = false;
+        const resent = resendLaunches(actions, lastSupportsLaunchLast, Date.now());
+        actions = resent.state;
+        for (const message of resent.messages) {
+          send(message);
+        }
       }
       update();
       return;
@@ -342,5 +433,11 @@ export function mountHomeView(
   });
   update();
 
-  return unsubscribe;
+  return () => {
+    unsubscribe();
+    if (expiry !== null) {
+      clearInterval(expiry);
+      expiry = null;
+    }
+  };
 }

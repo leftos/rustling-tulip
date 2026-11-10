@@ -16,6 +16,7 @@ import type {
   PendingInput,
   RepoEntry,
   SessionSnapshot,
+  SpawnConfig,
   WorkspaceEntry,
 } from "./protocol";
 
@@ -27,6 +28,21 @@ const ZULU: RepoEntry = { id: "zz", name: "Zulu", path: "C:\\dev\\zulu", default
 const ZETA: RepoEntry = { id: "z", name: "Zeta", path: "C:\\dev\\zeta", default_branch: null };
 
 const WORKSPACE: WorkspaceEntry = { id: "w", name: "ws-one", member_repo_ids: ["z"] };
+
+/** A stored launch config for `ALPHA`, interactive unless told otherwise. */
+function spawnConfig(mode: SpawnConfig["mode"] = "interactive"): SpawnConfig {
+  return {
+    target: {
+      kind: "single",
+      repo_id: "a",
+      branch_name: "main",
+      base_branch: null,
+      use_worktree: true,
+    },
+    mode,
+    agent: null,
+  };
+}
 
 function session(id: string, overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
   return {
@@ -406,4 +422,40 @@ test("home_other_prompt_with_no_message_says_waiting", () => {
       open: "Open",
     },
   ]);
+});
+
+test("home_a_repo_with_a_stored_launch_offers_it_on_its_group", () => {
+  const launched: RepoEntry = { ...ALPHA, last_spawn_config: spawnConfig() };
+  const model = modelFrom(withRepos(launched), sessions(session("s1")));
+
+  expect(homeGroups(model)[0]?.launch).toEqual({ kind: "repo", id: "a" });
+});
+
+test("home_a_headless_stored_launch_is_not_offered", () => {
+  const headless: RepoEntry = { ...ALPHA, last_spawn_config: spawnConfig("headless") };
+  const model = modelFrom(withRepos(headless), sessions(session("s1")));
+
+  expect(homeGroups(model)[0]?.launch).toBeNull();
+});
+
+test("home_a_container_without_a_stored_launch_offers_none", () => {
+  const model = modelFrom(
+    withRepos(ALPHA),
+    { type: "workspaces", workspaces: [{ ...WORKSPACE, last_spawn_config: spawnConfig() }] },
+    sessions(session("s1", { kind: "workspace", workspace_id: "w", members: [] }), session("s2")),
+  );
+
+  const [workspace, repo] = homeGroups(model);
+  expect(workspace?.launch).toEqual({ kind: "workspace", id: "w" });
+  expect(repo?.launch).toBeNull();
+});
+
+test("home_containers_with_a_launch_and_no_sessions_wait_in_launch_again", () => {
+  const launched: RepoEntry = { ...ALPHA, last_spawn_config: spawnConfig() };
+  const model = modelFrom(withRepos(launched, ZULU), sessions());
+
+  const groups = homeGroups(model);
+  expect(groups.map((group) => group.kind)).toEqual(["launch_again"]);
+  expect(groups[0]?.rows).toEqual([]);
+  expect(groups[0]?.containers).toEqual([{ name: "alpha", launch: { kind: "repo", id: "a" } }]);
 });

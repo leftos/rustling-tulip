@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { answer, NO_ACTIONS, stop, type HomeActions } from "./home-actions";
+import { answer, NO_ACTIONS, launchLast, stop, type HomeActions } from "./home-actions";
 import { reset, type HomeModel } from "./home-model";
 import {
   homeScreen,
@@ -10,7 +10,14 @@ import {
   updatedSession,
   type HomeState,
 } from "./home-screen";
-import type { PendingInput, SessionSnapshot, SessionStatus, StatusLabel } from "./protocol";
+import type {
+  PendingInput,
+  RepoEntry,
+  SessionSnapshot,
+  SessionStatus,
+  SpawnConfig,
+  StatusLabel,
+} from "./protocol";
 
 const SINCE = "2026-11-06T12:00:00Z";
 
@@ -42,6 +49,48 @@ function model(sessions: readonly SessionSnapshot[]): HomeModel {
   return { ...reset(), sessions: [...sessions] };
 }
 
+/** A stored launch config for the repo below. */
+function spawnConfig(): SpawnConfig {
+  return {
+    target: {
+      kind: "single",
+      repo_id: "a",
+      branch_name: "main",
+      base_branch: null,
+      use_worktree: true,
+    },
+    mode: "interactive",
+    agent: null,
+  };
+}
+
+/** A repo that has launched before. */
+const REPO: RepoEntry = {
+  id: "a",
+  name: "alpha",
+  path: "C:\\dev\\alpha",
+  default_branch: null,
+  last_spawn_config: spawnConfig(),
+};
+
+function repoModel(sessions: readonly SessionSnapshot[]): HomeModel {
+  const owned = sessions.map((snapshot) => ({
+    ...snapshot,
+    members:
+      snapshot.members.length > 0
+        ? snapshot.members
+        : [
+            {
+              repo_id: "a",
+              repo_name: "alpha",
+              branch: "main",
+              worktree_path: "C:\\dev\\alpha",
+            },
+          ],
+  }));
+  return { ...model(owned), repos: [REPO] };
+}
+
 /** Home's state at rest: ready, paired, shown, on the first card, online. */
 function view(overrides: Partial<HomeState> = {}): HomeState {
   return {
@@ -51,6 +100,7 @@ function view(overrides: Partial<HomeState> = {}): HomeState {
     card: null,
     index: 0,
     offline: false,
+    supportsLaunchLast: true,
     ...overrides,
   };
 }
@@ -345,4 +395,81 @@ test("an unknown label falls back to the status word", () => {
 
 test("a spawning status without a label reads Starting", () => {
   expect(rowWord(session("s1", { status: "spawning" }))).toBe("Starting");
+});
+
+test("home_screen_shows_the_launch_button_only_on_a_host_that_launches", () => {
+  const running = repoModel([session("s1", { status: "working" })]);
+
+  expect(homeScreen(running, NO_ACTIONS, view()).groups[0]?.launch).toEqual({
+    target: { kind: "repo", id: "a" },
+    label: "Launch last",
+    enabled: true,
+  });
+  expect(
+    homeScreen(running, NO_ACTIONS, view({ supportsLaunchLast: false })).groups[0]?.launch,
+  ).toBeNull();
+});
+
+test("home_screen_shows_a_pending_launch_as_launching", () => {
+  const running = repoModel([session("s1", { status: "working" })]);
+  const pending = launchLast(NO_ACTIONS, { kind: "repo", id: "a" }, () => "req-1", 0).state;
+
+  const launch = homeScreen(running, pending, view()).groups[0]?.launch;
+  expect(launch?.label).toBe("Launching…");
+  expect(launch?.enabled).toBe(false);
+});
+
+test("home_screen_shows_a_launch_refusal_under_the_header", () => {
+  const running = repoModel([session("s1", { status: "working" })]);
+  const refused: HomeActions = {
+    ...NO_ACTIONS,
+    launchErrors: new Map([["repo:a", "alpha has no last launch yet."]]),
+  };
+
+  expect(homeScreen(running, refused, view()).groups[0]?.launchError).toBe(
+    "alpha has no last launch yet.",
+  );
+  expect(homeScreen(running, NO_ACTIONS, view()).groups[0]?.launchError).toBeNull();
+});
+
+test("home_screen_disables_the_launch_button_while_reconnecting", () => {
+  const running = repoModel([session("s1", { status: "working" })]);
+
+  const launch = homeScreen(running, NO_ACTIONS, view({ status: "backoff" })).groups[0]?.launch;
+  expect(launch?.label).toBe("Launch last");
+  expect(launch?.enabled).toBe(false);
+});
+
+test("home_screen_lists_containers_with_a_launch_and_no_sessions", () => {
+  const idle: HomeModel = { ...repoModel([]), loaded: true };
+  const screen = homeScreen(idle, NO_ACTIONS, view());
+
+  const group = screen.groups[0];
+  expect(group?.name).toBe("Launch again");
+  expect(group?.rows).toEqual([]);
+  expect(group?.launches).toEqual([
+    {
+      name: "alpha",
+      launch: { target: { kind: "repo", id: "a" }, label: "Launch last", enabled: true },
+      launchError: null,
+    },
+  ]);
+  expect(screen.empty).toBeNull();
+});
+
+test("home_screen_leaves_out_launch_again_on_a_host_that_cannot_launch", () => {
+  const idle: HomeModel = { ...repoModel([]), loaded: true };
+
+  const screen = homeScreen(idle, NO_ACTIONS, view({ supportsLaunchLast: false }));
+  expect(screen.groups).toEqual([]);
+});
+
+test("home_screen_says_no_sessions_when_only_hidden_launches_would_show", () => {
+  const idle: HomeModel = { ...repoModel([]), loaded: true };
+
+  expect(homeScreen(idle, NO_ACTIONS, view({ supportsLaunchLast: false })).empty).toBe(
+    "No sessions",
+  );
+  // With the feature the group is content, so the line stays away.
+  expect(homeScreen(idle, NO_ACTIONS, view()).empty).toBeNull();
 });

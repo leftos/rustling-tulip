@@ -1,4 +1,10 @@
-import type { ClientMessage, DaemonMessage, PromptChoice, SessionSnapshot } from "./protocol";
+import type {
+  ClientMessage,
+  ContainerRef,
+  DaemonMessage,
+  PromptChoice,
+  SessionSnapshot,
+} from "./protocol";
 
 /** The three things the Home screen sends about a session. */
 export type ActionKind = "answer" | "stop" | "resume";
@@ -18,10 +24,37 @@ export interface PendingRequest {
   readonly discardsOriginal?: boolean;
 }
 
+/** A Launch last on its way: one per container, kept until the daemon answers it. */
+export interface PendingLaunch {
+  readonly requestId: string;
+  readonly target: ContainerRef;
+  /** When the request's first send went out, ms since the epoch: the daemon's journal clock. */
+  readonly sentAt: number;
+  /** When the latest send, the first or a resend, went out: the answer clock. */
+  readonly lastSentAt: number;
+}
+
+/**
+ * How long the daemon's spawn journal remembers a request id. A resend later
+ * than this is a new request and spawns a second session.
+ */
+export const LAUNCH_RESEND_LIMIT_MS = 9 * 60 * 1000;
+
+/**
+ * How long an unanswered launch waits for its echo. The daemon keeps quiet to
+ * a repeat while the first spawn still runs, and that spawn's echo went to
+ * the connection that has since died.
+ */
+export const LAUNCH_ANSWER_LIMIT_MS = 60 * 1000;
+
+/** What a container says when its launch may have started a session anyway. */
+export const LAUNCH_MAYBE_STARTED =
+  "This launch may have started a session. Check the list before launching again.";
+
 /**
  * What the Home screen keeps between taps: the requests on their way, the
- * Stop waiting for its confirming second tap, and the daemon's refusal text
- * per session.
+ * Stop waiting for its confirming second tap, the daemon's refusal text per
+ * session, and the launches the daemon has not answered yet.
  */
 export interface HomeActions {
   readonly pending: readonly PendingRequest[];
@@ -29,10 +62,28 @@ export interface HomeActions {
   readonly armed: string | null;
   /** The daemon's refusal text per session, shown on its row or card. */
   readonly errors: ReadonlyMap<string, string>;
+  /** The launches waiting for the daemon, one per container. */
+  readonly launches: readonly PendingLaunch[];
+  /** The daemon's refusal text per container, keyed by `containerKey`. */
+  readonly launchErrors: ReadonlyMap<string, string>;
 }
 
 /** The state before any tap: what `reset` returns. */
-export const NO_ACTIONS: HomeActions = { pending: [], armed: null, errors: new Map() };
+export const NO_ACTIONS: HomeActions = {
+  pending: [],
+  armed: null,
+  errors: new Map(),
+  launches: [],
+  launchErrors: new Map(),
+};
+
+/** What the phone says when the host no longer lists `launch_last`. */
+export const UNSUPPORTED_LAUNCH = "This host can't launch from the phone.";
+
+/** The key a launch's pending record and its refusal text are filed under. */
+export function containerKey(target: ContainerRef): string {
+  return `${target.kind}:${target.id}`;
+}
 
 /** The state a screen starts from on every `ready`, since no reply is coming. */
 export function reset(): HomeActions {
@@ -173,6 +224,100 @@ export function errorFor(state: HomeActions, sessionId: string): string | null {
 }
 
 /**
+ * Launch the container's stored last spawn config again, or nothing while its
+ * earlier tap still waits for the daemon. The launch is recorded, with `now`
+ * as its first send, before the send, so a tap that reaches no daemon is
+ * resent on the next reconnect.
+ */
+export function launchLast(
+  state: HomeActions,
+  target: ContainerRef,
+  newRequestId: NewRequestId,
+  now: number,
+): ActionResult {
+  const key = containerKey(target);
+  if (state.launches.some((launch) => containerKey(launch.target) === key)) {
+    return { message: null, state };
+  }
+  const requestId = newRequestId();
+  return {
+    message: { type: "launch_last", target, request_id: requestId },
+    state: {
+      ...state,
+      launches: [...state.launches, { requestId, target, sentAt: now, lastSentAt: now }],
+      launchErrors: withoutLaunchError(state.launchErrors, key),
+    },
+  };
+}
+
+/**
+ * The state a screen starts from on every `ready`: the requests on their way
+ * are gone, but a pending launch still waits for an answer and is resent.
+ */
+export function keepLaunches(old: HomeActions): HomeActions {
+  return { ...NO_ACTIONS, launches: old.launches };
+}
+
+/** What a reconnect leaves to send: the pending launches, each with its id. */
+export interface LaunchResend {
+  readonly messages: readonly ClientMessage[];
+  readonly state: HomeActions;
+}
+
+/**
+ * The messages a reconnect sends for the launches still waiting. A host that
+ * launches gets each one again with its earlier id, so the daemon's journal
+ * makes one session: a launch older than the journal is dropped instead,
+ * since a resend would make a second session. An older host gets nothing,
+ * its launches are dropped, and each container shows why.
+ */
+export function resendLaunches(
+  state: HomeActions,
+  supportsLaunchLast: boolean,
+  now: number,
+): LaunchResend {
+  if (state.launches.length === 0) {
+    return { messages: [], state };
+  }
+  const launchErrors = new Map(state.launchErrors);
+  const messages: ClientMessage[] = [];
+  const launches: PendingLaunch[] = [];
+  for (const launch of state.launches) {
+    const key = containerKey(launch.target);
+    if (!supportsLaunchLast) {
+      launchErrors.set(key, UNSUPPORTED_LAUNCH);
+    } else if (now - launch.sentAt >= LAUNCH_RESEND_LIMIT_MS) {
+      launchErrors.set(key, LAUNCH_MAYBE_STARTED);
+    } else {
+      launches.push({ ...launch, lastSentAt: now });
+      messages.push({ type: "launch_last", target: launch.target, request_id: launch.requestId });
+    }
+  }
+  return { messages, state: { ...state, launches, launchErrors } };
+}
+
+/**
+ * Drops the launches whose answer never came, a minute after their latest
+ * send, each container saying it may have started a session anyway. Sends
+ * nothing; returns the state itself when every launch is still waiting.
+ */
+export function expireLaunches(state: HomeActions, now: number): HomeActions {
+  if (state.launches.length === 0) {
+    return state;
+  }
+  const launchErrors = new Map(state.launchErrors);
+  const launches: PendingLaunch[] = [];
+  for (const launch of state.launches) {
+    if (now - launch.lastSentAt >= LAUNCH_ANSWER_LIMIT_MS) {
+      launchErrors.set(containerKey(launch.target), LAUNCH_MAYBE_STARTED);
+    } else {
+      launches.push(launch);
+    }
+  }
+  return launches.length === state.launches.length ? state : { ...state, launches, launchErrors };
+}
+
+/**
  * One daemon message folded into the state. A refusal echoing a pending
  * request (an `Error` or an `ActionFailed`) becomes that session's error
  * text, the daemon's message verbatim, and frees the request so the user can
@@ -196,19 +341,28 @@ export function foldReply(state: HomeActions, message: DaemonMessage): FoldResul
   }
 }
 
-/** A refusal echoing `requestId`: the session's error text and its record freed. */
+/** A refusal echoing `requestId`: the session's or the launch's error text, its record freed. */
 function refuse(state: HomeActions, requestId: string | null, text: string): FoldResult {
   if (requestId === null) {
     return { state, effects: [] };
   }
   const request = findRequest(state, requestId);
-  if (request === undefined) {
+  if (request !== undefined) {
+    const errors = new Map(state.errors);
+    errors.set(request.sessionId, text);
+    return {
+      state: { ...state, pending: withoutRequest(state, requestId), errors },
+      effects: [],
+    };
+  }
+  const launch = findLaunch(state, requestId);
+  if (launch === undefined) {
     return { state, effects: [] };
   }
-  const errors = new Map(state.errors);
-  errors.set(request.sessionId, text);
+  const launchErrors = new Map(state.launchErrors);
+  launchErrors.set(containerKey(launch.target), text);
   return {
-    state: { ...state, pending: withoutRequest(state, requestId), errors },
+    state: { ...state, launches: withoutLaunch(state, requestId), launchErrors },
     effects: [],
   };
 }
@@ -221,7 +375,8 @@ function onSessionUpdated(
 ): FoldResult {
   const landed = requestId === null ? undefined : findRequest(state, requestId);
   const done = requestId === null ? state : forgetRequest(state, requestId);
-  const idle = forgetSessionRequests(done, session.id);
+  const settled = requestId === null ? done : forgetLaunch(done, requestId);
+  const idle = forgetSessionRequests(settled, session.id);
   const discardOriginal =
     landed?.action === "resume" && landed.discardsOriginal === true
       ? [{ type: "discard_session" as const, session_id: landed.sessionId, cleanup: [] }]
@@ -251,6 +406,31 @@ function withoutRequest(state: HomeActions, requestId: string): readonly Pending
 function forgetRequest(state: HomeActions, requestId: string): HomeActions {
   const pending = withoutRequest(state, requestId);
   return pending.length === state.pending.length ? state : { ...state, pending };
+}
+
+function findLaunch(state: HomeActions, requestId: string): PendingLaunch | undefined {
+  return state.launches.find((launch) => launch.requestId === requestId);
+}
+
+function withoutLaunch(state: HomeActions, requestId: string): readonly PendingLaunch[] {
+  return state.launches.filter((launch) => launch.requestId !== requestId);
+}
+
+function forgetLaunch(state: HomeActions, requestId: string): HomeActions {
+  const launches = withoutLaunch(state, requestId);
+  return launches.length === state.launches.length ? state : { ...state, launches };
+}
+
+function withoutLaunchError(
+  errors: ReadonlyMap<string, string>,
+  key: string,
+): ReadonlyMap<string, string> {
+  if (!errors.has(key)) {
+    return errors;
+  }
+  const next = new Map(errors);
+  next.delete(key);
+  return next;
 }
 
 /** Drops the session's waits that no reply can end: answers and abandoned resumes. */

@@ -199,7 +199,8 @@ p {
 .home-card-previous,
 .home-card-next,
 .home-row-stop,
-.home-row-resume {
+.home-row-resume,
+.home-group-launch {
   min-height: 44px;
   box-sizing: border-box;
   border: 1px solid #45475a;
@@ -223,7 +224,8 @@ p {
 .home-choice:disabled,
 .home-row-label:disabled,
 .home-row-stop:disabled,
-.home-row-resume:disabled {
+.home-row-resume:disabled,
+.home-group-launch:disabled {
   opacity: 0.5;
 }
 
@@ -249,6 +251,18 @@ p {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.home-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+}
+
+.home-group-header .home-group-name {
+  flex: 1;
+  margin: 0;
 }
 
 .home-row {
