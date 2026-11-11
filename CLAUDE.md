@@ -37,7 +37,7 @@ docs/architecture.md    components, what the product does, and a task index: whi
 docs/native-client.md   the native client's settled design decisions
 docs/auto-update.md     how the native client finds, verifies and installs a published release
 docs/env-secrets.md     how secret env rows are sealed into Credential Manager, and what is and isn't protected
-docs/plans/MAIN.md      the plan snapshot, generated from Linear team RT: every open item by wave, in working order
+docs/plans/MAIN.md      the plan snapshot, generated from Linear team RT: every open item by project, in working order
 docs/plans/*.md         design files: designs and rulings for open items, linked from their Linear issues
 ```
 
@@ -187,7 +187,7 @@ Rust edition 2024 on the `stable` channel (`rust-toolchain.toml` pins the channe
 
 ## Plan files
 
-Every task is a Linear issue in team RT, grouped into one project per wave; the rules are in `~/.claude/docs/plan-operations.md`, and this repo's project order is in the `rustling-tulip-nextup` profile. `docs/plans/MAIN.md` is a generated snapshot of it: never edit it by hand; change Linear and regenerate it.
+Every task is a Linear issue in team RT, grouped into one project per subsystem or outcome; the rules are in `~/.claude/docs/plan-operations.md`, and this repo's project order is in the `rustling-tulip-nextup` profile. `docs/plans/MAIN.md` is a generated snapshot of it: never edit it by hand; change Linear and regenerate it.
 
 A task, idea or steer that comes up mid-task gets an **add** first. New designs go in `docs/plans/*.md` with `- [ ]` checklists for their steps and are linked from their issue's description or their project's content.
 
@@ -197,4 +197,4 @@ Once nothing open links a design file, its durable decisions are promoted into `
 
 Don't go looking for these — they're explicitly out of scope until their plan item comes up:
 
-- **Sub-agent / Task-tool interception**, **attach from outside the tailnet** by internet exposure or a relay, **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine over the network, and clients over OpenSSH are being built (`docs/plans/ssh-remote.md`; `docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`). Viewing a subagent's transcript read-only is planned (Wave 10, "Subagent streams"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.
+- **Sub-agent / Task-tool interception**, **attach from outside the tailnet** by internet exposure or a relay, **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine over the network, and clients over OpenSSH are being built (`docs/plans/ssh-remote.md`; `docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`). Viewing a subagent's transcript read-only is planned (project "Agents and subagents"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.

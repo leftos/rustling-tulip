@@ -20,7 +20,7 @@ The start page for working on rustling-tulip: a native Windows desktop client (G
 - [remote-hand-checklist.md](remote-hand-checklist.md): the by-hand checks of remote access over a real tailnet, run before a release that touches it.
 - [phone-app.md](phone-app.md): putting the phone app on an iPhone and pairing it with a PC, its notification switches, and what to check when it misbehaves.
 - [ux-audit.md](ux-audit.md): the UX audit of the retired Tauri app, kept for its findings (its paths resolve on the `tauri` branch).
-- [plans/MAIN.md](plans/MAIN.md): the plan snapshot, generated from Linear team RT (open work by wave); the `plans/` folder holds the design files open items link.
+- [plans/MAIN.md](plans/MAIN.md): the plan snapshot, generated from Linear team RT (open work by plan project); the `plans/` folder holds the design files open items link.
 - [research/](research/): research notes on outside tools and docs.
 - [spikes/](spikes/): write-ups of throwaway experiments.
 
@@ -58,7 +58,7 @@ docs/
   architecture.md - components, what the product does, task index
   native-client.md - the native client's design decisions
   images/       - the screenshots the root README shows
-  plans/MAIN.md - the plan snapshot, generated from Linear: open work in waves
+  plans/MAIN.md - the plan snapshot, generated from Linear: open work by plan project
   plans/        - design files for open items (archive/ holds older finished designs)
 ```
 
@@ -185,7 +185,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **ES.1, ES.9**: step ids of the finished secrets-in-env-rows design (ES sealing steps), named in commit messages; its decisions are in `docs/env-secrets.md`.
 - **Fan-out**: an agent splitting a task into independent parts, each run by a worker in its own worktree.
 - **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
-- **Feature marker**: `branch: feat/<name>` in a wave's Linear project content; every item in that project lands on the `feat/<name>` branch instead of `main` (user-level `nextup` §3, "Feature branches").
+- **Feature marker**: `branch: feat/<name>` in a plan project's content; every item in that project lands on the `feat/<name>` branch instead of `main` (user-level `nextup` §3, "Feature branches").
 - **Feature PR**: the draft pull request from a marker's `feat/<name>` into `main`, opened with the first item under the marker and merged with `--rebase` by `/ship` once every item under the marker has landed.
 - **Fetched copy**: the file a remote-host fetch saved under the download root, which opens in the viewer or an external app in place of the host's file. See `docs/native-client.md` ("Fetched files").
 - **Final look**: the last discovery pass for a session still without a conversation id, run inline in `history::record_session_end` before the history entry is built, so an id found late reaches the entry.
@@ -290,7 +290,8 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Pick mode**: the theme editor's toggle that makes a click on a part of its preview jump the token list to that part's token (`PICK_REGIONS` in `apps/native/src/themes_view.rs`).
 - **Pinned question**: the summary view's open prompt shown as a card on top, answered from the same card as in the chat.
 - **Pinned run**: a gate run sent to one named builder alone (`--builder <host>`), never another builder and never this PC; it must match one of the repo's routed patterns. `rt.ps1 mac` pins every run to the Mac mini builder.
-- **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by wave in working order; never edited by hand.
+- **Plan project**: a Linear project of team RT holding the plan items of one subsystem or outcome, which share owning files, so one implementer reads those files once and one review covers them; its content names its scope and owning files.
+- **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by plan project in working order; never edited by hand.
 - **Poller**: the task that runs a waiting session's discovery passes, every 2 s for 5 minutes, every 10 s up to an hour, then every minute while the session runs (`crates/daemon/src/conversations/discovery.rs`).
 - **Pop-out**: a second window of the native client showing a pane, a tab (a grid or a diff) or a session that has no pane; it is a window of the same process and view, and closing it docks it back; see `docs/native-client.md` ("Windows and pop-outs").
 - **Popped card**: the card a popped pane (in its grid slot) or an active popped tab leaves in the main window, with the label, Focus window and Dock back; it is not a terminal and holds no keyboard.
@@ -418,7 +419,6 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Waiting devices**: the owner's list of tailnet devices whose pairing request awaits approval, in Settings → Remote access; its model is `apps/native/src/pairing.rs` and its views are in `apps/native/src/pairing_view.rs`.
 - **Waiting gate**: a gate process queued for a slot of a pool (`GateWaiting`), listed under that pool in the Gates view with its folder, command and time waited.
 - **Warm-up gate**: auto-switch making no decision until every usable account has been polled since it started.
-- **Wave**: a release-sized bundle of plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave is a Linear project whose content names its files, review and verification.
 - **What's new window**: the modal titled "What's new in {version}" showing the changelog of every release after the start version up to the new one, opened from the ready update's button or the installed toast (`apps/native/src/whats_new_view.rs`, `docs/auto-update.md`).
 - **WNF**: Windows Notification Facility, the undocumented state-publish channel the shell uses; the client reads its quiet-hours state (`WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED`) to see Windows 11 Do Not Disturb.
 - **Work area**: the part of a Windows monitor the taskbar leaves free (`rcWork`), where the app's toast stack sits; macOS's counterpart is the visible frame (`docs/native-client.md` "The app's own toasts").
