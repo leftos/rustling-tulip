@@ -679,9 +679,10 @@ impl RootView {
         let popped = self
             .is_tab_popped(&tab.id)
             .then(|| popped_mark(&tab.id, &t));
-        let host = self
-            .tab_host(tab)
-            .map(|host| host_chip(fonts::ui_text_size(cx), &tab.id, host, &t));
+        let host = self.tab_host(tab).map(|host| {
+            let name = format!("tab-host-{}", tab.id);
+            host_chip(fonts::ui_text_size(cx), name, host, &t)
+        });
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .driver_id(|| name)
@@ -1368,10 +1369,10 @@ fn count_badge(offset: i8, tab_id: &str, badge: TabBadge, t: &UiTheme) -> Statef
         .child(pill.text)
 }
 
-/// The remote host's short name after a tab's name, tagged
-/// `tab-host-<id>`; its full name on hover.
-fn host_chip(offset: i8, tab_id: &str, host: HostLabel, t: &UiTheme) -> Stateful<Div> {
-    let name = format!("tab-host-{tab_id}");
+/// The remote host's short name, tagged `name` (`tab-host-<id>` after a
+/// tab's name, `sidebar-host-<host short>-<session id>` on a Tabs-view
+/// leaf); its full name on hover.
+pub(crate) fn host_chip(offset: i8, name: String, host: HostLabel, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .driver_id(|| name)

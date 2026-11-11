@@ -503,7 +503,7 @@ pub fn sidebar_reorder(
             DragPayload::Leaf {
                 session_id,
                 container_id,
-                ..
+                host,
             },
             SidebarRow::Leaf {
                 container_key,
@@ -511,10 +511,20 @@ pub fn sidebar_reorder(
             },
         ) => {
             let container = containers.iter().find(|c| &c.key == container_key)?;
-            if &container.id != container_id || !leaf_reorders(container.kind) {
+            if &container.id != container_id
+                || !leaf_reorders(container.kind)
+                || *host != container.host
+            {
                 return None;
             }
-            let ids: Vec<String> = container.leaves.iter().map(|l| l.id.clone()).collect();
+            // The order goes to the container's host, so it names only that
+            // host's leaves: a tab's remote leaves keep their place.
+            let ids: Vec<String> = container
+                .leaves
+                .iter()
+                .filter(|l| l.host == container.host)
+                .map(|l| l.id.clone())
+                .collect();
             reorder_sessions(&ids, container_id, session_id, target, side)
         }
         _ => None,
@@ -2527,6 +2537,56 @@ mod tests {
         assert!(
             sidebar_reorder(&t2, &repos_view(), &header("repo:r1"), Side::Before).is_none(),
             "a tab drags onto tab containers only"
+        );
+    }
+
+    #[test]
+    fn a_tab_reorder_sends_only_this_pcs_leaf_ids() {
+        use crate::sidebar::tests::session;
+        use protocol::DaemonMessage;
+        let mut model = crate::sidebar::SidebarModel::default();
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![session("a"), session("c")],
+            },
+        );
+        let remote = HostKey::Remote("box".to_owned());
+        model.apply(
+            &remote,
+            &DaemonMessage::Sessions {
+                sessions: vec![session("b")],
+            },
+        );
+        let tabs = model.tab_containers(&[tab(
+            "t1",
+            &split(
+                H,
+                0.5,
+                pane("p1", Some("a")),
+                split(
+                    H,
+                    0.5,
+                    crate::tabs::tests::pane_on("p2", Some("b"), "box"),
+                    pane("p3", Some("c")),
+                ),
+            ),
+        )]);
+        let message = sidebar_reorder(
+            &leaf_drag("c", "t1"),
+            &tabs,
+            &leaf_row("tab:t1", "a"),
+            Side::Before,
+        )
+        .expect("a reorder");
+        assert_eq!(
+            wire(&message),
+            json!({
+                "type": "reorder_sessions",
+                "container_id": "t1",
+                "ordered_ids": ["c", "a"],
+            }),
+            "the remote b stays out of This PC's order"
         );
     }
 

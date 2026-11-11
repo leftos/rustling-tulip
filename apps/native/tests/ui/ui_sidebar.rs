@@ -566,6 +566,30 @@ fn view_toggle_switches_to_tabs_and_saves(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tabs_view_lists_a_remote_session_with_its_host_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::mixed_tabs(cx, &dir);
+    let remote_leaf = format!("leaf-{}::b1", support::REMOTE);
+    assert!(
+        !drawn(&mut h, "sidebar-host-box-b1"),
+        "the Repos view draws no leaf chip"
+    );
+
+    h.click_on("sidebar-view-tabs");
+    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Tabs);
+    assert!(drawn(&mut h, &remote_leaf), "t1 lists box's b1");
+    assert!(
+        drawn(&mut h, "sidebar-host-box-b1"),
+        "b1's leaf names its host"
+    );
+    assert!(drawn(&mut h, "leaf-a1"), "t1 lists This PC's a1 too");
+    assert!(
+        !drawn(&mut h, "sidebar-host-box-a1"),
+        "This PC's leaf carries no chip"
+    );
+}
+
+#[gpui::test]
 fn saved_tabs_view_is_restored_on_launch(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     std::fs::write(

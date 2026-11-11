@@ -18,7 +18,7 @@ use crate::driver_id::DriverId as _;
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{self, DEFAULT_FAMILY};
 use crate::fonts::{ui_px, ui_px_at};
-use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
+use crate::grid_view::{ADD_REPO_TIP, HostLabel, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
 use crate::palette::ROW_GAP;
 use crate::preset_launch::LaunchHighlight;
@@ -37,6 +37,7 @@ use crate::sidebar::{
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view, marker_mode};
+use crate::tab_bar::host_chip;
 use crate::tabs::{SessionRef, TabPill};
 use crate::target::HostKey;
 use crate::target::Target;
@@ -308,10 +309,14 @@ impl RootView {
                     .unwrap_or_else(|| window.is_window_hovered()),
             ),
             detached_stop_all: self.detached_stop_all.armed(),
-            hosts: containers
+            host_chips: containers
                 .iter()
-                .chain(groups.iter().flat_map(|group| group.containers.iter()))
-                .map(|container| (container.key.clone(), container.host.clone()))
+                .filter(|container| container.kind == ContainerKind::Tab)
+                .flat_map(|container| &container.leaves)
+                .filter_map(|leaf| {
+                    let label = self.host_chip_label(&leaf.host)?;
+                    Some((leaf.host.clone(), label))
+                })
                 .collect(),
             dimmed: self.dimmed_rows(containers),
             highlighted: &self.launched_highlight,
@@ -1486,7 +1491,9 @@ fn leaf_drag_row(
         container_key: container.key.clone(),
         session_id: leaf.id.clone(),
     };
-    let session = SessionRef::new(ctx.host_of(&container.key), leaf.id.clone());
+    // The leaf's own host: a tab's leaves span hosts, so its container's
+    // host does not name theirs.
+    let session = SessionRef::new(leaf.host.clone(), leaf.id.clone());
     // An offline host's leaf is as inert as its other dimmed rows: like an
     // SH or DIR header it neither drags nor takes a drop, so no drag starts
     // and no drop mark shows while the host is away.
@@ -2042,9 +2049,9 @@ struct LeafRows<'a> {
     hovered_row: Option<&'a str>,
     /// The Detached banner's Stop all is armed.
     detached_stop_all: bool,
-    /// Each listed container's host, by the container's key: the host
-    /// that lists the sessions of its leaves.
-    hosts: HashMap<String, HostKey>,
+    /// The chip label of each remote host a tab container's leaf is on;
+    /// empty in the Repos view, whose host headers name the host.
+    host_chips: HashMap<HostKey, HostLabel>,
     /// The rows whose host is a remote host that is not open.
     dimmed: DimmedRows<'a>,
     /// The sessions Select launched marked.
@@ -2056,13 +2063,6 @@ struct LeafRows<'a> {
 }
 
 impl LeafRows<'_> {
-    /// The host of the container keyed `key`; This PC for a key the render
-    /// did not list, as [`RootView::host_of_container`] places a key it
-    /// cannot place.
-    fn host_of(&self, key: &str) -> HostKey {
-        self.hosts.get(key).cloned().unwrap_or(HostKey::Local)
-    }
-
     /// The side of `row` the insertion line stands at, when it is there.
     fn mark_at(&self, row: &SidebarRow) -> Option<Side> {
         self.drop_mark
@@ -2735,6 +2735,12 @@ fn leaf_row(
     let ground = leaf_ground(selected, ctx.highlighted.contains(id), &t);
     let key = leaf_key(host, id);
     let row = leaf_frame(leaf, host, &key, ground, accent, ctx.density, cx);
+    // A Tabs-view leaf of a remote host names it, at the end of its name
+    // row before the inline buttons.
+    let host_tag = ctx.host_chips.get(host).map(|label| {
+        let name = format!("sidebar-host-{}-{id}", label.short);
+        host_chip(crate::fonts::ui_text_size(cx), name, label.clone(), &t)
+    });
     match ctx.density {
         LeafDensity::Compact => {
             let pill = ctx.pill(host, id).map(|pill| PillChip {
@@ -2754,6 +2760,7 @@ fn leaf_row(
                     &key,
                     &theme(cx),
                 ))
+                .children(host_tag)
                 .children(inline_buttons(leaf, host, &key, cx))
                 .children(chips)
         }
@@ -2769,6 +2776,7 @@ fn leaf_row(
                     &key,
                     &theme(cx),
                 ))
+                .children(host_tag)
                 .children(inline_buttons(leaf, host, &key, cx));
             let lower = comfortable_lower(leaf, host, &key, ctx, window, cx);
             row.flex_col().py(px(6.0)).child(label_line).children(lower)
@@ -3248,6 +3256,7 @@ mod tests {
     fn leaf(chip: Option<&str>) -> Leaf {
         Leaf {
             id: "s1".to_owned(),
+            host: HostKey::Local,
             status: SessionStatus::Idle,
             mode: SessionMode::Interactive,
             agent: Some(AgentId("claude".to_owned())),

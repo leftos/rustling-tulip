@@ -175,6 +175,9 @@ pub enum RepoSort {
 )]
 pub struct Leaf {
     pub id: String,
+    /// The host that lists the session: a Repos-view leaf's container's,
+    /// a tab's leaf the host of the pane that shows it.
+    pub host: HostKey,
     pub status: SessionStatus,
     pub mode: SessionMode,
     /// The agent driving the session; `None` for a plain shell.
@@ -1993,6 +1996,9 @@ impl SidebarModel {
                 container.key = host_container_key(host, &container.key);
                 container.collapsed = collapsed.contains(&container.key);
                 container.host = host.clone();
+                for leaf in &mut container.leaves {
+                    leaf.host = host.clone();
+                }
             }
         }
         built
@@ -2069,18 +2075,24 @@ impl SidebarModel {
     }
 
     /// The tabs view's containers for `tabs`, This PC's layout, in the
-    /// daemon's tab order.
+    /// daemon's tab order, each pane's session read from its own host.
     pub fn tab_containers(&self, tabs: &[TabEntry]) -> Vec<Container> {
-        let local = &self.local;
+        let hosts: Vec<TabHost<'_>> = self
+            .slices()
+            .map(|(host, slice)| TabHost {
+                host,
+                sessions: &slice.sessions,
+                label_agents: slice.label_agents(),
+                rollups: TabRollups {
+                    session_order: &slice.session_order,
+                    attention: &slice.attention,
+                    unseen: &slice.unseen,
+                },
+            })
+            .collect();
         build_tab_containers(
             &self.shown_tabs(tabs),
-            &local.sessions,
-            local.label_agents(),
-            &TabRollups {
-                session_order: &local.session_order,
-                attention: &local.attention,
-                unseen: &local.unseen,
-            },
+            &hosts,
             &self.ui.collapsed_containers,
         )
     }
@@ -3195,6 +3207,9 @@ fn leaf(
     let up = agent_up(s, runtime.as_deref(), label_agents).is_some();
     Leaf {
         id: s.id.clone(),
+        // This PC's, as a built container's; a remote host's caller sets
+        // its own.
+        host: HostKey::Local,
         status: s.status,
         mode: s.mode,
         agent: s.agent.clone(),
@@ -3342,44 +3357,47 @@ pub struct TabRollups<'a> {
     pub unseen: &'a HashSet<String>,
 }
 
+/// One host's part of the tabs view: the sessions it lists, the agents its
+/// labels read, and its rollups. Only This PC's `session_order` applies, as
+/// the tabs are This PC's layout.
+#[derive(Clone, Copy)]
+pub struct TabHost<'a> {
+    pub host: &'a HostKey,
+    pub sessions: &'a [SessionSnapshot],
+    pub label_agents: &'a [AgentDescriptor],
+    pub rollups: TabRollups<'a>,
+}
+
+impl TabHost<'_> {
+    /// Session `s`'s tabs-view leaf, marked by this host's sets.
+    fn leaf(&self, s: &SessionSnapshot) -> Leaf {
+        let TabRollups {
+            attention, unseen, ..
+        } = self.rollups;
+        Leaf {
+            host: self.host.clone(),
+            ..leaf(s, attention, unseen, true, self.label_agents)
+        }
+    }
+}
+
 /// The tabs view: one container per tab in the daemon's order, holding the
-/// listed sessions its panes show, each once, in the tab's manual order from
-/// `session_order` and then pane order (a diff tab's is empty); then
-/// Unbound, the sessions no pane shows sorted by label, when there are any.
+/// listed sessions its panes show, each once per host, This PC's in the
+/// tab's manual order from This PC's `session_order` and then pane order,
+/// then the other hosts' in pane order (a diff tab's is empty); then
+/// Unbound, This PC's sessions no pane shows sorted by label, when there
+/// are any. `hosts` holds every host's part, each pane's session looked up
+/// in its own host's.
 pub fn build_tab_containers(
     tabs: &[TabEntry],
-    sessions: &[SessionSnapshot],
-    label_agents: &[AgentDescriptor],
-    rollups: &TabRollups<'_>,
+    hosts: &[TabHost<'_>],
     collapsed: &BTreeSet<String>,
 ) -> Vec<Container> {
-    let TabRollups {
-        session_order,
-        attention,
-        unseen,
-    } = *rollups;
-    let by_id: HashMap<&str, &SessionSnapshot> =
-        sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+    let local = hosts.iter().find(|h| *h.host == HostKey::Local);
     let mut shown: HashSet<&str> = HashSet::new();
     let mut out = Vec::new();
     for tab in tabs {
-        let mut seen: HashSet<&str> = HashSet::new();
-        let in_pane_order: Vec<&SessionSnapshot> = tab
-            .grid()
-            .map(collect_panes)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|pane| pane.session)
-            .filter(|id| seen.insert(id))
-            .filter_map(|id| by_id.get(id).copied())
-            .collect();
-        let leaves: Vec<Leaf> = apply_session_order(in_pane_order, session_order.get(&tab.id))
-            .into_iter()
-            .map(|s| {
-                shown.insert(s.id.as_str());
-                leaf(s, attention, unseen, true, label_agents)
-            })
-            .collect();
+        let leaves = tab_leaves(tab, hosts, &mut shown);
         out.push(tab_view_container(
             ContainerKind::Tab,
             &tab.id,
@@ -3388,16 +3406,17 @@ pub fn build_tab_containers(
             collapsed,
         ));
     }
-    let mut unbound: Vec<&SessionSnapshot> = sessions
+    let Some(local) = local else {
+        return out;
+    };
+    let mut unbound: Vec<&SessionSnapshot> = local
+        .sessions
         .iter()
         .filter(|s| !shown.contains(s.id.as_str()))
         .collect();
     if !unbound.is_empty() {
         unbound.sort_by(|a, b| cmp_ci(&a.label, &b.label));
-        let leaves = unbound
-            .into_iter()
-            .map(|s| leaf(s, attention, unseen, true, label_agents))
-            .collect();
+        let leaves = unbound.into_iter().map(|s| local.leaf(s)).collect();
         out.push(tab_view_container(
             ContainerKind::Unbound,
             "",
@@ -3407,6 +3426,51 @@ pub fn build_tab_containers(
         ));
     }
     out
+}
+
+/// `tab`'s leaves: each session its panes show, once per host and id, This
+/// PC's in its manual order then the other hosts' in pane order. This PC's
+/// ids join `shown`.
+fn tab_leaves<'a>(
+    tab: &TabEntry,
+    hosts: &[TabHost<'a>],
+    shown: &mut HashSet<&'a str>,
+) -> Vec<Leaf> {
+    let mut seen: HashSet<SessionRef> = HashSet::new();
+    let mut local: Vec<&'a SessionSnapshot> = Vec::new();
+    let mut remote: Vec<Leaf> = Vec::new();
+    for pane in tab.grid().map(collect_panes).unwrap_or_default() {
+        let Some(id) = pane.session else {
+            continue;
+        };
+        let Some(host) = hosts.iter().find(|h| *h.host == pane.host) else {
+            continue;
+        };
+        let Some(s) = host.sessions.iter().find(|s| s.id == id) else {
+            continue;
+        };
+        if !seen.insert(SessionRef::new(pane.host.clone(), id)) {
+            continue;
+        }
+        if pane.host == HostKey::Local {
+            local.push(s);
+        } else {
+            remote.push(host.leaf(s));
+        }
+    }
+    let Some(this_pc) = hosts.iter().find(|h| *h.host == HostKey::Local) else {
+        return remote;
+    };
+    let order = this_pc.rollups.session_order.get(&tab.id);
+    let mut leaves: Vec<Leaf> = apply_session_order(local, order)
+        .into_iter()
+        .map(|s| {
+            shown.insert(s.id.as_str());
+            this_pc.leaf(s)
+        })
+        .collect();
+    leaves.extend(remote);
+    leaves
 }
 
 fn tab_view_container(
@@ -4640,13 +4704,16 @@ pub(crate) mod tests {
         let tabs = [tab("t1", &pane("p1", Some("s1")))];
         let tab_tree = build_tab_containers(
             &tabs,
-            &[session("s1")],
-            &[],
-            &TabRollups {
-                session_order: &HashMap::new(),
-                attention: &HashSet::new(),
-                unseen: &HashSet::new(),
-            },
+            &[TabHost {
+                host: &HostKey::Local,
+                sessions: &[session("s1")],
+                label_agents: &[],
+                rollups: TabRollups {
+                    session_order: &HashMap::new(),
+                    attention: &HashSet::new(),
+                    unseen: &HashSet::new(),
+                },
+            }],
             &BTreeSet::new(),
         );
         let tab_container = tab_tree.first().expect("TAB");
@@ -5314,13 +5381,16 @@ pub(crate) mod tests {
         let attention: HashSet<String> = ["s1".to_owned()].into();
         let tree = build_tab_containers(
             &tabs,
-            &[excluded],
-            &[],
-            &TabRollups {
-                session_order: &HashMap::new(),
-                attention: &attention,
-                unseen: &HashSet::new(),
-            },
+            &[TabHost {
+                host: &HostKey::Local,
+                sessions: &[excluded],
+                label_agents: &[],
+                rollups: TabRollups {
+                    session_order: &HashMap::new(),
+                    attention: &attention,
+                    unseen: &HashSet::new(),
+                },
+            }],
             &BTreeSet::new(),
         );
         assert!(
@@ -8394,13 +8464,16 @@ pub(crate) mod tests {
     fn tab_view(tabs: &[TabEntry], sessions: &[SessionSnapshot]) -> Vec<Container> {
         build_tab_containers(
             tabs,
-            sessions,
-            &[],
-            &TabRollups {
-                session_order: &HashMap::new(),
-                attention: &HashSet::new(),
-                unseen: &HashSet::new(),
-            },
+            &[TabHost {
+                host: &HostKey::Local,
+                sessions,
+                label_agents: &[],
+                rollups: TabRollups {
+                    session_order: &HashMap::new(),
+                    attention: &HashSet::new(),
+                    unseen: &HashSet::new(),
+                },
+            }],
             &BTreeSet::new(),
         )
     }
@@ -8596,13 +8669,16 @@ pub(crate) mod tests {
         let attention: HashSet<String> = ["s1".to_owned()].into();
         let tree = build_tab_containers(
             &tabs,
-            &[session("s1"), session("s2")],
-            &[],
-            &TabRollups {
-                session_order: &HashMap::new(),
-                attention: &attention,
-                unseen: &HashSet::new(),
-            },
+            &[TabHost {
+                host: &HostKey::Local,
+                sessions: &[session("s1"), session("s2")],
+                label_agents: &[],
+                rollups: TabRollups {
+                    session_order: &HashMap::new(),
+                    attention: &attention,
+                    unseen: &HashSet::new(),
+                },
+            }],
             &BTreeSet::new(),
         );
         let marks: Vec<(bool, bool)> = tree
@@ -9275,6 +9351,132 @@ pub(crate) mod tests {
             leaf_ids(&model.tab_containers(&tabs), "tab:t1"),
             ["a", "b"],
             "the daemon's order applies by tab id"
+        );
+    }
+
+    /// This PC listing `local` and [`BOX`] listing `remote`.
+    fn two_host_model(local: &[&str], remote: &[&str]) -> SidebarModel {
+        let mut model = SidebarModel::default();
+        model.apply(&HostKey::Local, &sessions_msg(local));
+        model.apply(&remote_host(BOX), &sessions_msg(remote));
+        model
+    }
+
+    /// Each leaf of container `key` as its session id and host.
+    fn leaf_hosts(containers: &[Container], key: &str) -> Vec<(String, HostKey)> {
+        containers
+            .iter()
+            .find(|c| c.key == key)
+            .map(|c| {
+                c.leaves
+                    .iter()
+                    .map(|l| (l.id.clone(), l.host.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn tab_view_lists_a_remote_panes_session_with_its_host() {
+        let model = two_host_model(&["a"], &["b"]);
+        let t1 = tab(
+            "t1",
+            &split2(
+                pane("p1", Some("a")),
+                crate::tabs::tests::pane_on("p2", Some("b"), BOX),
+            ),
+        );
+        let tree = model.tab_containers(&[t1]);
+        assert_eq!(
+            leaf_hosts(&tree, "tab:t1"),
+            [
+                ("a".to_owned(), HostKey::Local),
+                ("b".to_owned(), remote_host(BOX))
+            ]
+        );
+    }
+
+    #[test]
+    fn tab_view_keeps_two_hosts_sessions_with_one_id() {
+        let model = two_host_model(&["a"], &["a"]);
+        let t1 = tab(
+            "t1",
+            &split2(
+                pane("p1", Some("a")),
+                crate::tabs::tests::pane_on("p2", Some("a"), BOX),
+            ),
+        );
+        let tree = model.tab_containers(&[t1]);
+        assert_eq!(
+            leaf_hosts(&tree, "tab:t1"),
+            [
+                ("a".to_owned(), HostKey::Local),
+                ("a".to_owned(), remote_host(BOX))
+            ],
+            "one leaf per host"
+        );
+    }
+
+    #[test]
+    fn tab_container_rolls_up_a_remote_sessions_attention() {
+        let mut model = two_host_model(&["a"], &["b"]);
+        model.apply(
+            &remote_host(BOX),
+            &DaemonMessage::Attention {
+                session_id: "b".to_owned(),
+                reason: AttentionReason::AwaitingInput,
+            },
+        );
+        let t1 = tab(
+            "t1",
+            &split2(
+                pane("p1", Some("a")),
+                crate::tabs::tests::pane_on("p2", Some("b"), BOX),
+            ),
+        );
+        let tree = model.tab_containers(&[t1]);
+        let t1 = tree.iter().find(|c| c.key == "tab:t1").expect("tab:t1");
+        assert!(t1.attention, "the remote b's attention marks its tab");
+    }
+
+    #[test]
+    fn tab_order_orders_local_leaves_and_puts_remote_ones_after() {
+        let mut model = two_host_model(&["a", "c"], &["b"]);
+        model.reorder_sessions_local(&HostKey::Local, "t1", &["c".to_owned(), "a".to_owned()]);
+        let t1 = tab(
+            "t1",
+            &split2(
+                crate::tabs::tests::pane_on("p1", Some("b"), BOX),
+                split2(pane("p2", Some("a")), pane("p3", Some("c"))),
+            ),
+        );
+        assert_eq!(
+            leaf_hosts(&model.tab_containers(&[t1]), "tab:t1"),
+            [
+                ("c".to_owned(), HostKey::Local),
+                ("a".to_owned(), HostKey::Local),
+                ("b".to_owned(), remote_host(BOX))
+            ]
+        );
+    }
+
+    #[test]
+    fn unbound_keeps_only_this_pcs_sessions() {
+        let model = two_host_model(&["a", "u"], &["b", "r"]);
+        let t1 = tab(
+            "t1",
+            &split2(
+                pane("p1", Some("a")),
+                crate::tabs::tests::pane_on("p2", Some("b"), BOX),
+            ),
+        );
+        let tree = model.tab_containers(&[t1]);
+        assert_eq!(leaf_ids(&tree, "unbound"), ["u"]);
+        assert!(
+            tree.iter()
+                .flat_map(|c| &c.leaves)
+                .all(|l| !(l.id == "r" && l.host == remote_host(BOX))),
+            "the remote r no pane shows is in no container"
         );
     }
 
