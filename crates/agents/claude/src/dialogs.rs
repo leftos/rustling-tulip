@@ -1333,11 +1333,29 @@ fn submit_multi(prompt: &ChatPrompt) -> Result<AnswerRecipe, AnswerRefusal> {
 }
 
 /// Answering a question with text: the cursor moved to the `Type something`
-/// option, then the text and Enter.
+/// option, then `i` and Backspace, then the text and Enter.
+///
+/// The `i` and Backspace go first because the vim editor mode reads raw keys
+/// as commands in NORMAL mode, so the text would arrive as vim commands and
+/// no letters at all: `i` enters INSERT. Without vim, or in vim's INSERT
+/// mode, `i` types the letter and the Backspace takes it back, so the pair
+/// leaves the field as it was.
+///
+/// The two steps expect a settled reading only: in vim's NORMAL mode `i`
+/// changes the footer alone, which the parsed screen does not carry, so a
+/// same-dialog check would never see the step taken.
 fn type_something(prompt: &ChatPrompt, text: &str) -> Result<AnswerRecipe, AnswerRefusal> {
     let typed = typed_text(text)?;
     let option = type_something_option(prompt).ok_or(AnswerRefusal::NotThisDialog)?;
     let mut steps: Vec<RecipeStep> = cursor_move(prompt, option)?.into_iter().collect();
+    steps.push(RecipeStep {
+        keys: vec![Key::Text("i".to_owned())],
+        expect: ScreenExpect::Any,
+    });
+    steps.push(RecipeStep {
+        keys: vec![Key::Backspace],
+        expect: ScreenExpect::Any,
+    });
     steps.push(typed);
     Ok(AnswerRecipe { steps })
 }
@@ -2956,10 +2974,52 @@ mod tests {
         let steps = recipe(&prompt, &answer).expect("a recipe").steps;
         assert_eq!(
             steps,
-            [RecipeStep {
-                keys: vec![Key::Text("x".to_owned()), Key::Enter],
-                expect: ScreenExpect::Any,
-            }]
+            [
+                RecipeStep {
+                    keys: vec![Key::Text("i".to_owned())],
+                    expect: ScreenExpect::Any,
+                },
+                RecipeStep {
+                    keys: vec![Key::Backspace],
+                    expect: ScreenExpect::Any,
+                },
+                RecipeStep {
+                    keys: vec![Key::Text("x".to_owned()), Key::Enter],
+                    expect: ScreenExpect::Any,
+                },
+            ]
+        );
+    }
+
+    /// A vim editor mode reads raw keys as commands in NORMAL mode, so the
+    /// answer types `i` and a Backspace to enter INSERT before the text.
+    #[test]
+    fn a_typed_answer_enters_vims_insert_mode_first() {
+        let prompt = question(&ask(&["❯ 1. sub", "  2. div", "  3. Type something."]));
+        let answer = ChatAnswerKind::TypeSomething {
+            text: "x".to_owned(),
+        };
+        let steps = recipe(&prompt, &answer).expect("a recipe").steps;
+        assert_eq!(
+            steps,
+            [
+                RecipeStep {
+                    keys: vec![Key::Down, Key::Down],
+                    expect: ScreenExpect::OptionSelected(3),
+                },
+                RecipeStep {
+                    keys: vec![Key::Text("i".to_owned())],
+                    expect: ScreenExpect::Any,
+                },
+                RecipeStep {
+                    keys: vec![Key::Backspace],
+                    expect: ScreenExpect::Any,
+                },
+                RecipeStep {
+                    keys: vec![Key::Text("x".to_owned()), Key::Enter],
+                    expect: ScreenExpect::Any,
+                },
+            ]
         );
     }
 

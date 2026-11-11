@@ -2815,6 +2815,12 @@ mod tests {
                     "  ❯ 4. Type something.",
                 );
                 a.term.show(&on_row).await;
+                a.typed(b"i", "i enters vim's insert mode").await;
+                a.term
+                    .show(&edited(&on_row, "  ❯ 4. Type something.", "  ❯ 4. i"))
+                    .await;
+                a.typed(b"\x7f", "Backspace takes the i back").await;
+                a.term.show(&on_row).await;
                 a.typed(b"fuzz tests", "the text, as typed").await;
                 a.typed(ENTER, "then Enter").await;
                 a.waits("the Enter");

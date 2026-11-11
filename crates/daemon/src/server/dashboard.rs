@@ -2030,6 +2030,42 @@ mod tests {
                 "❯ 3. Type something.",
             );
             w.term.show(&on_row).await;
+            assert_eq!(w.term.typed().await, b"i", "i enters vim's insert mode");
+            w.term
+                .show(&edited(&on_row, "❯ 3. Type something.", "❯ 3. i"))
+                .await;
+            assert_eq!(w.term.typed().await, b"\x7f", "Backspace takes the i back");
+            w.term.show(&on_row).await;
+            assert_eq!(w.term.typed().await, b"use mul", "the text, as typed");
+            w.types_and_ends(ENTER, "then Enter").await;
+        }
+
+        /// A question in vim's NORMAL mode: `i` enters INSERT and changes
+        /// only the footer, which the parsed screen does not carry, so the
+        /// screen the reader sees stays as it was; the answer is still taken.
+        #[tokio::test]
+        async fn a_typed_answer_lands_when_i_changes_nothing_on_screen() {
+            let mut w = waiting(
+                "dash-answer-typed-no-change",
+                ONE_QUESTION,
+                question(&["Red", "Blue"], false),
+            );
+            w.answer(PromptChoice::TypeSomething {
+                text: "use mul".to_owned(),
+            })
+            .await;
+            assert_eq!(w.term.typed().await, DOWN, "Down 1");
+            assert_eq!(w.term.typed().await, DOWN, "Down 2");
+            let on_row = edited(
+                &edited(ONE_QUESTION, "❯ 1. Red", "  1. Red"),
+                "  3. Type something.",
+                "❯ 3. Type something.",
+            );
+            w.term.show(&on_row).await;
+            assert_eq!(w.term.typed().await, b"i", "i enters vim's insert mode");
+            w.term.show(&on_row).await;
+            assert_eq!(w.term.typed().await, b"\x7f", "Backspace takes the i back");
+            w.term.show(&on_row).await;
             assert_eq!(w.term.typed().await, b"use mul", "the text, as typed");
             w.types_and_ends(ENTER, "then Enter").await;
         }

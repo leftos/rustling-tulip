@@ -13,6 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A Claude session in bash mode whose reply quotes a question's footer reads as idle, not as waiting on you, and Chat shows no question for it.
 - With Claude's vim editor mode on, a session running a background shell reads as background, and a question in a narrow pane reads as waiting on you.
 - A session whose subagent asks for permission keeps waiting on you until you answer, without a brief false Idle and a second alert before the dialog draws.
+- With Claude's vim editor mode on, an answer typed from Chat into a question's own-answer field lands as text even after an Esc in that field.
 
 ### Changed
 

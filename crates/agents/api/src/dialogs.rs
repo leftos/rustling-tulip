@@ -17,6 +17,8 @@ pub enum Key {
     Tab,
     /// Enter.
     Enter,
+    /// Backspace.
+    Backspace,
     /// The up arrow.
     Up,
     /// The down arrow.
@@ -45,6 +47,7 @@ impl Key {
             Self::Digit(d) => vec![b'0' + d],
             Self::Tab => b"\t".to_vec(),
             Self::Enter => b"\r".to_vec(),
+            Self::Backspace => vec![0x7f],
             Self::Up => b"\x1b[A".to_vec(),
             Self::Down => b"\x1b[B".to_vec(),
             Self::Right => b"\x1b[C".to_vec(),
@@ -212,6 +215,11 @@ mod tests {
     #[test]
     fn stash_key_writes_ctrl_s() {
         assert_eq!(Key::Stash.to_bytes(), vec![0x13]);
+    }
+
+    #[test]
+    fn backspace_writes_del() {
+        assert_eq!(Key::Backspace.to_bytes(), vec![0x7f]);
     }
 
     #[test]
