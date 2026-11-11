@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Changed
 
 - Ctrl+clicking a file path in a terminal opens it in its app at once; Ctrl+Shift+click offers its app, the viewer or its folder.
+- The tab you are looking at now stands out lighter than the other tabs, with an accent bar along its top.
 
 ## v0.12.1-alpha
 

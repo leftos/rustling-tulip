@@ -15,6 +15,7 @@ use protocol::{
 
 use crate::activity_bar::badge_text;
 use crate::assets::{DASHBOARD_ICON, TAB_CLOSE_ICON, TAB_NEW_ICON};
+use crate::contrast::relative_luminance;
 use crate::drag::{self, DragPayload, Side};
 use crate::ellipsis::ellipsized;
 use crate::fonts;
@@ -649,7 +650,8 @@ impl RootView {
         let active = self.tabs.active_id() == Some(tab.id.as_str());
         let look = PillLook::of(active, self.tabs.selection.contains(&tab.id));
         let armed = self.tabs.close_confirm.armed() == Some(tab.id.as_str());
-        let [badge, icon, need_badge] = self.pill_marks(tab, &t, cx);
+        let marks = mark_theme(active, &t);
+        let [badge, icon, need_badge] = self.pill_marks(tab, &marks, cx);
         let rename = self.renaming.as_ref().filter(|r| r.tab_id == tab.id);
         let label = match rename {
             Some(rename) => div()
@@ -681,7 +683,7 @@ impl RootView {
             .then(|| popped_mark(&tab.id, &t));
         let host = self.tab_host(tab).map(|host| {
             let name = format!("tab-host-{}", tab.id);
-            host_chip(fonts::ui_text_size(cx), name, host, &t)
+            host_chip(fonts::ui_text_size(cx), name, host, &marks)
         });
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
@@ -736,7 +738,8 @@ impl RootView {
             .children(host)
             .children(need_badge)
             .children(popped)
-            .child(close_button(&tab.id, armed, cx))
+            .child(close_button(&tab.id, armed, active, cx))
+            .children(look.bar(accent).map(|bar| shown_bar(&tab.id, bar)))
             .children(mark)
             .into_any_element()
     }
@@ -1239,12 +1242,46 @@ impl RootView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PillLook {
     Plain,
-    /// The tab shown: the main area's ground.
+    /// The tab shown: a fill lighter than the strip, under an accent bar.
     Active,
     /// Selected, not shown: a light accent wash.
     Washed,
-    /// Shown and selected: the main area's ground in an accent outline.
+    /// Shown and selected: the shown fill and bar in an accent outline.
     ActiveOutlined,
+}
+
+/// The shown pill's fill, `0xRRGGBB`: the lighter of the ground and the
+/// chip, so the shown tab stands out of the strip rather than sinking into
+/// it.
+fn shown_fill(t: &UiTheme) -> u32 {
+    if relative_luminance(t.chip) > relative_luminance(t.ground) {
+        t.chip
+    } else {
+        t.ground
+    }
+}
+
+/// The fill of a chip or badge on the shown pill: whichever of ground and
+/// chip the pill itself does not use.
+fn shown_mark_fill(t: &UiTheme) -> u32 {
+    if shown_fill(t) == t.chip {
+        t.ground
+    } else {
+        t.chip
+    }
+}
+
+/// `t`, its chip moved off the shown pill's fill while `active`, so a count
+/// badge, a host chip or a needs-you badge on it keeps its edge.
+fn mark_theme(active: bool, t: &UiTheme) -> UiTheme {
+    if active {
+        UiTheme {
+            chip: shown_mark_fill(t),
+            ..*t
+        }
+    } else {
+        *t
+    }
 }
 
 impl PillLook {
@@ -1261,9 +1298,15 @@ impl PillLook {
     fn background(self, accent: u32, t: &UiTheme) -> Option<u32> {
         match self {
             Self::Plain => None,
-            Self::Active | Self::ActiveOutlined => Some((t.ground << 8) | 0xff),
+            Self::Active | Self::ActiveOutlined => Some((shown_fill(t) << 8) | 0xff),
             Self::Washed => Some((accent << 8) | SELECTED_WASH_ALPHA),
         }
+    }
+
+    /// The colour of the bar along the pill's top edge, `0xRRGGBB`, if it
+    /// has one.
+    fn bar(self, accent: u32) -> Option<u32> {
+        matches!(self, Self::Active | Self::ActiveOutlined).then_some(accent)
     }
 
     /// The outline's colour, `0xRRGGBB`, if it has one.
@@ -1448,6 +1491,20 @@ const GHOST_OPACITY: f32 = 0.85;
 const GHOST_BADGE_HEIGHT: f32 = 15.0;
 const GHOST_BADGE_TEXT_SIZE: f32 = 9.5;
 
+/// The accent bar along the top edge of `tab_id`'s pill, in `accent`
+/// `0xRRGGBB`; tagged `tab-shown-bar-<id>`.
+fn shown_bar(tab_id: &str, accent: u32) -> Div {
+    let selector = format!("tab-shown-bar-{tab_id}");
+    div()
+        .driver_id(move || selector)
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(2.0))
+        .bg(gpui::rgb(accent))
+}
+
 /// The accent bar at `side` of `tab_id`'s pill, where a dragged pill lands.
 fn insertion_mark(tab_id: &str, side: Side, t: &UiTheme) -> Div {
     let selector = format!("tab-drop-mark-{tab_id}");
@@ -1542,8 +1599,14 @@ impl Render for PillGhost {
 }
 
 /// The close icon, or ✓ while a close waits for its second click. It acts
-/// on the press so the root's click-elsewhere reset never sees it.
-fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
+/// on the press so the root's click-elsewhere reset never sees it. It hovers
+/// one step darker on the shown pill, whose fill is already the hover fill.
+fn close_button(
+    tab_id: &str,
+    armed: bool,
+    active: bool,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
     let t = theme(cx);
     let id = tab_id.to_owned();
     let tip = if armed {
@@ -1564,7 +1627,7 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
         .min_w(px(CLOSE_ICON_SIZE + 4.0))
         .h(px(CLOSE_ICON_SIZE + 4.0))
         .rounded(px(3.0))
-        .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
+        .hover(move |style| style.bg(gpui::rgb(if active { t.pressed } else { t.hover_bg })))
         .tooltip(tooltip(tip))
         .map(move |button| {
             if armed {
@@ -1620,12 +1683,12 @@ fn new_tab_button(cx: &mut Context<RootView>) -> Stateful<Div> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::palette::{ASKING, CHIP, GROUND, ON_ASKING, SUBTLE, WORKING};
+    use crate::palette::{ASKING, CHIP, ON_ASKING, SUBTLE, WORKING};
 
     const ACCENT: u32 = 0x005b_9bff;
 
     #[test]
-    fn active_selected_tab_keeps_active_background() {
+    fn shown_tab_fill_is_lighter_than_the_strip() {
         let active = PillLook::of(true, false);
         let both = PillLook::of(true, true);
         assert_eq!(both, PillLook::ActiveOutlined);
@@ -1635,10 +1698,14 @@ mod tests {
         );
         assert_eq!(
             both.background(ACCENT, &UiTheme::CONTRAST),
-            Some((GROUND << 8) | 0xff)
+            Some((CHIP << 8) | 0xff)
         );
         assert_eq!(both.outline(ACCENT), Some(ACCENT));
         assert_eq!(active.outline(ACCENT), None);
+        assert_eq!(both.bar(ACCENT), Some(ACCENT));
+        assert_eq!(active.bar(ACCENT), Some(ACCENT));
+        assert_eq!(PillLook::of(false, true).bar(ACCENT), None);
+        assert_eq!(PillLook::of(false, false).bar(ACCENT), None);
 
         let washed = PillLook::of(false, true);
         assert_eq!(
@@ -1649,6 +1716,54 @@ mod tests {
         assert_eq!(
             PillLook::of(false, false).background(ACCENT, &UiTheme::CONTRAST),
             None
+        );
+    }
+
+    #[test]
+    fn shown_tab_is_lighter_than_the_strip_in_every_built_in() {
+        fn fill(theme: &UiTheme) -> Option<u32> {
+            PillLook::Active
+                .background(ACCENT, theme)
+                .map(|background| background >> 8)
+        }
+        fn check(name: &str, theme: &UiTheme) {
+            let lighter = fill(theme)
+                .is_some_and(|fill| relative_luminance(fill) > relative_luminance(theme.surface));
+            assert!(
+                lighter,
+                "{name}: the shown tab's fill is not lighter than the strip"
+            );
+        }
+
+        check("Contrast", &UiTheme::CONTRAST);
+        for (id, _, theme) in crate::builtin_themes::BUILT_INS {
+            check(id, theme);
+        }
+        assert_eq!(fill(&crate::builtin_themes::NORD), Some(0x0042_4854));
+        assert_eq!(
+            fill(&crate::builtin_themes::CATPPUCCIN_LATTE),
+            Some(0x00ef_f1f5)
+        );
+    }
+
+    #[test]
+    fn shown_marks_differ_from_the_shown_fill() {
+        fn check(name: &str, theme: &UiTheme) {
+            assert_ne!(
+                shown_mark_fill(theme),
+                shown_fill(theme),
+                "{name}: a mark on the shown pill would vanish into it"
+            );
+        }
+
+        check("Contrast", &UiTheme::CONTRAST);
+        for (id, _, theme) in crate::builtin_themes::BUILT_INS {
+            check(id, theme);
+        }
+        assert_eq!(shown_mark_fill(&crate::builtin_themes::NORD), 0x002e_3440);
+        assert_eq!(
+            shown_mark_fill(&crate::builtin_themes::CATPPUCCIN_LATTE),
+            0x00db_dde4
         );
     }
 

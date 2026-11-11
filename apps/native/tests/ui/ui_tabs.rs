@@ -74,6 +74,24 @@ fn the_tab_bar_grows_with_the_ui_text_size(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_shown_tab_has_a_bar_along_its_top(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    let pill = h.bounds("tab-t1");
+    let bar = h.bounds("tab-shown-bar-t1");
+    assert_eq!(bar.top(), pill.top(), "the bar sits on the pill's top edge");
+    assert_eq!(bar.size.height, px(2.0), "two pixels tall");
+    assert!(
+        bar.size.width >= pill.size.width - px(1.0),
+        "the bar spans the pill, less its 1 px right border at most: {bar:?} vs {pill:?}"
+    );
+    assert!(
+        h.bounds("tab-shown-bar-t2").origin.x < px(0.0),
+        "the tab that is not shown draws no bar"
+    );
+}
+
+#[gpui::test]
 fn split_right_sends_a_horizontal_split_and_shift_places_first(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
