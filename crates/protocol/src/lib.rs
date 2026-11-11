@@ -98,6 +98,13 @@ pub const FEATURE_ACCOUNT_EVENTS: &str = "account_events";
 /// the connected daemon lists it.
 pub const FEATURE_GATE_STATE: &str = "gate_state";
 
+/// `Welcome.features` entry: the daemon watches the dispatch tool's live-run
+/// folder and sends [`DaemonMessage::DispatchRuns`],
+/// [`DaemonMessage::DispatchRunUpdated`] and
+/// [`DaemonMessage::DispatchRunRemoved`]. A client draws dispatch runs only
+/// when the connected daemon lists it.
+pub const FEATURE_DISPATCH_RUNS: &str = "dispatch_runs";
+
 /// `Welcome.features` entry: the daemon sends pushes to a registered phone
 /// ([`ClientMessage::GetPushStatus`], [`ClientMessage::RegisterPush`],
 /// [`ClientMessage::UnregisterPush`]).
@@ -4253,6 +4260,73 @@ pub struct GateCommandSummary {
     pub max_seconds: f64,
 }
 
+/// One live dispatch run, as the dispatch tool recorded it in its live-run
+/// file plus what the daemon read from the run's stream
+/// ([`DaemonMessage::DispatchRuns`], [`DaemonMessage::DispatchRunUpdated`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DispatchRunSnapshot {
+    /// The run's id: the live-run file's name without its extension.
+    pub run_id: String,
+    /// The run's title, as the dispatch tool recorded it.
+    pub title: String,
+    /// An opaque string naming what the run works with, shown as it is. No
+    /// code matches on it.
+    pub backend: String,
+    /// The run's tier, when it has one.
+    #[serde(default)]
+    pub tier: Option<u8>,
+    /// The folder the run works in.
+    pub worktree: String,
+    /// The worktree's main checkout, resolved by the daemon. `None` for a
+    /// plain checkout, a layout the daemon cannot resolve, or a missing
+    /// worktree, and a client then places the run by its `worktree`.
+    #[serde(default)]
+    pub main_checkout: Option<String>,
+    /// The run's output folder.
+    pub run_dir: String,
+    /// When the run's process started.
+    pub started_at: DateTime<Utc>,
+    /// The run's status.
+    pub status: DispatchRunStatus,
+    /// The stream's token counts, cost and last activity.
+    #[serde(default)]
+    pub metrics: SessionMetrics,
+    /// The run's most recent actions, oldest first, capped by the daemon.
+    #[serde(default)]
+    pub recent_actions: Vec<String>,
+    /// The run's own conversation id, from its stream.
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
+    /// The dispatching session's id, from the live-run file; `None` for a
+    /// run started outside a session.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// The conversation the run continues, when it continues one.
+    #[serde(default)]
+    pub resumed_from: Option<String>,
+    /// True for a run the dispatch tool resumed on its own.
+    #[serde(default)]
+    pub auto_resume: bool,
+}
+
+/// A dispatch run's status, decided from its stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchRunStatus {
+    /// The stream has not reported its first status yet.
+    Starting,
+    /// The stream's first status arrived and the run has not ended.
+    Working,
+    /// A stop was asked for and the run is being ended.
+    Stopping,
+    /// The stream reported its final status; the live-run file usually goes
+    /// moments later.
+    Ended,
+    /// Forward-compat fallback: a status the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
@@ -6156,6 +6230,20 @@ pub enum DaemonMessage {
     GateState {
         #[serde(default)]
         state: Option<Box<GateState>>,
+    },
+    /// Every live dispatch run, sent after `Welcome` beside `Sessions` and
+    /// again to a connection whose stream lagged, by a daemon that lists
+    /// [`FEATURE_DISPATCH_RUNS`].
+    DispatchRuns {
+        runs: Vec<DispatchRunSnapshot>,
+    },
+    /// A dispatch run appeared or changed.
+    DispatchRunUpdated {
+        run: DispatchRunSnapshot,
+    },
+    /// A dispatch run ended: its live-run file went, or its process died.
+    DispatchRunRemoved {
+        run_id: String,
     },
     /// The answer to a [`ClientMessage::SetGateSlotCount`] that was written,
     /// echoing its `kind`, `count` and `request_id`.
@@ -11960,6 +12048,97 @@ mod tests {
                 "{json}: {back:?}"
             );
         }
+    }
+
+    fn dispatch_run_full() -> DispatchRunSnapshot {
+        DispatchRunSnapshot {
+            run_id: "9f2c1e".to_owned(),
+            title: "Add the dispatch-run types".to_owned(),
+            backend: "native".to_owned(),
+            tier: Some(2),
+            worktree: "X:/dev/repo".to_owned(),
+            main_checkout: Some("X:/dev/repo-main".to_owned()),
+            run_dir: "X:/dev/repo/.tmp/dispatch/9f2c1e".to_owned(),
+            started_at: gate_time("2026-11-11T09:00:00Z"),
+            status: DispatchRunStatus::Working,
+            metrics: SessionMetrics {
+                input_tokens: 1200,
+                output_tokens: 340,
+                cost_usd: 0.42,
+                last_activity_at: Some(gate_time("2026-11-11T09:10:00Z")),
+            },
+            recent_actions: vec!["read crates/protocol/src/lib.rs".to_owned()],
+            agent_session_id: Some("conv-a".to_owned()),
+            session_id: Some("sess-b".to_owned()),
+            resumed_from: Some("conv-c".to_owned()),
+            auto_resume: true,
+        }
+    }
+
+    #[test]
+    fn dispatch_run_messages_round_trip() {
+        let runs = DaemonMessage::DispatchRuns {
+            runs: vec![dispatch_run_full()],
+        };
+        let json = serde_json::to_string(&runs).expect("serializes");
+        assert!(json.starts_with(r#"{"type":"dispatch_runs""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("decodes");
+        assert!(
+            matches!(&back, DaemonMessage::DispatchRuns { runs } if runs == &vec![dispatch_run_full()]),
+            "{back:?}"
+        );
+
+        let updated = DaemonMessage::DispatchRunUpdated {
+            run: dispatch_run_full(),
+        };
+        let json = serde_json::to_string(&updated).expect("serializes");
+        assert!(
+            json.starts_with(r#"{"type":"dispatch_run_updated""#),
+            "{json}"
+        );
+        let back: DaemonMessage = serde_json::from_str(&json).expect("decodes");
+        assert!(
+            matches!(&back, DaemonMessage::DispatchRunUpdated { run } if run == &dispatch_run_full()),
+            "{back:?}"
+        );
+
+        let removed = DaemonMessage::DispatchRunRemoved {
+            run_id: "9f2c1e".to_owned(),
+        };
+        let json = serde_json::to_string(&removed).expect("serializes");
+        assert!(
+            json.starts_with(r#"{"type":"dispatch_run_removed""#),
+            "{json}"
+        );
+        let back: DaemonMessage = serde_json::from_str(&json).expect("decodes");
+        assert!(
+            matches!(&back, DaemonMessage::DispatchRunRemoved { run_id } if run_id == "9f2c1e"),
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_run_status_unknown_decodes_as_unknown() {
+        let status: DispatchRunStatus = serde_json::from_str(r#""paused""#).expect("decodes");
+        assert_eq!(status, DispatchRunStatus::Unknown);
+    }
+
+    #[test]
+    fn dispatch_run_snapshot_decodes_without_defaulted_fields() {
+        let json = r#"{"run_id":"9f2c1e","title":"T","backend":"native",
+            "worktree":"X:/dev/repo","run_dir":"X:/dev/repo/.tmp/dispatch/9f2c1e",
+            "started_at":"2026-11-11T09:00:00Z","status":"working"}"#;
+        let run: DispatchRunSnapshot = serde_json::from_str(json).expect("decodes");
+        assert_eq!(run.tier, None);
+        assert_eq!(run.main_checkout, None);
+        assert_eq!(run.metrics, SessionMetrics::default());
+        assert_eq!(run.recent_actions, Vec::<String>::new());
+        assert_eq!(run.agent_session_id, None);
+        assert_eq!(run.session_id, None);
+        assert_eq!(run.resumed_from, None);
+        assert!(!run.auto_resume);
+        assert_eq!(run.status, DispatchRunStatus::Working);
+        assert_eq!(run.started_at, gate_time("2026-11-11T09:00:00Z"));
     }
 
     #[test]

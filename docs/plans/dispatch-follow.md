@@ -244,7 +244,7 @@ This repo's steps are dormant (an empty folder, no leaves) until the dispatch to
 
 Proving commands run from the repo root through the gate, written here as `gate … -- <command>` for `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/<step>.log --timeout 1800 --slot heavy -- <command>`. DF.11 calls `rt.ps1` bare, since it gates its own steps. Hotspots: `crates/protocol/src/lib.rs`, `crates/daemon/src/server.rs`, `apps/native/src/lib.rs`.
 
-- [ ] **DF.1 Protocol types.** The dispatch-run snapshot, status, three daemon messages, `StopDispatchRun` and `FEATURE_DISPATCH_RUNS` on the wire.
+- [x] **DF.1 Protocol types.** The dispatch-run snapshot, status, three daemon messages and `FEATURE_DISPATCH_RUNS` on the wire. `StopDispatchRun` lands with its handler in DF.6, since the daemon's `dispatch` must handle every client message.
   - Files: `crates/protocol/src/lib.rs`, `apps/pwa/src/protocol.ts` (regenerated with `cargo run -p protocol-ts`).
   - Proof: `gate … -- cargo nextest run -p protocol --cargo-profile test-release dispatch_run` (a round trip per message, an unknown status decodes as `Unknown`, a snapshot missing every defaulted field decodes), then `gate … -- cargo nextest run -p protocol-ts --cargo-profile test-release generated_protocol_ts_is_current`.
   - Waits on: nothing. Hotspot: protocol.
@@ -264,8 +264,8 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: `crates/daemon/src/dispatch_runs.rs`, `crates/daemon/src/git.rs`, `crates/daemon/src/worktrees_admin.rs`.
   - Proof: `gate … -- cargo nextest run -p daemon --cargo-profile test-release -E 'test(/dispatch_runs::|repo_path_for_worktree/)'`. The tests use a scratch folder and a live-run file for the test's own child process: appended stream lines show as actions, killing the child removes the run and deletes its file, a dead-pid file is dropped at startup, and a file whose start time does not match is rejected.
   - Waits on: DF.2, DF.3. Hotspot: none.
-- [ ] **DF.6 Server wiring and Stop.** The hub holds the runs; `DispatchRuns` follows `Welcome`, with `dispatch_runs` in the feature list only when a folder is watched; broadcasts with the lag resend; `StopDispatchRun` (guard held, `Stopping`, marker, tree kill, `ActionFailed` with `request_id`).
-  - Files: `crates/daemon/src/server.rs`, `crates/daemon/src/server/handshake.rs`, `crates/daemon/src/server/connection.rs`, `crates/daemon/src/server/dispatch_runs.rs` (new), `crates/daemon/src/main.rs`.
+- [ ] **DF.6 Server wiring and Stop.** The hub holds the runs; `DispatchRuns` follows `Welcome`, with `dispatch_runs` in the feature list only when a folder is watched; broadcasts with the lag resend; `ClientMessage::StopDispatchRun { run_id, request_id }` added to the protocol with its handler (guard held, `Stopping`, marker, tree kill, `ActionFailed` with `request_id`).
+  - Files: `crates/protocol/src/lib.rs` and the regenerated `apps/pwa/src/protocol.ts` (the client message), `crates/daemon/src/server.rs`, `crates/daemon/src/server/handshake.rs`, `crates/daemon/src/server/connection.rs`, `crates/daemon/src/server/dispatch_runs.rs` (new), `crates/daemon/src/main.rs`.
   - Proof: `gate … -- cargo nextest run -p daemon --cargo-profile test-release -E 'test(/dispatch_run|handshake/)'`, including `stop_dispatch_run_kills_the_tree_and_writes_the_marker` with a parent and a grandchild process.
   - Waits on: DF.1, DF.5. Hotspot: `server.rs`.
 - [ ] **DF.7 Background flag from a linked run.** `SessionRecord::snapshot()` reports `background` while a live run's `session_id` matches the record's `conversation_id`, through the registry's `DispatchLinks`, and the watcher pushes session updates when a link changes.

@@ -113,6 +113,15 @@ export const FEATURE_ACCOUNT_EVENTS = "account_events";
 export const FEATURE_GATE_STATE = "gate_state";
 
 /**
+ * `Welcome.features` entry: the daemon watches the dispatch tool's live-run
+ * folder and sends [`DaemonMessage::DispatchRuns`],
+ * [`DaemonMessage::DispatchRunUpdated`] and
+ * [`DaemonMessage::DispatchRunRemoved`]. A client draws dispatch runs only
+ * when the connected daemon lists it.
+ */
+export const FEATURE_DISPATCH_RUNS = "dispatch_runs";
+
+/**
  * `Welcome.features` entry: the daemon sends pushes to a registered phone
  * ([`ClientMessage::GetPushStatus`], [`ClientMessage::RegisterPush`],
  * [`ClientMessage::UnregisterPush`]).
@@ -3230,6 +3239,68 @@ export interface GateCommandSummary {
   max_seconds?: number;
 }
 
+/**
+ * One live dispatch run, as the dispatch tool recorded it in its live-run
+ * file plus what the daemon read from the run's stream
+ * ([`DaemonMessage::DispatchRuns`], [`DaemonMessage::DispatchRunUpdated`]).
+ */
+export interface DispatchRunSnapshot {
+  /** The run's id: the live-run file's name without its extension. */
+  run_id: string;
+  /** The run's title, as the dispatch tool recorded it. */
+  title: string;
+  /**
+   * An opaque string naming what the run works with, shown as it is. No
+   * code matches on it.
+   */
+  backend: string;
+  /** The run's tier, when it has one. */
+  tier?: number | null;
+  /** The folder the run works in. */
+  worktree: string;
+  /**
+   * The worktree's main checkout, resolved by the daemon. `None` for a
+   * plain checkout, a layout the daemon cannot resolve, or a missing
+   * worktree, and a client then places the run by its `worktree`.
+   */
+  main_checkout?: string | null;
+  /** The run's output folder. */
+  run_dir: string;
+  /** When the run's process started. */
+  started_at: string;
+  /** The run's status. */
+  status: DispatchRunStatus;
+  /** The stream's token counts, cost and last activity. */
+  metrics?: SessionMetrics;
+  /** The run's most recent actions, oldest first, capped by the daemon. */
+  recent_actions?: string[];
+  /** The run's own conversation id, from its stream. */
+  agent_session_id?: string | null;
+  /**
+   * The dispatching session's id, from the live-run file; `None` for a
+   * run started outside a session.
+   */
+  session_id?: string | null;
+  /** The conversation the run continues, when it continues one. */
+  resumed_from?: string | null;
+  /** True for a run the dispatch tool resumed on its own. */
+  auto_resume?: boolean;
+}
+
+/** A dispatch run's status, decided from its stream. */
+export type DispatchRunStatus =
+  /** The stream has not reported its first status yet. */
+  | "starting"
+  /** The stream's first status arrived and the run has not ended. */
+  | "working"
+  /** A stop was asked for and the run is being ended. */
+  | "stopping"
+  /**
+   * The stream reported its final status; the live-run file usually goes
+   * moments later.
+   */
+  | "ended";
+
 export type ClientMessage =
   /**
    * Always the first message after WS upgrade. Fails the connection if the
@@ -4854,6 +4925,16 @@ export type DaemonMessage =
    * daemon that lists [`FEATURE_GATE_STATE`]. `None` means no gate state.
    */
   | { type: "gate_state"; state?: GateState | null }
+  /**
+   * Every live dispatch run, sent after `Welcome` beside `Sessions` and
+   * again to a connection whose stream lagged, by a daemon that lists
+   * [`FEATURE_DISPATCH_RUNS`].
+   */
+  | { type: "dispatch_runs"; runs: DispatchRunSnapshot[] }
+  /** A dispatch run appeared or changed. */
+  | { type: "dispatch_run_updated"; run: DispatchRunSnapshot }
+  /** A dispatch run ended: its live-run file went, or its process died. */
+  | { type: "dispatch_run_removed"; run_id: string }
   /**
    * The answer to a [`ClientMessage::SetGateSlotCount`] that was written,
    * echoing its `kind`, `count` and `request_id`.
