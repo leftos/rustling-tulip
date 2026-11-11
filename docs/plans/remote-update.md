@@ -49,7 +49,7 @@ Each part lands on `feat/remote-update`, and each is a sub-issue of RT-1298.
 - [x] **The breaking flag.** A machine-readable note in each release of what it breaks, read by the confirm dialog, and the requester updating itself right after the host. `docs/release.md` says when to set it.
 - [x] **Host to client.** A per-connection record on the host, an addressed message, "Update connected clients", and the client's countdown with Cancel.
 - [x] **SSH hosts.** The host's daemon launches the installer detached, surviving the bridge's exit, with the result read on reconnect; the Connections dialog offers `Update host` on SSH rows.
-- [ ] **Proof.** A live spec against a fake release feed, and a real update on a second machine (`docs/release.md` smoke test), both directions, on Windows and macOS.
+- [ ] **Proof.** A live spec against a fake release feed, and a real update on a second machine (the `prepare-release` skill's feature smoke test), both directions, on Windows and macOS.
 
 ## Trust and safety checks for each brief
 

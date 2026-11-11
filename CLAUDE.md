@@ -30,7 +30,7 @@ tools/folder-bench/     package folder-bench (publish = false, never in the inst
 tools/protocol-ts/      package protocol-ts (publish = false, never in the installer): the generator, run with `cargo run -p protocol-ts`, that writes the wire types as TypeScript to apps/pwa/src/protocol.ts, and the test that fails when that file is stale
 tools/rt-driver-mcp/    package rt-driver-mcp (never in the installer): the stdio MCP server `rt-driver` (registered in .mcp.json) that launches an isolated driven native client and calls its driver endpoint; see docs/native-client.md "Driver MCP server"
 vendor/gpui/            a trimmed copy of gpui 0.2.2 (outside the workspace, wired by `[patch.crates-io]`) that fixes a text-measure panic in the Dashboard's truncated labels; see its VENDORED.md
-README.md               the user-facing feature showcase and install steps, refreshed each release (docs/release.md)
+README.md               the user-facing feature showcase and install steps, refreshed each release (the prepare-release skill)
 CHANGELOG.md            what changed in each release, for users; each landed item adds its bullet under Unreleased
 docs/README.md          the docs start page: one line per doc under docs/, the developer layout, build and run notes, and the glossary
 docs/architecture.md    components, what the product does, and a task index: which files to read, in order, for each kind of change
@@ -115,7 +115,7 @@ cargo nextest run -p rustling-tulip-native --cargo-profile test-release --featur
 
 The repo is in `test mode: stable`: every landed change's last gate runs the full suite (`cargo nextest run --workspace --cargo-profile test-release`, then the driver specs with `-p rustling-tulip-native --features driver`, then the phone app's checks in `apps/pwa`; `.\rt.ps1 test` runs all three). The **test map**, `tools/test-map.json` (keys `central`, `ignore`, `rows` of source paths to nextest filtersets), still drives `.\rt.ps1 test -Reached` for a quick run while iterating.
 
-The release step is cutting a versioned release from the Linear release pipeline's `vNext`, only after a green full suite (procedure: `docs/release.md`); `v0.1.0-alpha` was the first.
+The release step is cutting a versioned release from the Linear release pipeline's `vNext`, only after a green full suite (procedure: the `prepare-release` skill, `/prepare-release`; what a release publishes: `docs/release.md`); `v0.1.0-alpha` was the first.
 
 Every cargo command `rt.ps1` runs goes through the repo's gate wrapper, `pwsh -NoProfile -File tools/gate.ps1 run …` (`Invoke-Gated`, logging to `.tmp/rt-<name>.log`), so a bare `.\rt.ps1 test` routes its nextest run to a builder machine; inside a gate's command (`GATE_SLOT_HELD` set by a local gate, `GATE_BOX_JOB` by a routed run on a builder; `Test-UnderGate`) it runs them directly, and the native client the `launch` verbs open holds no slot. So `rt.ps1` itself is always called bare, never inside `tools/gate.ps1 run`: an outer gate keeps every step it would have routed (a `native-shot`, a `test`) on this PC.
 

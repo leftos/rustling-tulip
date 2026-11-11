@@ -4,7 +4,7 @@ The native client finds a newer published release, downloads it in the backgroun
 
 The code is `crates/update-core` (feed, pick, download, verify, `last-result.json` read, the update lock; the client's `update.rs` re-exports it and keeps `Updater`, the start of the installer and the launch cleanup), the client's `update_view.rs` (timer, notice, Restart to update, toasts), `whats_new_view.rs` (the What's new window), the daemon's `cli_apply_update.rs` (the file swap), `crates/daemon-client/src/supervisor.rs` (daemon takeover) and the NSIS script `tools/installer/rustling-tulip.nsi`.
 
-The client's side of the UI is in [native-client.md](./native-client.md) ("Updates"), the release steps in [release.md](./release.md) and what the installer does in [tools/installer/README.md](../tools/installer/README.md).
+The client's side of the UI is in [native-client.md](./native-client.md) ("Updates"), what a release publishes in [release.md](./release.md) and what the installer does in [tools/installer/README.md](../tools/installer/README.md).
 
 ## Trust model
 

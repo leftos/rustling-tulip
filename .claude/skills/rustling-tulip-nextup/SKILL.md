@@ -39,7 +39,7 @@ The goal is each release as soon as possible, through Release 2; this overrides 
 
 - **Per item:** the implementer's gates are `cargo fmt --all --check`, `cargo clippy` on the touched crates, and the item's own new or changed tests by name. No reached tests, no full suite, no load-burn, no `--slot critical`.
 - **Review:** one `code-review` pass per item. Only real bugs in the item's own change that block the item go back (one fix round). Every other real bug, a pre-existing one or a non-critical one in the change, gets an **add** in `Backlog` (`--kind bug`) and never holds the landing. Hardening, style, coverage wishes and behaviour not asked for are dropped. Nits ride the next change touching their file.
-- **Releases:** once a milestone set with the owner is complete (every item of `vHotfix`, or of `vNext`, Done), the orchestrator cuts and publishes its release by `docs/release.md` without asking, and never before every new feature has passed its agent-run smoke test in the real runtime (`docs/release.md` step 4, a remote feature on a real second machine such as `builder@leftos-buildbox`). A release runs no installer hand test.
+- **Releases:** once a milestone set with the owner is complete (every item of `vHotfix`, or of `vNext`, Done), the orchestrator cuts and publishes its release by the `prepare-release` skill without asking, and never before every new feature has passed its agent-run smoke test in the real runtime (`prepare-release` Phase 5, a remote feature on a real second machine such as `builder@leftos-buildbox`). A release runs no installer hand test.
 - **Full suite:** only at milestones: the end of a project, a push, a feature-branch merge and the release step. A red milestone run becomes the next item.
 - **Commits:** prek runs only hygiene and `cargo fmt --check` at commit; clippy runs at pre-push, so a commit is cheap and items commit often.
 - **Mocks:** only for a big visual choice (a new view or layout). Small looks are decided by the orchestrator from the existing palette and shown as a `native-shot` at landing.
@@ -64,7 +64,7 @@ The goal is each release as soon as possible, through Release 2; this overrides 
   - the live tier, `pwsh ./rt.ps1 native-e2e` (heavy), and the OS tier, `pwsh ./rt.ps1 native-smoke` (light), when an item's verification names them
 - test mode: stable
 - stable milestone: Release 1 — v0.1.0-alpha: Claude daily driver
-- release step: cutting a versioned release (the first is `v0.1.0-alpha`) from the Linear release pipeline's `vNext`, only after a green full suite (procedure: `docs/release.md`).
+- release step: cutting a versioned release (the first is `v0.1.0-alpha`) from the Linear release pipeline's `vNext`, only after a green full suite (procedure: the `prepare-release` skill).
 - test map: `tools/test-map.json` (keys `central`, `ignore`, `rows`: source paths to nextest filtersets), read by `rt.ps1 test -Reached`.
 
   A landed change's reached tests are `pwsh -NoProfile -File ./rt.ps1 test -Reached -PrintOnly` for the filter (it runs no cargo command; every `rt.ps1` verb that does gates itself), then `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nextest run --workspace --cargo-profile test-release --no-tests warn -E '<filter>'` so the run routes, and each `reached (features <f>): <filter>` line it prints is its own gate call, `cargo nextest run -p rustling-tulip-native --cargo-profile test-release --features <f> --no-tests warn -E '<filter>'` (a feature filter run without its feature selects nothing and passes silently). A central file or an unmapped file runs the full suite. The live and smoke tiers run through `rt.ps1 native-e2e` and `native-smoke`.
@@ -110,7 +110,7 @@ The repo keeps `CHANGELOG.md` in its root. Read by the user-level `changelog-and
 
 - Every landed item with a user-visible change adds or folds its bullet under `## Unreleased`, in the item's own commit (an item on a feature branch: in its commit there, and the merge carries it).
 - Sub-headings, in order: `### Added`, `### Fixed`, `### Changed`. The audience is the app's users: no issue numbers, crate, module or type names.
-- The release cut renames `## Unreleased` to `## v<version>` and opens a new empty `## Unreleased` above it (`docs/release.md`).
+- The release cut renames `## Unreleased` to `## v<version>` and opens a new empty `## Unreleased` above it (`prepare-release` Phase 3).
 - A release section with more than 4 bullets opens with `### Highlights` before `### Added`: up to 4 bullets naming what matters most to users in the release, each in the same bullet style.
 - Plan (Step 2b): **land** each item after its commit.
 

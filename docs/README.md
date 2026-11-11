@@ -16,7 +16,7 @@ The start page for working on rustling-tulip: a native Windows desktop client (G
 - [auto-update.md](auto-update.md): how the native client finds, verifies and installs a published release, and how the daemon is taken over.
 - [env-secrets.md](env-secrets.md): how secret env rows are sealed into Windows Credential Manager, and what is and isn't protected.
 - [tracer-abi.md](tracer-abi.md): the daemon/tracer ABI, its stability contract and what counts as a bump.
-- [release.md](release.md): how a versioned release is cut, from the Linear release pipeline to the GitHub release.
+- [release.md](release.md): what a versioned release publishes and how its notes mark what it breaks; the steps of a cut are the `prepare-release` skill ([.claude/skills/prepare-release/SKILL.md](../.claude/skills/prepare-release/SKILL.md)).
 - [remote-hand-checklist.md](remote-hand-checklist.md): the by-hand checks of remote access over a real tailnet, run before a release that touches it.
 - [phone-app.md](phone-app.md): putting the phone app on an iPhone and pairing it with a PC, its notification switches, and what to check when it misbehaves.
 - [ux-audit.md](ux-audit.md): the UX audit of the retired Tauri app, kept for its findings (its paths resolve on the `tauri` branch).
