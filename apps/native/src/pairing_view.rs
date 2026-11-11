@@ -22,6 +22,7 @@ use crate::driver_id::DriverId as _;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notify::PairingActionSink;
+use crate::offscreen;
 use crate::pairing::{
     Arrival, DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix,
     ToastActionQueue, WaitingRow, approve_message, deny_message,
@@ -196,7 +197,7 @@ impl RootView {
         }
         match action {
             PairingAction::Approve { request_id } => {
-                window.activate_window();
+                offscreen::bring_to_front(window, cx);
                 // An open dialog (a code on screen, or an approval on its
                 // way) is never replaced from a toast.
                 let waiting = self
@@ -212,7 +213,7 @@ impl RootView {
                 }
             }
             PairingAction::GoTo { host, id } => {
-                window.activate_window();
+                offscreen::bring_to_front(window, cx);
                 // A client already up shows the session, or nothing when no
                 // host lists it. One still starting holds the press as the
                 // command line's session is held: the daemon sends the
@@ -226,7 +227,7 @@ impl RootView {
                     self.try_wanted_session(window, cx);
                 }
             }
-            PairingAction::Open => window.activate_window(),
+            PairingAction::Open => offscreen::bring_to_front(window, cx),
         }
     }
 

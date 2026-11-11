@@ -1809,7 +1809,7 @@ impl RootView {
         let (host, id) = key.clone();
         let target = root.clone();
         let shown = main.update(cx, move |_, window, cx| {
-            window.activate_window();
+            offscreen::bring_to_front(window, cx);
             target.update(cx, |root, cx| {
                 root.select_session_on(&host, &id, window, cx);
             })

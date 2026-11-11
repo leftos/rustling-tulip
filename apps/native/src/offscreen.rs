@@ -1,7 +1,7 @@
 //! Opening a window cloaked and never activated: the mode the smoke tier and
 //! the benchmarks run the client in.
 
-use gpui::Window;
+use gpui::{App, Window};
 
 /// When set to a non-empty value, the window opens cloaked and is never
 /// activated, so the smoke specs never cover or take focus from the user's
@@ -15,6 +15,18 @@ pub const OFFSCREEN_ENV: &str = "RUSTLING_TULIP_OFFSCREEN_WINDOW";
 #[must_use]
 pub fn requested() -> bool {
     std::env::var_os(OFFSCREEN_ENV).is_some_and(|value| !value.is_empty())
+}
+
+/// Brings `window` to the front for a press that came from outside it (a
+/// toast), activating the application too: on macOS a window raised on
+/// its own stays behind the frontmost app. A cloaked client activates
+/// nothing.
+pub fn bring_to_front(window: &mut Window, cx: &mut App) {
+    if requested() {
+        return;
+    }
+    window.activate_window();
+    cx.activate(true);
 }
 
 /// The exit code of a process whose window could not be cloaked.

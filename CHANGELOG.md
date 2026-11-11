@@ -6,6 +6,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- On macOS, Go to pane on a toast brings the app to the front when another app is in front.
+
+### Fixed
+
 - On the phone's Home, starting Launch last or New session clears an earlier refusal of the other kind shown for that repo or workspace.
 
 ## v0.12.0-alpha
