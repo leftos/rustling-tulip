@@ -454,28 +454,28 @@
 
 ## Phone app
 
-- [ ] RT-1473 Keep the phone header's Back on one line beside a long title
-- [ ] RT-1472 Strip a plan's leading "#" from the phone plan sheet's title
-- [ ] RT-1471 Sort a new row into its phone Home group as the desktop does
-- [ ] RT-83 PW.14: Dictation on the phone through the keyboard's dictation key
-- [ ] RT-106 PW.12: Phone files: viewer with Share and Save, worktree tree, send photos and files into a session
+- [ ] RT-1473 Keep the phone header's Back on one line beside a long title · release vNext
+- [ ] RT-1472 Strip a plan's leading "#" from the phone plan sheet's title · release vNext
+- [ ] RT-1471 Sort a new row into its phone Home group as the desktop does · release vNext
+- [ ] RT-83 PW.14: Dictation on the phone through the keyboard's dictation key · release vNext
+- [ ] RT-106 PW.12: Phone files: viewer with Share and Save, worktree tree, send photos and files into a session · release vNext
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
-- [ ] RT-112 PW.13: Accounts screen on the phone
-- [ ] RT-142 Phone: tap a Linear identifier to see its card
+- [ ] RT-112 PW.13: Accounts screen on the phone · release vNext
+- [ ] RT-142 Phone: tap a Linear identifier to see its card · release vNext
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge
   - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone
-- [ ] RT-881 Compare ghostty-web with xterm.js for the phone's full terminal
-- [ ] RT-1137 Design a push relay so native phone apps get alerts from any user's daemon
-- [ ] RT-1177 Keep the push handler's file I/O out from under the device lock
-- [ ] RT-1183 Send a push round's targets concurrently so one slow push service holds no other device
-- [ ] RT-1187 Don't count or push a session removed before the push trigger reads its update
-- [ ] RT-1266 Plan the GPUI phone app: phases from the spike's go
-- [ ] RT-1268 Bring the phone's chat to the desktop's: Compact fold, Summary, stacked cards
-- [ ] RT-1347 Treat the phone terminal's private cursor-position reply as an automatic reply
-- [ ] RT-1379 Check the phone's Home row fits 'Working in the background' at 375 px
-- [ ] RT-1391 Align the phone's resume order with the daemon's and close ResumeSession's test gaps
-- [ ] RT-1453 Show a plan longer than 2000 characters in full on the phone before approving
-- [ ] RT-1460 Sort phone Home's groups by the desktop's sort, needs-you first
+- [ ] RT-881 Compare ghostty-web with xterm.js for the phone's full terminal · release vNext
+- [ ] RT-1137 Design a push relay so native phone apps get alerts from any user's daemon · release vNext
+- [ ] RT-1177 Keep the push handler's file I/O out from under the device lock · release vNext
+- [ ] RT-1183 Send a push round's targets concurrently so one slow push service holds no other device · release vNext
+- [ ] RT-1187 Don't count or push a session removed before the push trigger reads its update · release vNext
+- [ ] RT-1266 Plan the GPUI phone app: phases from the spike's go · release vNext
+- [ ] RT-1268 Bring the phone's chat to the desktop's: Compact fold, Summary, stacked cards · release vNext
+- [ ] RT-1347 Treat the phone terminal's private cursor-position reply as an automatic reply · release vNext
+- [ ] RT-1379 Check the phone's Home row fits 'Working in the background' at 375 px · release vNext
+- [ ] RT-1391 Align the phone's resume order with the daemon's and close ResumeSession's test gaps · release vNext
+- [ ] RT-1453 Show a plan longer than 2000 characters in full on the phone before approving · release vNext
+- [ ] RT-1460 Sort phone Home's groups by the desktop's sort, needs-you first · release vNext
 
 ## Dashboard, Gates and Linear
 
