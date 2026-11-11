@@ -4,21 +4,30 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.12.1-alpha
+
+### Highlights
+
+- Settings' Install hooks, Accounts, Appearance and the Dashboard's stored key wait for OK or Apply, and Cancel leaves them as they were.
+- With Claude's vim editor mode on, sessions show the right state and Chat answers land as text.
+- Popovers, menus, dialogs and tooltips are wider, so their text fits on fewer lines.
+- A session started with a first prompt on a cmd host, such as the phone's New session, stays open.
+
 ### Fixed
 
 - On macOS, Go to pane on a toast brings the app to the front when another app is in front.
-- A session started with a first prompt on a host whose shell is cmd, such as the phone's New session, stays open instead of answering once and ending.
+- A session started with a first prompt on a cmd host, such as the phone's New session, stays open instead of answering once and ending.
 - The sidebar's Tabs view lists sessions from other computers shown in a tab, each with its computer's name beside it.
 - On the phone's Home, starting Launch last or New session clears an earlier refusal of the other kind shown for that repo or workspace.
-- A Claude session in bash mode whose reply quotes a question's footer reads as idle, not as waiting on you, and Chat shows no question for it.
-- With Claude's vim editor mode on, a session running a background shell reads as background, and a question in a narrow pane reads as waiting on you.
-- A session whose subagent asks for permission keeps waiting on you until you answer, without a brief false Idle and a second alert before the dialog draws.
-- With Claude's vim editor mode on, an answer typed from Chat into a question's own-answer field lands as text even after an Esc in that field.
+- A Claude session in bash mode whose reply quotes a question's footer reads as idle, not waiting on you, with no question in Chat.
+- With Claude's vim editor mode on, a session running a background shell shows as background, and a narrow pane's question as waiting on you.
+- A session whose subagent asks for permission keeps waiting on you, without a brief false Idle or a second alert before the dialog draws.
+- With Claude's vim editor mode on, an answer typed from Chat into a question's own-answer field lands as text, even after an Esc.
 
 ### Changed
 
 - Settings › Claude's Install hooks switch waits for OK or Apply, and Cancel leaves the hooks as they were.
-- Settings › Dashboard's Clear is Delete stored key: it waits for OK or Apply and deletes only the shown provider's key; Test waits for applied changes.
+- Settings › Dashboard's Clear is Delete stored key: it waits for OK or Apply and deletes only the shown provider's key; Test uses the applied settings.
 - Removing a saved Claude account in Settings › Accounts asks you to confirm first.
 - Settings › Accounts' names, order and auto-switch settings wait for OK or Apply, and Cancel leaves them as they were.
 - Settings › Appearance and the Themes picker's Use preview at once but save only on OK or Apply; Cancel puts the saved look back.
