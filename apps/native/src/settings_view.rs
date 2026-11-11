@@ -5345,72 +5345,7 @@ impl RootView {
         let shown_weight = crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD);
         let rows: Vec<AnyElement> = choices
             .into_iter()
-            .map(|(host, open)| {
-                let shown = host == self.settings_host;
-                let dim = !shown && !open;
-                let key = host.wire().unwrap_or("local").to_owned();
-                let selector = format!("settings-host-{key}");
-                let label = crate::sidebar::host_label(&host);
-                let version = self.settings_host_version(&host);
-                let label_key = key.clone();
-                let version_key = key.clone();
-                let behind_key = key;
-                let text = match (shown, open) {
-                    (true, _) => t.text,
-                    (false, true) => t.text_2,
-                    (false, false) => t.muted,
-                };
-                div()
-                    .id(gpui::SharedString::from(selector.clone()))
-                    .driver_id(move || selector.clone())
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .h(crate::fonts::ui_px(cx, TAB_ROW_HEIGHT))
-                    .px(px(12.0))
-                    .rounded(px(TAB_ROW_RADIUS))
-                    .text_color(gpui::rgb(text))
-                    .when(dim, |row| row.opacity(OFFLINE_HOST_OPACITY))
-                    .when(shown, |row| {
-                        row.bg(gpui::rgb(t.selection)).font_weight(shown_weight)
-                    })
-                    .when(!shown && open, |row| {
-                        row.cursor_pointer()
-                            .hover(|style| style.bg(gpui::rgb(t.popover_hover)))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.choose_settings_host(host.clone(), window, cx);
-                            }))
-                    })
-                    .child(
-                        crate::ellipsis::truncating(
-                            &format!("settings-host-label-{label_key}"),
-                            StyledText::new(label),
-                        )
-                        .flex_1(),
-                    )
-                    .children(version.as_ref().map(|(version, _)| {
-                        div()
-                            .driver_id(move || format!("settings-host-version-{version_key}"))
-                            .flex_none()
-                            .ml(px(6.0))
-                            .font_family(crate::fonts::DEFAULT_FAMILY)
-                            .font_weight(crate::fonts::mono_weight())
-                            .text_size(crate::fonts::ui_px_at(crate::fonts::ui_text_size(cx), 10.5))
-                            .text_color(gpui::rgb(t.muted))
-                            .child(format!("v{version}"))
-                    }))
-                    .children(version.as_ref().filter(|(_, behind)| *behind).map(|_| {
-                        crate::connection_picker_view::tag(
-                            crate::fonts::ui_text_size(cx),
-                            crate::fonts::ui_weight_shift(cx),
-                            format!("settings-host-behind-{behind_key}"),
-                            "Behind".to_owned(),
-                            &t,
-                        )
-                        .ml(px(6.0))
-                    }))
-                    .into_any_element()
-            })
+            .map(|(host, open)| self.settings_host_choice(host, open, shown_weight, cx))
             .collect();
         Some(
             div()
@@ -5427,6 +5362,93 @@ impl RootView {
                 ))
                 .children(rows),
         )
+    }
+
+    /// One row of the host selector: the host's name, and below it, when the
+    /// host reports a version, that version and an older host's Behind tag.
+    fn settings_host_choice(
+        &self,
+        host: HostKey,
+        open: bool,
+        shown_weight: FontWeight,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let shown = host == self.settings_host;
+        let dim = !shown && !open;
+        let key = host.wire().unwrap_or("local").to_owned();
+        let selector = format!("settings-host-{key}");
+        let label = crate::sidebar::host_label(&host);
+        let version = self.settings_host_version(&host);
+        let label_key = key.clone();
+        let name_key = key.clone();
+        let version_key = key.clone();
+        let behind_key = key;
+        let text = match (shown, open) {
+            (true, _) => t.text,
+            (false, true) => t.text_2,
+            (false, false) => t.muted,
+        };
+        div()
+            .id(gpui::SharedString::from(selector.clone()))
+            .driver_id(move || selector.clone())
+            .flex()
+            .flex_col()
+            .flex_none()
+            .justify_center()
+            .min_h(crate::fonts::ui_px(cx, TAB_ROW_HEIGHT))
+            .py(px(6.0))
+            .px(px(12.0))
+            .rounded(px(TAB_ROW_RADIUS))
+            .text_color(gpui::rgb(text))
+            .when(dim, |row| row.opacity(OFFLINE_HOST_OPACITY))
+            .when(shown, |row| {
+                row.bg(gpui::rgb(t.selection)).font_weight(shown_weight)
+            })
+            .when(!shown && open, |row| {
+                row.cursor_pointer()
+                    .hover(|style| style.bg(gpui::rgb(t.popover_hover)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.choose_settings_host(host.clone(), window, cx);
+                    }))
+            })
+            .child(
+                crate::ellipsis::truncating(
+                    &format!("settings-host-label-{label_key}"),
+                    StyledText::new(label),
+                )
+                .driver_id(move || format!("settings-host-name-{name_key}")),
+            )
+            .children(version.as_ref().map(|(version, behind)| {
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_x(px(6.0))
+                    .gap_y(px(2.0))
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .driver_id(move || format!("settings-host-version-{version_key}"))
+                            .flex_none()
+                            .font_family(crate::fonts::DEFAULT_FAMILY)
+                            .font_weight(crate::fonts::mono_weight())
+                            .text_size(crate::fonts::ui_px_at(crate::fonts::ui_text_size(cx), 10.5))
+                            .text_color(gpui::rgb(t.muted))
+                            .child(format!("v{version}")),
+                    )
+                    .children(behind.then(|| {
+                        crate::connection_picker_view::tag(
+                            crate::fonts::ui_text_size(cx),
+                            crate::fonts::ui_weight_shift(cx),
+                            format!("settings-host-behind-{behind_key}"),
+                            "Behind".to_owned(),
+                            &t,
+                        )
+                    }))
+            }))
+            .into_any_element()
     }
 
     /// One clickable tab row; the shown one is filled, bold, and ringed

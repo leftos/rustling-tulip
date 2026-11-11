@@ -109,6 +109,64 @@ fn a_host_on_an_older_release_shows_its_version_and_behind_in_the_selector(
 }
 
 #[gpui::test]
+fn a_behind_host_row_shows_its_name_above_its_version_and_tag(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect_with_version("0.11.90-alpha");
+    h.keys("ctrl-,");
+
+    let key = remote_key();
+    let wire = key.wire().expect("a remote host has a wire key");
+    let name = h.bounds(&format!("settings-host-name-{wire}"));
+    let version = h.bounds(&format!("settings-host-version-{wire}"));
+    let behind = h.bounds(&format!("settings-host-behind-{wire}"));
+    let row = h.bounds("settings-host-row");
+    assert!(
+        name.size.width >= px(40.0),
+        "the host's name keeps its own line's width: {name:?}"
+    );
+    assert!(
+        version.origin.y >= name.origin.y + name.size.height,
+        "the version sits below the name: {version:?} against {name:?}"
+    );
+    assert!(
+        behind.origin.x + behind.size.width <= row.origin.x + row.size.width,
+        "the Behind tag stays inside the selector: {behind:?} against {row:?}"
+    );
+    assert!(
+        behind.origin.y >= version.origin.y + version.size.height,
+        "a long version drops the tag below it: {behind:?} against {version:?}"
+    );
+    assert!(
+        h.bounds("settings-host-name-local").size.width > px(0.0),
+        "This PC's row shows its name"
+    );
+}
+
+#[gpui::test]
+fn a_short_behind_version_keeps_its_tag_on_the_version_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect_with_version("0.9.0");
+    h.keys("ctrl-,");
+
+    let key = remote_key();
+    let wire = key.wire().expect("a remote host has a wire key");
+    let version = h.bounds(&format!("settings-host-version-{wire}"));
+    let behind = h.bounds(&format!("settings-host-behind-{wire}"));
+    let row = h.bounds("settings-host-row");
+    let centre = behind.origin.y + behind.size.height / 2.0;
+    assert!(
+        centre >= version.origin.y && centre <= version.origin.y + version.size.height,
+        "a short version keeps the tag on its line: {behind:?} against {version:?}"
+    );
+    assert!(
+        behind.origin.x + behind.size.width <= row.origin.x + row.size.width,
+        "the Behind tag stays inside the selector: {behind:?} against {row:?}"
+    );
+}
+
+#[gpui::test]
 fn detailed_logging_rows_are_hidden_while_a_remote_host_is_chosen(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = two_hosts(cx, &dir);
