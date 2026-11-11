@@ -162,8 +162,9 @@ impl RootView {
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
         // The menu's delete confirm and the spawn and Shell… dialogs have
-        // sent nothing yet, so they can go; the appearance editor and
-        // Settings have already applied every change.
+        // sent nothing yet, so they can go; the appearance editor's other
+        // levels have already applied every change, and closing Settings
+        // discards its unapplied edits and puts the saved look back.
         self.close_delete_dialog(window, cx);
         self.close_spawn_dialog(window, cx);
         self.close_shell_dialog(window, cx);

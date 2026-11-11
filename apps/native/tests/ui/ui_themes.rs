@@ -261,12 +261,18 @@ fn use_applies_saves_and_closes(cx: &mut TestAppContext) {
     h.click_on("themes-use");
 
     assert_eq!(drawn(&mut h), DRACULA);
-    assert_eq!(saved_theme(&dir).as_deref(), Some("dracula"));
+    assert_eq!(saved_theme(&dir), None, "a preview until Apply");
     assert_returned_to_settings(&mut h);
     assert_eq!(
         h.root(|root, _| root.appearance_theme_name()).as_deref(),
         Some("Dracula"),
         "the row follows"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(
+        saved_theme(&dir).as_deref(),
+        Some("dracula"),
+        "Apply saves it"
     );
 }
 
@@ -279,8 +285,108 @@ fn enter_uses_the_row(cx: &mut TestAppContext) {
     h.keys("enter");
 
     assert_eq!(drawn(&mut h), DRACULA);
-    assert_eq!(saved_theme(&dir).as_deref(), Some("dracula"));
+    assert_eq!(saved_theme(&dir), None, "a preview until Apply");
     assert_returned_to_settings(&mut h);
+    h.click_on("settings-apply");
+    assert_eq!(saved_theme(&dir).as_deref(), Some("dracula"));
+}
+
+/// The window on the saved theme, Dracula used from the Themes modal.
+fn previewing_dracula<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = opened(cx, dir);
+    cursor_to(&mut h, "dracula", true);
+    h.click_on("themes-use");
+    assert_eq!(drawn(&mut h), DRACULA, "the preview draws");
+    assert_ne!(
+        h.root(|root, _| root.theme_base()),
+        ui_theme_base(&NORD),
+        "the base follows the preview"
+    );
+    h
+}
+
+/// The base a session's appearance falls to under `theme`.
+fn ui_theme_base(theme: &UiTheme) -> rustling_tulip_native::appearance::ThemeBase {
+    rustling_tulip_native::appearance::ThemeBase::of(theme)
+}
+
+/// Settings closed, Nord drawn again with its base, nothing saved.
+fn assert_reverted(h: &mut Harness<'_>, dir: &TestDir) {
+    assert!(!h.root(|root, _| root.settings_open()), "Settings closed");
+    assert_eq!(drawn(h), NORD, "the saved theme draws again");
+    assert_eq!(h.root(|root, _| root.theme_base()), ui_theme_base(&NORD));
+    assert_eq!(saved_theme(dir), None, "nothing was saved");
+}
+
+#[gpui::test]
+fn use_then_cancel_reverts_the_theme(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = previewing_dracula(cx, &dir);
+    h.click_on("settings-cancel");
+    assert_reverted(&mut h, &dir);
+}
+
+#[gpui::test]
+fn use_then_escape_reverts_the_theme(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = previewing_dracula(cx, &dir);
+    h.keys("escape");
+    assert_reverted(&mut h, &dir);
+}
+
+#[gpui::test]
+fn use_then_the_close_button_reverts_the_theme(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = previewing_dracula(cx, &dir);
+    h.click_on("settings-close");
+    assert_reverted(&mut h, &dir);
+}
+
+#[gpui::test]
+fn use_then_ok_saves_the_theme(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = previewing_dracula(cx, &dir);
+    h.click_on("settings-ok");
+    assert!(!h.root(|root, _| root.settings_open()), "Settings closed");
+    assert_eq!(drawn(&mut h), DRACULA, "the theme stays");
+    assert_eq!(saved_theme(&dir).as_deref(), Some("dracula"), "OK saves it");
+}
+
+#[gpui::test]
+fn deleting_the_saved_theme_while_previewing_saves_the_default_on_cancel(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let id = ThemeStore::new(dir.path().join(THEMES_DIR))
+        .save("Mine", &UiTheme::CONTRAST, None, None)
+        .expect("save");
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::json!({ "theme": id }).to_string(),
+    )
+    .expect("write native-ui.json");
+    let mut h = Harness::with_saved_theme(cx, &dir, &fixture());
+    open_dialog(&mut h);
+    assert_eq!(drawn(&mut h), UiTheme::CONTRAST);
+    cursor_to(&mut h, "dracula", true);
+    h.click_on("themes-use");
+    assert_eq!(drawn(&mut h), DRACULA);
+
+    h.click_on("appearance-theme");
+    cursor_to(&mut h, &id, false);
+    h.click_on("themes-delete");
+    h.click_on("themes-ask-yes");
+    assert_eq!(drawn(&mut h), DRACULA, "the preview stays");
+    assert_eq!(
+        saved_theme(&dir).as_deref(),
+        Some("nord"),
+        "the saved look names no deleted theme"
+    );
+    h.click_on("themes-cancel");
+    h.click_on("settings-cancel");
+
+    assert!(!h.root(|root, _| root.settings_open()), "Settings closed");
+    assert_eq!(drawn(&mut h), NORD, "the default draws");
+    assert_eq!(h.root(|root, _| root.theme_base()), ui_theme_base(&NORD));
+    assert_eq!(saved_theme(&dir).as_deref(), Some("nord"), "and is saved");
 }
 
 #[gpui::test]
@@ -432,6 +538,8 @@ fn the_theme_row_works_on_a_remote_host(cx: &mut TestAppContext) {
     h.keys("enter");
 
     assert_eq!(drawn(&mut h), DRACULA, "the theme is this PC's to choose");
+    assert_eq!(saved_theme(&dir), None, "a preview until Apply");
+    h.click_on("settings-apply");
     assert_eq!(saved_theme(&dir).as_deref(), Some("dracula"));
 }
 

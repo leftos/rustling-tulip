@@ -548,6 +548,38 @@ fn quitting_flushes_the_pending_tab_save(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn quitting_with_settings_open_saves_the_saved_look(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = focused(cx, &dir, &Fixture::single(session("s1").exited(0).build()));
+    h.keys("ctrl-shift-=");
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-appearance");
+    h.click_on("appearance-size-up");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Settings is open, previewing a size"
+    );
+
+    assert!(
+        h.cx.simulate_close(),
+        "nothing to ask about, so the window closes"
+    );
+    h.cx.run_until_parked();
+
+    let saved = saved(&dir);
+    assert_eq!(
+        saved["tab_font_sizes"]["t1"].as_f64(),
+        Some(14.0),
+        "the quit path writes the pending tab save"
+    );
+    assert_eq!(
+        saved["terminal_font"]["size"].as_f64(),
+        Some(13.0),
+        "and the look Settings opened with, not the preview"
+    );
+}
+
+#[gpui::test]
 fn overrides_survive_a_tab_update_before_the_first_list(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     std::fs::write(

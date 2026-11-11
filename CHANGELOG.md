@@ -21,6 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Settings › Dashboard's Clear is Delete stored key: it waits for OK or Apply and deletes only the shown provider's key; Test waits for applied changes.
 - Removing a saved Claude account in Settings › Accounts asks you to confirm first.
 - Settings › Accounts' names, order and auto-switch settings wait for OK or Apply, and Cancel leaves them as they were.
+- Settings › Appearance and the Themes picker's Use preview at once but save only on OK or Apply; Cancel puts the saved look back.
 - The Connections panel, context menus, confirm dialogs, the undo shelf, tooltips and Settings' host list are wider, so their text fits on fewer lines.
 
 ## v0.12.0-alpha

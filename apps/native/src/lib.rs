@@ -1053,6 +1053,11 @@ pub struct RootView {
     /// Settings' toggles and choices waiting for Apply, and what OK waits
     /// for.
     settings_pending: settings_view::PendingSettings,
+    /// The look `native-ui.json` keeps while Settings is open and previews
+    /// the one drawn: every save writes it in place of the live six fields,
+    /// OK and Apply move it to the live look, and closing Settings draws it
+    /// again. `None` while Settings is closed.
+    appearance_saved: Option<sidebar::SavedAppearance>,
     /// The host whose agent pages Settings shows: This PC each time
     /// Settings opens, and again once the shown host's connection closes.
     settings_host: HostKey,
@@ -1675,6 +1680,7 @@ impl RootView {
             remote_access_tab: None,
             agent_tabs: settings_view::AgentTabs::default(),
             settings_pending: settings_view::PendingSettings::default(),
+            appearance_saved: None,
             settings_host: HostKey::Local,
             autostart,
             window_title: String::new(),
@@ -3128,9 +3134,70 @@ impl RootView {
         for host in &remote {
             self.sidebar.drop_ended_session_views(host);
         }
-        match save_ui_state(dir, self.sidebar.ui_state()) {
+        // While Settings previews a look, the file keeps the saved one: it
+        // is swapped in for the write and back out after, whatever the
+        // write returns.
+        if let Some(saved) = self.appearance_saved.as_mut() {
+            self.sidebar.swap_appearance(saved);
+        }
+        let written = save_ui_state(dir, self.sidebar.ui_state());
+        if let Some(saved) = self.appearance_saved.as_mut() {
+            self.sidebar.swap_appearance(saved);
+        }
+        match written {
             Ok(()) => self.sidebar.popouts_written(),
             Err(err) => tracing::warn!("saving the sidebar layout: {err:#}"),
+        }
+    }
+
+    /// Whether Settings draws a look other than the saved one, which OK and
+    /// Apply would save.
+    fn appearance_previewed(&self) -> bool {
+        self.appearance_saved
+            .as_ref()
+            .is_some_and(|saved| *saved != self.sidebar.look())
+    }
+
+    /// OK and Apply: the look drawn becomes the saved one, and is written.
+    fn commit_appearance_preview(&mut self) {
+        if self.appearance_previewed() {
+            self.appearance_saved = Some(self.sidebar.look());
+            self.save_ui();
+        }
+    }
+
+    /// Settings is closing: the saved look draws again, as boot draws it.
+    /// Nothing is written, since the file already holds it.
+    fn revert_appearance_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(mut saved) = self.appearance_saved.take() else {
+            return;
+        };
+        if saved == self.sidebar.look() {
+            return;
+        }
+        self.sidebar.swap_appearance(&mut saved);
+        let ui = self.sidebar.ui_state();
+        fonts::set_ui_family(ui.ui_font_family.as_deref(), cx);
+        fonts::set_ui_text_size(ui.ui_text_size, cx);
+        fonts::set_ui_weight(ui.ui_font_weight, cx);
+        let theme = theme_store::resolve_selection(self.themes_dir.as_deref(), ui.theme.as_deref());
+        ui_theme::set_theme(theme, cx);
+        self.sidebar
+            .set_theme_base(appearance::ThemeBase::of(&theme));
+        self.apply_pane_fonts(true, cx);
+        cx.refresh_windows();
+    }
+
+    /// A theme file `id` is gone: a saved look that names it falls to the
+    /// default theme, written now so `native-ui.json` never names it.
+    fn forget_saved_theme(&mut self, id: &str) {
+        let named = self
+            .appearance_saved
+            .as_ref()
+            .is_some_and(|saved| saved.theme.as_deref() == Some(id));
+        if named && let Some(saved) = self.appearance_saved.as_mut() {
+            saved.theme = Some(theme_store::DEFAULT_ID.to_owned());
+            self.save_ui();
         }
     }
 

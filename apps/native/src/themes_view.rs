@@ -1711,6 +1711,10 @@ impl RootView {
             self.show_themes_error("deleting the theme", &err, cx);
             return;
         }
+        // A shadow file's id still names its built-in.
+        if !target.shadow {
+            self.forget_saved_theme(&target.id);
+        }
         let in_use = self.sidebar.ui_state().theme.as_deref() == Some(target.id.as_str());
         let selected = if in_use && !target.shadow {
             self.select_theme(theme_store::DEFAULT_ID, cx)

@@ -3976,18 +3976,26 @@ fn a_ui_font_pick_redraws_the_interface_and_is_saved_and_reset_restores_the_defa
     assert_eq!(ui_family(&mut h), "Inter", "nothing picked: the default");
 
     h.click_on("appearance-ui-family-option-Geist");
+    assert_eq!(ui_family(&mut h), "Geist", "the pick draws at once");
+    assert_eq!(
+        saved_ui(&dir)["ui_font_family"],
+        serde_json::Value::Null,
+        "a preview until Apply"
+    );
+    h.click_on("settings-apply");
     assert_eq!(
         saved_ui(&dir)["ui_font_family"],
         "Geist",
-        "saved on this machine"
+        "Apply saves it on this machine"
     );
-    assert_eq!(ui_family(&mut h), "Geist", "the pick draws at once");
 
     // A family the test text system knows: one of gpui's fallbacks.
     h.click_on("appearance-ui-family-filter");
     type_text(&mut h, "segoe");
     h.click_on("appearance-ui-family-option-Segoe UI");
     assert_eq!(ui_family(&mut h), "Segoe UI", "the pick draws at once");
+    assert_eq!(saved_ui(&dir)["ui_font_family"], "Geist");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["ui_font_family"], "Segoe UI");
     assert_eq!(
         h.root(|root, cx| root.pane_font("p1", cx).and_then(|font| font.family)),
@@ -4001,6 +4009,8 @@ fn a_ui_font_pick_redraws_the_interface_and_is_saved_and_reset_restores_the_defa
         "Inter",
         "Use built-in restores the default"
     );
+    assert_eq!(saved_ui(&dir)["ui_font_family"], "Segoe UI");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["ui_font_family"], serde_json::Value::Null);
 }
 
@@ -4068,12 +4078,20 @@ fn ui_weight_buttons_set_and_save_the_weight(cx: &mut TestAppContext) {
     );
     assert_eq!(
         saved_ui(&dir)["ui_font_weight"],
+        400,
+        "a preview until Apply"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(
+        saved_ui(&dir)["ui_font_weight"],
         600,
-        "saved on this machine"
+        "Apply saves it on this machine"
     );
 
     press_ui_weight(&mut h, "medium");
     assert_eq!(body_weight(&mut h), FontWeight::MEDIUM);
+    assert_eq!(saved_ui(&dir)["ui_font_weight"], 600);
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["ui_font_weight"], 500);
     assert_eq!(
         h.cx.update(|_, cx| fonts::ui_text_size(cx)),
@@ -4083,6 +4101,8 @@ fn ui_weight_buttons_set_and_save_the_weight(cx: &mut TestAppContext) {
 
     press_ui_weight(&mut h, "regular");
     assert_eq!(body_weight(&mut h), FontWeight::NORMAL);
+    assert_eq!(saved_ui(&dir)["ui_font_weight"], 500);
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["ui_font_weight"], 400);
 }
 
@@ -4122,13 +4142,105 @@ fn ui_text_size_plus_raises_every_ui_text_and_saves(cx: &mut TestAppContext) {
         "every UI text size reads one pixel larger"
     );
     assert_eq!(ui_text_size_label(&mut h), "+1 px");
-    assert_eq!(saved_ui(&dir)["ui_text_size"], 1, "saved on this machine");
+    assert_eq!(saved_ui(&dir)["ui_text_size"], 0, "a preview until Apply");
+    h.click_on("settings-apply");
+    assert_eq!(
+        saved_ui(&dir)["ui_text_size"],
+        1,
+        "Apply saves it on this machine"
+    );
 
     press_ui_text_size(&mut h, "down");
     press_ui_text_size(&mut h, "down");
     assert_eq!(ui_text_size(&mut h), -1);
     assert_eq!(ui_text_size_label(&mut h), "−1 px");
+    assert_eq!(saved_ui(&dir)["ui_text_size"], 1);
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["ui_text_size"], -1);
+}
+
+#[gpui::test]
+fn cancel_reverts_the_ui_font_size_and_weight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    h.click_on("appearance-ui-family-option-Geist");
+    press_ui_text_size(&mut h, "up");
+    press_ui_weight(&mut h, "semibold");
+    assert_eq!(ui_family(&mut h), "Geist");
+    assert_eq!(ui_text_size(&mut h), 1);
+    assert_eq!(body_weight(&mut h), FontWeight::SEMIBOLD);
+
+    h.click_on("settings-cancel");
+
+    assert!(!h.root(|root, _| root.settings_open()), "Settings closed");
+    assert_eq!(ui_family(&mut h), "Inter", "the saved family draws again");
+    assert_eq!(ui_text_size(&mut h), 0, "the saved size draws again");
+    assert_eq!(
+        body_weight(&mut h),
+        FontWeight::NORMAL,
+        "the saved weight draws again"
+    );
+    let saved = saved_ui(&dir);
+    assert_eq!(saved["ui_font_family"], serde_json::Value::Null, "{saved}");
+    assert_eq!(saved["ui_text_size"], 0, "{saved}");
+    assert_eq!(saved["ui_font_weight"], 400, "{saved}");
+}
+
+#[gpui::test]
+fn a_look_stepped_back_to_the_saved_one_holds_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    assert_eq!(apply_gate(&mut h), (false, false), "nothing is pending");
+
+    press_ui_text_size(&mut h, "up");
+    assert_eq!(apply_gate(&mut h), (true, true), "the preview pends");
+
+    press_ui_text_size(&mut h, "down");
+    assert_eq!(
+        apply_gate(&mut h),
+        (false, false),
+        "back at the saved size, nothing is held"
+    );
+}
+
+#[gpui::test]
+fn apply_saves_the_look_and_a_later_cancel_keeps_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    press_ui_text_size(&mut h, "up");
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["ui_text_size"], 1, "Apply saves it");
+    assert_eq!(apply_gate(&mut h), (false, false), "Apply took it");
+
+    press_ui_text_size(&mut h, "up");
+    assert_eq!(ui_text_size(&mut h), 2);
+    h.click_on("settings-cancel");
+
+    assert_eq!(ui_text_size(&mut h), 1, "back to the applied size");
+    assert_eq!(
+        saved_ui(&dir)["ui_text_size"],
+        1,
+        "the applied size stays saved"
+    );
+}
+
+#[gpui::test]
+fn a_save_from_elsewhere_while_previewing_keeps_the_saved_look(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    press_ui_text_size(&mut h, "up");
+
+    h.root_update(|root, _, cx| root.toggle_chat_mode(cx));
+
+    let mode = match h.root(|root, _| root.chat_mode()) {
+        ChatMode::Compact => "compact",
+        ChatMode::Comfortable => "comfortable",
+    };
+    let saved = saved_ui(&dir);
+    assert_eq!(saved["chat_mode"], mode, "the unrelated change is saved");
+    assert_eq!(saved["ui_text_size"], 0, "the saved look stays saved");
+    assert_eq!(ui_text_size(&mut h), 1, "the preview still draws");
+    assert_eq!(apply_gate(&mut h), (true, true), "and still pends");
 }
 
 #[gpui::test]
@@ -4188,6 +4300,8 @@ fn ui_text_size_buttons_stop_at_the_ends_of_the_range(cx: &mut TestAppContext) {
     }
     assert_eq!(ui_text_size(&mut h), -2, "− stops at −2");
     assert_eq!(ui_text_size_label(&mut h), "−2 px");
+    assert_eq!(saved_ui(&dir)["ui_text_size"], 0, "a preview until Apply");
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["ui_text_size"], -2);
     let ring = appearance_ring(&mut h);
     assert!(
@@ -4231,7 +4345,11 @@ fn appearance_term_weight_picks_with_space(cx: &mut TestAppContext) {
         appearance_hint(&mut h, "weight"),
         "Resolved: SemiBold from app"
     );
-    assert_eq!(saved_ui(&dir)["terminal_font"]["weight"], 600);
+    assert_eq!(
+        saved_ui(&dir)["terminal_font"]["weight"],
+        fonts::DEFAULT_TERMINAL_WEIGHT,
+        "a preview until Apply"
+    );
     assert_eq!(
         settings_focus(&mut h),
         Some("appearance-term-weight-semibold"),

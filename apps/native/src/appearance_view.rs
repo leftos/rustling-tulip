@@ -446,6 +446,15 @@ impl RootView {
 
     /// Closes the editor and hands the keyboard back to the active pane.
     pub(crate) fn close_appearance_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Every close of Settings draws the saved look again: OK and Apply
+        // have already made the shown look the saved one.
+        if self
+            .appearance_editor
+            .as_ref()
+            .is_some_and(|editor| editor.level == Level::App)
+        {
+            self.revert_appearance_preview(cx);
+        }
         if self.appearance_editor.take().is_some() {
             self.themes_modal = None;
             // The Worktrees tab lives with Settings: dropping it here means

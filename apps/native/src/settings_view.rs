@@ -2867,6 +2867,11 @@ impl RootView {
                     valid,
                 });
             }
+            // The Appearance preview counts once, while it differs from
+            // the saved look.
+            if self.appearance_previewed() {
+                pending.push(toggle.clone());
+            }
             let local = self.settings_pending.local.len();
             pending.extend(std::iter::repeat_n(toggle, local));
         }
@@ -2932,6 +2937,7 @@ impl RootView {
             failed |= self.commit_local(value, window, cx);
         }
         self.commit_chat_width();
+        self.commit_appearance_preview();
         cx.notify();
         Some(Applied {
             owed: self.settings_pending.log.take().unwrap_or_default(),
@@ -4331,6 +4337,8 @@ impl RootView {
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_appearance_editor(Level::App, window, cx);
         if self.settings_open() {
+            // Appearance previews from here on; this is the look kept.
+            self.appearance_saved = Some(self.sidebar.look());
             self.settings_host = HostKey::Local;
             self.settings_tab = SettingsTab::General;
             self.accounts.forget_applied_refusals();

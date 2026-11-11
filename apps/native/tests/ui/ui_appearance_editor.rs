@@ -1018,15 +1018,23 @@ fn app_frame_width_persists_locally_and_repaints(cx: &mut TestAppContext) {
 
     h.click_on("appearance-frame-width-up");
     assert_eq!(appearance_sends(&h.sent()), 0, "the app level stays here");
-    assert_eq!(saved_ui(&dir)["terminal_frame_width"], 2);
+    let saved = saved_ui(&dir);
+    assert!(
+        saved["terminal_frame_width"].is_null(),
+        "a preview until Apply: {saved}"
+    );
     assert_eq!(hint(&mut h, "frame-width"), "2 px · app");
     assert_eq!(
         frame_width_of(&mut h, "p1"),
         2,
         "a session that sets no width repaints at the app's"
     );
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["terminal_frame_width"], 2, "Apply saves it");
 
     h.click_on("appearance-frame-width-reset");
+    assert_eq!(saved_ui(&dir)["terminal_frame_width"], 2, "until Apply");
+    h.click_on("settings-apply");
     let saved = saved_ui(&dir);
     assert!(saved["terminal_frame_width"].is_null(), "{saved}");
     assert_eq!(appearance_sends(&h.sent()), 0);
@@ -1036,6 +1044,40 @@ fn app_frame_width_persists_locally_and_repaints(cx: &mut TestAppContext) {
         1,
         "back to the built-in width"
     );
+}
+
+#[gpui::test]
+fn cancel_reverts_the_app_frame_width_and_terminal_font(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-appearance");
+
+    h.click_on("appearance-frame-width-up");
+    h.click_on("appearance-size-up");
+    assert_eq!(frame_width_of(&mut h, "p1"), 2, "the preview repaints");
+    assert_eq!(
+        h.root(|root, cx| root.pane_font("p1", cx).map(|font| font.size)),
+        Some(14.0)
+    );
+
+    h.click_on("settings-cancel");
+
+    assert!(!h.root(|root, _| root.settings_open()), "Settings closed");
+    assert_eq!(
+        frame_width_of(&mut h, "p1"),
+        1,
+        "the pane repaints at the saved width"
+    );
+    assert_eq!(
+        h.root(|root, cx| root.pane_font("p1", cx).map(|font| font.size)),
+        Some(13.0),
+        "and at the saved size"
+    );
+    let saved = saved_ui(&dir);
+    assert!(saved["terminal_frame_width"].is_null(), "{saved}");
+    assert_eq!(saved["terminal_font"]["size"], 13.0, "{saved}");
 }
 
 #[gpui::test]
@@ -1108,7 +1150,17 @@ fn ctrl_comma_opens_settings_and_app_level_font_changes_persist_locally_without_
     assert_eq!(hint(&mut h, "size"), "Resolved: 14px from app");
     assert_eq!(hint(&mut h, "weight"), "Resolved: SemiBold from app");
     let saved = saved_ui(&dir);
-    assert_eq!(saved["terminal_font"]["size"], 14.0);
+    assert_eq!(
+        saved["terminal_font"]["size"], 13.0,
+        "a preview until Apply"
+    );
+    assert_eq!(
+        saved["terminal_font"]["weight"],
+        rustling_tulip_native::fonts::DEFAULT_TERMINAL_WEIGHT
+    );
+    h.click_on("settings-apply");
+    let saved = saved_ui(&dir);
+    assert_eq!(saved["terminal_font"]["size"], 14.0, "Apply saves it");
     assert_eq!(saved["terminal_font"]["weight"], 600);
     assert!(
         saved.get("app_appearance").is_none(),
@@ -1117,9 +1169,17 @@ fn ctrl_comma_opens_settings_and_app_level_font_changes_persist_locally_without_
 
     h.click_on("appearance-size-reset");
     assert_eq!(hint(&mut h, "size"), "Resolved: 13px from built-in");
+    assert_eq!(saved_ui(&dir)["terminal_font"]["size"], 14.0, "until OK");
+    h.click_on("settings-ok");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "OK closes Settings"
+    );
     let saved = saved_ui(&dir);
-    assert_eq!(saved["terminal_font"]["size"], 13.0);
+    assert_eq!(saved["terminal_font"]["size"], 13.0, "OK saves it");
     assert_eq!(appearance_sends(&h.sent()), 0);
+    h.keys("ctrl-,");
+    assert!(h.root(|root, _| root.settings_open()));
 
     h.click_on("settings-cancel");
     assert!(!h.root(|root, _| root.settings_open()));

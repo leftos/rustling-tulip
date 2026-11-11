@@ -410,6 +410,18 @@ pub enum Activity {
     Sessions,
 }
 
+/// The six [`UiState`] fields that make the app's look, held apart: the
+/// look `native-ui.json` keeps while Settings previews another.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SavedAppearance {
+    pub(crate) terminal_font: FontSettings,
+    pub(crate) ui_font_family: Option<String>,
+    pub(crate) ui_text_size: i8,
+    pub(crate) ui_font_weight: u16,
+    pub(crate) terminal_frame_width: Option<u16>,
+    pub(crate) theme: Option<String>,
+}
+
 /// The persisted sidebar layout.
 #[expect(
     clippy::struct_excessive_bools,
@@ -2402,6 +2414,32 @@ impl SidebarModel {
         self.ui.theme = id;
     }
 
+    /// The look the interface draws in now: the six appearance fields.
+    pub(crate) fn look(&self) -> SavedAppearance {
+        SavedAppearance {
+            terminal_font: self.ui.terminal_font.clone(),
+            ui_font_family: self.ui.ui_font_family.clone(),
+            ui_text_size: self.ui.ui_text_size,
+            ui_font_weight: self.ui.ui_font_weight,
+            terminal_frame_width: self.ui.terminal_frame_width,
+            theme: self.ui.theme.clone(),
+        }
+    }
+
+    /// Swaps the six appearance fields with `other`'s, the rest of the
+    /// layout untouched.
+    pub(crate) fn swap_appearance(&mut self, other: &mut SavedAppearance) {
+        std::mem::swap(&mut self.ui.terminal_font, &mut other.terminal_font);
+        std::mem::swap(&mut self.ui.ui_font_family, &mut other.ui_font_family);
+        std::mem::swap(&mut self.ui.ui_text_size, &mut other.ui_text_size);
+        std::mem::swap(&mut self.ui.ui_font_weight, &mut other.ui_font_weight);
+        std::mem::swap(
+            &mut self.ui.terminal_frame_width,
+            &mut other.terminal_frame_width,
+        );
+        std::mem::swap(&mut self.ui.theme, &mut other.theme);
+    }
+
     /// Whether the diff tabs show whitespace-only changes.
     pub fn set_diff_include_whitespace(&mut self, include: bool) {
         self.ui.diff_include_whitespace = include;
@@ -4119,6 +4157,40 @@ pub(crate) mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    #[test]
+    fn swap_appearance_swaps_only_the_six_fields() {
+        let mut model = SidebarModel::new(UiState {
+            sidebar_width: 333.0,
+            tab_font_sizes: BTreeMap::from([("t1".to_owned(), 17.0)]),
+            ..UiState::default()
+        });
+        let live = model.look();
+        let mut other = SavedAppearance {
+            terminal_font: FontSettings {
+                family: Some("Fira Code".to_owned()),
+                size: 15.0,
+                weight: 600,
+            },
+            ui_font_family: Some("Geist".to_owned()),
+            ui_text_size: 2,
+            ui_font_weight: 500,
+            terminal_frame_width: Some(3),
+            theme: Some("dracula".to_owned()),
+        };
+        let swapped_in = other.clone();
+
+        model.swap_appearance(&mut other);
+
+        assert_eq!(model.look(), swapped_in, "the six fields came in");
+        assert_eq!(other, live, "the live six went out");
+        assert!((model.ui_state().sidebar_width - 333.0).abs() < f32::EPSILON);
+        assert_eq!(
+            model.ui_state().tab_font_sizes.get("t1").copied(),
+            Some(17.0),
+            "the rest of the layout stays"
+        );
+    }
 
     #[test]
     fn no_hovered_row_once_the_pointer_has_left_the_window() {
