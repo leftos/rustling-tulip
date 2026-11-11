@@ -54,7 +54,7 @@ It is alpha software.
 ### Claude accounts
 
 - Save several Claude logins and switch between them. The footer shows the account in use with its five-hour and weekly usage, and the account list adds its Fable weekly limit while Fable is in use; click it to switch, turn auto-switch on and see when your accounts run dry.
-- Settings › Accounts lists your saved accounts to switch, rename, reorder, remove or add, logs in a new account in a terminal session, and sets auto-switch's threshold, cooldown, strategy and forecast window.
+- Settings › Accounts lists your saved accounts to switch, rename, reorder, remove (after you confirm) or add, logs in a new account in a terminal session, and sets auto-switch's threshold, cooldown, strategy and forecast window.
 - A toast tells you when auto-switch changes accounts, finds every account used up, or stops.
 
 ![The footer's account popover: each saved account's five-hour and weekly usage with its resets, a Switch button, the account in use, and auto-switch at 85%](docs/images/accounts.png)
@@ -131,7 +131,7 @@ It is alpha software.
 - Start the daemon at login, the folder worktrees go in, and Manage worktrees to clean up old ones.
 - Appearance: themes for the whole window and its terminals (built-in ones, Nord by default, or your own), session accent colours, terminal and interface fonts (Inter, Geist, Schibsted Grotesk or any installed font), the interface's text size and weight, the terminal's weight and frame width per app, repo, workspace or session, font sizes per session or per tab, and the window title.
 - The Themes window previews every theme with its contrast check, edits any colour of your own copy, and exports or imports theme files.
-- A search box finds any setting on any page (Ctrl+F), and changes wait for OK or Apply; Cancel or Esc discards them.
+- A search box finds any setting on any page (Ctrl+F), and changes wait for OK or Apply; Cancel or Esc discards them. Appearance and the Themes picker preview a change at once.
 - The Chat section sets Compact or Comfortable and the chat's maximum width, and Diagnostics has a Detailed logging switch and Open logs folder.
 - Update notices have a What's new button with the release notes for every version since the one you had.
 
@@ -155,6 +155,15 @@ On a Mac with Apple silicon (there is no build for Intel Macs):
 4. Secret environment rows need Windows Credential Manager, so on a Mac a session with a secret row will not start; give it the secret through an `${env:NAME}` row instead.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.12.1-alpha
+
+- Settings' Install hooks, Accounts, Appearance and the Dashboard's stored key wait for OK or Apply, and Cancel leaves them as they were.
+- With Claude's vim editor mode on, sessions show the right state and Chat answers land as text.
+- Popovers, menus, dialogs and tooltips are wider, so their text fits on fewer lines.
+- A session started with a first prompt on a cmd host, such as the phone's New session, stays open.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.12.1-alpha).
 
 ## What's new in v0.12.0-alpha
 
