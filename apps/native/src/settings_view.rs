@@ -24,7 +24,7 @@ use protocol::{
     SummarizerKeySource, SummarizerSettings, SummarySource, UserHooksWire, error_codes,
 };
 
-use crate::accounts_settings::{AccountsControl, AliasFields};
+use crate::accounts_settings::{AccountsControl, AliasFields, RemoveConfirm};
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for, trusted_moves};
 use crate::agent_options_view::UPDATE_CLIENT;
 use crate::appearance_stops::{AppearanceStop, after_lost};
@@ -4897,6 +4897,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // The Accounts page's Remove confirm takes every key while it is
+        // open, before the frame's own keys and the page beneath it.
+        if self.on_account_remove_key(keystroke, window, cx) {
+            return true;
+        }
         let mods = &keystroke.modifiers;
         let ctrl_only =
             mods.control && !mods.alt && !mods.shift && !mods.platform && !mods.function;
@@ -9064,6 +9069,8 @@ pub(crate) struct PendingSettings {
     /// The Accounts page's alias fields, one per account it lists, built
     /// while the page shows.
     pub(crate) account_aliases: AliasFields,
+    /// The Accounts page's open Remove confirm, for the account it names.
+    pub(crate) remove_confirm: Option<RemoveConfirm>,
 }
 
 /// The General tab's Maximum chat width field and its draft.

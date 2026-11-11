@@ -50,6 +50,7 @@ impl RootView {
             self.ask_accounts(host);
         }
         if folded.changed {
+            self.settle_remove_confirm(host);
             cx.notify();
         }
     }

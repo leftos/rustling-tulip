@@ -6165,6 +6165,7 @@ impl Render for RootView {
             .children(self.host_path_prompt_layer(cx))
             .children(self.appearance_editor_layer(window, cx))
             .children(self.settings_layer(window, cx))
+            .children(self.account_remove_confirm_layer(cx))
             .children(self.themes_layer(window, cx))
             .children(self.whats_new_layer(cx))
             .children(self.worktrees_manager_layer(window, cx))

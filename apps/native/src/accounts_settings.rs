@@ -1,19 +1,22 @@
 //! The Settings › Accounts page: the saved accounts of the host Settings
 //! shows (`settings_host`), one row each with Switch, the alias field, Up
 //! and Down and Remove, then Add current login, Log in a new account and
-//! its Cancel, the running login's status line, and the auto-switch block. Every control sends its account write at once
-//! through [`RootView::send_account_write`] (never Apply), the page shows
-//! what the next `Accounts` or `AccountsUpdated` carries, and every write
-//! control waits while a write is pending. The texts and the rows' actions
-//! live in [`crate::accounts`]; this module only draws them and forwards
-//! presses.
+//! its Cancel, the running login's status line, and the auto-switch block.
+//! Every control sends its account write at once through
+//! [`RootView::send_account_write`] (never Apply), except Remove, which
+//! asks in a confirm first; the page shows what the next `Accounts` or
+//! `AccountsUpdated` carries, and every write control waits while a write
+//! is pending. The texts and the rows' actions live in [`crate::accounts`];
+//! this module only draws them and forwards presses.
 
 use chrono::Utc;
 use gpui::{
-    AnyElement, App, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight, Stateful,
-    Subscription, Window, div, prelude::*, px, relative,
+    AnyElement, App, ClickEvent, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight,
+    Keystroke, Stateful, Subscription, Window, div, prelude::*, px, relative,
 };
-use protocol::{AutoSwitchStrategy, ClientMessage, ConnectionOrigin, FEATURE_ACCOUNTS};
+use protocol::{
+    AccountSnapshot, AutoSwitchStrategy, ClientMessage, ConnectionOrigin, FEATURE_ACCOUNTS,
+};
 
 use crate::accounts::{
     self, AliasChange, Level, Removal, Row, RowActions, SWITCH_FIRST, Tag, WriteAction,
@@ -21,12 +24,15 @@ use crate::accounts::{
 use crate::buttons::{Layer, field_frame};
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_text_size, ui_weight, ui_weight_shift};
+use crate::notice_view::modal_panel;
 use crate::section::section;
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_view::{
     RowLock, SettingsControl, SettingsTab, ToggleState, choice_row, hint, input_frame, intern,
     settings_button, toggle,
 };
 use crate::spawn_view::{DISABLED_OPACITY, field};
+use crate::target::HostKey;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, tagged_text, tooltip};
@@ -42,6 +48,9 @@ const CANCEL_LOGIN_LABEL: &str = "Cancel login";
 const UP_LABEL: &str = "Up";
 const DOWN_LABEL: &str = "Down";
 const REMOVE_LABEL: &str = "Remove";
+/// What the Remove confirm says removing a saved login does.
+const REMOVE_CONFIRM_BODY: &str =
+    "Its saved login is deleted from this computer. You can add it again by logging in.";
 /// The section headings.
 const TABLE_SECTION: &str = "Accounts";
 const AUTO_SECTION: &str = "Auto-switch";
@@ -126,6 +135,100 @@ impl AccountsControl {
     }
 }
 
+/// A button of the Remove confirm, in Tab order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoveButton {
+    Cancel,
+    Remove,
+}
+
+impl RemoveButton {
+    pub(crate) const ALL: [Self; 2] = [Self::Cancel, Self::Remove];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Cancel => "Cancel",
+            Self::Remove => REMOVE_LABEL,
+        }
+    }
+
+    pub(crate) const fn selector(self) -> &'static str {
+        match self {
+            Self::Cancel => "account-remove-confirm-cancel",
+            Self::Remove => "account-remove-confirm-remove",
+        }
+    }
+
+    const fn other(self) -> Self {
+        match self {
+            Self::Cancel => Self::Remove,
+            Self::Remove => Self::Cancel,
+        }
+    }
+}
+
+/// The open Remove confirm: the account it would remove, the name its title
+/// shows, and the button with the keyboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoveConfirm {
+    number: u32,
+    label: String,
+    focused: RemoveButton,
+}
+
+impl RemoveConfirm {
+    /// The confirm for account `number`, shown as `label`: its alias, else
+    /// its email. Cancel has the keyboard when it opens.
+    pub(crate) fn open(number: u32, label: String) -> Self {
+        Self {
+            number,
+            label,
+            focused: RemoveButton::Cancel,
+        }
+    }
+
+    /// `Remove {label}?`
+    pub(crate) fn title(&self) -> String {
+        format!("Remove {}?", self.label)
+    }
+
+    pub(crate) const fn number(&self) -> u32 {
+        self.number
+    }
+
+    pub(crate) const fn focused(&self) -> RemoveButton {
+        self.focused
+    }
+
+    /// A key while the confirm is open; returns the button it presses. Esc
+    /// presses Cancel, Enter the focused button, and Tab or Shift+Tab moves
+    /// the focus to the other button.
+    fn key(&mut self, key: &str) -> Option<RemoveButton> {
+        match key {
+            "escape" => Some(RemoveButton::Cancel),
+            "enter" => Some(self.focused),
+            "tab" => {
+                self.focused = self.focused.other();
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// A press of `pressed`, with `writing` saying an account write is
+    /// pending: the account whose removal Remove sends, or nothing. Remove
+    /// waits for the pending write, which leaves the confirm open and its
+    /// Remove disabled until the write's answer arrives; Cancel is the
+    /// caller's to close.
+    pub(crate) fn press(&mut self, pressed: RemoveButton, writing: bool) -> Option<u32> {
+        match pressed {
+            RemoveButton::Cancel => None,
+            RemoveButton::Remove if writing => None,
+            RemoveButton::Remove => Some(self.number),
+        }
+    }
+}
+
 /// One account's alias field and the alias it last showed from the host.
 pub(crate) struct AliasField {
     number: u32,
@@ -195,18 +298,22 @@ impl RootView {
     }
 
     /// Settings moved to another host: the alias fields, and any edit they
-    /// hold, belong to the host they were built for and go.
+    /// hold, belong to the host they were built for and go, and so does an
+    /// open Remove confirm.
     pub(crate) fn drop_account_alias_fields(&mut self) {
         self.settings_pending.account_aliases = AliasFields::default();
+        self.settings_pending.remove_confirm = None;
     }
 
     /// The Accounts tab was selected, or Settings moved to another host
     /// while it shows: the host Settings shows is asked for its list, as
-    /// the popover does, and the alias fields are built.
+    /// the popover does, the alias fields are built, and a Remove confirm
+    /// left from an earlier visit goes.
     pub(crate) fn on_accounts_tab_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.settings_host.clone();
         self.ask_accounts_if_listed(&host);
         self.hold_account_alias_fields(window, cx);
+        self.settings_pending.remove_confirm = None;
     }
 
     /// While the Accounts tab shows: one alias field per account listed, a
@@ -489,14 +596,7 @@ impl RootView {
                     );
                 }
             }
-            AccountsControl::Remove(number) => {
-                self.send_account_write(
-                    &host,
-                    WriteAction::Remove(number),
-                    |request_id| ClientMessage::RemoveAccount { number, request_id },
-                    cx,
-                );
-            }
+            AccountsControl::Remove(number) => self.open_remove_confirm(number, cx),
             AccountsControl::AddLogin => {
                 self.send_account_write(
                     &host,
@@ -533,6 +633,202 @@ impl RootView {
             | AccountsControl::Strategy(_)
             | AccountsControl::Window(_) => self.press_auto_control(control, cx),
         }
+    }
+
+    /// The Remove confirm, while Settings shows the Accounts page and the
+    /// account it names is still listed. Leaving the page, closing Settings
+    /// or the account going closes it.
+    fn remove_confirm(&self) -> Option<&RemoveConfirm> {
+        let on_page = self.settings_open() && self.settings_tab == SettingsTab::Accounts;
+        self.settings_pending
+            .remove_confirm
+            .as_ref()
+            .filter(|confirm| {
+                on_page
+                    && self
+                        .accounts
+                        .accounts(&self.settings_host)
+                        .iter()
+                        .any(|account| account.number == confirm.number())
+            })
+    }
+
+    /// The Remove confirm's title and the selector of its focused button,
+    /// while it shows.
+    #[must_use]
+    pub fn account_remove_confirm(&self) -> Option<(String, &'static str)> {
+        self.remove_confirm()
+            .map(|confirm| (confirm.title(), confirm.focused().selector()))
+    }
+
+    /// Remove on `number`'s row: its confirm opens with Cancel focused, and
+    /// nothing is sent until its Remove is pressed.
+    fn open_remove_confirm(&mut self, number: u32, cx: &mut Context<Self>) {
+        let Some(label) = self
+            .accounts
+            .accounts(&self.settings_host)
+            .iter()
+            .find(|account| account.number == number)
+            .map(remove_label)
+        else {
+            return;
+        };
+        self.settings_pending.remove_confirm = Some(RemoveConfirm::open(number, label));
+        cx.notify();
+    }
+
+    /// A key while the Remove confirm shows; returns whether it took the
+    /// key. Esc presses Cancel, Tab and Shift+Tab move between its buttons
+    /// and Enter presses the focused one; every other key is the confirm's
+    /// too, so nothing beneath it acts.
+    pub(crate) fn on_account_remove_key(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.remove_confirm().is_none() {
+            return false;
+        }
+        let mods = &keystroke.modifiers;
+        if mods.control || mods.alt || mods.platform || mods.function {
+            return true;
+        }
+        let pressed = self
+            .settings_pending
+            .remove_confirm
+            .as_mut()
+            .and_then(|confirm| confirm.key(keystroke.key.as_str()));
+        match pressed {
+            Some(pressed) => self.press_remove_button(pressed, window, cx),
+            None => cx.notify(),
+        }
+        true
+    }
+
+    /// A press of the Remove confirm's `pressed` button: the confirm closes,
+    /// and Remove first sends the account's removal.
+    fn press_remove_button(
+        &mut self,
+        pressed: RemoveButton,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings_pending.remove_confirm.is_none() {
+            return;
+        }
+        let host = self.settings_host.clone();
+        let writing = self.accounts.writing(&host);
+        let remove = self
+            .settings_pending
+            .remove_confirm
+            .as_mut()
+            .and_then(|confirm| confirm.press(pressed, writing));
+        let Some(number) = remove else {
+            if pressed == RemoveButton::Remove {
+                // The account write the page waits on is still pending.
+                cx.notify();
+                return;
+            }
+            self.close_remove_confirm(window, cx);
+            return;
+        };
+        tracing::info!(number, "accounts: removing a saved login");
+        let sent = self.send_account_write(
+            &host,
+            WriteAction::Remove(number),
+            |request_id| ClientMessage::RemoveAccount { number, request_id },
+            cx,
+        );
+        if sent {
+            self.close_remove_confirm(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Closes the confirm and hands the keyboard back to the Settings frame.
+    fn close_remove_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_pending.remove_confirm = None;
+        self.settings_tabs_focus.focus(window);
+        cx.notify();
+    }
+
+    /// `host`'s accounts changed or were forgotten: a Remove confirm for the
+    /// host Settings shows closes when its account left the list or its row
+    /// no longer offers Remove, so a confirm never comes back unasked.
+    pub(crate) fn settle_remove_confirm(&mut self, host: &HostKey) {
+        if *host != self.settings_host || self.settings_pending.remove_confirm.is_none() {
+            return;
+        }
+        let list = self.accounts.accounts(host);
+        let removable = self
+            .settings_pending
+            .remove_confirm
+            .as_ref()
+            .and_then(|confirm| {
+                list.iter()
+                    .position(|account| account.number == confirm.number())
+                    .map(|index| (index, &list[index]))
+            })
+            .is_some_and(|(index, account)| {
+                let row = accounts::row(account, None, false, Utc::now(), &Utc);
+                accounts::row_actions(&row, index, list.len()).removal == Removal::Remove
+            });
+        if !removable {
+            self.settings_pending.remove_confirm = None;
+        }
+    }
+
+    /// The Remove confirm over a backdrop that takes every click beneath it.
+    pub(crate) fn account_remove_confirm_layer(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let t = theme(cx);
+        let confirm = self.remove_confirm()?;
+        // Remove waits for a pending account write, and enables when its
+        // answer arrives.
+        let writing = self.accounts.writing(&self.settings_host);
+        let buttons = RemoveButton::ALL.into_iter().map(|pressed| {
+            let enabled = pressed == RemoveButton::Cancel || !writing;
+            let button = dialog_button(
+                pressed.selector(),
+                pressed.label().to_owned(),
+                dialog_look(
+                    crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
+                    pressed == RemoveButton::Remove,
+                    enabled,
+                    &theme(cx),
+                ),
+                confirm.focused() == pressed,
+            );
+            if enabled {
+                button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.press_remove_button(pressed, window, cx);
+                }))
+            } else {
+                button
+            }
+        });
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "account-remove-confirm-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.appearance_focus)
+        .child(
+            div()
+                .font_weight(ui_weight(cx, FontWeight::SEMIBOLD))
+                .child(confirm.title()),
+        )
+        .child(
+            div()
+                .text_color(gpui::rgb(t.muted))
+                .child(REMOVE_CONFIRM_BODY),
+        )
+        .child(div().flex().justify_end().gap(px(8.0)).children(buttons));
+        Some(backdrop("account-remove-confirm", panel, &theme(cx)))
     }
 
     /// A press of the auto-switch block's `control`, while the host
@@ -1041,6 +1337,12 @@ struct Rules {
     rate_window_minutes: Option<u32>,
 }
 
+/// The name the Remove confirm shows for `account`: its alias, else its
+/// email, as its row shows it.
+fn remove_label(account: &AccountSnapshot) -> String {
+    accounts::row(account, None, false, Utc::now(), &Utc).name
+}
+
 /// `button` with the tooltip naming why it is locked (any host but this
 /// machine) while `locked`.
 fn locked_tip(button: Stateful<Div>, locked: bool) -> Stateful<Div> {
@@ -1204,4 +1506,85 @@ fn window_line(
                     line.reset.clone(),
                 )),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use protocol::{AccountKind, AccountSnapshot, AccountUsageStatus};
+
+    use super::{RemoveButton, RemoveConfirm, remove_label};
+
+    /// An account with `alias` (none when `None`) and `email`.
+    fn account(alias: Option<&str>, email: &str) -> AccountSnapshot {
+        AccountSnapshot {
+            number: 1,
+            email: email.to_owned(),
+            alias: alias.map(str::to_owned),
+            organization_name: None,
+            kind: AccountKind::Oauth,
+            active: false,
+            disabled: false,
+            status: AccountUsageStatus::Ok,
+            five_hour: None,
+            seven_day: None,
+            model_limits: Vec::new(),
+            extra_usage: None,
+            fetched_at: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn the_confirm_opens_on_cancel_and_names_the_account() {
+        let confirm = RemoveConfirm::open(2, "ops".to_owned());
+        assert_eq!(confirm.title(), "Remove ops?");
+        assert_eq!(confirm.number(), 2);
+        assert_eq!(confirm.focused(), RemoveButton::Cancel);
+    }
+
+    #[test]
+    fn enter_presses_the_focused_button_and_tab_moves_the_focus() {
+        let mut confirm = RemoveConfirm::open(2, "ops".to_owned());
+        assert_eq!(confirm.key("enter"), Some(RemoveButton::Cancel));
+        assert!(confirm.key("tab").is_none(), "Tab presses nothing");
+        assert_eq!(confirm.focused(), RemoveButton::Remove);
+        assert_eq!(confirm.key("enter"), Some(RemoveButton::Remove));
+        assert!(confirm.key("tab").is_none());
+        assert_eq!(confirm.focused(), RemoveButton::Cancel);
+    }
+
+    #[test]
+    fn escape_presses_cancel_from_either_button() {
+        let mut confirm = RemoveConfirm::open(2, "ops".to_owned());
+        assert_eq!(confirm.key("escape"), Some(RemoveButton::Cancel));
+        confirm.key("tab");
+        assert_eq!(confirm.key("escape"), Some(RemoveButton::Cancel));
+        assert_eq!(confirm.focused(), RemoveButton::Remove, "Esc picks Cancel");
+    }
+
+    #[test]
+    fn remove_waits_for_a_pending_write_and_sends_otherwise() {
+        let mut confirm = RemoveConfirm::open(3, "lab".to_owned());
+        assert_eq!(confirm.press(RemoveButton::Remove, true), None);
+        assert_eq!(confirm.press(RemoveButton::Remove, false), Some(3));
+        assert_eq!(confirm.press(RemoveButton::Cancel, true), None);
+        assert_eq!(confirm.press(RemoveButton::Cancel, false), None);
+    }
+
+    #[test]
+    fn the_title_names_the_alias_else_the_email() {
+        assert_eq!(
+            remove_label(&account(Some("ops"), "ops@example.com")),
+            "ops"
+        );
+        assert_eq!(
+            remove_label(&account(None, "sam@example.com")),
+            "sam@example.com"
+        );
+        assert_eq!(
+            remove_label(&account(Some("  "), "sam@example.com")),
+            "sam@example.com",
+            "a blank alias shows the email, as the row does"
+        );
+    }
 }

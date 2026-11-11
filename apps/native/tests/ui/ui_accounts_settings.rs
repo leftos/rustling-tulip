@@ -371,8 +371,14 @@ fn switch_on_the_page_sends_switch_account(cx: &mut TestAppContext) {
     assert_eq!(h.root(|root, _| root.accounts_switching()), Some(2));
 }
 
+/// The Remove confirm's title and the selector of its focused button, while
+/// it shows.
+fn remove_confirm(h: &mut Harness<'_>) -> Option<(String, &'static str)> {
+    h.root(|root, _| root.account_remove_confirm())
+}
+
 #[gpui::test]
-fn remove_sends_remove_account_and_the_active_row_says_switch_first(cx: &mut TestAppContext) {
+fn remove_opens_a_confirm_and_sends_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     page(&mut h, trio(), None);
@@ -385,11 +391,155 @@ fn remove_sends_remove_account_and_the_active_row_says_switch_first(cx: &mut Tes
         "no Remove on the account in use"
     );
     press(&mut h, "settings-accounts-remove-3");
+    assert!(writes(&mut h).is_empty(), "Remove asks before it deletes");
+    assert_eq!(
+        remove_confirm(&mut h),
+        Some(("Remove lab?".to_owned(), "account-remove-confirm-cancel"))
+    );
+    assert!(drawn(&mut h, "account-remove-confirm-remove"));
+}
+
+#[gpui::test]
+fn confirming_remove_sends_remove_account(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-remove-3");
+    h.click_on("account-remove-confirm-remove");
     let sent = one_write(&mut h);
     assert!(
         matches!(sent, ClientMessage::RemoveAccount { number: 3, .. }),
         "{sent:?}"
     );
+    assert_eq!(remove_confirm(&mut h), None, "the confirm closes on Remove");
+}
+
+#[gpui::test]
+fn cancel_and_escape_close_the_remove_confirm(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-remove-3");
+    h.keys("tab");
+    assert_eq!(
+        remove_confirm(&mut h),
+        Some(("Remove lab?".to_owned(), "account-remove-confirm-remove")),
+        "Tab moves the focus"
+    );
+    h.keys("shift-tab");
+    assert_eq!(
+        remove_confirm(&mut h),
+        Some(("Remove lab?".to_owned(), "account-remove-confirm-cancel"))
+    );
+    h.click_on("account-remove-confirm-cancel");
+    assert_eq!(remove_confirm(&mut h), None);
+    let sent = writes(&mut h);
+    assert!(sent.is_empty(), "Cancel sends nothing: {sent:?}");
+
+    press(&mut h, "settings-accounts-remove-3");
+    h.keys("escape");
+    assert_eq!(remove_confirm(&mut h), None, "Esc cancels");
+    let sent = writes(&mut h);
+    assert!(sent.is_empty(), "Esc sends nothing: {sent:?}");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Esc closed only the confirm"
+    );
+}
+
+#[gpui::test]
+fn an_account_leaving_the_list_closes_the_remove_confirm(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-remove-3");
+    h.send(accounts_updated(vec![
+        account(1, "main").active().build(),
+        account(2, "ops").five_hour(61.0).seven_day(40.0).build(),
+    ]));
+    assert_eq!(remove_confirm(&mut h), None, "the account it names is gone");
+    let sent = writes(&mut h);
+    assert!(sent.is_empty(), "nothing is sent: {sent:?}");
+}
+
+#[gpui::test]
+fn leaving_the_accounts_page_closes_the_remove_confirm(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-remove-3");
+    h.root_update(|root, window, cx| root.show_settings_tab("General", window, cx));
+    assert_eq!(remove_confirm(&mut h), None, "the page left");
+    let sent = writes(&mut h);
+    assert!(sent.is_empty(), "nothing is sent: {sent:?}");
+}
+
+#[gpui::test]
+fn a_reconnect_closes_the_remove_confirm(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-remove-3");
+    // A new connection: its Welcome forgets the host's accounts, and its
+    // first list brings the same three back.
+    h.send_welcome(PROTOCOL);
+    let id = listed(&mut h);
+    h.send(accounts_reply(trio(), None, &id));
+    assert!(
+        drawn(&mut h, "settings-accounts-name-3=lab"),
+        "the list came back with the account the confirm named"
+    );
+    assert_eq!(
+        remove_confirm(&mut h),
+        None,
+        "a new connection's list does not reopen it"
+    );
+    let sent = writes(&mut h);
+    assert!(sent.is_empty(), "nothing is sent: {sent:?}");
+}
+
+#[gpui::test]
+fn a_remove_confirm_does_not_come_back_when_its_account_returns(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-remove-3");
+    h.send(accounts_updated(vec![
+        account(1, "main").active().build(),
+        account(2, "ops").five_hour(61.0).seven_day(40.0).build(),
+    ]));
+    h.send(accounts_updated(trio()));
+    assert!(
+        drawn(&mut h, "settings-accounts-name-3=lab"),
+        "the account is listed again"
+    );
+    assert_eq!(
+        remove_confirm(&mut h),
+        None,
+        "it closed when its account left, and stays closed"
+    );
+    let sent = writes(&mut h);
+    assert!(sent.is_empty(), "nothing is sent: {sent:?}");
+}
+
+#[gpui::test]
+fn the_remove_confirm_closes_when_its_account_becomes_active(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-remove-3");
+    h.send(accounts_updated(vec![
+        account(1, "main").build(),
+        account(2, "ops").five_hour(61.0).seven_day(40.0).build(),
+        account(3, "lab").active().build(),
+    ]));
+    assert_eq!(
+        remove_confirm(&mut h),
+        None,
+        "the row says Switch first now, so the confirm goes"
+    );
+    let sent = writes(&mut h);
+    assert!(sent.is_empty(), "nothing is sent: {sent:?}");
 }
 
 #[gpui::test]
@@ -587,6 +737,11 @@ fn the_write_controls_wait_for_the_pending_write(cx: &mut TestAppContext) {
             "{selector} waits for the pending write"
         );
     }
+    assert_eq!(
+        remove_confirm(&mut h),
+        None,
+        "a Remove press while the write is pending opens no confirm"
+    );
 
     h.send(accounts_reply(
         trio(),
@@ -594,6 +749,7 @@ fn the_write_controls_wait_for_the_pending_write(cx: &mut TestAppContext) {
         &request_id(&sent),
     ));
     press(&mut h, "settings-accounts-remove-3");
+    h.click_on("account-remove-confirm-remove");
     assert!(
         matches!(
             one_write(&mut h),
