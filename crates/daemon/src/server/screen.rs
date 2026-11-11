@@ -111,9 +111,14 @@ fn region_text(region: ScreenRegion) -> String {
         ScreenRegion::AbovePromptBox { rows } => format!("above_prompt_box({rows})"),
         ScreenRegion::Title => "title".to_owned(),
         ScreenRegion::AfterLastRule => "after_last_rule".to_owned(),
-        ScreenRegion::FromLastMarkedRow { marker, rows } => {
-            format!("from_last_marked_row({marker}, {rows})")
-        }
+        ScreenRegion::FromLastMarkedRow {
+            marker,
+            or_marker,
+            rows,
+        } => match or_marker {
+            Some(other) => format!("from_last_marked_row({marker}|{other}, {rows})"),
+            None => format!("from_last_marked_row({marker}, {rows})"),
+        },
         ScreenRegion::Unknown => "unknown".to_owned(),
     }
 }

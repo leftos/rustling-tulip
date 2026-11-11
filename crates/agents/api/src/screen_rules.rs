@@ -191,13 +191,17 @@ pub enum ScreenRegion {
     /// prompt box), trailing empty rows dropped.
     AfterLastRule,
     /// The last `rows` non-empty rows from the last row that starts with
-    /// `marker` (leading blanks skipped) down, that row included; the last
-    /// `rows` non-empty rows of the screen when no row starts with it. A
-    /// dialog's footer sits below its own cursor row, while a footer quoted
-    /// in the transcript sits above the input box's cursor row.
+    /// `marker` or `or_marker` (leading blanks skipped) down, that row
+    /// included; the last `rows` non-empty rows of the screen when no row
+    /// starts with either. A dialog's footer sits below its own cursor row,
+    /// while a footer quoted in the transcript sits above the input box's
+    /// cursor row.
     FromLastMarkedRow {
         /// The character the anchoring row starts with.
         marker: char,
+        /// A second character an anchoring row may start with instead.
+        #[serde(default)]
+        or_marker: Option<char>,
         /// How many rows to read.
         rows: usize,
     },

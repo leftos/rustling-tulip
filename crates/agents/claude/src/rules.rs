@@ -73,12 +73,15 @@ pub(crate) const READY_SIGNAL: ReadySignal = ReadySignal {
     quiet_for: Duration::from_millis(1500),
 };
 
-/// Where the dialog rules read: the bottom rows from the last `❯` row down.
-/// A dialog draws its footer under its own cursor row, while a footer a reply
-/// quoted sits in the transcript above the idle box's `❯` row, so it is cut
-/// off (the chat's dialog reader anchors its footer the same way).
+/// Where the dialog rules read: the bottom rows from the last `❯` row down,
+/// or from the last `!` row in the bash mode, whose box draws `!` where the
+/// cursor goes and so anchors the region as the `❯` row does. A dialog draws
+/// its footer under its own cursor row, while a footer a reply quoted sits in
+/// the transcript above the idle box's prompt row, so it is cut off (the
+/// chat's dialog reader anchors its footer the same way).
 const DIALOG_REGION: ScreenRegion = ScreenRegion::FromLastMarkedRow {
     marker: '❯',
+    or_marker: Some('!'),
     rows: 24,
 };
 

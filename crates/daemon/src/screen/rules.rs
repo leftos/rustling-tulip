@@ -494,20 +494,30 @@ fn region_lines(screen: &Screen, region: ScreenRegion) -> Vec<String> {
         ScreenRegion::AbovePromptBox { rows } => screen.above_prompt_box(rows),
         ScreenRegion::Title => screen.title().into_iter().collect(),
         ScreenRegion::AfterLastRule => screen.after_last_horizontal_rule(),
-        ScreenRegion::FromLastMarkedRow { marker, rows } => {
-            from_last_marked_row(&screen.rows(), marker, rows)
-        }
+        ScreenRegion::FromLastMarkedRow {
+            marker,
+            or_marker,
+            rows,
+        } => from_last_marked_row(&screen.rows(), marker, or_marker, rows),
         ScreenRegion::Unknown => Vec::new(),
     }
 }
 
 /// The last `n` non-empty rows of `rows` from the last one that starts with
-/// `marker` (leading blanks skipped) down, that row included; the last `n`
-/// non-empty rows of all of them when none does.
-fn from_last_marked_row(rows: &[String], marker: char, n: usize) -> Vec<String> {
+/// `marker` or `or_marker` (leading blanks skipped) down, that row included;
+/// the last `n` non-empty rows of all of them when none does.
+fn from_last_marked_row(
+    rows: &[String],
+    marker: char,
+    or_marker: Option<char>,
+    n: usize,
+) -> Vec<String> {
     let start = rows
         .iter()
-        .rposition(|row| row.trim_start().starts_with(marker))
+        .rposition(|row| {
+            let text = row.trim_start();
+            text.starts_with(marker) || or_marker.is_some_and(|other| text.starts_with(other))
+        })
         .unwrap_or(0);
     let mut lines: Vec<String> = rows[start..]
         .iter()
@@ -1434,6 +1444,30 @@ mod tests {
         assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
     }
 
+    /// A bash-mode box draws `!` where the idle box draws `❯`, so the region
+    /// must anchor on the `!` row too: a footer quoted above the box is still
+    /// transcript, with an older `❯` row higher up.
+    #[test]
+    fn a_quoted_question_footer_above_a_bash_mode_box_reads_idle() {
+        let capture = include_str!("fixtures/v03-bang-quoting-question-footer--synthesized.txt");
+        assert!(
+            capture.contains("  Enter to select · ↑/↓ to navigate · Esc to cancel"),
+            "the reply quotes the footer"
+        );
+        let lines: Vec<&str> = capture.lines().collect();
+        let prompt = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with('❯'))
+            .expect("the transcript holds a ❯ row");
+        let footer = lines
+            .iter()
+            .position(|line| line.contains("Enter to select · ↑/↓ to navigate"))
+            .expect("the reply quotes the footer");
+        assert!(prompt < footer, "the ❯ row sits above the quoted footer");
+        let reading = read_claude(&screen_from(capture));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
+    }
+
     /// With the vim editor mode on, the cursor on `Type something` heads the
     /// question's footer with `-- INSERT --` and drops its `Esc to cancel`.
     #[test]
@@ -1527,6 +1561,24 @@ mod tests {
         assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
         assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
         assert!(!reading.from_title);
+    }
+
+    /// The anchor row is the last one starting with either marker: a `!` box
+    /// row below an older `❯` prompt starts the region, and without the
+    /// second marker the prompt does.
+    #[test]
+    fn from_last_marked_row_anchors_on_either_marker() {
+        let rows = [
+            "❯ old".to_string(),
+            "quoted".to_string(),
+            "! now".to_string(),
+            "tail".to_string(),
+        ];
+        assert_eq!(
+            from_last_marked_row(&rows, '❯', Some('!'), 24),
+            ["! now".to_string(), "tail".to_string()]
+        );
+        assert_eq!(from_last_marked_row(&rows, '❯', None, 24), rows);
     }
 
     #[test]

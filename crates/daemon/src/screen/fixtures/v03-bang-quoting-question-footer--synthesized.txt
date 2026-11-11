@@ -1,0 +1,75 @@
+
+ ▐▛███▛█   Claude Code v2.1.307
+▝▜██████▀  Opus 5.5 with high effort · Claude Max
+ ▝▝   ▝▝   ~\dev\probe-repo
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+❯ What does a question dialog's footer say?
+
+● The footer under a question reads:
+
+  Enter to select · ↑/↓ to navigate · Esc to cancel
+
+  It names the keys that pick an option, move between them and cancel.
+
+
+                                                                                                                    ● high · /effort
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+!
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ! for shell mode
+  Opus 5.5  |  main
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents

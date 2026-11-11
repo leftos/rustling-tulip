@@ -37,6 +37,9 @@ const BOX_CHAR: char = '╌';
 /// The marker on the row the cursor is on, and the input box's prompt.
 const CURSOR: char = '❯';
 
+/// The prompt a bash-mode input box draws in place of the cursor.
+const BASH_MODE: char = '!';
+
 /// The largest body a prompt carries, in bytes.
 const BODY_CAP: usize = 4096;
 
@@ -643,12 +646,13 @@ fn without_vim_insert(footer: &str) -> &str {
 }
 
 /// Whether nothing but the footer's own wrapped tail, blank rows and rules
-/// sit under `footer`: an input box's `❯` row or a numbered list below it
-/// means the footer was quoted in the transcript, not drawn by a dialog.
+/// sit under `footer`: an input box's `❯` row, a bash-mode box's `!` row or a
+/// numbered list below it means the footer was quoted in the transcript, not
+/// drawn by a dialog.
 fn footer_is_last(rows: &[String], footer: usize) -> bool {
     rows[footer + 1..].iter().all(|row| {
         let text = row.trim();
-        !text.starts_with(CURSOR) && numbered(row).is_none()
+        !text.starts_with(CURSOR) && !text.starts_with(BASH_MODE) && numbered(row).is_none()
     })
 }
 
@@ -874,7 +878,7 @@ fn composer(rows: &[String]) -> ComposerState {
     let typed = if let Some(rest) = first.strip_prefix(CURSOR) {
         let rest = rest.trim();
         !rest.is_empty() && !is_try_placeholder(rest) && !is_agent_placeholder(rest)
-    } else if let Some(rest) = first.strip_prefix('!') {
+    } else if let Some(rest) = first.strip_prefix(BASH_MODE) {
         !rest.trim().is_empty()
     } else {
         return ComposerState::Unknown;
@@ -2572,6 +2576,35 @@ mod tests {
         screen.extend(rows(&["❯", ""]));
         screen.push(rule());
         screen.extend(rows(&["? for shortcuts"]));
+        let screen = read(&screen);
+        assert!(screen.prompt.is_none(), "a quoted footer is not a dialog");
+        assert_eq!(screen.composer, ComposerState::Ready);
+    }
+
+    /// The same quoted footer with a bash-mode input box under it: the box
+    /// draws `!` where the cursor goes, and is still a box, so the footer was
+    /// quoted.
+    #[test]
+    fn a_quoted_question_footer_above_a_bash_mode_box_reads_no_question() {
+        let mut screen = rows(&[
+            "❯ quote the dialog footer",
+            "",
+            "A reply that quotes a dialog:",
+            "",
+            "  1. First point",
+            "  2. Second point",
+            "",
+        ]);
+        screen.push(rule());
+        screen.extend(rows(&[
+            "  9. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]));
+        screen.push(rule());
+        screen.extend(rows(&["!", ""]));
+        screen.push(rule());
+        screen.extend(rows(&["! for shell mode"]));
         let screen = read(&screen);
         assert!(screen.prompt.is_none(), "a quoted footer is not a dialog");
         assert_eq!(screen.composer, ComposerState::Ready);
