@@ -227,6 +227,7 @@
 - [ ] RT-894 Compute Settings search hits once per query change, not on every frame
 - [ ] RT-1352 Cap a saved theme's file name so any theme name can be saved
 - [ ] RT-1437 Hide a Settings field by its rule while a provider change is pending
+- [ ] RT-1493 Pick colours from a colour picker modal, not only swatches and a hex field
 
 ## Window, sidebar and tabs
 
@@ -265,6 +266,7 @@
 - [ ] RT-1378 Word the crash box for a panic past the start's stable window
 - [ ] RT-707 Keep a repo's sessions out of Detached once the repo joins a workspace
 - [ ] RT-1484 Keep an offline host's leaf in the Tabs view from dragging, and dim it by its own host
+- [ ] RT-1492 Make the shown tab stand out lighter than the others, not darker · release vNext
 
 ## Terminal, panes and links
 
@@ -478,7 +480,7 @@
 ## Dashboard, Gates and Linear
 
 - [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries
-  - [ ] RT-499 Nest dispatch runs under their session and track them (DB.21)
+  - [ ] RT-499 Nest dispatch runs under their session and track them (DB.21) · release vNext
   - [ ] RT-501 Draw the repo lanes, the default view (DB.24)
   - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25)
   - [ ] RT-453 Document the summarizer and the Dashboard (SA.11)
@@ -552,7 +554,7 @@
 ## Agents and subagents
 
 - [ ] RT-30 View a session's running subagents as read-only sessions
-- [ ] RT-31 Follow DeepSeek dispatch runs as read-only sessions
+- [ ] RT-31 Follow DeepSeek dispatch runs as read-only sessions · release vNext
 - [ ] RT-49 Offer every popular agent harness in the spawn dialog's runtime dropdown
   - [ ] RT-214 AH.1 Spike: DSH per-invocation patch, hook payload and resume
   - [ ] RT-215 AH.2 Pi runtime: backend, session id and dialog entry
