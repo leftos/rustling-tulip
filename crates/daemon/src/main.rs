@@ -68,6 +68,7 @@ mod session;
 mod spawn_journal;
 mod spawn_plan;
 mod state;
+mod stream_state;
 mod summarizer;
 mod summary_lines;
 mod sync;

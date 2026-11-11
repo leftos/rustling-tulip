@@ -8,6 +8,7 @@
 
 use crate::paths::Dirs;
 use crate::session::{SessionRecord, SessionRegistry, push_recent_action};
+use crate::stream_state::apply_event;
 use agent_api::HeadlessEvent;
 use anyhow::{Context as _, anyhow};
 use protocol::{AgentId, SessionStatus};
@@ -238,24 +239,15 @@ fn record_exit(registry: &SessionRegistry, session_id: &str, exit: Option<i32>) 
 
 /// Apply one event a plugin read from its headless output to `rec`.
 fn apply_headless_event(rec: &mut SessionRecord, event: HeadlessEvent) {
-    match event {
-        HeadlessEvent::Status(status) => rec.status = status,
-        HeadlessEvent::RecentAction(action) => push_recent_action(rec, action),
-        HeadlessEvent::Metrics {
-            cost_usd,
-            input_tokens,
-            output_tokens,
-        } => {
-            if let Some(cost) = cost_usd {
-                rec.metrics.cost_usd = cost;
-            }
-            if let Some(tokens) = input_tokens {
-                rec.metrics.input_tokens = tokens;
-            }
-            if let Some(tokens) = output_tokens {
-                rec.metrics.output_tokens = tokens;
-            }
-        }
+    let mut status = Some(rec.status);
+    apply_event(
+        event,
+        &mut status,
+        &mut rec.metrics,
+        &mut rec.recent_actions,
+    );
+    if let Some(status) = status {
+        rec.status = status;
     }
 }
 

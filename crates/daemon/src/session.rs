@@ -11,6 +11,7 @@ use crate::paths::Dirs;
 use crate::pty::{LifecycleItem, PtyExit, PtyHandle};
 use crate::screen::SharedScreen;
 use crate::scrollback::{self, ScrollbackWriter};
+use crate::stream_state::push_capped;
 use crate::sync::{lock, read, write};
 use crate::termstate::{self, BracketedPasteTracker};
 use chrono::{DateTime, Utc};
@@ -23,10 +24,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-
-/// In-memory cap on a session's `recent_actions`, matching the tail the
-/// clients' headless log draws before it offers the rest.
-const RECENT_ACTIONS_CAP: usize = 200;
 
 /// On-disk cap for the persisted `recent_actions` tail. Smaller than the
 /// in-memory cap because the sidecar is read on every daemon startup and
@@ -1543,11 +1540,7 @@ pub fn build_replay_snapshot(
 }
 
 pub fn push_recent_action(rec: &mut SessionRecord, action: String) {
-    rec.recent_actions.push(action);
-    if rec.recent_actions.len() > RECENT_ACTIONS_CAP {
-        let drop_count = rec.recent_actions.len() - RECENT_ACTIONS_CAP;
-        rec.recent_actions.drain(0..drop_count);
-    }
+    push_capped(&mut rec.recent_actions, action);
     rec.metrics.last_activity_at = Some(Utc::now());
 }
 
@@ -2181,6 +2174,7 @@ impl SessionRegistry {
 mod tests {
     use super::*;
     use crate::pty::PtyProducer;
+    use crate::stream_state::RECENT_ACTIONS_CAP;
 
     /// The bound on these tests' waits: a hang guard a passing run never
     /// comes near, failing as "hung".

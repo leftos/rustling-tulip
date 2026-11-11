@@ -248,6 +248,8 @@ pub enum HeadlessEvent {
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
     },
+    /// The CLI's own conversation id, read from its first line.
+    SessionId(String),
 }
 
 /// How an interactive spawn's conversation id is decided, as the plugin plans

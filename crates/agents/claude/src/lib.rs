@@ -693,10 +693,17 @@ fn is_plain_conversation_id(id: &str) -> bool {
 /// The session changes one parsed stream-json event makes, in order.
 fn headless_events(event: StreamEvent) -> Vec<HeadlessEvent> {
     match event {
-        StreamEvent::System { subtype } => vec![
-            HeadlessEvent::Status(SessionStatus::Working),
-            HeadlessEvent::RecentAction(format!("system: {subtype}")),
-        ],
+        StreamEvent::System {
+            subtype,
+            session_id,
+        } => {
+            let mut events = vec![
+                HeadlessEvent::Status(SessionStatus::Working),
+                HeadlessEvent::RecentAction(format!("system: {subtype}")),
+            ];
+            events.extend(session_id.map(HeadlessEvent::SessionId));
+            events
+        }
         StreamEvent::Assistant { message } => message
             .and_then(|m| m.content)
             .into_iter()
@@ -779,6 +786,8 @@ enum StreamEvent {
     System {
         #[serde(default)]
         subtype: String,
+        #[serde(default)]
+        session_id: Option<String>,
     },
     Assistant {
         #[serde(default)]
@@ -1712,7 +1721,28 @@ mod tests {
                 vec![
                     HeadlessEvent::Status(SessionStatus::Working),
                     HeadlessEvent::RecentAction("system: init".to_string()),
+                    HeadlessEvent::SessionId("s1".to_string()),
                 ]
+            );
+        }
+
+        #[test]
+        fn system_init_line_yields_the_session_id() {
+            assert_eq!(
+                parse(r#"{"type":"system","subtype":"init","session_id":"abc-123"}"#),
+                vec![
+                    HeadlessEvent::Status(SessionStatus::Working),
+                    HeadlessEvent::RecentAction("system: init".to_string()),
+                    HeadlessEvent::SessionId("abc-123".to_string()),
+                ]
+            );
+            assert_eq!(
+                parse(r#"{"type":"system","subtype":"init"}"#),
+                vec![
+                    HeadlessEvent::Status(SessionStatus::Working),
+                    HeadlessEvent::RecentAction("system: init".to_string()),
+                ],
+                "a system line without a session id yields no SessionId"
             );
         }
 

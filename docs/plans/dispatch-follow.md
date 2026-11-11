@@ -248,7 +248,7 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: `crates/protocol/src/lib.rs`, `apps/pwa/src/protocol.ts` (regenerated with `cargo run -p protocol-ts`).
   - Proof: `gate … -- cargo nextest run -p protocol --cargo-profile test-release dispatch_run` (a round trip per message, an unknown status decodes as `Unknown`, a snapshot missing every defaulted field decodes), then `gate … -- cargo nextest run -p protocol-ts --cargo-profile test-release generated_protocol_ts_is_current`.
   - Waits on: nothing. Hotspot: protocol.
-- [ ] **DF.2 Stream state.** `HeadlessEvent::SessionId` from the Claude plugin's `init` line, and a pure `StreamState` accumulator the headless session path shares, keeping the recent-actions cap in one place.
+- [x] **DF.2 Stream state.** `HeadlessEvent::SessionId` from the Claude plugin's `init` line, and a pure `StreamState` accumulator the headless session path shares, keeping the recent-actions cap in one place.
   - Files: `crates/agents/api/src/lib.rs`, `crates/agents/claude/src/lib.rs`, `crates/daemon/src/stream_state.rs` (new), `crates/daemon/src/headless.rs`, `crates/daemon/src/session.rs`, `crates/daemon/src/main.rs`.
   - Proof: `gate … -- cargo nextest run -p agent-api -p agent-claude -p daemon --cargo-profile test-release -E 'test(/headless|stream_state/)'`, then `.\rt.ps1 clippy` for the seam check.
   - Waits on: nothing. Hotspot: none.
