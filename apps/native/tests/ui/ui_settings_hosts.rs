@@ -112,7 +112,7 @@ fn a_host_on_an_older_release_shows_its_version_and_behind_in_the_selector(
 fn a_behind_host_row_shows_its_name_above_its_version_and_tag(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
-    h.host(&remote()).connect_with_version("0.11.90-alpha");
+    h.host(&remote()).connect_with_version("0.11.90-alpha.long");
     h.keys("ctrl-,");
 
     let key = remote_key();

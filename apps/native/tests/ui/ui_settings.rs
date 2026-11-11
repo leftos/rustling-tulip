@@ -379,6 +379,47 @@ fn settings_panel_keeps_one_size_across_categories(cx: &mut TestAppContext) {
     }
 }
 
+/// The panel takes its full width on a window with the room for it, and
+/// narrows to the window less its side margins on one without: the tab list
+/// keeps its width and the content column gives way.
+#[gpui::test]
+fn the_settings_panel_fits_a_narrow_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    let wide = h.bounds("settings-panel").size;
+    let tab = h.bounds("settings-tab-general").size;
+    let content = h.bounds("settings-content").size;
+    assert_eq!(
+        wide.width,
+        px(894.0),
+        "the panel is its full width on the default window: {wide:?}"
+    );
+
+    let height = h.window_height();
+    h.cx.simulate_resize(gpui::size(px(860.0), px(height)));
+    let panel = h.bounds("settings-panel");
+    assert_eq!(
+        panel.size.width,
+        px(812.0),
+        "at 860 px the panel leaves 24 px at each edge: {panel:?}"
+    );
+    assert!(
+        panel.left() >= px(0.0) && panel.right() <= px(860.0),
+        "the panel {panel:?} stays inside the 860 px window"
+    );
+    assert_eq!(
+        h.bounds("settings-tab-general").size,
+        tab,
+        "the tab list keeps its width while the panel narrows"
+    );
+    assert!(
+        h.bounds("settings-content").size.width < content.width,
+        "the content column narrows with the panel: {content:?} became {:?}",
+        h.bounds("settings-content").size
+    );
+}
+
 /// The thumb the Settings content's scrollbar shows now, after a frame.
 fn scroll_thumb(h: &mut Harness<'_>) -> Option<rustling_tulip_native::Thumb> {
     h.bounds("settings-content");

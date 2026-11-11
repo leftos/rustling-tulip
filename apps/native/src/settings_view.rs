@@ -64,7 +64,7 @@ use crate::window_title::compute_title;
 use crate::{FileFilter, Pick, RootView, tooltip};
 
 /// The tab list's width, its padding and edge included; fixed so the tabs' column lines up.
-const TAB_LIST_WIDTH: f32 = 150.0;
+const TAB_LIST_WIDTH: f32 = 200.0;
 /// A tab row's height and corner radius, as on the Settings board; fixed so the tabs line up.
 const TAB_ROW_HEIGHT: f32 = 34.0;
 /// A section label's text size, above the rows of its group.
@@ -82,6 +82,8 @@ const CONTENT_PAD_X: f32 = 18.0;
 const CONTENT_PAD_Y: f32 = 16.0;
 /// The room kept above and below the panel on a window too short for it.
 const PANEL_MARGIN_Y: f32 = 24.0;
+/// The room kept left and right of the panel on a window too narrow for it.
+const PANEL_MARGIN_X: f32 = 24.0;
 /// The modal's width: the tab list, the content and its padding, and the
 /// card's 1 px edges.
 const PANEL_WIDTH: f32 = TAB_LIST_WIDTH + CONTENT_WIDTH + 2.0 * CONTENT_PAD_X + 2.0;
@@ -5253,7 +5255,8 @@ impl RootView {
                 div()
                     .relative()
                     .flex()
-                    .flex_none()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .child(
                         div()
                             .id("settings-content")
@@ -5262,8 +5265,10 @@ impl RootView {
                             .track_scroll(self.settings_scroll.handle())
                             .flex()
                             .flex_col()
-                            .flex_none()
-                            .w(px(CONTENT_WIDTH + 2.0 * CONTENT_PAD_X))
+                            .w_full()
+                            .max_w(px(CONTENT_WIDTH + 2.0 * CONTENT_PAD_X))
+                            .min_w(px(0.0))
+                            .flex_shrink()
                             .px(px(CONTENT_PAD_X))
                             .py(px(CONTENT_PAD_Y))
                             .children(self.settings_content(window, cx)),
@@ -5271,10 +5276,12 @@ impl RootView {
                     .child(self.settings_scroll.overlay()),
             );
         let cap = window.viewport_size().height / px(1.0) - 2.0 * PANEL_MARGIN_Y;
+        let width =
+            (window.viewport_size().width / px(1.0) - 2.0 * PANEL_MARGIN_X).min(PANEL_WIDTH);
         let panel = dialog_card(
             crate::fonts::ui_text_size(cx),
             "settings-panel",
-            PANEL_WIDTH,
+            width,
             &theme(cx),
         )
         .h(px(PANEL_HEIGHT.min(cap)))
