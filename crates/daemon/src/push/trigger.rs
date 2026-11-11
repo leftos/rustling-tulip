@@ -4,8 +4,8 @@
 //! the push services' answers (`docs/plans/mobile-app.md`, "Push").
 //!
 //! A round takes `Hub::devices` then `Hub::push` to collect its targets,
-//! releases both before any network call, and takes `Hub::push` alone
-//! afterwards to delete a subscription its push service dropped.
+//! releases both before any network call, and takes them again in that
+//! order afterwards to delete a subscription its push service dropped.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use futures::StreamExt as _;
 use protocol::{RemoteState, SessionMode, SessionSnapshot, SessionStatus};
 use reqwest::Url;
 use tokio::sync::broadcast::error::RecvError;
@@ -52,6 +53,9 @@ const BACKOFF_MOST: Duration = Duration::from_secs(600);
 /// Failures in a row after which a subscription is deleted, counted only
 /// while its push service accepts another subscription in the same round.
 const FAILURES_TO_DELETE: u32 = 5;
+
+/// How many of a round's pushes are in flight at once.
+const SENDS_AT_ONCE: usize = 8;
 
 /// What a session change raises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,15 +206,14 @@ pub(crate) fn needs_you_count<'a>(snapshots: impl IntoIterator<Item = &'a Sessio
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
-/// `snapshots` with `snapshot` standing for its session, added when the
-/// registry no longer holds it: the event can be newer than the registry read.
+/// `snapshots` with `snapshot` in place of its session's entry; a session
+/// the registry no longer holds is not added back.
 fn with_snapshot(
     mut snapshots: Vec<SessionSnapshot>,
     snapshot: &SessionSnapshot,
 ) -> Vec<SessionSnapshot> {
-    match snapshots.iter_mut().find(|seen| seen.id == snapshot.id) {
-        Some(seen) => *seen = snapshot.clone(),
-        None => snapshots.push(snapshot.clone()),
+    if let Some(seen) = snapshots.iter_mut().find(|seen| seen.id == snapshot.id) {
+        *seen = snapshot.clone();
     }
     snapshots
 }
@@ -567,45 +570,97 @@ impl Trigger {
         })
     }
 
-    /// Encrypt and post `plaintext` to each target whose push service is
-    /// not backed off, holding no lock; returns the answers.
+    /// Encrypt every target whose push service is not backed off, then post
+    /// them: at most [`SENDS_AT_ONCE`] pushes are in flight at once, and each
+    /// push service's back-off is noted once, after every answer is in.
+    /// Holds no lock; returns the answers in target order.
     async fn send_all(
         &mut self,
         round: Round,
         plaintext: &[u8],
         topic: &str,
     ) -> Vec<(Target, Outcome)> {
-        let mut answers = Vec::new();
+        let mut prepared = Vec::new();
         for target in round.targets {
             if self.backed_off(&target.audience) {
                 tracing::debug!(device_id = %target.device_id, push_service = %target.audience, "push: the push service is backed off; skipped");
                 continue;
             }
-            let body = match webpush::encrypt(&target.subscriber, plaintext) {
-                Ok(body) => body,
+            match webpush::encrypt(&target.subscriber, plaintext) {
+                Ok(body) => prepared.push((target, body)),
                 Err(err) => {
                     tracing::warn!(device_id = %target.device_id, err = format!("{err:#}"), "push: the payload did not encrypt");
-                    continue;
                 }
-            };
-            let answer = send::send(
-                &self.client,
-                &target.url,
-                body,
-                topic,
-                &target.jwt,
-                &round.public_key,
-            )
+            }
+        }
+        let client = &self.client;
+        let public_key = &round.public_key;
+        let answers: Vec<(Target, anyhow::Result<Outcome>)> = futures::stream::iter(prepared)
+            .map(|(target, body)| async move {
+                let answer =
+                    send::send(client, &target.url, body, topic, &target.jwt, public_key).await;
+                (target, answer)
+            })
+            .buffered(SENDS_AT_ONCE)
+            .collect()
             .await;
-            self.note_push_service(&target.audience, answer.as_ref().ok());
+        self.note_round(&answers);
+        let mut delivered = Vec::new();
+        for (target, answer) in answers {
             match answer {
-                Ok(outcome) => answers.push((target, outcome)),
+                Ok(outcome) => delivered.push((target, outcome)),
                 Err(err) => {
                     tracing::warn!(device_id = %target.device_id, err = format!("{err:#}"), "push: no answer from the push service");
                 }
             }
         }
-        answers
+        delivered
+    }
+
+    /// Note each push service's answers once for the round: a service with a
+    /// throttled, failed or unreachable answer is backed off once, at the
+    /// longest `Retry-After` it asked for; a service whose answers all
+    /// arrived and none asked to retry has its back-off cleared.
+    fn note_round(&mut self, answers: &[(Target, anyhow::Result<Outcome>)]) {
+        let mut audiences: Vec<&str> = Vec::new();
+        for (target, _) in answers {
+            if !audiences.contains(&target.audience.as_str()) {
+                audiences.push(target.audience.as_str());
+            }
+        }
+        for audience in audiences {
+            self.note_audience(audience, answers);
+        }
+    }
+
+    /// One push service's answers, noted once for the round.
+    fn note_audience(&mut self, audience: &str, answers: &[(Target, anyhow::Result<Outcome>)]) {
+        let mut back_off = false;
+        let mut longest: Option<(Option<Duration>, &Outcome)> = None;
+        let mut first_ok: Option<&Outcome> = None;
+        for (_, answer) in answers
+            .iter()
+            .filter(|(target, _)| target.audience == audience)
+        {
+            match answer {
+                Err(_) => back_off = true,
+                Ok(outcome @ Outcome::Retry { retry_after, .. }) => {
+                    back_off = true;
+                    let asked = *retry_after;
+                    if longest.is_none_or(|(seen, _)| asked > seen) {
+                        longest = Some((asked, outcome));
+                    }
+                }
+                Ok(outcome) => {
+                    first_ok.get_or_insert(outcome);
+                }
+            }
+        }
+        if back_off {
+            self.note_push_service(audience, longest.map(|(_, outcome)| outcome));
+        } else if let Some(outcome) = first_ok {
+            self.note_push_service(audience, Some(outcome));
+        }
     }
 
     /// Whether `audience`'s back-off is still running.
@@ -726,7 +781,8 @@ impl Trigger {
     /// raises nothing for the missed window, keeping the Finished holds, which
     /// read the registry when they end; a removal is forgotten, and an
     /// update is judged against what was seen before it; the count takes the
-    /// event's own snapshot as its session's current state. A Finished raises
+    /// event's own snapshot as its session's current state, and an update for
+    /// a session the registry no longer holds raises nothing. A Finished raises
     /// no push here: it is held through its grace, and any update first
     /// drops a hold its session no longer earns. No I/O.
     pub(crate) fn step(
@@ -754,8 +810,11 @@ impl Trigger {
                         Step::Nothing
                     }
                     Some(PushKind::NeedsYou) => {
-                        let count =
-                            needs_you_count(with_snapshot(sessions.snapshots(), &snapshot).iter());
+                        let snapshots = sessions.snapshots();
+                        if !snapshots.iter().any(|seen| seen.id == snapshot.id) {
+                            return Step::Nothing;
+                        }
+                        let count = needs_you_count(with_snapshot(snapshots, &snapshot).iter());
                         Step::Alert {
                             session: snapshot,
                             count,
@@ -936,10 +995,14 @@ async fn deliver_held(
     let sessions_due = trigger.held_now(sessions);
     trigger.held.clear();
     for session in &sessions_due {
+        let snapshots = sessions.snapshots();
+        if !snapshots.iter().any(|seen| seen.id == session.id) {
+            continue;
+        }
         let alert = Alert {
             kind: PushKind::NeedsYou,
             session,
-            count: needs_you_count(with_snapshot(sessions.snapshots(), session).iter()),
+            count: needs_you_count(with_snapshot(snapshots, session).iter()),
             at_desk: false,
             only_held: true,
         };
@@ -968,8 +1031,8 @@ mod tests {
 
     use super::{
         Alert, BACKOFF_FIRST, BACKOFF_MOST, Delivery, FINISHED_GRACE, FinishedHolds, PushKind,
-        Sources, Step, Stores, Tracker, Trigger, deliver_finished, label, needs_you_count, origin,
-        payload, run, spawn,
+        Sources, Step, Stores, Tracker, Trigger, deliver_finished, deliver_held, label,
+        needs_you_count, origin, payload, run, spawn,
     };
     use crate::devices::DeviceStore;
     use crate::paths::Dirs;
@@ -978,7 +1041,8 @@ mod tests {
     use crate::push::state::PushState;
     use crate::push::store::Subscription;
     use crate::push::test_fake::{
-        Fake, Server, TESTS, fake_push_service, fake_push_service_hooked, fake_push_service_with,
+        Fake, Server, TESTS, fake_push_service, fake_push_service_by_path, fake_push_service_gated,
+        fake_push_service_hooked, fake_push_service_with,
     };
     use crate::push::webpush::{self, Subscriber};
     use crate::server::test_support::idle_record;
@@ -1396,6 +1460,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_held_session_removed_during_an_earlier_held_push_is_skipped() {
+        let setup = setup("held-removed");
+        let device = setup.pair(1);
+        let sessions = registry(&setup);
+        for id in ["s1", "s2"] {
+            sessions.insert(idle_record(id));
+            sessions.update(id, |record| record.status = SessionStatus::AwaitingInput);
+        }
+        let mut trigger = trigger();
+        trigger.held.extend(["s1".to_owned(), "s2".to_owned()]);
+        // The held list's order decides which session is delivered first;
+        // the fake removes the other one while that round is in flight.
+        let due = trigger.held_now(&sessions);
+        assert_eq!(due.len(), 2, "both held sessions are due");
+        let second = due[1].id.clone();
+        let hook = {
+            let sessions = Arc::clone(&sessions);
+            Box::new(move || sessions.remove(&second))
+        };
+        let (url, fake, _server) = fake_push_service_hooked(201, hook).await;
+        setup.subscribe(&device, url.as_str(), true, true);
+        let remote: Arc<dyn Fn() -> RemoteState + Send + Sync> = Arc::new(serving);
+
+        deliver_held(&mut trigger, &sessions, setup.stores(), &remote).await;
+
+        assert_eq!(
+            fake.posts(),
+            1,
+            "the session removed during the first push is not pushed to"
+        );
+    }
+
+    #[tokio::test]
     async fn a_created_push_carries_the_web_push_headers() {
         let (setup, device, _url, fake, _server) = one_device("created", 201).await;
 
@@ -1546,6 +1643,132 @@ mod tests {
         assert_eq!(second, Vec::new(), "the host is backed off");
         assert_eq!(fake.posts(), 1, "no second POST inside the back-off");
         assert_eq!(setup.endpoint_of(&device).as_deref(), Some(url.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_slow_push_service_holds_no_other_device() {
+        let setup = setup("slow-service");
+        let first = setup.pair(1);
+        let second = setup.pair(2);
+        // A round posts in device-id order and the ids are random, so the
+        // gated service goes on whichever device sorts first.
+        let (gated_device, other_device) = if first < second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (gated_url, gated_fake, _gated_server) =
+            fake_push_service_gated(201, Arc::clone(&gate)).await;
+        let released = Arc::clone(&gate);
+        let (url, fake, _server) =
+            fake_push_service_hooked(201, Box::new(move || released.notify_one())).await;
+        setup.subscribe(&gated_device, gated_url.as_str(), true, true);
+        setup.subscribe(&other_device, url.as_str(), true, true);
+
+        let delivered = round(&mut trigger(), &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(delivered.len(), 2, "{delivered:?}");
+        assert!(
+            delivered
+                .iter()
+                .all(|delivery| delivery.outcome == Outcome::Sent),
+            "{delivered:?}"
+        );
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|delivery| delivery.device_id.as_str())
+                .collect::<Vec<_>>(),
+            [gated_device.as_str(), other_device.as_str()],
+            "the answers come back in target order, though the first one answered last"
+        );
+        assert_eq!(gated_fake.posts(), 1, "the gated service was posted to");
+        assert_eq!(fake.posts(), 1, "the other device got its POST too");
+    }
+
+    #[tokio::test]
+    async fn a_sent_and_a_throttled_answer_back_the_service_off() {
+        let setup = setup("sent-and-throttled");
+        let first = setup.pair(1);
+        let second = setup.pair(2);
+        let (url, fake, _server) =
+            fake_push_service_by_path(&[("one", 201, &[]), ("two", 429, &[])]).await;
+        let one = url.join("one").expect("a URL");
+        let two = url.join("two").expect("a URL");
+        setup.subscribe(&first, one.as_str(), true, true);
+        setup.subscribe(&second, two.as_str(), true, true);
+        let mut trigger = trigger();
+
+        let delivered = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(delivered.len(), 2, "both targets were in flight");
+        assert_eq!(fake.posts(), 2);
+        let backoff = trigger
+            .backoff
+            .get(&audience(&url))
+            .expect("the push service is backed off");
+        assert_eq!(
+            backoff.delay, BACKOFF_FIRST,
+            "a throttled answer wins over a sent one"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_longest_retry_after_wins() {
+        let setup = setup("longest-retry-after");
+        let first = setup.pair(1);
+        let second = setup.pair(2);
+        let (url, fake, _server) = fake_push_service_by_path(&[
+            ("one", 429, &[("retry-after", "60")]),
+            ("two", 429, &[("retry-after", "120")]),
+        ])
+        .await;
+        let one = url.join("one").expect("a URL");
+        let two = url.join("two").expect("a URL");
+        setup.subscribe(&first, one.as_str(), true, true);
+        setup.subscribe(&second, two.as_str(), true, true);
+        let mut trigger = trigger();
+
+        let before = Instant::now();
+        let delivered = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(fake.posts(), 2);
+        let backoff = trigger
+            .backoff
+            .get(&audience(&url))
+            .expect("the push service is backed off");
+        assert!(
+            backoff.until >= before + Duration::from_secs(120),
+            "the longest retry-after decides the wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_throttled_answers_on_one_push_service_back_it_off_once() {
+        let setup = setup("throttled-twice");
+        let first = setup.pair(1);
+        let second = setup.pair(2);
+        let (url, fake, _server) = fake_push_service(429, "").await;
+        let one = url.join("one").expect("a URL");
+        let two = url.join("two").expect("a URL");
+        setup.subscribe(&first, one.as_str(), true, true);
+        setup.subscribe(&second, two.as_str(), true, true);
+        let mut trigger = trigger();
+
+        let delivered = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(delivered.len(), 2, "both targets were in flight");
+        assert_eq!(fake.posts(), 2);
+        let backoff = trigger
+            .backoff
+            .get(&audience(&url))
+            .expect("the push service is backed off");
+        assert_eq!(
+            backoff.delay, BACKOFF_FIRST,
+            "one back-off for the round, not one per answer"
+        );
     }
 
     #[tokio::test]
@@ -1880,6 +2103,21 @@ mod tests {
                 count: 1,
             }
         );
+    }
+
+    #[test]
+    fn event_step_skips_a_session_the_registry_no_longer_holds() {
+        let setup = setup("step-gone");
+        let sessions = registry(&setup);
+        let mut trigger = trigger();
+        trigger.tracker.seed([&status("working")]);
+
+        // The session was removed from the registry while its `Removed`
+        // event still sits behind this update, so the registry no longer
+        // holds it: no alert is raised for a session that is gone.
+        let (_, event) = update("awaiting_input");
+
+        assert!(matches!(trigger.step(event, &sessions), Step::Nothing));
     }
 
     #[test]
