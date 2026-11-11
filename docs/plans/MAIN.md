@@ -166,6 +166,7 @@
 - [ ] RT-1396 Map the remote-update and spawn files in tools/test-map.json
 - [ ] RT-1458 Let a driven cloaked client run its updater against a test feed, for release smoke runs
 - [ ] RT-1481 Scrub the owner's paths and status line from the screen fixtures
+- [ ] RT-1541 Check the dispatch dir in the isolated daemon's launch check
 
 ## Elevated daemon and security
 
@@ -266,7 +267,6 @@
 - [ ] RT-1378 Word the crash box for a panic past the start's stable window
 - [ ] RT-707 Keep a repo's sessions out of Detached once the repo joins a workspace
 - [ ] RT-1484 Keep an offline host's leaf in the Tabs view from dragging, and dim it by its own host
-- [ ] RT-1492 Make the shown tab stand out lighter than the others, not darker · release vNext
 
 ## Terminal, panes and links
 
@@ -465,17 +465,43 @@
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge
   - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone
 - [ ] RT-881 Compare ghostty-web with xterm.js for the phone's full terminal
-- [ ] RT-1137 Design a push relay so native phone apps get alerts from any user's daemon · release vNext
-- [ ] RT-1177 Keep the push handler's file I/O out from under the device lock · release vNext
-- [ ] RT-1183 Send a push round's targets concurrently so one slow push service holds no other device · release vNext
-- [ ] RT-1187 Don't count or push a session removed before the push trigger reads its update · release vNext
-- [ ] RT-1266 Plan the GPUI phone app: phases from the spike's go · release vNext
 - [ ] RT-1268 Bring the phone's chat to the desktop's: Compact fold, Summary, stacked cards
 - [ ] RT-1347 Treat the phone terminal's private cursor-position reply as an automatic reply
 - [ ] RT-1379 Check the phone's Home row fits 'Working in the background' at 375 px
 - [ ] RT-1391 Align the phone's resume order with the daemon's and close ResumeSession's test gaps
 - [ ] RT-1453 Show a plan longer than 2000 characters in full on the phone before approving
 - [ ] RT-1460 Sort phone Home's groups by the desktop's sort, needs-you first
+- [ ] RT-1508 Move the push trigger round's file I/O out from under the device lock
+- [ ] RT-1511 PR.1: Share the RFC 8291 push encryption as a push-crypto crate with decrypt
+- [ ] RT-1512 PR.2: Add the apns and fcm push registrations and the push notice to the wire
+- [ ] RT-1513 PR.3: Store a push subscription as switches plus a kind-tagged channel
+- [ ] RT-1514 PR.4: Accept apns and fcm push registrations from a paired phone
+- [ ] RT-1515 PR.5: Build the push relay Worker with its APNs sender
+- [ ] RT-1516 PR.6: Deploy the push relay on the owner's Cloudflare account
+- [ ] RT-1517 PR.7: Send Needs you and Finished to native phones through the push relay
+- [ ] RT-1518 PR.8: Prove a relay push end to end on a real iPhone
+- [ ] RT-1519 PR.9: Add the FCM sender to the push relay for the Android app
+- [ ] RT-1520 MA.1: Take the spike's GPUI upgrade onto feat/gpui-upgrade
+- [ ] RT-1521 MA.2: Fix the GPUI upgrade's test and example targets
+- [ ] RT-1522 MA.3: Clear the GPUI upgrade's warnings and runtime traps
+- [ ] RT-1523 MA.4: Carry the first-mouse fix on the pinned GPUI revision and drop vendor/gpui
+- [ ] RT-1524 MA.5: Pass the desktop checks on the GPUI upgrade and merge it
+- [ ] RT-1525 MA.6: Build the phone app for the iOS simulator
+- [ ] RT-1526 MA.7: Make TextInput work with the soft keyboard and Return
+- [ ] RT-1527 MA.8: Give iOS its TLS roots, Keychain token store and config dir
+- [ ] RT-1528 MA.9: Build the phone root over RootView with no This PC
+- [ ] RT-1529 MA.10: Reconnect when the phone app returns to the foreground
+- [ ] RT-1530 MA.11: Sign the phone app and upload it to TestFlight
+- [ ] RT-1531 MA.12: Run the phone app on the owner's iPhone against the PC's daemon
+- [ ] RT-1532 MA.13: Build the phone's Home
+- [ ] RT-1533 MA.14: Build the phone's session screen with its chat
+- [ ] RT-1534 MA.15: Build the phone's terminal
+- [ ] RT-1535 MA.16: Check the phone screens on the owner's iPhone
+- [ ] RT-1536 MA.17: Build the phone app's notification service extension
+- [ ] RT-1537 MA.18: Register the phone app for push
+- [ ] RT-1538 MA.19: Open the session a notification names
+- [ ] RT-1539 MA.20: Add the in-process SSH transport for the phone
+- [ ] RT-1540 MA.21: Add SSH hosts on the phone
 
 ## Dashboard, Gates and Linear
 
@@ -537,6 +563,7 @@
 - [ ] RT-1133 Tag registered folders DIR in the compact Dashboard and drop Source Control's stale pinned host
 - [ ] RT-1451 List a backgrounded subagent once on the Dashboard, not again as a bg shell
 - [ ] RT-1479 Keep the Dashboard's subagent name uncut while its row has room
+- [ ] RT-1509 Nest a dispatch run under its session by the live-run file's session id (DB.21)
 
 ## Repos, workspaces and worktrees
 
@@ -554,7 +581,15 @@
 ## Agents and subagents
 
 - [ ] RT-30 View a session's running subagents as read-only sessions
-- [ ] RT-31 Follow DeepSeek dispatch runs as read-only sessions · release vNext
+- [/] RT-31 Follow DeepSeek dispatch runs as read-only sessions · release vNext
+  - [ ] RT-1500 DF.6: Wire dispatch runs into the server and handle Stop · release vNext
+  - [ ] RT-1501 DF.7: Count a linked live run as the launching session's background work · release vNext
+  - [ ] RT-1502 DF.8: Let a tab pane follow a dispatch run · release vNext
+  - [ ] RT-1503 DF.9: Show dispatch runs as DS leaves in the native sidebar · release vNext
+  - [ ] RT-1504 DF.10: Draw a followed dispatch run in its pane, with Stop · release vNext
+  - [ ] RT-1505 DF.11: Prove following and stopping a dispatch run end to end · release vNext
+  - [!] RT-1506 DF.12: Request live-run files and the stop marker from the dispatch tool · release vNext
+  - [ ] RT-1507 DF.13: Document following dispatch runs · release vNext
 - [ ] RT-49 Offer every popular agent harness in the spawn dialog's runtime dropdown
   - [ ] RT-214 AH.1 Spike: DSH per-invocation patch, hook payload and resume
   - [ ] RT-215 AH.2 Pi runtime: backend, session id and dialog entry
@@ -570,6 +605,8 @@
 - [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user
 - [ ] RT-687 Remove AgentDescriptor.accent and AccentToken with the next protocol bump
 - [ ] RT-716 Let the agent plugin name a permission prompt's allow, always-allow and deny options
+- [ ] RT-1510 Rewrite the subagent-streams design against the client's real views and the pane follow field
+- [ ] RT-1542 Stop dispatch-run tailers with their watcher, and keep a stop marker until the runner is gone
 
 ## macOS and Unix
 
@@ -645,25 +682,26 @@
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
-- [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789
+- [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789, RT-1509
 - [default-shell.md](default-shell.md) — RT-956
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
-- [dispatch-follow.md](dispatch-follow.md) — RT-167
+- [dispatch-follow.md](dispatch-follow.md) — RT-31, RT-167, RT-1500, RT-1501, RT-1502, RT-1503, RT-1504, RT-1505, RT-1506, RT-1507, RT-1509, RT-1510, RT-1541, RT-1542
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-787, RT-867, RT-868, RT-869
 - [finished-toast.md](finished-toast.md) — RT-755, RT-757
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1266, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1520, RT-1521, RT-1522, RT-1523, RT-1524, RT-1525, RT-1526, RT-1527, RT-1528, RT-1529, RT-1530, RT-1531, RT-1532, RT-1533, RT-1534, RT-1535, RT-1536, RT-1537, RT-1538, RT-1539, RT-1540, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
+- [push-relay.md](push-relay.md) — RT-1511, RT-1512, RT-1513, RT-1514, RT-1515, RT-1516, RT-1517, RT-1518, RT-1519, RT-1530, RT-1536, RT-1537
 - [remote-access.md](remote-access.md) — Remote hosts and connections
 - [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1361, RT-1362, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
 - [remote-update.md](remote-update.md) — RT-1353, RT-1355, RT-1397, Updates and installer
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792, Remote hosts and connections
-- [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406, Agents and subagents
+- [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406, RT-1510, Agents and subagents
 - [toast-position.md](toast-position.md) — RT-1105
