@@ -435,10 +435,6 @@ pub fn resolve_push_dir() -> anyhow::Result<PathBuf> {
     Ok(profile::roots()?.1.push)
 }
 
-/// The variable that names the dispatch tool's live-run folder.
-#[expect(dead_code, reason = "read by the dispatch-run watcher (DF.5)")]
-pub const DISPATCH_DIR_VAR: &str = "RUSTLING_TULIP_DISPATCH_DIR";
-
 /// The dispatch tool's live-run folder: `RUSTLING_TULIP_DISPATCH_DIR` when set
 /// and not empty (made absolute against the current dir), else the first folder
 /// a registered agent names, else none, and the daemon follows no dispatch
@@ -449,7 +445,7 @@ pub const DISPATCH_DIR_VAR: &str = "RUSTLING_TULIP_DISPATCH_DIR";
 #[must_use]
 pub fn resolve_dispatch_live_dir() -> Option<PathBuf> {
     dispatch_live_dir_from(
-        std::env::var_os(DISPATCH_DIR_VAR),
+        std::env::var_os(daemon_client::isolation::DISPATCH_DIR_VAR),
         agent_registry::all()
             .iter()
             .map(|plugin| plugin.live_runs_dir()),

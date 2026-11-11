@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use agent_api::{AgentPlugin, FakeCli};
-use daemon_client::isolation::check_isolated;
+use daemon_client::isolation::{DISPATCH_DIR_VAR, check_isolated};
 use protocol::AgentId;
 
 use crate::{DaemonSpec, LaunchError, TestShell};
@@ -14,7 +14,7 @@ use crate::{DaemonSpec, LaunchError, TestShell};
 pub const STUB_MARKER: &str = "[rt-e2e agent stub]";
 
 /// The daemon's directories under the scratch root.
-const SCRATCH_DIRS: [&str; 8] = [
+const SCRATCH_DIRS: [&str; 9] = [
     "config",
     "binaries",
     "worktrees",
@@ -23,6 +23,7 @@ const SCRATCH_DIRS: [&str; 8] = [
     "updates",
     "ui",
     "fake-bin",
+    "dispatch-live",
 ];
 
 /// The variables that isolate a daemon to `spec`'s scratch root, with
@@ -76,6 +77,11 @@ pub(crate) fn isolated_envs(
         (
             "RUSTLING_TULIP_PUSH_DIR",
             root.join("push").into_os_string(),
+        ),
+        // The dispatch tool's live-run folder: the live tier never reads or stops the owner's real dispatch runs.
+        (
+            DISPATCH_DIR_VAR,
+            root.join("dispatch-live").into_os_string(),
         ),
         // The account store: never the user's saved logins. The store
         // creates the folder itself, owner-only, when it first opens it.
@@ -300,6 +306,24 @@ mod tests {
             env_value(&envs, "RUSTLING_TULIP_UPDATES_DIR"),
             Some(root.join("updates").into_os_string()),
             "the live tier never cleans or reads the user's real updates folder"
+        );
+    }
+
+    #[test]
+    fn the_dispatch_dir_is_isolated_under_the_scratch_root() {
+        let root = std::env::temp_dir().join(format!("rt-dispatch-env-{}", std::process::id()));
+
+        let envs =
+            isolated_envs(&spec(root.clone())).expect("every registered agent has a fake CLI");
+
+        assert!(
+            SCRATCH_DIRS.contains(&"dispatch-live"),
+            "the scratch root makes a dispatch live folder"
+        );
+        assert_eq!(
+            env_value(&envs, "RUSTLING_TULIP_DISPATCH_DIR"),
+            Some(root.join("dispatch-live").into_os_string()),
+            "the live tier never reads or stops the owner's real dispatch runs"
         );
     }
 }

@@ -19,6 +19,11 @@ pub const ISOLATED_DIR_VARS: [&str; 3] = [
 /// it stays out of [`ISOLATED_DIR_VARS`].
 pub const REMOTE_FILES_DIR_VAR: &str = "RUSTLING_TULIP_REMOTE_FILES_DIR";
 
+/// The variable naming the dispatch tool's live-run folder a daemon follows. A driven run
+/// isolates it too, so a test daemon never reads or stops the owner's real runs; it stays out
+/// of [`ISOLATED_DIR_VARS`], which the update sandbox and the bench tools also check.
+pub const DISPATCH_DIR_VAR: &str = "RUSTLING_TULIP_DISPATCH_DIR";
+
 /// The folder name a driven run's folders must sit under.
 const TMP_FOLDER: &str = ".tmp";
 

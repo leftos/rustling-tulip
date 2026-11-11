@@ -203,10 +203,8 @@ Rules:
 
 A test or driven daemon must never show, or stop, the owner's real runs. `RUSTLING_TULIP_DISPATCH_DIR` therefore joins:
 
-- the isolated daemon's environment in `crates/dev-daemon/src/env.rs` (under the scratch root, as `RUSTLING_TULIP_PUSH_DIR` is), which the live tier's `LiveDaemon` and the driver MCP's launches share;
-- the client profile's resolved dirs in `crates/daemon-client/src/profile.rs`;
-- the `isolation` check: a `DISPATCH_DIR_VAR` constant in `crates/daemon-client/src/isolation.rs`, checked with `check_isolated_var` by the driver gate (`apps/native/src/driver_gate.rs`) and the isolated daemon's launch, as `REMOTE_FILES_DIR_VAR` is. It stays out of `ISOLATED_DIR_VARS` so the update sandbox and `folder-bench`, which never read runs, are untouched;
-- `rt.ps1 native-e2e`, which sets it under `.tmp`.
+- the isolated daemon's environment in `crates/dev-daemon/src/env.rs` (`{scratch}/dispatch-live`, as `RUSTLING_TULIP_PUSH_DIR` is), which the live tier's `LiveDaemon`, the driver MCP's launches and the smoke tier's driven client all pass on through `IsolatedDaemon::envs()`, so neither `rt.ps1` nor the client profile needs it (the daemon reads it itself in `paths.rs`);
+- the `isolation` check: a `DISPATCH_DIR_VAR` constant in `crates/daemon-client/src/isolation.rs`, checked with `check_isolated_var` by the driver gate (`apps/native/src/driver_gate.rs`), as `REMOTE_FILES_DIR_VAR` is, and by the isolated daemon's launch (RT-1541). It stays out of `ISOLATED_DIR_VARS` so the update sandbox and `folder-bench`, which never read runs, are untouched.
 
 ### 14. The agent seam
 
@@ -256,8 +254,8 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: `crates/agents/api/src/lib.rs`, `crates/agents/claude/src/lib.rs`, `crates/daemon/src/paths.rs`, `crates/daemon/src/dispatch_runs.rs` (new, parse only), `crates/daemon/src/main.rs`.
   - Proof: `gate … -- cargo nextest run -p agent-claude -p daemon --cargo-profile test-release -E 'test(/dispatch_runs::parse|dispatch_dir|live_runs_dir/)'`, then `.\rt.ps1 clippy`.
   - Waits on: DF.2 (same agent files). Hotspot: none.
-- [ ] **DF.4 Isolation sites.** `RUSTLING_TULIP_DISPATCH_DIR` under `.tmp` for every isolated daemon and driven run (`DISPATCH_DIR_VAR`, checked like `REMOTE_FILES_DIR_VAR`).
-  - Files: `crates/daemon-client/src/isolation.rs`, `crates/daemon-client/src/profile.rs`, `crates/dev-daemon/src/env.rs`, `crates/dev-daemon/src/lib.rs`, `apps/native/src/driver_gate.rs`, `rt.ps1`.
+- [x] **DF.4 Isolation sites.** `RUSTLING_TULIP_DISPATCH_DIR` under `.tmp` for every isolated daemon and driven run (`DISPATCH_DIR_VAR`, checked like `REMOTE_FILES_DIR_VAR`).
+  - Files: `crates/daemon-client/src/isolation.rs`, `crates/daemon/src/paths.rs`, `crates/dev-daemon/src/env.rs`, `apps/native/src/driver_gate.rs`.
   - Proof: `gate … -- cargo nextest run -p daemon-client -p dev-daemon --cargo-profile test-release -E 'test(/isolat|dispatch_dir/)'`, then `gate … -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --features driver -E 'test(/driver_gate/)'`.
   - Waits on: DF.3. Hotspot: none.
 - [ ] **DF.5 Watcher, tailer, liveness.** Debouncer plus 30 s rescan, the 250 ms tailer (partial line, shrink, missing file), the exact creation-time guard with stale-file deletion, and main-checkout resolution with `repo_path_for_worktree` moved to `git.rs`.
