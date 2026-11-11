@@ -59,9 +59,13 @@ pub(super) fn handle(hub: &Hub, msg: &ClientMessage, ctx: &ConnCtx<'_>) {
     let _ = ctx.out_tx.send(reply);
 }
 
-/// Serve one push request. `devices` stays locked until the push work is
-/// done, so a block, forget or re-pair cannot land between the lookup and a
-/// write; `push` is taken after it (`server/pairing.rs` has the lock order).
+/// Serve one push request in three phases, so `devices` is never held
+/// across the push folder's file I/O: [`lookup`] finds the peer's device id
+/// under `devices` alone, [`write`] loads the push state and stores or
+/// removes the subscription under `push` alone, and [`confirm`] takes
+/// `devices` then `push` (`server/pairing.rs` has the lock order), sweeps
+/// the state and checks the device again, undoing a write that raced a
+/// block, forget or re-pair.
 fn serve(
     hub: &Hub,
     msg: &ClientMessage,
@@ -71,10 +75,35 @@ fn serve(
     let AuthKind::Tailnet(peer) = auth else {
         return Err(Refusal::invalid("push is for paired phones on the tailnet"));
     };
-    let devices = crate::sync::lock(&hub.devices);
-    let Some(device_id) = devices.unrevoked_id_of(&peer.stable_id) else {
-        return Err(Refusal::invalid("this device is not paired"));
-    };
+    let device_id = lookup(hub, peer)?;
+    let (reply, registered) = write(hub, msg, &device_id, request_id)?;
+    confirm(hub, peer, &device_id, registered)?;
+    Ok(reply)
+}
+
+/// The id of `peer`'s unrevoked device record, read under `devices` alone.
+fn lookup(hub: &Hub, peer: &tailnet::PeerIdentity) -> Result<String, Refusal> {
+    crate::sync::lock(&hub.devices)
+        .unrevoked_id_of(&peer.stable_id)
+        .map(str::to_owned)
+        .ok_or_else(not_paired)
+}
+
+/// The refusal of a peer without an unrevoked device record.
+fn not_paired() -> Refusal {
+    Refusal::invalid("this device is not paired")
+}
+
+/// The request's push work under `push` alone: the state is loaded (unswept;
+/// [`confirm`] sweeps it), a `RegisterPush` stores the device's subscription
+/// and an `UnregisterPush` removes it. Returns the `PushStatus` reply and
+/// whether a subscription was stored.
+fn write(
+    hub: &Hub,
+    msg: &ClientMessage,
+    device_id: &str,
+    request_id: &str,
+) -> Result<(DaemonMessage, bool), Refusal> {
     let mut push = crate::sync::lock(&hub.push);
     let policy = push.policy();
     let new_subscription = match msg {
@@ -93,7 +122,26 @@ fn serve(
         )?),
         _ => None,
     };
-    let loaded = push.load(&devices).map_err(|err| Refusal::internal(&err))?;
+    let loaded = push.load_unswept().map_err(|err| Refusal::internal(&err))?;
+    match store(loaded, msg, new_subscription, device_id) {
+        Ok(registered) => Ok((push_status(loaded, device_id, request_id), registered)),
+        Err(err) => {
+            // The state may be unswept, and `confirm` does not run after a
+            // refusal: unloaded, it is swept again on the next load.
+            push.unload();
+            Err(Refusal::internal(&err))
+        }
+    }
+}
+
+/// Store `new` for a `RegisterPush`, or remove the device's subscription
+/// for an `UnregisterPush`; returns whether a subscription was stored.
+fn store(
+    loaded: &mut Loaded,
+    msg: &ClientMessage,
+    new_subscription: Option<Subscription>,
+    device_id: &str,
+) -> anyhow::Result<bool> {
     match (msg, new_subscription) {
         (ClientMessage::RegisterPush { .. }, Some(mut new)) => {
             // The same endpoint is the same subscription with new switches:
@@ -103,24 +151,48 @@ fn serve(
             {
                 new.created_at.clone_from(&stored.created_at);
             }
-            loaded
-                .subs
-                .put(device_id, new)
-                .map_err(|err| Refusal::internal(&err))?;
+            loaded.subs.put(device_id, new)?;
             info!(%device_id, "push: the device's subscription was stored");
+            Ok(true)
         }
         (ClientMessage::UnregisterPush { .. }, _) => {
-            let removed = loaded
-                .subs
-                .remove(device_id)
-                .map_err(|err| Refusal::internal(&err))?;
-            if removed {
+            if loaded.subs.remove(device_id)? {
                 info!(%device_id, "push: the device's subscription was removed");
             }
+            Ok(false)
         }
-        _ => {}
+        _ => Ok(false),
     }
-    Ok(push_status(loaded, device_id, request_id))
+}
+
+/// Check the device again under `devices` then `push`, after [`write`]
+/// released `push`: the state is swept against `devices`, and when this
+/// request stored a subscription (`registered`) but `peer` no longer
+/// resolves to `device_id` (blocked, forgotten or re-paired meanwhile), the
+/// subscription is deleted and the request refused as [`lookup`] refuses. An
+/// unregister is never refused here.
+fn confirm(
+    hub: &Hub,
+    peer: &tailnet::PeerIdentity,
+    device_id: &str,
+    registered: bool,
+) -> Result<(), Refusal> {
+    let devices = crate::sync::lock(&hub.devices);
+    let mut push = crate::sync::lock(&hub.push);
+    if let Err(err) = push.sweep(&devices) {
+        // The sweep unloaded the state, so nothing it would drop stays in
+        // memory and the next load sweeps again; the request still stands.
+        warn!(
+            err = format!("{err:#}"),
+            "push: the sweep could not save; the push state is unloaded until the next request"
+        );
+    }
+    if registered && devices.unrevoked_id_of(&peer.stable_id) != Some(device_id) {
+        push.remove_device(device_id);
+        info!(%device_id, "push: the device changed during the request; its subscription was undone");
+        return Err(not_paired());
+    }
+    Ok(())
 }
 
 /// The subscription a `RegisterPush` asks for, checked: the endpoint is
@@ -626,5 +698,148 @@ mod tests {
             vec![device_id],
             "the orphan is dropped"
         );
+    }
+
+    // ---- a block, forget or re-pair racing a request, phase by phase ----
+
+    /// The phase's value, failing on a refusal.
+    fn served<T>(result: Result<T, Refusal>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(refusal) => panic!("refused: {} {}", refusal.code, refusal.message),
+        }
+    }
+
+    /// Fail unless `confirm` refused as the lookup refuses an unpaired peer.
+    fn not_paired(result: Result<(), Refusal>) {
+        match result {
+            Err(refusal) => assert_eq!(
+                (refusal.code, refusal.message.as_str()),
+                (error_codes::INVALID_REQUEST, "this device is not paired")
+            ),
+            Ok(()) => panic!("want the not-paired refusal, got Ok"),
+        }
+    }
+
+    /// Whether the loaded push state holds a subscription for `device_id`.
+    fn held_in_memory(hub: &Hub, device_id: &str) -> bool {
+        let devices = crate::sync::lock(&hub.devices);
+        let mut push = crate::sync::lock(&hub.push);
+        let loaded = push.load(&devices).expect("loaded");
+        loaded.subs.get(device_id).is_some()
+    }
+
+    #[tokio::test]
+    async fn a_block_between_lookup_and_write_leaves_no_subscription() {
+        let (hub, scratch) = test_hub("push-race-block-early");
+        let device_id = pair(&hub);
+        let peer = test_peer();
+
+        let id = served(lookup(&hub, &peer));
+        // `block_device`'s store calls, on a state not loaded yet.
+        crate::sync::lock(&hub.devices).revoke(&id).expect("revoke");
+        crate::sync::lock(&hub.push).remove_device(&id);
+        let (_, registered) = served(write(&hub, &register(APPLE), &id, "p2"));
+        not_paired(confirm(&hub, &peer, &id, registered));
+
+        assert!(!stored_ids(&scratch).contains(&device_id), "none on disk");
+        assert!(!held_in_memory(&hub, &device_id), "none in memory");
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_unloads_the_push_state() {
+        let (hub, scratch) = test_hub("push-write-save-fails");
+        let device_id = pair(&hub);
+        crate::sync::lock(&hub.push).load_unswept().expect("loaded");
+        // A folder where the file belongs makes every save fail.
+        std::fs::create_dir(push_dir(&scratch).join(SUBSCRIPTIONS_FILE))
+            .expect("make a folder in the file's place");
+
+        let Err(refusal) = write(&hub, &register(APPLE), &device_id, "p2") else {
+            panic!("want the save to fail");
+        };
+
+        assert_eq!(refusal.code, error_codes::INTERNAL);
+        assert!(
+            !crate::sync::lock(&hub.push).is_loaded(),
+            "an unswept state does not stay loaded past a failed save"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_block_between_write_and_confirm_leaves_no_subscription() {
+        let (hub, scratch) = test_hub("push-race-block");
+        let device_id = pair(&hub);
+        let peer = test_peer();
+
+        let id = served(lookup(&hub, &peer));
+        let (_, registered) = served(write(&hub, &register(APPLE), &id, "p2"));
+        assert!(registered, "the register wrote a subscription");
+        crate::server::pairing::block_device(&hub, &id).expect("block");
+        not_paired(confirm(&hub, &peer, &id, registered));
+
+        assert!(!stored_ids(&scratch).contains(&device_id), "none on disk");
+        assert!(!held_in_memory(&hub, &device_id), "none in memory");
+    }
+
+    #[tokio::test]
+    async fn a_forget_between_lookup_and_write_leaves_no_subscription() {
+        let (hub, scratch) = test_hub("push-race-forget");
+        let device_id = pair(&hub);
+        let peer = test_peer();
+
+        let id = served(lookup(&hub, &peer));
+        crate::sync::lock(&hub.devices).forget(&id).expect("forget");
+        crate::sync::lock(&hub.push).remove_device(&id);
+        let (_, registered) = served(write(&hub, &register(APPLE), &id, "p2"));
+        not_paired(confirm(&hub, &peer, &id, registered));
+
+        assert!(!stored_ids(&scratch).contains(&device_id), "none on disk");
+        assert!(!held_in_memory(&hub, &device_id), "none in memory");
+    }
+
+    #[tokio::test]
+    async fn a_re_pair_between_lookup_and_write_leaves_no_subscription() {
+        let (hub, scratch) = test_hub("push-race-re-pair");
+        let old_id = pair(&hub);
+        let peer = test_peer();
+
+        let id = served(lookup(&hub, &peer));
+        let new_id = pair(&hub);
+        crate::sync::lock(&hub.push).remove_device(&id);
+        let (_, registered) = served(write(&hub, &register(APPLE), &id, "p2"));
+        not_paired(confirm(&hub, &peer, &id, registered));
+
+        assert_ne!(new_id, old_id, "the re-pair made a new device id");
+        assert!(stored_ids(&scratch).is_empty(), "none on disk");
+        assert!(!held_in_memory(&hub, &old_id), "none in memory");
+    }
+
+    #[tokio::test]
+    async fn an_unregister_racing_a_block_answers_as_before() {
+        let (hub, scratch) = test_hub("push-race-unregister");
+        let device_id = pair(&hub);
+        status(
+            &dispatch_one_as(&hub, register(APPLE), &tailnet()).await,
+            "p2",
+        );
+        let peer = test_peer();
+        let unregister = ClientMessage::UnregisterPush {
+            request_id: "p3".to_owned(),
+        };
+
+        let id = served(lookup(&hub, &peer));
+        crate::server::pairing::block_device(&hub, &id).expect("block");
+        let (reply, registered) = served(write(&hub, &unregister, &id, "p3"));
+        assert!(!registered, "an unregister registers nothing");
+        assert!(
+            confirm(&hub, &peer, &id, registered).is_ok(),
+            "an unregister is never refused at the re-check"
+        );
+
+        let after = status(&reply, "p3");
+        assert_eq!((after.1, after.2, after.3), (None, false, false));
+        assert!(stored_ids(&scratch).is_empty(), "the subscription is gone");
+        assert!(!held_in_memory(&hub, &device_id), "none in memory");
     }
 }

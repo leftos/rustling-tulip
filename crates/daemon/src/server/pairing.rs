@@ -17,10 +17,12 @@
 //! `devices`.
 //!
 //! [`Hub::push`] is a leaf below them: live devices, then devices, then
-//! push. A push request holds `devices` from its device lookup until its
-//! push work is done; a block, a forget and a re-pair delete the device's
-//! subscription after their `devices` change. Nothing takes `devices` or
-//! `live_devices` while holding `push`.
+//! push. A push request looks its device up under `devices` alone, does its
+//! file work under `push` alone, then takes `devices` then `push` to sweep
+//! and check the device again, undoing a subscription stored for a device
+//! that changed meanwhile; a block, a forget and a re-pair delete the
+//! device's subscription after their `devices` change. Nothing takes
+//! `devices` or `live_devices` while holding `push`.
 use super::connection::{AuthKind, ConnCtx, ConnLife, Inbound, undecoded_reply};
 use super::live_devices::{LiveDevices, Notifier};
 use super::{Hub, StateEvent};

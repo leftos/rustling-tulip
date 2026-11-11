@@ -8,6 +8,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - A phone alert no longer goes out, or counts in the badge, for a session closed a moment before.
 - One slow or unreachable push service no longer delays alerts to your other devices.
+- Connecting or pairing from another device no longer waits while a phone saves its alert settings.
 
 ### Changed
 

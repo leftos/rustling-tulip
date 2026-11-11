@@ -478,6 +478,10 @@ impl Trigger {
         only_held: bool,
     ) -> Option<Round> {
         let devices = lock(stores.devices);
+        // A push request stores a subscription under `push` alone and
+        // undoes it if the device was revoked meanwhile; until it does, the
+        // subscription of a device that is not an unrevoked record is skipped.
+        let paired = super::state::unrevoked_ids(&devices);
         let mut push = lock(stores.push);
         let policy = push.policy();
         let loaded = match push.load(&devices) {
@@ -499,7 +503,10 @@ impl Trigger {
         };
         let mut targets = Vec::new();
         let mut held = 0_u32;
-        for (device_id, subscription) in loaded.subs.iter().filter(|(_, s)| kind.wanted_by(s)) {
+        let wanted = loaded.subs.iter().filter(|(id, s)| {
+            kind.wanted_by(s) && paired.as_ref().is_none_or(|ids| ids.contains(*id))
+        });
+        for (device_id, subscription) in wanted {
             if only_held && !subscription.hold_at_desk {
                 continue;
             }
@@ -1576,6 +1583,19 @@ mod tests {
             None,
             "the subscription is deleted"
         );
+    }
+
+    #[tokio::test]
+    async fn collect_skips_a_revoked_device() {
+        let (setup, device, _url, fake, _server) = one_device("revoked", 201).await;
+        // Revoked, with its subscription still stored: a push request's
+        // write that a block raced, before the request's re-check undoes it.
+        lock(&setup.devices).revoke(&device).expect("revoke");
+
+        let delivered = round(&mut trigger(), &setup, &serving(), PushKind::Finished).await;
+
+        assert!(delivered.is_empty(), "{delivered:?}");
+        assert_eq!(fake.posts(), 0, "no POST to a revoked device");
     }
 
     #[tokio::test]

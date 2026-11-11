@@ -50,11 +50,9 @@ impl PushState {
         self.policy
     }
 
-    /// The key and the store, loading them on first use: the folder is
-    /// created, the key is read or made, the store is read, and every
-    /// subscription of a device that is not an unrevoked record in
-    /// `devices` is dropped (skipped when `devices` is corrupt, so a corrupt
-    /// `devices.json` wipes nothing).
+    /// The key and the store, loading them on first use and then sweeping
+    /// them against `devices`: [`Self::load_unswept`], then, on that first
+    /// load only, [`Self::sweep`].
     ///
     /// # Errors
     ///
@@ -64,6 +62,29 @@ impl PushState {
     /// request tries again; the messages name the files, never an endpoint
     /// or a key.
     pub(crate) fn load(&mut self, devices: &DeviceStore) -> anyhow::Result<&mut Loaded> {
+        let first = self.loaded.is_none();
+        self.load_unswept()?;
+        if first {
+            self.sweep(devices)?;
+        }
+        self.loaded
+            .as_mut()
+            .ok_or_else(|| anyhow!("the push state did not load"))
+    }
+
+    /// The key and the store, loading them on first use without
+    /// `Hub::devices`: the folder is created, the key is read or made, and
+    /// the store is read. A first load keeps every subscription in the file,
+    /// so the caller runs [`Self::sweep`] under `Hub::devices` before it
+    /// lets go of this lock's work (a block that found the state unloaded
+    /// relies on that sweep).
+    ///
+    /// # Errors
+    ///
+    /// The push folder is unresolved or could not be created, the key file
+    /// could not be read, decoded or written, or `subscriptions.json` is
+    /// corrupt. Nothing is kept, so the next request tries again.
+    pub(crate) fn load_unswept(&mut self) -> anyhow::Result<&mut Loaded> {
         if self.loaded.is_none() {
             let dir = self
                 .dir
@@ -72,33 +93,50 @@ impl PushState {
             super::ensure_folder(dir)?;
             let key = super::keys::load_or_create(dir)?;
             let path = dir.join(SUBSCRIPTIONS_FILE);
-            let mut subs = SubscriptionStore::load(&path);
+            let subs = SubscriptionStore::load(&path);
             if subs.is_corrupt() {
                 return Err(anyhow!(
                     "{} is corrupt; the file is left as it is",
                     path.display()
                 ));
             }
-            if !devices.is_corrupt() {
-                let known: HashSet<String> = devices
-                    .list()
-                    .iter()
-                    .filter(|record| !record.revoked)
-                    .map(|record| record.id.clone())
-                    .collect();
-                let dropped = subs.retain_devices(&known)?;
-                if dropped > 0 {
-                    tracing::info!(
-                        dropped,
-                        "push: dropped the subscriptions of devices no longer paired"
-                    );
-                }
-            }
             self.loaded = Some(Loaded { key, subs });
         }
         self.loaded
             .as_mut()
             .ok_or_else(|| anyhow!("the push state did not load"))
+    }
+
+    /// Drop every loaded subscription of a device that is not an unrevoked
+    /// record in `devices`, in memory and, when one drops, in the file. An
+    /// unloaded state, or a corrupt `devices` (so a corrupt `devices.json`
+    /// wipes nothing), is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// The sweep could not save the file; the state is then unloaded, so no
+    /// dropped subscription stays in memory and the next load sweeps again.
+    pub(crate) fn sweep(&mut self, devices: &DeviceStore) -> anyhow::Result<()> {
+        let Some(loaded) = self.loaded.as_mut() else {
+            return Ok(());
+        };
+        let Some(known) = unrevoked_ids(devices) else {
+            return Ok(());
+        };
+        match loaded.subs.retain_devices(&known) {
+            Ok(0) => Ok(()),
+            Ok(dropped) => {
+                tracing::info!(
+                    dropped,
+                    "push: dropped the subscriptions of devices no longer paired"
+                );
+                Ok(())
+            }
+            Err(err) => {
+                self.loaded = None;
+                Err(err)
+            }
+        }
     }
 
     /// Whether the key and the store are loaded.
@@ -108,8 +146,8 @@ impl PushState {
         self.loaded.is_some()
     }
 
-    /// Drop the loaded key and store, as a failed save does.
-    #[cfg(test)]
+    /// Drop the loaded key and store, as a failed save does, so the next
+    /// load reads the file and sweeps it again.
     pub(crate) fn unload(&mut self) {
         self.loaded = None;
     }
@@ -163,4 +201,20 @@ impl PushState {
             }
         }
     }
+}
+
+/// The ids of `devices`' unrevoked records, the devices a subscription may
+/// belong to; `None` when `devices` is corrupt, so nothing is judged by it.
+pub(crate) fn unrevoked_ids(devices: &DeviceStore) -> Option<HashSet<String>> {
+    if devices.is_corrupt() {
+        return None;
+    }
+    Some(
+        devices
+            .list()
+            .iter()
+            .filter(|record| !record.revoked)
+            .map(|record| record.id.clone())
+            .collect(),
+    )
 }
