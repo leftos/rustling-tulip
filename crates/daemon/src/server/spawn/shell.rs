@@ -1139,9 +1139,11 @@ impl AgentCommandChoice {
     }
 
     /// The direct spawn's arguments for the resolved `program`: the
-    /// resolver's leading `prepend`, the plugin's own `plugin_args` (which
-    /// carry `initial_prompt`), then the launch command's extra arguments,
-    /// then the spawn's own.
+    /// resolver's leading `prepend`, the plugin's own options, the launch
+    /// command's extra arguments, the spawn's own, then the plugin's `--`
+    /// separator and what follows it (`initial_prompt`). User arguments stay
+    /// ahead of the separator so the program never reads one as part of the
+    /// prompt.
     ///
     /// # Errors
     ///
@@ -1181,10 +1183,15 @@ impl AgentCommandChoice {
                 program_env_var: self.program_env_var,
             });
         }
+        let (options, after_separator) = match plugin_args.iter().position(|arg| arg == "--") {
+            Some(at) => (plugin_args[..at].to_vec(), plugin_args[at..].to_vec()),
+            None => (plugin_args, Vec::new()),
+        };
         let mut args = prepend;
-        args.extend(plugin_args);
+        args.extend(options);
         args.extend(self.extra_args.iter().cloned());
         args.extend(self.spawn_args.iter().cloned());
+        args.extend(after_separator);
         Ok(args)
     }
 }
@@ -2480,6 +2487,33 @@ mod launch_command_tests {
             .direct_args(r"C:\npm\claude.cmd", Vec::new(), Vec::new(), None)
             .expect_err("cmd.exe would act on the spawn's &");
         assert_eq!(refused.argument, "an extra argument of this spawn");
+    }
+
+    #[test]
+    fn launch_arguments_go_before_the_prompt_separator() {
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
+        let chosen = choose_agent_command(plugin, &command("", "--debug"), &no_env)
+            .expect("the command splits")
+            .with_spawn_args(&["--name".to_owned(), "a b".to_owned()]);
+        let argv = chosen
+            .direct_args(
+                r"C:\bin\claude.exe",
+                Vec::new(),
+                vec![
+                    "--model".to_owned(),
+                    "opus".to_owned(),
+                    "--".to_owned(),
+                    "hello".to_owned(),
+                ],
+                Some("hello"),
+            )
+            .expect("an .exe takes every argument");
+        assert_eq!(
+            argv,
+            ["--model", "opus", "--debug", "--name", "a b", "--", "hello"],
+            "the host's extras and the spawn's own go before the separator"
+        );
     }
 
     #[test]

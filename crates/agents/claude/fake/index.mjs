@@ -60,8 +60,13 @@
  *     account store's capture, fails, or hangs; every case exits before the
  *     banner, the settings load or the prompt.
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
- *   - Acknowledges (but does not act on) the `--add-dir`, `-p`,
- *     `--model`, and `--permission-mode` flags the daemon may pass.
+ *   - Takes the prompt as Claude does: the argument after `--`, or a bare
+ *     argument that is no known flag's value, is the session's first message
+ *     and the run stays interactive (`prompt: <text>`). `-p`/`--print` is
+ *     print mode: one answer, a `print: <text>` line, then exit 0.
+ *   - Acknowledges (but does not act on) the `--add-dir`, `--append-system-prompt`,
+ *     `--effort`, `--output-format`, `--model`, `--permission-mode` and
+ *     `--verbose` flags the daemon may pass.
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -229,6 +234,13 @@ if (flags.permissionMode) {
 }
 if (flags.skipPermissions) {
   process.stdout.write(`${TAG} dangerously-skip-permissions: yes\r\n`);
+}
+// Print mode answers once and ends: no idle box, no turn loop.
+if (flags.print) {
+  await new Promise((resolve) =>
+    process.stdout.write(`${TAG} print: ${flags.prompt ?? ""}\r\n`, resolve),
+  );
+  process.exit(0);
 }
 if (flags.prompt !== null) {
   process.stdout.write(`${TAG} prompt: ${flags.prompt}\r\n`);
@@ -1132,13 +1144,53 @@ function uuidOf(hex) {
 }
 
 /**
+ * Stores the flag at `argv[index]`, with its value when it takes one.
+ *
+ * @param {any} out
+ * @param {{takesValue: boolean, apply: (out: any, value?: string) => void}} spec
+ * @param {string[]} argv
+ * @param {number} index
+ * @returns {number} the index of the last argument consumed
+ */
+function applyFlag(out, spec, argv, index) {
+  if (!spec.takesValue) {
+    spec.apply(out);
+    return index;
+  }
+  if (argv[index + 1] === undefined) {
+    return index;
+  }
+  spec.apply(out, argv[index + 1]);
+  return index + 1;
+}
+
+/**
+ * The positional prompt: the argument after `--`, or any bare argument that
+ * is no flag's value. The first one wins, as in the real CLI.
+ *
+ * @param {{prompt: string | null}} out
+ * @param {string} argument
+ * @param {boolean} afterSeparator whether a `--` ended option parsing
+ */
+function takePrompt(out, argument, afterSeparator) {
+  if (out.prompt !== null) {
+    return;
+  }
+  if (afterSeparator || !argument.startsWith("-")) {
+    out.prompt = argument;
+  }
+}
+
+/**
  * @param {string[]} argv
  */
 function parseArgs(argv) {
-  /** @type {{addDirs: string[], prompt: string | null, model: string | null, permissionMode: string | null, skipPermissions: boolean, settings: string | null, conversationId: string | null, resumed: boolean}} */
+  /** @type {{addDirs: string[], prompt: string | null, print: boolean, model: string | null, permissionMode: string | null, skipPermissions: boolean, settings: string | null, conversationId: string | null, resumed: boolean}} */
   const out = {
     addDirs: [],
     prompt: null,
+    // `-p`/`--print`: answer once and exit, as Claude's print mode does.
+    print: false,
     model: null,
     permissionMode: null,
     skipPermissions: false,
@@ -1147,23 +1199,50 @@ function parseArgs(argv) {
     // Whether the conversation id came from `--resume`.
     resumed: false,
   };
+  // Every flag the shim knows: whether it takes a value, and what it stores.
+  // `-p`/`--print` are boolean in the real CLI (print mode is a flag, not a
+  // value option), so the argument after them is the positional prompt. The
+  // flags the daemon passes but the shim does not act on still need an entry,
+  // or their value would read as a bare argument, i.e. as the prompt.
+  /** @type {Map<string, {takesValue: boolean, apply: (out: any, value?: string) => void}>} */
+  const flags = new Map([
+    ["--add-dir", { takesValue: true, apply: (out, value) => out.addDirs.push(value) }],
+    ["--model", { takesValue: true, apply: (out, value) => { out.model = value; } }],
+    ["--permission-mode", {
+      takesValue: true,
+      apply: (out, value) => { out.permissionMode = value; },
+    }],
+    ["--settings", { takesValue: true, apply: (out, value) => { out.settings = value; } }],
+    ["--session-id", { takesValue: true, apply: (out, value) => { out.conversationId = value; } }],
+    ["--resume", {
+      takesValue: true,
+      apply: (out, value) => {
+        out.resumed = true;
+        out.conversationId = value;
+      },
+    }],
+    ["-p", { takesValue: false, apply: (out) => { out.print = true; } }],
+    ["--print", { takesValue: false, apply: (out) => { out.print = true; } }],
+    ["--dangerously-skip-permissions", {
+      takesValue: false,
+      apply: (out) => { out.skipPermissions = true; },
+    }],
+    // Acknowledged with their values consumed, never acted on.
+    ["--append-system-prompt", { takesValue: true, apply: () => {} }],
+    ["--effort", { takesValue: true, apply: () => {} }],
+    ["--output-format", { takesValue: true, apply: () => {} }],
+    ["--verbose", { takesValue: false, apply: () => {} }],
+  ]);
+  let afterSeparator = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--add-dir" && argv[i + 1] !== undefined) {
-      out.addDirs.push(argv[++i]);
-    } else if (a === "-p" && argv[i + 1] !== undefined) {
-      out.prompt = argv[++i];
-    } else if (a === "--model" && argv[i + 1] !== undefined) {
-      out.model = argv[++i];
-    } else if (a === "--permission-mode" && argv[i + 1] !== undefined) {
-      out.permissionMode = argv[++i];
-    } else if (a === "--settings" && argv[i + 1] !== undefined) {
-      out.settings = argv[++i];
-    } else if ((a === "--session-id" || a === "--resume") && argv[i + 1] !== undefined) {
-      out.resumed = a === "--resume";
-      out.conversationId = argv[++i];
-    } else if (a === "--dangerously-skip-permissions") {
-      out.skipPermissions = true;
+    const spec = afterSeparator ? undefined : flags.get(a);
+    if (a === "--" && !afterSeparator) {
+      afterSeparator = true;
+    } else if (spec !== undefined) {
+      i = applyFlag(out, spec, argv, i);
+    } else {
+      takePrompt(out, a, afterSeparator);
     }
   }
   return out;

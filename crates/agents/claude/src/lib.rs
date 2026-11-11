@@ -378,6 +378,7 @@ impl Agent for ClaudePlugin {
             "--continue",
             "-c",
             "--fork-session",
+            "--",
         ]
     }
 
@@ -470,13 +471,18 @@ impl Agent for ClaudePlugin {
             args.push("--session-id".to_string());
             args.push(id.to_string());
         }
-        // When a prompt injector is attached, it carries the prompt as
-        // scripted PTY input — passing `-p` would race the injector and
-        // disable plan mode. The injector path takes over.
+        // The prompt goes in as Claude's positional `[prompt]` argument, after
+        // a `--` separator so a prompt starting with `-` is never read as a
+        // flag, and so a variadic option before it (`--add-dir <dirs...>`)
+        // cannot swallow it. That starts an interactive session whose first
+        // message is the prompt; `-p` is print mode, which answers once and
+        // ends the session. With a prompt injector attached, the injector
+        // carries the prompt as scripted PTY input instead, since passing it
+        // on the argv would race the injector and disable plan mode.
         if !common.has_prompt_injector
             && let Some(prompt) = initial_prompt
         {
-            args.push("-p".to_string());
+            args.push("--".to_string());
             args.push(prompt.to_string());
         }
         args
@@ -1338,11 +1344,13 @@ mod tests {
                 "--continue",
                 "-c",
                 "--fork-session",
+                "--",
             ]
         );
     }
 
-    /// Every flag-shaped token in `args`.
+    /// Every flag-shaped token in `args`, the `--` separator included, which
+    /// the plugin reserves because it decides where the prompt starts.
     fn flags(args: &[String]) -> Vec<String> {
         args.iter()
             .filter(|arg| arg.starts_with('-'))
@@ -1476,11 +1484,21 @@ mod tests {
         let m = members(&["X:/dev/a"]);
         let opts = options(None, None);
         let args = interactive(&opts, &with_session_id(false), &m, Some("hello"));
-        assert_eq!(args, vec!["--session-id", SESSION_ID, "-p", "hello"]);
+        assert_eq!(args, vec!["--session-id", SESSION_ID, "--", "hello"]);
 
         // With an injector the prompt stays off the argv; the id does not.
         let injected = interactive(&opts, &with_session_id(true), &m, Some("hello"));
         assert_eq!(injected, vec!["--session-id", SESSION_ID]);
+    }
+
+    #[test]
+    fn interactive_args_put_a_dash_prompt_after_the_separator() {
+        let m = members(&["X:/dev/a", "X:/dev/b"]);
+        let opts = options(None, None);
+        let prompt = "-x starts with a dash";
+        let args = interactive(&opts, &with_session_id(false), &m, Some(prompt));
+        assert!(args.ends_with(&["--".to_string(), prompt.to_string()]));
+        assert!(!args.contains(&"-p".to_string()));
     }
 
     const HOOK_SETTINGS: &str =
@@ -1599,7 +1617,7 @@ mod tests {
                 "opus",
                 "--permission-mode",
                 "acceptEdits",
-                "-p",
+                "--",
                 "hello",
             ]
         );

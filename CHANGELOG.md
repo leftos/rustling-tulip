@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - On macOS, Go to pane on a toast brings the app to the front when another app is in front.
+- A session started with a first prompt on a host whose shell is cmd, such as the phone's New session, stays open instead of answering once and ending.
 - On the phone's Home, starting Launch last or New session clears an earlier refusal of the other kind shown for that repo or workspace.
 - A Claude session in bash mode whose reply quotes a question's footer reads as idle, not as waiting on you, and Chat shows no question for it.
 

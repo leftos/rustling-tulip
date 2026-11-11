@@ -1195,6 +1195,17 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_launch_command_may_not_pass_the_separator() {
+        let (hub, _scratch) = test_hub("agent-command-separator");
+        assert_agent_command_refused(
+            &hub,
+            set_command("", "--debug --"),
+            "-- is set by rustling-tulip; remove it from the extra arguments.",
+        )
+        .await;
+    }
+
     #[test]
     fn extra_args_without_a_reserved_flag_pass() {
         assert_eq!(
