@@ -1636,6 +1636,14 @@ mod tests {
         let v52 = include_str!("fixtures/v52-plan-feedback-open.txt");
         let v53 = include_str!("fixtures/v53-plan-feedback-typed.txt");
         let typed = |value: &str| Ok(vec![(vec![Key::Text(text(value)), Key::Enter], Any)]);
+        // A Type something answer types `i` and Backspace first, for vim's NORMAL mode.
+        let typed_into_field = |value: &str| {
+            Ok(vec![
+                (vec![Key::Text(text("i"))], Any),
+                (vec![Key::Backspace], Any),
+                (vec![Key::Text(text(value)), Key::Enter], Any),
+            ])
+        };
         let refused = Err(AnswerRefusal::NotThisDialog);
         let type_x = || ChatAnswerKind::TypeSomething { text: text("x") };
         let digit = |n: u8| (vec![Key::Digit(n)], DialogGone);
@@ -1811,6 +1819,8 @@ mod tests {
                 type_x(),
                 Ok(vec![
                     (vec![Key::Down; 3], OptionSelected(4)),
+                    (vec![Key::Text(text("i"))], Any),
+                    (vec![Key::Backspace], Any),
                     (vec![Key::Text(text("x")), Key::Enter], Any),
                 ]),
             ),
@@ -1886,6 +1896,8 @@ mod tests {
                 },
                 Ok(vec![
                     (vec![Key::Down; 4], OptionSelected(5)),
+                    (vec![Key::Text(text("i"))], Any),
+                    (vec![Key::Backspace], Any),
                     (vec![Key::Text(text("fuzz tests")), Key::Enter], Any),
                 ]),
             ),
@@ -1895,7 +1907,7 @@ mod tests {
                 ChatAnswerKind::TypeSomething {
                     text: text("fuzz tests"),
                 },
-                typed("fuzz tests"),
+                typed_into_field("fuzz tests"),
             ),
             ("v38-ask-q3", v38, type_x(), refused.clone()),
             ("v42-ask-review", v42, option(1), Ok(vec![digit(1)])),
