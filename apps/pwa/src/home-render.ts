@@ -7,6 +7,8 @@ import {
   type HomeScreen,
   type LaunchRowView,
   type LaunchView,
+  type NewSessionRowView,
+  type NewSessionView,
   type PresetRowView,
   type PresetsView,
   type RowView,
@@ -23,6 +25,8 @@ import type { ContainerRef } from "./protocol";
 export interface HomeHandlers {
   choose(card: CardView, choice: CardButton): void;
   launch(target: ContainerRef): void;
+  toggleNewSession(): void;
+  newSession(target: ContainerRef): void;
   togglePresets(target: ContainerRef): void;
   launchPreset(request: PresetLaunchRequest): void;
   cancelPreset(jobId: string): void;
@@ -32,7 +36,10 @@ export interface HomeHandlers {
   open(sessionId: string): void;
 }
 
-/** The nodes Home's container holds for `screen`, in order: bar, card tray, groups, empty line. */
+/**
+ * The nodes Home's container holds for `screen`, in order: bar, card tray,
+ * the New session button and its open list, groups, empty line.
+ */
 export function homeNodes(screen: HomeScreen, handlers: HomeHandlers): HTMLElement[] {
   const nodes: HTMLElement[] = [];
   if (screen.bar !== null) {
@@ -43,6 +50,9 @@ export function homeNodes(screen: HomeScreen, handlers: HomeHandlers): HTMLEleme
   if (screen.card !== null) {
     nodes.push(cardPanel(screen.card, handlers));
   }
+  if (screen.newSession !== null) {
+    nodes.push(...newSessionNodes(screen.newSession, handlers));
+  }
   for (const group of screen.groups) {
     nodes.push(groupSection(group, handlers));
   }
@@ -52,6 +62,46 @@ export function homeNodes(screen: HomeScreen, handlers: HomeHandlers): HTMLEleme
     nodes.push(empty);
   }
   return nodes;
+}
+
+/** The New session button and, while it is open, its list of containers. */
+function newSessionNodes(picker: NewSessionView, handlers: HomeHandlers): HTMLElement[] {
+  const nodes: HTMLElement[] = [];
+  if (picker.label !== null) {
+    nodes.push(
+      button("home-new-session", picker.label, picker.enabled, () => {
+        handlers.toggleNewSession();
+      }),
+    );
+  }
+  if (picker.open) {
+    const list = element("div", "home-presets");
+    for (const row of picker.rows) {
+      list.append(newSessionRow(row, handlers));
+    }
+    nodes.push(list);
+  }
+  return nodes;
+}
+
+function newSessionRow(row: NewSessionRowView, handlers: HomeHandlers): HTMLElement {
+  const node = element("div", "home-row");
+  const line = element("div", "home-row-main");
+  const name = element("span", "home-row-label");
+  name.textContent = row.name;
+  line.append(name);
+  if (row.label !== null) {
+    line.append(
+      button("home-new-session-start", row.label, row.enabled, () => {
+        handlers.newSession(row.target);
+      }),
+    );
+  }
+  node.append(line);
+  if (row.error !== null) {
+    node.append(errorLine(row.error));
+  }
+  return node;
 }
 
 function cardPanel(card: CardView, handlers: HomeHandlers): HTMLElement {

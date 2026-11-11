@@ -7,6 +7,7 @@ import {
   keepLaunches,
   launchLast,
   launchPreset,
+  newSession,
   reset as resetActions,
   resendLaunches,
   resendPresetLaunches,
@@ -41,6 +42,7 @@ import type { ConnectionStateName } from "./connection-machine";
 import { introLineShown } from "./installed";
 import {
   FEATURE_LAUNCH_LAST,
+  FEATURE_NEW_SESSION,
   FEATURE_PRESET_JOB_REPEAT,
   FEATURE_RESUME_SESSION,
   type ClientMessage,
@@ -69,6 +71,8 @@ interface HomeView {
   lastIndex: number;
   offline: boolean;
   lastSupportsLaunchLast: boolean;
+  lastSupportsNewSession: boolean;
+  newSessionOpen: boolean;
   drawn: HomeScreen | null;
   expiry: ReturnType<typeof setInterval> | null;
 }
@@ -118,6 +122,8 @@ export function mountHomeView(
     lastIndex: 0,
     offline: false,
     lastSupportsLaunchLast: false,
+    lastSupportsNewSession: false,
+    newSessionOpen: false,
     drawn: null,
     expiry: null,
   };
@@ -174,11 +180,16 @@ function onReady(context: HomeContext, view: HomeView, paint: HomePaint): void {
   view.model = resetModel();
   view.actions = keepLaunches(view.actions);
   view.lastSupportsLaunchLast = context.connection.supports(FEATURE_LAUNCH_LAST);
+  view.lastSupportsNewSession = context.connection.supports(FEATURE_NEW_SESSION);
   view.cardId = null;
   view.lastIndex = 0;
   view.offline = false;
   const now = Date.now();
-  const resent = resendLaunches(view.actions, view.lastSupportsLaunchLast, now);
+  const resent = resendLaunches(
+    view.actions,
+    (kind) => (kind === "launch_last" ? view.lastSupportsLaunchLast : view.lastSupportsNewSession),
+    now,
+  );
   const supportsRepeat = context.connection.supports(FEATURE_PRESET_JOB_REPEAT);
   const presetsResent = resendPresetLaunches(resent.state, supportsRepeat, now);
   const relisted = reconnectPresets(view.presets, paint.newRequestId, supportsRepeat, now);
@@ -258,6 +269,8 @@ function createHomePaint(context: HomeContext, view: HomeView): HomePaint {
       index: view.lastIndex,
       offline: view.offline,
       supportsLaunchLast: view.lastSupportsLaunchLast,
+      supportsNewSession: view.lastSupportsNewSession,
+      newSessionOpen: view.newSessionOpen,
     };
     const screen = homeScreen(view.model, view.actions, state, view.presets);
     if (screen.visible) {
@@ -315,6 +328,7 @@ function createHomeActions(context: HomeContext, view: HomeView, paint: HomePain
       }
       paint.update(handlers);
     },
+    ...createNewSessionActions(view, paint, () => handlers),
     ...createPresetActions(view, paint, () => handlers),
     stop(sessionId: string): void {
       const result = requestStop(view.actions, sessionId);
@@ -358,6 +372,33 @@ function createHomeActions(context: HomeContext, view: HomeView, paint: HomePain
     },
   };
   return handlers;
+}
+
+/** What a tap on the New session button or one of its rows asks for. */
+type NewSessionHandlers = Pick<HomeHandlers, "toggleNewSession" | "newSession">;
+
+/** The New session half of Home's actions; `handlers` hands back the whole set for the repaint. */
+function createNewSessionActions(
+  view: HomeView,
+  paint: HomePaint,
+  handlers: () => HomeHandlers,
+): NewSessionHandlers {
+  return {
+    toggleNewSession(): void {
+      view.actions = tappedElsewhere(view.actions);
+      view.newSessionOpen = !view.newSessionOpen;
+      paint.update(handlers());
+    },
+    newSession(target: ContainerRef): void {
+      view.actions = tappedElsewhere(view.actions);
+      const result = newSession(view.actions, target, paint.newRequestId, Date.now());
+      view.actions = result.state;
+      if (result.message !== null) {
+        paint.send(result.message);
+      }
+      paint.update(handlers());
+    },
+  };
 }
 
 /** What a tap on a group's presets toggle or a preset row asks the daemon to do. */

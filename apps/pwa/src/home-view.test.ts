@@ -129,8 +129,8 @@ interface Harness {
   unmount(): void;
 }
 
-/** Home over a scripted connection whose sends all land. */
-function harness(): Harness {
+/** Home over a scripted connection whose sends all land; `supports` answers its feature checks. */
+function harness(supports: (feature: string) => boolean = () => true): Harness {
   const container = new FakeNode("div");
   const sent: ClientMessage[] = [];
   const opened: string[] = [];
@@ -150,7 +150,7 @@ function harness(): Harness {
       return true;
     },
     paired: () => true,
-    supports: () => true,
+    supports,
     status: () => "ready",
   } as unknown as Connection;
   const unmount = mountHomeView(
@@ -382,6 +382,60 @@ test("a refused presets list shows the daemon's message in the group", () => {
   expect(presets?.pick("p", "home-row-error")?.textContent).toBe("No such repo or workspace.");
   // The rest of Home still draws.
   expect(h.container.pick("button", "home-group-launch")?.textContent).toBe("Launch last");
+  h.unmount();
+});
+
+test("a tap on New session opens the list and a Start sends one new_session with /nextup", () => {
+  const h = launched();
+  const toggle = h.container.pick("button", "home-new-session");
+  expect(toggle?.textContent).toBe("New session");
+  // With no bar and no card, nothing sits above it; the groups come right after it.
+  expect(h.container.children[0]).toBe(toggle);
+  expect(h.container.children[1]?.className).toBe("home-group");
+  expect(h.container.pick("button", "home-new-session-start")).toBeUndefined();
+
+  toggle?.fire("click");
+  const start = h.container.pick("button", "home-new-session-start");
+  expect(start?.textContent).toBe("Start");
+  start?.fire("click");
+  h.container.pick("button", "home-new-session-start")?.fire("click");
+
+  expect(h.sent).toEqual([
+    {
+      type: "new_session",
+      target: { kind: "repo", id: "a" },
+      initial_prompt: "/nextup",
+      request_id: expect.any(String),
+    },
+  ]);
+  expect(h.container.pick("button", "home-new-session-start")?.textContent).toBe("Starting…");
+  h.unmount();
+});
+
+test("a New session resent to a host without new_session says why and offers no button", () => {
+  let newSessionHost = true;
+  const h = harness((feature) => feature !== "new_session" || newSessionHost);
+  h.notice({ kind: "status", state: "ready" });
+  h.notice({ kind: "message", message: repos({ ...ALPHA, last_spawn_config: spawnConfig() }) });
+  h.notice({ kind: "message", message: sessions(session("s1")) });
+  h.container.pick("button", "home-new-session")?.fire("click");
+  h.container.pick("button", "home-new-session-start")?.fire("click");
+
+  // The connection drops before an answer; the host it comes back to lacks the feature.
+  newSessionHost = false;
+  h.notice({ kind: "status", state: "backoff" });
+  h.notice({ kind: "status", state: "ready" });
+  h.notice({ kind: "message", message: repos({ ...ALPHA, last_spawn_config: spawnConfig() }) });
+  h.notice({ kind: "message", message: sessions(session("s1")) });
+
+  expect(sentOf(h, "new_session")).toHaveLength(1);
+  expect(h.container.pick("button", "home-new-session")).toBeUndefined();
+  expect(h.container.pick("button", "home-new-session-start")).toBeUndefined();
+  const list = h.container.pick("div", "home-presets");
+  expect(list?.pick("span", "home-row-label")?.textContent).toBe("alpha");
+  expect(list?.pick("p", "home-row-error")?.textContent).toBe(
+    "This host can't launch from the phone.",
+  );
   h.unmount();
 });
 

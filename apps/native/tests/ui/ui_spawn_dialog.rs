@@ -759,7 +759,7 @@ fn extra_args_typed_in_advanced_reach_the_spawn_split(cx: &mut TestAppContext) {
         None,
         "this host takes extra arguments"
     );
-    tab_to(&mut h, "tab", "spawn-args", 12);
+    tab_to(&mut h, "tab", "spawn-args", 20);
     h.set_clipboard(r#"--a b "c d"#);
     h.keys("ctrl-v");
     assert_eq!(

@@ -514,7 +514,7 @@ fn a_registry_update_that_snaps_the_target_redraws_its_env_rows(cx: &mut TestApp
     h.click_on("sidebar-add-session");
     h.click_on("spawn-target");
     h.click_on(&format!("spawn-target-repo-r2@{REMOTE}"));
-    h.cx.simulate_resize(gpui::size(px(1000.0), px(1400.0)));
+    h.cx.simulate_resize(gpui::size(px(1000.0), px(1800.0)));
     h.click_on("spawn-advanced");
     add_env_row(&mut h, "TOKEN", SEALED);
     add_env_row(&mut h, "PLAIN", "1");

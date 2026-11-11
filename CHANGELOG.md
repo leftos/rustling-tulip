@@ -16,6 +16,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Choose Claude's effort level, from Low to Max, when starting a session or as a default in Settings; Fable is offered among Claude's models.
 - Claude's question about a new MCP server in a project shows as a card in Chat and on the phone, with its three choices as buttons.
 - Add your own command-line arguments to a session in the spawn dialog's Advanced section; Duplicate and Launch last repeat them.
+- On the phone's Home, New session starts `/nextup` in any repo or workspace, even one never launched before.
 - On the phone's Home, Presets lists a repo's or workspace's presets and launches those that need no typing, showing each launch's progress.
 - Connections and Settings show the release each host runs, and mark a host on an older release than this app as Behind.
 - When another device updates this PC, the app counts down 10 seconds, says who asked, offers Cancel, then reopens after the update.

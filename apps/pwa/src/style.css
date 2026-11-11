@@ -203,7 +203,9 @@ p {
 .home-group-launch,
 .home-group-presets,
 .home-preset-launch,
-.home-preset-cancel {
+.home-preset-cancel,
+.home-new-session,
+.home-new-session-start {
   min-height: 44px;
   box-sizing: border-box;
   border: 1px solid #45475a;
@@ -231,8 +233,15 @@ p {
 .home-group-launch:disabled,
 .home-group-presets:disabled,
 .home-preset-launch:disabled,
-.home-preset-cancel:disabled {
+.home-preset-cancel:disabled,
+.home-new-session:disabled,
+.home-new-session-start:disabled {
   opacity: 0.5;
+}
+
+/* Below the bar and the Needs you tray, above the groups or `No sessions`. */
+.home-new-session {
+  margin: 0 0 12px;
 }
 
 .home-hint {

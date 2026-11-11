@@ -6,6 +6,7 @@ import {
   WAITING_FOR_YOU,
   homeGroups,
   homeStep,
+  newSessionChoices,
   needsYou,
   needsYouCount,
   reset,
@@ -543,4 +544,36 @@ test("home_containers_with_a_launch_and_no_sessions_wait_in_launch_again", () =>
   expect(groups.map((group) => group.kind)).toEqual(["launch_again"]);
   expect(groups[0]?.rows).toEqual([]);
   expect(groups[0]?.containers).toEqual([{ name: "alpha", launch: { kind: "repo", id: "a" } }]);
+});
+
+test("home_new_session_choices_are_workspaces_and_non_member_repos_in_container_order", () => {
+  const notes: RepoEntry = {
+    id: "f",
+    name: "notes",
+    path: "C:\\notes",
+    default_branch: null,
+    is_git: false,
+  };
+  const wsTwo: WorkspaceEntry = { id: "w2", name: "ws-two", member_repo_ids: [] };
+  const model = modelFrom(
+    withRepos(ZULU, ALPHA, ZETA, notes),
+    { type: "workspaces", workspaces: [wsTwo, WORKSPACE] },
+    {
+      type: "containers_reordered",
+      ordered: [
+        { kind: "repo", id: "zz" },
+        { kind: "workspace", id: "w2" },
+      ],
+    },
+    sessions(),
+  );
+
+  // Nothing has launched and no session runs; Zeta is a member of ws-one.
+  expect(newSessionChoices(model)).toEqual([
+    { name: "Zulu", target: { kind: "repo", id: "zz" } },
+    { name: "ws-two", target: { kind: "workspace", id: "w2" } },
+    { name: "ws-one", target: { kind: "workspace", id: "w" } },
+    { name: "alpha", target: { kind: "repo", id: "a" } },
+    { name: "notes", target: { kind: "repo", id: "f" } },
+  ]);
 });
