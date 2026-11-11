@@ -624,7 +624,7 @@ pub(crate) enum SettingsControl {
     RemoteAutostart,
     AgentProgram,
     AgentArgs,
-    /// The shown agent page's Hooks switch, which sends at once.
+    /// The shown agent page's Hooks switch, held until OK or Apply.
     AgentUserHooks,
     Appearance(AppearanceStop),
     DashboardEnabled,
@@ -1987,9 +1987,10 @@ impl RootView {
         }
     }
 
-    /// The Hooks switch's press on the shown agent page: asks the daemon at
-    /// once for the opposite of the switch as shown, which the switch shows
-    /// until the answer.
+    /// The Hooks switch's press on the shown agent page: holds the opposite
+    /// of the switch as shown until OK or Apply, or nothing when that is the
+    /// value the switch shows without a held one and the row asks for no
+    /// repair.
     fn toggle_user_hooks(&mut self) {
         let host = self.settings_host.clone();
         let Some(agent) = self.settings_tab.agent() else {
@@ -2001,9 +2002,31 @@ impl RootView {
         else {
             return;
         };
-        let enabled = !row.checked;
+        let Some(saved) = self.user_hooks_row_held(&host, &agent, None) else {
+            return;
+        };
+        // An install the row asks to repair has no saved value to fall back
+        // to: off and on again holds on, which Apply sends to rewrite it.
+        let saved = (!saved.repair).then(|| HostPending::UserHooks {
+            agent: agent.clone(),
+            enabled: saved.checked,
+        });
+        self.settings_pending.set_host(
+            &host,
+            HostPending::UserHooks {
+                agent,
+                enabled: !row.checked,
+            },
+            saved.as_ref(),
+        );
+    }
+
+    /// Apply reaching a held Hooks switch: `host` is asked to install
+    /// (`enabled`) or remove agent `agent`'s user hooks, which the switch
+    /// shows until the answer, and OK waits for that answer.
+    fn apply_user_hooks(&mut self, host: &HostKey, agent: AgentId, enabled: bool) {
         let request_id = crate::new_request_id();
-        let Some(mirrors) = self.mirrors_of_mut(&host) else {
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
             return;
         };
         mirrors.agent_user_hooks_pending.insert(
@@ -2014,8 +2037,8 @@ impl RootView {
             },
         );
         tracing::info!(agent = %agent.0, ?host, enabled, %request_id, "settings: setting an agent's user hooks");
-        self.send_to(
-            &host,
+        self.send_setting(
+            host,
             ClientMessage::SetAgentUserHooks {
                 agent,
                 enabled,
@@ -2509,9 +2532,31 @@ impl RootView {
             .map(|_| USER_HOOKS_UNSUPPORTED_TIP)
     }
 
-    /// `host`'s agent `agent`'s Hooks section; none while the connection is
-    /// not open.
+    /// `host`'s agent `agent`'s Hooks section, its held switch included;
+    /// none while the connection is not open.
     fn user_hooks_row_of(&self, host: &HostKey, agent: &AgentId) -> Option<UserHooksRow> {
+        let held = self
+            .settings_pending
+            .host(host)
+            .iter()
+            .find_map(|value| match value {
+                HostPending::UserHooks {
+                    agent: held_agent,
+                    enabled,
+                } if held_agent == agent => Some(*enabled),
+                _ => None,
+            });
+        self.user_hooks_row_held(host, agent, held)
+    }
+
+    /// `host`'s agent `agent`'s Hooks section with `held` the switch's
+    /// value waiting for Apply; none while the connection is not open.
+    fn user_hooks_row_held(
+        &self,
+        host: &HostKey,
+        agent: &AgentId,
+        held: Option<bool>,
+    ) -> Option<UserHooksRow> {
         let conn = self.conn_of(host).filter(|conn| conn.is_open())?;
         let flag = self
             .sidebar
@@ -2523,6 +2568,7 @@ impl RootView {
             flag,
             conn.supports(FEATURE_AGENT_USER_HOOKS),
             mirrors.agent_user_hooks.get(agent),
+            held,
             mirrors.agent_user_hooks_pending.get(agent),
         )
     }
@@ -2785,6 +2831,7 @@ impl RootView {
                         | HostPending::AgentField { .. }
                         | HostPending::RemoteEnabled(_)
                         | HostPending::DefaultShell(_)
+                        | HostPending::UserHooks { .. }
                 )
             })
             .count();
@@ -2914,6 +2961,9 @@ impl RootView {
                 } => self.set_agent_setting(host, &agent, &field, value, false),
                 HostPending::RemoteEnabled(on) => remote = Some(on),
                 HostPending::DefaultShell(setting) => self.apply_default_shell(host, setting),
+                HostPending::UserHooks { agent, enabled } => {
+                    self.apply_user_hooks(host, agent, enabled);
+                }
                 other => dashboard.push(other),
             }
         }
@@ -8539,6 +8589,12 @@ pub(crate) enum HostPending {
     RemoteEnabled(bool),
     /// The Default shell row's pick, as Apply sends it.
     DefaultShell(ShellSetting),
+    /// Agent `agent`'s Hooks switch: install (`enabled`) or remove its
+    /// hooks in the agent's user settings.
+    UserHooks {
+        agent: AgentId,
+        enabled: bool,
+    },
     Summaries(bool),
     SummaryProvider(String),
     SummaryKeySource(KeySourceChoice),
@@ -8556,6 +8612,12 @@ impl HostPending {
                     ..
                 },
             ) => agent == other_agent && field == other_field,
+            (
+                Self::UserHooks { agent, .. },
+                Self::UserHooks {
+                    agent: other_agent, ..
+                },
+            ) => agent == other_agent,
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -8606,12 +8668,14 @@ pub struct UserHooksRow {
 
 /// The Hooks section of an agent whose descriptor has `flag` set, on a
 /// connection that does (`feature`) or does not list the feature, given the
-/// daemon's last answer `entry` and the Set still waiting `pending`. `None`
-/// draws no section.
+/// daemon's last answer `entry`, the switch's value `held` for Apply and
+/// the Set still waiting `pending`. The switch shows the held value first,
+/// then the waiting Set's, then the answer's. `None` draws no section.
 pub(crate) fn user_hooks_row(
     flag: bool,
     feature: bool,
     entry: Option<&UserHooksEntry>,
+    held: Option<bool>,
     pending: Option<&UserHooksPending>,
 ) -> Option<UserHooksRow> {
     if !flag {
@@ -8638,8 +8702,8 @@ pub(crate) fn user_hooks_row(
     let installed = repair || state == Some(UserHooksWire::On);
     Some(UserHooksRow {
         enabled: true,
-        checked: pending.map_or(installed, |pending| pending.enabled),
-        repair: repair && pending.is_none(),
+        checked: held.unwrap_or_else(|| pending.map_or(installed, |pending| pending.enabled)),
+        repair: repair && held.is_none() && pending.is_none(),
         path: entry.and_then(|entry| entry.path.clone()),
         error: entry.and_then(|entry| entry.error.clone()),
         pending: pending.is_some(),
@@ -8676,6 +8740,7 @@ enum EchoKind {
     Summarizer,
     DetailedLogging,
     DefaultShell,
+    UserHooks,
 }
 
 /// A send of Apply to `host`, owing its echo; a refusal of it carries
@@ -8704,6 +8769,9 @@ impl OwedEcho {
                 (EchoKind::DefaultShell, request_id.clone())
             }
             ClientMessage::ConfigureRemote { .. } => (EchoKind::Remote, None),
+            ClientMessage::SetAgentUserHooks { request_id, .. } => {
+                (EchoKind::UserHooks, request_id.clone())
+            }
             ClientMessage::SetSummarizerSettings { request_id, .. }
             | ClientMessage::SetSummarizerKey { request_id, .. } => {
                 (EchoKind::Summarizer, request_id.clone())
@@ -8742,9 +8810,32 @@ const fn echo_kind(msg: &DaemonMessage) -> Option<(EchoKind, EchoState)> {
             return Some((EchoKind::Remote, remote_echo(state)));
         }
         DaemonMessage::SummarizerStatus { .. } => EchoKind::Summarizer,
+        // A failed write comes back in the answer itself, not as an error.
+        DaemonMessage::AgentUserHooks { error, .. } => {
+            let state = if error.is_some() {
+                EchoState::Failed
+            } else {
+                EchoState::Done
+            };
+            return Some((EchoKind::UserHooks, state));
+        }
         _ => return None,
     };
     Some((kind, EchoState::Done))
+}
+
+/// Whether the echo `msg`, of kind `kind`, answers `owed`: an answer
+/// carrying its request's id answers that send alone, since the same
+/// message also answers requests Apply did not send; any other echo
+/// answers any send of its kind.
+fn echo_answers(owed: &OwedEcho, kind: EchoKind, msg: &DaemonMessage) -> bool {
+    owed.kind == kind
+        && match msg {
+            DaemonMessage::AgentUserHooks { request_id, .. } => {
+                owed.request_id.is_some() && owed.request_id == *request_id
+            }
+            _ => true,
+        }
 }
 
 /// How far a `ConfigureRemote` went, as the status `state` its echo
@@ -8791,7 +8882,7 @@ fn hear_owed_echo(wait: &mut Vec<OwedEcho>, host: &HostKey, msg: &DaemonMessage)
             };
             let Some(at) = wait
                 .iter()
-                .position(|owed| owed.host == *host && owed.kind == kind)
+                .position(|owed| owed.host == *host && echo_answers(owed, kind, other))
             else {
                 return false;
             };
@@ -9722,10 +9813,13 @@ mod tests {
     fn user_hooks_row_hidden_without_the_descriptor_flag() {
         use protocol::UserHooksWire;
         let on = hooks_entry(UserHooksWire::On);
-        assert_eq!(super::user_hooks_row(false, true, Some(&on), None), None);
-        assert_eq!(super::user_hooks_row(false, true, None, None), None);
         assert_eq!(
-            super::user_hooks_row(false, false, None, None),
+            super::user_hooks_row(false, true, Some(&on), None, None),
+            None
+        );
+        assert_eq!(super::user_hooks_row(false, true, None, None, None), None);
+        assert_eq!(
+            super::user_hooks_row(false, false, None, None, None),
             None,
             "an agent without the flag draws nothing, even on an older daemon"
         );
@@ -9734,7 +9828,7 @@ mod tests {
     #[test]
     fn user_hooks_row_disabled_without_the_feature() {
         assert_eq!(
-            super::user_hooks_row(true, false, None, None),
+            super::user_hooks_row(true, false, None, None, None),
             Some(super::UserHooksRow {
                 enabled: false,
                 checked: false,
@@ -9749,7 +9843,7 @@ mod tests {
     #[test]
     fn user_hooks_row_shows_on_off_and_repair() {
         use protocol::UserHooksWire;
-        let row = |state| super::user_hooks_row(true, true, Some(&hooks_entry(state)), None);
+        let row = |state| super::user_hooks_row(true, true, Some(&hooks_entry(state)), None, None);
         assert_eq!(row(UserHooksWire::On), Some(live_row(true, false, false)));
         assert_eq!(row(UserHooksWire::Off), Some(live_row(false, false, false)));
         assert_eq!(
@@ -9760,12 +9854,12 @@ mod tests {
         let mut failed = hooks_entry(UserHooksWire::Off);
         failed.error = Some("denied".to_owned());
         assert_eq!(
-            super::user_hooks_row(true, true, Some(&failed), None).and_then(|row| row.error),
+            super::user_hooks_row(true, true, Some(&failed), None, None).and_then(|row| row.error),
             Some("denied".to_owned()),
             "the answer's error shows under the row"
         );
         assert_eq!(
-            super::user_hooks_row(true, true, None, None),
+            super::user_hooks_row(true, true, None, None, None),
             Some(super::UserHooksRow {
                 path: None,
                 ..live_row(false, false, false)
@@ -9779,9 +9873,18 @@ mod tests {
         use protocol::UserHooksWire;
         for state in [UserHooksWire::Unsupported, UserHooksWire::Unknown] {
             let entry = hooks_entry(state);
-            assert_eq!(super::user_hooks_row(true, true, Some(&entry), None), None);
             assert_eq!(
-                super::user_hooks_row(true, true, Some(&entry), Some(&hooks_pending("r1", true))),
+                super::user_hooks_row(true, true, Some(&entry), None, None),
+                None
+            );
+            assert_eq!(
+                super::user_hooks_row(
+                    true,
+                    true,
+                    Some(&entry),
+                    None,
+                    Some(&hooks_pending("r1", true))
+                ),
                 None,
                 "{state:?} hides the section with a Set waiting too"
             );
@@ -9803,7 +9906,7 @@ mod tests {
         );
         let row = |entries: &HashMap<AgentId, super::UserHooksEntry>,
                    pending: &HashMap<AgentId, super::UserHooksPending>| {
-            super::user_hooks_row(true, true, entries.get(&claude), pending.get(&claude))
+            super::user_hooks_row(true, true, entries.get(&claude), None, pending.get(&claude))
         };
         assert_eq!(row(&entries, &pending), Some(live_row(false, false, false)));
 

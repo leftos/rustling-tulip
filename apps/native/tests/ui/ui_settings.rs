@@ -2161,7 +2161,7 @@ fn user_hooks_get_sent_when_agents_arrive(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn user_hooks_toggle_sends_set_and_shows_the_reply(cx: &mut TestAppContext) {
+fn user_hooks_toggle_pends_until_ok(cx: &mut TestAppContext) {
     use protocol::UserHooksWire;
     let dir = TestDir::new();
     let mut h = opened_with_user_hooks(cx, &dir, UserHooksWire::Off);
@@ -2171,6 +2171,16 @@ fn user_hooks_toggle_sends_set_and_shows_the_reply(cx: &mut TestAppContext) {
     assert!(drawn(&mut h, "settings-agent-user-hooks-path"));
 
     h.click_on("settings-agent-user-hooks");
+    assert_eq!(
+        user_hooks_sets(&h.sent()),
+        Vec::new(),
+        "the click sends nothing"
+    );
+    let row = user_hooks_row(&mut h).expect("still drawn");
+    assert!(row.checked && !row.pending, "the held value shows: {row:?}");
+    assert!(applies(&mut h), "the held switch enables Apply");
+
+    h.click_on("settings-apply");
     let sets = user_hooks_sets(&h.sent());
     assert_eq!(sets.len(), 1, "one Set: {sets:?}");
     let (agent, enabled, id) = sets[0].clone();
@@ -2179,8 +2189,9 @@ fn user_hooks_toggle_sends_set_and_shows_the_reply(cx: &mut TestAppContext) {
     let row = user_hooks_row(&mut h).expect("still drawn");
     assert!(
         row.checked && row.pending,
-        "the asked-for value shows: {row:?}"
+        "the asked-for value shows while the Set waits: {row:?}"
     );
+    assert!(!applies(&mut h), "Apply holds nothing after it sent");
 
     h.send(user_hooks_reply(UserHooksWire::Stale, None, id));
     let row = user_hooks_row(&mut h).expect("still drawn");
@@ -2191,6 +2202,10 @@ fn user_hooks_toggle_sends_set_and_shows_the_reply(cx: &mut TestAppContext) {
     assert!(drawn(&mut h, "settings-agent-user-hooks-repair"));
 
     h.click_on("settings-agent-user-hooks");
+    assert_eq!(user_hooks_sets(&h.sent()), Vec::new());
+    let row = user_hooks_row(&mut h).expect("still drawn");
+    assert!(!row.checked && !row.pending && !row.repair, "{row:?}");
+    h.click_on("settings-apply");
     let sets = user_hooks_sets(&h.sent());
     assert_eq!(sets.len(), 1, "one Set: {sets:?}");
     assert!(!sets[0].1, "a click on the switch shown on asks for off");
@@ -2203,6 +2218,174 @@ fn user_hooks_toggle_sends_set_and_shows_the_reply(cx: &mut TestAppContext) {
     ));
     let row = user_hooks_row(&mut h).expect("still drawn");
     assert!(!row.checked && !row.pending && !row.repair, "{row:?}");
+}
+
+#[gpui::test]
+fn turning_a_stale_hooks_switch_off_and_on_repairs_it_at_apply(cx: &mut TestAppContext) {
+    use protocol::UserHooksWire;
+    let dir = TestDir::new();
+    let mut h = opened_with_user_hooks(cx, &dir, UserHooksWire::Stale);
+    let row = user_hooks_row(&mut h).expect("the Hooks section is drawn");
+    assert!(
+        row.checked && row.repair,
+        "on, asking for a repair: {row:?}"
+    );
+    h.click_on("settings-agent-user-hooks");
+    h.click_on("settings-agent-user-hooks");
+    assert!(applies(&mut h), "off and on again on a repair row holds on");
+    assert_eq!(
+        user_hooks_sets(&h.sent()),
+        Vec::new(),
+        "the clicks send nothing"
+    );
+    h.click_on("settings-apply");
+    let sets = user_hooks_sets(&h.sent());
+    assert_eq!(sets.len(), 1, "one Set: {sets:?}");
+    assert_eq!((sets[0].0.clone(), sets[0].1), (claude(), true));
+}
+
+#[gpui::test]
+fn clicking_the_hooks_switch_twice_holds_nothing(cx: &mut TestAppContext) {
+    use protocol::UserHooksWire;
+    let dir = TestDir::new();
+    let mut h = opened_with_user_hooks(cx, &dir, UserHooksWire::Off);
+    h.click_on("settings-agent-user-hooks");
+    assert!(applies(&mut h), "the first click holds the switch");
+    h.click_on("settings-agent-user-hooks");
+    assert!(!applies(&mut h), "back at the saved value, nothing is held");
+    let row = user_hooks_row(&mut h).expect("still drawn");
+    assert!(!row.checked && !row.pending, "{row:?}");
+    assert_eq!(user_hooks_sets(&h.sent()), Vec::new());
+}
+
+/// Settings opened again on Claude's page with the Hooks switch in view.
+fn reopen_on_user_hooks(h: &mut Harness<'_>) {
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    h.scroll_into_view("settings-content", "settings-agent-user-hooks");
+}
+
+#[gpui::test]
+fn cancel_discards_a_pending_hooks_switch(cx: &mut TestAppContext) {
+    use protocol::UserHooksWire;
+    let dir = TestDir::new();
+    let mut h = opened_with_user_hooks(cx, &dir, UserHooksWire::Off);
+    h.click_on("settings-agent-user-hooks");
+    h.click_on("settings-cancel");
+    assert!(!h.root(|root, _| root.settings_open()), "Cancel closes");
+    reopen_on_user_hooks(&mut h);
+    assert_eq!(user_hooks_sets(&h.sent()), Vec::new(), "nothing was sent");
+    let row = user_hooks_row(&mut h).expect("the Hooks section is drawn");
+    assert!(
+        !row.checked && !row.pending,
+        "the saved value shows: {row:?}"
+    );
+    assert!(!applies(&mut h), "nothing is held");
+}
+
+#[gpui::test]
+fn escape_discards_a_pending_hooks_switch(cx: &mut TestAppContext) {
+    use protocol::UserHooksWire;
+    let dir = TestDir::new();
+    let mut h = opened_with_user_hooks(cx, &dir, UserHooksWire::Off);
+    h.click_on("settings-agent-user-hooks");
+    h.keys("escape");
+    assert!(!h.root(|root, _| root.settings_open()), "Escape closes");
+    reopen_on_user_hooks(&mut h);
+    assert_eq!(user_hooks_sets(&h.sent()), Vec::new(), "nothing was sent");
+    let row = user_hooks_row(&mut h).expect("the Hooks section is drawn");
+    assert!(
+        !row.checked && !row.pending,
+        "the saved value shows: {row:?}"
+    );
+    assert!(!applies(&mut h), "nothing is held");
+}
+
+#[gpui::test]
+fn ok_waits_for_the_hooks_echo_and_stays_open_on_an_error(cx: &mut TestAppContext) {
+    use protocol::UserHooksWire;
+    let dir = TestDir::new();
+    let mut h = opened_with_user_hooks(cx, &dir, UserHooksWire::Off);
+    h.click_on("settings-agent-user-hooks");
+    h.click_on("settings-ok");
+    let id = user_hooks_sets(&h.sent()).pop().and_then(|(_, _, id)| id);
+    assert!(id.is_some(), "OK sent the Set with a request id");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Settings stays open"
+    );
+    assert!(h.root(|root, _| root.settings_ok_waiting()), "OK waits");
+
+    h.send(user_hooks_reply(
+        UserHooksWire::Off,
+        None,
+        Some("someone-else".to_owned()),
+    ));
+    assert!(
+        h.root(|root, _| root.settings_ok_waiting()),
+        "an answer to another request does not end the wait"
+    );
+
+    let refusal = "writing C:\\Users\\me\\.agent\\settings.json: access denied";
+    h.send(user_hooks_reply(UserHooksWire::Off, Some(refusal), id));
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "a failed write keeps Settings open"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_ok_waiting()),
+        "the wait ends"
+    );
+    let row = user_hooks_row(&mut h).expect("still drawn");
+    assert_eq!(row.error.as_deref(), Some(refusal));
+    assert!(drawn(&mut h, "settings-agent-user-hooks-error"));
+
+    h.click_on("settings-agent-user-hooks");
+    h.click_on("settings-ok");
+    let id = user_hooks_sets(&h.sent()).pop().and_then(|(_, _, id)| id);
+    assert!(id.is_some(), "OK sent the Set again");
+    assert!(h.root(|root, _| root.settings_ok_waiting()));
+    h.send(user_hooks_reply(UserHooksWire::On, None, id));
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "a clean answer closes Settings"
+    );
+}
+
+#[gpui::test]
+fn a_remote_hosts_hooks_switch_is_sent_only_to_that_host(cx: &mut TestAppContext) {
+    use protocol::UserHooksWire;
+    use rustling_tulip_native::target::{HostKey, Target};
+    let dir = TestDir::new();
+    let mut h = opened_with_user_hooks(cx, &dir, UserHooksWire::Off);
+    let remote = Target::tailnet("box.tail1234.ts.net", None);
+    h.host(&remote)
+        .connect_with_features(&[protocol::FEATURE_AGENT_USER_HOOKS]);
+    let selector = format!(
+        "settings-host-{}",
+        HostKey::of(&remote)
+            .wire()
+            .expect("a remote host has a wire key")
+    );
+    h.click_on(&selector);
+    h.click_on("settings-tab-claude");
+    h.scroll_into_view("settings-content", "settings-agent-user-hooks");
+    h.click_on("settings-agent-user-hooks");
+    assert_eq!(
+        user_hooks_sets(&h.host(&remote).sent()),
+        Vec::new(),
+        "the click sends nothing"
+    );
+    h.click_on("settings-apply");
+    let sets = user_hooks_sets(&h.host(&remote).sent());
+    assert_eq!(sets.len(), 1, "one Set to the remote host: {sets:?}");
+    assert_eq!((sets[0].0.clone(), sets[0].1), (claude(), true));
+    assert!(sets[0].2.is_some(), "the Set carries a request id");
+    assert_eq!(
+        user_hooks_sets(&h.sent()),
+        Vec::new(),
+        "and none to This PC"
+    );
 }
 
 #[gpui::test]
@@ -2242,6 +2425,7 @@ fn user_hooks_error_shown_under_the_row(cx: &mut TestAppContext) {
     let mut h = opened_with_user_hooks(cx, &dir, UserHooksWire::Off);
     assert!(!drawn(&mut h, "settings-agent-user-hooks-error"));
     h.click_on("settings-agent-user-hooks");
+    h.click_on("settings-apply");
     let id = user_hooks_sets(&h.sent()).pop().and_then(|(_, _, id)| id);
     let refusal = "writing C:\\Users\\me\\.agent\\settings.json: access denied";
     h.send(user_hooks_reply(UserHooksWire::Off, Some(refusal), id));
