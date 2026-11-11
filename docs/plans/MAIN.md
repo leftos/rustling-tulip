@@ -225,12 +225,6 @@
 - [ ] RT-883 Send This PC's daemon the saved Detailed logging switch when the two disagree
 - [ ] RT-884 Match the Detailed logging echo on its value so a reconnect or failed save cannot release OK
 - [ ] RT-894 Compute Settings search hits once per query change, not on every frame
-- [ ] RT-1087 Make every Settings control wait for OK or Apply, starting with Claude's Install hooks · release vNext
-  - [ ] RT-1096 Keep a typed account alias from being saved by Cancel, the close button or leaving the field · release vNext
-  - [ ] RT-1097 Stage the Accounts page's auto-switch settings until OK or Apply · release vNext
-  - [ ] RT-1098 Stage the Accounts page's Up and Down reordering until OK or Apply · release vNext
-  - [ ] RT-1099 Stage Appearance and the Themes picker's Use until OK or Apply, with a live preview Cancel reverts · release vNext
-  - [ ] RT-1486 Show a held Dashboard key deletion only on its own provider's row
 - [ ] RT-1352 Cap a saved theme's file name so any theme name can be saved
 - [ ] RT-1437 Hide a Settings field by its rule while a provider change is pending
 
@@ -636,6 +630,11 @@
 - [ ] RT-191 Plan a built-in browser that agents can navigate
 - [ ] RT-604 Bring the native client's oversized functions within the parameter and length limits
 - [ ] RT-1194 Try the daemon's screen on libghostty-vt behind a feature and measure it
+- [ ] RT-1487 Drop a hidden held Dashboard key deletion when Apply runs for other changes
+- [ ] RT-1488 Keep a key typed for one Dashboard provider from saving under another
+- [ ] RT-1489 Keep Settings › Accounts alias drafts when Settings shows another host and back
+- [ ] RT-1490 Treat no saved theme as the default when Settings compares the Appearance look
+- [ ] RT-1491 Keep Settings' saved look when open_settings runs again while Settings is open
 
 ## Design files
 
