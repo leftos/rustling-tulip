@@ -135,7 +135,7 @@ The daemon contacts the relay only for an `apns` or `fcm` subscription, which ex
 
 - **Any inbound path.** The relay never connects to a daemon, and a daemon never listens for it; exposing the daemon to the internet or reaching it through an inbound relay stays a non-goal ([architecture.md](../architecture.md#non-goals)).
 - **The PWA.** It keeps direct Web Push with no relay; the web app is frozen.
-- **Push for a phone reached over SSH.** Push registration is keyed by a tailnet device record, and an SSH bridge connection is `Local` (`server/connection.rs` `AuthKind`), which the push handler refuses. The native app requires the Tailscale app and registers over its tailnet connection; a phone that reaches the PC only over SSH gets push once SSH connections carry a device identity, which RT-1266's SSH phase designs.
+- **Push for a phone reached over SSH.** Push registration is keyed by a tailnet device record, and an SSH bridge connection is `Local` (`server/connection.rs` `AuthKind`), which the push handler refuses. The native app requires the Tailscale app and registers over its tailnet connection, so a phone that reaches the PC over SSH adds the PC as a tailnet host too for push; SSH connections get no device identity (`docs/plans/mobile-app.md`, the push decision).
 - **UnifiedPush and other push services.** Android waits on the GPUI spike's verdict; when it starts, FCM through the relay is the path, since UnifiedPush needs a distributor app on the phone.
 - **Delivery receipts, notification actions and a relay dashboard.** None is needed to deliver an alert.
 
