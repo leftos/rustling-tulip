@@ -1,0 +1,32 @@
+
+ ▐▛███▛█   Claude Code v2.1.322
+▝▜██████▀  Opus 5.5 with high effort · Claude Ultra
+ ▝▝   ▝▝   X:\dev\rustling-tulip\.tmp\rt-1442\probe-repo
+
+
+● Unknown command: /vim
+
+❯ /config
+  ⎿  Set editor mode to vim
+
+❯ Use the AskUserQuestion tool to ask me one question: "Which color?" with the options Red and Blue. Do nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Color
+
+Which color?
+
+  1. Red
+     Pick red.
+  2. Blue
+     Pick blue.
+❯ 3. x
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+-- INSERT -- · Enter to select · ↑/↓ to navigate · ctrl+g to edit in Notepad
+
+
+
+
+
+

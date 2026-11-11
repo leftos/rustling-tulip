@@ -83,6 +83,9 @@ const NEXT_ROW: &str = "Next";
 /// The start of a question step's footer.
 const QUESTION_FOOTER: &str = "Enter to select";
 
+/// The vim editor mode's marker heading a question's footer in insert mode.
+const VIM_INSERT_HEAD: &str = "-- INSERT -- · ";
+
 /// The title row of the review step, and the row above its options.
 const REVIEW_TITLE: &str = "Review your answers";
 const REVIEW_READY: &str = "Ready to submit your answers?";
@@ -528,7 +531,7 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
         return Some(parse_review(rows, title, tabs));
     }
     let Some(footer) = find(rows, bar + 1, |row| {
-        row.trim_start().starts_with(QUESTION_FOOTER)
+        without_vim_insert(row.trim_start()).starts_with(QUESTION_FOOTER)
     }) else {
         return Some(Parsed::HalfDrawn);
     };
@@ -623,10 +626,20 @@ fn footer_text(rows: &[String], index: usize) -> String {
 
 /// Whether the footer starting on `rows[index]` is a single question's:
 /// `Enter to select …` naming `Esc to cancel`, with no `Tab` in it, whether
-/// it shows on one row or wraps onto the row under it.
+/// it shows on one row or wraps onto the row under it. Headed by the vim
+/// mode's `-- INSERT --`, it names no Esc at all.
 fn is_single_question_footer(rows: &[String], index: usize) -> bool {
     let text = footer_text(rows, index);
-    text.starts_with(QUESTION_FOOTER) && text.contains("Esc to cancel") && !text.contains("Tab")
+    let body = without_vim_insert(&text);
+    let vim_insert = body.len() < text.len();
+    let esc_cancels = body.contains("Esc to cancel") || (vim_insert && !body.contains("Esc to"));
+    body.starts_with(QUESTION_FOOTER) && esc_cancels && !body.contains("Tab")
+}
+
+/// `footer` without the `-- INSERT -- · ` that heads a question's footer in
+/// the vim editor mode while the cursor sits on `Type something`.
+fn without_vim_insert(footer: &str) -> &str {
+    footer.strip_prefix(VIM_INSERT_HEAD).unwrap_or(footer)
 }
 
 /// Whether nothing but the footer's own wrapped tail, blank rows and rules
@@ -2610,6 +2623,40 @@ mod tests {
             prompt.questions.is_empty(),
             "the bar is not read without its rule"
         );
+    }
+
+    /// With the vim editor mode on, the cursor on `Type something` heads the
+    /// footer with `-- INSERT --` and drops its `Esc to cancel`, as Claude
+    /// Code 2.1.322 draws it; the question still reads, with its bar and
+    /// without it.
+    #[test]
+    fn a_question_in_vim_insert_mode_reads_its_options() {
+        let dialog = rows(&[
+            "Which color?",
+            "",
+            "  1. Red",
+            "     Pick red.",
+            "  2. Blue",
+            "     Pick blue.",
+            "❯ 3. Type something.",
+            &rule(),
+            "  4. Chat about this",
+            "",
+            "-- INSERT -- · Enter to select · ↑/↓ to navigate · ctrl+g to edit in Notepad",
+        ]);
+        let mut with_bar = vec![rule(), " ☐ Color".to_owned(), String::new()];
+        with_bar.extend(dialog.iter().cloned());
+        for (name, screen) in [("with bar", with_bar), ("without bar", dialog)] {
+            let screen = read(&screen);
+            assert_eq!(screen.composer, ComposerState::Dialog, "{name}");
+            let prompt = screen.prompt.as_ref().expect("a question prompt");
+            assert_eq!(prompt.subject, "Which color?", "{name}");
+            assert_eq!(
+                labels(&screen)[..2],
+                [(1, "Red".to_owned()), (2, "Blue".to_owned())],
+                "{name}"
+            );
+        }
     }
 
     #[test]

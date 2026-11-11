@@ -1065,7 +1065,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 41] = [
+        let cases: [(&str, &str, Verdict); 46] = [
             (
                 "v03-ready",
                 include_str!("fixtures/v03-ready.txt"),
@@ -1255,6 +1255,31 @@ mod tests {
                 include_str!("fixtures/claude--v2302-turn-ending-stop-hooks--w119.txt"),
                 Verdict::HooksRunning,
             ),
+            (
+                "v2322-ask-vim-first-option-w120",
+                include_str!("fixtures/v2322-ask-vim-first-option-w120.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v2322-ask-vim-insert-w120",
+                include_str!("fixtures/v2322-ask-vim-insert-w120.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v2322-ask-vim-insert-typed-w120",
+                include_str!("fixtures/v2322-ask-vim-insert-typed-w120.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v2322-ask-vim-normal-w120",
+                include_str!("fixtures/v2322-ask-vim-normal-w120.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v2322-ask-vim-cancelled-idle-w120",
+                include_str!("fixtures/v2322-ask-vim-cancelled-idle-w120.txt"),
+                State(Idle),
+            ),
         ];
         let mut wrong = Vec::new();
         for (name, text, expected) in cases {
@@ -1403,6 +1428,47 @@ mod tests {
         assert!(
             capture.contains("  Enter to select · ↑/↓ to navigate · Esc to cancel"),
             "the reply quotes the footer"
+        );
+        let reading = read_claude(&screen_from(capture));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
+        assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
+    }
+
+    /// With the vim editor mode on, the cursor on `Type something` heads the
+    /// question's footer with `-- INSERT --` and drops its `Esc to cancel`.
+    #[test]
+    fn a_question_in_vim_insert_mode_reads_as_a_dialog() {
+        let capture = include_str!("fixtures/v2322-ask-vim-insert-w120.txt");
+        assert!(
+            capture.contains(
+                "\n-- INSERT -- · Enter to select · ↑/↓ to navigate · ctrl+g to edit in Notepad\n"
+            ),
+            "the capture draws the vim footer"
+        );
+        let reading = read_claude(&screen_from(capture));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::AwaitingInput));
+        assert_eq!(reading.rule.as_deref(), Some("dialog_question"));
+    }
+
+    /// Text typed on the `Type something` row keeps the vim footer, and the
+    /// dialog stays up.
+    #[test]
+    fn a_question_with_typed_text_in_vim_insert_mode_reads_as_a_dialog() {
+        let capture = include_str!("fixtures/v2322-ask-vim-insert-typed-w120.txt");
+        assert!(capture.contains("❯ 3. x\n"), "the row holds the typed text");
+        let reading = read_claude(&screen_from(capture));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::AwaitingInput));
+        assert_eq!(reading.rule.as_deref(), Some("dialog_question"));
+    }
+
+    /// The idle box's own `-- INSERT --` status line is not a question's
+    /// footer: once the dialog is cancelled the screen reads idle.
+    #[test]
+    fn the_vim_insert_status_line_under_an_idle_box_reads_idle() {
+        let capture = include_str!("fixtures/v2322-ask-vim-cancelled-idle-w120.txt");
+        assert!(
+            capture.contains("  -- INSERT -- ⏵⏵ auto mode on"),
+            "the box's status line shows the vim mode"
         );
         let reading = read_claude(&screen_from(capture));
         assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));

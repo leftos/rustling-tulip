@@ -132,11 +132,13 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             name: "dialog_question".to_string(),
             priority: 980,
             region: DIALOG_REGION,
-            // A narrow pane wraps the footer, cutting off its `Esc to cancel`.
-            matcher: LineMatcher::Regex(r"^\s*Enter to select ·".to_string()),
+            // A narrow pane wraps the footer, cutting off its `Esc to cancel`;
+            // the vim mode's insert marker heads it on `Type something`, with no Esc.
+            matcher: LineMatcher::Regex(r"^\s*(?:-- INSERT -- · )?Enter to select ·".to_string()),
             // An Esc that does anything but cancel: a list, not a question.
             not: vec![LineMatcher::Regex(
-                r"^\s*Enter to select ·.*Esc to\s+(?:[^c\s]|c[^a\s])".to_string(),
+                r"^\s*(?:-- INSERT -- · )?Enter to select ·.*Esc to\s+(?:[^c\s]|c[^a\s])"
+                    .to_string(),
             )],
             verdict: ScreenVerdict::AwaitingInput,
         },
