@@ -543,7 +543,7 @@ fn the_remove_confirm_closes_when_its_account_becomes_active(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn the_alias_field_sends_set_account_alias_on_enter(cx: &mut TestAppContext) {
+fn the_alias_field_sends_nothing_on_enter_and_apply_sends_it(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     page(&mut h, trio(), None);
@@ -555,6 +555,12 @@ fn the_alias_field_sends_set_account_alias_on_enter(cx: &mut TestAppContext) {
     h.keys("ctrl-a");
     type_line(&mut h, "work");
     h.keys("enter");
+    assert!(writes(&mut h).is_empty(), "Enter sends nothing");
+    assert!(
+        h.root(|root, _| root.settings_apply_enabled()),
+        "the typed alias is pending"
+    );
+    h.click_on("settings-apply");
     let sent = one_write(&mut h);
     assert!(
         matches!(
@@ -571,6 +577,8 @@ fn the_alias_field_sends_set_account_alias_on_enter(cx: &mut TestAppContext) {
     h.send(accounts_reply(trio(), None, &request_id(&sent)));
     press(&mut h, "settings-accounts-alias-3");
     h.keys("ctrl-a backspace enter");
+    assert!(writes(&mut h).is_empty(), "Enter sends nothing");
+    h.click_on("settings-apply");
     let sent = one_write(&mut h);
     assert!(
         matches!(
@@ -585,8 +593,21 @@ fn the_alias_field_sends_set_account_alias_on_enter(cx: &mut TestAppContext) {
     );
 }
 
+/// The page's rows of [`trio`]'s accounts, top to bottom.
+fn row_order(h: &mut Harness<'_>) -> Vec<u32> {
+    let mut rows: Vec<(f32, u32)> = [1, 2, 3]
+        .into_iter()
+        .map(|n| {
+            let y = h.bounds(&format!("settings-accounts-row-{n}")).origin.y / px(1.0);
+            (y, n)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    rows.into_iter().map(|(_, n)| n).collect()
+}
+
 #[gpui::test]
-fn up_sends_the_moved_order(cx: &mut TestAppContext) {
+fn up_holds_the_moved_order_until_apply(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     page(&mut h, trio(), None);
@@ -599,13 +620,291 @@ fn up_sends_the_moved_order(cx: &mut TestAppContext) {
         "no Down on the last"
     );
     press(&mut h, "settings-accounts-up-2");
+    assert!(writes(&mut h).is_empty(), "Up sends nothing");
+    assert_eq!(row_order(&mut h), [2, 1, 3], "ops moved up one place");
+    press(&mut h, "settings-accounts-down-1");
+    assert!(writes(&mut h).is_empty(), "Down sends nothing");
+    assert_eq!(row_order(&mut h), [2, 3, 1], "the presses add up");
+    h.click_on("settings-apply");
+    let sent = one_write(&mut h);
+    assert!(
+        matches!(
+            &sent,
+            ClientMessage::SetAccountOrder { order, .. } if order == &[2, 3, 1]
+        ),
+        "the full shown order: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn cancel_restores_the_saved_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-up-2");
+    assert_eq!(row_order(&mut h), [2, 1, 3]);
+    h.click_on("settings-cancel");
+    assert!(writes(&mut h).is_empty(), "nothing is sent");
+    on_page(&mut h, trio(), None);
+    assert_eq!(row_order(&mut h), [1, 2, 3], "the saved order shows");
+    assert!(!h.root(|root, _| root.settings_apply_enabled()));
+}
+
+/// [`trio`] as the daemon answers once `work` and `home` are the aliases
+/// of 2 and 3 and lab moved above ops.
+fn renamed_and_moved() -> Vec<AccountSnapshot> {
+    vec![
+        account(1, "main").active().build(),
+        account(3, "home").build(),
+        account(2, "work").five_hour(61.0).seven_day(40.0).build(),
+    ]
+}
+
+/// On the page of [`trio`]: `work` typed as 2's alias, `home` as 3's,
+/// and lab moved up, nothing sent.
+fn three_edits(h: &mut Harness<'_>) {
+    page(h, trio(), None);
+    press(h, "settings-accounts-alias-2");
+    h.keys("ctrl-a");
+    type_line(h, "work");
+    press(h, "settings-accounts-alias-3");
+    h.keys("ctrl-a");
+    type_line(h, "home");
+    press(h, "settings-accounts-up-3");
+    assert!(writes(h).is_empty(), "nothing is sent before Apply");
+}
+
+/// The three writes of [`three_edits`], each checked, with their ids.
+#[track_caller]
+fn three_writes(h: &mut Harness<'_>) -> Vec<String> {
+    let sent = writes(h);
+    assert_eq!(sent.len(), 3, "two aliases and the order: {sent:?}");
+    let alias = |number: u32, text: &str| {
+        sent.iter().any(|msg| {
+            matches!(
+                msg,
+                ClientMessage::SetAccountAlias { number: n, alias: Some(a), .. }
+                    if *n == number && a == text
+            )
+        })
+    };
+    assert!(alias(2, "work") && alias(3, "home"), "{sent:?}");
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::SetAccountOrder { order, .. } if order == &[1, 3, 2]
+        )),
+        "{sent:?}"
+    );
+    let ids: Vec<String> = sent.iter().map(request_id).collect();
+    let distinct: std::collections::HashSet<&String> = ids.iter().collect();
+    assert_eq!(distinct.len(), 3, "each write has its own id: {ids:?}");
+    ids
+}
+
+#[gpui::test]
+fn apply_sends_two_aliases_and_the_order_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    three_edits(&mut h);
+    h.click_on("settings-apply");
+    three_writes(&mut h);
+}
+
+#[gpui::test]
+fn ok_waits_for_every_account_answer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    three_edits(&mut h);
+    h.click_on("settings-ok");
+    let ids = three_writes(&mut h);
+    assert!(h.root(|root, _| root.settings_open()), "OK waits");
+    h.send(accounts_reply(renamed_and_moved(), None, &ids[0]));
+    h.send(accounts_updated(renamed_and_moved()));
+    h.send(accounts_reply(renamed_and_moved(), None, &ids[1]));
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "a broadcast answers nothing; one write is still unanswered"
+    );
+    h.send(accounts_reply(renamed_and_moved(), None, &ids[2]));
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "the last answer closes Settings"
+    );
+}
+
+#[gpui::test]
+fn ok_stays_open_when_an_account_write_is_refused(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-alias-2");
+    h.keys("ctrl-a");
+    type_line(&mut h, "work");
+    press(&mut h, "settings-accounts-up-3");
+    h.click_on("settings-ok");
+    let sent = writes(&mut h);
+    assert_eq!(sent.len(), 2, "the alias and the order: {sent:?}");
+    let order = sent
+        .iter()
+        .find(|msg| matches!(msg, ClientMessage::SetAccountOrder { .. }))
+        .expect("the order was sent");
+    let alias = sent
+        .iter()
+        .find(|msg| matches!(msg, ClientMessage::SetAccountAlias { .. }))
+        .expect("the alias was sent");
+    h.send(protocol::DaemonMessage::Error {
+        code: Some(protocol::error_codes::ACCOUNT_BUSY.to_owned()),
+        message: "another account change is running".to_owned(),
+        request_id: Some(request_id(order)),
+    });
+    let mut renamed = trio();
+    renamed[1] = account(2, "work").five_hour(61.0).seven_day(40.0).build();
+    h.send(accounts_reply(renamed.clone(), None, &request_id(alias)));
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "a refusal keeps Settings open"
+    );
+    assert!(
+        drawn(
+            &mut h,
+            "settings-accounts-error=another account change is running"
+        ),
+        "the other write's answer leaves the refusal shown"
+    );
+    h.click_on("settings-tab-general");
+    h.click_on("settings-tab-accounts");
+    let id = listed(&mut h);
+    h.send(accounts_reply(renamed, None, &id));
+    assert!(
+        drawn(
+            &mut h,
+            "settings-accounts-error=another account change is running"
+        ),
+        "so does a list reply"
+    );
+}
+
+#[gpui::test]
+fn a_held_order_the_daemon_caught_up_with_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-down-2");
+    assert!(h.root(|root, _| root.settings_apply_enabled()));
+    h.send(accounts_updated(trio()[..2].to_vec()));
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "lab left: the shown order 1, 2 is the daemon's"
+    );
+    h.click_on("settings-apply");
+    assert!(writes(&mut h).is_empty(), "no order is sent");
+}
+
+#[gpui::test]
+fn a_held_order_takes_in_an_account_added_since(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio()[..2].to_vec(), None);
+    press(&mut h, "settings-accounts-down-1");
+    h.send(accounts_updated(trio()));
+    h.click_on("settings-apply");
     let sent = one_write(&mut h);
     assert!(
         matches!(
             &sent,
             ClientMessage::SetAccountOrder { order, .. } if order == &[2, 1, 3]
         ),
-        "the full order, ops moved up one place: {sent:?}"
+        "the shown order over the daemon's current list: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_typed_alias_survives_a_rename_from_elsewhere(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    typed_alias(&mut h);
+    press(&mut h, "settings-accounts-up-3");
+    let mut renamed = trio();
+    renamed[1] = account(2, "home").five_hour(61.0).seven_day(40.0).build();
+    h.send(accounts_updated(renamed));
+    assert_eq!(
+        h.root(|root, cx| root.settings_account_alias(2, cx)),
+        Some("work".to_owned()),
+        "the draft stays"
+    );
+    h.click_on("settings-apply");
+    let sent = writes(&mut h);
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::SetAccountAlias { number: 2, alias: Some(alias), .. } if alias == "work"
+        )),
+        "Apply sends the draft: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn an_applied_alias_keeps_showing_until_its_answer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    typed_alias(&mut h);
+    h.click_on("settings-apply");
+    let sent = one_write(&mut h);
+    assert_eq!(
+        h.root(|root, cx| root.settings_account_alias(2, cx)),
+        Some("work".to_owned()),
+        "the sent alias shows before its answer"
+    );
+    assert!(!h.root(|root, _| root.settings_apply_enabled()));
+    let mut renamed = trio();
+    renamed[1] = account(2, "work").five_hour(61.0).seven_day(40.0).build();
+    h.send(accounts_reply(renamed, None, &request_id(&sent)));
+    assert_eq!(
+        h.root(|root, cx| root.settings_account_alias(2, cx)),
+        Some("work".to_owned())
+    );
+    assert!(!h.root(|root, _| root.settings_apply_enabled()));
+}
+
+#[gpui::test]
+fn a_refused_alias_reads_as_edited_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    typed_alias(&mut h);
+    h.click_on("settings-apply");
+    let sent = one_write(&mut h);
+    h.send(protocol::DaemonMessage::Error {
+        code: Some(protocol::error_codes::ACCOUNT_BUSY.to_owned()),
+        message: "another account change is running".to_owned(),
+        request_id: Some(request_id(&sent)),
+    });
+    assert_eq!(
+        h.root(|root, cx| root.settings_account_alias(2, cx)),
+        Some("work".to_owned()),
+        "the field keeps the refused text"
+    );
+    assert!(
+        h.root(|root, _| root.settings_apply_enabled()),
+        "and Apply relights"
+    );
+}
+
+#[gpui::test]
+fn the_apply_answer_updates_the_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), None);
+    press(&mut h, "settings-accounts-up-2");
+    h.click_on("settings-apply");
+    let sent = one_write(&mut h);
+    let mut moved = trio();
+    moved.swap(0, 1);
+    h.send(accounts_reply(moved, None, &request_id(&sent)));
+    assert_eq!(row_order(&mut h), [2, 1, 3], "the answer's order shows");
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "nothing is held"
     );
 }
 
@@ -624,7 +923,7 @@ fn add_current_login_sends_the_message(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_auto_switch_toggle_sends_set_auto_switch(cx: &mut TestAppContext) {
+fn the_auto_switch_toggle_holds_until_apply(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     let mut auto = auto_switch(None);
@@ -639,6 +938,8 @@ fn the_auto_switch_toggle_sends_set_auto_switch(cx: &mut TestAppContext) {
         "no verdict, no forecast"
     );
     press(&mut h, "settings-accounts-auto");
+    assert!(writes(&mut h).is_empty(), "the toggle sends nothing");
+    h.click_on("settings-apply");
     let sent = one_write(&mut h);
     assert!(
         matches!(
@@ -654,11 +955,13 @@ fn the_auto_switch_toggle_sends_set_auto_switch(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_strategy_choice_sends_set_auto_switch_rules(cx: &mut TestAppContext) {
+fn the_strategy_choice_holds_until_apply(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     page(&mut h, trio(), Some(auto_switch(None)));
     press(&mut h, "settings-accounts-strategy-consume-first");
+    assert!(writes(&mut h).is_empty(), "the choice sends nothing");
+    h.click_on("settings-apply");
     let sent = one_write(&mut h);
     assert!(
         matches!(
@@ -676,11 +979,13 @@ fn the_strategy_choice_sends_set_auto_switch_rules(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_forecast_window_choice_sends_its_minutes(cx: &mut TestAppContext) {
+fn the_forecast_window_choice_holds_until_apply(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     page(&mut h, trio(), Some(auto_switch(None)));
     press(&mut h, "settings-accounts-window-120");
+    assert!(writes(&mut h).is_empty(), "the choice sends nothing");
+    h.click_on("settings-apply");
     let sent = one_write(&mut h);
     assert!(
         matches!(
@@ -728,8 +1033,6 @@ fn the_write_controls_wait_for_the_pending_write(cx: &mut TestAppContext) {
         "settings-accounts-remove-3",
         "settings-accounts-up-2",
         "settings-accounts-add-login",
-        "settings-accounts-auto",
-        "settings-accounts-strategy-consume-first",
     ] {
         press(&mut h, selector);
         assert!(
@@ -737,6 +1040,16 @@ fn the_write_controls_wait_for_the_pending_write(cx: &mut TestAppContext) {
             "{selector} waits for the pending write"
         );
     }
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "Up held nothing while the write was pending"
+    );
+    press(&mut h, "settings-accounts-strategy-consume-first");
+    assert!(writes(&mut h).is_empty(), "a choice sends nothing");
+    assert!(
+        h.root(|root, _| root.settings_apply_enabled()),
+        "the auto-switch controls stay live and hold their value"
+    );
     assert_eq!(
         remove_confirm(&mut h),
         None,
@@ -802,6 +1115,8 @@ fn the_admin_controls_are_disabled_for_a_remote_origin(cx: &mut TestAppContext) 
         &request_id(&sent),
     ));
     press(&mut h, "settings-accounts-auto");
+    assert!(writes(&mut h).is_empty(), "the toggle waits for Apply");
+    h.click_on("settings-apply");
     assert!(
         matches!(
             one_write(&mut h),
@@ -839,6 +1154,10 @@ fn an_alias_field_is_read_only_while_a_write_is_pending(cx: &mut TestAppContext)
         writes(&mut h).is_empty(),
         "nothing was typed into the field while it waited"
     );
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "no alias edit is pending"
+    );
 }
 
 #[gpui::test]
@@ -852,6 +1171,10 @@ fn closing_settings_with_ok_sends_a_typed_alias(cx: &mut TestAppContext) {
     h.click_on("settings-ok");
     let sent = one_write(&mut h);
     assert!(
+        h.root(|root, _| root.settings_open()),
+        "OK waits for the alias's answer"
+    );
+    assert!(
         matches!(
             &sent,
             ClientMessage::SetAccountAlias {
@@ -862,9 +1185,12 @@ fn closing_settings_with_ok_sends_a_typed_alias(cx: &mut TestAppContext) {
         ),
         "{sent:?}"
     );
+    let mut renamed = trio();
+    renamed[1] = account(2, "work").five_hour(61.0).seven_day(40.0).build();
+    h.send(accounts_reply(renamed, None, &request_id(&sent)));
     assert!(
         !h.root(|root, _| root.settings_open()),
-        "OK closes Settings"
+        "OK closes Settings once the alias is answered"
     );
 }
 
@@ -877,14 +1203,65 @@ fn leaving_an_untouched_alias_field_does_not_undo_a_rename_from_elsewhere(cx: &m
     let mut renamed = trio();
     renamed[1] = account(2, "work").five_hour(61.0).seven_day(40.0).build();
     h.send(accounts_updated(renamed));
-    // The test window does not report a blur, so Enter, which commits as
-    // leaving does, stands for it.
-    h.keys("enter");
+    h.click_on("settings-apply");
     press(&mut h, "settings-accounts-alias-3");
+    h.click_on("settings-apply");
     assert!(
         writes(&mut h).is_empty(),
         "the field the user never edited sends nothing"
     );
+}
+
+/// Settings open on the Accounts page of [`trio`], `work` typed into
+/// account 2's alias field and nothing sent.
+fn typed_alias(h: &mut Harness<'_>) {
+    page(h, trio(), None);
+    press(h, "settings-accounts-alias-2");
+    h.keys("ctrl-a");
+    type_line(h, "work");
+    assert!(writes(h).is_empty(), "typing sends nothing");
+}
+
+/// Settings closed by whatever the spec pressed: nothing was sent, and
+/// reopening it shows account 2's saved alias.
+#[track_caller]
+fn the_typed_alias_is_gone(h: &mut Harness<'_>) {
+    assert!(!h.root(|root, _| root.settings_open()), "Settings closed");
+    assert!(writes(h).is_empty(), "nothing is sent");
+    on_page(h, trio(), None);
+    assert_eq!(
+        h.root(|root, cx| root.settings_account_alias(2, cx)),
+        Some("ops".to_owned()),
+        "the saved alias shows"
+    );
+    assert!(!h.root(|root, _| root.settings_apply_enabled()));
+}
+
+#[gpui::test]
+fn cancel_discards_a_typed_alias(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    typed_alias(&mut h);
+    h.click_on("settings-cancel");
+    the_typed_alias_is_gone(&mut h);
+}
+
+#[gpui::test]
+fn the_close_button_discards_a_typed_alias(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    typed_alias(&mut h);
+    h.click_on("settings-close");
+    the_typed_alias_is_gone(&mut h);
+}
+
+#[gpui::test]
+fn escape_discards_a_typed_alias(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    typed_alias(&mut h);
+    h.keys("escape");
+    the_typed_alias_is_gone(&mut h);
 }
 
 /// The running login's status line, as the page shows it.
@@ -1213,6 +1590,123 @@ fn a_remote_hosts_accounts_lock_administration(cx: &mut TestAppContext) {
         sent.iter()
             .any(|msg| matches!(msg, ClientMessage::SwitchAccount { number: 2, .. })),
         "Switch stays live and goes to the remote host: {sent:?}"
+    );
+    assert!(writes(&mut h).is_empty(), "nothing goes to This PC");
+}
+
+#[gpui::test]
+fn cancel_discards_held_auto_switch_settings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), Some(auto_switch(None)));
+    press(&mut h, "settings-accounts-auto");
+    press(&mut h, "settings-accounts-threshold-down");
+    press(&mut h, "settings-accounts-strategy-consume-first");
+    assert!(drawn(&mut h, "settings-accounts-threshold=85%"));
+    h.click_on("settings-cancel");
+    assert!(writes(&mut h).is_empty(), "nothing is sent");
+    on_page(&mut h, trio(), Some(auto_switch(None)));
+    assert!(
+        drawn(&mut h, "settings-accounts-threshold=90%"),
+        "the saved threshold shows"
+    );
+    assert!(!h.root(|root, _| root.settings_apply_enabled()));
+}
+
+#[gpui::test]
+fn a_threshold_and_a_toggle_go_in_one_set_auto_switch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), Some(auto_switch(None)));
+    press(&mut h, "settings-accounts-threshold-down");
+    press(&mut h, "settings-accounts-threshold-down");
+    assert!(
+        drawn(&mut h, "settings-accounts-threshold=80%"),
+        "the stepper steps from the shown value"
+    );
+    press(&mut h, "settings-accounts-auto");
+    assert!(writes(&mut h).is_empty(), "nothing is sent before Apply");
+    h.click_on("settings-apply");
+    let sent = one_write(&mut h);
+    assert!(
+        matches!(
+            sent,
+            ClientMessage::SetAutoSwitch {
+                enabled: Some(false),
+                threshold_pct: Some(threshold),
+                ..
+            } if (threshold - 80.0).abs() < f64::EPSILON
+        ),
+        "{sent:?}"
+    );
+}
+
+#[gpui::test]
+fn two_rules_go_in_one_set_auto_switch_rules(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), Some(auto_switch(None)));
+    press(&mut h, "settings-accounts-hysteresis-up");
+    press(&mut h, "settings-accounts-hysteresis-up");
+    assert!(drawn(&mut h, "settings-accounts-hysteresis=7%"));
+    press(&mut h, "settings-accounts-strategy-consume-first");
+    assert!(writes(&mut h).is_empty(), "nothing is sent before Apply");
+    h.click_on("settings-apply");
+    let sent = one_write(&mut h);
+    assert!(
+        matches!(
+            sent,
+            ClientMessage::SetAutoSwitchRules {
+                hysteresis_pct: Some(hysteresis),
+                cooldown_secs: None,
+                strategy: Some(AutoSwitchStrategy::ConsumeFirst),
+                rate_window_minutes: None,
+                ..
+            } if (hysteresis - 7.0).abs() < f64::EPSILON
+        ),
+        "{sent:?}"
+    );
+}
+
+#[gpui::test]
+fn pressing_back_to_the_saved_value_holds_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, trio(), Some(auto_switch(None)));
+    press(&mut h, "settings-accounts-auto");
+    assert!(h.root(|root, _| root.settings_apply_enabled()));
+    press(&mut h, "settings-accounts-auto");
+    press(&mut h, "settings-accounts-threshold-down");
+    press(&mut h, "settings-accounts-threshold-up");
+    assert!(
+        !h.root(|root, _| root.settings_apply_enabled()),
+        "every value is back at the saved one"
+    );
+    assert!(writes(&mut h).is_empty());
+}
+
+#[gpui::test]
+fn a_remote_hosts_auto_switch_settings_stage_too(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    remote_page(&mut h);
+    press(&mut h, "settings-accounts-auto");
+    assert!(
+        h.host(&remote()).sent().is_empty(),
+        "the toggle waits for Apply on a remote host"
+    );
+    h.click_on("settings-apply");
+    let sent = h.host(&remote()).sent();
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::SetAutoSwitch {
+                enabled: Some(false),
+                threshold_pct: None,
+                ..
+            }
+        )),
+        "Apply sends it to the remote host: {sent:?}"
     );
     assert!(writes(&mut h).is_empty(), "nothing goes to This PC");
 }

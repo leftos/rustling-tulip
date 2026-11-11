@@ -97,10 +97,7 @@ pub(crate) enum WriteAction {
     LogIn,
     CancelLogin,
     Remove(u32),
-    Alias(u32),
-    Order,
     AutoSwitch,
-    Rules,
 }
 
 /// A daemon-driven login on one host, until the next `LogIn` press or the
@@ -131,6 +128,13 @@ struct HostAccounts {
     list: Option<Ask>,
     /// The account write not answered yet.
     write: Option<WriteAsk>,
+    /// The writes Settings' Apply sent and the host has not answered yet;
+    /// they hold no slot, so the page's own write stays free.
+    applied: Vec<Ask>,
+    /// The writes of the last Apply the host refused, by request id; while
+    /// any is, its refusal stays shown through other replies, until the
+    /// next Apply, the page's own next write or Settings opening again.
+    refused_applied: Vec<String>,
     /// The daemon's refusal of the last ask, until the next reply lands.
     error: Option<String>,
     /// The daemon-driven login this connection last heard of.
@@ -313,6 +317,8 @@ impl AccountsState {
             .is_some_and(|write| write.ask.request_id == id)
         {
             (state.write.take().map(|write| write.ask), true)
+        } else if let Some(at) = state.applied.iter().position(|ask| ask.request_id == id) {
+            (Some(state.applied.remove(at)), true)
         } else {
             tracing::debug!(
                 ?host,
@@ -333,7 +339,9 @@ impl AccountsState {
         }
         state.accounts = accounts.to_vec();
         state.auto = auto.cloned();
-        state.error = None;
+        if state.refused_applied.is_empty() {
+            state.error = None;
+        }
         Folded {
             changed: true,
             ask_again: false,
@@ -341,7 +349,7 @@ impl AccountsState {
     }
 
     /// A daemon `Error` from `host` answering `request_id`: when it answers
-    /// the pending write or list, the ask ends and `message` shows until
+    /// the pending write or list, or a write Apply sent, the ask ends and `message` shows until
     /// the next reply lands. Returns whether it answered either.
     pub(crate) fn refused(&mut self, host: &HostKey, request_id: &str, message: &str) -> bool {
         let Some(state) = self.hosts.get_mut(host) else {
@@ -359,6 +367,13 @@ impl AccountsState {
             .is_some_and(|ask| ask.request_id == request_id)
         {
             state.list = None;
+        } else if let Some(at) = state
+            .applied
+            .iter()
+            .position(|ask| ask.request_id == request_id)
+        {
+            state.applied.remove(at);
+            state.refused_applied.push(request_id.to_owned());
         } else {
             return false;
         }
@@ -388,6 +403,44 @@ impl AccountsState {
             },
         });
         state.error = None;
+        state.refused_applied.clear();
+    }
+
+    /// Settings' Apply sent `host` the account write `request_id`; it holds
+    /// no slot, and the last refusal goes.
+    pub(crate) fn sent_applied(&mut self, host: &HostKey, request_id: String) {
+        let state = self.hosts.entry(host.clone()).or_default();
+        state.applied.push(Ask {
+            request_id,
+            updates_at_ask: state.updates_seen,
+        });
+        state.error = None;
+        state.refused_applied.clear();
+    }
+
+    /// Whether Settings' Apply write `request_id` to `host` is unanswered.
+    pub(crate) fn applied_pending(&self, host: &HostKey, request_id: &str) -> bool {
+        self.hosts
+            .get(host)
+            .is_some_and(|state| state.applied.iter().any(|ask| ask.request_id == request_id))
+    }
+
+    /// Whether `host` refused Settings' Apply write `request_id`, until
+    /// the next Apply or the page's own next write.
+    pub(crate) fn applied_refused(&self, host: &HostKey, request_id: &str) -> bool {
+        self.hosts
+            .get(host)
+            .is_some_and(|state| state.refused_applied.iter().any(|id| id == request_id))
+    }
+
+    /// Settings opened: the refusals of an earlier Apply no longer show.
+    pub(crate) fn forget_applied_refusals(&mut self) {
+        for state in self.hosts.values_mut() {
+            if !state.refused_applied.is_empty() {
+                state.refused_applied.clear();
+                state.error = None;
+            }
+        }
     }
 
     /// `host`'s accounts, in its daemon's order; none before it sent any.
@@ -1377,10 +1430,7 @@ mod tests {
             WriteAction::Switch(2),
             WriteAction::AddLogin,
             WriteAction::Remove(2),
-            WriteAction::Alias(2),
-            WriteAction::Order,
             WriteAction::AutoSwitch,
-            WriteAction::Rules,
         ];
         for action in actions {
             let mut state = AccountsState::default();
@@ -1455,6 +1505,84 @@ mod tests {
         state.sent_list(&host, "l1".to_owned());
         state.fold(&host, &reply(Some("l1"), vec![active(1)]));
         assert_eq!(state.error(&host), None, "the next reply clears it");
+    }
+
+    #[test]
+    fn an_applied_write_reply_replaces_the_list() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.fold(&host, &updated(vec![active(1), account(2, "b")]));
+        state.sent_applied(&host, "a1".to_owned());
+        state.sent_applied(&host, "a2".to_owned());
+        let folded = state.fold(&host, &reply(Some("a2"), vec![account(1, "a"), active(2)]));
+        assert!(folded.changed && !folded.ask_again, "the answer lands");
+        assert_eq!(in_use(&state, &host), Some(2));
+        let folded = state.fold(&host, &reply(Some("a1"), vec![active(1), account(2, "b")]));
+        assert!(folded.changed, "the other applied write's answer lands too");
+        assert_eq!(in_use(&state, &host), Some(1));
+        assert!(
+            !state
+                .fold(&host, &reply(Some("a1"), vec![account(1, "a"), active(2)]))
+                .changed,
+            "an applied write takes one answer"
+        );
+    }
+
+    #[test]
+    fn a_refused_applied_write_shows_its_message() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.fold(&host, &updated(vec![active(1), account(2, "b")]));
+        state.sent_applied(&host, "a1".to_owned());
+        assert!(!state.refused(&host, "other", "no"), "not the write's id");
+        assert!(state.refused(&host, "a1", "busy"));
+        assert_eq!(state.error(&host), Some("busy"));
+        assert!(!state.refused(&host, "a1", "busy"), "it was answered");
+        state.sent_applied(&host, "a2".to_owned());
+        assert_eq!(state.error(&host), None, "the next send clears it");
+    }
+
+    #[test]
+    fn a_refused_applied_write_outlives_the_other_replies() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.fold(&host, &updated(vec![active(1), account(2, "b")]));
+        state.sent_applied(&host, "a1".to_owned());
+        state.sent_applied(&host, "a2".to_owned());
+        state.sent_list(&host, "l1".to_owned());
+        assert!(state.refused(&host, "a1", "mismatch"));
+        assert!(state.applied_refused(&host, "a1"));
+        assert!(!state.applied_pending(&host, "a1"));
+        assert!(state.applied_pending(&host, "a2"));
+        state.fold(&host, &reply(Some("a2"), vec![active(1), account(2, "c")]));
+        assert_eq!(state.error(&host), Some("mismatch"), "a sibling's answer");
+        state.fold(&host, &reply(Some("l1"), vec![active(1), account(2, "c")]));
+        assert_eq!(state.error(&host), Some("mismatch"), "a list reply");
+        state.forget_applied_refusals();
+        assert_eq!(state.error(&host), None, "Settings opened again");
+        assert!(!state.applied_refused(&host, "a1"));
+
+        state.sent_applied(&host, "a3".to_owned());
+        state.refused(&host, "a3", "busy");
+        state.sent_write(&host, WriteAction::Switch(2), "s1".to_owned());
+        assert_eq!(state.error(&host), None, "the page's own write clears it");
+        assert!(state.refused(&host, "s1", "busy"));
+        state.sent_list(&host, "l2".to_owned());
+        state.fold(&host, &reply(Some("l2"), vec![active(1)]));
+        assert_eq!(
+            state.error(&host),
+            None,
+            "an own write's refusal: next reply"
+        );
+    }
+
+    #[test]
+    fn an_applied_write_is_not_the_pages_write() {
+        let mut state = AccountsState::default();
+        let host = HostKey::Local;
+        state.sent_applied(&host, "a1".to_owned());
+        assert!(!state.writing(&host), "the page's write slot stays free");
+        assert_eq!(state.switching(&host), None);
     }
 
     #[test]

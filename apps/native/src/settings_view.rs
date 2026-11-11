@@ -18,7 +18,7 @@ use gpui::{
     prelude::*, px, svg,
 };
 use protocol::{
-    AgentCommandEntry, AgentDescriptor, AgentId, ClientMessage, DaemonMessage,
+    AgentCommandEntry, AgentDescriptor, AgentId, AutoSwitchStrategy, ClientMessage, DaemonMessage,
     FEATURE_AGENT_COMMANDS, FEATURE_AGENT_USER_HOOKS, FEATURE_DEFAULT_SHELL,
     FEATURE_DETAILED_LOGGING, FieldKind, KeepAwakeMode, KeyState, OptionValue, RemoteState, Secret,
     SummarizerKeySource, SummarizerSettings, SummarySource, UserHooksWire, error_codes,
@@ -2224,11 +2224,9 @@ impl RootView {
     /// buttons; a disabled one is left out.
     fn settings_controls(&self, cx: &App) -> Vec<SettingsControl> {
         let applies = self.settings_apply_enabled();
-        let ok = applies || self.account_alias_edited(cx);
         let mut controls = self.tab_controls(cx);
         controls.extend(FOOTER_CONTROLS.into_iter().filter(|control| match control {
-            SettingsControl::FooterOk => ok,
-            SettingsControl::FooterApply => applies,
+            SettingsControl::FooterOk | SettingsControl::FooterApply => applies,
             _ => true,
         }));
         controls
@@ -2834,10 +2832,22 @@ impl RootView {
                         | HostPending::RemoteEnabled(_)
                         | HostPending::DefaultShell(_)
                         | HostPending::UserHooks { .. }
+                        | HostPending::AutoSwitchEnabled(_)
+                        | HostPending::AutoSwitchThreshold(_)
+                        | HostPending::AutoRule(_)
                 )
             })
             .count();
         pending.extend(std::iter::repeat_n(toggle.clone(), daemon_toggles));
+        // A held order counts only while the order it shows over the
+        // daemon's current list differs from the daemon's.
+        if self.account_order_pending(host) {
+            pending.push(toggle.clone());
+        }
+        if *host == self.settings_host {
+            let aliases = self.account_alias_edits();
+            pending.extend(std::iter::repeat_n(toggle.clone(), aliases));
+        }
         if self.worktrees_pending(host) {
             pending.push(PendingEdit {
                 row: PendingRow::WorktreesRoot,
@@ -2867,6 +2877,9 @@ impl RootView {
     /// Every host's pending edits, hosts without any left out.
     fn pending_edits(&self) -> HashMap<HostKey, Vec<PendingEdit>> {
         let mut hosts: Vec<HostKey> = vec![HostKey::Local];
+        if self.settings_host != HostKey::Local {
+            hosts.push(self.settings_host.clone());
+        }
         hosts.extend(self.agent_tabs.all().map(|(host, _)| host.clone()));
         hosts.extend(self.worktrees_tabs.keys().cloned());
         hosts.extend(self.settings_pending.hosts.keys().cloned());
@@ -2910,6 +2923,7 @@ impl RootView {
             return None;
         }
         self.settings_pending.log = Some(Vec::new());
+        self.apply_account_aliases(cx);
         for (host, edits) in pending {
             self.apply_host_edits(&host, &edits, cx);
         }
@@ -2944,7 +2958,8 @@ impl RootView {
         self.apply_dashboard(host, dashboard, edits, delete, cx);
     }
 
-    /// `host`'s held keep-awake mode and agent toggles, sent; returns its
+    /// `host`'s held keep-awake mode, agent toggles and Accounts page
+    /// values, sent; returns its
     /// held remote access switch and Dashboard values, which go out in one
     /// message each, and the key deletion its Dashboard page shows.
     fn apply_held_settings(
@@ -2954,6 +2969,7 @@ impl RootView {
         let live_delete = self.live_key_delete(host);
         let mut remote = None;
         let mut dashboard = Vec::new();
+        let mut account = Vec::new();
         for value in self.settings_pending.take_host(host) {
             match value {
                 HostPending::KeepAwake(mode) => {
@@ -2970,14 +2986,19 @@ impl RootView {
                 HostPending::UserHooks { agent, enabled } => {
                     self.apply_user_hooks(host, agent, enabled);
                 }
+                value @ (HostPending::AccountOrder(_)
+                | HostPending::AutoSwitchEnabled(_)
+                | HostPending::AutoSwitchThreshold(_)
+                | HostPending::AutoRule(_)) => account.push(value),
                 other => dashboard.push(other),
             }
         }
+        self.apply_account_values(host, account);
         (remote, dashboard, live_delete)
     }
 
     /// `msg` to `host` as a send of Apply, whose echo OK waits for.
-    fn send_setting(&mut self, host: &HostKey, msg: ClientMessage) {
+    pub(crate) fn send_setting(&mut self, host: &HostKey, msg: ClientMessage) {
         if let (Some(log), Some(owed)) =
             (self.settings_pending.log.as_mut(), OwedEcho::of(host, &msg))
         {
@@ -2990,13 +3011,7 @@ impl RootView {
     /// once every daemon echoed what it sent; a This PC setting Apply could
     /// not write keeps Settings open.
     fn press_settings_ok(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // An alias typed on the Accounts page is sent as Enter would; it
-        // owes no echo, so it never holds Settings open.
-        let alias_sent = self.commit_alias_on_close(cx);
         let Some(applied) = self.apply_pending_settings(window, cx) else {
-            if alias_sent {
-                self.close_appearance_editor(window, cx);
-            }
             return;
         };
         if applied.failed {
@@ -4318,6 +4333,7 @@ impl RootView {
         if self.settings_open() {
             self.settings_host = HostKey::Local;
             self.settings_tab = SettingsTab::General;
+            self.accounts.forget_applied_refusals();
             self.settings_scroll = Scrollbar::default();
             self.settings_control = None;
             self.notifications.sound_list = None;
@@ -5249,7 +5265,6 @@ impl RootView {
         }
         let close = close_button("settings-close", false, &theme(cx)).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| {
-                this.commit_alias_on_close(cx);
                 this.close_appearance_editor(window, cx);
             },
         ));
@@ -5308,13 +5323,11 @@ impl RootView {
     }
 
     /// The footer: OK, Apply and Cancel, right-aligned. OK and Apply are
-    /// disabled while [`Self::settings_apply_enabled`] says no; OK also
-    /// takes a press while an Accounts alias field holds an edit, which it
-    /// sends.
+    /// disabled while [`Self::settings_apply_enabled`] says no.
     fn settings_footer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let focused = self.focused_settings_control(window, cx);
         let applies = self.settings_apply_enabled();
-        let ok = applies || self.account_alias_edited(cx);
+        let ok = applies;
         dialog_footer(&theme(cx))
             .child(settings_button(
                 SettingsControl::FooterOk,
@@ -8774,6 +8787,25 @@ pub(crate) enum HostPending {
     SummaryKeyDelete {
         provider: String,
     },
+    /// The Accounts page's rotation order, every account's number.
+    AccountOrder(Vec<u32>),
+    /// The Accounts page's auto-switch toggle.
+    AutoSwitchEnabled(bool),
+    /// The Accounts page's Switch at threshold, in percent.
+    AutoSwitchThreshold(f64),
+    /// One of the Accounts page's auto-switch rules.
+    AutoRule(AutoRule),
+}
+
+/// An auto-switch rule the Accounts page holds for Apply, which sends every
+/// held rule in one `SetAutoSwitchRules`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum AutoRule {
+    Hysteresis(f64),
+    Cooldown(u64),
+    Strategy(AutoSwitchStrategy),
+    /// The forecast window, in minutes.
+    Window(u32),
 }
 
 impl HostPending {
@@ -8794,6 +8826,9 @@ impl HostPending {
                     agent: other_agent, ..
                 },
             ) => agent == other_agent,
+            (Self::AutoRule(rule), Self::AutoRule(other_rule)) => {
+                std::mem::discriminant(rule) == std::mem::discriminant(other_rule)
+            }
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -8917,6 +8952,8 @@ enum EchoKind {
     DetailedLogging,
     DefaultShell,
     UserHooks,
+    /// An Accounts page write: alias, order or auto-switch.
+    Accounts,
 }
 
 /// A send of Apply to `host`, owing its echo; a refusal of it carries
@@ -8947,6 +8984,12 @@ impl OwedEcho {
             ClientMessage::ConfigureRemote { .. } => (EchoKind::Remote, None),
             ClientMessage::SetAgentUserHooks { request_id, .. } => {
                 (EchoKind::UserHooks, request_id.clone())
+            }
+            ClientMessage::SetAccountAlias { request_id, .. }
+            | ClientMessage::SetAccountOrder { request_id, .. }
+            | ClientMessage::SetAutoSwitch { request_id, .. }
+            | ClientMessage::SetAutoSwitchRules { request_id, .. } => {
+                (EchoKind::Accounts, request_id.clone())
             }
             ClientMessage::SetSummarizerSettings { request_id, .. }
             | ClientMessage::SetSummarizerKey { request_id, .. } => {
@@ -8986,6 +9029,8 @@ const fn echo_kind(msg: &DaemonMessage) -> Option<(EchoKind, EchoState)> {
             return Some((EchoKind::Remote, remote_echo(state)));
         }
         DaemonMessage::SummarizerStatus { .. } => EchoKind::Summarizer,
+        // A refused account write comes back as an `Error`.
+        DaemonMessage::Accounts { .. } => EchoKind::Accounts,
         // A failed write comes back in the answer itself, not as an error.
         DaemonMessage::AgentUserHooks { error, .. } => {
             let state = if error.is_some() {
@@ -9007,7 +9052,8 @@ const fn echo_kind(msg: &DaemonMessage) -> Option<(EchoKind, EchoState)> {
 fn echo_answers(owed: &OwedEcho, kind: EchoKind, msg: &DaemonMessage) -> bool {
     owed.kind == kind
         && match msg {
-            DaemonMessage::AgentUserHooks { request_id, .. } => {
+            DaemonMessage::AgentUserHooks { request_id, .. }
+            | DaemonMessage::Accounts { request_id, .. } => {
                 owed.request_id.is_some() && owed.request_id == *request_id
             }
             _ => true,
@@ -9138,7 +9184,12 @@ impl PendingSettings {
 
     /// Holds `value` for `host` in place of any earlier value of its
     /// setting, or nothing for it when it is `saved`.
-    fn set_host(&mut self, host: &HostKey, value: HostPending, saved: Option<&HostPending>) {
+    pub(crate) fn set_host(
+        &mut self,
+        host: &HostKey,
+        value: HostPending,
+        saved: Option<&HostPending>,
+    ) {
         let held = self.hosts.entry(host.clone()).or_default();
         held.retain(|old| !old.same_slot(&value));
         if saved != Some(&value) {
@@ -9150,7 +9201,7 @@ impl PendingSettings {
     }
 
     /// `host`'s held values.
-    fn host(&self, host: &HostKey) -> &[HostPending] {
+    pub(crate) fn host(&self, host: &HostKey) -> &[HostPending] {
         self.hosts.get(host).map_or(&[], Vec::as_slice)
     }
 

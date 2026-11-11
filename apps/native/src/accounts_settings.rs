@@ -2,11 +2,14 @@
 //! shows (`settings_host`), one row each with Switch, the alias field, Up
 //! and Down and Remove, then Add current login, Log in a new account and
 //! its Cancel, the running login's status line, and the auto-switch block.
-//! Every control sends its account write at once through
-//! [`RootView::send_account_write`] (never Apply), except Remove, which
-//! asks in a confirm first; the page shows what the next `Accounts` or
-//! `AccountsUpdated` carries, and every write control waits while a write
-//! is pending. The texts and the rows' actions live in [`crate::accounts`];
+//! The alias fields, Up and Down and the auto-switch block's values wait
+//! for OK or Apply, which sends them all at once (each with its own request
+//! id, outside the page's one-write slot), and Cancel, the close button
+//! and Escape discard them. The action buttons (Switch, Remove behind its
+//! confirm, Add current login, Log in and Cancel login) act at once through
+//! [`RootView::send_account_write`] and wait while one of their writes is
+//! pending, as do the alias fields and Up and Down; the page shows what the
+//! next `Accounts` or `AccountsUpdated` carries. The texts and the rows' actions live in [`crate::accounts`];
 //! this module only draws them and forwards presses.
 
 use chrono::Utc;
@@ -15,7 +18,8 @@ use gpui::{
     Keystroke, Stateful, Subscription, Window, div, prelude::*, px, relative,
 };
 use protocol::{
-    AccountSnapshot, AutoSwitchStrategy, ClientMessage, ConnectionOrigin, FEATURE_ACCOUNTS,
+    AccountSnapshot, AutoSwitchState, AutoSwitchStrategy, ClientMessage, ConnectionOrigin,
+    FEATURE_ACCOUNTS,
 };
 
 use crate::accounts::{
@@ -28,12 +32,12 @@ use crate::notice_view::modal_panel;
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_view::{
-    RowLock, SettingsControl, SettingsTab, ToggleState, choice_row, hint, input_frame, intern,
-    settings_button, toggle,
+    AutoRule, HostPending, RowLock, SettingsControl, SettingsTab, ToggleState, choice_row, hint,
+    input_frame, intern, settings_button, toggle,
 };
 use crate::spawn_view::{DISABLED_OPACITY, field};
 use crate::target::HostKey;
-use crate::text_input::{TextInput, TextInputEvent};
+use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, tagged_text, tooltip};
 
@@ -236,6 +240,12 @@ pub(crate) struct AliasField {
     focus: FocusHandle,
     /// The host's alias the field was last set to.
     base: String,
+    /// The field's text, kept as it changes.
+    draft: String,
+    /// The request id and text of the alias Apply sent from the field,
+    /// while that write is unanswered: the field keeps showing the text,
+    /// which reads as unedited.
+    applied: Option<(String, String)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -254,6 +264,10 @@ impl std::fmt::Debug for AliasFields {
 impl AliasFields {
     fn get(&self, number: u32) -> Option<&AliasField> {
         self.0.iter().find(|field| field.number == number)
+    }
+
+    fn get_mut(&mut self, number: u32) -> Option<&mut AliasField> {
+        self.0.iter_mut().find(|field| field.number == number)
     }
 }
 
@@ -316,8 +330,8 @@ impl RootView {
         self.settings_pending.remove_confirm = None;
     }
 
-    /// While the Accounts tab shows: one alias field per account listed, a
-    /// field whose host alias changed taking it unless it has the keyboard.
+    /// While the Accounts tab shows: one alias field per account listed,
+    /// each settled against its host alias by [`Self::settle_alias_field`].
     pub(crate) fn hold_account_alias_fields(
         &mut self,
         window: &mut Window,
@@ -343,14 +357,8 @@ impl RootView {
         let fields = &mut self.settings_pending.account_aliases.0;
         fields.retain(|field| listed.iter().any(|(number, ..)| *number == field.number));
         for (number, alias, email) in listed {
-            let fields = &mut self.settings_pending.account_aliases.0;
-            if let Some(field) = fields.iter_mut().find(|field| field.number == number) {
-                if field.base != alias && !field.focus.is_focused(window) {
-                    field.base.clone_from(&alias);
-                    field
-                        .input
-                        .update(cx, |input, cx| input.set_text(alias, cx));
-                }
+            if let Some(field) = self.settings_pending.account_aliases.get_mut(number) {
+                Self::settle_alias_field(field, alias, &self.accounts, &host, cx);
                 // While a write is pending the field takes no edits, and
                 // keeps the keyboard if it has it.
                 field
@@ -369,7 +377,8 @@ impl RootView {
     }
 
     /// Account `number`'s alias field showing `alias`, its placeholder
-    /// `email`: Enter or leaving it sends a changed alias, Esc is Cancel.
+    /// `email`: a draft that waits for OK or Apply. Enter and leaving it
+    /// send nothing; Esc is Cancel.
     fn new_alias_field(
         number: u32,
         alias: String,
@@ -382,92 +391,262 @@ impl RootView {
         let keys = cx.subscribe_in(
             &input,
             window,
-            move |this, _, event: &TextInputEvent, window, cx| match event {
-                TextInputEvent::Submit => {
-                    this.commit_alias(number, cx);
+            |this, _, event: &TextInputEvent, window, cx| {
+                if matches!(event, TextInputEvent::Cancel) {
+                    this.close_appearance_editor(window, cx);
                 }
-                TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
             },
         );
-        let blur = cx.on_blur(&focus, window, move |this, _, cx| {
-            this.commit_alias(number, cx);
-        });
+        let edits = cx.subscribe_in(
+            &input,
+            window,
+            move |this, input, _: &TextChanged, _, cx| {
+                let text = input.read(cx).text().to_owned();
+                if let Some(field) = this
+                    .settings_pending
+                    .account_aliases
+                    .0
+                    .iter_mut()
+                    .find(|field| field.number == number)
+                {
+                    field.draft = text;
+                }
+                cx.notify();
+            },
+        );
         AliasField {
             number,
             input,
             focus,
-            base: alias,
-            _subscriptions: vec![keys, blur],
+            base: alias.clone(),
+            draft: alias,
+            applied: None,
+            _subscriptions: vec![keys, edits],
         }
     }
 
-    /// The edit `field` holds: its text against the alias it was last set
-    /// to from the host, so a rename made elsewhere is never undone by a
-    /// field the user did not touch.
-    fn alias_edit(field: &AliasField, cx: &App) -> Option<AliasChange> {
-        accounts::alias_change(Some(&field.base), field.input.read(cx).text())
-    }
-
-    /// Sends account `number`'s alias as its field reads, when the user
-    /// edited it; a blank field clears it. Nothing while a write is pending
-    /// or while the admin controls are locked (any host but this machine).
-    /// Returns whether it sent.
-    fn commit_alias(&mut self, number: u32, cx: &mut Context<Self>) -> bool {
-        let host = self.settings_host.clone();
-        if self.accounts_admin_locked() || self.accounts.writing(&host) {
-            return false;
+    /// `field` against its account's host `alias` on `host`, whose writes
+    /// `state` tracks. A field holding an edit keeps it. An alias Apply sent
+    /// keeps showing while its write is unanswered; once the host reports
+    /// it, it is the field's base; once refused, the field keeps the text,
+    /// which reads as edited again. An untouched field takes the host's
+    /// alias, so a rename made elsewhere shows.
+    fn settle_alias_field(
+        field: &mut AliasField,
+        alias: String,
+        state: &accounts::AccountsState,
+        host: &HostKey,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((id, text)) = field.applied.take() {
+            if alias == text {
+                field.base = alias;
+                return;
+            }
+            if state.applied_pending(host, &id) {
+                field.applied = Some((id, text));
+                return;
+            }
+            // Refused, or typed over since: the text is an edit again.
+            if state.applied_refused(host, &id) || field.draft != text {
+                return;
+            }
+        } else if field.base == alias || Self::alias_edit(field).is_some() {
+            return;
         }
-        let Some(alias) = self
-            .settings_pending
-            .account_aliases
-            .get(number)
-            .and_then(|field| Self::alias_edit(field, cx))
-            .map(AliasChange::alias)
-        else {
-            return false;
-        };
-        self.send_account_write(
-            &host,
-            WriteAction::Alias(number),
-            |request_id| ClientMessage::SetAccountAlias {
-                number,
-                alias,
-                request_id,
-            },
-            cx,
-        )
+        field.base.clone_from(&alias);
+        field.draft.clone_from(&alias);
+        field
+            .input
+            .update(cx, |input, cx| input.set_text(alias, cx));
     }
 
-    /// Whether an alias field holds an edit not sent yet.
-    pub(crate) fn account_alias_edited(&self, cx: &App) -> bool {
+    /// The edit `field` holds: its draft against the alias Apply sent from
+    /// it while that is unanswered, else the alias it was last set to from
+    /// the host, so a rename made elsewhere is never undone by a field the
+    /// user did not touch.
+    fn alias_edit(field: &AliasField) -> Option<AliasChange> {
+        let base = field.applied.as_ref().map_or(&field.base, |(_, text)| text);
+        accounts::alias_change(Some(base), &field.draft)
+    }
+
+    /// The alias fields of accounts the host Settings shows still lists
+    /// that hold an edit Apply would send, with the text each sends; none
+    /// while the admin controls are locked (any host but this machine).
+    fn account_alias_drafts(&self) -> Vec<(u32, AliasChange, String)> {
+        if self.accounts_admin_locked() {
+            return Vec::new();
+        }
+        let list = self.accounts.accounts(&self.settings_host);
         self.settings_pending
             .account_aliases
             .0
             .iter()
-            .any(|field| Self::alias_edit(field, cx).is_some())
+            .filter(|field| list.iter().any(|account| account.number == field.number))
+            .filter_map(|field| Some((field.number, Self::alias_edit(field)?, field.draft.clone())))
+            .collect()
     }
 
-    /// Settings closes by OK or its close button: the first alias field
-    /// holding an edit sends it, as Enter would; only one write can be in
-    /// flight, so any other edit is dropped. Returns whether it sent.
-    pub(crate) fn commit_alias_on_close(&mut self, cx: &mut Context<Self>) -> bool {
-        let edited: Vec<u32> = self
-            .settings_pending
-            .account_aliases
-            .0
-            .iter()
-            .filter(|field| Self::alias_edit(field, cx).is_some())
-            .map(|field| field.number)
-            .collect();
-        let Some(first) = edited.first() else {
-            return false;
-        };
-        if edited.len() > 1 {
-            tracing::info!(
-                "accounts: closed Settings with more than one alias edit; only the first was sent"
-            );
+    /// How many alias fields hold an edit Apply would send.
+    pub(crate) fn account_alias_edits(&self) -> usize {
+        self.account_alias_drafts().len()
+    }
+
+    /// Apply on the Accounts page: every edited alias field of a listed
+    /// account sends its alias to the host Settings shows, a blank one
+    /// clearing it, and shows it, unedited, until the write is answered.
+    pub(crate) fn apply_account_aliases(&mut self, cx: &mut Context<Self>) {
+        let host = self.settings_host.clone();
+        for (number, change, text) in self.account_alias_drafts() {
+            let alias = change.alias();
+            let id = self.send_applied_account_write(&host, |request_id| {
+                ClientMessage::SetAccountAlias {
+                    number,
+                    alias,
+                    request_id,
+                }
+            });
+            if let Some(field) = self.settings_pending.account_aliases.get_mut(number) {
+                field.applied = Some((id, text));
+            }
         }
-        self.commit_alias(*first, cx)
+        cx.notify();
+    }
+
+    /// The order Apply sends `host` for the `held` order: the held order
+    /// over the daemon's current list, as the rows show it, or `None` when
+    /// that is the daemon's own order.
+    fn account_order_to_send(&self, host: &HostKey, held: &[u32]) -> Option<Vec<u32>> {
+        let list = self.accounts.accounts(host);
+        let shown: Vec<u32> = in_held_order(list, held)
+            .iter()
+            .map(|account| account.number)
+            .collect();
+        let daemon: Vec<u32> = list.iter().map(|account| account.number).collect();
+        (shown != daemon).then_some(shown)
+    }
+
+    /// Whether `host`'s held order would send an order on Apply.
+    pub(crate) fn account_order_pending(&self, host: &HostKey) -> bool {
+        self.settings_pending
+            .host(host)
+            .iter()
+            .any(|value| match value {
+                HostPending::AccountOrder(order) => {
+                    self.account_order_to_send(host, order).is_some()
+                }
+                _ => false,
+            })
+    }
+
+    /// `host`'s accounts as the page shows them: the daemon's list in the
+    /// order Up and Down hold, when they hold one.
+    pub(crate) fn shown_accounts(&self, host: &HostKey) -> Vec<AccountSnapshot> {
+        let list = self.accounts.accounts(host);
+        let held = self
+            .settings_pending
+            .host(host)
+            .iter()
+            .find_map(|value| match value {
+                HostPending::AccountOrder(order) => Some(order),
+                _ => None,
+            });
+        match held {
+            Some(order) => in_held_order(list, order),
+            None => list.to_vec(),
+        }
+    }
+
+    /// Up or Down on account `number`'s row: the shown order with it moved
+    /// one place, held for Apply; the daemon's order holds nothing. Nothing
+    /// while the page's own write is pending.
+    fn hold_moved_order(&mut self, number: u32, up: bool, cx: &mut Context<Self>) {
+        let host = self.settings_host.clone();
+        if self.accounts.writing(&host) {
+            return;
+        }
+        let Some(order) = accounts::moved_order(&self.shown_accounts(&host), number, up) else {
+            return;
+        };
+        let saved = self
+            .accounts
+            .accounts(&host)
+            .iter()
+            .map(|account| account.number)
+            .collect();
+        self.settings_pending.set_host(
+            &host,
+            HostPending::AccountOrder(order),
+            Some(&HostPending::AccountOrder(saved)),
+        );
+        cx.notify();
+    }
+
+    /// `host`'s auto-switch state as the page shows it: the daemon's, with
+    /// every value the page holds for Apply over it.
+    pub(crate) fn shown_auto(&self, host: &HostKey) -> Option<AutoSwitchState> {
+        let mut auto = self.accounts.auto(host)?.clone();
+        for value in self.settings_pending.host(host) {
+            held_over(&mut auto, value);
+        }
+        Some(auto)
+    }
+
+    /// Apply reaching `host`'s held Accounts page values: the order in one
+    /// `SetAccountOrder`, the toggle and threshold in one `SetAutoSwitch`,
+    /// and every rule in one `SetAutoSwitchRules`, each only when held.
+    pub(crate) fn apply_account_values(&mut self, host: &HostKey, values: Vec<HostPending>) {
+        let held = HeldAccountValues::of(values);
+        let order = held
+            .order
+            .as_deref()
+            .and_then(|order| self.account_order_to_send(host, order));
+        if let Some(order) = order {
+            self.send_applied_account_write(host, |request_id| ClientMessage::SetAccountOrder {
+                order,
+                request_id,
+            });
+        }
+        if held.enabled.is_some() || held.threshold_pct.is_some() {
+            self.send_applied_account_write(host, |request_id| ClientMessage::SetAutoSwitch {
+                enabled: held.enabled,
+                threshold_pct: held.threshold_pct,
+                request_id,
+            });
+        }
+        let rules = held.rules;
+        if rules != Rules::default() {
+            self.send_applied_account_write(host, |request_id| ClientMessage::SetAutoSwitchRules {
+                hysteresis_pct: rules.hysteresis_pct,
+                cooldown_secs: rules.cooldown_secs,
+                strategy: rules.strategy,
+                rate_window_minutes: rules.rate_window_minutes,
+                request_id,
+            });
+        }
+    }
+
+    /// Sends `host` the account write `message` as a send of Apply: its own
+    /// request id, recorded so the page's list takes its answer and OK
+    /// waits for it, outside the page's one-write slot. Returns the id.
+    pub(crate) fn send_applied_account_write(
+        &mut self,
+        host: &HostKey,
+        message: impl FnOnce(Option<String>) -> ClientMessage,
+    ) -> String {
+        let request_id = crate::new_request_id();
+        self.accounts.sent_applied(host, request_id.clone());
+        self.send_setting(host, message(Some(request_id.clone())));
+        request_id
+    }
+
+    /// The text account `number`'s alias field shows, once built.
+    #[must_use]
+    pub fn settings_account_alias(&self, number: u32, cx: &App) -> Option<String> {
+        self.settings_pending
+            .account_aliases
+            .get(number)
+            .map(|field| field.input.read(cx).text().to_owned())
     }
 
     /// Whether an alias field of the shown Accounts page has the keyboard.
@@ -498,7 +677,7 @@ impl RootView {
         let locked = self.accounts_admin_locked();
         let switching = self.accounts.switching(&host);
         let running = self.accounts.login_running(&host);
-        let list = self.accounts.accounts(&host);
+        let list = self.shown_accounts(&host);
         let now = Utc::now();
         let admin = !writing && !locked;
         let mut controls: Vec<(AccountsControl, bool)> = Vec::new();
@@ -525,8 +704,10 @@ impl RootView {
         if running {
             controls.push((AccountsControl::CancelLogin, admin));
         }
-        if let Some(auto) = self.accounts.auto(&host) {
-            let live = !writing;
+        if let Some(auto) = self.shown_auto(&host) {
+            // The block holds its values for Apply, so it never waits for
+            // the page's own write.
+            let live = true;
             let threshold = |up| accounts::threshold_step(auto.threshold_pct, up).is_some();
             let hysteresis = |up| accounts::hysteresis_step(auto.hysteresis_pct, up).is_some();
             controls.extend([
@@ -581,20 +762,11 @@ impl RootView {
                     cx,
                 );
             }
-            // The field takes keys; Enter and leaving it send.
+            // The field takes keys; its draft waits for OK or Apply.
             AccountsControl::Alias(_) => {}
             AccountsControl::Up(number) | AccountsControl::Down(number) => {
                 let up = matches!(control, AccountsControl::Up(_));
-                if let Some(order) =
-                    accounts::moved_order(self.accounts.accounts(&host), number, up)
-                {
-                    self.send_account_write(
-                        &host,
-                        WriteAction::Order,
-                        |request_id| ClientMessage::SetAccountOrder { order, request_id },
-                        cx,
-                    );
-                }
+                self.hold_moved_order(number, up, cx);
             }
             AccountsControl::Remove(number) => self.open_remove_confirm(number, cx),
             AccountsControl::AddLogin => {
@@ -832,116 +1004,20 @@ impl RootView {
     }
 
     /// A press of the auto-switch block's `control`, while the host
-    /// reports an auto-switch state.
+    /// reports an auto-switch state: the value it picks, or a stepper's
+    /// step from the shown value, held for Apply; a value pressed back to
+    /// the daemon's holds nothing.
     fn press_auto_control(&mut self, control: AccountsControl, cx: &mut Context<Self>) {
         let host = self.settings_host.clone();
-        let auto = self.accounts.auto(&host).cloned();
-        match control {
-            AccountsControl::AutoSwitch => {
-                if let Some(auto) = auto {
-                    self.send_account_write(
-                        &host,
-                        WriteAction::AutoSwitch,
-                        |request_id| ClientMessage::SetAutoSwitch {
-                            enabled: Some(!auto.enabled),
-                            threshold_pct: None,
-                            request_id,
-                        },
-                        cx,
-                    );
-                }
-            }
-            AccountsControl::ThresholdDown | AccountsControl::ThresholdUp => {
-                let up = control == AccountsControl::ThresholdUp;
-                if let Some(threshold) =
-                    auto.and_then(|auto| accounts::threshold_step(auto.threshold_pct, up))
-                {
-                    self.send_account_write(
-                        &host,
-                        WriteAction::AutoSwitch,
-                        |request_id| ClientMessage::SetAutoSwitch {
-                            enabled: None,
-                            threshold_pct: Some(threshold),
-                            request_id,
-                        },
-                        cx,
-                    );
-                }
-            }
-            AccountsControl::HysteresisDown | AccountsControl::HysteresisUp => {
-                let up = control == AccountsControl::HysteresisUp;
-                if let Some(hysteresis) =
-                    auto.and_then(|auto| accounts::hysteresis_step(auto.hysteresis_pct, up))
-                {
-                    self.send_rules(
-                        Rules {
-                            hysteresis_pct: Some(hysteresis),
-                            ..Rules::default()
-                        },
-                        cx,
-                    );
-                }
-            }
-            AccountsControl::Cooldown(secs) => {
-                if auto.is_some_and(|auto| auto.cooldown_secs != secs) {
-                    self.send_rules(
-                        Rules {
-                            cooldown_secs: Some(secs),
-                            ..Rules::default()
-                        },
-                        cx,
-                    );
-                }
-            }
-            AccountsControl::Strategy(strategy) => {
-                if auto.is_some_and(|auto| auto.strategy != strategy) {
-                    self.send_rules(
-                        Rules {
-                            strategy: Some(strategy),
-                            ..Rules::default()
-                        },
-                        cx,
-                    );
-                }
-            }
-            AccountsControl::Window(minutes) => {
-                if auto.is_some_and(|auto| auto.rate_window_minutes != Some(minutes)) {
-                    self.send_rules(
-                        Rules {
-                            rate_window_minutes: Some(minutes),
-                            ..Rules::default()
-                        },
-                        cx,
-                    );
-                }
-            }
-            AccountsControl::Switch(_)
-            | AccountsControl::Alias(_)
-            | AccountsControl::Up(_)
-            | AccountsControl::Down(_)
-            | AccountsControl::Remove(_)
-            | AccountsControl::AddLogin
-            | AccountsControl::LogIn
-            | AccountsControl::CancelLogin => {}
+        let (Some(saved), Some(shown)) =
+            (self.accounts.auto(&host).cloned(), self.shown_auto(&host))
+        else {
+            return;
+        };
+        if let Some((value, saved)) = auto_hold(control, &shown, &saved) {
+            self.settings_pending.set_host(&host, value, saved.as_ref());
+            cx.notify();
         }
-    }
-
-    /// Sends the host Settings shows a `SetAutoSwitchRules` carrying
-    /// `rules`.
-    fn send_rules(&mut self, rules: Rules, cx: &mut Context<Self>) {
-        let host = self.settings_host.clone();
-        self.send_account_write(
-            &host,
-            WriteAction::Rules,
-            |request_id| ClientMessage::SetAutoSwitchRules {
-                hysteresis_pct: rules.hysteresis_pct,
-                cooldown_secs: rules.cooldown_secs,
-                strategy: rules.strategy,
-                rate_window_minutes: rules.rate_window_minutes,
-                request_id,
-            },
-            cx,
-        );
     }
 
     /// The Accounts page: the refusal of the last write, the account table
@@ -954,7 +1030,7 @@ impl RootView {
         let t = theme(cx);
         let host = self.settings_host.clone();
         let now = Utc::now();
-        let list = self.accounts.accounts(&host);
+        let list = self.shown_accounts(&host);
         let writing = self.accounts.writing(&host);
         let switching = self.accounts.switching(&host);
         let page = Page {
@@ -1233,7 +1309,7 @@ impl RootView {
     fn auto_section(&self, page: Page, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
         let block = section(ui_text_size(cx), ui_weight_shift(cx), AUTO_SECTION);
-        let Some(auto) = self.accounts.auto(&self.settings_host) else {
+        let Some(auto) = self.shown_auto(&self.settings_host) else {
             return block.child(
                 div()
                     .driver_id(|| "settings-accounts-auto-missing".to_owned())
@@ -1241,12 +1317,11 @@ impl RootView {
                     .child(tagged_text("settings-accounts-auto-missing", AUTO_MISSING)),
             );
         };
-        let live = !page.writing;
         let switch = toggle(
             AccountsControl::AutoSwitch.control(),
             ToggleState {
                 checked: auto.enabled,
-                enabled: live,
+                enabled: true,
             },
             AUTO_TOGGLE_LABEL,
             page.focused,
@@ -1286,7 +1361,7 @@ impl RootView {
             page,
             cx,
         );
-        let lock = if live { RowLock::Live } else { RowLock::Dimmed };
+        let lock = RowLock::Live;
         let cooldown = choices(
             accounts::cooldown_segments(auto.cooldown_secs),
             AccountsControl::Cooldown,
@@ -1299,12 +1374,12 @@ impl RootView {
             accounts::window_segments(auto.rate_window_minutes),
             AccountsControl::Window,
         );
-        let paused = accounts::paused_line(Some(auto)).map(|line| {
+        let paused = accounts::paused_line(Some(&auto)).map(|line| {
             div()
                 .text_color(gpui::rgb(t.asking))
                 .child(tagged_text("settings-accounts-paused", line))
         });
-        let forecast = accounts::forecast(Some(auto), Utc::now(), &chrono::Local).map(|line| {
+        let forecast = accounts::forecast(Some(&auto), Utc::now(), &chrono::Local).map(|line| {
             div()
                 .driver_id(|| "settings-accounts-forecast".to_owned())
                 .text_color(gpui::rgb(t.text_2))
@@ -1329,12 +1404,141 @@ impl RootView {
 }
 
 /// The fields of a `SetAutoSwitchRules`; a field left out keeps its value.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 struct Rules {
     hysteresis_pct: Option<f64>,
     cooldown_secs: Option<u64>,
     strategy: Option<AutoSwitchStrategy>,
     rate_window_minutes: Option<u32>,
+}
+
+impl Rules {
+    /// `rule` set in its field.
+    const fn hold(&mut self, rule: AutoRule) {
+        match rule {
+            AutoRule::Hysteresis(pct) => self.hysteresis_pct = Some(pct),
+            AutoRule::Cooldown(secs) => self.cooldown_secs = Some(secs),
+            AutoRule::Strategy(strategy) => self.strategy = Some(strategy),
+            AutoRule::Window(minutes) => self.rate_window_minutes = Some(minutes),
+        }
+    }
+}
+
+/// A host's held Accounts page values, as Apply's messages carry them.
+#[derive(Default)]
+struct HeldAccountValues {
+    order: Option<Vec<u32>>,
+    enabled: Option<bool>,
+    threshold_pct: Option<f64>,
+    rules: Rules,
+}
+
+impl HeldAccountValues {
+    /// The Accounts page values among `values`; any other is left out.
+    fn of(values: Vec<HostPending>) -> Self {
+        let mut held = Self::default();
+        for value in values {
+            match value {
+                HostPending::AccountOrder(order) => held.order = Some(order),
+                HostPending::AutoSwitchEnabled(on) => held.enabled = Some(on),
+                HostPending::AutoSwitchThreshold(pct) => held.threshold_pct = Some(pct),
+                HostPending::AutoRule(rule) => held.rules.hold(rule),
+                _ => {}
+            }
+        }
+        held
+    }
+}
+
+/// `auto` with the held `value` over it, when it is an auto-switch value.
+fn held_over(auto: &mut AutoSwitchState, value: &HostPending) {
+    match *value {
+        HostPending::AutoSwitchEnabled(on) => auto.enabled = on,
+        HostPending::AutoSwitchThreshold(pct) => auto.threshold_pct = pct,
+        HostPending::AutoRule(AutoRule::Hysteresis(pct)) => auto.hysteresis_pct = pct,
+        HostPending::AutoRule(AutoRule::Cooldown(secs)) => auto.cooldown_secs = secs,
+        HostPending::AutoRule(AutoRule::Strategy(strategy)) => auto.strategy = strategy,
+        HostPending::AutoRule(AutoRule::Window(minutes)) => {
+            auto.rate_window_minutes = Some(minutes);
+        }
+        _ => {}
+    }
+}
+
+/// What a press of the auto-switch `control` holds over the `shown` state,
+/// and the same setting at the daemon's `saved` value, which holds nothing;
+/// `None` for a stepper end past its bound or a control of another block.
+fn auto_hold(
+    control: AccountsControl,
+    shown: &AutoSwitchState,
+    saved: &AutoSwitchState,
+) -> Option<(HostPending, Option<HostPending>)> {
+    let rule = |held: AutoRule, at: AutoRule| {
+        (HostPending::AutoRule(held), Some(HostPending::AutoRule(at)))
+    };
+    match control {
+        AccountsControl::AutoSwitch => Some((
+            HostPending::AutoSwitchEnabled(!shown.enabled),
+            Some(HostPending::AutoSwitchEnabled(saved.enabled)),
+        )),
+        AccountsControl::ThresholdDown | AccountsControl::ThresholdUp => {
+            let up = control == AccountsControl::ThresholdUp;
+            accounts::threshold_step(shown.threshold_pct, up).map(|pct| {
+                (
+                    HostPending::AutoSwitchThreshold(pct),
+                    Some(HostPending::AutoSwitchThreshold(saved.threshold_pct)),
+                )
+            })
+        }
+        AccountsControl::HysteresisDown | AccountsControl::HysteresisUp => {
+            let up = control == AccountsControl::HysteresisUp;
+            accounts::hysteresis_step(shown.hysteresis_pct, up).map(|pct| {
+                rule(
+                    AutoRule::Hysteresis(pct),
+                    AutoRule::Hysteresis(saved.hysteresis_pct),
+                )
+            })
+        }
+        AccountsControl::Cooldown(secs) => Some(rule(
+            AutoRule::Cooldown(secs),
+            AutoRule::Cooldown(saved.cooldown_secs),
+        )),
+        AccountsControl::Strategy(strategy) => Some(rule(
+            AutoRule::Strategy(strategy),
+            AutoRule::Strategy(saved.strategy),
+        )),
+        AccountsControl::Window(minutes) => Some((
+            HostPending::AutoRule(AutoRule::Window(minutes)),
+            saved
+                .rate_window_minutes
+                .map(|at| HostPending::AutoRule(AutoRule::Window(at))),
+        )),
+        AccountsControl::Switch(_)
+        | AccountsControl::Alias(_)
+        | AccountsControl::Up(_)
+        | AccountsControl::Down(_)
+        | AccountsControl::Remove(_)
+        | AccountsControl::AddLogin
+        | AccountsControl::LogIn
+        | AccountsControl::CancelLogin => None,
+    }
+}
+
+/// The accounts of `list` in the held `order`: those it names first, in
+/// its order, then any it leaves out in the daemon's order; a number it
+/// names that is not listed is skipped.
+fn in_held_order(list: &[AccountSnapshot], order: &[u32]) -> Vec<AccountSnapshot> {
+    let mut shown: Vec<AccountSnapshot> = order
+        .iter()
+        .filter_map(|number| list.iter().find(|account| account.number == *number))
+        .cloned()
+        .collect();
+    shown.extend(
+        list.iter()
+            .filter(|account| !order.contains(&account.number))
+            .cloned(),
+    );
+    shown
 }
 
 /// The name the Remove confirm shows for `account`: its alias, else its
@@ -1367,11 +1571,9 @@ fn choices<T>(
         .collect()
 }
 
-/// A −/+ stepper row; an end whose step leaves the bounds, or every end
-/// while a write is pending, is disabled.
+/// A −/+ stepper row; an end whose step leaves the bounds is disabled.
 fn stepper(stepper: Stepper, page: Page, cx: &mut Context<RootView>) -> Div {
     let t = theme(cx);
-    let live = !page.writing;
     let (down, down_ok) = stepper.down;
     let (up, up_ok) = stepper.up;
     let value = div()
@@ -1388,18 +1590,12 @@ fn stepper(stepper: Stepper, page: Page, cx: &mut Context<RootView>) -> Div {
             .child(settings_button(
                 down.control(),
                 "−",
-                live && down_ok,
+                down_ok,
                 page.focused,
                 cx,
             ))
             .child(value)
-            .child(settings_button(
-                up.control(),
-                "+",
-                live && up_ok,
-                page.focused,
-                cx,
-            )),
+            .child(settings_button(up.control(), "+", up_ok, page.focused, cx)),
     )
 }
 
