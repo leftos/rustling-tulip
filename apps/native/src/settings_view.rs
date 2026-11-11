@@ -2936,18 +2936,22 @@ impl RootView {
                 _ => {}
             }
         }
-        let (remote, dashboard) = self.apply_held_settings(host);
+        let (remote, dashboard, delete) = self.apply_held_settings(host);
         self.save_worktrees_root(host);
         if *host == HostKey::Local {
             self.apply_remote_access(remote);
         }
-        self.apply_dashboard(host, dashboard, edits, cx);
+        self.apply_dashboard(host, dashboard, edits, delete, cx);
     }
 
     /// `host`'s held keep-awake mode and agent toggles, sent; returns its
     /// held remote access switch and Dashboard values, which go out in one
-    /// message each.
-    fn apply_held_settings(&mut self, host: &HostKey) -> (Option<bool>, Vec<HostPending>) {
+    /// message each, and the key deletion its Dashboard page shows.
+    fn apply_held_settings(
+        &mut self,
+        host: &HostKey,
+    ) -> (Option<bool>, Vec<HostPending>, Option<String>) {
+        let live_delete = self.live_key_delete(host);
         let mut remote = None;
         let mut dashboard = Vec::new();
         for value in self.settings_pending.take_host(host) {
@@ -2969,7 +2973,7 @@ impl RootView {
                 other => dashboard.push(other),
             }
         }
-        (remote, dashboard)
+        (remote, dashboard, live_delete)
     }
 
     /// `msg` to `host` as a send of Apply, whose echo OK waits for.
@@ -7567,14 +7571,19 @@ impl RootView {
         })
     }
 
-    /// Clear deletes a stored key: one the daemon holds, rejected or not.
+    /// Clear deletes a stored key: the shown provider's, rejected or not.
     fn key_clear_enabled(&self) -> bool {
-        !self.summarizer_locked()
-            && matches!(
-                self.shown_summarizer()
-                    .and_then(SummarizerStatus::key_state),
-                Some(KeyState::Stored | KeyState::Rejected)
-            )
+        if self.summarizer_locked() {
+            return false;
+        }
+        let Some(provider) = self.shown_key_provider() else {
+            return false;
+        };
+        matches!(
+            self.shown_summarizer()
+                .and_then(|status| status.key_state_of(&provider)),
+            Some(KeyState::Stored | KeyState::Rejected)
+        )
     }
 
     /// Whether the Key row's button takes a press: Clear while the daemon
@@ -7594,12 +7603,13 @@ impl RootView {
     }
 
     /// The shown key's state: no key while its deletion is held, else the
-    /// daemon's.
+    /// shown provider's as the daemon reports it.
     fn shown_key_state(&self) -> Option<KeyState> {
         if self.held_key_delete().is_some() {
             return Some(KeyState::Missing);
         }
-        self.shown_summarizer()?.key_state()
+        let provider = self.shown_key_provider()?;
+        self.shown_summarizer()?.key_state_of(&provider)
     }
 
     /// Whether the shown host's Dashboard page holds a change Apply would
@@ -7817,20 +7827,34 @@ impl RootView {
     }
 
     /// The provider whose stored key a held deletion deletes on the shown
-    /// host, if one is held.
+    /// host, if one is held and the page shows it.
     fn held_key_delete(&self) -> Option<String> {
-        self.dashboard_pending(|value| match value {
-            HostPending::SummaryKeyDelete { provider } => Some(provider.clone()),
-            _ => None,
-        })
+        self.live_key_delete(&self.settings_host)
     }
 
-    /// Whether `host` holds a deletion of its stored summarizer key.
-    fn holds_key_delete(&self, host: &HostKey) -> bool {
-        self.settings_pending
+    /// `host`'s held key deletion, while its row draws it: the deletion is
+    /// for the provider shown as chosen, that provider takes a key, and the
+    /// key source shown is the stored one. One that is not stays held but
+    /// shows nowhere, counts for nothing and is never sent.
+    fn live_key_delete(&self, host: &HostKey) -> Option<String> {
+        let provider = self
+            .settings_pending
             .host(host)
             .iter()
-            .any(|value| matches!(value, HostPending::SummaryKeyDelete { .. }))
+            .find_map(|value| match value {
+                HostPending::SummaryKeyDelete { provider } => Some(provider.clone()),
+                _ => None,
+            })?;
+        if self.shown_provider_of(host).as_deref() != Some(provider.as_str()) {
+            return None;
+        }
+        let needs_key = self.summarizer_settings.status(host).is_some_and(|status| {
+            status
+                .providers
+                .iter()
+                .any(|entry| entry.id == provider && entry.needs_key)
+        });
+        (needs_key && self.pending_key_source(host) == KeySourceChoice::Stored).then_some(provider)
     }
 
     /// Whether summaries show as on: pending, else the daemon's.
@@ -7844,11 +7868,25 @@ impl RootView {
 
     /// The provider shown as chosen: pending, else the daemon's.
     fn shown_provider_id(&self, status: &SummarizerStatus) -> String {
-        self.dashboard_pending(|value| match value {
-            HostPending::SummaryProvider(id) => Some(id.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| status.settings.provider.clone())
+        self.shown_provider_of(&self.settings_host)
+            .unwrap_or_else(|| status.settings.provider.clone())
+    }
+
+    /// `host`'s provider shown as chosen: the pending one, else the one the
+    /// daemon saved.
+    fn shown_provider_of(&self, host: &HostKey) -> Option<String> {
+        self.settings_pending
+            .host(host)
+            .iter()
+            .find_map(|value| match value {
+                HostPending::SummaryProvider(id) => Some(id.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                self.summarizer_settings
+                    .status(host)
+                    .map(|status| status.settings.provider.clone())
+            })
     }
 
     /// The provider the shown host's typed key would be saved under.
@@ -7913,7 +7951,7 @@ impl RootView {
         let tab = self.dashboard_settings_tabs.get(host);
         let variable = tab.map_or("", |tab| tab.variable_draft.trim());
         let mut rows = self.dashboard_toggle_rows(host, variable);
-        if self.holds_key_delete(host) {
+        if self.live_key_delete(host).is_some() {
             rows.push(PendingEdit {
                 row: PendingRow::Toggle,
                 valid: true,
@@ -7962,13 +8000,15 @@ impl RootView {
     }
 
     /// Apply reaching `host`'s Dashboard: its pending toggles, choices,
-    /// variable and cap as one settings message, then a typed key, sent as
-    /// the key Save sent before and the field emptied.
+    /// variable and cap as one settings message, then `delete`, the key
+    /// deletion its page shows, then a typed key, sent as the key Save sent
+    /// before and the field emptied.
     fn apply_dashboard(
         &mut self,
         host: &HostKey,
         held: Vec<HostPending>,
         rows: &[PendingEdit],
+        delete: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(mut settings) = self.summarizer_settings.next_settings(host).cloned() else {
@@ -7976,15 +8016,12 @@ impl RootView {
         };
         let has = |row: PendingRow| rows.iter().any(|edit| edit.row == row);
         let mut changed = false;
-        let mut delete = None;
         for value in held {
-            match value {
-                HostPending::SummaryKeyDelete { provider } => delete = Some(provider),
-                other => {
-                    take_dashboard_value(&mut settings, other);
-                    changed = true;
-                }
+            if matches!(value, HostPending::SummaryKeyDelete { .. }) {
+                continue;
             }
+            take_dashboard_value(&mut settings, value);
+            changed = true;
         }
         let tab = self.dashboard_settings_tabs.get(host);
         let variable = tab
@@ -8076,10 +8113,7 @@ impl RootView {
                 .drop_key_delete(&self.settings_host, &provider);
             return;
         }
-        let Some(provider) = self
-            .shown_summarizer()
-            .map(|status| status.settings.provider.clone())
-        else {
+        let Some(provider) = self.shown_key_provider() else {
             return;
         };
         if self.summarizer_locked() || !self.key_clear_enabled() {

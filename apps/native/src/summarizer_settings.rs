@@ -30,11 +30,11 @@ impl SummarizerStatus {
             .find(|provider| provider.id == self.settings.provider)
     }
 
-    /// The state of the chosen provider's key, when the daemon reports one.
-    pub(crate) fn key_state(&self) -> Option<KeyState> {
+    /// The state of `provider`'s key, when the daemon reports one.
+    pub(crate) fn key_state_of(&self, provider: &str) -> Option<KeyState> {
         self.keys
             .iter()
-            .find(|key| key.provider == self.settings.provider)
+            .find(|key| key.provider == provider)
             .map(|key| key.state)
     }
 }

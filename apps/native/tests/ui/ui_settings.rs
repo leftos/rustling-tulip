@@ -4806,7 +4806,7 @@ fn typing_a_key_after_delete_sends_the_key(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_key_typed_for_another_provider_keeps_the_held_deletion(cx: &mut TestAppContext) {
+fn a_deletion_held_for_another_provider_is_not_sent(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = dashboard_tab(
         cx,
@@ -4824,12 +4824,127 @@ fn a_key_typed_for_another_provider_keeps_the_held_deletion(cx: &mut TestAppCont
     h.click_on("settings-apply");
     assert_eq!(
         key_sets(&h.sent()),
-        [
-            ("p1".to_owned(), None),
-            ("p2".to_owned(), Some("sk-9".to_owned()))
-        ],
-        "the old provider's key is deleted and the new one's saved"
+        [("p2".to_owned(), Some("sk-9".to_owned()))],
+        "only the shown provider's key is saved; the hidden deletion is not sent"
     );
+}
+
+/// A status offering two keyed providers, `p1` chosen.
+fn two_keyed_providers() -> support::SummarizerStatusBuilder {
+    support::summarizer_status()
+        .offers("p1", "First model", true, CLI_PRIVACY)
+        .offers("p2", "Second model", true, KEYED_PRIVACY)
+        .chosen("p1")
+}
+
+#[gpui::test]
+fn a_held_deletion_shows_only_on_its_providers_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, two_keyed_providers());
+    h.click_on("settings-dashboard-key-clear");
+    h.click_on("settings-dashboard-provider-p2");
+    assert_eq!(
+        key_action(&mut h),
+        "Delete stored key",
+        "the other provider's row holds no deletion"
+    );
+    assert_eq!(
+        key_state_line(&mut h),
+        None,
+        "the row reads the other provider's key"
+    );
+    h.click_on("settings-dashboard-provider-p1");
+    assert_eq!(
+        key_action(&mut h),
+        "Undo delete",
+        "the deletion shows again"
+    );
+    assert_eq!(
+        key_state_line(&mut h),
+        Some("No key"),
+        "the row reads the key as deleted"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(
+        key_sets(&h.sent()),
+        [("p1".to_owned(), None)],
+        "Apply deletes the key the row shows"
+    );
+}
+
+#[gpui::test]
+fn a_deletion_hidden_by_the_env_key_source_is_not_sent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    h.click_on("settings-dashboard-key-clear");
+    h.sent();
+    h.click_on("settings-dashboard-key-source-env");
+    h.click_on("settings-dashboard-env-variable");
+    type_text(&mut h, "MY_KEY");
+    h.keys("enter");
+    h.click_on("settings-apply");
+    let sent = h.sent();
+    assert_eq!(key_sets(&sent), [], "the hidden deletion is not sent");
+    assert_eq!(
+        summarizer_sets(&sent).len(),
+        1,
+        "the key source change is sent"
+    );
+}
+
+#[gpui::test]
+fn a_deletion_hidden_by_a_keyless_provider_is_not_sent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    h.click_on("settings-dashboard-key-clear");
+    h.sent();
+    h.click_on("settings-dashboard-provider-cli");
+    assert_eq!(
+        apply_gate(&mut h),
+        (true, true),
+        "the provider change pends"
+    );
+    h.click_on("settings-apply");
+    let sent = h.sent();
+    assert_eq!(key_sets(&sent), [], "the hidden deletion is not sent");
+    assert_eq!(
+        summarizer_sets(&sent)
+            .iter()
+            .map(|settings| settings.provider.clone())
+            .collect::<Vec<_>>(),
+        ["cli".to_owned()],
+        "the settings sent choose the new provider"
+    );
+}
+
+#[gpui::test]
+fn a_press_on_another_providers_row_leaves_the_held_deletion(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, two_keyed_providers());
+    h.click_on("settings-dashboard-key-clear");
+    h.click_on("settings-dashboard-provider-p2");
+    assert_eq!(
+        key_action(&mut h),
+        "Delete stored key",
+        "the other provider's row offers no Undo"
+    );
+    h.click_on("settings-dashboard-key-clear");
+    h.click_on("settings-dashboard-provider-p1");
+    assert_eq!(
+        key_action(&mut h),
+        "Undo delete",
+        "the held deletion still shows"
+    );
+    assert_eq!(
+        key_state_line(&mut h),
+        Some("No key"),
+        "and reads as deleted"
+    );
+    h.click_on("settings-dashboard-key-clear");
+    assert_eq!(key_action(&mut h), "Delete stored key", "Undo drops it");
+    assert_eq!(apply_gate(&mut h), (false, false), "nothing is held");
+    h.click_on("settings-apply");
+    assert_eq!(key_sets(&h.sent()), [], "nothing is deleted");
 }
 
 #[gpui::test]
