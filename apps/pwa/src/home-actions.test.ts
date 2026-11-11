@@ -63,6 +63,8 @@ function unused(): () => string {
 /** The repo and workspace a launch names on the wire. */
 const REPO: ContainerRef = { kind: "repo", id: "a" };
 const WORKSPACE: ContainerRef = { kind: "workspace", id: "w" };
+/** A second repo, so a test can check one container's refusal is kept when another's launch starts. */
+const OTHER_REPO: ContainerRef = { kind: "repo", id: "b" };
 
 /** The clock a launch tap reads; every deadline below counts from it. */
 const NOW = 1_700_000_000_000;
@@ -512,6 +514,42 @@ test("home_keep_launches_keeps_the_pending_launch_and_drops_the_errors", () => {
   expect(kept.errors.size).toBe(0);
   expect(kept.armed).toBeNull();
   expect(kept.pending).toEqual([]);
+});
+
+test("home_a_new_session_clears_a_launch_last_refusal_on_its_container", () => {
+  const before: HomeActions = {
+    ...NO_ACTIONS,
+    launchErrors: new Map([
+      [containerKey(REPO), "alpha has no last launch yet."],
+      [containerKey(OTHER_REPO), "beta has no last launch yet."],
+    ]),
+  };
+
+  const started = newSession(before, REPO, counter(), NOW);
+
+  expect(started.message).toMatchObject({ type: "new_session", target: REPO });
+  expect(started.state.launchErrors.has(containerKey(REPO))).toBe(false);
+  expect(started.state.launchErrors.get(containerKey(OTHER_REPO))).toBe(
+    "beta has no last launch yet.",
+  );
+});
+
+test("home_a_launch_last_clears_a_new_session_refusal_on_its_container", () => {
+  const before: HomeActions = {
+    ...NO_ACTIONS,
+    newSessionErrors: new Map([
+      [containerKey(REPO), "alpha can't start a new session."],
+      [containerKey(OTHER_REPO), "beta can't start a new session."],
+    ]),
+  };
+
+  const started = launchLast(before, REPO, counter(), NOW);
+
+  expect(started.message).toMatchObject({ type: "launch_last", target: REPO });
+  expect(started.state.newSessionErrors.has(containerKey(REPO))).toBe(false);
+  expect(started.state.newSessionErrors.get(containerKey(OTHER_REPO))).toBe(
+    "beta can't start a new session.",
+  );
 });
 
 test("home_resend_keeps_the_same_id_on_a_host_that_launches", () => {

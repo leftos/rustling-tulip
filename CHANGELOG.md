@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- On the phone's Home, starting Launch last or New session clears an earlier refusal of the other kind shown for that repo or workspace.
+
 ## v0.12.0-alpha
 
 ### Highlights

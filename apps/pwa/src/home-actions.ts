@@ -317,7 +317,10 @@ export function newSession(
   return startLaunch(state, "new_session", target, newRequestId, now);
 }
 
-/** A launch of `kind` on `target`, refused while any launch on that container waits. */
+/**
+ * A launch of `kind` on `target`, refused while any launch on that container
+ * waits. A start clears both kinds' refusals for the container.
+ */
 function startLaunch(
   state: HomeActions,
   kind: LaunchKind,
@@ -337,7 +340,8 @@ function startLaunch(
     lastSentAt: now,
   };
   const errors = launchErrorMaps(state);
-  errors[kind].delete(key);
+  errors.launch_last.delete(key);
+  errors.new_session.delete(key);
   return {
     message: launchMessage(launch),
     state: { ...withLaunchErrorMaps(state, errors), launches: [...state.launches, launch] },
