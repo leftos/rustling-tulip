@@ -8,14 +8,11 @@
 
 ## Remote update
 
-- [ ] RT-1308 Prove remote update on a second machine, both directions (sub-issue of RT-1298) · release vNext
-  - [/] RT-1406 Remote update proof B: gated install seam and a full live update · release vNext
-  - [ ] RT-1407 Remote update proof C: host-to-client live spec · release vNext
-  - [ ] RT-1408 Remote update proof D: real Windows update on the buildbox · release vNext
-  - [ ] RT-1409 Remote update proof E: real macOS update on the Mac mini · release vNext
 - [ ] RT-1316 Merge feat/remote-update to main (#206) (sub-issue of RT-1298)
 - [ ] RT-1336 Keep one process list and one update mutex in the daemon
 - [ ] RT-1337 Release a host's update guard when its installer never stops the daemon
+- [ ] RT-1431 Clear a host update in flight when apply-update cannot stop the daemon
+- [ ] RT-1432 Start the new daemon after an update even if the relaunched app crashes
 
 ## Wave 17 — Themes
 
@@ -290,6 +287,8 @@
 - [ ] RT-1354 Document RUSTLING_TULIP_BIN_TEMPLATES in the environment variables table
 - [ ] RT-1394 Repoint four issues that cite a missing docs/plans/reboot-resume.md
 - [ ] RT-1395 Reword the fake ssh README: it runs any rustling-tulipd verb, not only bridge
+- [ ] RT-1418 Repoint five issues that link the deleted reboot-resume design
+- [ ] RT-1428 Note the session-driving verbs' quirks in the daemon CLI doc
 
 ## Build tooling
 
@@ -362,6 +361,8 @@
 ## Agent CLIs
 
 - [ ] RT-48 Update an agent CLI before launching it
+- [/] RT-1425 Pass custom CLI arguments to a new session, beside its env vars · release vNext
+- [ ] RT-1434 Refuse a bundle of short flags that holds a reserved one
 
 ## Agent harnesses
 
@@ -390,8 +391,7 @@
 - [ ] RT-124 Fetch every file a turn touched as one folder
 - [ ] RT-125 Launch a session from the phone: launch last again, a preset, or /nextup in a repo · release vNext
   - [ ] RT-1383 Start a /nextup session from the phone in any repo or workspace · release vNext
-  - [ ] RT-1384 Launch a no-input preset from the phone · release vNext
-    - [ ] RT-1411 List and launch no-input presets on phone Home · release vNext
+    - [ ] RT-1422 Pick a repo or workspace on phone Home and start /nextup there · release vNext
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit
 - [ ] RT-661 Plan file-type previewers for the in-app viewer: images, PDF, tables and more
@@ -399,6 +399,7 @@
 
 ## Backlog
 
+- [ ] RT-1426 Drop shell-integration dots on a remote pane's cls
 - [ ] RT-59 Split the oversized daemon, protocol and native UI source files
 - [ ] RT-291 Make the daemon's default log filter match its rustling_tulipd targets
 - [ ] RT-785 Disable core.fsmonitor on the daemon's own git calls
@@ -608,7 +609,6 @@
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading
 - [ ] RT-1271 Close the remaining gaps in turn-end and pending-prompt reading
 - [ ] RT-1284 Close the remaining edges of how a prompt ends · release vNext
-- [ ] RT-1288 Fix the polish the v0.11.0-alpha smoke run saw · release vNext
 - [ ] RT-1290 Touch no disk for a client's worktree_path until it is vouched for
 - [ ] RT-1291 Take the worktree size walk off the connection's reader
 - [ ] RT-1293 Keep serde's message out of the remaining parse failures: workspace file, CLI, client
@@ -653,6 +653,8 @@
 - [ ] RT-1414 Let the live remote-update refusal specs pass on an elevated run
 - [ ] RT-1416 Check the host-update sandbox switch before the daemon's startup work
 - [ ] RT-1417 Read RUSTLING_TULIP_CONFIG_DIR the same way everywhere, non-Unicode values included
+- [ ] RT-1436 Focus an Advanced text field in the spawn dialog on click
+- [ ] RT-1437 Hide a Settings field by its rule while a provider change is pending
 
 ## Design files
 
@@ -680,7 +682,7 @@
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
 - [remote-access.md](remote-access.md) — Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
 - [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1361, RT-1362, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
-- [remote-update.md](remote-update.md) — RT-1308, RT-1353, RT-1355, RT-1397, Remote update
+- [remote-update.md](remote-update.md) — RT-1353, RT-1355, RT-1397, Remote update
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792
 - [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406
