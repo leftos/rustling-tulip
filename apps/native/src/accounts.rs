@@ -706,6 +706,11 @@ pub(crate) struct WindowLine {
     pub(crate) used_up: bool,
 }
 
+/// The width of a usage line's label column, at the UI text size, so every
+/// line's bar and percentage line up whatever its label ("5h", "7d",
+/// "Fable 7d").
+pub(crate) const WINDOW_LABEL_WIDTH: f32 = 60.0;
+
 /// A row's Switch button.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SwitchButton {

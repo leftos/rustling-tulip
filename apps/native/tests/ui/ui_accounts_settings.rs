@@ -354,6 +354,38 @@ fn the_page_shows_a_model_limit_in_use(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn settings_accounts_lines_up_usage_lines_of_any_label(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(
+        &mut h,
+        vec![
+            account(1, "main")
+                .active()
+                .seven_day(40.0)
+                .model_limit("Fable", 37.0)
+                .build(),
+        ],
+        None,
+    );
+    assert!(
+        drawn(&mut h, "settings-accounts-7d-1=40%"),
+        "the seven-day line is drawn"
+    );
+    assert!(
+        drawn(&mut h, "settings-accounts-fable-7d-1=37%"),
+        "the model limit's line is drawn"
+    );
+    let seven_day = h.bounds("settings-accounts-7d-1=40%");
+    let model = h.bounds("settings-accounts-fable-7d-1=37%");
+    assert_eq!(
+        seven_day.origin.x + seven_day.size.width,
+        model.origin.x + model.size.width,
+        "the model limit's percentage ends where the seven-day line's does"
+    );
+}
+
+#[gpui::test]
 fn switch_on_the_page_sends_switch_account(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);

@@ -1669,8 +1669,10 @@ fn window_line(
         .gap(px(8.0))
         .child(
             div()
-                .min_w(px(18.0))
+                .w(ui_px(cx, accounts::WINDOW_LABEL_WIDTH))
                 .flex_none()
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .text_size(ui_px(cx, 11.0))
                 .text_color(gpui::rgb(t.subtle))
                 .child(label.to_owned()),

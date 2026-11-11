@@ -147,6 +147,37 @@ fn the_popover_shows_a_model_limit_in_use(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_popover_lines_up_usage_lines_of_any_label(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    popover(
+        &mut h,
+        vec![
+            account(1, "main")
+                .active()
+                .seven_day(40.0)
+                .model_limit("Fable", 37.0)
+                .build(),
+        ],
+    );
+    assert!(
+        drawn(&mut h, "accounts-7d-1=40%"),
+        "the seven-day line is drawn"
+    );
+    assert!(
+        drawn(&mut h, "accounts-fable-7d-1=37%"),
+        "the model limit's line is drawn"
+    );
+    let seven_day = h.bounds("accounts-7d-1=40%");
+    let model = h.bounds("accounts-fable-7d-1=37%");
+    assert_eq!(
+        seven_day.origin.x + seven_day.size.width,
+        model.origin.x + model.size.width,
+        "the model limit's percentage ends where the seven-day line's does"
+    );
+}
+
+#[gpui::test]
 fn the_footer_chip_follows_the_focused_panes_host(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = support::remote_in_pane(
