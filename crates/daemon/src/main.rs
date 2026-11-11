@@ -29,6 +29,7 @@ mod daemon_id;
 mod dashboard;
 mod detach;
 mod devices;
+mod dispatch_runs;
 mod env_secrets;
 mod file_fetch;
 mod file_tail;

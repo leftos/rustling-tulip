@@ -729,6 +729,12 @@ pub trait Agent: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// The folder where this agent's dispatch tool registers its live runs, one file per run, if it
+    /// has one. The daemon watches it unless `RUSTLING_TULIP_DISPATCH_DIR` names another.
+    fn live_runs_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// The hook files and argv an interactive spawn of this CLI carries, or an
     /// empty plan for a CLI that takes none. The daemon writes the plan's
     /// files into the session's own directory and appends the plan's args to
@@ -1021,6 +1027,9 @@ pub trait AgentPlugin: Send + Sync {
     /// See [`Agent::parse_headless_line`].
     fn parse_headless_line(&self, line: &str) -> Vec<HeadlessEvent>;
 
+    /// See [`Agent::live_runs_dir`].
+    fn live_runs_dir(&self) -> Option<PathBuf>;
+
     /// [`Agent::hook_plan`] over `opts` decoded.
     ///
     /// # Errors
@@ -1269,6 +1278,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn parse_headless_line(&self, line: &str) -> Vec<HeadlessEvent> {
         Agent::parse_headless_line(self, line)
+    }
+
+    fn live_runs_dir(&self) -> Option<PathBuf> {
+        Agent::live_runs_dir(self)
     }
 
     fn hook_plan(&self, opts: &OptionValues, shim: &HookShim<'_>) -> Result<HookPlan, AgentError> {

@@ -34,6 +34,7 @@ use agent_api::{
     SummarizerSpec, TracerRun, TranscriptLineFacts, UserHooksState, ViewGoal, ViewReading,
     ViewStep, hook_vocabulary, workspace_prelude,
 };
+use directories::UserDirs;
 use options::{ClaudeProvider, Effort, PermissionMode};
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, BypassChoice, CharRange,
@@ -42,12 +43,17 @@ use protocol::{
     ShiftEnter, SpawnPlacement, TitleRules,
 };
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tracing::debug;
 
 /// The instruction files the workspace prelude names.
 const INSTRUCTION_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
+
+/// The variable that moves the dispatch tool's log folder; its live runs sit
+/// in `live` under it.
+const DISPATCH_LOG_DIR_VAR: &str = "DISPATCH_LOG_DIR";
 
 /// The model a `DeepSeek` spawn passes as `--model` when it names none.
 pub const DEEPSEEK_MODEL: &str = "deepseek-flash";
@@ -280,6 +286,17 @@ fn effort_field() -> OptionField {
     }
 }
 
+/// The dispatch tool's live-run folder from the log-folder override `log_dir`
+/// ([`DISPATCH_LOG_DIR_VAR`]) and the tool's default home folder `home`: `live`
+/// under the override when it is set and not empty, else under `dispatch` in
+/// the home. `None` when neither is known.
+fn live_runs_dir_from(log_dir: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+    match log_dir.filter(|value| !value.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir).join("live")),
+        None => home.map(|home| home.join("dispatch").join("live")),
+    }
+}
+
 impl Agent for ClaudePlugin {
     type Options = ClaudeOptions;
 
@@ -293,6 +310,16 @@ impl Agent for ClaudePlugin {
 
     fn default_program(&self) -> &'static str {
         "claude"
+    }
+
+    /// `live` under the dispatch tool's log folder, [`DISPATCH_LOG_DIR_VAR`],
+    /// else under the tool's own default, the user's `<home>/.claude`, which
+    /// ignores the config dir the transcripts follow.
+    fn live_runs_dir(&self) -> Option<PathBuf> {
+        live_runs_dir_from(
+            std::env::var_os(DISPATCH_LOG_DIR_VAR),
+            UserDirs::new().map(|dirs| dirs.home_dir().join(".claude")),
+        )
     }
 
     /// `fake/`'s shim, relative to the workspace root, with Claude Code's
@@ -843,6 +870,36 @@ struct UsageInfo {
 mod tests {
     use super::*;
     use protocol::OptionValues;
+    use std::ffi::OsString;
+
+    #[test]
+    fn live_runs_dir_honours_dispatch_log_dir() {
+        assert_eq!(
+            live_runs_dir_from(Some("X:/logs".into()), Some(PathBuf::from("H:/home"))),
+            Some(PathBuf::from("X:/logs/live"))
+        );
+    }
+
+    #[test]
+    fn live_runs_dir_defaults_under_the_claude_home() {
+        assert_eq!(
+            live_runs_dir_from(None, Some(PathBuf::from("H:/home"))),
+            Some(PathBuf::from("H:/home/dispatch/live"))
+        );
+    }
+
+    #[test]
+    fn live_runs_dir_is_none_without_a_home() {
+        assert_eq!(live_runs_dir_from(None, None), None);
+    }
+
+    #[test]
+    fn live_runs_dir_counts_an_empty_dispatch_log_dir_as_unset() {
+        assert_eq!(
+            live_runs_dir_from(Some(OsString::new()), Some(PathBuf::from("H:/home"))),
+            Some(PathBuf::from("H:/home/dispatch/live"))
+        );
+    }
 
     /// The compiled regex of the title screen rule named `name`.
     fn title_rule(name: &str) -> regex::Regex {

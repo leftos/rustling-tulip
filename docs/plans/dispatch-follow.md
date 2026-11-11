@@ -22,8 +22,8 @@ Each run folder already holds a `run.json` the tool writes before the spawn (`ru
 
 The daemon resolves one folder, in order:
 
-1. `RUSTLING_TULIP_DISPATCH_DIR` when set and non-empty (made absolute against the current dir). The live tier and driven runs point it under `.tmp` (section 13).
-2. Else the first folder a registered agent plugin names through a new defaulted `Agent` method (`live_runs_dir()`, `None` by default; the `AgentPlugin` slot and blanket adapter carry it). The Claude plugin returns `$DISPATCH_LOG_DIR/live` when that variable is set, else `<Claude home>/dispatch/live`, using the home it already resolves for transcripts (`transcripts::own_claude_home`, which honours `CLAUDE_CONFIG_DIR`).
+1. `RUSTLING_TULIP_DISPATCH_DIR` when set and non-empty (made absolute against the current dir). The live tier and driven runs point it under `.tmp` (section 13). A set value that cannot be made absolute leaves no folder, never the agent's: an isolated daemon must not read the owner's real runs.
+2. Else the first folder a registered agent plugin names through a new defaulted `Agent` method (`live_runs_dir()`, `None` by default; the `AgentPlugin` slot and blanket adapter carry it). The Claude plugin returns `$DISPATCH_LOG_DIR/live` when that variable is set, else `<user home>/.claude/dispatch/live`: the dispatch tool's own rule (`log.py`'s `log_dir()`), which ignores `CLAUDE_CONFIG_DIR`, so the plugin does too rather than following the config dir its transcripts use.
 3. Else no folder: the daemon runs no watcher and does not list the feature (section 5).
 
 The resolution lives in `crates/daemon/src/paths.rs` as `resolve_dispatch_live_dir() -> Option<PathBuf>`, beside `resolve_push_dir` and `resolve_tailnet_dir`. The daemon creates the folder before watching it, since a `notify` watch on a missing folder fails.
@@ -252,7 +252,7 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: `crates/agents/api/src/lib.rs`, `crates/agents/claude/src/lib.rs`, `crates/daemon/src/stream_state.rs` (new), `crates/daemon/src/headless.rs`, `crates/daemon/src/session.rs`, `crates/daemon/src/main.rs`.
   - Proof: `gate … -- cargo nextest run -p agent-api -p agent-claude -p daemon --cargo-profile test-release -E 'test(/headless|stream_state/)'`, then `.\rt.ps1 clippy` for the seam check.
   - Waits on: nothing. Hotspot: none.
-- [ ] **DF.3 Live folder and live-run file parse.** `Agent::live_runs_dir()` (default `None`, implemented by the Claude plugin), `resolve_dispatch_live_dir()` with `RUSTLING_TULIP_DISPATCH_DIR`, and the schema-1 parse (`.tmp` and `.stop` ignored, unknown schema skipped, `agent` defaulted).
+- [x] **DF.3 Live folder and live-run file parse.** `Agent::live_runs_dir()` (default `None`, implemented by the Claude plugin), `resolve_dispatch_live_dir()` with `RUSTLING_TULIP_DISPATCH_DIR`, and the schema-1 parse (`.tmp` and `.stop` ignored, unknown schema skipped, `agent` defaulted).
   - Files: `crates/agents/api/src/lib.rs`, `crates/agents/claude/src/lib.rs`, `crates/daemon/src/paths.rs`, `crates/daemon/src/dispatch_runs.rs` (new, parse only), `crates/daemon/src/main.rs`.
   - Proof: `gate … -- cargo nextest run -p agent-claude -p daemon --cargo-profile test-release -E 'test(/dispatch_runs::parse|dispatch_dir|live_runs_dir/)'`, then `.\rt.ps1 clippy`.
   - Waits on: DF.2 (same agent files). Hotspot: none.

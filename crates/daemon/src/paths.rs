@@ -2,7 +2,9 @@
 
 use anyhow::Context as _;
 use daemon_client::profile::{self, Overrides, Profile};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct Dirs {
@@ -219,6 +221,10 @@ mod dir_tests {
 }
 
 #[cfg(all(test, windows))]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert the resolved override is present"
+)]
 mod tests {
     use super::*;
 
@@ -244,6 +250,43 @@ mod tests {
     fn leaves_volume_guid_alone() {
         let p = r"\\?\Volume{12345678-1234-1234-1234-123456789012}\dir";
         assert_eq!(simplify_path(Path::new(p)), PathBuf::from(p));
+    }
+
+    #[test]
+    fn dispatch_dir_env_override_wins() {
+        let root = if cfg!(windows) { r"C:\logs" } else { "/logs" };
+        assert_eq!(
+            dispatch_live_dir_from(Some(root.into()), [Some(PathBuf::from("plugin"))]),
+            Some(PathBuf::from(root))
+        );
+        let relative = dispatch_live_dir_from(Some("logs".into()), [Some(PathBuf::from("plugin"))])
+            .expect("a relative override is made absolute");
+        assert!(relative.is_absolute());
+        assert!(relative.ends_with("logs"));
+    }
+
+    #[test]
+    fn dispatch_dir_empty_var_counts_as_unset() {
+        assert_eq!(
+            dispatch_live_dir_from(Some(OsString::new()), [Some(PathBuf::from("plugin"))]),
+            Some(PathBuf::from("plugin"))
+        );
+    }
+
+    #[test]
+    fn dispatch_dir_falls_back_to_the_first_plugin_folder() {
+        assert_eq!(
+            dispatch_live_dir_from(
+                None,
+                [None, Some(PathBuf::from("a")), Some(PathBuf::from("b"))]
+            ),
+            Some(PathBuf::from("a"))
+        );
+    }
+
+    #[test]
+    fn dispatch_dir_is_none_without_either() {
+        assert_eq!(dispatch_live_dir_from(None, [None]), None);
     }
 }
 
@@ -390,6 +433,46 @@ pub fn resolve_tailnet_dir() -> anyhow::Result<PathBuf> {
 /// push request ([`crate::push::ensure_folder`]).
 pub fn resolve_push_dir() -> anyhow::Result<PathBuf> {
     Ok(profile::roots()?.1.push)
+}
+
+/// The variable that names the dispatch tool's live-run folder.
+#[expect(dead_code, reason = "read by the dispatch-run watcher (DF.5)")]
+pub const DISPATCH_DIR_VAR: &str = "RUSTLING_TULIP_DISPATCH_DIR";
+
+/// The dispatch tool's live-run folder: `RUSTLING_TULIP_DISPATCH_DIR` when set
+/// and not empty (made absolute against the current dir), else the first folder
+/// a registered agent names, else none, and the daemon follows no dispatch
+/// runs. An override that cannot be made absolute answers none rather than
+/// another folder, so an isolated run never reads the owner's real runs.
+/// Nothing is created here.
+#[expect(dead_code, reason = "read by the dispatch-run watcher (DF.5)")]
+#[must_use]
+pub fn resolve_dispatch_live_dir() -> Option<PathBuf> {
+    dispatch_live_dir_from(
+        std::env::var_os(DISPATCH_DIR_VAR),
+        agent_registry::all()
+            .iter()
+            .map(|plugin| plugin.live_runs_dir()),
+    )
+}
+
+/// [`resolve_dispatch_live_dir`] over an explicit override `var`, taking the
+/// first folder the registered agents name when the override is unset or
+/// empty. A set override that cannot be made absolute answers none.
+fn dispatch_live_dir_from(
+    var: Option<OsString>,
+    plugin_dirs: impl IntoIterator<Item = Option<PathBuf>>,
+) -> Option<PathBuf> {
+    match var.filter(|value| !value.is_empty()) {
+        Some(dir) => match std::path::absolute(Path::new(&dir)) {
+            Ok(dir) => Some(dir),
+            Err(err) => {
+                warn!(%err, "dispatch dir override could not be made absolute; following no dispatch runs");
+                None
+            }
+        },
+        None => plugin_dirs.into_iter().flatten().next(),
+    }
 }
 
 /// The summarizer's working folder by the profile, created if missing: an
