@@ -1388,6 +1388,7 @@ mod tests {
                 agent: AgentId("claude".to_owned()),
                 options: protocol::OptionValues::new(),
             }),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         });
         let mut value = serde_json::to_value(&trusted).expect("serialize the meta");
@@ -1570,6 +1571,7 @@ mod tests {
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
             agent: Some(options.clone()),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         };
         let meta = meta_from_record(

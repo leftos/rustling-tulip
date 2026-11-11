@@ -247,6 +247,7 @@ mod tests {
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
             agent: Some(crate::agent_options::test_selection("claude", &[])),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         }
     }

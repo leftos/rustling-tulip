@@ -1742,6 +1742,7 @@ async fn spawn_one(
         // The spawn intake derives the flag from the options' bypass choice.
         dangerously_skip_permissions: false,
         agent: Some(preset_selection(&plan.preset)),
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: Some(injector),

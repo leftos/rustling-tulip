@@ -2212,6 +2212,7 @@ mod tests {
                     protocol::OptionValue::Text("deepseek".to_owned()),
                 )]),
             }),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         }
     }

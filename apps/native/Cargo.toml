@@ -77,6 +77,9 @@ pulldown-cmark = { version = "0.13", default-features = false }
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy"] }
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 qrcodegen = "1.8"
+# The spawn dialog's Extra arguments split by POSIX shell words, the rule the
+# daemon splits the launch command's extra arguments by.
+shell-words = "1.1"
 # The updater (`src/update.rs`): the release feed and its downloads over HTTPS,
 # rustls on the `ring` backend with the OS's root certificates as the daemon's
 # summarizer uses it; the download's SHA-256; the release versions' order.

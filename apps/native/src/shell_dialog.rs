@@ -311,6 +311,7 @@ pub(crate) fn standalone_shell_request(cwd: Option<String>) -> SpawnRequest {
         initial_prompt: None,
         dangerously_skip_permissions: false,
         agent: None,
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,

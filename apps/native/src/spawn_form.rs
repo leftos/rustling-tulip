@@ -452,6 +452,8 @@ pub(crate) enum Control {
         field: String,
         value: String,
     },
+    /// The Extra arguments field.
+    Args,
     EnvKey(usize),
     EnvValue(usize),
     /// A secret row's Show / Hide button beside its masked value.
@@ -507,6 +509,7 @@ impl Control {
             Self::FieldSuggestion { field, value } => {
                 format!("{}-{}", field_selector(field), value.replace('_', "-"))
             }
+            Self::Args => "spawn-args".to_owned(),
             Self::EnvKey(index) => format!("spawn-env-key-{index}"),
             Self::EnvValue(index) => format!("spawn-env-value-{index}"),
             Self::EnvReveal(index) => format!("spawn-env-value-{index}-reveal"),
@@ -809,6 +812,39 @@ struct Advanced {
     /// A target move to another host dropped `${secret:…}` rows, sealed on
     /// that host; the env section's note says so until its next edit.
     secrets_dropped: Option<String>,
+    /// The Extra arguments field's text, as typed; kept while the field is
+    /// hidden, but sent only while it shows (see [`SpawnForm::extra_args`]).
+    args: String,
+}
+
+/// The line under the Extra arguments field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArgsNote {
+    /// The text does not split: it blocks Spawn.
+    UnclosedQuote,
+    /// The target's host does not list `spawn_extra_args`: the field is
+    /// disabled and nothing is sent.
+    HostTooOld,
+}
+
+impl ArgsNote {
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Self::UnclosedQuote => "The extra arguments have an unclosed quote.",
+            Self::HostTooOld => "This host is too old for extra arguments.",
+        }
+    }
+
+    /// Whether it is a problem that blocks Spawn, not a remark.
+    pub(crate) fn blocks_spawn(self) -> bool {
+        matches!(self, Self::UnclosedQuote)
+    }
+}
+
+/// `text` split into arguments by POSIX shell words, the rule the daemon
+/// splits the launch command's extra arguments by; blank text is none.
+pub(crate) fn split_extra_args(text: &str) -> Result<Vec<String>, ArgsNote> {
+    shell_words::split(text).map_err(|_| ArgsNote::UnclosedQuote)
 }
 
 /// Which runtime defaults the user has overridden.
@@ -950,6 +986,9 @@ pub(crate) struct HostInputs {
     /// Whether the host is a remote host whose connection is not open: its
     /// targets are listed but cannot be picked.
     pub offline: bool,
+    /// Whether the host's daemon takes a spawn's own extra arguments (it
+    /// lists [`protocol::FEATURE_SPAWN_EXTRA_ARGS`]).
+    pub extra_args: bool,
 }
 
 impl HostInputs {
@@ -1250,6 +1289,7 @@ impl SpawnForm {
             .iter()
             .map(|(key, value)| EnvRow::prefilled(key, value))
             .collect();
+        self.advanced.args = shell_words::join(&config.extra_args);
         self.follow_advanced();
         if Target::from_spawn(self.target.host(), &config.target).as_ref() == Some(&self.target) {
             self.apply_branch_fields(&config.target, cache, now)
@@ -1288,8 +1328,8 @@ impl SpawnForm {
             .insert(agent.clone(), AgentChoice { options, touched });
     }
 
-    /// Advanced opens on the chosen agent's Advanced values or the env
-    /// rows, until the user opens or closes it.
+    /// Advanced opens on the chosen agent's Advanced values, extra
+    /// arguments or the env rows, until the user opens or closes it.
     fn follow_advanced(&mut self) {
         if self.advanced.chosen {
             return;
@@ -1297,8 +1337,10 @@ impl SpawnForm {
         let agent_set = self
             .chosen_agent()
             .is_some_and(|choice| choice.options.advanced_set());
-        self.advanced.open =
-            agent_set || !self.advanced.env.is_empty() || self.advanced.secrets_dropped.is_some();
+        self.advanced.open = agent_set
+            || !self.extra_args().is_empty()
+            || !self.advanced.env.is_empty()
+            || self.advanced.secrets_dropped.is_some();
     }
 
     /// The target moved to another host: the agents and their Settings
@@ -2747,6 +2789,47 @@ impl SpawnForm {
             .collect()
     }
 
+    /// Whether the Extra arguments field shows: for an agent, not a plain
+    /// shell (the dialog spawns an agent interactive only).
+    pub(crate) fn args_shown(&self) -> bool {
+        !self.plain_shell()
+    }
+
+    /// Whether the target's host takes a spawn's own extra arguments.
+    pub(crate) fn args_supported(&self) -> bool {
+        host_in(&self.hosts, self.target.host()).is_some_and(|host| host.extra_args)
+    }
+
+    pub(crate) fn args_text(&self) -> &str {
+        &self.advanced.args
+    }
+
+    /// The user typed in the Extra arguments field.
+    pub(crate) fn edit_args(&mut self, text: &str) {
+        text.clone_into(&mut self.advanced.args);
+    }
+
+    /// The line under the shown Extra arguments field: the host is too old
+    /// for them, or the text does not split. `None` while it is hidden.
+    pub(crate) fn args_note(&self) -> Option<ArgsNote> {
+        if !self.args_shown() {
+            return None;
+        }
+        if !self.args_supported() {
+            return Some(ArgsNote::HostTooOld);
+        }
+        split_extra_args(&self.advanced.args).err()
+    }
+
+    /// The arguments the spawn sends: the field's text split, while the
+    /// field shows on a host that takes them; else none.
+    fn extra_args(&self) -> Vec<String> {
+        if !self.args_shown() || !self.args_supported() {
+            return Vec::new();
+        }
+        split_extra_args(&self.advanced.args).unwrap_or_default()
+    }
+
     pub(crate) fn env_rows(&self) -> &[EnvRow] {
         &self.advanced.env
     }
@@ -3069,8 +3152,9 @@ impl SpawnForm {
         self.refs.fetch_failed
     }
 
-    /// Whether Spawn can go: a branch name or a picked worktree, and no env
-    /// row with a problem. A folder spawn asks for neither.
+    /// Whether Spawn can go: a branch name or a picked worktree, no env row
+    /// with a problem, and extra arguments that split. A folder spawn asks
+    /// for neither of the first two.
     pub(crate) fn can_submit(&self) -> bool {
         let located = if !self.git_choices_shown() {
             true
@@ -3079,7 +3163,7 @@ impl SpawnForm {
         } else {
             !self.branch.value.trim().is_empty()
         };
-        located && self.env_valid()
+        located && self.env_valid() && !self.args_note().is_some_and(ArgsNote::blocks_spawn)
     }
 
     /// The focusable controls, in the order they are drawn.
@@ -3118,6 +3202,9 @@ impl SpawnForm {
             return ring;
         }
         ring.extend(self.field_controls(SpawnPlacement::Advanced));
+        if self.args_shown() && self.args_supported() {
+            ring.push(Control::Args);
+        }
         for index in 0..self.advanced.env.len() {
             ring.extend(self.env_row_controls(index));
         }
@@ -3265,6 +3352,7 @@ impl SpawnForm {
             Control::Branch
             | Control::Base
             | Control::FieldText(_)
+            | Control::Args
             | Control::EnvKey(_)
             | Control::EnvValue(_) => Vec::new(),
             Control::FieldChoice { .. }
@@ -3420,6 +3508,7 @@ impl SpawnForm {
             initial_prompt: None,
             dangerously_skip_permissions: bypasses,
             agent,
+            extra_args: self.extra_args(),
             extra_env: self.extra_env(),
             secret_env_keys: self.secret_env_keys(),
             prompt_injector: None,
@@ -3823,6 +3912,7 @@ mod tests {
             agents: agent_registry::descriptors(),
             agent_settings: BTreeMap::new(),
             offline: false,
+            extra_args: true,
         }
     }
 
@@ -3850,6 +3940,7 @@ mod tests {
                 agents: self.agents.clone(),
                 agent_settings: self.agent_settings.clone(),
                 offline: false,
+                extra_args: true,
             };
             std::iter::once(local)
                 .chain(self.others.iter().cloned())
@@ -4109,6 +4200,7 @@ mod tests {
             agents,
             agent_settings: settings,
             offline: false,
+            extra_args: true,
         }
     }
 
@@ -5491,6 +5583,75 @@ mod tests {
             .collect()
     }
 
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn extra_args_split_by_shell_words_into_the_request() {
+        let mut form = ready_form();
+        assert!(form.args_shown() && form.args_supported());
+        form.edit_args(r#"--a b "c d""#);
+        assert_eq!(form.args_note(), None);
+        assert_eq!(request_of(&form).extra_args, strings(&["--a", "b", "c d"]));
+        form.edit_args("   ");
+        assert_eq!(form.args_note(), None, "blank is no arguments");
+        assert_eq!(request_of(&form).extra_args, Vec::<String>::new());
+        assert!(form.can_submit());
+    }
+
+    #[test]
+    fn an_unclosed_quote_shows_the_note_and_blocks_spawn() {
+        let mut form = ready_form();
+        assert!(form.can_submit());
+        form.edit_args(r#"--name "a b"#);
+        assert_eq!(form.args_note(), Some(ArgsNote::UnclosedQuote));
+        assert_eq!(
+            ArgsNote::UnclosedQuote.text(),
+            "The extra arguments have an unclosed quote."
+        );
+        assert!(!form.can_submit(), "Spawn waits for the quote to close");
+        assert!(!form.controls().contains(&Control::Submit));
+    }
+
+    #[test]
+    fn a_plain_shell_hides_the_extra_args_and_sends_none() {
+        let mut form = ready_form();
+        form.edit_args("--debug");
+        press(&mut form, &Control::AdvancedToggle);
+        assert!(form.controls().contains(&Control::Args));
+        press(&mut form, &Control::Runtime(Runtime::PlainShell));
+        assert!(!form.args_shown());
+        assert_eq!(form.args_note(), None, "a hidden field shows no note");
+        assert!(form.can_submit(), "a hidden field blocks nothing");
+        assert!(!form.controls().contains(&Control::Args));
+        assert_eq!(request_of(&form).extra_args, Vec::<String>::new());
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
+        assert_eq!(form.args_text(), "--debug", "the text is kept");
+    }
+
+    #[test]
+    fn a_host_without_the_feature_disables_the_extra_args_and_sends_none() {
+        let mut form = ready_form();
+        for host in &mut form.hosts {
+            host.extra_args = false;
+        }
+        form.edit_args("--debug");
+        press(&mut form, &Control::AdvancedToggle);
+        assert!(!form.args_supported());
+        assert_eq!(form.args_note(), Some(ArgsNote::HostTooOld));
+        assert_eq!(
+            ArgsNote::HostTooOld.text(),
+            "This host is too old for extra arguments."
+        );
+        assert!(form.can_submit(), "the note does not block Spawn");
+        assert!(
+            !form.controls().contains(&Control::Args),
+            "nothing to type in"
+        );
+        assert_eq!(request_of(&form).extra_args, Vec::<String>::new());
+    }
+
     #[test]
     fn plain_shell_clears_to_interactive_and_sends_no_agent_extras() {
         let mut form = ready_form();
@@ -6131,6 +6292,7 @@ mod tests {
                 choice("effort", "high"),
                 choice("effort", "xhigh"),
                 choice("effort", "max"),
+                Control::Args,
                 Control::EnvAdd,
                 Control::Cancel,
                 Control::Submit,
@@ -6473,6 +6635,14 @@ mod tests {
         );
         let shell = duplicated(stored_config(&json!({ "mode": "plain_shell" })));
         assert_eq!(shell.runtime(), Runtime::PlainShell);
+    }
+
+    #[test]
+    fn a_duplicate_prefill_shows_the_extra_args_joined_and_sends_them_back() {
+        let form = duplicated(stored_config(&json!({ "extra_args": ["--x", "a b"] })));
+        assert_eq!(form.args_text(), "--x 'a b'");
+        assert!(form.advanced_open(), "the prefilled arguments show");
+        assert_eq!(request_of(&form).extra_args, strings(&["--x", "a b"]));
     }
 
     /// A stored in-place launch on `r1`'s `dev`.

@@ -119,6 +119,7 @@ fn a_repo_row_with_a_summary_grows_by_two_offsets(cx: &mut TestAppContext) {
         mode: SessionMode::Interactive,
         dangerously_skip_permissions: false,
         agent: None,
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
     });
     fixture.repos = vec![launched, repo("r2", "D:/src/r2")];
@@ -1664,6 +1665,7 @@ fn summary_config(target: SpawnTarget) -> SpawnConfig {
         mode: SessionMode::Interactive,
         dangerously_skip_permissions: false,
         agent: Some(serde_json::from_value(serde_json::json!({ "agent": "claude", "options": { "permission_mode": "accept_edits", "model": "opus" } })).expect("agent selection")),
+        extra_args: Vec::new(),
         extra_env: vec![
             ("A".to_owned(), "1".to_owned()),
             ("B".to_owned(), "2".to_owned()),

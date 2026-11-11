@@ -398,6 +398,7 @@ mod tests {
                 agent: agent_registry::default_agent(),
                 options: protocol::OptionValues::new(),
             }),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         };
         assert_eq!(

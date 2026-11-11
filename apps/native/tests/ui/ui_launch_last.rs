@@ -131,6 +131,7 @@ fn config(target: SpawnTarget) -> SpawnConfig {
         mode: SessionMode::Interactive,
         dangerously_skip_permissions: false,
         agent: Some(serde_json::from_value(serde_json::json!({ "agent": "claude", "options": { "permission_mode": "accept_edits", "model": "opus" } })).expect("agent selection")),
+        extra_args: Vec::new(),
         extra_env: vec![("A".to_owned(), "1".to_owned())],
     }
 }

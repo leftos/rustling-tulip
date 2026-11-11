@@ -1630,6 +1630,10 @@ fn folder_agent(
         dangerously_skip_permissions: false,
         agent: Some(spawn.selection),
         extra_env: recorded_env(entry).to_vec(),
+        extra_args: entry
+            .spawn_config
+            .as_ref()
+            .map_or_else(Vec::new, |config| config.extra_args.clone()),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
         request_id: None,
@@ -1651,6 +1655,7 @@ fn shell_request(entry: &HistoryEntry, folder: &str) -> SpawnRequest {
         initial_prompt: None,
         dangerously_skip_permissions: false,
         agent: None,
+        extra_args: Vec::new(),
         extra_env: recorded_env(entry).to_vec(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
@@ -3388,6 +3393,7 @@ mod recovery_tests {
                 ("model", "opus"),
                 ("permission_mode", "bypass_permissions"),
             ])),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         }
     }
@@ -4118,6 +4124,7 @@ mod recovery_tests {
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
             agent: Some(claude(&[])),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         }
     }
@@ -4525,6 +4532,7 @@ mod recovery_tests {
                 ("model", "opus"),
                 ("permission_mode", "bypass_permissions"),
             ])),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         });
 

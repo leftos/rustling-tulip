@@ -1131,6 +1131,7 @@ mod tests {
                     ("sandbox".to_owned(), protocol::OptionValue::Bool(false)),
                 ]),
             }),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         };
         crate::orphan::meta_from_record(

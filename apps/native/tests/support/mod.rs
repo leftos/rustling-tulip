@@ -61,6 +61,7 @@ pub fn daemon_features() -> Vec<String> {
     vec![
         protocol::FEATURE_AGENT_COMMANDS.to_owned(),
         protocol::FEATURE_DETAILED_LOGGING.to_owned(),
+        protocol::FEATURE_SPAWN_EXTRA_ARGS.to_owned(),
     ]
 }
 

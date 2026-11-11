@@ -261,6 +261,7 @@ fn launch_last_row_is_disabled_for_a_headless_config(cx: &mut TestAppContext) {
             serde_json::from_value(serde_json::json!({ "agent": "claude", "options": {} }))
                 .expect("agent selection"),
         ),
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
     });
     let mut h = Harness::with(cx, &dir, &fixture);

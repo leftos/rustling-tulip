@@ -70,6 +70,7 @@ mod tests {
                 agent: AgentId(agent.to_owned()),
                 options,
             }),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,

@@ -1443,6 +1443,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
+    /// A `last_spawn_config` saved before spawns took extra arguments reads
+    /// as none, with every other value it held kept.
+    #[test]
+    fn a_spawn_config_saved_without_extra_args_reads_as_none() {
+        let dirs = scratch_dirs("v051-extra-args");
+        std::fs::write(&dirs.state_file, V0_5_1_STATE_JSON).expect("write the v0.5.1 state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("the v0.5.1 state.json loads");
+        let persisted = state.with_persisted(PersistedState::clone);
+
+        let repo = &persisted.repos[0];
+        assert_v0_5_1_repo(repo);
+        let spawn = repo
+            .last_spawn_config
+            .as_ref()
+            .expect("the repo keeps its last spawn config");
+        assert!(spawn.extra_args.is_empty(), "{spawn:?}");
+        let workspace_spawn = persisted.workspaces[0]
+            .last_spawn_config
+            .as_ref()
+            .expect("the workspace keeps its last spawn config");
+        assert!(workspace_spawn.extra_args.is_empty(), "{workspace_spawn:?}");
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
     #[test]
     fn detailed_logging_defaults_off_in_an_old_state_json() {
         let old: PersistedState =

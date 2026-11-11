@@ -41,6 +41,7 @@ fn config(mode: SessionMode) -> SpawnConfig {
         mode,
         dangerously_skip_permissions: false,
         agent,
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
     }
 }

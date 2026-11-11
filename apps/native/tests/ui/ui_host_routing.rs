@@ -1103,6 +1103,7 @@ fn remote_request(use_worktree: bool) -> SpawnRequest {
             serde_json::from_value(serde_json::json!({ "agent": "claude", "options": {} }))
                 .expect("agent selection"),
         ),
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
@@ -1731,6 +1732,7 @@ fn shell_launch(branch: &str) -> SpawnConfig {
         mode: SessionMode::PlainShell,
         dangerously_skip_permissions: false,
         agent: None,
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
     }
 }

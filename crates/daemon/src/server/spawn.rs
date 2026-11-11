@@ -25,6 +25,7 @@ use self::worktree::{
 use super::connection::{AuthKind, ConnCtx};
 use super::git::{active_sessions_using_worktree, worktree_in_use_failure};
 use super::sessions::{request_origin, write_meta_then_sync};
+use super::settings::refused_reserved_arg;
 use super::{Hub, StateEvent};
 use crate::conversations;
 use crate::conversations::discovery::{self, Baseline, Waiter};
@@ -650,6 +651,7 @@ fn new_session_request(
         dangerously_skip_permissions: false,
         agent: Some(new_session_selection(inputs, &plan.container)),
         extra_env: Vec::new(),
+        extra_args: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
         request_id,
@@ -931,6 +933,7 @@ where
         selection.options.clone_from(&options);
     }
     check_with_plugin(&req, backend, &options, &resolve)?;
+    check_extra_args(&req, backend)?;
     // A secret row's literal moves into the credential store and becomes a
     // `${secret:<id>}` reference before anything captures the request, so the
     // session record, the sidecar, `state.json`, the `Repos`/`Workspaces`
@@ -948,6 +951,7 @@ where
         dangerously_skip_permissions: _,
         agent: _,
         extra_env,
+        extra_args: _,
         secret_env_keys: _,
         prompt_injector,
         request_id: _,
@@ -1752,10 +1756,12 @@ async fn spawn_interactive_session(
     let agent = cfg.agent.clone();
     let backend = cfg.backend;
     // The host's launch command is read now, never from the session's stored
-    // config, so Restart and Resume use the current one.
+    // config, so Restart and Resume use the current one; the spawn's own
+    // extra arguments come from that config and follow the launch command's.
     let command = choose_agent_command(backend, &hub.state.agent_command(&agent), &|name| {
         std::env::var(name).ok()
-    })?;
+    })?
+    .with_spawn_args(&stored_config.extra_args);
     let raw_program = command.program.clone();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
     let (conversation_id, resume_conversation, discover) = planned_conversation(
@@ -1803,6 +1809,7 @@ async fn spawn_interactive_session(
                     typed: TypedCommand {
                         program_word: command.typed_verbatim.then_some(raw_program.as_str()),
                         extra: &command.extra_text,
+                        spawn_args: &command.spawn_args,
                     },
                     cwd: &cwd,
                     initial_prompt: initial_prompt.as_deref(),
@@ -2571,6 +2578,7 @@ fn prepare_shell_resume(
                     TypedCommand {
                         program_word: Some(program.as_str()),
                         extra: "",
+                        spawn_args: &[],
                     },
                 )
             })
@@ -3238,6 +3246,41 @@ fn check_with_plugin(
         .map_err(spawn_plan::SpawnFailure::from)
 }
 
+/// Refuse `request`'s own extra arguments when it is not an interactive agent
+/// spawn, or when one names a flag `backend`, its agent's plugin, sets itself
+/// or holds a control character (see [`refused_reserved_arg`]).
+fn check_extra_args(
+    request: &SpawnRequest,
+    backend: &dyn AgentPlugin,
+) -> Result<(), spawn_plan::SpawnFailure> {
+    if request.extra_args.is_empty() {
+        return Ok(());
+    }
+    let refused = |detail: String| spawn_plan::SpawnFailure {
+        title: "Extra arguments refused".to_owned(),
+        detail,
+        hint: None,
+    };
+    if request.mode != SessionMode::Interactive || request.agent.is_none() {
+        return Err(refused(
+            "Extra arguments apply only to an interactive agent session.".to_owned(),
+        ));
+    }
+    if request
+        .extra_args
+        .iter()
+        .any(|arg| arg.chars().any(char::is_control))
+    {
+        return Err(refused(
+            "Extra arguments cannot contain a newline or other control character.".to_owned(),
+        ));
+    }
+    match refused_reserved_arg(&request.extra_args, backend.reserved_args()) {
+        Some(message) => Err(refused(message)),
+        None => Ok(()),
+    }
+}
+
 /// The checks behind [`check_spawn_request`]: the request must pass its
 /// agent plugin's check (see [`check_with_plugin`]), every secret row must
 /// be sealable (see [`env_secrets::check_sealable`]), and every reference
@@ -3248,6 +3291,7 @@ fn check_env_rows_with(
 ) -> Result<(), spawn_plan::SpawnFailure> {
     let (_, backend, options) = request_agent(request)?;
     check_with_plugin(request, backend, &options, &resolve)?;
+    check_extra_args(request, backend)?;
     env_secrets::check_sealable(&request.extra_env, &request.secret_env_keys)?;
     resolve_env_refs(&request.extra_env, &resolve)?;
     Ok(())
@@ -3814,6 +3858,156 @@ mod tests {
         let stored = serde_json::to_string(&stored).expect("encode the spawn config");
         assert!(!stored.contains("my-claude-wrapper"), "{stored}");
         assert!(!stored.contains("--launch-extra-marker"), "{stored}");
+    }
+
+    /// An interactive spawn of the default agent into the main checkout of
+    /// `env_ref_repo_hub`'s repo, carrying `extra_args`.
+    fn extra_args_spawn(mode: SessionMode, extra_args: &[&str]) -> SpawnRequest {
+        let mut target = single_target(false, None);
+        if let SpawnTarget::Single { branch_name, .. } = &mut target {
+            "main".clone_into(branch_name);
+        }
+        SpawnRequest {
+            extra_args: extra_args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ..env_spawn(target, mode, Vec::new(), Some("rq-args"))
+        }
+    }
+
+    #[tokio::test]
+    async fn extra_args_are_saved_in_the_spawn_config() {
+        let (hub, _scratch, _repo) = env_ref_repo_hub("extra-args-config");
+        spawn_session(
+            &hub,
+            extra_args_spawn(SessionMode::Interactive, &["--debug", "a b"]),
+            None,
+            false,
+        )
+        .await
+        .expect_err("no tracer can start");
+
+        let stored = hub
+            .state
+            .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+            .expect("last spawn config stored");
+        let want = vec!["--debug".to_owned(), "a b".to_owned()];
+        assert_eq!(stored.extra_args, want, "stored as sent");
+        assert_eq!(
+            stored.to_clone_request().extra_args,
+            want,
+            "a clone carries them"
+        );
+        assert_eq!(
+            stored
+                .to_duplicate_request(Some("wt/brave-lynx".to_owned()))
+                .extra_args,
+            want,
+            "a duplicate carries them"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reserved_extra_arg_refuses_the_spawn() {
+        let (hub, _scratch, _repo) = env_ref_repo_hub("extra-args-reserved");
+        let err = spawn_session(
+            &hub,
+            extra_args_spawn(SessionMode::Interactive, &["--debug", "--model=opus"]),
+            None,
+            false,
+        )
+        .await
+        .expect_err("a reserved flag refuses");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        send_spawn_failure(&out_tx, &err, Some("rq-args"));
+        let reply = out_rx.try_recv().expect("a reply");
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::ActionFailed { title, detail, request_id: Some(id), .. }
+                    if title == "Extra arguments refused"
+                        && detail == "--model is set by rustling-tulip; remove it from the extra arguments."
+                        && id == "rq-args"
+            ),
+            "{reply:?}"
+        );
+        assert!(
+            hub.state
+                .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+                .is_none(),
+            "no last spawn config was stored"
+        );
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[test]
+    fn a_reserved_extra_arg_is_refused_by_the_pre_check() {
+        let failure = check_spawn_request_with(
+            &extra_args_spawn(SessionMode::Interactive, &["--model", "opus"]),
+            |_| None,
+        )
+        .expect_err("the pre-check refuses a reserved flag");
+        assert_eq!(failure.title, "Extra arguments refused");
+        assert_eq!(
+            failure.detail,
+            "--model is set by rustling-tulip; remove it from the extra arguments."
+        );
+        assert!(
+            check_spawn_request_with(
+                &extra_args_spawn(SessionMode::Interactive, &["--debug"]),
+                |_| None
+            )
+            .is_ok(),
+            "an argument the plugin does not set passes"
+        );
+    }
+
+    #[test]
+    fn a_spawn_extra_arg_holding_a_control_character_is_refused_in_its_own_words() {
+        let failure = check_spawn_request_with(
+            &extra_args_spawn(SessionMode::Interactive, &["--debug", "a\nb"]),
+            |_| None,
+        )
+        .expect_err("the pre-check refuses a control character");
+        assert_eq!(failure.title, "Extra arguments refused");
+        assert_eq!(
+            failure.detail, "Extra arguments cannot contain a newline or other control character.",
+            "the spawn's refusal does not name the launch command"
+        );
+    }
+
+    #[test]
+    fn extra_args_on_a_headless_spawn_are_refused() {
+        let failure = check_spawn_request_with(
+            &extra_args_spawn(SessionMode::Headless, &["--debug"]),
+            |_| None,
+        )
+        .expect_err("a headless spawn takes no extra arguments");
+        assert_eq!(failure.title, "Extra arguments refused");
+        assert_eq!(
+            failure.detail,
+            "Extra arguments apply only to an interactive agent session."
+        );
+    }
+
+    #[tokio::test]
+    async fn extra_args_on_a_plain_shell_are_refused() {
+        let request = extra_args_spawn(SessionMode::PlainShell, &["--debug"]);
+        let failure = check_spawn_request_with(&request, |_| None).expect_err("a shell takes none");
+        assert_eq!(failure.title, "Extra arguments refused");
+        assert_eq!(
+            failure.detail,
+            "Extra arguments apply only to an interactive agent session."
+        );
+
+        let (hub, _scratch, _repo) = env_ref_repo_hub("extra-args-shell");
+        let err = spawn_session(&hub, request, None, false)
+            .await
+            .expect_err("the spawn refuses too");
+        assert!(
+            format!("{err:#}")
+                .contains("Extra arguments apply only to an interactive agent session."),
+            "{err:#}"
+        );
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
     }
 
     /// The spawn arguments of a recovered shell that resumes Claude
@@ -6091,6 +6285,7 @@ mod tests {
                 initial_prompt: Some("x".to_owned()),
                 dangerously_skip_permissions: false,
                 agent,
+                extra_args: Vec::new(),
                 extra_env: Vec::new(),
                 secret_env_keys: Vec::new(),
                 prompt_injector: None,

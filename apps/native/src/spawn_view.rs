@@ -27,8 +27,8 @@ use crate::remote_mode::spawn_no_repos_note;
 use crate::runtime_icon::runtime_icon_view;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_form::{
-    Control, EnvRow, EnvRowNote, FormInputs, HostInputs, ListField, Lock, OpenChoice, Outcome,
-    Prefill, Runtime, ShareButton, SpawnForm, TabChoices, Target, WorktreeMode,
+    ArgsNote, Control, EnvRow, EnvRowNote, FormInputs, HostInputs, ListField, Lock, OpenChoice,
+    Outcome, Prefill, Runtime, ShareButton, SpawnForm, TabChoices, Target, WorktreeMode,
 };
 use crate::spawn_preview::{
     CollisionNotice, RECREATE_LABEL, REUSE_NOTE, ReuseChoice, Tone, collision_notice, member_row,
@@ -86,6 +86,9 @@ const RANDOM_TIP: &str = "Generate a random worktree branch name";
 const SUGGESTING: &str = "Picking a name no existing branch uses…";
 const FETCH_FAILED: &str = "Couldn't reach the remote — comparing against the last fetched refs.";
 const CURRENT_TAB_DISABLED: &str = "The current tab cannot host terminal panes";
+const ARGS_LABEL: &str = "Extra arguments";
+const ARGS_PLACEHOLDER: &str = r#"--flag value "quoted value""#;
+const ARGS_HELP: &str = "Added after the agent's own arguments. Use a Secret env row for anything secret, not an argument.";
 const NO_ENV: &str = "No extra env vars.";
 const ENV_VALUE_PLACEHOLDER: &str = "value";
 const REMOVE_ENV_TIP: &str = "Remove env var";
@@ -140,6 +143,8 @@ pub(crate) struct SpawnDialog {
     aim: Option<PaneAim>,
     branch_input: Entity<TextInput>,
     base_input: Entity<TextInput>,
+    /// The Extra arguments field.
+    args_input: Entity<TextInput>,
     /// One field per text or model field of the chosen agent, in order.
     option_inputs: Vec<OptionInput>,
     /// One pair of fields per env row of the form, in order.
@@ -211,6 +216,7 @@ impl SpawnDialog {
             Control::TargetField if self.form.target_list_open() => Some(&self.target_query),
             Control::Branch => Some(&self.branch_input),
             Control::Base => Some(&self.base_input),
+            Control::Args => Some(&self.args_input),
             Control::FieldText(id) => self
                 .option_inputs
                 .iter()
@@ -223,14 +229,19 @@ impl SpawnDialog {
     }
 
     fn inputs(&self) -> impl Iterator<Item = &Entity<TextInput>> {
-        [&self.branch_input, &self.base_input, &self.target_query]
-            .into_iter()
-            .chain(self.option_inputs.iter().map(|input| &input.input))
-            .chain(
-                self.env_inputs
-                    .iter()
-                    .flat_map(|row| [&row.key, &row.value]),
-            )
+        [
+            &self.branch_input,
+            &self.base_input,
+            &self.target_query,
+            &self.args_input,
+        ]
+        .into_iter()
+        .chain(self.option_inputs.iter().map(|input| &input.input))
+        .chain(
+            self.env_inputs
+                .iter()
+                .flat_map(|row| [&row.key, &row.value]),
+        )
     }
 }
 
@@ -257,6 +268,7 @@ enum Field {
     Base,
     /// An agent's text or model field, by its id.
     Option(String),
+    Args,
     EnvKey(usize),
     EnvValue(usize),
 }
@@ -267,6 +279,7 @@ impl Field {
             Self::Branch => Control::Branch,
             Self::Base => Control::Base,
             Self::Option(id) => Control::FieldText(id.clone()),
+            Self::Args => Control::Args,
             Self::EnvKey(index) => Control::EnvKey(*index),
             Self::EnvValue(index) => Control::EnvValue(*index),
         }
@@ -457,6 +470,13 @@ impl RootView {
             .map(str::to_owned)
     }
 
+    /// The note under the Extra arguments field, while the dialog is open
+    /// and the field shows one.
+    #[must_use]
+    pub fn spawn_dialog_args_note(&self) -> Option<&'static str> {
+        self.form_dialog()?.form.args_note().map(ArgsNote::text)
+    }
+
     /// The note env row `index` shows about where its value is kept, while
     /// the dialog is open and the row has one.
     #[must_use]
@@ -628,6 +648,9 @@ impl RootView {
                 .map(|conn| conn.mirrors.agent_settings.clone())
                 .unwrap_or_default(),
             offline: self.is_remote_offline(host),
+            extra_args: self
+                .conn_of(host)
+                .is_some_and(|conn| conn.supports(protocol::FEATURE_SPAWN_EXTRA_ARGS)),
         }
     }
 
@@ -758,14 +781,18 @@ impl RootView {
         let branch_input = cx.new(|cx| TextInput::new(form.branch().to_owned(), "", cx));
         let base_input = cx.new(|cx| TextInput::new(form.base().to_owned(), "", cx));
         let target_query = cx.new(|cx| TextInput::new("", TARGET_QUERY_PLACEHOLDER, cx));
+        let args_input =
+            cx.new(|cx| TextInput::new(form.args_text().to_owned(), ARGS_PLACEHOLDER, cx));
         let mut subscriptions = Self::watch_field(&branch_input, Field::Branch, window, cx);
         subscriptions.extend(Self::watch_field(&base_input, Field::Base, window, cx));
+        subscriptions.extend(Self::watch_field(&args_input, Field::Args, window, cx));
         subscriptions.extend(Self::watch_target_query(&target_query, window, cx));
         self.spawn_dialog = Some(SpawnModal::Form(Box::new(SpawnDialog {
             form,
             aim,
             branch_input,
             base_input,
+            args_input,
             option_inputs: Vec::new(),
             env_inputs: Vec::new(),
             _subscriptions: subscriptions,
@@ -941,6 +968,7 @@ impl RootView {
                     Field::Branch => form.edit_branch(&text, &mut this.branch_cache),
                     Field::Base => form.edit_base(&text),
                     Field::Option(id) => form.edit_option_text(id, &text),
+                    Field::Args => form.edit_args(&text),
                     Field::EnvKey(index) => form.edit_env_key(*index, &text),
                     Field::EnvValue(index) => form.edit_env_value(*index, &text),
                 }
@@ -1364,6 +1392,10 @@ impl RootView {
             let text = if typed.trim() == value { typed } else { value };
             sync_field(&option.input, &text, placeholder, cx);
         }
+        let args_read_only = !form.args_supported();
+        dialog
+            .args_input
+            .update(cx, |input, cx| input.set_read_only(args_read_only, cx));
         for (index, (row, inputs)) in form.env_rows().iter().zip(&dialog.env_inputs).enumerate() {
             sync_field(
                 &inputs.value,
@@ -3338,7 +3370,43 @@ fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<Root
             focus,
             cx,
         ))
+        .children(args_field(dialog, focus, cx))
         .child(env_field(dialog, focus, cx))
+}
+
+/// The Extra arguments field, its help and its note, for an agent; `None`
+/// for a plain shell.
+fn args_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> Option<Div> {
+    let form = &dialog.form;
+    if !form.args_shown() {
+        return None;
+    }
+    let t = theme(cx);
+    let note = form.args_note();
+    let input = input_box(&Control::Args, &dialog.args_input, focus, cx)
+        .when(note.is_some_and(ArgsNote::blocks_spawn), |input| {
+            input.border_color(gpui::rgb(t.warning))
+        })
+        .when(!form.args_supported(), |input| input.opacity(0.5));
+    let line = note.map(|note| {
+        let color = if note.blocks_spawn() {
+            t.warning
+        } else {
+            t.muted
+        };
+        div()
+            .driver_id(|| "spawn-args-note".to_owned())
+            .text_color(gpui::rgb(color))
+            .child(note.text())
+    });
+    let offset = crate::fonts::ui_text_size(cx);
+    let help = self::note(offset, ARGS_HELP, &t);
+    Some(
+        field(offset, crate::fonts::ui_weight_shift(cx), ARGS_LABEL, &t)
+            .child(div().flex().child(input))
+            .children(line)
+            .child(help),
+    )
 }
 
 /// The env rows, each with its problem, and `+ Add env var`.

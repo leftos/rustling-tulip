@@ -1337,6 +1337,7 @@ mod tests {
                 agent: protocol::AgentId("claude".to_owned()),
                 options: OptionValues::new(),
             }),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         }
     }

@@ -746,6 +746,78 @@ fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
     assert_eq!(request.extra_env, [("FOO".to_owned(), "bar".to_owned())]);
 }
 
+#[gpui::test]
+fn extra_args_typed_in_advanced_reach_the_spawn_split(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    show_whole_dialog(&mut h);
+    open(&mut h);
+    suggest(&mut h, "r1", "wt/brave-fox");
+    h.click_on("spawn-advanced");
+    assert_eq!(
+        h.root(|root, _| root.spawn_dialog_args_note()),
+        None,
+        "this host takes extra arguments"
+    );
+    tab_to(&mut h, "tab", "spawn-args", 12);
+    h.set_clipboard(r#"--a b "c d"#);
+    h.keys("ctrl-v");
+    assert_eq!(
+        h.root(|root, _| root.spawn_dialog_args_note()),
+        Some("The extra arguments have an unclosed quote.")
+    );
+    assert!(drawn(&mut h, "spawn-args-note"));
+    h.set_clipboard("\"");
+    h.keys("ctrl-v");
+    assert_eq!(h.root(|root, _| root.spawn_dialog_args_note()), None);
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(request.extra_args, ["--a", "b", "c d"]);
+}
+
+#[gpui::test]
+fn a_host_without_spawn_extra_args_disables_the_field_and_sends_none(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.welcome_without_features();
+    show_whole_dialog(&mut h);
+    h.right_click_on("leaf-s1");
+    h.click_on("session-menu-duplicate");
+    let at = h.center("duplicate-new-tab");
+    h.click(
+        at,
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    let config = serde_json::json!({
+        "target": { "kind": "single", "repo_id": "r1", "branch_name": "feat/dup",
+            "base_branch": "origin/dev", "use_worktree": true },
+        "mode": "interactive",
+        "dangerously_skip_permissions": false,
+        "agent": { "agent": "claude", "options": {} },
+        "extra_args": ["--debug", "a b"],
+    });
+    h.send(DaemonMessage::SpawnConfigReply {
+        session_id: "s1".to_owned(),
+        config: Some(serde_json::from_value(config).expect("spawn config fixture")),
+    });
+    assert!(is_open(&mut h), "the prefilled dialog opened");
+    suggest(&mut h, "r1", "wt/brave-fox");
+    h.sent();
+    h.click_on("spawn-advanced");
+    assert!(drawn(&mut h, "spawn-args"), "the field shows, disabled");
+    assert!(drawn(&mut h, "spawn-args-note"));
+    assert_eq!(
+        h.root(|root, _| root.spawn_dialog_args_note()),
+        Some("This host is too old for extra arguments.")
+    );
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(request.extra_args, Vec::<String>::new());
+}
+
 /// The provider `request` names on the wire; `None` when it names none
 /// (Anthropic is skipped, a plain shell has no provider).
 fn wire_provider(request: &SpawnRequest) -> Option<String> {

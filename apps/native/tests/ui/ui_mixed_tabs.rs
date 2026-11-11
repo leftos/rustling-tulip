@@ -79,6 +79,7 @@ fn remote_request() -> SpawnRequest {
             serde_json::from_value(serde_json::json!({ "agent": "claude", "options": {} }))
                 .expect("agent selection"),
         ),
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,

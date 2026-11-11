@@ -1136,6 +1136,7 @@ pub(super) fn env_spawn(
             options: validated_claude(&OptionValues::new()),
         }),
         extra_env,
+        extra_args: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
         request_id: request_id.map(str::to_owned),

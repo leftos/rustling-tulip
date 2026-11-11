@@ -1589,6 +1589,7 @@ mod tests {
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
             agent: None,
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         });
         hub.sessions.insert(record);

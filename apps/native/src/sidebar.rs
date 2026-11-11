@@ -3262,7 +3262,18 @@ pub fn launch_summary(config: Option<&SpawnConfig>, agents: &[AgentDescriptor]) 
     if !config.extra_env.is_empty() {
         parts.push(format!("{} env", config.extra_env.len()));
     }
+    parts.extend(args_summary(config.extra_args.len()));
     Some(parts.join(" · "))
+}
+
+/// A launch summary's count of the spawn's own extra arguments: `1 arg`,
+/// `{n} args`; `None` without any.
+fn args_summary(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some("1 arg".to_owned()),
+        n => Some(format!("{n} args")),
+    }
 }
 
 /// The agent's name in a launch summary: a plain-shell config names the
@@ -8715,6 +8726,7 @@ pub(crate) mod tests {
             mode,
             dangerously_skip_permissions: false,
             agent: (mode != SessionMode::PlainShell).then(|| agent_selection("claude", &[])),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         }
     }
@@ -8778,6 +8790,31 @@ pub(crate) mod tests {
         assert_eq!(
             launch_summary(Some(&config), &[claude_descriptor()]).as_deref(),
             Some("Claude · Interactive · new worktree from main · Accept edits · opus · 2 env")
+        );
+    }
+
+    #[test]
+    fn launch_summary_counts_the_extra_args_after_the_env() {
+        let mut config = spawn_config(
+            single_target("feat/x", None, false),
+            SessionMode::Interactive,
+        );
+        config.extra_env = vec![("A".to_owned(), "1".to_owned())];
+        let summary = |config: &SpawnConfig| launch_summary(Some(config), &[claude_descriptor()]);
+        assert_eq!(
+            summary(&config).as_deref(),
+            Some("Claude · Interactive · feat/x · 1 env"),
+            "no arguments, no count"
+        );
+        config.extra_args = vec!["--debug".to_owned()];
+        assert_eq!(
+            summary(&config).as_deref(),
+            Some("Claude · Interactive · feat/x · 1 env · 1 arg")
+        );
+        config.extra_args.push("a b".to_owned());
+        assert_eq!(
+            summary(&config).as_deref(),
+            Some("Claude · Interactive · feat/x · 1 env · 2 args")
         );
     }
 

@@ -231,6 +231,7 @@ pub(super) async fn spawn(
         initial_prompt: options.prompt.clone(),
         dangerously_skip_permissions: false,
         agent,
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,

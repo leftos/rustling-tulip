@@ -1109,6 +1109,7 @@ mod tests {
                 agent: agent_registry::default_agent(),
                 options: protocol::OptionValues::new(),
             }),
+            extra_args: Vec::new(),
             extra_env: rows
                 .iter()
                 .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))

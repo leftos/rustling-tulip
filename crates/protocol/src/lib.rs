@@ -131,6 +131,12 @@ pub const FEATURE_LAUNCH_LAST: &str = "launch_last";
 /// repo or workspace from one [`ClientMessage::NewSession`].
 pub const FEATURE_NEW_SESSION: &str = "new_session";
 
+/// `Welcome.features` entry: the daemon reads [`SpawnRequest::extra_args`],
+/// passes them to an interactive agent spawn and saves them in its
+/// [`SpawnConfig`]. A daemon without it drops the field unread, so a client
+/// sends no extra arguments to it.
+pub const FEATURE_SPAWN_EXTRA_ARGS: &str = "spawn_extra_args";
+
 /// `Welcome.features` entry: the daemon answers a [`ClientMessage::LaunchPreset`]
 /// whose `job_id` names a job it still holds a snapshot of with that job's latest
 /// [`DaemonMessage::PresetLaunchJobUpdated`], to the sender only, and starts no
@@ -1901,6 +1907,11 @@ pub struct SpawnRequest {
     /// back, so a client that replays a config verbatim keeps working.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
+    /// Extra command-line arguments the user added to this spawn, already
+    /// split, passed after the agent's own arguments and the host's
+    /// launch-command extras; interactive agent spawns only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
     /// Keys whose rows this client considers secret whatever their name, set by
     /// the spawn dialog's per-row Secret toggle. The daemon seals the union of
     /// these and the rows its own name pattern catches, so a secret under a
@@ -1954,6 +1965,11 @@ pub struct SpawnConfig {
     /// was built, so a stored or echoed config carries no secret values.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
+    /// Extra command-line arguments the user added to this spawn, already
+    /// split, passed after the agent's own arguments and the host's
+    /// launch-command extras; interactive agent spawns only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
 }
 
 impl SpawnRequest {
@@ -2079,6 +2095,7 @@ impl SpawnConfig {
             dangerously_skip_permissions: req.dangerously_skip_permissions,
             agent: req.agent.clone(),
             extra_env: req.extra_env.clone(),
+            extra_args: req.extra_args.clone(),
         }
     }
 
@@ -2096,6 +2113,7 @@ impl SpawnConfig {
             dangerously_skip_permissions: self.dangerously_skip_permissions,
             agent: self.agent.clone(),
             extra_env: self.extra_env.clone(),
+            extra_args: self.extra_args.clone(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
@@ -10514,6 +10532,7 @@ mod tests {
             dangerously_skip_permissions: true,
             agent: Some(deepseek_selection()),
             extra_env: vec![],
+            extra_args: Vec::new(),
             prompt_injector: Some(PromptInjector {
                 steps: vec![
                     InjectorStep::Delay { ms: 6000 },
@@ -10563,6 +10582,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent: None,
             extra_env: vec![],
+            extra_args: Vec::new(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
@@ -10593,6 +10613,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent: Some(deepseek_selection()),
             extra_env: vec![],
+            extra_args: Vec::new(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
@@ -10602,10 +10623,15 @@ mod tests {
 
     #[test]
     fn clone_and_duplicate_keep_the_agent_selection() {
-        let req = claude_spawn_request();
+        let req = SpawnRequest {
+            extra_args: vec!["--debug".to_string()],
+            ..claude_spawn_request()
+        };
         let config = SpawnConfig::from_request(&req);
         assert_eq!(config.agent, Some(deepseek_selection()));
+        assert_eq!(config.extra_args, req.extra_args, "the capture keeps them");
         assert_eq!(config.to_clone_request().agent, Some(deepseek_selection()));
+        assert_eq!(config.to_clone_request().extra_args, req.extra_args);
         assert_eq!(
             config
                 .to_duplicate_request(Some("wt/brave-lynx".to_string()))
@@ -10658,6 +10684,7 @@ mod tests {
                 options: option_values(&[("model", text("sonnet-4"))]),
             }),
             extra_env: vec![("RT_TEST".to_string(), "1".to_string())],
+            extra_args: vec!["--debug".to_string(), "a b".to_string()],
         }
     }
 
@@ -10710,6 +10737,7 @@ mod tests {
         assert_eq!(req.mode, config.mode);
         assert_eq!(req.agent, config.agent);
         assert_eq!(req.extra_env, config.extra_env);
+        assert_eq!(req.extra_args, config.extra_args);
         assert!(req.dangerously_skip_permissions);
         assert_eq!(req.label, None);
         assert_eq!(req.initial_prompt, None);
@@ -10987,6 +11015,7 @@ mod tests {
     fn a_worktree_replay_takes_the_fresh_branch() {
         let config = duplicate_source_config(single_target("wt/sleepy-otter", true));
         let req = config.to_replay_request(&[replay_repo("r1", true)], Some("b2".to_string()));
+        assert_eq!(req.extra_args, config.extra_args, "a replay keeps them");
         match req.target {
             SpawnTarget::Single {
                 branch_name,
@@ -12850,6 +12879,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent: Some(deepseek_selection()),
             extra_env: vec![],
+            extra_args: Vec::new(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: Some("req-1".to_string()),
@@ -14335,6 +14365,40 @@ mod tests {
         };
         let json = serde_json::to_string(&req).expect("encode");
         assert!(json.contains(r#""secret_env_keys":["GH_PAT"]"#), "{json}");
+    }
+
+    #[test]
+    fn extra_args_defaults_empty_and_is_not_serialized_when_empty() {
+        // A client that predates the field sends no `extra_args`.
+        let req: SpawnRequest = serde_json::from_str(
+            r#"{"label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent":{"agent":"claude","options":{}}}"#,
+        )
+        .expect("a request without extra_args decodes");
+        assert!(req.extra_args.is_empty(), "{req:?}");
+
+        let json = serde_json::to_value(&req).expect("encode");
+        assert!(
+            json.get("extra_args").is_none(),
+            "an empty list stays off the wire: {json}"
+        );
+
+        // A non-empty one round-trips.
+        let req = SpawnRequest {
+            extra_args: vec!["--debug".to_owned(), "a b".to_owned()],
+            ..req
+        };
+        let json = serde_json::to_string(&req).expect("encode");
+        assert!(json.contains(r#""extra_args":["--debug","a b"]"#), "{json}");
+
+        // A config saved without the field reads as no arguments, and an
+        // empty list stays out of what it writes.
+        let config: SpawnConfig = serde_json::from_str(
+            r#"{"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","dangerously_skip_permissions":false,"agent":null,"extra_env":[]}"#,
+        )
+        .expect("a config without extra_args decodes");
+        assert!(config.extra_args.is_empty(), "{config:?}");
+        let json = serde_json::to_value(&config).expect("encode");
+        assert!(json.get("extra_args").is_none(), "{json}");
     }
 
     fn claude_id() -> AgentId {

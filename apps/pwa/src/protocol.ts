@@ -166,6 +166,14 @@ export const FEATURE_LAUNCH_LAST = "launch_last";
 export const FEATURE_NEW_SESSION = "new_session";
 
 /**
+ * `Welcome.features` entry: the daemon reads [`SpawnRequest::extra_args`],
+ * passes them to an interactive agent spawn and saves them in its
+ * [`SpawnConfig`]. A daemon without it drops the field unread, so a client
+ * sends no extra arguments to it.
+ */
+export const FEATURE_SPAWN_EXTRA_ARGS = "spawn_extra_args";
+
+/**
  * `Welcome.features` entry: the daemon answers a [`ClientMessage::LaunchPreset`]
  * whose `job_id` names a job it still holds a snapshot of with that job's latest
  * [`DaemonMessage::PresetLaunchJobUpdated`], to the sender only, and starts no
@@ -1488,6 +1496,12 @@ export interface SpawnRequest {
    */
   extra_env?: [string, string][];
   /**
+   * Extra command-line arguments the user added to this spawn, already
+   * split, passed after the agent's own arguments and the host's
+   * launch-command extras; interactive agent spawns only.
+   */
+  extra_args?: string[];
+  /**
    * Keys whose rows this client considers secret whatever their name, set by
    * the spawn dialog's per-row Secret toggle. The daemon seals the union of
    * these and the rows its own name pattern catches, so a secret under a
@@ -1547,6 +1561,12 @@ export interface SpawnConfig {
    * was built, so a stored or echoed config carries no secret values.
    */
   extra_env?: [string, string][];
+  /**
+   * Extra command-line arguments the user added to this spawn, already
+   * split, passed after the agent's own arguments and the host's
+   * launch-command extras; interactive agent spawns only.
+   */
+  extra_args?: string[];
 }
 
 export interface CleanupAction {
