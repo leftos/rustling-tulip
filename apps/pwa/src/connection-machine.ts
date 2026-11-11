@@ -38,7 +38,12 @@ export type ConnectionState =
     } & DialFlags)
   | { readonly name: "backoff"; readonly attempt: number }
   | { readonly name: "hidden" }
-  | { readonly name: "notApproved" }
+  /**
+   * `redial` marks a presented token refused with `device not approved`: the
+   * visit drops it and a queued `tokenChanged` redials without it, so a hide
+   * before that redial is honoured like any other and waits for `visible`.
+   */
+  | { readonly name: "notApproved"; readonly redial?: true }
   /**
    * The no-token pairing channel. `connected` is whether its socket is still
    * open; with none, only a tap (`askPair`) or a new token dials.
@@ -184,7 +189,11 @@ function onVisible(state: ConnectionState): StepResult {
 
 function onHidden(state: ConnectionState): StepResult {
   if (state.name === "notApproved") {
-    return unchanged(state);
+    if (state.redial !== true) {
+      return unchanged(state);
+    }
+    // The refused socket is already closed: only the timer and the status are left.
+    return transition(state, { name: "hidden" }, [{ type: "clearTimer" }]);
   }
   if (state.name === "pairing") {
     // The pairing channel stays the screen: its socket closes, and only a tap
@@ -265,9 +274,13 @@ function refused(
     // `device not approved` for a presented token: the daemon does not know
     // it (or cannot read its device store), so this visit redials without
     // it and lands on the pairing channel.
-    const drop: ConnectionEffect[] =
-      message.reason === DEVICE_NOT_APPROVED ? [{ type: "dropToken" }] : [];
-    return transition(state, { name: "notApproved" }, [...clear, { type: "close" }, ...drop]);
+    const drop = message.reason === DEVICE_NOT_APPROVED;
+    const dropEffects: ConnectionEffect[] = drop ? [{ type: "dropToken" }] : [];
+    return transition(state, { name: "notApproved", ...(drop ? { redial: true } : {}) }, [
+      ...clear,
+      { type: "close" },
+      ...dropEffects,
+    ]);
   }
   const effects: ConnectionEffect[] = [...clear];
   if (message.reason !== DEVICE_NOT_APPROVED) {

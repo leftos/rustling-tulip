@@ -598,15 +598,12 @@ fn a_remote_pane_moves_between_tabs_keeping_its_host(cx: &mut TestAppContext) {
 fn a_press_on_a_chip_stop_or_exit_code_never_starts_a_drag(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = Fixture {
-        sessions: vec![
-            session("s1").trusted().build(),
-            session("s2").exited(1).build(),
-        ],
+        sessions: vec![session("s1").build(), session("s2").exited(1).build()],
         ..pair()
     };
     let mut h = attached(cx, &dir, &fixture);
 
-    for control in ["pane-chip-p1-trusted", "pane-stop-p1", "exit-code-p2"] {
+    for control in ["pane-chip-p1-runtime", "pane-stop-p1", "exit-code-p2"] {
         let bounds = h.bounds(control);
         assert!(bounds.origin.x >= px(0.0), "{control} is on screen");
         let press = bounds.center();

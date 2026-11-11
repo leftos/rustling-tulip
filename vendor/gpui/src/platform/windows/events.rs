@@ -40,6 +40,7 @@ impl WindowsWindowInner {
     ) -> LRESULT {
         let handled = match msg {
             WM_ACTIVATE => self.handle_activate_msg(wparam),
+            WM_MOUSEACTIVATE => self.handle_mouse_activate_msg(lparam),
             WM_CREATE => self.handle_create_msg(handle),
             WM_MOVE => self.handle_move_msg(handle, lparam),
             WM_SIZE => self.handle_size_msg(wparam, lparam),
@@ -442,6 +443,16 @@ impl WindowsWindowInner {
         None
     }
 
+    /// Marks the coming mouse-down as the press that brought the window
+    /// forward, when the click landed on the client area. `None` lets
+    /// `DefWindowProc` activate the window as usual; the click is never eaten.
+    fn handle_mouse_activate_msg(&self, lparam: LPARAM) -> Option<isize> {
+        if (lparam.0 as u32) & 0xFFFF == HTCLIENT {
+            self.state.borrow_mut().pending_first_mouse = true;
+        }
+        None
+    }
+
     fn handle_mouse_down_msg(
         &self,
         handle: HWND,
@@ -457,6 +468,8 @@ impl WindowsWindowInner {
         let y = lparam.signed_hiword();
         let physical_point = point(DevicePixels(x as i32), DevicePixels(y as i32));
         let click_count = lock.click_state.update(button, physical_point);
+        let first_mouse = lock.pending_first_mouse;
+        lock.pending_first_mouse = false;
         let scale_factor = lock.scale_factor;
         drop(lock);
 
@@ -465,7 +478,7 @@ impl WindowsWindowInner {
             position: logical_point(x as f32, y as f32, scale_factor),
             modifiers: current_modifiers(),
             click_count,
-            first_mouse: false,
+            first_mouse,
         });
         let handled = !func(input).propagate;
         self.state.borrow_mut().callbacks.input = Some(func);

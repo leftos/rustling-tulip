@@ -58,27 +58,42 @@ pub struct LaunchArgs {
     pub client_id: String,
 }
 
+/// Start a preset launch from a client's `ClientMessage::LaunchPreset`: answer
+/// a repeat of a job this daemon still holds with that job's latest snapshot,
+/// and start anything else in the background. `out_tx` is the requesting
+/// connection's queue, so a repeat's answer reaches only the client that asked
+/// again. The answer is sent while the store's lock is held, so it is never
+/// older than the snapshot a later record broadcasts.
+pub(crate) fn start(
+    hub: &Hub,
+    args: LaunchArgs,
+    out_tx: &tokio::sync::mpsc::UnboundedSender<protocol::DaemonMessage>,
+) {
+    let mut args = args;
+    args.job_id = normalize_job_id(&args.job_id);
+    let mut jobs = crate::sync::lock(&hub.preset_job_snapshots);
+    match jobs.claim(resolving_snapshot(&args)) {
+        Some(existing) => {
+            info!(
+                job_id = %existing.job_id,
+                "preset launch: a repeat of a known job; answered with its snapshot"
+            );
+            let _ = out_tx.send(protocol::DaemonMessage::PresetLaunchJobUpdated { job: existing });
+        }
+        None => {
+            tokio::spawn(launch(hub.clone(), args));
+        }
+    }
+    drop(jobs);
+}
+
 pub async fn launch(hub: Hub, args: LaunchArgs) {
     let mut args = args;
     args.job_id = normalize_job_id(&args.job_id);
     let job_id = args.job_id.clone();
     let preset_id = args.preset_id.clone();
     let target = args.target.clone();
-    send_job_update(
-        &hub,
-        PresetLaunchJobSnapshot {
-            job_id: job_id.clone(),
-            preset_id: preset_id.clone(),
-            target: target.clone(),
-            total: 0,
-            launched: 0,
-            created_session_ids: Vec::new(),
-            created_tab_ids: Vec::new(),
-            status: PresetLaunchJobStatus::Resolving,
-            error: None,
-            current_tab_id: None,
-        },
-    );
+    send_job_update(&hub, resolving_snapshot(&args));
     let (cancel_tx, cancel_rx) = watch::channel(false);
     hub.preset_cancellations
         .lock()
@@ -123,6 +138,22 @@ fn normalize_job_id(job_id: &str) -> String {
         format!("preset-{}", Uuid::new_v4())
     } else {
         trimmed.to_string()
+    }
+}
+
+/// The snapshot a launch starts from, before [`run`] resolves anything.
+fn resolving_snapshot(args: &LaunchArgs) -> PresetLaunchJobSnapshot {
+    PresetLaunchJobSnapshot {
+        job_id: args.job_id.clone(),
+        preset_id: args.preset_id.clone(),
+        target: args.target.clone(),
+        total: 0,
+        launched: 0,
+        created_session_ids: Vec::new(),
+        created_tab_ids: Vec::new(),
+        status: PresetLaunchJobStatus::Resolving,
+        error: None,
+        current_tab_id: None,
     }
 }
 
@@ -183,6 +214,17 @@ impl PresetJobSnapshots {
             stored.finished_at = Some(self.finished);
         }
         self.prune();
+    }
+
+    /// Claim `job`'s id for a new launch: `Some` with the snapshot already
+    /// held for that id, so the caller starts nothing, or `None` after
+    /// recording `job` as its job's first snapshot.
+    pub fn claim(&mut self, job: PresetLaunchJobSnapshot) -> Option<PresetLaunchJobSnapshot> {
+        if let Some(stored) = self.jobs.iter().find(|s| s.snapshot.job_id == job.job_id) {
+            return Some(stored.snapshot.clone());
+        }
+        self.record(job);
+        None
     }
 
     /// Every stored snapshot, in job start order.
@@ -298,6 +340,14 @@ async fn list_workspace_presets(hub: &Hub, workspace_id: &str) -> anyhow::Result
     Ok(all)
 }
 
+/// The fields of a preset entry that older releases wrote and the entry no longer has.
+#[derive(serde::Deserialize)]
+struct LegacyPreset {
+    /// The Trusted flag, which loads as the agent's bypass choice.
+    #[serde(default)]
+    dangerously_skip_permissions: bool,
+}
+
 async fn load_repo_presets(repo_path: &Path, repo_id: &str) -> anyhow::Result<Vec<PresetEntry>> {
     let path = repo_path.join(".rustling-tulip").join("presets.json");
     if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
@@ -306,14 +356,27 @@ async fn load_repo_presets(repo_path: &Path, repo_id: &str) -> anyhow::Result<Ve
     let bytes = tokio::fs::read(&path)
         .await
         .with_context(|| format!("reading {}", path.display()))?;
-    let mut entries: Vec<PresetEntry> = serde_json::from_slice(&bytes).map_err(|err| {
+    let parse_error = |err: serde_json::Error| {
         anyhow::anyhow!(
             "parsing {}: {}",
             path.display(),
             crate::logging::json_error_at(&err)
         )
-    })?;
-    for entry in &mut entries {
+    };
+    let mut entries: Vec<PresetEntry> = serde_json::from_slice(&bytes).map_err(parse_error)?;
+    // Older releases wrote a `dangerously_skip_permissions` flag the entry no longer has; read it
+    // with its old type, so a value that is not a bool still fails, and fold it into the agent's
+    // bypass choice.
+    let legacy: Vec<LegacyPreset> = serde_json::from_slice(&bytes).map_err(parse_error)?;
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let trusted = legacy
+            .get(index)
+            .is_some_and(|legacy| legacy.dangerously_skip_permissions);
+        if trusted {
+            let mut selection = preset_selection(entry);
+            crate::trusted_fold::fold_options(&selection.agent, true, &mut selection.options);
+            entry.agent = Some(selection);
+        }
         if let TabGroupingConfig::NewTab {
             max_panes_per_tab: Some(0),
             ..
@@ -1676,8 +1739,10 @@ async fn spawn_one(
         target: spawn_target,
         mode: SessionMode::Interactive,
         initial_prompt: None,
-        dangerously_skip_permissions: plan.preset.dangerously_skip_permissions,
+        // The spawn intake derives the flag from the options' bypass choice.
+        dangerously_skip_permissions: false,
         agent: Some(preset_selection(&plan.preset)),
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: Some(injector),
@@ -2415,6 +2480,110 @@ mod tests {
             } => assert!(max_panes_per_tab.is_none()),
             protocol::TabGroupingConfig::None => panic!("expected new_tab grouping"),
         }
+        assert_eq!(
+            smoke
+                .agent
+                .as_ref()
+                .and_then(|selection| selection.options.get("permission_mode")),
+            Some(&protocol::OptionValue::Text(
+                "bypass_permissions".to_owned()
+            )),
+            "the smoke preset runs in bypass mode"
+        );
+    }
+
+    /// One preset in the shape `.rustling-tulip/presets.json` took in v0.5.1-alpha, with
+    /// `fields` merged over its required keys.
+    fn v0_5_1_preset(id: &str, fields: serde_json::Value) -> serde_json::Value {
+        let mut preset = serde_json::json!({
+            "id": id,
+            "name": id,
+            "prompt_sources": [{"kind": "inline"}],
+            "prompt_template": "{prompt}",
+            "branch_template": "tmp/{index}",
+            "tab_grouping": {"kind": "none"},
+            "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
+        });
+        if let (Some(preset), serde_json::Value::Object(fields)) = (preset.as_object_mut(), fields)
+        {
+            preset.extend(fields);
+        }
+        preset
+    }
+
+    #[tokio::test]
+    async fn a_preset_file_from_v0_5_1_alpha_with_the_trusted_flag_loads_in_bypass_mode() {
+        let scratch = ScratchDir::new();
+        let folder = scratch.path().join(".rustling-tulip");
+        std::fs::create_dir_all(&folder).expect("create the preset folder");
+        let presets = serde_json::json!([
+            v0_5_1_preset(
+                "smoke",
+                serde_json::json!({
+                    "dangerously_skip_permissions": true,
+                    "model": null,
+                    "permission_mode": null
+                })
+            ),
+            v0_5_1_preset(
+                "planned",
+                serde_json::json!({
+                    "dangerously_skip_permissions": true,
+                    "agent": {"agent": "claude", "options": {"permission_mode": "plan"}}
+                })
+            ),
+            v0_5_1_preset("plain", serde_json::json!({})),
+        ]);
+        let json = serde_json::to_vec(&presets).expect("serialize the presets");
+        std::fs::write(folder.join("presets.json"), json).expect("write presets.json");
+
+        let entries = load_repo_presets(scratch.path(), "repo-1")
+            .await
+            .expect("the v0.5.1 presets load");
+
+        let bypass = protocol::OptionValue::Text("bypass_permissions".to_owned());
+        assert_eq!(
+            entries[0].agent,
+            Some(AgentSelection {
+                agent: AgentId("claude".to_owned()),
+                options: OptionValues::from([("permission_mode".to_owned(), bypass.clone())]),
+            }),
+            "the old smoke shape runs the default agent in bypass mode"
+        );
+        assert_eq!(
+            entries[1]
+                .agent
+                .as_ref()
+                .and_then(|selection| selection.options.get("permission_mode")),
+            Some(&bypass),
+            "the trusted flag wins over a stored mode"
+        );
+        assert_eq!(
+            entries[2].agent, None,
+            "a preset without the flag is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preset_whose_trusted_flag_is_not_a_bool_fails_to_parse() {
+        let scratch = ScratchDir::new();
+        let folder = scratch.path().join(".rustling-tulip");
+        std::fs::create_dir_all(&folder).expect("create the preset folder");
+        let presets = serde_json::json!([v0_5_1_preset(
+            "quoted",
+            serde_json::json!({"dangerously_skip_permissions": "true"})
+        )]);
+        let json = serde_json::to_vec(&presets).expect("serialize the presets");
+        std::fs::write(folder.join("presets.json"), json).expect("write presets.json");
+
+        let err = load_repo_presets(scratch.path(), "repo-1")
+            .await
+            .expect_err("a string flag is refused as older releases refused it");
+        let text = err.to_string();
+        assert!(
+            text.contains("parsing") && text.contains("line 1 column"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -2809,6 +2978,110 @@ mod tests {
         assert_eq!(finished, FINISHED_JOB_SNAPSHOTS);
     }
 
+    #[test]
+    fn a_claim_of_a_known_job_returns_its_snapshot_and_records_nothing() {
+        let mut jobs = PresetJobSnapshots::default();
+        jobs.record(job_snapshot("job-a", PresetLaunchJobStatus::Spawning));
+
+        let claimed = jobs.claim(job_snapshot("job-a", PresetLaunchJobStatus::Resolving));
+
+        assert_eq!(
+            claimed.map(|job| job.status),
+            Some(PresetLaunchJobStatus::Spawning)
+        );
+        let snapshots = jobs.snapshots();
+        assert_eq!(snapshots.len(), 1, "a claim of a known job records nothing");
+        assert_eq!(snapshots[0].status, PresetLaunchJobStatus::Spawning);
+    }
+
+    #[test]
+    fn a_claim_of_a_new_job_records_it() {
+        let mut jobs = PresetJobSnapshots::default();
+
+        let claimed = jobs.claim(job_snapshot("job-b", PresetLaunchJobStatus::Resolving));
+
+        assert!(claimed.is_none(), "a new job's claim starts it");
+        let snapshots = jobs.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].job_id, "job-b");
+    }
+
+    fn launch_args(job_id: &str) -> LaunchArgs {
+        LaunchArgs {
+            job_id: job_id.to_string(),
+            target: PresetTarget::Repo {
+                repo_id: "repo-1".to_string(),
+            },
+            preset_id: "preset-1".to_string(),
+            source: LaunchPresetSource::Inline {
+                prompts: vec!["prompt 1".to_string()],
+            },
+            variable_values: Vec::new(),
+            use_worktree_override: None,
+            max_panes_per_tab_override: None,
+            client_id: "test-client".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resent_launch_with_a_known_job_id_starts_no_second_job() {
+        let (hub, mut preset_rx, _scratch) = test_hub();
+        crate::sync::lock(&hub.preset_job_snapshots)
+            .record(job_snapshot("job-r", PresetLaunchJobStatus::Spawning));
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+
+        start(&hub, launch_args("job-r"), &out_tx);
+
+        let answer = out_rx.try_recv().expect("the repeat is answered");
+        assert!(
+            matches!(
+                &answer,
+                protocol::DaemonMessage::PresetLaunchJobUpdated { job }
+                    if job.job_id == "job-r" && job.status == PresetLaunchJobStatus::Spawning
+            ),
+            "{answer:?}"
+        );
+        assert!(
+            matches!(
+                preset_rx.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "a repeat is answered to its sender only, never broadcast"
+        );
+        assert_eq!(
+            crate::sync::lock(&hub.preset_job_snapshots)
+                .snapshots()
+                .len(),
+            1
+        );
+        assert!(
+            hub.preset_cancellations.lock().await.is_empty(),
+            "a repeat starts no job, so it registers no cancel handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_launch_with_a_blank_job_id_is_never_a_repeat() {
+        let (hub, _preset_rx, _scratch) = test_hub();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+
+        start(&hub, launch_args("  "), &out_tx);
+        start(&hub, launch_args("  "), &out_tx);
+
+        assert!(
+            matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "a blank job id names no job, so it is never a repeat"
+        );
+        let snapshots = crate::sync::lock(&hub.preset_job_snapshots).snapshots();
+        assert_eq!(snapshots.len(), 2);
+        assert_ne!(snapshots[0].job_id, snapshots[1].job_id);
+        assert!(
+            snapshots
+                .iter()
+                .all(|job| job.job_id.starts_with("preset-"))
+        );
+    }
+
     fn new_tab_preset(max_panes_per_tab: Option<u32>) -> PresetEntry {
         let mut preset = test_launch_plan(1, 0).preset;
         preset.tab_grouping = TabGroupingConfig::NewTab {
@@ -2973,6 +3246,7 @@ mod tests {
             keep_awake_mode: Arc::new(keep_awake_mode),
             keep_awake_status,
             recovering: crate::server::RecoveryClaims::default(),
+            spawn_journal: Arc::default(),
             resume_in_flight: Arc::default(),
             start_resume: Arc::default(),
             resume_reported: Arc::default(),
@@ -3024,7 +3298,6 @@ mod tests {
                 branch_template: "branch-{index}".to_string(),
                 session_label_template: Some("session {index}".to_string()),
                 default_use_worktree: Some(false),
-                dangerously_skip_permissions: false,
                 agent: None,
                 tab_grouping: TabGroupingConfig::None,
                 injector: InjectorTemplate {

@@ -6,17 +6,23 @@ import type {
   PromptChoice,
   RepoEntry,
   SessionSnapshot,
+  SpawnConfig,
   WorkspaceEntry,
 } from "./protocol";
 
-/** What a group of Home rows is: the desktop sidebar's container kinds. */
-export type HomeGroupKind = "workspace" | "repo" | "shell" | "folder" | "detached";
+/** What a group of Home rows is: the desktop sidebar's container kinds, and the launches waiting for a session. */
+export type HomeGroupKind = "workspace" | "repo" | "shell" | "folder" | "detached" | "launch_again";
+
+/** What the trailing group of containers with nothing running is called. */
+const LAUNCH_AGAIN = "Launch again";
 
 /**
  * The phone's Home state, folded from the daemon's repo, workspace and
- * session messages. Sessions live in first-seen order, so a row keeps its
- * place whenever its state changes; it moves only when a container's manual
- * order says so.
+ * session messages. The first `sessions` list after a reset is sorted by
+ * label, case-insensitive, then id, as the desktop sidebar sorts; a session
+ * named after it, by an update or a later list, goes last. A row then keeps
+ * its place whenever its state changes; it moves only when a container's
+ * manual order says so.
  */
 export interface HomeModel {
   readonly repos: readonly RepoEntry[];
@@ -64,7 +70,13 @@ export function homeStep(model: HomeModel, message: DaemonMessage): HomeModel {
     case "workspaces":
       return { ...model, workspaces: message.workspaces };
     case "sessions":
-      return { ...model, sessions: [...message.sessions], loaded: true };
+      return {
+        ...model,
+        sessions: model.loaded
+          ? keptInPlace(model.sessions, message.sessions)
+          : byLabel(message.sessions),
+        loaded: true,
+      };
     case "session_updated":
       return { ...model, sessions: withSession(model.sessions, message.session) };
     case "session_removed": {
@@ -86,6 +98,40 @@ export function homeStep(model: HomeModel, message: DaemonMessage): HomeModel {
   }
 }
 
+/**
+ * The daemon's first list sorted as the desktop sidebar sorts: by the label a
+ * row shows, case-insensitive, then by id. The daemon's own order is not
+ * stable across a relaunch.
+ */
+function byLabel(sessions: readonly SessionSnapshot[]): readonly SessionSnapshot[] {
+  return sessions
+    .slice()
+    .sort((a, b) => compareNames(displayLabel(a), displayLabel(b)) || compareIds(a.id, b.id));
+}
+
+/**
+ * A later full list (a resync, a re-listing) over the rows already drawn: a
+ * known session keeps its place with its new state, one the list no longer
+ * names leaves, and a new one goes last in the list's order.
+ */
+function keptInPlace(
+  known: readonly SessionSnapshot[],
+  listed: readonly SessionSnapshot[],
+): readonly SessionSnapshot[] {
+  const byId = new Map(listed.map((session) => [session.id, session]));
+  const kept = known.flatMap((session) => byId.get(session.id) ?? []);
+  const knownIds = new Set(known.map((session) => session.id));
+  return [...kept, ...listed.filter((session) => !knownIds.has(session.id))];
+}
+
+/** The plain order of two session ids. */
+function compareIds(a: string, b: string): number {
+  if (a < b) {
+    return -1;
+  }
+  return a > b ? 1 : 0;
+}
+
 /** `sessions` with `session` replacing its own row in place, or appended. */
 function withSession(
   sessions: readonly SessionSnapshot[],
@@ -100,6 +146,12 @@ function withSession(
   return next;
 }
 
+/** One container a group offers to launch again, for the trailing group. */
+export interface LaunchContainer {
+  readonly name: string;
+  readonly launch: ContainerRef;
+}
+
 /** One group of rows: a workspace, a repo, or one of the single buckets. */
 export interface HomeGroup {
   readonly kind: HomeGroupKind;
@@ -107,17 +159,59 @@ export interface HomeGroup {
   readonly id: string;
   readonly name: string;
   readonly rows: readonly SessionSnapshot[];
+  /** The container's stored last launch; null when it has none to replay. */
+  readonly launch: ContainerRef | null;
+  /** The containers the Launch again group lists; absent for every other group. */
+  readonly containers?: readonly LaunchContainer[];
 }
 
 /** The rows grouped as the desktop's sidebar groups them, in its order. */
 export function homeGroups(model: HomeModel): readonly HomeGroup[] {
+  const members = memberRepoIds(model);
+  const build: GroupBuild = {
+    model,
+    bucketed: bucketSessions(model, members),
+    workspaces: new Map(model.workspaces.map((workspace) => [workspace.id, workspace])),
+    repos: new Map(
+      model.repos.filter((repo) => !members.has(repo.id)).map((repo) => [repo.id, repo]),
+    ),
+    groups: [],
+    trailing: [],
+  };
+  pushRemaining(build, pushManualOrder(build));
+  pushGroup(build.groups, "shell", "shell", "Shells", build.bucketed.shells);
+  pushGroup(build.groups, "folder", "folder", "Folders", build.bucketed.folders);
+  pushGroup(build.groups, "detached", "detached", "Detached", build.bucketed.detached);
+  const again = launchAgainGroup(build.trailing);
+  if (again !== null) {
+    build.groups.push(again);
+  }
+  return build.groups;
+}
+
+/** What one group list is built from, passed along to the helpers that fill it. */
+interface GroupBuild {
+  readonly model: HomeModel;
+  readonly bucketed: Buckets;
+  readonly workspaces: ReadonlyMap<string, WorkspaceEntry>;
+  readonly repos: ReadonlyMap<string, RepoEntry>;
+  readonly groups: HomeGroup[];
+  readonly trailing: LaunchContainer[];
+}
+
+/** Every repo a workspace holds, so its sessions stay in the workspace's group. */
+function memberRepoIds(model: HomeModel): Set<string> {
   const members = new Set<string>();
   for (const workspace of model.workspaces) {
     for (const id of workspace.member_repo_ids) {
       members.add(id);
     }
   }
+  return members;
+}
 
+/** Every session filed where the desktop's `build_containers` files it. */
+function bucketSessions(model: HomeModel, members: ReadonlySet<string>): Buckets {
   const bucketed: Buckets = {
     workspaces: new Map(),
     repos: new Map(),
@@ -128,49 +222,66 @@ export function homeGroups(model: HomeModel): readonly HomeGroup[] {
   for (const session of model.sessions) {
     place(session, model, members, bucketed);
   }
+  return bucketed;
+}
 
-  const groups: HomeGroup[] = [];
-  const workspaces = new Map(model.workspaces.map((workspace) => [workspace.id, workspace]));
-  const repos = new Map(
-    model.repos.filter((repo) => !members.has(repo.id)).map((repo) => [repo.id, repo]),
-  );
-
-  // The user's manual order first, workspaces and repos mixed; then the rest
-  // alphabetically, the desktops's two passes in `apply_container_order`.
+/**
+ * The user's manual order first, workspaces and repos mixed, the desktop's
+ * first pass in `apply_container_order`; returns every container it placed.
+ */
+function pushManualOrder(build: GroupBuild): Set<string> {
   const placed = new Set<string>();
-  for (const ref of model.containerOrder) {
+  for (const ref of build.model.containerOrder) {
     const key = `${ref.kind}:${ref.id}`;
     if (placed.has(key)) {
       continue;
     }
     if (ref.kind === "workspace") {
-      const workspace = workspaces.get(ref.id);
+      const workspace = build.workspaces.get(ref.id);
       if (workspace !== undefined) {
         placed.add(key);
-        pushWorkspaceGroup(groups, model, bucketed, workspace);
+        pushWorkspaceGroup(build, workspace);
       }
     } else {
-      const repo = repos.get(ref.id);
+      const repo = build.repos.get(ref.id);
       if (repo !== undefined) {
         placed.add(key);
-        pushRepoGroup(groups, model, bucketed, repo);
+        pushRepoGroup(build, repo);
       }
     }
   }
-  for (const workspace of [...workspaces.values()].sort((a, b) => compareNames(a.name, b.name))) {
+  return placed;
+}
+
+/** The containers the manual order did not name, alphabetically, the desktop's second pass. */
+function pushRemaining(build: GroupBuild, placed: ReadonlySet<string>): void {
+  const workspaces = [...build.workspaces.values()].sort((a, b) => compareNames(a.name, b.name));
+  for (const workspace of workspaces) {
     if (!placed.has(`workspace:${workspace.id}`)) {
-      pushWorkspaceGroup(groups, model, bucketed, workspace);
+      pushWorkspaceGroup(build, workspace);
     }
   }
-  for (const repo of [...repos.values()].sort((a, b) => compareNames(a.name, b.name))) {
+  const repos = [...build.repos.values()].sort((a, b) => compareNames(a.name, b.name));
+  for (const repo of repos) {
     if (!placed.has(`repo:${repo.id}`)) {
-      pushRepoGroup(groups, model, bucketed, repo);
+      pushRepoGroup(build, repo);
     }
   }
-  pushGroup(groups, "shell", "shell", "Shells", bucketed.shells);
-  pushGroup(groups, "folder", "folder", "Folders", bucketed.folders);
-  pushGroup(groups, "detached", "detached", "Detached", bucketed.detached);
-  return groups;
+}
+
+/** The trailing group of containers with nothing running; null when there are none. */
+function launchAgainGroup(trailing: readonly LaunchContainer[]): HomeGroup | null {
+  if (trailing.length === 0) {
+    return null;
+  }
+  return {
+    kind: "launch_again",
+    id: "launch_again",
+    name: LAUNCH_AGAIN,
+    rows: [],
+    launch: null,
+    containers: trailing,
+  };
 }
 
 /** Where a group's rows are collected before the groups are built. */
@@ -191,28 +302,74 @@ function pushGroup(
   rows: readonly SessionSnapshot[],
 ): void {
   if (rows.length > 0) {
-    groups.push({ kind, id, name, rows });
+    groups.push({ kind, id, name, rows, launch: null });
   }
 }
 
-function pushWorkspaceGroup(
-  groups: HomeGroup[],
-  model: HomeModel,
-  bucketed: Buckets,
-  workspace: WorkspaceEntry,
-): void {
-  const rows = ordered(bucketed.workspaces.get(workspace.id) ?? [], model.orders.get(workspace.id));
-  pushGroup(groups, "workspace", workspace.id, workspace.name, rows);
+/** One workspace or repo group before the trailing group is decided. */
+interface ContainerGroup {
+  readonly kind: "workspace" | "repo";
+  readonly id: string;
+  readonly name: string;
+  readonly rows: readonly SessionSnapshot[];
+  readonly launch: ContainerRef | null;
 }
 
-function pushRepoGroup(
+/**
+ * A workspace or repo group, or, when it has no rows, its place in the
+ * trailing Launch again group if it has a launch to offer.
+ */
+function pushContainer(
   groups: HomeGroup[],
-  model: HomeModel,
-  bucketed: Buckets,
-  repo: RepoEntry,
+  trailing: LaunchContainer[],
+  entry: ContainerGroup,
 ): void {
-  const rows = ordered(bucketed.repos.get(repo.id) ?? [], model.orders.get(repo.id));
-  pushGroup(groups, "repo", repo.id, repo.name, rows);
+  if (entry.rows.length > 0) {
+    groups.push({
+      kind: entry.kind,
+      id: entry.id,
+      name: entry.name,
+      rows: entry.rows,
+      launch: entry.launch,
+    });
+  } else if (entry.launch !== null) {
+    trailing.push({ name: entry.name, launch: entry.launch });
+  }
+}
+
+function pushWorkspaceGroup(build: GroupBuild, workspace: WorkspaceEntry): void {
+  pushContainer(build.groups, build.trailing, {
+    kind: "workspace",
+    id: workspace.id,
+    name: workspace.name,
+    rows: ordered(
+      build.bucketed.workspaces.get(workspace.id) ?? [],
+      build.model.orders.get(workspace.id),
+    ),
+    launch: containerLaunch("workspace", workspace.id, workspace.last_spawn_config),
+  });
+}
+
+function pushRepoGroup(build: GroupBuild, repo: RepoEntry): void {
+  pushContainer(build.groups, build.trailing, {
+    kind: "repo",
+    id: repo.id,
+    name: repo.name,
+    rows: ordered(build.bucketed.repos.get(repo.id) ?? [], build.model.orders.get(repo.id)),
+    launch: containerLaunch("repo", repo.id, repo.last_spawn_config),
+  });
+}
+
+/** The launch a container's stored config offers; a missing or headless one offers none. */
+function containerLaunch(
+  kind: "repo" | "workspace",
+  id: string,
+  config: SpawnConfig | null | undefined,
+): ContainerRef | null {
+  if (config === null || config === undefined || config.mode === "headless") {
+    return null;
+  }
+  return { kind, id };
 }
 
 /** Rows reordered by `order`; a row it does not name keeps its first-seen place after the named ones. */
@@ -468,7 +625,7 @@ function questionChoices(questions: readonly PendingQuestion[]): readonly TrayCh
     return [];
   }
   const question = questions[0];
-  if (question === undefined || question.multi_select === true) {
+  if (question === undefined || question.multi_select === true || question.preview === true) {
     return [];
   }
   const options = question.options ?? [];

@@ -12,7 +12,9 @@ use crate::support;
 use std::time::Duration;
 
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
-use gpui::{Modifiers, MouseButton, Point, TestAppContext, point, px, size};
+use gpui::{
+    Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Point, TestAppContext, point, px, size,
+};
 use protocol::{ClientMessage, DaemonMessage, ImagePaste, SessionSnapshot, SplitDirection};
 use rustling_tulip_native::fonts::FontSettings;
 use rustling_tulip_native::ui_theme::UiTheme;
@@ -858,6 +860,75 @@ fn a_drag_that_brings_focus_sends_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_press_that_brings_the_window_forward_only_focuses(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+
+    // p1 still holds the keyboard, as the pane last used does while another
+    // app is in front; the platform marks the press that activates the window.
+    let at = h.cell_center("p1", 2, 3);
+    h.cx.simulate_event(MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+        first_mouse: true,
+    });
+    h.cx.simulate_event(MouseUpEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+    });
+    h.cx.run_until_parked();
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the press that brings the window forward reaches no program"
+    );
+
+    h.click(at, Modifiers::none());
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\x1b[<0;3;4M\x1b[<0;3;4m",
+        "a later ordinary click reaches the program"
+    );
+}
+
+#[gpui::test]
+fn an_activating_right_click_neither_pastes_nor_reaches_the_program(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+    h.set_clipboard("x");
+
+    let at = h.cell_center("p1", 2, 3);
+    h.cx.simulate_event(MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Right,
+        click_count: 1,
+        first_mouse: true,
+    });
+    h.cx.simulate_event(MouseUpEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Right,
+        click_count: 1,
+    });
+    h.cx.run_until_parked();
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the right press that brings the window forward neither pastes nor reaches the program"
+    );
+
+    h.right_click(at);
+    assert_eq!(
+        h.sent_input("s1"),
+        b"x",
+        "a later ordinary right-click pastes as before"
+    );
+}
+
+#[gpui::test]
 fn a_shift_right_press_that_brings_focus_sends_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = one_focused_pane_reporting(cx, &dir);
@@ -1487,6 +1558,113 @@ fn rebinding_a_pane_to_another_session_does_not_claim(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn binding_an_unbound_session_from_its_pill_claims_the_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.advance(Duration::from_secs(6));
+    h.sent();
+
+    h.click_on("leaf-pill-s2");
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t2", &pane("p2", Some("s2"))),
+    });
+    h.answer_scrollback("s2", b"");
+    let claims = resize_claims(&h.sent(), "s2");
+    assert_eq!(
+        claims.first(),
+        Some(&true),
+        "the pane this client opened the session in claims its size: {claims:?}"
+    );
+}
+
+#[gpui::test]
+fn adding_an_unbound_session_to_the_current_tab_claims_the_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.advance(Duration::from_secs(6));
+    h.sent();
+
+    h.right_click_on("leaf-s1");
+    h.click_on("session-menu-add-current");
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p1", Some("s1"))),
+    });
+    h.answer_scrollback("s1", b"");
+    let claims = resize_claims(&h.sent(), "s1");
+    assert_eq!(
+        claims.first(),
+        Some(&true),
+        "the pane the user placed the session in claims its size: {claims:?}"
+    );
+}
+
+/// The point `fx` across and `fy` down pane `pane_id`'s card.
+fn on_pane_center(h: &mut Harness<'_>, pane_id: &str, fx: f32, fy: f32) -> Point<gpui::Pixels> {
+    let frame = h.bounds(&format!("pane-frame-{pane_id}"));
+    point(
+        frame.origin.x + frame.size.width * fx,
+        frame.origin.y + frame.size.height * fy,
+    )
+}
+
+#[gpui::test]
+fn dropping_an_unbound_session_on_an_empty_pane_claims_the_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("a").build(), session("u").build()],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("a")),
+                pane("p2", None),
+            ),
+        )],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("a", b"");
+    h.advance(Duration::from_secs(6));
+    h.sent();
+
+    let row = h.bounds("leaf-u");
+    let from = point(
+        row.origin.x + row.size.width * 0.3,
+        row.origin.y + row.size.height * 0.5,
+    );
+    let to = on_pane_center(&mut h, "p2", 0.5, 0.5);
+    h.start_drag(from);
+    h.drag_to(to);
+    h.release(to);
+    h.sent();
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("a")),
+                pane("p2", Some("u")),
+            ),
+        ),
+    });
+    h.answer_scrollback("u", b"");
+    let claims = resize_claims(&h.sent(), "u");
+    assert_eq!(
+        claims.first(),
+        Some(&true),
+        "the pane the session was dropped on claims its size: {claims:?}"
+    );
+}
+
+#[gpui::test]
 fn another_clients_layout_change_does_not_claim(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let grid = split(
@@ -1512,6 +1690,52 @@ fn another_clients_layout_change_does_not_claim(cx: &mut TestAppContext) {
         "p1 widened once its neighbour closed: {sent:?}"
     );
     assert_sized_unclaimed(&sent, "s1", "another client's layout change claims nothing");
+}
+
+#[gpui::test]
+fn refused_split_bind_does_not_claim_a_later_bind_from_another_client(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.advance(Duration::from_secs(6));
+    h.sent();
+
+    h.right_click_on("leaf-s2");
+    h.click_on("session-menu-add-current");
+    let sent = h.sent();
+    let request_id = sent
+        .iter()
+        .find_map(|msg| match msg {
+            ClientMessage::SplitPane { request_id, .. } => request_id.clone(),
+            _ => None,
+        })
+        .expect("placing s2 beside a full pane splits it with a request id");
+    h.send(DaemonMessage::Error {
+        message: "refused".to_owned(),
+        request_id: Some(request_id),
+        code: None,
+    });
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", Some("s2")),
+            ),
+        ),
+    });
+    h.answer_scrollback("s2", b"");
+    let claims = resize_claims(&h.sent(), "s2");
+    assert!(
+        !claims.is_empty() && claims.iter().all(|claim| !claim),
+        "another client's bind after a refused split claims nothing: {claims:?}"
+    );
 }
 
 #[gpui::test]

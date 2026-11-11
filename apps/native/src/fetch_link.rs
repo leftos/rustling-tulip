@@ -7,6 +7,7 @@ use protocol::{RepoEntry, SessionFolder, SessionMember, SessionSnapshot};
 
 use crate::file_fetch::FetchRequest;
 use crate::links::TerminalLinkCandidate;
+use crate::open::LinkAction;
 use crate::target::HostKey;
 
 /// A folder on the host a fetch may name: a repo or one of its worktrees.
@@ -145,7 +146,7 @@ pub fn readings(
                     line: candidate.line,
                     column: candidate.column,
                     open_when_done: true,
-                    prefer_viewer: true,
+                    action: LinkAction::Viewer,
                 };
                 let seen = found.iter().any(|other| {
                     (&other.repo_id, &other.worktree_path, &other.rel_path)
@@ -326,6 +327,7 @@ mod tests {
     };
     use crate::file_fetch::FetchRequest;
     use crate::links::TerminalLinkCandidate;
+    use crate::open::LinkAction;
     use crate::target::HostKey;
 
     /// [`all_readings`] with one list joining and matching, as a session's
@@ -384,7 +386,7 @@ mod tests {
             line: None,
             column: None,
             open_when_done: true,
-            prefer_viewer: true,
+            action: LinkAction::Viewer,
         }
     }
 

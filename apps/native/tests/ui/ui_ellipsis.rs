@@ -13,6 +13,8 @@ use chrono::Utc;
 use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point, px};
 use protocol::{ClientMessage, DaemonMessage, GitCommit, GitCommitDetail, GitFileChange, TabEntry};
 use rustling_tulip_native::ellipsis::{drawn_text, enable_probe};
+use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
+use rustling_tulip_native::ui_theme::UiTheme;
 use serde_json::{Value, json};
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
 
@@ -67,6 +69,24 @@ fn sc_panel<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     let mut h = Harness::with(cx, dir, &one_repo());
     h.click_on("activity-source-control");
     h
+}
+
+// --- Tab strip -----------------------------------------------------------
+
+#[gpui::test]
+fn a_long_shown_name_ends_in_an_ellipsis(cx: &mut TestAppContext) {
+    let dir = probed();
+    let name = long("repo");
+    let mut fixture = Fixture::single(session("s1").in_repo(&name).build());
+    "Tab".clone_into(&mut fixture.tabs[0].name);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.cx.run_until_parked();
+    assert_eq!(
+        h.root(|root, _| root.tab_pill_label("t1")).as_deref(),
+        Some(name.as_str()),
+        "the unnamed tab shows its repo's name"
+    );
+    assert_ellipsized("tab-label-t1", &name);
 }
 
 // --- Changes -------------------------------------------------------------
@@ -463,17 +483,6 @@ fn needs_you_view_row_label_ends_in_an_ellipsis(cx: &mut TestAppContext) {
     assert_ellipsized("needs-you-row-s1-label", &title);
 }
 
-#[gpui::test]
-fn needs_you_view_row_detail_ends_in_an_ellipsis(cx: &mut TestAppContext) {
-    let dir = probed();
-    let title = long("Title");
-    let _h = asking(cx, &dir, &title);
-    assert_ellipsized(
-        "needs-you-row-s1-detail",
-        &format!("Waiting for input · {title}"),
-    );
-}
-
 // --- Sidebar -------------------------------------------------------------
 
 #[gpui::test]
@@ -529,27 +538,7 @@ fn sidebar_view_leaf_subline_ends_in_an_ellipsis(cx: &mut TestAppContext) {
     assert_ellipsized("leaf-subline-s1-label", &branch);
 }
 
-// --- Undo shelf and footer -----------------------------------------------
-
-#[gpui::test]
-fn undo_view_message_ends_in_an_ellipsis(cx: &mut TestAppContext) {
-    let dir = probed();
-    let label = long("Label");
-    let mut h = Harness::with(
-        cx,
-        &dir,
-        &Fixture::single(session("s1").label(&label).build()),
-    );
-    h.click_on("close-pane-p1");
-    h.click_on("pane-close-only");
-    let id = h
-        .root(|root, _| root.undo_entries().first().map(|entry| entry.id))
-        .expect("an undo entry");
-    assert_ellipsized(
-        &format!("undo-entry-{id}-message"),
-        &format!("Closed pane \"{label}\""),
-    );
-}
+// --- Footer ------------------------------------------------------------
 
 #[gpui::test]
 fn footer_status_ends_in_an_ellipsis(cx: &mut TestAppContext) {
@@ -571,6 +560,53 @@ fn footer_status_that_fits_is_drawn_whole(cx: &mut TestAppContext) {
         drawn_text("footer-status").as_deref(),
         Some("session gone not found")
     );
+}
+
+// --- Jump palette ------------------------------------------------------
+
+#[gpui::test]
+fn quick_jump_view_primary_ends_in_an_ellipsis(cx: &mut TestAppContext) {
+    let dir = probed();
+    let name = long("Name");
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.repos = vec![repo(&name, "C:/name")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let cell = h.cell_center("p1", 0, 0);
+    h.click(cell, Modifiers::none());
+    h.sent();
+    h.keys("ctrl-shift-p");
+    h.cx.simulate_input("Name");
+    h.cx.run_until_parked();
+    assert_ellipsized("quick-jump-row-0-primary", &name);
+}
+
+// --- Themes ------------------------------------------------------------
+
+/// The token rows' labels are a fixed table in the app, none of them long,
+/// so only the theme name is driven past its box here.
+#[gpui::test]
+fn themes_view_theme_name_ends_in_an_ellipsis(cx: &mut TestAppContext) {
+    let dir = probed();
+    let name = long("Mine");
+    let themes = dir.path().join(THEMES_DIR);
+    let id = ThemeStore::new(themes.clone())
+        .save("Mine", &UiTheme::CONTRAST, None, None)
+        .expect("save");
+    let file = themes.join(format!("{id}.json"));
+    let text = std::fs::read_to_string(&file).expect("read the saved theme");
+    let mut saved: Value = serde_json::from_str(&text).expect("JSON");
+    saved["name"] = Value::String(name.clone());
+    std::fs::write(&file, saved.to_string()).expect("rename the saved theme");
+    let mut h = Harness::with_saved_theme(cx, &dir, &Fixture::single(session("s1").build()));
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-appearance");
+    h.click_on("appearance-theme");
+    assert!(
+        h.root(|root, _| root.themes_modal_open()),
+        "the dialog opens"
+    );
+    h.cx.run_until_parked();
+    assert_ellipsized(&format!("themes-row-user-{id}-name"), &name);
 }
 
 #[gpui::test]

@@ -18,6 +18,7 @@ use daemon_client::device_tokens::MemoryTokens;
 use gpui::TestAppContext;
 use protocol::{ClientMessage, DaemonMessage};
 use rustling_tulip_native::Connection;
+use rustling_tulip_native::LinkAction;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use support::live::{
@@ -214,7 +215,7 @@ fn a_file_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
         line: None,
         column: None,
         open_when_done: true,
-        prefer_viewer: false,
+        action: LinkAction::DefaultApp,
     };
     h.root_update(move |view, _, cx| view.fetch_remote_file(request, cx))
         .expect("a fetch on the ssh host starts");
@@ -313,7 +314,7 @@ fn a_folder_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext)
         line: None,
         column: None,
         open_when_done: false,
-        prefer_viewer: false,
+        action: LinkAction::DefaultApp,
     };
     h.root_update(move |view, _, cx| view.fetch_remote_folder(request, cx))
         .expect("a folder fetch on the ssh host starts");

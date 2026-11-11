@@ -60,7 +60,6 @@ static EMPTY_SCREEN_RULES: ScreenRules = ScreenRules { rules: Vec::new() };
 /// readable. Fields are borrowed from the daemon's in-flight spawn so the
 /// caller doesn't have to clone anything to call a plugin method.
 pub struct SpawnContext<'a> {
-    pub dangerously_skip_permissions: bool,
     /// `true` when the spawn has a prompt injector attached, in which case
     /// the plugin must NOT emit the initial prompt as a CLI arg — the
     /// injector delivers it through the PTY post-spawn instead. Ignored by
@@ -512,15 +511,12 @@ pub struct SummaryOutput {
 }
 
 /// What [`Agent::recovery_options`] is asked: the options a session recorded
-/// when it ran, if the app has them, and whether it ran trusted.
+/// when it ran, if the app has them.
 #[derive(Debug, Clone, Copy)]
 pub struct RecoveredRun<'a> {
     /// The options the session ran with, as the app recorded them; `None`
     /// when it recorded none.
     pub recorded: Option<&'a OptionValues>,
-    /// Whether the session ran trusted. The app carries the trusted flag on
-    /// the recovery's request itself; Claude's options do not read it.
-    pub trusted: bool,
 }
 
 impl RecoveredRun<'_> {
@@ -558,8 +554,6 @@ pub struct ImportedRun<O> {
     pub extra_dirs: Vec<String>,
     /// The options the run's arguments show.
     pub options: O,
-    /// Whether the run was trusted.
-    pub trusted: bool,
 }
 
 /// A plugin's stand-in for its CLI, which the live test tier runs in place
@@ -737,7 +731,7 @@ pub trait Agent: Send + Sync + 'static {
     /// empty plan for a CLI that takes none. The daemon writes the plan's
     /// files into the session's own directory and appends the plan's args to
     /// the spawn with each `{file:<name>}` replaced by the written path.
-    fn hook_plan(&self, _opts: &Self::Options, _trusted: bool, _shim: &HookShim<'_>) -> HookPlan {
+    fn hook_plan(&self, _opts: &Self::Options, _shim: &HookShim<'_>) -> HookPlan {
         HookPlan::default()
     }
 
@@ -792,13 +786,11 @@ pub trait Agent: Send + Sync + 'static {
 
     /// What one hook payload says about its session, or `None` for a payload
     /// the agent does not know. `spawn` is the session's spawn options, when
-    /// the session has a record that carries them, and `trusted` whether it
-    /// was spawned trusted.
+    /// the session has a record that carries them.
     fn map_hook_event(
         &self,
         _body: &serde_json::Value,
         _spawn: Option<&Self::Options>,
-        _trusted: bool,
     ) -> Option<HookReport> {
         None
     }
@@ -1032,12 +1024,7 @@ pub trait AgentPlugin: Send + Sync {
     /// # Errors
     ///
     /// One naming the agent when `opts` do not decode.
-    fn hook_plan(
-        &self,
-        opts: &OptionValues,
-        trusted: bool,
-        shim: &HookShim<'_>,
-    ) -> Result<HookPlan, AgentError>;
+    fn hook_plan(&self, opts: &OptionValues, shim: &HookShim<'_>) -> Result<HookPlan, AgentError>;
 
     /// See [`Agent::user_settings_path`].
     fn user_settings_path(&self) -> Option<PathBuf>;
@@ -1074,7 +1061,6 @@ pub trait AgentPlugin: Send + Sync {
         &self,
         body: &serde_json::Value,
         spawn: Option<&OptionValues>,
-        trusted: bool,
     ) -> Option<HookReport>;
 
     /// [`Agent::map_live_line`].
@@ -1193,7 +1179,6 @@ impl<A: Agent> AgentPlugin for A {
                 program_name: imported.program_name,
                 extra_dirs: imported.extra_dirs,
                 options,
-                trusted: imported.trusted,
             }),
             Err(err) => {
                 error!(%err, "dropping an imported run whose options do not serialize");
@@ -1284,14 +1269,9 @@ impl<A: Agent> AgentPlugin for A {
         Agent::parse_headless_line(self, line)
     }
 
-    fn hook_plan(
-        &self,
-        opts: &OptionValues,
-        trusted: bool,
-        shim: &HookShim<'_>,
-    ) -> Result<HookPlan, AgentError> {
+    fn hook_plan(&self, opts: &OptionValues, shim: &HookShim<'_>) -> Result<HookPlan, AgentError> {
         let opts = decode_options(self, opts)?;
-        Ok(Agent::hook_plan(self, &opts, trusted, shim))
+        Ok(Agent::hook_plan(self, &opts, shim))
     }
 
     fn user_settings_path(&self) -> Option<PathBuf> {
@@ -1322,7 +1302,6 @@ impl<A: Agent> AgentPlugin for A {
         &self,
         body: &serde_json::Value,
         spawn: Option<&OptionValues>,
-        trusted: bool,
     ) -> Option<HookReport> {
         let opts = spawn.and_then(|values| match decode_options(self, values) {
             Ok(opts) => Some(opts),
@@ -1331,7 +1310,7 @@ impl<A: Agent> AgentPlugin for A {
                 None
             }
         });
-        Agent::map_hook_event(self, body, opts.as_ref(), trusted)
+        Agent::map_hook_event(self, body, opts.as_ref())
     }
 
     fn map_live_line(&self, body: &serde_json::Value) -> Option<LiveLine> {
@@ -1837,7 +1816,6 @@ mod tests {
         let recorded = values(&[("mode", text("slow")), ("sandbox", OptionValue::Bool(true))]);
         let replayed = plugin.recovery_options(&RecoveredRun {
             recorded: Some(&recorded),
-            trusted: true,
         });
         assert_eq!(
             replayed,
@@ -1847,10 +1825,7 @@ mod tests {
                 ("profile", OptionValue::Null),
             ]))
         );
-        let fresh = plugin.recovery_options(&RecoveredRun {
-            recorded: None,
-            trusted: false,
-        });
+        let fresh = plugin.recovery_options(&RecoveredRun { recorded: None });
         assert_eq!(
             fresh,
             Ok(values(&[
@@ -1868,7 +1843,6 @@ mod tests {
         let err = plugin
             .recovery_options(&RecoveredRun {
                 recorded: Some(&bad),
-                trusted: false,
             })
             .expect_err("recorded options that do not decode refuse the recovery");
         assert!(err.to_string().contains("Test agent"), "{err}");
@@ -1964,7 +1938,6 @@ mod tests {
 
     fn context() -> SpawnContext<'static> {
         SpawnContext {
-            dangerously_skip_permissions: false,
             has_prompt_injector: false,
             conversation_id: None,
             resume_conversation: None,
@@ -1986,10 +1959,7 @@ mod tests {
             session_id: "s-1",
             config_dir: Path::new("C:/rt/config"),
         };
-        assert_eq!(
-            plugin.hook_plan(&good, false, &shim),
-            Ok(HookPlan::default())
-        );
+        assert_eq!(plugin.hook_plan(&good, &shim), Ok(HookPlan::default()));
     }
 
     #[test]

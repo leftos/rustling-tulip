@@ -27,8 +27,8 @@ use crate::remote_mode::spawn_no_repos_note;
 use crate::runtime_icon::runtime_icon_view;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_form::{
-    Control, EnvRow, EnvRowNote, FormInputs, HostInputs, ListField, Lock, OpenChoice, Outcome,
-    Prefill, Runtime, ShareButton, SpawnForm, TabChoices, Target, WorktreeMode,
+    ArgsNote, Control, EnvRow, EnvRowNote, FormInputs, HostInputs, ListField, Lock, OpenChoice,
+    Outcome, Prefill, Runtime, ShareButton, SpawnForm, TabChoices, Target, WorktreeMode,
 };
 use crate::spawn_preview::{
     CollisionNotice, RECREATE_LABEL, REUSE_NOTE, ReuseChoice, Tone, collision_notice, member_row,
@@ -40,7 +40,7 @@ use crate::text_input::{NavKey, TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, tagged_text, tooltip};
 
-/// The spawn dialog's width, as on the Spawn board.
+/// The spawn dialog's width, as on the Spawn board: a window-like cap; its text wraps and its height follows.
 const DIALOG_WIDTH: f32 = 640.0;
 /// The padding at the sides of a dialog's header, body and footer.
 const DIALOG_PAD_X: f32 = 18.0;
@@ -61,7 +61,7 @@ const CHECK_SIZE: f32 = 16.0;
 const CHECK_RADIUS: f32 = 4.0;
 /// The side of a chosen radio's dot.
 const RADIO_DOT: f32 = 7.0;
-/// The least outer height of a segment of a segmented control.
+/// The least outer height of a segment of a segmented control: fixed so every segment lines up.
 const SEGMENT_HEIGHT: f32 = 32.0;
 /// The corner radius of a segment, and of the control round the segments.
 pub(crate) const SEGMENT_RADIUS: f32 = 6.0;
@@ -86,8 +86,9 @@ const RANDOM_TIP: &str = "Generate a random worktree branch name";
 const SUGGESTING: &str = "Picking a name no existing branch uses…";
 const FETCH_FAILED: &str = "Couldn't reach the remote — comparing against the last fetched refs.";
 const CURRENT_TAB_DISABLED: &str = "The current tab cannot host terminal panes";
-/// The trusted-launch warning's text under its title.
-const TRUSTED_WARNING: &str = "Approval prompts are bypassed for this session.";
+const ARGS_LABEL: &str = "Extra arguments";
+const ARGS_PLACEHOLDER: &str = r#"--flag value "quoted value""#;
+const ARGS_HELP: &str = "Added after the agent's own arguments. Use a Secret env row for anything secret, not an argument.";
 const NO_ENV: &str = "No extra env vars.";
 const ENV_VALUE_PLACEHOLDER: &str = "value";
 const REMOVE_ENV_TIP: &str = "Remove env var";
@@ -128,7 +129,7 @@ pub(crate) enum SpawnEntry {
         preselect: Option<String>,
     },
     /// A Shift-duplicate: held on the source's repo or workspace when it
-    /// has one, and filled from `prefill` over the Spawn defaults.
+    /// has one, and filled from `prefill` over the agent's Settings values.
     Duplicate {
         lock: Option<Lock>,
         prefill: Box<Prefill>,
@@ -142,6 +143,8 @@ pub(crate) struct SpawnDialog {
     aim: Option<PaneAim>,
     branch_input: Entity<TextInput>,
     base_input: Entity<TextInput>,
+    /// The Extra arguments field.
+    args_input: Entity<TextInput>,
     /// One field per text or model field of the chosen agent, in order.
     option_inputs: Vec<OptionInput>,
     /// One pair of fields per env row of the form, in order.
@@ -173,10 +176,6 @@ pub(crate) struct SpawnDialog {
     target_list_bounds: Option<Bounds<Pixels>>,
     /// Where the open branch, base or env name list is scrolled to.
     list_scroll: ScrollHandle,
-    /// The dialog opened filled from a stored config (a duplicate, a
-    /// launch-last review), so its submit is not the user's own Trusted
-    /// choice.
-    prefilled: bool,
 }
 
 /// The spawn dialog while open: its form, or the state it opens in while no
@@ -217,6 +216,7 @@ impl SpawnDialog {
             Control::TargetField if self.form.target_list_open() => Some(&self.target_query),
             Control::Branch => Some(&self.branch_input),
             Control::Base => Some(&self.base_input),
+            Control::Args => Some(&self.args_input),
             Control::FieldText(id) => self
                 .option_inputs
                 .iter()
@@ -229,14 +229,19 @@ impl SpawnDialog {
     }
 
     fn inputs(&self) -> impl Iterator<Item = &Entity<TextInput>> {
-        [&self.branch_input, &self.base_input, &self.target_query]
-            .into_iter()
-            .chain(self.option_inputs.iter().map(|input| &input.input))
-            .chain(
-                self.env_inputs
-                    .iter()
-                    .flat_map(|row| [&row.key, &row.value]),
-            )
+        [
+            &self.branch_input,
+            &self.base_input,
+            &self.target_query,
+            &self.args_input,
+        ]
+        .into_iter()
+        .chain(self.option_inputs.iter().map(|input| &input.input))
+        .chain(
+            self.env_inputs
+                .iter()
+                .flat_map(|row| [&row.key, &row.value]),
+        )
     }
 }
 
@@ -263,6 +268,7 @@ enum Field {
     Base,
     /// An agent's text or model field, by its id.
     Option(String),
+    Args,
     EnvKey(usize),
     EnvValue(usize),
 }
@@ -273,6 +279,7 @@ impl Field {
             Self::Branch => Control::Branch,
             Self::Base => Control::Base,
             Self::Option(id) => Control::FieldText(id.clone()),
+            Self::Args => Control::Args,
             Self::EnvKey(index) => Control::EnvKey(*index),
             Self::EnvValue(index) => Control::EnvValue(*index),
         }
@@ -355,7 +362,6 @@ impl RootView {
             Control::OpenIn(form.open_in().clone()),
         ];
         chosen.extend(form.chosen_options());
-        chosen.extend(form.trusted().then_some(Control::Trusted));
         let worktree = form.git_choices_shown() && form.use_worktree();
         chosen.extend(worktree.then_some(Control::UseWorktree));
         chosen.extend(worktree.then_some(Control::Mode(form.mode())));
@@ -440,13 +446,6 @@ impl RootView {
             .map(|input| input.input.read(cx).text().to_owned())
     }
 
-    /// The trusted-launch row's detail, the chosen agent's trust note,
-    /// while the dialog is open.
-    #[must_use]
-    pub fn spawn_dialog_trust_note(&self) -> Option<String> {
-        self.form_dialog()?.form.trusted_detail().map(str::to_owned)
-    }
-
     /// The key and value fields of every env row, while the dialog is open.
     #[must_use]
     pub fn spawn_dialog_env(&self, cx: &gpui::App) -> Option<Vec<(String, String)>> {
@@ -469,6 +468,13 @@ impl RootView {
             .form
             .env_section_note()
             .map(str::to_owned)
+    }
+
+    /// The note under the Extra arguments field, while the dialog is open
+    /// and the field shows one.
+    #[must_use]
+    pub fn spawn_dialog_args_note(&self) -> Option<&'static str> {
+        self.form_dialog()?.form.args_note().map(ArgsNote::text)
     }
 
     /// The note env row `index` shows about where its value is kept, while
@@ -607,6 +613,7 @@ impl RootView {
             || self.open_in_main(Overlay::SessionMenu)
             || self.container_menu.is_some()
             || self.open_in_main(Overlay::ShellMenu)
+            || self.open_in_main(Overlay::LinkMenu)
             || self.sc_picker_open
             || self.changes.file_menu.is_some()
             || self.changes.discard.is_some()
@@ -641,6 +648,9 @@ impl RootView {
                 .map(|conn| conn.mirrors.agent_settings.clone())
                 .unwrap_or_default(),
             offline: self.is_remote_offline(host),
+            extra_args: self
+                .conn_of(host)
+                .is_some_and(|conn| conn.supports(protocol::FEATURE_SPAWN_EXTRA_ARGS)),
         }
     }
 
@@ -745,8 +755,10 @@ impl RootView {
             focused: focused
                 .as_ref()
                 .map(|(host, session)| (host.clone(), session)),
-            tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
-            spawn_defaults: self.sidebar.ui_state().spawn,
+            tabs: TabChoices::from_tabs(
+                &self.sidebar.shown_tabs(self.tabs.tabs()),
+                self.tabs.active_id(),
+            ),
             lock,
             preselected,
         };
@@ -769,14 +781,18 @@ impl RootView {
         let branch_input = cx.new(|cx| TextInput::new(form.branch().to_owned(), "", cx));
         let base_input = cx.new(|cx| TextInput::new(form.base().to_owned(), "", cx));
         let target_query = cx.new(|cx| TextInput::new("", TARGET_QUERY_PLACEHOLDER, cx));
+        let args_input =
+            cx.new(|cx| TextInput::new(form.args_text().to_owned(), ARGS_PLACEHOLDER, cx));
         let mut subscriptions = Self::watch_field(&branch_input, Field::Branch, window, cx);
         subscriptions.extend(Self::watch_field(&base_input, Field::Base, window, cx));
+        subscriptions.extend(Self::watch_field(&args_input, Field::Args, window, cx));
         subscriptions.extend(Self::watch_target_query(&target_query, window, cx));
         self.spawn_dialog = Some(SpawnModal::Form(Box::new(SpawnDialog {
             form,
             aim,
             branch_input,
             base_input,
+            args_input,
             option_inputs: Vec::new(),
             env_inputs: Vec::new(),
             _subscriptions: subscriptions,
@@ -791,7 +807,6 @@ impl RootView {
             target_scroll: ScrollHandle::new(),
             target_list_bounds: None,
             list_scroll: ScrollHandle::new(),
-            prefilled: prefill.is_some(),
         })));
         self.sync_env_inputs(window, cx);
         self.sync_option_inputs(window, cx);
@@ -953,6 +968,7 @@ impl RootView {
                     Field::Branch => form.edit_branch(&text, &mut this.branch_cache),
                     Field::Base => form.edit_base(&text),
                     Field::Option(id) => form.edit_option_text(id, &text),
+                    Field::Args => form.edit_args(&text),
                     Field::EnvKey(index) => form.edit_env_key(*index, &text),
                     Field::EnvValue(index) => form.edit_env_value(*index, &text),
                 }
@@ -1325,7 +1341,6 @@ impl RootView {
                     Some(SpawnModal::Form(dialog)) => dialog.aim.take(),
                     _ => None,
                 };
-                self.remember_trusted_choice();
                 let open_in = match aim {
                     Some(aim) => aim.open_in(submission.open_in),
                     None => submission.open_in,
@@ -1333,22 +1348,6 @@ impl RootView {
                 self.close_spawn_dialog(window, cx);
                 self.spawn_on(&host, submission.request, open_in, cx);
             }
-        }
-    }
-
-    /// Saves the Trusted launch choice of a dialog the user filled in, which
-    /// the next fresh dialog opens with; a prefilled dialog or a plain shell
-    /// (no Trusted control) leaves it alone.
-    fn remember_trusted_choice(&mut self) {
-        let Some(SpawnModal::Form(dialog)) = &self.spawn_dialog else {
-            return;
-        };
-        if dialog.prefilled || !dialog.form.trusted_shown() {
-            return;
-        }
-        let trusted = dialog.form.trusted();
-        if self.sidebar.set_spawn_last_trusted(trusted) {
-            self.save_ui();
         }
     }
 
@@ -1382,7 +1381,7 @@ impl RootView {
             let Some((value, placeholder)) = text_field(field) else {
                 continue;
             };
-            // A field a trusted launch locks takes no typing.
+            // A field of a kind this client does not know takes no typing.
             let read_only = field.disabled;
             option
                 .input
@@ -1393,6 +1392,10 @@ impl RootView {
             let text = if typed.trim() == value { typed } else { value };
             sync_field(&option.input, &text, placeholder, cx);
         }
+        let args_read_only = !form.args_supported();
+        dialog
+            .args_input
+            .update(cx, |input, cx| input.set_read_only(args_read_only, cx));
         for (index, (row, inputs)) in form.env_rows().iter().zip(&dialog.env_inputs).enumerate() {
             sync_field(
                 &inputs.value,
@@ -1686,7 +1689,10 @@ impl RootView {
     /// The tabs changed: Open in follows them.
     pub(crate) fn refresh_spawn_tabs(&mut self) {
         if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
-            let tabs = TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id());
+            let tabs = TabChoices::from_tabs(
+                &self.sidebar.shown_tabs(self.tabs.tabs()),
+                self.tabs.active_id(),
+            );
             dialog.form.set_tabs(tabs);
         }
     }
@@ -1713,9 +1719,7 @@ impl RootView {
                 cx,
             ))
             .child(open_in_field(form, &focus, cx));
-        let run = divided(&t)
-            .children(trusted_rows(form, &focus, cx))
-            .child(advanced_section(dialog, &focus, cx));
+        let run = divided(&t).child(advanced_section(dialog, &focus, cx));
         let body = div()
             .id("spawn-body")
             .debug_selector(|| "spawn-body".to_owned())
@@ -2000,7 +2004,8 @@ pub(crate) fn now_unix() -> i64 {
 }
 
 /// A dialog's card, `width` wide and tagged `id`: the modal card, its
-/// header, body and footer bands drawn edge to edge.
+/// header, body and footer bands drawn edge to edge. Its width is a
+/// window-like cap; the text wraps and the card's height follows.
 pub(crate) fn dialog_card(offset: i8, id: &'static str, width: f32, t: &UiTheme) -> Stateful<Div> {
     modal_panel(offset, id, t)
         .driver_id(move || id.to_owned())
@@ -2865,38 +2870,6 @@ fn checkbox(
         .into_any_element()
 }
 
-fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Vec<AnyElement> {
-    let t = theme(cx);
-    if !form.trusted_shown() {
-        return Vec::new();
-    }
-    let label = check_label(
-        "Trusted launch",
-        form.trusted_detail()
-            .map(|detail| note(crate::fonts::ui_text_size(cx), detail.to_owned(), &t)),
-    );
-    let mut rows = vec![checkbox(
-        &Control::Trusted,
-        form.trusted(),
-        focus,
-        label,
-        cx,
-    )];
-    if form.trusted_warning_shown() {
-        let warning = warning_box(&t)
-            .driver_id(|| "spawn-trusted-launch-warning".to_owned())
-            .gap(px(2.0))
-            .child(
-                div()
-                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
-                    .child("Trusted launch"),
-            )
-            .child(TRUSTED_WARNING);
-        rows.push(warning.into_any_element());
-    }
-    rows
-}
-
 fn worktree_checkbox(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> AnyElement {
     let t = theme(cx);
     let (text, unchecked) = if form.is_workspace() {
@@ -3283,7 +3256,7 @@ fn collision_box(
         .into_any_element()
 }
 
-/// One cell of the workspace preview table.
+/// One cell of the workspace preview table: fixed so the columns line up, and each cell's text wraps inside its column.
 fn table_cell(column: usize, t: &UiTheme) -> Div {
     let cell = div().min_w(px(0.0));
     match column {
@@ -3397,7 +3370,43 @@ fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<Root
             focus,
             cx,
         ))
+        .children(args_field(dialog, focus, cx))
         .child(env_field(dialog, focus, cx))
+}
+
+/// The Extra arguments field, its help and its note, for an agent; `None`
+/// for a plain shell.
+fn args_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> Option<Div> {
+    let form = &dialog.form;
+    if !form.args_shown() {
+        return None;
+    }
+    let t = theme(cx);
+    let note = form.args_note();
+    let input = input_box(&Control::Args, &dialog.args_input, focus, cx)
+        .when(note.is_some_and(ArgsNote::blocks_spawn), |input| {
+            input.border_color(gpui::rgb(t.warning))
+        })
+        .when(!form.args_supported(), |input| input.opacity(0.5));
+    let line = note.map(|note| {
+        let color = if note.blocks_spawn() {
+            t.warning
+        } else {
+            t.muted
+        };
+        div()
+            .driver_id(|| "spawn-args-note".to_owned())
+            .text_color(gpui::rgb(color))
+            .child(note.text())
+    });
+    let offset = crate::fonts::ui_text_size(cx);
+    let help = self::note(offset, ARGS_HELP, &t);
+    Some(
+        field(offset, crate::fonts::ui_weight_shift(cx), ARGS_LABEL, &t)
+            .child(div().flex().child(input))
+            .children(line)
+            .child(help),
+    )
 }
 
 /// The env rows, each with its problem, and `+ Add env var`.

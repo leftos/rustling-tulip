@@ -410,7 +410,7 @@ struct MacWindowState {
     keystroke_for_do_command: Option<Keystroke>,
     do_command_handled: Option<bool>,
     external_files_dragged: bool,
-    // Whether the next left-mouse click is also the focusing click.
+    // Whether the next mouse click is also the focusing click.
     first_mouse: bool,
     fullscreen_restore_bounds: Bounds<Pixels>,
     move_tab_to_new_window_callback: Option<Box<dyn FnMut()>>,
@@ -1791,6 +1791,11 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
                 },
             ) => {
                 // On mac, a ctrl-left click should be handled as a right click.
+                // An activating one still marks the press that brought the
+                // window forward, and clears the flag, so it cannot leave the
+                // flag set to swallow the next left click.
+                let first_mouse = lock.first_mouse;
+                lock.first_mouse = false;
                 *event = MouseDownEvent {
                     button: MouseButton::Right,
                     modifiers: Modifiers {
@@ -1798,6 +1803,7 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
                         ..event.modifiers
                     },
                     click_count: 1,
+                    first_mouse,
                     ..*event
                 };
             }
@@ -1813,6 +1819,15 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
                     first_mouse: true,
                     ..*event
                 };
+                lock.first_mouse = false;
+            }
+
+            // Any other button's press that brings the window forward is
+            // marked too, so an activating right press neither pastes nor
+            // reaches the program; the flag is cleared so it marks only the
+            // very next press, whatever its button.
+            PlatformInput::MouseDown(event) if (lock.first_mouse) => {
+                event.first_mouse = true;
                 lock.first_mouse = false;
             }
 

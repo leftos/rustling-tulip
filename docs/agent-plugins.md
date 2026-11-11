@@ -22,7 +22,7 @@ Inside the seam (the plugin owns it): the CLI's binary name and override variabl
 
 Outside the seam (app code, agent-neutral): the plain shell; the PTY, `rt-tracer.exe`, the tracer ABI and reattach; scrollback; tabs and layouts; worktrees, workspaces and git. The hook side the app keeps is the `/hook/{session_id}` route, the hook ordering stamp, the early-event buffer and `apply_status` (`crates/daemon/src/hook_status.rs`, `pty_state.rs`), plus the idle demotions and the byte-volume and title heuristics.
 
-Also app code: env-row sealing and `${env:}` / `${secret:}` resolution; the base environment keep-list (`crates/daemon/src/child_env.rs`); npm-shim resolution (`resolve_agent_program`, `server/spawn/shell.rs`); the trusted-launch flag (`dangerously_skip_permissions`) and its `elevated_authority` chip; every process the app runs for a plugin (a pre-create, a discovery poll) with its timeout and kill; history storage, pruning and the recover dialog's layout; the schema validation function.
+Also app code: env-row sealing and `${env:}` / `${secret:}` resolution; the base environment keep-list (`crates/daemon/src/child_env.rs`); npm-shim resolution (`resolve_agent_program`, `server/spawn/shell.rs`); the deprecated `dangerously_skip_permissions` wire flag, folded into the descriptor's `bypass` choice (`crates/daemon/src/trusted_fold.rs`); every process the app runs for a plugin (a pre-create, a discovery poll) with its timeout and kill; history storage, pruning and the recover dialog's layout; the schema validation function.
 
 ## Crate layout
 
@@ -60,7 +60,7 @@ pub trait Agent: Send + Sync + 'static {
     fn check_request(&self, opts: &Self::Options, req: &SpawnCheck<'_>) -> Result<(), Refusal>;
     fn spawn_env(&self, opts: &Self::Options, rows: &ResolvedRows, keys: &dyn KeyLookup) -> Result<EnvPlan, Refusal>;
     fn conversation_plan(&self, opts: &Self::Options, resume: Option<&str>) -> ConversationPlan;
-    fn hook_plan(&self, opts: &Self::Options, trusted: bool, shim: &HookShim<'_>) -> HookPlan;
+    fn hook_plan(&self, opts: &Self::Options, shim: &HookShim<'_>) -> HookPlan;
     fn interactive_args(&self, opts: &Self::Options, ctx: &SpawnContext<'_>, members: &[SessionMember], initial_prompt: Option<&str>) -> Vec<String>;
     fn headless_args(&self, opts: &Self::Options, ctx: &SpawnContext<'_>, prompt: &str) -> Option<Vec<String>>;
     fn map_hook_event(&self, body: &serde_json::Value, spawn: Option<&Self::Options>) -> Option<HookReport>;
@@ -114,16 +114,16 @@ The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) an
 
 The context and result types, all in `agent-api`:
 
-- `SpawnContext`: `session_id`, `trusted`, `members: &[SessionMember]`, `add_dirs`, `cwd: &Path`, `initial_prompt`, `has_prompt_injector`, `resume`, `conversation_id`, `hook_args: &[String]` (from the written `HookPlan`).
+- `SpawnContext`: `session_id`, `members: &[SessionMember]`, `add_dirs`, `cwd: &Path`, `initial_prompt`, `has_prompt_injector`, `resume`, `conversation_id`, `hook_args: &[String]` (from the written `HookPlan`).
 - `ResolvedRows`: the spawn's env rows after the app's `${env:}` / `${secret:}` resolution, values included, never stored. Every query that reads the agent's own files carries them, so a plugin honours a session's own home variable. Claude's `claude_home` (`crates/agents/claude/src/transcripts.rs`) reads the session's `CLAUDE_CONFIG_DIR` row first, then the daemon's, then `~/.claude`.
 - `HookShim`: the cached `rt-tracer.exe`, the session id and the config dir; a plugin builds its hook command from these. `HookPlan { files: Vec<HookFile { name, contents }>, args: Vec<String> }`: a settings file plus `--settings {file:hook-settings.json}` for Claude; argv-only tables for an agent like Codex, gated on its own options.
 - `ConversationPlan`: `Minted(String)` (the plugin chose the id: Claude's UUID), `Resumed(String)`, `PreCreate { args: Vec<String>, parse: fn(&str) -> Option<String> }`, `DiscoverAfterLaunch`, `None`.
 - `ConversationQuery`: the folder, a time window, a known id when one is recorded, the resolved rows. `FoundConversation { id, last_active, title }`.
 - `HookReport`: `status`, `pending` (a `PendingUpdate`: `Clear`, `Set` or `KeepOr`), `conversation_id`, `last_message`, `failure` (the recent-actions line a failed turn leaves), `permission_mismatch` (to warn about), `agent_ended` (a `SessionEnd` that is not a `/clear`, which a plain shell hosting the agent acts on), `agent_started`, `subagent`, `background: Option<bool>` and `weak_idle`.
 
-  `map_hook_event` takes the event body, the spawn's decoded options (`None` when the session has no record yet) and the trusted flag, and returns `None` for an event that says nothing.
+  `map_hook_event` takes the event body, the spawn's decoded options (`None` when the session has no record yet), and returns `None` for an event that says nothing.
 - `HeadlessEvent`: `Status`, `RecentAction`, `Metrics { cost_usd, input_tokens, output_tokens }`, `ConversationId(String)`.
-- `ReadySignal { min_output_bytes, quiet_for }` (the default is Claude's 1024 bytes and 1.5 s). `ScreenRules { rules }` is described under "Status rules"; `file_reference(repo_relative)` returns the prompt text naming a file (default the bare path, Claude's `@<path>`). `ImportedRun<O> { program_name, extra_dirs, options: O, trusted }`. `EnvPlan { set, remove }`. `Refusal { title, detail, hint }`.
+- `ReadySignal { min_output_bytes, quiet_for }` (the default is Claude's 1024 bytes and 1.5 s). `ScreenRules { rules }` is described under "Status rules"; `file_reference(repo_relative)` returns the prompt text naming a file (default the bare path, Claude's `@<path>`). `ImportedRun<O> { program_name, extra_dirs, options: O }`. `EnvPlan { set, remove }`. `Refusal { title, detail, hint }`.
 - `hook_vocabulary`: a helper mapping Claude Code's hook event names and payload fields (`SessionStart`, `PreToolUse` with `AskUserQuestion` / `ExitPlanMode`, `Notification`, `Stop`, …) to a `HookReport`, so any agent whose hooks speak that vocabulary (Claude; Codex's `-c` hooks; the DeepSeek Harness bridge in [plans/agent-harnesses.md](./plans/agent-harnesses.md)) calls it instead of copying it.
 
 `workspace_prelude` is an `agent-api` helper that takes the instruction-file names to mention, so the plugin passes "CLAUDE.md".
@@ -169,7 +169,7 @@ Neither needs an app change to return:
 Details of each message are in [wire-protocol.md](./wire-protocol.md); the shapes the seam relies on:
 
 - **Naming an agent.** `AgentId(String)`, `#[serde(transparent)]`. A plain shell has no agent: `SessionSnapshot.agent`, `HistoryEntry.agent` and the sidecar's `agent` are `Option<AgentId>`, `None` for a shell.
-- **Options.** `AgentSelection { agent: AgentId, options: OptionValues }`, where `OptionValues` is a `BTreeMap<String, OptionValue>` and `OptionValue` is untagged `Bool | Text | Null`. `SpawnRequest`, `SpawnConfig` and `PresetEntry` carry `agent: Option<AgentSelection>`, `None` exactly for a plain shell. `dangerously_skip_permissions` is the app's trusted flag, not an option.
+- **Options.** `AgentSelection { agent: AgentId, options: OptionValues }`, where `OptionValues` is a `BTreeMap<String, OptionValue>` and `OptionValue` is untagged `Bool | Text | Null`. `SpawnRequest`, `SpawnConfig` and `PresetEntry` carry `agent: Option<AgentSelection>`, `None` exactly for a plain shell. `dangerously_skip_permissions` is a deprecated wire flag, not an option: true exactly when the options hold the descriptor's `bypass` choice, and a received `true` folds into that choice (`crates/daemon/src/trusted_fold.rs`).
 - **Conversation.** `SessionSnapshot` and `HistoryEntry` carry `conversation_id`.
 - **Recovery kinds.** `RecoverAs` is `Agent`, `RegisterRepoThenAgent { path }`, `ShellResume` (offered when `caps.shell_resume`) and `Shell` (a plain shell in the folder, nothing typed), plus `Unknown`.
 - **Advertising agents.** `DaemonMessage::Agents { agents: Vec<AgentDescriptor> }`, sent to each connection right after `Welcome` and before `Sessions`. Registration is static, so it is sent once per connection.
@@ -190,12 +190,12 @@ pub struct AgentDescriptor {
     pub accent: AccentToken,        // a palette name; Unknown draws the default
     pub shift_enter: ShiftEnter,    // BackslashCr | Lf | Unknown
     pub caps: AgentCaps,            // headless, resume, extra_folders, shell_resume, user_hooks
-    pub trust_note: Option<String>, // what trusted launch passes, for the dialog's note
     pub texts: AgentTexts,          // shell_resume_label, no_conversation
     pub fields: Vec<OptionField>,
     pub chips: Vec<ChipRule>,
     pub title: TitleRules,          // title glyphs and placeholder
     pub icon: Option<String>,       // runtime icon, SVG markup in its own colours
+    pub bypass: Option<BypassChoice>, // { field, value }: the choice that bypasses permission prompts
 }
 pub struct OptionField {
     pub id: String,
@@ -205,7 +205,7 @@ pub struct OptionField {
     pub default: OptionValue,
     pub settings: bool,             // on the agent's Settings page; its value is the dialog's default
     pub spawn: SpawnPlacement,      // Main | Advanced | Hidden | Unknown
-    pub locked_when_trusted: bool,
+    pub locked_when_trusted: bool,  // deprecated, always false
     pub when: Vec<FieldRule>,
 }
 pub enum FieldKind {
@@ -220,17 +220,17 @@ pub struct FieldOverride { pub hidden: Option<bool>, pub placeholder: Option<Str
 pub struct ChipRule { pub field: String, pub hide_when: OptionValue, pub tip: String }
 ```
 
-Claude's descriptor holds `permission_mode` (Choice: CLI default, default, accept edits, bypass permissions, plan; Settings and spawn Advanced; locked when trusted), `provider` (Choice Anthropic / DeepSeek, segmented; Settings and spawn Main), `model` (Model with the opus / sonnet / haiku suggestions, spawn Advanced only and not a Settings field, and a rule: when `provider` is `deepseek`, placeholder `deepseek-flash` and no suggestions), and one chip rule on `provider` hiding at `anthropic`. Its `texts` carry "Shell running claude --resume" and "no conversation found".
+Claude's descriptor holds `permission_mode` (Choice: CLI default, default, accept edits, bypass permissions, plan; Settings and spawn Advanced; its bypass permissions choice is the descriptor's `bypass` and passes `--permission-mode bypassPermissions`), `provider` (Choice Anthropic / DeepSeek, segmented; Settings and spawn Main), `model` (Model with the opus / sonnet / haiku suggestions, spawn Advanced only and not a Settings field, and a rule: when `provider` is `deepseek`, placeholder `deepseek-flash` and no suggestions), and one chip rule on `provider` hiding at `anthropic`. Its `texts` carry "Shell running claude --resume" and "no conversation found".
 
 ## Client rendering
 
-A plain-Rust model `apps/native/src/agent_options.rs` holds one agent's descriptor and an `OptionValues`: defaults, the `when` rules, the trusted lock, validation for the Text and Model kinds, and conversion to and from the wire map.
+A plain-Rust model `apps/native/src/agent_options.rs` holds one agent's descriptor and an `OptionValues`: defaults, the `when` rules, validation for the Text and Model kinds, and conversion to and from the wire map.
 
 Its view `apps/native/src/agent_options_view.rs` draws a field list for a placement: Toggle as a switch, Choice as a segmented row or a dropdown by `style`, Text and Model as a text field (Model with its suggestion chips), and an Unknown kind as a disabled row reading "Update the client to change this". Keyboard stops follow the field order through the existing `spawn_form.rs` `move_focus` and `settings_view.rs` `SettingsControl` rings.
 
 Where it mounts:
 
-- Spawn dialog: `Runtime::Agent(AgentId)` lists the descriptors in daemon order, then Plain shell; the Main and Advanced sections render the agent's fields, starting from the agent's settings; Run mode offers Headless only when `caps.headless`; the trusted note reads `trust_note`. Duplicate and launch-last prefill an `AgentSelection` as stored.
+- Spawn dialog: `Runtime::Agent(AgentId)` lists the descriptors in daemon order, then Plain shell; the Main and Advanced sections render the agent's fields, starting from the agent's settings; Run mode offers Headless only when `caps.headless`; the request's deprecated `dangerously_skip_permissions` is derived from the descriptor's `bypass` choice. Duplicate and launch-last prefill an `AgentSelection` as stored.
 - Settings: one page per descriptor under the non-selectable `Agents` group row, holding the fields with `settings: true`, read from `AgentSettings` and written with `SetAgentSettings`.
 - Chips and labels: pane headers and leaves draw `agent_chips`; the runtime chip's label is `program_name`, else `tag`, else the agent id, and it is drawn as the descriptor's `icon` only while that label is the tag itself (a shell's label draws its shell's icon); Shift+Enter sends the bytes `shift_enter` names. A session with no name of its own shows its agent's tag.
 - Recover dialog: offers the kinds `caps` allows, named by `label` and `texts`; its options and labels come from the descriptor and the daemon's `SessionHistoryItem.shell_resume`.
@@ -242,7 +242,7 @@ Where it mounts:
 
 `ScreenRules { rules: Vec<ScreenRule> }` is defined in `crates/agents/api/src/screen_rules.rs` and derives `Serialize` and `Deserialize`. A `ScreenRule` is `{ name, priority, region, matcher, not, verdict }`:
 
-- `region` is a `ScreenRegion`: the last N non-empty rows (`BottomNonEmpty`), the rows between the prompt box's two rules (`PromptBoxBody`), the last N non-empty rows above the prompt box (`AbovePromptBox`) or the OSC title (`Title`).
+- `region` is a `ScreenRegion`: the last N non-empty rows (`BottomNonEmpty`), the rows between the prompt box's two rules (`PromptBoxBody`), the last N non-empty rows above the prompt box (`AbovePromptBox`) or the OSC title (`Title`). A `Title` rule with verdict `Working` also withholds a no-`Stop` `Idle` from a hook-driven turn while the terminal keeps writing (up to the quiet limit, `TITLE_QUIET_LIMIT`), so it matters beyond the ceiling; rows are physical, so a wrapped spinner row can miss its rule.
 - `matcher` is a `LineMatcher`: `Contains` (a literal substring of a row) or `Regex` (matched per row). `not` is a list of matchers that veto the rule when any hits the same region.
 - `verdict` is a `ScreenVerdict`: `Working`, `AwaitingInput`, `Idle`, or `Keep` (an overlay is open, so the status stays as it is).
 - Every enum carries an `Unknown` variant that absorbs a value a newer plugin sends. A table with any bad rule (a structural problem, an unknown region, matcher, guard or verdict, an empty pattern, too many rules, an over-long pattern, too many guards, a regex that does not compile) is refused whole by `ScreenRules::validate`: the daemon logs one error and that agent's screen sets no status.

@@ -1,4 +1,5 @@
 import { INITIAL_CHAT, chatStep, latestPrompt, type ChatState } from "./chat-model";
+import { measureScroll, scrollAfterPaint, scrollAfterResize, type ChatScroll } from "./chat-scroll";
 import {
   INITIAL_COMPOSER,
   edit,
@@ -15,6 +16,7 @@ import type { ConnectedLatch } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
 import type { HomeModel } from "./home-model";
 import type { KeyTrayEntry } from "./keys";
+import { parseMarkdown } from "./markdown";
 import { renderMarkdown } from "./markdown-view";
 import {
   NO_SHEET,
@@ -31,9 +33,11 @@ import {
 } from "./prompt-sheet";
 import type { ClientMessage, DaemonMessage } from "./protocol";
 import type { QuickReplyGroup } from "./quick";
+import { planRows, syncChildren, type DrawnRow } from "./row-reuse";
 import {
   OFFLINE_NOT_SENT,
   samePart,
+  sameRow,
   sameRows,
   sameScreen,
   sessionLook,
@@ -52,6 +56,7 @@ import {
 import type { Connection } from "./socket";
 import { mountTerminal, type TerminalView } from "./terminal-view";
 import { sessionBox } from "./viewport";
+import { NO_WORK, nextRepaint } from "./work-line";
 
 /** What a session screen is mounted over. */
 export interface SessionViewOptions {
@@ -99,20 +104,28 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   let offline: string | null = null;
   /** A send has been refused since the last `ready`, which the bar shows as `Offline`. */
   let sendRefused = false;
-  /** A key bar or terminal-dock tap is being typed into the pane right now. */
-  let userTerminalInput = false;
-  /** That tap's send was refused. */
+  /** `sendUser` refused a send; `terminalInput` clears it before a key bar or dock tap and reads it after. */
   let terminalRefused = false;
   let drawn: SessionScreen | null = null;
   let drawnRows: readonly ChatRow[] | null = null;
   let drawnHidden: string | null = null;
+  /** The nodes the chat's rows are drawn with, by row id, reused while a row holds. */
+  let drawnChat = new Map<string, DrawnRow<ChatRow, HTMLElement>>();
+  /** The hidden-rows line's node, kept until its text changes. */
+  let hiddenNode: HTMLElement | null = null;
+  let hiddenNodeText: string | null = null;
+  /** The chat's position when it last hid, applied once it shows again. */
+  let keptScroll: ChatScroll | null = null;
   let drawnKeys: readonly KeyTrayEntry[] | undefined;
   let drawnKeyBar: KeyBarView | null | undefined;
   let drawnComposer: ComposerView | null | undefined;
   let drawnDock: DockView | null | undefined;
   let drawnSheetButtons: readonly SheetButtonView[] | undefined;
   let drawnSheetId: string | null = null;
+  let drawnSheetPlan: string | null = null;
   let timer: number | undefined;
+  /** The running-work line's next re-tick, armed while the line shows. */
+  let workTimer: number | undefined;
   const expanded = new Set<string>();
   /** Each answer's parsed Markdown, so the live answer is parsed only when its text grows. */
   const answers: AnswerCache = new Map();
@@ -133,6 +146,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   const header = element("div", "session-header");
   header.append(back, title, toggle);
   const barEl = element("p", "session-bar");
+  const workEl = element("p", "session-work");
 
   const ended = element("p", "session-ended");
   const chatEl = element("div", "session-chat");
@@ -158,6 +172,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   composerEl.append(draft, errorEl, actions);
 
   const sheetTitle = element("h2", "session-sheet-title");
+  const sheetPlan = element("div", "session-sheet-plan session-md");
   const sheetButtons = element("div", "session-sheet-buttons");
   const sheetBox = document.createElement("textarea");
   sheetBox.className = "session-sheet-text";
@@ -176,11 +191,12 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     update();
   });
   const sheetEl = element("div", "session-sheet");
-  sheetEl.append(sheetTitle, sheetButtons, sheetBox, sheetKeys, sheetError, sheetHide);
+  sheetEl.append(sheetTitle, sheetPlan, sheetButtons, sheetBox, sheetKeys, sheetError, sheetHide);
 
   container.append(
     header,
     barEl,
+    workEl,
     ended,
     chatEl,
     notice,
@@ -208,16 +224,6 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   }
 
   /**
-   * The terminal's connection: a send made while a key bar or terminal-dock
-   * tap is typed into the pane is the user's, so its refusal counts; the
-   * pane's own replies and keys typed into xterm go straight through.
-   */
-  const terminalConnection: Connection = {
-    ...connection,
-    send: (message) => (userTerminalInput ? sendUser(message) : connection.send(message)),
-  };
-
-  /**
    * The terminal toggle follows the session's snapshot: a plain shell opens on
    * its terminal, anything else on the chat. A snapshot known at the first
    * paint sets it then, and one arriving later sets it when it comes; once the
@@ -237,10 +243,12 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       mirrorRefused = true;
     }
     const look = sessionLook(readHome(), sessionId);
+    const now = Date.now();
     const screen = sessionScreen({
       title: look.title,
       ended: look.ended,
       isAgent: look.isAgent,
+      plan: look.plan,
       chat,
       composer,
       sheet,
@@ -253,7 +261,9 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       sendRefused,
       connectedOnce: connectedOnce.connected(),
       answers,
+      now,
     });
+    syncWorkTimer(screen, now);
     if (drawn !== null && sameScreen(drawn, screen)) {
       return;
     }
@@ -270,9 +280,22 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     toggle.hidden = screen.toggle === null;
     toggle.textContent = screen.toggle ?? "";
     showText(barEl, screen.bar);
+    showText(workEl, screen.work);
     showText(ended, screen.endText);
     showText(notice, screen.notice);
+    const rowsSame = sameRows(drawnRows, screen.rows) && drawnHidden === screen.hiddenLine;
+    if (!chatEl.hidden && (screen.endText !== null || screen.terminal)) {
+      keptScroll = measureScroll(chatEl);
+    }
     chatEl.hidden = screen.endText !== null || screen.terminal;
+    if (!chatEl.hidden && keptScroll !== null && rowsSame) {
+      const target = scrollAfterPaint(keptScroll, measureScroll(chatEl), chatEl.scrollHeight);
+      if (target !== null) {
+        chatEl.scrollTop = target;
+      }
+      keptScroll = null;
+    }
+    const beforeToggles = measureBox(chatEl);
     terminalEl.hidden = !screen.terminal;
     composerEl.hidden = screen.composer === null;
     keysEl.hidden = screen.keys.length === 0;
@@ -295,7 +318,8 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       paintDock(screen.dock);
     }
     paintSheet(screen.sheet);
-    if (!sameRows(drawnRows, screen.rows) || drawnHidden !== screen.hiddenLine) {
+    keepAtBottom(chatEl, beforeToggles);
+    if (!rowsSame) {
       drawnRows = screen.rows;
       drawnHidden = screen.hiddenLine;
       paintChat(screen);
@@ -303,21 +327,32 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     syncTerminal(screen);
   }
 
-  /** Rebuilds the chat rows, keeping the newest row in view only when it was. */
+  /**
+   * Draws the chat's rows, rebuilding only the ones whose row changed so an
+   * earlier answer keeps its own scroll and selection, and keeps the newest row
+   * in view only when it was.
+   */
   function paintChat(screen: SessionScreen): void {
-    const atBottom = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 8;
-    const nodes: HTMLElement[] = [];
-    if (screen.hiddenLine !== null) {
-      const line = element("p", "session-hidden");
-      line.textContent = screen.hiddenLine;
-      nodes.push(line);
+    const before = measureScroll(chatEl);
+    if (hiddenNodeText !== screen.hiddenLine) {
+      hiddenNode = null;
+      hiddenNodeText = screen.hiddenLine;
+      if (screen.hiddenLine !== null) {
+        const line = element("p", "session-hidden");
+        line.textContent = screen.hiddenLine;
+        hiddenNode = line;
+      }
     }
-    for (const row of screen.rows) {
-      nodes.push(rowNode(row));
-    }
-    chatEl.replaceChildren(...nodes);
-    if (atBottom) {
-      chatEl.scrollTop = chatEl.scrollHeight;
+    const plan = planRows(drawnChat, screen.rows, sameRow, rowNode);
+    drawnChat = new Map(plan.map((entry) => [entry.row.id, entry]));
+    const nodes = plan.map((entry) => entry.node);
+    syncChildren(chatEl, hiddenNode === null ? nodes : [hiddenNode, ...nodes]);
+    if (!chatEl.hidden) {
+      const target = scrollAfterPaint(keptScroll, before, chatEl.scrollHeight);
+      if (target !== null) {
+        chatEl.scrollTop = target;
+      }
+      keptScroll = null;
     }
   }
 
@@ -431,7 +466,8 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     }
     terminalView = mountTerminal({
       sessionId,
-      connection: terminalConnection,
+      connection,
+      sendInput: sendUser,
       container: terminalEl,
       newRequestId,
       reason: terminalOn ? "toggle" : "attach",
@@ -502,9 +538,15 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     sheetEl.hidden = view === null;
     if (view === null) {
       drawnSheetId = null;
+      drawnSheetPlan = null;
       return;
     }
     sheetTitle.textContent = view.title;
+    sheetPlan.hidden = view.plan === null;
+    if (view.plan !== null && drawnSheetPlan !== view.plan) {
+      drawnSheetPlan = view.plan;
+      sheetPlan.replaceChildren(renderMarkdown(document, parseMarkdown(view.plan)));
+    }
     sheetBox.hidden = !view.typing;
     showText(sheetError, view.error);
     sheetHide.textContent = view.hide;
@@ -593,12 +635,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       return;
     }
     terminalRefused = false;
-    userTerminalInput = true;
-    try {
-      act();
-    } finally {
-      userTerminalInput = false;
-    }
+    act();
     offline = terminalRefused ? OFFLINE_NOT_SENT : null;
     ctrlArmed = terminalView.pane.ctrlArmed();
     update();
@@ -614,6 +651,29 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     } else if (composer.sending === null && timer !== undefined) {
       window.clearInterval(timer);
       timer = undefined;
+    }
+  }
+
+  /**
+   * Re-ticks the running-work line while it shows, so its ages and
+   * countdowns move: every build clears the last tick and arms the next one
+   * when the line is up.
+   */
+  function syncWorkTimer(screen: SessionScreen, now: number): void {
+    clearWorkTimer();
+    const delay = screen.work === null ? null : nextRepaint(chat.work ?? NO_WORK, now);
+    if (delay !== null) {
+      workTimer = window.setTimeout(() => {
+        workTimer = undefined;
+        update();
+      }, delay);
+    }
+  }
+
+  function clearWorkTimer(): void {
+    if (workTimer !== undefined) {
+      window.clearTimeout(workTimer);
+      workTimer = undefined;
     }
   }
 
@@ -693,7 +753,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
   });
   apply(chatStep(chat, { type: "enter", sessionId }, newRequestId));
   update();
-  const stopViewport = trackViewport(container);
+  const stopViewport = trackViewport(container, chatEl);
 
   return () => {
     // Off the page first: nothing this view wired can fire again.
@@ -707,6 +767,7 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       window.clearInterval(timer);
       timer = undefined;
     }
+    clearWorkTimer();
     apply(chatStep(chat, { type: "leave" }, newRequestId));
   };
 }
@@ -715,23 +776,19 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
  * Keeps `container` over the visual viewport while the screen is mounted, as
  * `--vv-top` and `--vv-height`, which `.session` is sized from, and marks it
  * `data-keyboard="open"` while the keyboard is up. A browser
- * without `visualViewport` keeps the screen at its full height. The returned
- * function removes the listeners and the variables.
+ * without `visualViewport` keeps the screen at its full height. A shown `chat`
+ * at its bottom stays at its bottom as the keyboard comes and goes. The
+ * returned function removes the listeners and the variables.
  */
-function trackViewport(container: HTMLElement): () => void {
+function trackViewport(container: HTMLElement, chat: HTMLElement): () => void {
   const viewport = window.visualViewport;
   if (viewport === null) {
     return () => {};
   }
   const place = (): void => {
-    const box = sessionBox(viewport, window.innerHeight);
-    container.style.setProperty("--vv-top", `${box.top}px`);
-    container.style.setProperty("--vv-height", `${box.height}px`);
-    if (box.keyboardOpen) {
-      container.dataset["keyboard"] = "open";
-    } else {
-      delete container.dataset["keyboard"];
-    }
+    const before = measureBox(chat);
+    placeOverViewport(container, viewport);
+    keepAtBottom(chat, before);
   };
   viewport.addEventListener("resize", place);
   viewport.addEventListener("scroll", place);
@@ -743,6 +800,48 @@ function trackViewport(container: HTMLElement): () => void {
     container.style.removeProperty("--vv-height");
     delete container.dataset["keyboard"];
   };
+}
+
+/** Whether a chat sits at its bottom, and its box's height, before a possible resize. */
+interface ChatBox {
+  readonly atBottom: boolean;
+  readonly height: number;
+}
+
+function measureBox(chat: HTMLElement): ChatBox {
+  return { atBottom: measureScroll(chat).atBottom, height: chat.clientHeight };
+}
+
+/**
+ * Keeps a shown `chat` at its bottom when it sat there in `before` and its box
+ * has since changed height; a hidden chat, one scrolled up and one whose box
+ * kept its height are not written to.
+ */
+function keepAtBottom(chat: HTMLElement, before: ChatBox): void {
+  if (chat.hidden) {
+    return;
+  }
+  const target = scrollAfterResize(
+    before.atBottom,
+    before.height,
+    chat.scrollHeight,
+    chat.clientHeight,
+  );
+  if (target !== null) {
+    chat.scrollTop = target;
+  }
+}
+
+/** Sets `container`'s `--vv-top`, `--vv-height` and keyboard mark from `viewport`. */
+function placeOverViewport(container: HTMLElement, viewport: VisualViewport): void {
+  const box = sessionBox(viewport, window.innerHeight);
+  container.style.setProperty("--vv-top", `${box.top}px`);
+  container.style.setProperty("--vv-height", `${box.height}px`);
+  if (box.keyboardOpen) {
+    container.dataset["keyboard"] = "open";
+  } else {
+    delete container.dataset["keyboard"];
+  }
 }
 
 function showText(node: HTMLElement, text: string | null): void {

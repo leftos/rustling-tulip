@@ -19,7 +19,7 @@ use crate::{
     tagged_text, tooltip,
 };
 
-/// The popover's width, in px.
+/// The popover's width, in px: a window-like cap; its text wraps inside it.
 const POPOVER_WIDTH: f32 = 540.0;
 /// The popover's gap from the window's right edge, in px.
 const POPOVER_RIGHT: f32 = 8.0;
@@ -570,8 +570,6 @@ impl RootView {
             .children(row.detail.map(|detail| {
                 div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
                     .text_color(gpui::rgb(t.subtle))
                     .child(tagged_text(format!("accounts-detail-{n}"), detail))
             }))
@@ -707,14 +705,15 @@ fn tag_view(tag: Tag, n: u32, t: &UiTheme, cx: &mut Context<RootView>) -> Div {
 /// A row's window line: its label, bar, percentage and reset text.
 fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>) -> Div {
     let label = line.label;
+    let slug = accounts::label_slug(&label);
     div()
         .flex()
         .items_center()
         .gap(px(8.0))
-        .h(px(19.0))
+        .min_h(px(19.0))
         .child(
             div()
-                .w(px(18.0))
+                .min_w(px(18.0))
                 .flex_none()
                 .text_size(ui_px(cx, 11.0))
                 .text_color(gpui::rgb(t.subtle))
@@ -729,20 +728,18 @@ fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>
                 .justify_end()
                 .font_weight(ui_weight(cx, FontWeight::SEMIBOLD))
                 .text_color(gpui::rgb(pct_color(line.bar.level, t)))
-                .child(tagged_text(format!("accounts-{label}-{n}"), line.bar.pct)),
+                .child(tagged_text(format!("accounts-{slug}-{n}"), line.bar.pct)),
         )
         .child(
             div()
                 .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
                 .text_color(gpui::rgb(if line.used_up {
                     t.danger_text
                 } else {
                     t.text_2
                 }))
                 .child(tagged_text(
-                    format!("accounts-reset-{label}-{n}"),
+                    format!("accounts-reset-{slug}-{n}"),
                     line.reset,
                 )),
         )

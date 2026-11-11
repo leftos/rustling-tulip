@@ -359,6 +359,15 @@ impl AgentFile {
                 .and_then(|fields| fields.description.clone())
                 .or_else(|| call.and_then(|call| call.description.clone()))
                 .or(first_line),
+            model: state
+                .sidechain_model
+                .as_deref()
+                .map(activity::model_display)
+                .or_else(|| call.and_then(|call| call.model.clone())),
+            effort: state
+                .effort
+                .clone()
+                .or_else(|| call.and_then(|call| call.effort.clone())),
             started_at: state.first_record_at,
             finished_at: ending.finished_at,
             state: ending.state,
@@ -548,6 +557,8 @@ mod tests {
             parent_agent_id: None,
             agent_type: Some("Explore".to_owned()),
             description: Some("Map the crate".to_owned()),
+            model: Some("Opus 5.5".to_owned()),
+            effort: None,
             started_at: Some(at("2026-09-27T10:00:01Z")),
             finished_at: None,
             state: AgentState::Running,
@@ -573,6 +584,8 @@ mod tests {
             parent_agent_id: None,
             agent_type: Some("reviewer".to_owned()),
             description: Some("Review the diff".to_owned()),
+            model: Some("fake-model".to_owned()),
+            effort: None,
             started_at: Some(at("2026-09-27T10:00:03Z")),
             finished_at: Some(at("2026-09-27T10:00:09Z")),
             state: AgentState::Finished,
@@ -854,5 +867,68 @@ mod tests {
 
         assert_eq!(node.state, AgentState::Finished);
         assert_eq!(node.finished_at, Some(at("2026-09-27T10:00:30Z")));
+    }
+
+    #[test]
+    fn subagent_model_and_effort_come_from_its_newest_reply() {
+        let transcript = concat!(
+            r#"{"type":"user","isSidechain":true,"agentId":"a20","timestamp":"2026-09-27T10:00:01.000Z","#,
+            r#""message":{"role":"user","content":"Map the crate"}}"#,
+            "\n",
+            r#"{"type":"assistant","isSidechain":true,"agentId":"a20","timestamp":"2026-09-27T10:00:05.000Z","#,
+            r#""effort":"medium","message":{"id":"msg_m1","role":"assistant","#,
+            r#""model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"First."}],"#,
+            r#""stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            "\n",
+            r#"{"type":"assistant","isSidechain":true,"agentId":"a20","timestamp":"2026-09-27T10:00:06.000Z","#,
+            r#""effort":"high","message":{"id":"msg_m2","role":"assistant","model":"claude-opus-5-5","#,
+            r#""content":[{"type":"text","text":"Second."}],"stop_reason":"tool_use","#,
+            r#""usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            "\n",
+            r#"{"type":"assistant","isSidechain":true,"agentId":"a20","timestamp":"2026-09-27T10:00:07.000Z","#,
+            r#""message":{"id":"msg_m3","role":"assistant","model":"<synthetic>","#,
+            r#""content":[{"type":"text","text":"No response requested."}],"stop_reason":"end_turn","#,
+            r#""usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            "\n"
+        );
+        let scratch = conversation("model-newest", &[("a20", transcript, Some(RUNNING_META))]);
+
+        let nodes = tree(&scratch, None, NOW);
+        let node = only(&nodes);
+
+        assert_eq!(node.model.as_deref(), Some("Opus 5.5"));
+        assert_eq!(node.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn subagent_model_and_effort_fall_back_to_its_launch() {
+        let main = MAIN.replace(
+            r#""subagent_type":"Explore""#,
+            r#""subagent_type":"Explore","model":"fable","effort":"xhigh""#,
+        );
+        let scratch = Scratch::new("model-launch");
+        scratch.write(&main);
+        scratch.put("agent-a20.jsonl", &lines(RUNNING, 0, 1));
+        scratch.put("agent-a20.meta.json", RUNNING_META);
+
+        let nodes = tree(&scratch, None, NOW);
+        let node = only(&nodes);
+
+        assert_eq!(node.model.as_deref(), Some("fable"));
+        assert_eq!(node.effort.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn subagent_model_and_effort_are_none_when_unknown() {
+        let scratch = conversation(
+            "model-unknown",
+            &[("a20", &lines(RUNNING, 0, 1), Some(RUNNING_META))],
+        );
+
+        let nodes = tree(&scratch, None, NOW);
+        let node = only(&nodes);
+
+        assert_eq!(node.model, None);
+        assert_eq!(node.effort, None);
     }
 }

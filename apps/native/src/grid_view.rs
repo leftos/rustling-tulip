@@ -4,6 +4,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use alacritty_terminal::vte::ansi::Rgb;
+
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
@@ -18,7 +20,7 @@ use protocol::{
 };
 
 use crate::appearance::{self, PaneFrame, Resolved, Source};
-use crate::assets::{SHIELD_ICON, SIDEBAR_MORE_ICON};
+use crate::assets::SIDEBAR_MORE_ICON;
 use crate::chat::PaneView;
 use crate::chat_view::{AGENT_DOWN_TIP, COMPACT_TIP, compact_toggle, offers_chat, view_segment};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
@@ -26,12 +28,13 @@ use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::header_tip::SHOW_DELAY as HEADER_TIP_DELAY;
+use crate::link_menu::LinkMenu;
 use crate::open_view::LinkSource;
 use crate::pane_header_fit;
 use crate::popouts::{self, PopoutKey};
 use crate::runtime_icon::{RuntimeIcon, runtime_icon, runtime_icon_view};
 use crate::session_actions::StopPlace;
-use crate::session_menu::{BorderedButton, bordered_button};
+use crate::session_menu::{BorderedButton, MENU_MAX_SHARE, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::{can_attach, chip_tip, display_label, label_tooltip, runtime_label};
 use crate::spawn_view::{DISABLED_OPACITY, SpawnEntry};
@@ -66,20 +69,26 @@ const PANE_SHELL_TIP: &str = "A plain shell in this pane, in the remembered fold
 pub(crate) const SPAWN_TIP: &str = "Spawn a new session";
 const OPEN_SHELL_TIP: &str = "A plain shell in a new tab, in the remembered folder";
 
+/// The pane header's height: a fixed strip in a splittable grid.
 const PANE_HEADER_HEIGHT: f32 = 36.0;
 /// The corner radius of a pane card and its header.
 const PANE_RADIUS: f32 = 8.0;
 /// The name's size in a pane header.
 const TITLE_TEXT_SIZE: f32 = 12.5;
+/// A header chip's height: one line inside the fixed header strip.
 const CHIP_HEIGHT: f32 = 20.0;
 const CHIP_RADIUS: f32 = 5.0;
 const CHIP_TEXT_SIZE: f32 = 11.0;
 /// A header chip's text shrink against the title's 1: large enough that the
 /// chip gives up nearly all its width before the title gives any.
 const BRANCH_CHIP_SHRINK: f32 = 1000.0;
+/// The least width a shrinking header chip keeps: a few characters and its
+/// `…`, so once a chip reaches it the title shrinks next. A chip narrower
+/// than this keeps its own width. A header too narrow to hold its chips at
+/// this floor ([`pane_header_fit::floors_fit`]) lets them shrink to nothing.
+const CHIP_MIN_WIDTH: f32 = 56.0;
 const HEADER_BUTTON_SIZE: f32 = 26.0;
 const HEADER_BUTTON_RADIUS: f32 = 6.0;
-const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
 /// The accent line down a pane header's left edge, below its top corner.
 const ACCENT_LINE_WIDTH: f32 = 3.0;
 
@@ -303,6 +312,16 @@ impl RootView {
                 self.panes.insert(binding.pane_id.clone(), slot);
             }
             let sender = self.hosts.sender(&binding.host);
+            // A pane that newly shows a session claims its size when this
+            // client's user bound it there; the bind is taken once.
+            let newly_bound = self.panes.get(&binding.pane_id).is_some_and(|slot| {
+                slot.session != binding.session_id || slot.host != binding.host
+            });
+            let bound = newly_bound
+                && binding.session_id.as_ref().is_some_and(|id| {
+                    let session = SessionRef::new(binding.host.clone(), id.clone());
+                    self.tabs.take_bind(&session, &binding.pane_id)
+                });
             let Some(slot) = self.panes.get_mut(&binding.pane_id) else {
                 continue;
             };
@@ -321,6 +340,9 @@ impl RootView {
             let remote = binding.host != HostKey::Local;
             slot.view.update(cx, |pane, _| {
                 pane.release();
+                if bound {
+                    pane.claim_next_size();
+                }
                 if rehosted {
                     pane.set_sender(sender, remote);
                 }
@@ -334,6 +356,8 @@ impl RootView {
                 self.open_pane_view(&binding.pane_id, session_id.as_deref());
             }
         }
+        // A pane-replacing bind this update did not take is not coming.
+        self.tabs.settle_pane_binds();
         shown
     }
 
@@ -481,7 +505,7 @@ impl RootView {
             if let Some(session) = session {
                 self.sidebar.mark_seen_on(&session.host, &session.id);
             }
-            self.tabs.set_focused(&tab_id, pane_id);
+            self.set_focused_pane(&tab_id, pane_id, cx);
             self.focus_history.record(&tab_id, Some(pane_id));
             self.preselected_target = None;
             // In a popped tab's own window, the pane shows its session while
@@ -672,17 +696,20 @@ impl RootView {
         by_user: bool,
         cx: &mut Context<Self>,
     ) {
-        let resolved: Vec<(String, Resolved)> = self
+        let resolved: Vec<(String, Resolved, bool)> = self
             .panes
             .iter()
             .filter(|(_, slot)| keep(slot))
             .map(|(pane_id, slot)| {
                 let resolved = self.pane_appearance(&slot.tab_id, slot.session.as_deref());
-                (pane_id.clone(), resolved)
+                // A session pop-out's pane belongs to no tab; the window is
+                // all its own, so it draws its band as a focused pane does.
+                let focused = self.pane_place(pane_id).is_none_or(|(_, focused)| focused);
+                (pane_id.clone(), resolved, focused)
             })
             .collect();
         let authored = theme(cx).terminal;
-        for (pane_id, resolved) in resolved {
+        for (pane_id, resolved, focused) in resolved {
             let Some(slot) = self.panes.get_mut(&pane_id) else {
                 continue;
             };
@@ -693,10 +720,14 @@ impl RootView {
             let override_bg = (resolved.background.source != Source::BuiltIn)
                 .then(|| appearance::term_rgb(resolved.background.value));
             let palette = crate::theme::resolve_palette(override_bg, &authored);
-            let frame = resolved.frame.value.map(appearance::term_rgb);
+            let band = frame_band(
+                focused,
+                resolved.frame.value.map(appearance::term_rgb),
+                appearance::term_rgb(resolved.accent.value),
+            );
             slot.view.update(cx, |pane, cx| {
                 pane.set_font(resolved.font(), by_user, cx);
-                pane.set_colors(palette, frame, resolved.frame_width.value, cx);
+                pane.set_colors(palette, band, resolved.frame_width.value, cx);
             });
         }
     }
@@ -722,6 +753,20 @@ impl RootView {
     pub fn pane_header_fill(&self, pane_id: &str, cx: &App) -> Option<u32> {
         let (_, focused) = self.pane_place(pane_id)?;
         Some(header_fill(focused, &theme(cx)))
+    }
+
+    /// The two ends of pane `pane_id`'s header fade, `0xRRGGBB`: its accent
+    /// mixed over the header's own fill at the left edge, and the plain fill
+    /// where the wash ends, whichever pane has the focus.
+    #[must_use]
+    pub fn pane_header_fade(&self, pane_id: &str, cx: &App) -> Option<(u32, u32)> {
+        let (session, focused) = self.pane_place(pane_id)?;
+        let accent = self.panes.get(pane_id).map_or_else(
+            || self.sidebar.appearance(session).accent.value,
+            |slot| slot.accent,
+        );
+        let (from, to) = header_fade_colors(header_fill(focused, &theme(cx)), accent);
+        Some((appearance::packed(from), appearance::packed(to)))
     }
 
     /// The session pane `pane_id` shows, and whether the pane has its
@@ -841,7 +886,7 @@ impl RootView {
                 link,
                 base_dirs,
                 session,
-                prefer_viewer,
+                action,
             } => {
                 let Some(host) = host else {
                     tracing::debug!(%slot_id, "a gone terminal's link click; not opened");
@@ -850,9 +895,34 @@ impl RootView {
                 let source = LinkSource {
                     host: &host,
                     session: session.as_deref(),
-                    prefer_viewer: *prefer_viewer,
+                    action: *action,
                 };
                 self.open_link(link, base_dirs.clone(), &source, window, cx);
+            }
+            PaneEvent::LinkMenu {
+                link,
+                base_dirs,
+                session,
+                at,
+            } => {
+                let Some(host) = host else {
+                    tracing::debug!(%slot_id, "a gone terminal's link click; no menu");
+                    return;
+                };
+                let menu = LinkMenu {
+                    link: link.clone(),
+                    base_dirs: base_dirs.clone(),
+                    session: session.clone(),
+                    host,
+                    at: *at,
+                    selected: 0,
+                    max_height: window.viewport_size().height * MENU_MAX_SHARE,
+                };
+                // The press focuses the clicked pane, but its focus-in never
+                // runs once the menu takes the keyboard, so the pane the click
+                // was in takes it here and gets it back when the menu closes.
+                self.pane_focused(slot_id, window, cx);
+                self.open_link_menu(menu, window, cx);
             }
             PaneEvent::CheckSpacedLink(check) => {
                 let Some(host) = host else {
@@ -1127,19 +1197,23 @@ impl RootView {
     /// Gives the keyboard to the active tab: its focused pane, or a diff or
     /// viewer tab's body. A popped focused pane takes nothing; a popped tab's
     /// card holds no focus, so the main window keeps the keyboard to itself.
+    /// With no tab or no pane to take it, the window's own focus does, so the
+    /// app's shortcuts keep working.
     pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &Context<Self>) {
         if self.focus_active_diff_tab(window, cx) || self.focus_active_viewer_tab(window) {
             return;
         }
         let Some(tab_id) = self.tabs.active_id() else {
+            self.root_focus.focus(window);
             return;
         };
         if self.is_tab_popped(tab_id) && self.is_main_window(window) {
             self.root_focus.focus(window);
             return;
         }
-        if let Some(pane_id) = self.tabs.focused_pane(tab_id) {
-            self.focus_pane_view(&pane_id, window, cx);
+        match self.tabs.focused_pane(tab_id) {
+            Some(pane_id) => self.focus_pane_view(&pane_id, window, cx),
+            None => self.root_focus.focus(window),
         }
     }
 
@@ -1232,15 +1306,23 @@ impl RootView {
             .unwrap_or_default()
     }
 
+    /// Gives `tab_id`'s focus to `pane_id` and applies every pane's colours
+    /// again: the band follows the focus even when the terminal never takes
+    /// the keyboard, as the spawn dialog opening over it leaves it.
+    pub(crate) fn set_focused_pane(&mut self, tab_id: &str, pane_id: &str, cx: &mut Context<Self>) {
+        self.tabs.set_focused(tab_id, pane_id);
+        self.apply_pane_fonts(false, cx);
+    }
+
     /// Gives pane `pane_id` of `tab_id` its tab's focus and the keyboard.
     fn focus_pane_in(
         &mut self,
         tab_id: &str,
         pane_id: &str,
         window: &mut Window,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        self.tabs.set_focused(tab_id, pane_id);
+        self.set_focused_pane(tab_id, pane_id, cx);
         self.focus_history.record(tab_id, Some(pane_id));
         self.preselected_target = None;
         self.remember_focused_session();
@@ -1461,7 +1543,7 @@ impl RootView {
                 TabContent::Grid { .. } | TabContent::Diff { .. }
                     if self.is_tab_popped(&tab.id) =>
                 {
-                    Self::popped_tab_card(tab, cx)
+                    Self::popped_tab_card(tab, self.sidebar.tab_display_name(tab), cx)
                 }
                 TabContent::Diff { .. } => self.diff_tab_element(&tab.id).unwrap_or_else(|| {
                     muted_note(crate::fonts::ui_text_size(cx), DIFF_LOADING_TEXT, &t)
@@ -1641,9 +1723,11 @@ impl RootView {
             .and_then(|_| self.pane_session_in(tab_id, pane_id))
             .map(|(host, session)| self.session_header_parts(&host, session));
         let target = self.header_target(tab_id, pane_id, session_id, parts.as_ref(), here);
+        let header_ground = header_fill(focused, &t);
+        let (fade_from, fade_to) = header_fade_stops(header_ground, colors.accent_line);
         let header = self
             .pane_header(&target, colors.accent_line, cx)
-            .bg(gpui::rgb(header_fill(focused, &t)))
+            .bg(gpui::linear_gradient(90.0, fade_from, fade_to))
             .child(
                 div()
                     .absolute()
@@ -1726,7 +1810,8 @@ impl RootView {
     /// The card a popped-out tab leaves in the main window in place of its
     /// grid: the tab's name, the popped-out note, Focus window and Dock
     /// back. It holds no focus, so keys typed while it shows go nowhere.
-    fn popped_tab_card(tab: &TabEntry, cx: &mut Context<Self>) -> AnyElement {
+    /// `name` is the name the tab shows.
+    fn popped_tab_card(tab: &TabEntry, name: String, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let key = PopoutKey::Tab {
             tab_id: tab.id.clone(),
@@ -1756,7 +1841,7 @@ impl RootView {
             crate::fonts::ui_text_size(cx),
             crate::fonts::ui_weight_shift(cx),
             names,
-            tab.name.clone(),
+            name,
             [focus, dock],
             &t,
         )
@@ -1813,7 +1898,7 @@ impl RootView {
             .whitespace_nowrap()
             .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
             .text_color(gpui::rgb(t.text))
-            .child(tab.name.clone())
+            .child(self.sidebar.tab_display_name(tab))
             .into_any_element();
         let dock = Self::popout_tab_dock_back(tab_id, cx);
         let toolbar = popout_toolbar_row(&format!("tab-{tab_id}"), vec![title], vec![dock], cx);
@@ -1855,7 +1940,7 @@ impl RootView {
             return popout_column(toolbar, note.into_any_element());
         };
         let parts = self.session_header_parts(host, session);
-        let title = header_title(&slot_id, Some(&parts), TipAt::Mouse, cx);
+        let title = header_title(&slot_id, Some(&parts), TipAt::Mouse, true, cx);
         let mut controls = self.header_stop(&slot_id, Some(session_id), StopPlace::Popout, cx);
         controls.push(Self::popout_close_window(&slot_id, cx));
         let toolbar = popout_toolbar_row(&slot_id, title, controls, cx);
@@ -1962,7 +2047,7 @@ impl RootView {
     ) -> AnyElement {
         let t = theme(cx);
         let parts = self.popout_header_parts(pane_id);
-        let mut title = header_title(pane_id, parts.as_ref(), TipAt::Mouse, cx);
+        let mut title = header_title(pane_id, parts.as_ref(), TipAt::Mouse, true, cx);
         if let Some(docked) = self.popout_docked_in(pane_id) {
             let name = format!("popout-tab-{pane_id}");
             let docked = div()
@@ -1981,7 +2066,7 @@ impl RootView {
     }
 
     /// The session's status glyph, name and chips (runtime, repo:branch
-    /// with a count of further members, trusted), its Pop out, its Stop or
+    /// with a count of further members), its Pop out, its Stop or
     /// exit code, split right and down (Shift: left and up), move and
     /// close. When the header in `target`'s window is too narrow for those
     /// buttons beside a readable name, everything from Pop out to the
@@ -2016,6 +2101,7 @@ impl RootView {
         let root = cx.entity().downgrade();
         let drag_session = session_id.map(str::to_owned);
         let (controls, buttons) = self.header_right(target, cx);
+        let floors = self.chip_floors_fit(target, cx);
         let controls = (!controls.is_empty()).then(|| header_controls(cx).children(controls));
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
@@ -2071,7 +2157,7 @@ impl RootView {
             .when(at == TipAt::BelowRow, |row| {
                 row.child(header_row_probe(pane_id))
             })
-            .children(header_title(pane_id, parts, at, cx))
+            .children(header_title(pane_id, parts, at, floors, cx))
             .child(div().flex_1())
             .children(controls)
             .children(buttons)
@@ -2261,11 +2347,16 @@ impl RootView {
     }
 
     /// Sends what a pane or leaf drop does: a pane move with its undo entry,
-    /// or the request that places an unbound session, with none.
+    /// or the request that places an unbound session, with none. The placing
+    /// request arms the bind, so the pane the session lands in claims its
+    /// size.
     pub(crate) fn send_leaf_drop(&mut self, drop: LeafDrop, cx: &mut Context<Self>) {
         match drop {
             LeafDrop::Move(drop) => self.send_pane_move(&drop, cx),
-            LeafDrop::Send(message) => {
+            LeafDrop::Send { message, session } => {
+                if let Some(target) = tabs::bind_target(&message) {
+                    self.tabs.arm_bind(&session, target);
+                }
                 self.tabs.note_layout_request(&message);
                 self.send_to(&HostKey::Local, *message);
             }
@@ -2600,21 +2691,19 @@ impl RootView {
         cx: &App,
     ) -> Option<Point<Pixels>> {
         let card = self.pane_card(target.tab_id, target.pane_id, target.here)?;
-        let fit = pane_header_fit::HeaderFit {
-            // The card's border takes a pixel on each side.
-            width: card.width - 2.0 * CARD_BORDER,
-            glyph: target.parts.map_or(0.0, |_| GlyphSize::Leaf.px()),
-            chips: target.parts.map_or_else(Vec::new, |parts| {
-                parts
-                    .chips
-                    .iter()
-                    .map(|chip| chip_width(chip, cx))
-                    .collect()
-            }),
-            cluster: cluster_item_widths(cluster, cx),
-            close: HEADER_BUTTON_SIZE,
-        };
+        let fit = header_fit(card, target, cluster, cx);
         pane_header_fit::collapses(&fit).then(|| overflow_menu_anchor(card, cx))
+    }
+
+    /// Whether `target`'s header holds its chips at their floor, judged on
+    /// the same widths as its collapse; true before the grid is laid out.
+    fn chip_floors_fit(&self, target: &HeaderTarget<'_>, cx: &App) -> bool {
+        let Some(card) = self.pane_card(target.tab_id, target.pane_id, target.here) else {
+            return true;
+        };
+        let cluster = self.header_cluster(target.tab_id, target.pane_id, target.session_id, cx);
+        let fit = header_fit(card, target, &cluster, cx);
+        pane_header_fit::floors_fit(&fit, CHIP_MIN_WIDTH, HEADER_BUTTON_SIZE)
     }
 
     /// The session shown by pane `pane_id` of the tab on screen, with the
@@ -2742,7 +2831,7 @@ impl RootView {
         let name = self
             .tabs
             .tab(tab_id)
-            .map_or(tab_id.as_str(), |tab| tab.name.as_str());
+            .map_or_else(|| tab_id.clone(), |tab| self.sidebar.tab_display_name(tab));
         Some(format!("in {name}"))
     }
 
@@ -2841,7 +2930,6 @@ pub enum HeaderChipKind {
     Branch,
     /// `+N`: the further members of a workspace session.
     More,
-    Trusted,
     /// The provider endpoint an agent session is routed to.
     Provider,
     /// The remote host the session runs on; This PC's sessions have none.
@@ -2855,7 +2943,6 @@ impl HeaderChipKind {
             Self::Runtime => "runtime",
             Self::Branch => "branch",
             Self::More => "more",
-            Self::Trusted => "trusted",
             Self::Provider => "provider",
             Self::Host => "host",
         }
@@ -2939,13 +3026,6 @@ fn header_parts(
         )
     }));
     chips.extend(member_chips(&session.members));
-    if session.elevated_authority {
-        chips.push(HeaderChip::new(
-            HeaderChipKind::Trusted,
-            "trusted",
-            TRUSTED_TIP,
-        ));
-    }
     PaneHeaderParts {
         status: session.status,
         mode: session.mode,
@@ -2996,17 +3076,59 @@ fn member_tip(name: String, member: &SessionMember) -> String {
     }
 }
 
+/// The colour a pane's frame band draws: its frame colour while it has its
+/// tab's focus, else its accent where no frame is set; `None` while it does
+/// not, where the band shows the terminal's background.
+fn frame_band(focused: bool, frame: Option<Rgb>, accent: Rgb) -> Option<Rgb> {
+    if focused {
+        Some(frame.unwrap_or(accent))
+    } else {
+        None
+    }
+}
+
 /// A pane header's fill: raised while the pane has its tab's focus.
 fn header_fill(focused: bool, t: &UiTheme) -> u32 {
     if focused { t.raised } else { t.surface }
 }
 
+/// How much of its accent a header's fade mixes over the header's own fill
+/// at its left edge, the same whether the pane has the focus or not.
+const HEADER_FADE_STRENGTH: f64 = 0.22;
+
+/// The fraction of a header's width at which its fade reaches the plain
+/// fill.
+const HEADER_FADE_END: f32 = 0.34;
+
+/// `fill`'s header fade as the two colours its gradient draws: the accent
+/// mixed [`HEADER_FADE_STRENGTH`] over `fill` at the left edge, and the plain
+/// fill where the wash ends.
+fn header_fade_colors(fill: u32, accent: u32) -> (Rgb, Rgb) {
+    let ground = appearance::term_rgb(fill);
+    (
+        crate::theme::mix(ground, appearance::term_rgb(accent), HEADER_FADE_STRENGTH),
+        ground,
+    )
+}
+
+/// The header's gradient stops: the accent wash at the left edge and the
+/// plain fill at [`HEADER_FADE_END`] of the header's width.
+fn header_fade_stops(fill: u32, accent: u32) -> (gpui::LinearColorStop, gpui::LinearColorStop) {
+    let (from, to) = header_fade_colors(fill, accent);
+    (
+        gpui::linear_color_stop(gpui::rgb(appearance::packed(from)), 0.0),
+        gpui::linear_color_stop(gpui::rgb(appearance::packed(to)), HEADER_FADE_END),
+    )
+}
+
 /// The header's left side: the status glyph, the name and the chips, or
-/// "Empty pane", each tipping `at`.
+/// "Empty pane", each tipping `at`. With `floors`, a text chip shrinks no
+/// further than [`CHIP_MIN_WIDTH`]; without, as far as nothing.
 fn header_title(
     pane_id: &str,
     parts: Option<&PaneHeaderParts>,
     at: TipAt,
+    floors: bool,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
     let t = theme(cx);
@@ -3055,18 +3177,18 @@ fn header_title(
         parts
             .chips
             .iter()
-            .map(|chip| header_chip(pane_id, chip, at, cx)),
+            .map(|chip| header_chip(pane_id, chip, at, floors, cx)),
     );
     out
 }
 
 /// A 20 px Geist Mono chip: the runtime a 20 px square holding its icon,
-/// repo:branch with its repo name bright, trusted an outlined square holding
-/// a shield, the rest filled.
+/// repo:branch with its repo name bright, the rest filled.
 fn header_chip(
     pane_id: &str,
     chip: &HeaderChip,
     at: TipAt,
+    floors: bool,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let t = theme(cx);
@@ -3099,6 +3221,11 @@ fn header_chip(
         base.whitespace_nowrap()
     };
     let text = chip.text.clone();
+    let floor = if floors {
+        (chip_width(chip, cx) > CHIP_MIN_WIDTH).then_some(px(CHIP_MIN_WIDTH))
+    } else {
+        Some(px(0.0))
+    };
     match chip.kind {
         HeaderChipKind::Runtime => match &chip.icon {
             Some(icon) => base
@@ -3106,46 +3233,54 @@ fn header_chip(
                 .px(px(0.0))
                 .justify_center()
                 .child(runtime_icon_view(icon, ui_px(cx, 12.0), &name, &t)),
-            None => chip_text(&name, base, text),
+            None => chip_text(&name, base, text, floor),
         },
-        HeaderChipKind::Branch => branch_chip(&name, base, text, &t),
-        HeaderChipKind::Trusted => base
-            .bg(gpui::rgba(t.transparent))
-            .border_color(gpui::rgb(t.line_strong))
-            .w(ui_px(cx, CHIP_HEIGHT))
-            .px(px(0.0))
-            .justify_center()
-            .child(
-                svg()
-                    .path(SHIELD_ICON)
-                    .size(ui_px(cx, 12.0))
-                    .flex_none()
-                    .text_color(gpui::rgb(t.text_2)),
-            ),
+        HeaderChipKind::Branch => branch_chip(&name, base, text, floor, &t),
         HeaderChipKind::More | HeaderChipKind::Provider | HeaderChipKind::Host => {
-            chip_text(&name, base, text)
+            chip_text(&name, base, text, floor)
         }
     }
     .into_any_element()
 }
 
 /// A text chip's label: it shrinks and truncates with `…` before the title
-/// does, its tooltip keeping the whole text. `name` names its text for the
-/// ellipsis probe.
-fn chip_text(name: &str, base: Stateful<Div>, text: String) -> Stateful<Div> {
-    let mut chip = base
-        .min_w(px(0.0))
+/// does, down to `floor`, its tooltip keeping the whole text. `name` names
+/// its text for the ellipsis probe.
+fn chip_text(
+    name: &str,
+    base: Stateful<Div>,
+    text: String,
+    floor: Option<Pixels>,
+) -> Stateful<Div> {
+    let chip = base
         .overflow_hidden()
         .child(truncating(name, StyledText::new(text)));
+    give_way(chip, floor)
+}
+
+/// `chip` shrinking before the title, down to `floor`; with no floor (a
+/// chip no wider than [`CHIP_MIN_WIDTH`]) it keeps its own width.
+fn give_way(chip: Stateful<Div>, floor: Option<Pixels>) -> Stateful<Div> {
+    let Some(floor) = floor else {
+        return chip;
+    };
+    let mut chip = chip.min_w(floor);
     chip.style().flex_shrink = Some(BRANCH_CHIP_SHRINK);
     chip
 }
 
 /// The repo:branch chip, its repo name bright and its colon subtle. It is
 /// the first part of a header to give way when the header runs short: it
-/// shrinks and truncates with `…` before the title does, its tooltip
-/// keeping the whole text. `id` names its text for the ellipsis probe.
-fn branch_chip(id: &str, base: Stateful<Div>, text: String, t: &UiTheme) -> Stateful<Div> {
+/// shrinks and truncates with `…` before the title does, down to `floor`,
+/// its tooltip keeping the whole text. `id` names its text for the ellipsis
+/// probe.
+fn branch_chip(
+    id: &str,
+    base: Stateful<Div>,
+    text: String,
+    floor: Option<Pixels>,
+    t: &UiTheme,
+) -> Stateful<Div> {
     let highlights = text.find(':').map(|colon| {
         let color = |token: u32| HighlightStyle {
             color: Some(gpui::rgb(token).into()),
@@ -3157,12 +3292,8 @@ fn branch_chip(id: &str, base: Stateful<Div>, text: String, t: &UiTheme) -> Stat
         ]
     });
     let label = StyledText::new(text).with_highlights(highlights.into_iter().flatten());
-    let mut chip = base
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .child(truncating(id, label));
-    chip.style().flex_shrink = Some(BRANCH_CHIP_SHRINK);
-    chip
+    let chip = base.overflow_hidden().child(truncating(id, label));
+    give_way(chip, floor)
 }
 
 /// A split's two children around their divider, the first sized by `ratio`.
@@ -3863,11 +3994,34 @@ fn text_width(
 
 /// The width `chip` takes in a header that has room for it: its icon's
 /// square, or its text with padding and border.
+/// What `target`'s header has to fit in `card`, with `cluster` as its
+/// buttons: what both its collapse and its chips' floor are judged on.
+fn header_fit(
+    card: tabs::Rect,
+    target: &HeaderTarget<'_>,
+    cluster: &HeaderCluster,
+    cx: &App,
+) -> pane_header_fit::HeaderFit {
+    pane_header_fit::HeaderFit {
+        // The card's border takes a pixel on each side.
+        width: card.width - 2.0 * CARD_BORDER,
+        glyph: target.parts.map_or(0.0, |_| GlyphSize::Leaf.px()),
+        chips: target.parts.map_or_else(Vec::new, |parts| {
+            parts
+                .chips
+                .iter()
+                .map(|chip| chip_width(chip, cx))
+                .collect()
+        }),
+        cluster: cluster_item_widths(cluster, cx),
+        close: HEADER_BUTTON_SIZE,
+    }
+}
+
 fn chip_width(chip: &HeaderChip, cx: &App) -> f32 {
     let square = ui_px(cx, CHIP_HEIGHT) / px(1.0);
     match chip.kind {
         HeaderChipKind::Runtime if chip.icon.is_some() => square,
-        HeaderChipKind::Trusted => square,
         _ => {
             let text = text_width(
                 cx,
@@ -4001,10 +4155,15 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{HeaderChip, HeaderChipKind, RetryGate, drawn_ratio, header_parts, status_label};
+    use super::{
+        HeaderChip, HeaderChipKind, RetryGate, drawn_ratio, frame_band, header_fade_colors,
+        header_fade_stops, header_parts, status_label,
+    };
+    use crate::appearance::term_rgb;
     use crate::runtime_icon::RuntimeIcon;
     use crate::tabs::SessionRef;
     use crate::target::HostKey;
+    use crate::theme::mix;
     use protocol::{AgentDescriptor, AgentId, SessionMode, SessionSnapshot, SessionStatus};
     use serde_json::json;
 
@@ -4039,6 +4198,43 @@ mod tests {
         );
         assert_eq!(status_label(SessionStatus::Stopped, false), "stopped");
         assert_eq!(status_label(SessionStatus::Error, false), "error");
+    }
+
+    #[test]
+    fn a_focused_band_is_the_frame_else_the_accent() {
+        let accent = term_rgb(0x00b4_8ead);
+        let frame = term_rgb(0x0012_3456);
+        assert_eq!(frame_band(true, Some(frame), accent), Some(frame));
+        assert_eq!(frame_band(true, None, accent), Some(accent));
+    }
+
+    #[test]
+    fn an_unfocused_band_draws_nothing_whatever_the_frame() {
+        let accent = term_rgb(0x00b4_8ead);
+        let frame = term_rgb(0x0012_3456);
+        assert_eq!(frame_band(false, Some(frame), accent), None);
+        assert_eq!(frame_band(false, None, accent), None);
+    }
+
+    #[test]
+    fn a_header_fades_its_accent_over_its_own_fill() {
+        let fill = 0x16_151a;
+        let accent = 0x008f_b3f0;
+        assert_eq!(
+            header_fade_colors(fill, accent),
+            (mix(term_rgb(fill), term_rgb(accent), 0.22), term_rgb(fill))
+        );
+    }
+
+    #[test]
+    fn the_fade_reaches_the_plain_fill_a_third_of_the_way_across() {
+        let (start, end) = header_fade_stops(0x16_151a, 0x008f_b3f0);
+        assert!((start.percentage - 0.0).abs() < f32::EPSILON);
+        assert!(
+            (end.percentage - 0.34).abs() < f32::EPSILON,
+            "the wash ends at {} of the header, not 0.34",
+            end.percentage
+        );
     }
 
     /// Session `id` of This PC.

@@ -25,8 +25,8 @@ use protocol::{
 };
 
 use crate::accounts_settings::{AccountsControl, AliasFields};
-use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
-use crate::agent_options_view::{LOCKED, UPDATE_CLIENT};
+use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for, trusted_moves};
+use crate::agent_options_view::UPDATE_CLIENT;
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::Level;
 use crate::assets::SIDEBAR_CHEVRON_DOWN_ICON;
@@ -63,9 +63,9 @@ use crate::ui_theme::{UiTheme, theme};
 use crate::window_title::compute_title;
 use crate::{FileFilter, Pick, RootView, tooltip};
 
-/// The tab list's width, its padding and edge included.
+/// The tab list's width, its padding and edge included; fixed so the tabs' column lines up.
 const TAB_LIST_WIDTH: f32 = 150.0;
-/// A tab row's height and corner radius, as on the Settings board.
+/// A tab row's height and corner radius, as on the Settings board; fixed so the tabs line up.
 const TAB_ROW_HEIGHT: f32 = 34.0;
 /// A section label's text size, above the rows of its group.
 const SECTION_LABEL_SIZE: f32 = 11.0;
@@ -90,7 +90,7 @@ const PANEL_WIDTH: f32 = TAB_LIST_WIDTH + CONTENT_WIDTH + 2.0 * CONTENT_PAD_X + 
 const PANEL_HEIGHT: f32 = 640.0;
 /// The size of a hint.
 const HINT_SIZE: f32 = 12.5;
-/// The width of a sound field, and of its list.
+/// The width of a sound field, and of its list: an input's width.
 const SOUND_FIELD_WIDTH: f32 = 280.0;
 /// The most height a sound list takes before it scrolls.
 const SOUND_LIST_MAX_HEIGHT: f32 = 240.0;
@@ -109,7 +109,7 @@ const REMOTE_RUN_HINT: &str =
 const AUTOSTART_HINT: &str = "So remote access works before you open this app.";
 /// The port field's placeholder: the daemon's default port.
 const DEFAULT_PORT_TEXT: &str = "8787";
-/// The port field's width.
+/// The port field's width: an input's width.
 const PORT_FIELD_WIDTH: f32 = 96.0;
 /// The Maximum chat width field's hint, placeholder and validation error.
 const CHAT_WIDTH_HINT: &str = "0 for no limit.";
@@ -261,7 +261,6 @@ pub(crate) enum SettingsTab {
     General,
     Notifications,
     Dashboard,
-    SpawnDefaults,
     Worktrees,
     RemoteAccess,
     /// This PC's saved agent accounts and the auto-switch rules.
@@ -275,11 +274,10 @@ pub(crate) enum SettingsTab {
 
 impl SettingsTab {
     /// The tabs shown before the agents' pages, in the list's order.
-    pub(crate) const FIXED: [Self; 9] = [
+    pub(crate) const FIXED: [Self; 8] = [
         Self::General,
         Self::Notifications,
         Self::Dashboard,
-        Self::SpawnDefaults,
         Self::Worktrees,
         Self::RemoteAccess,
         Self::Accounts,
@@ -294,7 +292,6 @@ impl SettingsTab {
             Self::General => "General",
             Self::Notifications => "Notifications",
             Self::Dashboard => "Dashboard",
-            Self::SpawnDefaults => "Spawn defaults",
             Self::Worktrees => "Worktrees",
             Self::RemoteAccess => "Remote access",
             Self::Accounts => "Accounts",
@@ -311,7 +308,6 @@ impl SettingsTab {
             Self::General => "settings-tab-general",
             Self::Notifications => "settings-tab-notifications",
             Self::Dashboard => "settings-tab-dashboard",
-            Self::SpawnDefaults => "settings-tab-spawn-defaults",
             Self::Worktrees => "settings-tab-worktrees",
             Self::RemoteAccess => "settings-tab-remote-access",
             Self::Accounts => "settings-tab-accounts",
@@ -599,7 +595,6 @@ pub(crate) enum SettingsControl {
     FinishedGrace(u32),
     #[cfg_attr(not(windows), expect(dead_code, reason = "Windows-only toast style"))]
     ToastStyle(ToastStyle),
-    SpawnTrusted,
     /// Choice `choice` of field `field` of the shown agent page's
     /// [`AgentOptions::settings_fields`]; `selector` is
     /// `settings-{tag}-{field id}-{choice}`.
@@ -735,7 +730,6 @@ impl SettingsControl {
             Self::FinishedGrace(_) => "settings-finished-grace-20",
             Self::ToastStyle(ToastStyle::Os) => "settings-toast-style-os",
             Self::ToastStyle(ToastStyle::App) => "settings-toast-style-app",
-            Self::SpawnTrusted => "settings-spawn-trusted",
             Self::AgentChoice { selector, .. }
             | Self::AgentToggle { selector, .. }
             | Self::AgentText { selector, .. }
@@ -1231,27 +1225,13 @@ impl RootView {
             .map(|choice| choice.label.clone())
     }
 
-    /// Whether trusted launch locks field `field` on the Settings page of
-    /// the agent tagged `tag`.
-    #[must_use]
-    pub fn settings_field_locked(&self, tag: &str, field: &str) -> bool {
-        self.settings_page_field(tag, field)
-            .is_some_and(|view| view.disabled && view.editor != FieldEditor::Unknown)
-    }
-
     /// The note the Settings page of the agent tagged `tag` shows for its
     /// field `field`: the update note for a kind this client does not know,
-    /// the locked note for a field trusted launch locks, else `None`.
+    /// else `None`.
     #[must_use]
     pub fn settings_field_note(&self, tag: &str, field: &str) -> Option<&'static str> {
         let view = self.settings_page_field(tag, field)?;
-        if view.editor == FieldEditor::Unknown {
-            Some(UPDATE_CLIENT)
-        } else if view.disabled {
-            Some(LOCKED)
-        } else {
-            None
-        }
+        (view.editor == FieldEditor::Unknown).then_some(UPDATE_CLIENT)
     }
 
     /// The ids of the fields the Settings page of the agent tagged `tag`
@@ -1326,7 +1306,7 @@ impl RootView {
             id: descriptor.id.clone(),
             tag: descriptor.tag.clone(),
             label: descriptor.label.clone(),
-            fields: options.settings_fields(self.shown_local().trusted),
+            fields: options.settings_fields(),
         })
     }
 
@@ -1659,7 +1639,7 @@ impl RootView {
                 // Only the selectors are compared, so the indices among the
                 // drawn fields serve.
                 options
-                    .settings_fields(self.shown_local().trusted)
+                    .settings_fields()
                     .iter()
                     .enumerate()
                     .flat_map(|(index, view)| field_controls(&descriptor.tag, index, view))
@@ -1695,7 +1675,7 @@ impl RootView {
                 let options =
                     AgentOptions::new(descriptor.clone(), self.agent_settings().get(&agent));
                 options
-                    .settings_fields(self.shown_local().trusted)
+                    .settings_fields()
                     .iter()
                     .enumerate()
                     .filter(|(index, view)| {
@@ -1942,7 +1922,42 @@ impl RootView {
             self.ask_user_hooks(host);
         }
         if pages_follow {
+            self.move_trusted_default(host);
             self.refresh_setting_texts(host, cx);
+        }
+    }
+
+    /// Moves the Trusted launch default older releases saved into `host`'s
+    /// agent Settings as each agent's bypass choice, once per host: only
+    /// while the default is owed, `host` is not recorded yet, its agents'
+    /// Settings values were received and its agents name a bypass choice.
+    /// A host whose agents name none (an older daemon) is not recorded, so
+    /// its next connect tries again.
+    fn move_trusted_default(&mut self, host: &HostKey) {
+        let spawn = &self.sidebar.ui_state().spawn;
+        if !spawn.bypass_owed()
+            || spawn
+                .trusted_moved
+                .contains(&crate::sidebar::trusted_move_key(host))
+            || !self
+                .mirrors_of(host)
+                .is_some_and(|mirrors| mirrors.agent_settings_received)
+        {
+            return;
+        }
+        let moves = trusted_moves(self.sidebar.agents(host));
+        if moves.is_empty() {
+            return;
+        }
+        tracing::info!(
+            ?host,
+            "settings: moving the saved trusted-launch default into the agents' bypass choice"
+        );
+        for (agent, field, value) in moves {
+            self.set_agent_setting(host, &agent, &field, value, false);
+        }
+        if self.sidebar.mark_trusted_moved(host) {
+            self.save_ui();
         }
     }
 
@@ -2226,7 +2241,6 @@ impl RootView {
                 .collect(),
             SettingsTab::Notifications => self.notifications_controls(),
             SettingsTab::Dashboard => self.dashboard_controls(false),
-            SettingsTab::SpawnDefaults => vec![SettingsControl::SpawnTrusted],
             SettingsTab::Agent(_) => self.agent_controls(),
             SettingsTab::Worktrees => {
                 let mut controls = vec![SettingsControl::WorktreesPath];
@@ -2277,9 +2291,7 @@ impl RootView {
                 controls
             }
             SettingsTab::Dashboard => self.dashboard_controls(true),
-            SettingsTab::AppTitle | SettingsTab::Notifications | SettingsTab::SpawnDefaults => {
-                self.tab_controls_of(tab, cx)
-            }
+            SettingsTab::AppTitle | SettingsTab::Notifications => self.tab_controls_of(tab, cx),
             SettingsTab::Agent(_) => {
                 let Some(agent) = tab.agent() else {
                     return Vec::new();
@@ -2289,11 +2301,10 @@ impl RootView {
                 };
                 let options =
                     AgentOptions::new(descriptor.clone(), self.agent_settings().get(&agent));
-                let trusted = self.shown_local().trusted;
                 // The indices are places among every field, not among those
                 // shown: only the selectors are compared with the ring.
                 options
-                    .every_settings_field(trusted)
+                    .every_settings_field()
                     .iter()
                     .enumerate()
                     .flat_map(|(index, view)| field_controls(&descriptor.tag, index, view))
@@ -2321,8 +2332,8 @@ impl RootView {
     }
 
     /// The shown agent page's controls in drawing order: each field's, then
-    /// the launch rows. A field trusted launch locks is out, every field is
-    /// out while [`Self::agent_rows_live`] says no, and the launch rows
+    /// the launch rows. A field of a kind this client does not know is out,
+    /// every field is out while [`Self::agent_rows_live`] says no, and the launch rows
     /// leave until the daemon reported the agent's command. A Program row
     /// an environment variable sets is out of the ring.
     fn agent_controls(&self) -> Vec<SettingsControl> {
@@ -3521,11 +3532,23 @@ impl RootView {
             SettingsControl::NeedsYouSoundField => {
                 self.toggle_sound_list(NotifyKind::NeedsYou, cx);
             }
-            SettingsControl::NeedsYouSoundPlay => self.play_needs_you_sound(cx),
+            SettingsControl::NeedsYouSoundPlay => {
+                self.preview_sound(
+                    self.sound_of(NotifyKind::NeedsYou),
+                    NotifyKind::NeedsYou,
+                    cx,
+                );
+            }
             SettingsControl::FinishedSoundField => {
                 self.toggle_sound_list(NotifyKind::Finished, cx);
             }
-            SettingsControl::FinishedSoundPlay => self.play_finished_sound(cx),
+            SettingsControl::FinishedSoundPlay => {
+                self.preview_sound(
+                    self.sound_of(NotifyKind::Finished),
+                    NotifyKind::Finished,
+                    cx,
+                );
+            }
             SettingsControl::DefaultShell => self.toggle_shell_list(cx),
             SettingsControl::AgentChoice {
                 field,
@@ -3563,8 +3586,7 @@ impl RootView {
             | SettingsControl::NotifyAccountSwitches
             | SettingsControl::NotifySkip(_)
             | SettingsControl::FinishedGrace(_)
-            | SettingsControl::ToastStyle(_)
-            | SettingsControl::SpawnTrusted => {}
+            | SettingsControl::ToastStyle(_) => {}
             SettingsControl::DashboardEnabled => self.toggle_summaries(),
             SettingsControl::DashboardProvider { index, .. } => {
                 self.choose_summarizer_provider(index);
@@ -3649,7 +3671,6 @@ impl RootView {
             SettingsControl::NotifySkip(skip) => LocalPending::NotifySkip(skip),
             SettingsControl::FinishedGrace(secs) => LocalPending::FinishedGrace(secs),
             SettingsControl::ToastStyle(style) => LocalPending::ToastStyle(style),
-            SettingsControl::SpawnTrusted => LocalPending::SpawnTrusted(!shown.trusted),
             _ => return None,
         })
     }
@@ -4740,7 +4761,8 @@ impl RootView {
     /// `value`, on top of any change still waiting for that daemon's
     /// broadcast, under a fresh request id; `from_text` marks the apply of
     /// text field `key`. Nothing is sent while the agent's rows are
-    /// disabled.
+    /// disabled. A send records `host` in `spawn.trusted_moved`
+    /// ([`crate::sidebar::SidebarModel::mark_trusted_moved`]).
     fn set_agent_setting(
         &mut self,
         host: &HostKey,
@@ -4779,6 +4801,11 @@ impl RootView {
                 request_id: Some(request_id),
             },
         );
+        // A host whose agent Settings this client changed never takes the
+        // Trusted launch default older releases saved on top of them.
+        if self.sidebar.mark_trusted_moved(host) {
+            self.save_ui();
+        }
     }
 
     /// Whether `host`'s agent `agent`'s Settings rows take input: `host` is
@@ -5057,7 +5084,7 @@ impl RootView {
         }
     }
 
-    /// Apply reaching a pending General or Spawn defaults setting:
+    /// Apply reaching a pending General setting:
     /// recorded; returns whether it is left to the caller to save.
     fn commit_general(&mut self, value: &LocalPending, cx: &mut Context<Self>) -> bool {
         match *value {
@@ -5086,10 +5113,6 @@ impl RootView {
                 true
             }
             LocalPending::ChatMode(mode) => self.sidebar.set_chat_mode(mode),
-            LocalPending::SpawnTrusted(on) => {
-                self.sidebar.set_spawn_trusted(on);
-                true
-            }
             _ => false,
         }
     }
@@ -5104,10 +5127,11 @@ impl RootView {
     /// The title the window should show now: the active tab's name as the
     /// App title settings shape it.
     fn wanted_window_title(&self) -> String {
-        compute_title(
-            self.tabs.active_tab().map(|tab| tab.name.as_str()),
-            &self.sidebar.ui_state().title,
-        )
+        let name = self
+            .tabs
+            .active_tab()
+            .map(|tab| self.sidebar.tab_display_name(tab));
+        compute_title(name.as_deref(), &self.sidebar.ui_state().title)
     }
 
     /// Sets the window title [`TITLE_DEBOUNCE`] after it last changed; a
@@ -5483,7 +5507,6 @@ impl RootView {
             SettingsTab::AppTitle => self.app_title_tab(focused, cx),
             SettingsTab::Notifications => self.notifications_tab(focused, cx),
             SettingsTab::Dashboard => self.dashboard_tab_content(focused, cx),
-            SettingsTab::SpawnDefaults => self.spawn_defaults_tab(focused, cx),
             SettingsTab::Agent(_) => self.agent_page_content(focused, cx),
             SettingsTab::Worktrees => self.worktrees_tab_content(focused, cx),
             SettingsTab::RemoteAccess => self.remote_access_tab_content(focused, cx),
@@ -5697,43 +5720,6 @@ impl RootView {
         .into_iter()
         .chain(error)
         .collect()
-    }
-
-    /// The Spawn defaults tab: trusted launch, which locks the agent fields
-    /// marked for it on their pages while it is on.
-    fn spawn_defaults_tab(
-        &self,
-        focused: Option<SettingsControl>,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let t = theme(cx);
-        let trusted = toggle(
-            SettingsControl::SpawnTrusted,
-            ToggleState {
-                checked: self.shown_local().trusted,
-                enabled: true,
-            },
-            "Trusted launch by default",
-            focused,
-            cx,
-        );
-        let section = section(
-            crate::fonts::ui_text_size(cx),
-            crate::fonts::ui_weight_shift(cx),
-            "Spawn defaults",
-        )
-        .child(hint(
-            crate::fonts::ui_text_size(cx),
-            "Pre-fill these in the spawn dialog. You can override on every spawn.",
-            &t,
-        ))
-        .child(trusted)
-        .child(hint(
-            crate::fonts::ui_text_size(cx),
-            "When enabled, new agent sessions skip their approval prompts.",
-            &t,
-        ));
-        vec![section.into_any_element()]
     }
 
     /// The shown agent's page: a section titled with the agent's label
@@ -7410,7 +7396,7 @@ const CAP_HINT: &str = "Summaries stop for the day once today's spend reaches th
 const TEST_HINT: &str = "Summarizes a fixed sample with the settings above.";
 const NEWER_DAEMON: &str =
     "This host's daemon is newer than this app; update the app to change these settings.";
-/// The widths of the Dashboard tab's key and variable fields.
+/// The widths of the Dashboard tab's key and variable fields: input widths.
 const KEY_FIELD_WIDTH: f32 = 280.0;
 const VARIABLE_FIELD_WIDTH: f32 = 220.0;
 
@@ -8507,7 +8493,6 @@ pub(crate) enum LocalPending {
     NotifySkip(NotifySkip),
     FinishedGrace(u32),
     ToastStyle(ToastStyle),
-    SpawnTrusted(bool),
     Autostart(bool),
 }
 
@@ -8890,7 +8875,6 @@ pub(crate) struct ShownLocal {
     pub(crate) general: crate::sidebar::GeneralSettings,
     pub(crate) title: crate::sidebar::TitleSettings,
     pub(crate) notifications: crate::sidebar::NotificationSettings,
-    pub(crate) trusted: bool,
     pub(crate) sidebar_view: SidebarView,
     pub(crate) chat_mode: ChatMode,
     /// Whether this PC starts the daemon on login, as the Remote access
@@ -8921,7 +8905,6 @@ impl ShownLocal {
             LocalPending::NotifySkip(skip) => self.notifications.skip_when = skip,
             LocalPending::FinishedGrace(secs) => self.notifications.finished_grace_secs = secs,
             LocalPending::ToastStyle(style) => self.notifications.toast_style = style,
-            LocalPending::SpawnTrusted(on) => self.trusted = on,
             LocalPending::Autostart(on) => self.autostart = Some(on),
         }
     }
@@ -8961,7 +8944,6 @@ impl ShownLocal {
                 LocalPending::FinishedGrace(notes.finished_grace_secs)
             }
             LocalPending::ToastStyle(_) => LocalPending::ToastStyle(notes.toast_style),
-            LocalPending::SpawnTrusted(_) => LocalPending::SpawnTrusted(self.trusted),
             // Only a launch that could be read can be drafted, so the
             // unknown saved value is never compared against.
             LocalPending::Autostart(_) => LocalPending::Autostart(self.autostart == Some(true)),
@@ -8977,7 +8959,6 @@ impl RootView {
             general: ui.general.clone(),
             title: ui.title.clone(),
             notifications: ui.notifications.clone(),
-            trusted: ui.spawn.trusted,
             sidebar_view: ui.sidebar_view,
             chat_mode: ui.chat_mode,
             autostart: self.remote_autostart(),
@@ -9165,8 +9146,7 @@ fn pressed_value(view: &FieldView, choice: Option<usize>) -> Option<OptionValue>
 /// segmented row of its choices, a toggle as a checkbox row, a text or
 /// model field as an input, and a kind this client does not know as a note
 /// saying so. The row takes input only while the page is live and the
-/// field is not disabled; a field trusted launch locks carries the locked
-/// note.
+/// field is not disabled.
 fn agent_field_row(
     page: &RowPage<'_>,
     index: usize,
@@ -9244,18 +9224,12 @@ fn agent_field_row(
         }
         FieldEditor::Unknown => unknown_field_row(tag, view, cx),
     };
-    let locked = view.disabled && view.editor != FieldEditor::Unknown;
-    let note = locked.then(|| {
-        let selector = format!("settings-{tag}-{}-locked", field_part(&view.id));
-        hint(crate::fonts::ui_text_size(cx), LOCKED, &t).driver_id(move || selector)
-    });
     Some(
         row.children(
             view.help
                 .clone()
                 .map(|help| hint(crate::fonts::ui_text_size(cx), help, &t)),
         )
-        .children(note)
         .into_any_element(),
     )
 }
@@ -9895,11 +9869,10 @@ mod tests {
         );
     }
 
-    const FIXED: [&str; 8] = [
+    const FIXED: [&str; 7] = [
         "General",
         "Notifications",
         "Dashboard",
-        "Spawn defaults",
         "Worktrees",
         "Remote access",
         "Appearance",
@@ -10092,7 +10065,7 @@ mod tests {
     #[test]
     fn accounts_follows_remote_access_only_where_offered() {
         let mut want = FIXED.to_vec();
-        want.insert(6, "Accounts");
+        want.insert(5, "Accounts");
         let shown: Vec<&str> = tab_rows(&[], true, true)
             .into_iter()
             .map(|row| row.label(&[]))

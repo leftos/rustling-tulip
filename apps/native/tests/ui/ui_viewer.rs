@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use gpui::{Modifiers, ScrollStrategy, TestAppContext, px};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, TabEntry};
+use rustling_tulip_native::LinkAction;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
@@ -65,7 +66,7 @@ fn numbered_lines(count: usize) -> String {
 
 fn ctrl_click_cell(h: &mut Harness<'_>, col: usize, row: usize) {
     let on = h.cell_center("p1", col, row);
-    h.click(on, Modifiers::secondary_key());
+    h.pick_link(on);
 }
 
 fn ctrl_shift_click_cell(h: &mut Harness<'_>, col: usize, row: usize) {
@@ -377,7 +378,7 @@ fn fetch(h: &mut Harness<'_>, root: &Path, rel: &str, line: Option<u32>, bytes: 
         line,
         column: None,
         open_when_done: true,
-        prefer_viewer: true,
+        action: LinkAction::Viewer,
     };
     let id = h
         .root_update(move |view, _, cx| view.fetch_remote_file(request, cx))

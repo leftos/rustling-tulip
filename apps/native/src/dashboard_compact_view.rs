@@ -36,7 +36,8 @@ use crate::{RootView, tooltip};
 
 /// The session cell's fixed columns, as the mock's grid sizes them, and the
 /// gap between them; the now line takes what is left, and the state word's
-/// column is measured ([`state_column_w`]).
+/// column is measured ([`state_column_w`]). Fixed so the rows' columns line
+/// up and nothing in the view scrolls.
 const LABEL_W: f32 = 196.0;
 const ISSUE_W: f32 = 64.0;
 const AGE_W: f32 = 32.0;

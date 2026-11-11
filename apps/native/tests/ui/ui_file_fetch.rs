@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonMessage, PathKind, SessionFolder, SessionSnapshot};
+use rustling_tulip_native::LinkAction;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
@@ -55,7 +56,7 @@ fn request(rel: &str, line: Option<u32>, column: Option<u32>) -> FetchRequest {
         line,
         column,
         open_when_done: true,
-        prefer_viewer: false,
+        action: LinkAction::DefaultApp,
     }
 }
 
@@ -515,10 +516,11 @@ fn click_link(h: &mut Harness<'_>, text: &str, col: usize) {
     click_again(h, col);
 }
 
-/// Ctrl+clicks column `col` of `p2`'s first row.
+/// Ctrl+clicks column `col` of `p2`'s first row and picks the link menu's
+/// first entry.
 fn click_again(h: &mut Harness<'_>, col: usize) {
     let on = h.cell_center("p2", col, 0);
-    h.click(on, Modifiers::secondary_key());
+    h.pick_link(on);
 }
 
 /// The one `FetchFile` sent to the saved [`HOST`] since the last look,
@@ -630,6 +632,23 @@ fn a_link_without_a_line_opens_in_the_default_app(cx: &mut TestAppContext) {
 
     let saved = root.join(HOST).join("r1").join("docs").join("notes.txt");
     assert_eq!(h.opened(), [Opened::DefaultApp(saved)]);
+}
+
+#[gpui::test]
+fn the_folder_entry_on_a_remote_path_reveals_the_fetched_copy(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+
+    h.host(&saved_remote())
+        .pty("s1", b"see C:/wt/x/docs/notes.txt");
+    let on = h.cell_center("p2", 6, 0);
+    h.click(on, Modifiers::secondary_key());
+    h.click_on("link-menu-folder");
+    let id = one_fetch(&mut h, "docs/notes.txt");
+    stream_on(&mut h, &saved_remote(), &id, b"first, ", b"second");
+
+    let saved = root.join(HOST).join("r1").join("docs").join("notes.txt");
+    assert_eq!(h.opened(), [Opened::Reveal(saved)]);
 }
 
 #[gpui::test]

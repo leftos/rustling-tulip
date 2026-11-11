@@ -376,6 +376,9 @@ pub struct NestedRow {
     pub name: String,
     /// What it runs now, or how it ended.
     pub task: String,
+    /// A subagent's model and effort, `Opus 5.5 · high`; `None` when neither
+    /// is known.
+    pub spawn: Option<String>,
     /// True for a task that runs something now, drawn in the monospace face.
     pub mono: bool,
     /// Its own stuck flag, worded as the row's flags are.
@@ -651,7 +654,7 @@ pub(crate) fn ask_block(input: &RowInput<'_>) -> Option<AskBlock> {
             now_text(input),
             None,
             question_choices(questions),
-            Some(AskBox::type_something()),
+            (!question_previews(questions)).then(AskBox::type_something),
         ),
         PendingInput::Permission { tool_name, summary } => (
             ASK_PERMISSION.to_owned(),
@@ -692,13 +695,20 @@ fn permission_text(input: &RowInput<'_>, tool_name: &str) -> String {
     }
 }
 
+/// Whether the prompt's single question carries previews, which are drawn in
+/// the pane rather than answered from here.
+fn question_previews(questions: &[PendingQuestion]) -> bool {
+    matches!(questions, [question] if question.preview)
+}
+
 /// One button per option of a single single-choice question, hinted `1` to
-/// `n`; none for several questions, a multi-select or no options.
+/// `n`; none for several questions, a multi-select, a preview question or no
+/// options.
 fn question_choices(questions: &[PendingQuestion]) -> Vec<AskChoice> {
     let [question] = questions else {
         return Vec::new();
     };
-    if question.multi_select {
+    if question.multi_select || question.preview {
         return Vec::new();
     }
     question
@@ -852,6 +862,7 @@ fn push_nested(nodes: &[AgentNode], depth: usize, now: DateTime<Utc>, rows: &mut
             state: node.state,
             name: node.name.clone(),
             task: node.task.clone(),
+            spawn: spawn_label(node),
             mono: node.task.starts_with("Running"),
             stuck: node
                 .stuck
@@ -860,6 +871,18 @@ fn push_nested(nodes: &[AgentNode], depth: usize, now: DateTime<Utc>, rows: &mut
             dimmed: node.state == AgentState::Finished,
         });
         push_nested(&node.children, depth + 1, now, rows);
+    }
+}
+
+/// A subagent's model and effort, `Opus 5.5 · high`, from whichever of them
+/// is known.
+fn spawn_label(node: &AgentNode) -> Option<String> {
+    let model = node.model.as_deref().filter(|model| !model.is_empty());
+    let effort = node.effort.as_deref().filter(|effort| !effort.is_empty());
+    match (model, effort) {
+        (Some(model), Some(effort)) => Some(format!("{model} · {effort}")),
+        (Some(one), None) | (None, Some(one)) => Some(one.to_owned()),
+        (None, None) => None,
     }
 }
 
@@ -1287,6 +1310,7 @@ mod tests {
             options: options.iter().map(|option| (*option).to_owned()).collect(),
             option_descriptions: Vec::new(),
             multi_select,
+            preview: false,
         }
     }
 
@@ -1478,6 +1502,8 @@ mod tests {
             kind,
             name: key.to_owned(),
             task: String::new(),
+            model: None,
+            effort: None,
             activity: Vec::new(),
             state,
             started_at: at(0),
@@ -1513,6 +1539,7 @@ mod tests {
                 options: Vec::new(),
                 option_descriptions: Vec::new(),
                 multi_select: false,
+                preview: false,
             }],
         });
         assert_eq!(
@@ -1925,6 +1952,28 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_row_joins_the_subagents_model_and_effort() {
+        let spawn = |model: Option<&str>, effort: Option<&str>| {
+            let mut agent = node("subagent:1", AgentKind::Subagent, AgentState::Running);
+            agent.model = model.map(str::to_owned);
+            agent.effort = effort.map(str::to_owned);
+            nested_rows(&[agent], at(0))[0].spawn.clone()
+        };
+        assert_eq!(
+            spawn(Some("Opus 5.5"), Some("high")),
+            Some("Opus 5.5 · high".to_owned())
+        );
+        assert_eq!(spawn(Some("Opus 5.5"), None), Some("Opus 5.5".to_owned()));
+        assert_eq!(spawn(None, Some("high")), Some("high".to_owned()));
+        assert_eq!(spawn(None, None), None);
+        assert_eq!(
+            spawn(Some(""), Some("")),
+            None,
+            "an empty value reads as unknown"
+        );
+    }
+
+    #[test]
     fn queue_chips_follow_waits_order_and_word_permission_as_tool_colon_command() {
         assert_eq!(QUEUE_HINT, "Oldest first");
         let first_row = row("s1");
@@ -2207,6 +2256,21 @@ mod tests {
             questions: vec![question("Anything?", &[], false)],
         });
         assert_eq!(block_of(&no_options, None).choices.len(), 0);
+    }
+
+    #[test]
+    fn a_preview_question_offers_no_buttons_or_typed_box() {
+        let preview = asking(PendingInput::Question {
+            questions: vec![protocol::PendingQuestion {
+                preview: true,
+                ..question("Which shape?", &["a", "b"], false)
+            }],
+        });
+        let block = block_of(&preview, None);
+        assert_eq!(block.label, "Question ·");
+        assert!(block.choices.is_empty(), "a preview question: {block:?}");
+        assert_eq!(block.typed, None, "ask_block offers no box at all");
+        assert_eq!(typed(&block), None, "and none is drawn");
     }
 
     #[test]

@@ -57,6 +57,10 @@ const BUTTON_TEXT: f32 = 12.0;
 /// logical px.
 const COMMAND_FRAME: f32 = 8.0;
 
+/// The command box's sides, in logical px: its 8 px padding and 1 px
+/// border each side, which the command wraps inside.
+const COMMAND_SIDES: f32 = 18.0;
+
 /// The room a label leaves for its key hint, in logical px: the gap and a
 /// digit at the hint's size, with some to spare.
 const HINT_ROOM: f32 = 16.0;
@@ -88,7 +92,7 @@ pub enum TextRole {
     /// The title and the body (the question), at the UI text size across
     /// the card's words.
     Body,
-    /// A permission's command, one line in the mono box.
+    /// A permission's command, wrapped in the mono box.
     Command,
     /// An answer's label, at a compact button's text size across the
     /// button, less its key hint's room when `hinted`; `bold` for the first,
@@ -155,7 +159,7 @@ impl<'a> CardText<'a> {
                     ..gpui::font(DEFAULT_FAMILY)
                 },
                 fonts::ui_px_at(offset, SMALL_TEXT),
-                WORDS_WIDTH,
+                WORDS_WIDTH - COMMAND_SIDES,
             ),
             TextRole::Answer { bold, hinted } => {
                 let weight = if bold {
@@ -264,8 +268,12 @@ pub fn card_layout(
     // The rows `answer_block` draws, branch for branch.
     let mut rows: Vec<f32> = Vec::new();
     if let Some(ask) = &toast.ask {
-        if ask.command.is_some() {
-            rows.push(COMMAND_FRAME + measure.line_height(TextRole::Command));
+        if let Some(command) = &ask.command {
+            rows.push(
+                COMMAND_FRAME
+                    + count(measure.lines(command, TextRole::Command))
+                        * measure.line_height(TextRole::Command),
+            );
         }
         if sent && !ask.choices.is_empty() {
             rows.push(button(&[(plain, 1)]));
@@ -553,10 +561,7 @@ fn answer_block(
                     .font_family(DEFAULT_FAMILY)
                     .font_weight(fonts::mono_weight())
                     .text_size(fonts::ui_px_at(offset, SMALL_TEXT))
-                    .child(crate::ellipsis::truncating(
-                        "toast-command-text",
-                        gpui::StyledText::new(command),
-                    ))
+                    .child(gpui::StyledText::new(command))
                     .driver_id(|| "toast-command".to_owned()),
             )
         })
@@ -602,7 +607,8 @@ fn head_block(
         // (from a sibling's intrinsic pass) replaced it. The absolutely
         // placed copy is measured once, at the box's final width. The
         // margin, not a padding, keeps it clear of ×: an absolute child
-        // spans its box's padding.
+        // spans its box's padding. The title stays one line: it is context,
+        // not the question, and the card's height measures the body.
         .child(
             div()
                 .relative()
@@ -1244,6 +1250,23 @@ mod tests {
         assert!(
             (capped - 200.0).abs() < f32::EPSILON,
             "a card taller than the work area is cut to it: {capped}"
+        );
+    }
+
+    #[test]
+    fn a_long_command_grows_the_card() {
+        // The command box is the frame plus its lines: a command wrapping to
+        // three lines adds two lines over the one-line box.
+        let short = asking(&["Allow", "Deny"], true);
+        let mut long = asking(&["Allow", "Deny"], true);
+        long.ask = long.ask.map(|mut ask| {
+            ask.command = Some("long command".to_owned());
+            ask
+        });
+        assert_eq!(
+            card_height(&long, false, &FAKE, 10_000.0),
+            card_height(&short, false, &FAKE, 10_000.0) + 2.0 * FAKE.line,
+            "wrapped lines grow the command's row"
         );
     }
 

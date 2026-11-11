@@ -24,7 +24,14 @@ import {
   type DockKind,
   type SessionScreen,
 } from "./session-screen";
-import type { ChatEntry, ChatPrompt, ChatScreen, SessionMode, SessionSnapshot } from "./protocol";
+import type {
+  ChatEntry,
+  ChatPrompt,
+  ChatScreen,
+  DaemonMessage,
+  SessionMode,
+  SessionSnapshot,
+} from "./protocol";
 
 const USER: ChatEntry = { kind: "user", id: "u1", text: "Add the reset on a target switch" };
 const ANSWER: ChatEntry = { kind: "answer", id: "a1", text: "Added reset_for_target." };
@@ -56,6 +63,18 @@ const PROMPT: ChatPrompt = {
 };
 const READY: ChatScreen = { composer: { state: "ready" } };
 const ASKING: ChatScreen = { composer: { state: "dialog" }, prompt: PROMPT };
+const PLAN: ChatPrompt = {
+  id: "p2",
+  kind: "plan",
+  subject: "Plan ready",
+  body: "",
+  options: [
+    { number: 1, label: "Approve (auto)" },
+    { number: 2, label: "Approve (manual edits)" },
+    { number: 3, label: "Tell the agent what to change" },
+  ],
+};
+const PLANNING: ChatScreen = { composer: { state: "dialog" }, prompt: PLAN };
 
 /** A chat the daemon answered, holding `entries`. */
 function loaded(entries: readonly ChatEntry[], hidden = 0, look: ChatScreen = READY): ChatState {
@@ -81,6 +100,7 @@ interface Overrides {
   readonly title?: string;
   readonly ended?: boolean;
   readonly isAgent?: boolean;
+  readonly plan?: string | null;
   readonly chat?: ChatState;
   readonly composer?: ComposerModel;
   readonly sheet?: SheetState;
@@ -93,7 +113,11 @@ interface Overrides {
   readonly sendRefused?: boolean;
   readonly connectedOnce?: boolean;
   readonly answers?: AnswerCache;
+  readonly now?: number;
 }
+
+/** The clock the running-work line reads in these tests. */
+const NOW = Date.parse("2026-10-30T12:00:00Z");
 
 /** The screen over the brief's defaults. */
 function screen(overrides: Overrides = {}): SessionScreen {
@@ -101,6 +125,7 @@ function screen(overrides: Overrides = {}): SessionScreen {
     title: overrides.title ?? "Session",
     ended: overrides.ended ?? false,
     isAgent: overrides.isAgent ?? false,
+    plan: overrides.plan ?? null,
     chat: overrides.chat ?? loaded([]),
     composer: overrides.composer ?? INITIAL_COMPOSER,
     sheet: overrides.sheet ?? NO_SHEET,
@@ -113,6 +138,7 @@ function screen(overrides: Overrides = {}): SessionScreen {
     sendRefused: overrides.sendRefused ?? false,
     connectedOnce: overrides.connectedOnce ?? true,
     answers: overrides.answers ?? new Map(),
+    now: overrides.now ?? NOW,
   });
 }
 
@@ -191,14 +217,34 @@ test("sessionLook: a listed session gives its title and whether it runs an agent
     ...resetHome(),
     sessions: [session("s1", { label: "repo", user_label: "work" })],
   };
-  expect(sessionLook(home, "s1")).toEqual({ title: "work", isAgent: false, ended: false });
-  expect(sessionLook(home, "s2")).toEqual({ title: "", isAgent: false, ended: false });
+  expect(sessionLook(home, "s1")).toEqual({
+    title: "work",
+    isAgent: false,
+    ended: false,
+    plan: null,
+  });
+  expect(sessionLook(home, "s2")).toEqual({ title: "", isAgent: false, ended: false, plan: null });
 });
 
 test("sessionLook: a session missing once Home loaded has ended", () => {
   const home = { ...resetHome(), sessions: [session("s1")], loaded: true };
-  expect(sessionLook(home, "s2")).toEqual({ title: "", isAgent: false, ended: true });
+  expect(sessionLook(home, "s2")).toEqual({ title: "", isAgent: false, ended: true, plan: null });
   expect(sessionLook(home, "s1").ended).toBe(false);
+});
+
+test("sessionLook reads the plan from pending_input", () => {
+  const home = {
+    ...resetHome(),
+    sessions: [
+      session("s1", { pending_input: { kind: "plan_approval", plan: "1. Do the thing" } }),
+      session("s2", { pending_input: { kind: "plan_approval" } }),
+      session("s3", { pending_input: { kind: "question", questions: [] } }),
+    ],
+  };
+  expect(sessionLook(home, "s1").plan).toBe("1. Do the thing");
+  expect(sessionLook(home, "s2").plan).toBeNull();
+  expect(sessionLook(home, "s3").plan).toBeNull();
+  expect(sessionLook(home, "s4").plan).toBeNull();
 });
 
 test("a_plain_shell_opens_on_the_terminal", () => {
@@ -433,6 +479,28 @@ test("the sheet draws the prompt's options with key-caps, and a swipe puts it aw
   expect(screen({ chat: loaded([]) }).sheet).toBeNull();
 });
 
+test("the sheet shows the session's plan", () => {
+  const view = screen({ chat: loaded([], 0, PLANNING), plan: "1. Do the thing" });
+
+  expect(view.sheet?.plan).toBe("1. Do the thing");
+});
+
+test("a session with no plan approval shows no plan", () => {
+  const view = screen({ chat: loaded([], 0, PLANNING) });
+
+  expect(view.sheet?.plan).toBeNull();
+});
+
+test("a plan that arrives later fills the same sheet", () => {
+  const early = screen({ chat: loaded([], 0, PLANNING) });
+  const late = screen({ chat: loaded([], 0, PLANNING), plan: "1. Do the thing" });
+
+  expect(early.sheet?.id).toBe("p2");
+  expect(late.sheet?.id).toBe("p2");
+  expect(early.sheet?.plan).toBeNull();
+  expect(late.sheet?.plan).toBe("1. Do the thing");
+});
+
 test("a send the connection dropped shows Offline: not sent and keeps the draft", () => {
   const sending: ComposerModel = {
     ...INITIAL_COMPOSER,
@@ -483,4 +551,43 @@ test("a refusal and a sheet error show their text verbatim", () => {
     error: { promptId: "p1", text: "That prompt is gone." },
   };
   expect(screen({ chat: loaded([], 0, ASKING), sheet }).sheet?.error).toBe("That prompt is gone.");
+});
+
+/** A loaded chat the daemon then sent `chat_work` for. */
+function working(work: Omit<Extract<DaemonMessage, { type: "chat_work" }>, "type" | "session_id">) {
+  return chatStep(
+    loaded([]),
+    { type: "message", message: { type: "chat_work", session_id: "s1", ...work } },
+    () => "req-3",
+  ).state;
+}
+
+test("the session screen shows the running-work line from ChatWork", () => {
+  const chat = working({
+    subagents: [{ id: "a1", description: "Sleeper A" }],
+    shells: [
+      {
+        id: "b1",
+        description: "",
+        command: "cargo test",
+        since: new Date(NOW - 3 * 60_000).toISOString(),
+      },
+    ],
+    wakeup_at: new Date(NOW + 4 * 60_000).toISOString(),
+  });
+  expect(screen({ chat }).work).toBe(
+    "1 subagent · 1 background shell (cargo test, 3m) · wakeup in 4m",
+  );
+  // The ages and countdowns read the clock the screen is built at.
+  expect(screen({ chat, now: NOW + 60_000 }).work).toBe(
+    "1 subagent · 1 background shell (cargo test, 4m) · wakeup in 3m",
+  );
+  // The terminal and the ended screen draw no chat, so no line either.
+  expect(screen({ chat, terminal: true }).work).toBeNull();
+  expect(screen({ chat, ended: true }).work).toBeNull();
+});
+
+test("no line when ChatWork is empty", () => {
+  expect(screen().work).toBeNull();
+  expect(screen({ chat: working({ subagents: [], shells: [] }) }).work).toBeNull();
 });

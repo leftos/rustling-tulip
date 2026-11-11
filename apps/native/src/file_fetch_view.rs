@@ -22,7 +22,7 @@ use crate::folder_unpack::{self, Announced};
 use crate::html_media;
 use crate::links::TerminalLink;
 use crate::notices::{ToastAction, ToastKind, ToastSpec};
-use crate::open::{OpenAction, OpenJob};
+use crate::open::{LinkAction, OpenAction, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, Opening, Origin, Route, Then};
 use crate::spawn_form::human_size;
 use crate::target::HostKey;
@@ -241,15 +241,15 @@ impl RootView {
     /// A Ctrl+click on a path link in a pane of remote host `host`: fetches
     /// the first of the link's readings under the repos and worktrees of
     /// `session` as that host lists it, trying them one at a time; the copy
-    /// opens in the viewer when `prefer_viewer` (Ctrl+Shift+click). A link
-    /// that may lie outside those folders is first asked of the host, which
-    /// lists every folder `git worktree list` names for them.
+    /// opens as `action` asks. A link that may lie outside those folders is
+    /// first asked of the host, which lists every folder
+    /// `git worktree list` names for them.
     pub(crate) fn fetch_path_link(
         &mut self,
         link: &TerminalLink,
         host: &HostKey,
         session: Option<&str>,
-        prefer_viewer: bool,
+        action: LinkAction,
         cx: &mut Context<Self>,
     ) {
         let found =
@@ -288,7 +288,7 @@ impl RootView {
                     target: link.target.clone(),
                     cwd,
                     own_roots,
-                    prefer_viewer,
+                    action,
                 },
                 session,
                 cx,
@@ -310,7 +310,7 @@ impl RootView {
             return;
         }
         for reading in &mut readings {
-            reading.prefer_viewer = prefer_viewer;
+            reading.action = action;
         }
         self.start_link_readings(readings, host, cx);
     }
@@ -432,7 +432,7 @@ impl RootView {
             return true;
         }
         for reading in &mut readings {
-            reading.prefer_viewer = ask.prefer_viewer;
+            reading.action = ask.action;
         }
         self.start_link_readings(readings, &ask.host, cx);
         true
@@ -1625,9 +1625,9 @@ impl RootView {
         }
     }
 
-    /// Opens the fetched copy at `path` the way `request` asked: when it
-    /// prefers the viewer, a text file in the viewer at its line; anything
-    /// else by the `:line` rule.
+    /// Opens the fetched copy at `path` the way `request` asked: for the
+    /// viewer, a text file in the viewer at its line; for its folder,
+    /// revealed there; anything else by the `:line` rule.
     fn open_fetched(
         &mut self,
         path: PathBuf,
@@ -1645,7 +1645,7 @@ impl RootView {
         };
         let opening = Opening {
             origin: Origin::Fetched,
-            prefer_viewer: request.prefer_viewer,
+            action: request.action,
         };
         self.open_text_or_external(action, opening, window, cx);
     }

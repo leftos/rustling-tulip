@@ -53,7 +53,7 @@ pub static DESCRIPTOR: LazyLock<AgentDescriptor> = LazyLock::new(|| AgentDescrip
         shell_resume: false,
         user_hooks: false,
     },
-    trust_note: None,
+    bypass: None,
     texts: AgentTexts {
         shell_resume_label: String::new(),
         no_conversation: String::new(),
@@ -199,13 +199,11 @@ impl Agent for TestAgent {
 
     /// A body whose `test_status` is `working`, `idle` or `awaiting_input`
     /// maps to that status, its last message naming the spawn's `mode`
-    /// (`none` without options) and trust: `"<mode> trusted=<trusted>"`.
-    /// Any other body maps to nothing.
+    /// (`none` without options). Any other body maps to nothing.
     fn map_hook_event(
         &self,
         body: &serde_json::Value,
         spawn: Option<&TestOptions>,
-        trusted: bool,
     ) -> Option<HookReport> {
         let status = match body.get("test_status")?.as_str()? {
             "working" => SessionStatus::Working,
@@ -219,7 +217,7 @@ impl Agent for TestAgent {
             pending: PendingUpdate::Clear,
             finished_tool: None,
             conversation_id: None,
-            last_message: Some(format!("{mode} trusted={trusted}")),
+            last_message: Some(mode.to_string()),
             failure: None,
             permission_mismatch: None,
             agent_ended: false,

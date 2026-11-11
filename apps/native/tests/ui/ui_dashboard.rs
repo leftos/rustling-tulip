@@ -425,6 +425,40 @@ fn each_column_shows_its_field(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_long_now_line_wraps_whole(cx: &mut TestAppContext) {
+    let fixture = on_dashboard(vec![
+        session("w1")
+            .members(&[("r1", "feat/x", "")])
+            .status("working")
+            .build(),
+        session("w2")
+            .members(&[("r1", "feat/y", "")])
+            .status("working")
+            .build(),
+    ]);
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    let long = format!(
+        "Running Bash · 1m: {}",
+        "cargo nextest run --workspace ".repeat(12)
+    );
+    h.send(facts_message(vec![
+        facts("w1").now("running_tool", &long).build(),
+        facts("w2")
+            .now("running_tool", "Running Bash · 1m: cargo test")
+            .build(),
+    ]));
+
+    let long_now = h.bounds("dashboard-row-w1-now");
+    let short_now = h.bounds("dashboard-row-w2-now");
+    assert!(
+        long_now.size.height > short_now.size.height * 1.5,
+        "a long Now line wraps: long {long_now:?}, short {short_now:?}"
+    );
+}
+
+#[gpui::test]
 fn a_hot_context_draws_in_the_danger_colour_past_80(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(
@@ -508,7 +542,7 @@ fn agent_tree() -> serde_json::Value {
     json!([
         {
             "key": "subagent:1", "kind": "subagent", "name": "look at the parser", "state": "running",
-            "started_at": minutes_ago(3),
+            "started_at": minutes_ago(3), "model": "Opus 5.5", "effort": "high",
             "children": [
                 { "key": "subagent:2", "kind": "subagent", "name": "read it", "state": "finished", "started_at": minutes_ago(2) },
             ],
@@ -575,6 +609,38 @@ fn nested_rows_show_under_working_rows_only(cx: &mut TestAppContext) {
         );
     }
     assert_eq!(cells(&mut h, "i1").nested.len(), 0);
+}
+
+#[gpui::test]
+fn a_subagent_row_shows_its_spawn_after_its_name(cx: &mut TestAppContext) {
+    let fixture = on_dashboard(vec![working("w1")]);
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    h.send(facts_message(vec![
+        facts("w1").agents(agent_tree()).build(),
+    ]));
+
+    let nested = cells(&mut h, "w1").nested;
+    assert_eq!(
+        nested[0].spawn.as_deref(),
+        Some("Opus 5.5 · high"),
+        "the model and effort after the name"
+    );
+    assert!(
+        drawn(&mut h, "dashboard-sub-w1-subagent:1-spawn"),
+        "its spawn is drawn"
+    );
+    assert_eq!(nested[1].spawn, None, "a subagent with neither shows none");
+    assert!(
+        !drawn(&mut h, "dashboard-sub-w1-subagent:2-spawn"),
+        "and draws no element"
+    );
+    assert_eq!(nested[2].spawn, None, "a shell shows none either");
+    assert!(
+        !drawn(&mut h, "dashboard-sub-w1-bg:1-spawn"),
+        "and draws no element"
+    );
 }
 
 #[gpui::test]

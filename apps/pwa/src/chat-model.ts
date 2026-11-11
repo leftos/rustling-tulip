@@ -1,4 +1,5 @@
 import type { ChatEntry, ChatPrompt, ChatScreen, ClientMessage, DaemonMessage } from "./protocol";
+import { workOf, type RunningWork } from "./work-line";
 
 /** Where one session's chat stands on this connection. */
 export type ChatPhase = "idle" | "loading" | "loaded" | "refused";
@@ -25,6 +26,11 @@ export interface ChatState {
   readonly requestId: string | null;
   /** The ids that left since the last load; a later append carrying one is ignored. */
   readonly gone: ReadonlySet<string>;
+  /**
+   * The work still running beside the chat, as the daemon's last `chat_work`
+   * for this session reported it; absent until one arrives.
+   */
+  readonly work?: RunningWork;
 }
 
 export const INITIAL_CHAT: ChatState = {
@@ -148,6 +154,10 @@ function onMessage(state: ChatState, message: DaemonMessage): ChatTransition {
       return onAppend(state, message);
     case "chat_screen_changed":
       return onScreenChanged(state, message);
+    case "chat_work":
+      return sameSession(state, message.session_id)
+        ? { state: { ...state, work: workOf(message) }, effects: [] }
+        : { state, effects: [] };
     case "error":
       return onError(state, message);
     default:

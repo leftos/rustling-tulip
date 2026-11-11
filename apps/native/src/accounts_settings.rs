@@ -45,7 +45,7 @@ const REMOVE_LABEL: &str = "Remove";
 /// The section headings.
 const TABLE_SECTION: &str = "Accounts";
 const AUTO_SECTION: &str = "Auto-switch";
-/// An alias field's width, in px.
+/// An alias field's width, in px: an input's width, fixed so the rows line up.
 const ALIAS_WIDTH: f32 = 130.0;
 /// A row bar's size, in px.
 const ROW_BAR: (f32, f32) = (120.0, 6.0);
@@ -773,8 +773,6 @@ impl RootView {
             .children(row.detail.clone().map(|detail| {
                 div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
                     .text_color(gpui::rgb(t.subtle))
                     .child(tagged_text(format!("settings-accounts-detail-{n}"), detail))
             }))
@@ -1150,7 +1148,8 @@ fn window_line(
     t: &UiTheme,
     cx: &mut Context<RootView>,
 ) -> Div {
-    let label = line.label;
+    let label = line.label.as_str();
+    let slug = accounts::label_slug(label);
     let (width, height) = ROW_BAR;
     let bar = div()
         .flex_none()
@@ -1171,11 +1170,11 @@ fn window_line(
         .gap(px(8.0))
         .child(
             div()
-                .w(px(18.0))
+                .min_w(px(18.0))
                 .flex_none()
                 .text_size(ui_px(cx, 11.0))
                 .text_color(gpui::rgb(t.subtle))
-                .child(label),
+                .child(label.to_owned()),
         )
         .child(bar)
         .child(
@@ -1186,22 +1185,20 @@ fn window_line(
                 .justify_end()
                 .text_color(gpui::rgb(pct_color(line.bar.level, t)))
                 .child(tagged_text(
-                    format!("settings-accounts-{label}-{n}"),
+                    format!("settings-accounts-{slug}-{n}"),
                     line.bar.pct.clone(),
                 )),
         )
         .child(
             div()
                 .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
                 .text_color(gpui::rgb(if line.used_up {
                     t.danger_text
                 } else {
                     t.text_2
                 }))
                 .child(tagged_text(
-                    format!("settings-accounts-reset-{label}-{n}"),
+                    format!("settings-accounts-reset-{slug}-{n}"),
                     line.reset.clone(),
                 )),
         )

@@ -429,3 +429,28 @@ test("chat_removed_ids_are_ignored_until_the_next_load", () => {
 
   expect(carried.entries).toEqual([ANSWER, FIXED]);
 });
+
+test("chat work is kept", () => {
+  const shells = [{ id: "b1", description: "Watch the build", command: "pnpm dev" }];
+  const kept = chatStep(
+    LOADED,
+    {
+      type: "message",
+      message: { type: "chat_work", session_id: "s1", shells, wakeup_at: "2026-10-30T12:04:00Z" },
+    },
+    counter(),
+  );
+  expect(kept).toEqual({
+    state: { ...LOADED, work: { subagents: [], shells, wakeupAt: "2026-10-30T12:04:00Z" } },
+    effects: [],
+  });
+  // Another session's work is not this chat's.
+  const other = chatStep(
+    LOADED,
+    { type: "message", message: { type: "chat_work", session_id: "s2", shells } },
+    counter(),
+  );
+  expect(other.state.work).toBeUndefined();
+  // Leaving the screen drops it with the rest of the chat.
+  expect(chatStep(kept.state, { type: "leave" }, counter()).state.work).toBeUndefined();
+});

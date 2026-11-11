@@ -1,11 +1,14 @@
-//! The start guard: counts starts that panicked before the client settled, so
-//! the next start can open safely, and keeps dated copies of what a safe start
-//! sets aside. Plain Rust with no GPUI: the panic hook calls into it while
-//! GPUI's own state cannot be trusted.
+//! The start guard: marks each run in the guard file until it ends cleanly, so
+//! a start after any crash (a panic, a hard fault, a kill from Task Manager or
+//! a power cut, at any point in a run) asks whether to open the tabs, and keeps
+//! dated copies of what a safe start sets aside. Plain Rust with no GPUI: the
+//! panic hook calls into it while GPUI's own state cannot be trusted.
 //!
-//! Only a panic on the main thread before [`mark_stable`] counts, so killing
-//! the client, an update or a power cut never closes anyone's tabs. Nothing
-//! here panics: a failed write logs and the start carries on.
+//! [`begin`] marks the run as starting, [`mark_stable`] as past the risky part
+//! of its start, and [`mark_clean_end`] clears the mark at every clean end (a
+//! quit, an update's restart, the end of the OS session). Only a run that died
+//! before stable counts towards the third start's reset of `native-ui.json`.
+//! Nothing here panics: a failed write logs and the start carries on.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -55,10 +58,16 @@ pub fn no_tabs_stable_after(cloaked: bool) -> Duration {
 pub const UI_COPY_PREFIX: &str = "native-ui.json.corrupt-";
 /// The prefix of a kept copy of the tab list a safe start closed.
 pub const LAYOUT_COPY_PREFIX: &str = "layout-set-aside-";
-/// The safe-start notice's title.
-pub const NOTICE_TITLE: &str = "Opened with your tabs closed";
-/// The safe-start notice's one button.
-pub const NOTICE_BUTTON: &str = "OK";
+/// The title of the prompt a start after a crashed one raises.
+pub const PROMPT_TITLE: &str = "The last start crashed";
+/// The prompt's button that opens the tabs as they were.
+pub const PROMPT_OPEN: &str = "Open tabs";
+/// The prompt's button that closes the tabs, keeping a copy.
+pub const PROMPT_WITHOUT: &str = "Start without tabs";
+/// The toast's title once a start went on without the tabs.
+pub const STARTED_WITHOUT_TITLE: &str = "Started without your tabs";
+/// The toast's title when a start with no tabs to ask about reset the UI.
+pub const UI_RESET_TITLE: &str = "Window and sidebar settings were reset";
 
 /// How many copies of one prefix are kept; the older ones go.
 const KEPT_COPIES: usize = 3;
@@ -75,40 +84,47 @@ static PANIC_BOX_SHOWN: AtomicBool = AtomicBool::new(false);
 static TABS_SEEN: AtomicBool = AtomicBool::new(false);
 /// Whether a safe start still has to act on This PC's first tab list.
 static SAFE_START_PENDING: AtomicBool = AtomicBool::new(false);
+/// Whether this run's main window failed to open.
+static WINDOW_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// How a start opens, from how many starts before it panicked: normally after
-/// one failed start at most, with the saved tabs closed after two, and with
-/// `native-ui.json` set aside after three or more.
+/// none, asking whether to open the saved tabs after one or more, and with
+/// `native-ui.json` set aside too after three or more.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum StartMode {
     /// Open the saved layout as it is.
     #[default]
     Normal,
-    /// Close the saved tabs, keeping a copy of the layout first.
-    CloseTabs,
+    /// Ask whether to open the saved tabs or start without them.
+    Ask,
     /// Also sets `native-ui.json` aside; `kept_ui` is the copy made of it.
-    CloseTabsAndResetUi { kept_ui: Option<PathBuf> },
+    AskAndResetUi { kept_ui: Option<PathBuf> },
 }
 
-/// What the app says on a safe start, once This PC's tab list has come.
+impl StartMode {
+    /// The copy this start made of `native-ui.json`, if it made one.
+    #[must_use]
+    pub fn kept_ui(&self) -> Option<&Path> {
+        match self {
+            Self::AskAndResetUi { kept_ui } => kept_ui.as_deref(),
+            Self::Normal | Self::Ask => None,
+        }
+    }
+}
+
+/// What the prompt says on a start after a crashed one, once This PC's tab
+/// list has come.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StartNotice {
-    layout_copy: Option<PathBuf>,
+pub struct StartPrompt {
     kept_ui: Option<PathBuf>,
 }
 
-impl StartNotice {
-    /// The notice for a start in `mode`, whose closed tabs were saved to
-    /// `layout_copy`.
+impl StartPrompt {
+    /// The prompt for a start in `mode`.
     #[must_use]
-    pub fn new(mode: &StartMode, layout_copy: Option<PathBuf>) -> Self {
-        let kept_ui = match mode {
-            StartMode::CloseTabsAndResetUi { kept_ui } => kept_ui.clone(),
-            StartMode::Normal | StartMode::CloseTabs => None,
-        };
+    pub fn new(mode: &StartMode) -> Self {
         Self {
-            layout_copy,
-            kept_ui,
+            kept_ui: mode.kept_ui().map(Path::to_path_buf),
         }
     }
 
@@ -116,16 +132,10 @@ impl StartNotice {
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![
-            "The last start crashed, so Rustling Tulip did not restore your tabs. Your sessions \
-             are still running: pick one in the sidebar to show it in a pane."
+            "Open your tabs as they were, or start without them? Your sessions keep running \
+             either way, and starting without them keeps a copy of the layout."
                 .to_owned(),
         ];
-        if let Some(path) = &self.layout_copy {
-            lines.push(format!(
-                "A copy of the old layout is in {}.",
-                path.display()
-            ));
-        }
         if let Some(path) = &self.kept_ui {
             lines.push(format!(
                 "Your window and sidebar settings went back to their defaults too. A copy is in \
@@ -135,6 +145,22 @@ impl StartNotice {
         }
         lines
     }
+}
+
+/// The detail of the toast a start without the tabs shows, naming `copy`.
+#[must_use]
+pub fn started_without_detail(copy: &Path) -> String {
+    format!("A copy of the layout is in {}.", copy.display())
+}
+
+/// The detail of the toast a start with no tabs to ask about shows when it
+/// set `native-ui.json` aside to `copy`.
+#[must_use]
+pub fn ui_reset_detail(copy: &Path) -> String {
+    format!(
+        "The last starts crashed. A copy of your settings is in {}.",
+        copy.display()
+    )
 }
 
 /// The ids of the tabs a safe start closed, so they are never drawn again
@@ -175,7 +201,7 @@ impl ClosedTabs {
 }
 
 /// The guard file's shape.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct Guard {
     failed_starts: u32,
@@ -183,6 +209,57 @@ struct Guard {
     /// Whether a start has already set `native-ui.json` aside.
     #[serde(default)]
     ui_set_aside: bool,
+    /// The run under way, or the last one if it never ended cleanly; none
+    /// after a clean end and in a file from an earlier release.
+    #[serde(default)]
+    run: Option<RunMark>,
+}
+
+/// A run the guard file marks: how far it got, and its process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct RunMark {
+    state: RunState,
+    pid: u32,
+}
+
+/// How far a marked run got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RunState {
+    /// Still in the risky part of its start.
+    Starting,
+    /// Past it: a crash from here asks, but does not count towards the reset.
+    Stable,
+    /// Ended cleanly while the prompt was up: the next start asks again and
+    /// counts nothing.
+    Asking,
+    /// Panicked past stable: dead whatever its pid says, so the next start
+    /// asks, counting nothing.
+    Crashed,
+    /// A state from a later release: read as stable.
+    #[serde(other)]
+    Unknown,
+}
+
+impl RunMark {
+    /// This process's mark in `state`.
+    fn own(state: RunState) -> Self {
+        Self {
+            state,
+            pid: std::process::id(),
+        }
+    }
+
+    /// Whether this process wrote the mark.
+    fn is_own(self) -> bool {
+        self.pid == std::process::id()
+    }
+}
+
+/// Whether `run` is this process's mark, or no mark at all, which this
+/// process may then write.
+fn ours_or_none(run: Option<RunMark>) -> bool {
+    run.is_none_or(RunMark::is_own)
 }
 
 /// The guard in `dir`; a fresh one when the file is missing or unusable.
@@ -202,14 +279,25 @@ fn read_guard(dir: &Path) -> Guard {
     })
 }
 
-/// Writes `guard` to `dir` through a temporary file; a failure logs.
-fn write_guard(dir: &Path, guard: &Guard) {
+/// Writes `guard` to `dir` through a temporary file, flushed to the disk
+/// before the rename when `durable`, so a power cut cannot lose it; a failure
+/// logs.
+fn write_guard(dir: &Path, guard: &Guard, durable: bool) {
+    use std::io::Write as _;
     let write = || -> anyhow::Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let path = dir.join(GUARD_FILE);
         let tmp = dir.join(format!("{GUARD_FILE}.tmp"));
         let json = serde_json::to_vec_pretty(guard).context("serializing the start guard")?;
-        std::fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
+        let mut file =
+            std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        file.write_all(&json)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        if durable {
+            file.sync_all()
+                .with_context(|| format!("flushing {}", tmp.display()))?;
+        }
+        drop(file);
         std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
     };
     if let Err(err) = write() {
@@ -217,28 +305,117 @@ fn write_guard(dir: &Path, guard: &Guard) {
     }
 }
 
-/// Reads the guard in `dir`, writes back that this start is under way, and
-/// says how to open: normally after one failed start at most, with the tabs
-/// closed after two, and with `native-ui.json` set aside after three. A later
-/// start leaves the file alone, since the safe start has saved defaults there
-/// by then.
+/// How a start opens after `failed_starts` failed starts.
+fn mode_for(failed_starts: u32) -> StartMode {
+    match failed_starts {
+        0 => StartMode::Normal,
+        1 | 2 => StartMode::Ask,
+        _ => StartMode::AskAndResetUi { kept_ui: None },
+    }
+}
+
+/// How a start opens from the guard the last run left, and the guard it
+/// writes back. A run still marked as starting died before stable: it counts
+/// and asks. One marked stable, asking, crashed or in an unknown state asks
+/// and counts nothing. A mark of a process `live` says still runs is a second
+/// client's, unless it is marked crashed: it is left as it is, and this start
+/// neither counts nor asks. With no mark, the count alone decides. The guard
+/// written back marks this run as starting.
+fn decide(guard: Guard, live: impl Fn(u32) -> bool) -> (StartMode, Guard) {
+    let mut next = guard;
+    let crashed = match next.run {
+        Some(mark) if mark.state != RunState::Crashed && !mark.is_own() && live(mark.pid) => {
+            return (StartMode::Normal, next);
+        }
+        Some(RunMark {
+            state: RunState::Starting,
+            ..
+        }) => {
+            next.failed_starts = next.failed_starts.saturating_add(1);
+            true
+        }
+        Some(_) => true,
+        None => false,
+    };
+    let asked = if crashed {
+        next.failed_starts.max(1)
+    } else {
+        next.failed_starts
+    };
+    next.run = Some(RunMark::own(RunState::Starting));
+    (mode_for(asked), next)
+}
+
+/// Reads the guard in `dir`, writes back that this run is starting, and says
+/// how to open: normally after a clean end with no failed start, asking about
+/// the tabs after a crashed run or one or two failed starts, and with
+/// `native-ui.json` set aside too after three. A later start leaves the file
+/// alone, since the safe start has saved defaults there by then. A run marked
+/// by a second client that still runs is left alone.
 #[must_use]
 pub fn begin(dir: &Path) -> StartMode {
     let guard = read_guard(dir);
-    write_guard(dir, &guard);
-    match guard.failed_starts {
-        0 | 1 => StartMode::Normal,
-        2 => StartMode::CloseTabs,
-        3 => reset_ui_once(dir, guard),
-        _ => StartMode::CloseTabsAndResetUi { kept_ui: None },
+    let (mode, next) = decide(guard.clone(), process_alive);
+    if next == guard {
+        return mode;
     }
+    write_guard(dir, &next, true);
+    if next.failed_starts == 3 {
+        return reset_ui_once(dir, next);
+    }
+    mode
+}
+
+/// Whether process `pid` still runs; a process this one may not open runs.
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: opens a query-only handle, closed below.
+    let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(process) => process,
+        Err(err) => return err.code() == ERROR_ACCESS_DENIED.to_hresult(),
+    };
+    let mut code = 0_u32;
+    // SAFETY: the handle opened above and an out-pointer to a local.
+    let read = unsafe { GetExitCodeProcess(process, &raw mut code) };
+    // SAFETY: the handle opened above, closed once.
+    let _ = unsafe { CloseHandle(process) };
+    read.is_ok() && code == STILL_ACTIVE.0.cast_unsigned()
+}
+
+/// Whether process `pid` still runs; a process this one may not signal runs.
+#[cfg(target_os = "macos")]
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: signal 0 sends nothing; it only checks that `pid` exists.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Whether process `pid` still runs: unknown here, so no.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn process_alive(_pid: u32) -> bool {
+    false
 }
 
 /// The third start's reset: sets `native-ui.json` aside and marks the guard, so
 /// no later start sets the defaults it saved aside again.
 fn reset_ui_once(dir: &Path, guard: Guard) -> StartMode {
     if guard.ui_set_aside {
-        return StartMode::CloseTabsAndResetUi { kept_ui: None };
+        return StartMode::AskAndResetUi { kept_ui: None };
     }
     let kept_ui = set_aside_ui_file(dir);
     // A set-aside that failed leaves the file in place, and marking the reset
@@ -250,9 +427,10 @@ fn reset_ui_once(dir: &Path, guard: Guard) -> StartMode {
                 ui_set_aside: true,
                 ..guard
             },
+            true,
         );
     }
-    StartMode::CloseTabsAndResetUi { kept_ui }
+    StartMode::AskAndResetUi { kept_ui }
 }
 
 /// Moves `native-ui.json` in `dir` aside, returning its copy; a file that is
@@ -273,16 +451,29 @@ fn set_aside_ui_file(dir: &Path) -> Option<PathBuf> {
 
 /// Records that this start panicked, once per process and only before
 /// [`mark_stable`], and returns the failed-start count the guard file holds
-/// afterwards.
+/// afterwards. The count it adds makes the next start ask, so this run's mark
+/// goes, or the next start would count the same run again. A panic after
+/// stable counts nothing and marks the run crashed, so a start while the crash
+/// message still holds this process open asks rather than taking it for a
+/// second client.
 #[must_use]
 pub fn record_panic(dir: &Path, message: &str) -> u32 {
-    if is_stable() || PANIC_RECORDED.swap(true, Ordering::SeqCst) {
+    if PANIC_RECORDED.swap(true, Ordering::SeqCst) {
         return read_guard(dir).failed_starts;
     }
     let mut guard = read_guard(dir);
-    guard.failed_starts = guard.failed_starts.saturating_add(1);
-    guard.last_panic = Some(message.to_owned());
-    write_guard(dir, &guard);
+    if is_stable() {
+        if ours_or_none(guard.run) {
+            guard.run = Some(RunMark::own(RunState::Crashed));
+        }
+    } else {
+        guard.failed_starts = guard.failed_starts.saturating_add(1);
+        guard.last_panic = Some(message.to_owned());
+        if ours_or_none(guard.run) {
+            guard.run = None;
+        }
+    }
+    write_guard(dir, &guard, false);
     read_guard(dir).failed_starts
 }
 
@@ -299,15 +490,56 @@ fn forget_guard(dir: &Path, remove: impl FnOnce(&Path) -> std::io::Result<()>) {
                 "removing {}: {err}; counting from zero instead",
                 path.display()
             );
-            write_guard(dir, &Guard::default());
+            write_guard(dir, &Guard::default(), true);
         }
     }
 }
 
-/// This run is past the risky part: forget the failed starts.
+/// This run is past the risky part: forget the failed starts, the last panic
+/// and the reset mark, and mark the run stable, so a crash from here asks
+/// without counting. A second client's mark stays.
 pub fn mark_stable(dir: &Path) {
     STABLE.store(true, Ordering::SeqCst);
-    forget_guard(dir, |path| std::fs::remove_file(path));
+    let run = read_guard(dir).run;
+    let run = if ours_or_none(run) {
+        Some(RunMark::own(RunState::Stable))
+    } else {
+        run
+    };
+    write_guard(
+        dir,
+        &Guard {
+            run,
+            ..Guard::default()
+        },
+        false,
+    );
+}
+
+/// The main window failed to open: the quit that follows is not a clean end,
+/// so the run stays marked.
+pub fn note_window_failed() {
+    WINDOW_FAILED.store(true, Ordering::SeqCst);
+}
+
+/// This run ends cleanly: its mark goes, keeping the failed starts, and the
+/// file goes once nothing is left in it. While a safe start still waits on
+/// the prompt the run is marked as asking instead, so the next start asks
+/// again without counting. A run whose window failed to open keeps its mark,
+/// and a second client's mark stays.
+pub fn mark_clean_end(dir: &Path) {
+    if WINDOW_FAILED.load(Ordering::SeqCst) {
+        return;
+    }
+    let mut guard = read_guard(dir);
+    if ours_or_none(guard.run) {
+        guard.run = safe_start_pending().then(|| RunMark::own(RunState::Asking));
+    }
+    if guard.failed_starts == 0 && guard.run.is_none() {
+        forget_guard(dir, |path| std::fs::remove_file(path));
+    } else {
+        write_guard(dir, &guard, true);
+    }
 }
 
 /// Whether this run is past the risky part of its start.
@@ -347,6 +579,26 @@ pub fn stable_without_tabs() {
     }
 }
 
+/// The no-tabs window is over: when no tab list came, counts this run stable
+/// and marks it so in the guard in `dir`, so a kill from here asks without
+/// counting. A safe start still waiting on This PC's tab list keeps its count,
+/// as a quit then does; otherwise the failed starts are forgotten.
+pub fn mark_stable_without_tabs(dir: &Path) {
+    if TABS_SEEN.load(Ordering::SeqCst) {
+        return;
+    }
+    if !safe_start_pending() {
+        mark_stable(dir);
+        return;
+    }
+    STABLE.store(true, Ordering::SeqCst);
+    let mut guard = read_guard(dir);
+    if ours_or_none(guard.run) {
+        guard.run = Some(RunMark::own(RunState::Stable));
+        write_guard(dir, &guard, false);
+    }
+}
+
 /// Whether this process should show the crash message: the first panic only,
 /// since unwinding out of a Win32 callback runs the hook again.
 #[must_use]
@@ -357,13 +609,12 @@ pub fn claim_panic_box() -> bool {
 /// What the next start does after a panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NextStart {
-    /// Open the saved layout as it is.
-    OpensNormally,
-    /// Open with the saved tabs closed.
-    ClosesTabs,
-    /// Open with the saved tabs closed and `native-ui.json` set aside.
-    ClosesTabsAndResetsUi,
-    /// The panic changes nothing about the next start.
+    /// Ask whether to open the saved tabs.
+    AsksAboutTabs,
+    /// Ask about the saved tabs, with `native-ui.json` set aside.
+    AsksAndResetsUi,
+    /// The panic changes nothing about the next start: there is no config dir
+    /// to record it in.
     Unaffected,
 }
 
@@ -372,12 +623,12 @@ pub enum NextStart {
 #[must_use]
 pub fn next_start_after(during_start: bool, failed_starts: u32) -> NextStart {
     if !during_start {
-        return NextStart::Unaffected;
+        // The run is marked crashed, so the next start asks without counting.
+        return NextStart::AsksAboutTabs;
     }
     match failed_starts {
-        0 | 1 => NextStart::OpensNormally,
-        3 => NextStart::ClosesTabsAndResetsUi,
-        _ => NextStart::ClosesTabs,
+        3 => NextStart::AsksAndResetsUi,
+        _ => NextStart::AsksAboutTabs,
     }
 }
 
@@ -387,19 +638,15 @@ pub fn panic_text(message: &str, next: NextStart, log_path: &Path) -> String {
     let message: String = message.chars().take(PANIC_MESSAGE_CAP).collect();
     let log = log_path.display();
     match next {
-        NextStart::OpensNormally => format!(
-            "Rustling Tulip crashed while starting.\n\n{message}\n\nYour sessions keep running. \
-             Start Rustling Tulip again to carry on; if it crashes again, it opens with your tabs \
-             closed. The log is at {log}."
+        NextStart::AsksAboutTabs => format!(
+            "Rustling Tulip crashed while starting.\n\n{message}\n\nStart Rustling Tulip again \
+             to carry on. The next start asks whether to open your tabs. Your sessions keep \
+             running. The log is at {log}."
         ),
-        NextStart::ClosesTabs => format!(
-            "Rustling Tulip crashed while starting.\n\n{message}\n\nThe next start opens with \
-             your tabs closed, and your sessions keep running. The log is at {log}."
-        ),
-        NextStart::ClosesTabsAndResetsUi => format!(
-            "Rustling Tulip crashed while starting.\n\n{message}\n\nThe next start opens with your \
-             tabs closed and your window and sidebar settings back at their defaults, with a copy \
-             of them kept. Your sessions keep running. The log is at {log}."
+        NextStart::AsksAndResetsUi => format!(
+            "Rustling Tulip crashed while starting.\n\n{message}\n\nThe next start asks whether \
+             to open your tabs, and your window and sidebar settings go back to their defaults, \
+             with a copy of them kept. Your sessions keep running. The log is at {log}."
         ),
         NextStart::Unaffected => format!(
             "Rustling Tulip crashed.\n\n{message}\n\nYour sessions keep running. Start Rustling \
@@ -612,28 +859,272 @@ mod tests {
         assert_eq!(dir.guard()["failed_starts"], json!(0));
     }
 
-    #[test]
-    fn a_start_killed_without_a_panic_stays_normal() {
-        let dir = TestDir::new("killed");
-        dir.seed(&json!({"failed_starts": 0, "last_panic": null}).to_string());
-        assert_eq!(begin(&dir.0), StartMode::Normal);
-        assert_eq!(dir.guard()["failed_starts"], json!(0));
+    /// A pid no process has.
+    const DEAD: u32 = u32::MAX;
+
+    /// The marker this process writes in `state`.
+    fn own_mark(state: &str) -> Value {
+        json!({"state": state, "pid": std::process::id()})
+    }
+
+    /// Seeds a guard of `failed` starts whose run, in `state`, was `pid`'s.
+    fn seed_run(dir: &TestDir, failed: u32, state: &str, pid: u32) {
+        dir.seed(
+            &json!({
+                "failed_starts": failed,
+                "last_panic": null,
+                "ui_set_aside": false,
+                "run": {"state": state, "pid": pid},
+            })
+            .to_string(),
+        );
     }
 
     #[test]
-    fn one_failed_start_opens_normally() {
-        let dir = seeded("one", 1);
+    fn a_run_killed_before_stable_asks_and_counts() {
+        let dir = TestDir::new("killed");
+        seed_run(&dir, 0, "starting", DEAD);
+        assert_eq!(begin(&dir.0), StartMode::Ask);
+        assert_eq!(dir.guard()["failed_starts"], json!(1));
+        assert_eq!(dir.guard()["run"], own_mark("starting"));
+    }
+
+    #[test]
+    fn a_run_killed_after_stable_asks_without_counting() {
+        let dir = TestDir::new("killed-stable");
+        seed_run(&dir, 0, "stable", DEAD);
+        assert_eq!(begin(&dir.0), StartMode::Ask);
+        assert_eq!(dir.guard()["failed_starts"], json!(0), "the count stays");
+        assert_eq!(dir.guard()["run"], own_mark("starting"));
+    }
+
+    #[test]
+    fn a_clean_end_clears_the_marker_and_the_file() {
+        let dir = TestDir::new("clean-end");
         assert_eq!(begin(&dir.0), StartMode::Normal);
+        mark_stable(&dir.0);
+
+        mark_clean_end(&dir.0);
+
+        assert!(!dir.0.join(GUARD_FILE).exists(), "nothing is left to ask");
+        assert_eq!(begin(&dir.0), StartMode::Normal, "the next start is normal");
+
+        let counted = seeded("clean-end-counted", 1);
+        assert_eq!(begin(&counted.0), StartMode::Ask);
+        mark_clean_end(&counted.0);
+        assert_eq!(counted.guard()["run"], Value::Null, "the marker goes");
+        assert_eq!(
+            counted.guard()["failed_starts"],
+            json!(1),
+            "the count stays"
+        );
+    }
+
+    #[test]
+    fn a_clean_end_with_the_prompt_up_keeps_the_marker() {
+        let dir = seeded("clean-end-prompt", 1);
+        assert_eq!(begin(&dir.0), StartMode::Ask);
+        set_safe_start_pending(true);
+
+        mark_clean_end(&dir.0);
+
+        assert_eq!(dir.guard()["run"], own_mark("asking"));
         assert_eq!(dir.guard()["failed_starts"], json!(1));
     }
 
     #[test]
-    fn two_failed_starts_close_the_tabs() {
+    fn quitting_with_the_prompt_up_asks_next_time_without_counting() {
+        let dir = seeded("prompt-quit", 2);
+        assert_eq!(begin(&dir.0), StartMode::Ask);
+        set_safe_start_pending(true);
+
+        mark_clean_end(&dir.0);
+
+        assert_eq!(
+            dir.guard(),
+            json!({
+                "failed_starts": 2,
+                "last_panic": "x",
+                "ui_set_aside": false,
+                "run": own_mark("asking"),
+            })
+        );
+        assert_eq!(begin(&dir.0), StartMode::Ask, "the next start asks");
+        assert_eq!(dir.guard()["failed_starts"], json!(2), "and counts nothing");
+    }
+
+    #[test]
+    fn a_window_that_failed_to_open_keeps_the_mark() {
+        let dir = TestDir::new("window-failed");
+        assert_eq!(begin(&dir.0), StartMode::Normal);
+        note_window_failed();
+
+        mark_clean_end(&dir.0);
+
+        assert_eq!(dir.guard()["run"], own_mark("starting"));
+    }
+
+    #[test]
+    fn a_panic_after_stable_marks_the_run_crashed() {
+        let dir = seeded("stable-panic", 0);
+        assert_eq!(begin(&dir.0), StartMode::Normal);
+        mark_stable(&dir.0);
+
+        assert_eq!(record_panic(&dir.0, "late"), 0, "the count stays");
+
+        assert_eq!(dir.guard()["run"], own_mark("crashed"));
+    }
+
+    #[test]
+    fn a_crashed_mark_of_a_live_pid_still_asks() {
+        let dir = TestDir::new("crashed-live");
+        seed_run(&dir, 0, "crashed", 4242);
+
+        let (mode, next) = decide(read_guard(&dir.0), |_| true);
+
+        assert_eq!(
+            mode,
+            StartMode::Ask,
+            "a crashed run is dead whatever its pid"
+        );
+        assert_eq!(next.failed_starts, 0, "and counts nothing");
+        assert_eq!(next.run, Some(RunMark::own(RunState::Starting)));
+    }
+
+    #[test]
+    fn an_unknown_run_state_asks_without_counting() {
+        let dir = TestDir::new("unknown-state");
+        seed_run(&dir, 1, "from_a_later_release", DEAD);
+
+        assert_eq!(begin(&dir.0), StartMode::Ask);
+
+        assert_eq!(dir.guard()["failed_starts"], json!(1), "the count stays");
+        assert_eq!(dir.guard()["run"], own_mark("starting"));
+    }
+
+    #[test]
+    fn a_run_stable_without_tabs_marks_the_run_stable() {
+        let dir = seeded("no-tabs-stable", 1);
+        assert_eq!(begin(&dir.0), StartMode::Ask);
+        set_safe_start_pending(true);
+
+        mark_stable_without_tabs(&dir.0);
+
+        assert!(is_stable());
+        assert_eq!(dir.guard()["run"], own_mark("stable"));
+        assert_eq!(
+            dir.guard()["failed_starts"],
+            json!(1),
+            "a safe start still waiting keeps its count"
+        );
+
+        set_safe_start_pending(false);
+        mark_stable_without_tabs(&dir.0);
+        assert_eq!(dir.guard()["failed_starts"], json!(0), "then it goes");
+        assert_eq!(dir.guard()["run"], own_mark("stable"));
+    }
+
+    #[test]
+    fn three_runs_killed_before_stable_reset_the_ui_once() {
+        let dir = TestDir::new("killed-three");
+        let ui = dir.0.join(UI_FILE);
+        std::fs::write(&ui, "real").expect("seed native-ui.json");
+
+        assert_eq!(begin(&dir.0), StartMode::Normal, "the first run");
+        assert_eq!(begin(&dir.0), StartMode::Ask, "after one kill");
+        assert_eq!(begin(&dir.0), StartMode::Ask, "after two kills");
+        let third = begin(&dir.0);
+
+        let names = dir.names(UI_COPY_PREFIX);
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert_eq!(
+            third,
+            StartMode::AskAndResetUi {
+                kept_ui: Some(dir.0.join(&names[0]))
+            }
+        );
+        std::fs::write(&ui, "defaults").expect("the defaults the reset saved");
+        assert_eq!(begin(&dir.0), StartMode::AskAndResetUi { kept_ui: None });
+        assert_eq!(dir.names(UI_COPY_PREFIX), names, "still the one copy");
+        assert_eq!(
+            std::fs::read_to_string(&ui).expect("read the file"),
+            "defaults"
+        );
+    }
+
+    #[test]
+    fn three_runs_killed_after_stable_never_reset_the_ui() {
+        let dir = TestDir::new("killed-stable-three");
+        let ui = dir.0.join(UI_FILE);
+        std::fs::write(&ui, "real").expect("seed native-ui.json");
+
+        assert_eq!(begin(&dir.0), StartMode::Normal);
+        for _ in 0..4 {
+            mark_stable(&dir.0);
+            assert_eq!(begin(&dir.0), StartMode::Ask, "a killed run asks");
+        }
+
+        assert_eq!(dir.guard()["failed_starts"], json!(0));
+        assert_eq!(dir.names(UI_COPY_PREFIX), Vec::<String>::new());
+        assert_eq!(std::fs::read_to_string(&ui).expect("read the file"), "real");
+    }
+
+    #[test]
+    fn a_marker_of_a_live_process_is_ignored() {
+        let dir = TestDir::new("live");
+        seed_run(&dir, 1, "starting", 4242);
+        let guard = read_guard(&dir.0);
+
+        let (mode, next) = decide(guard, |pid| pid == 4242);
+
+        assert_eq!(mode, StartMode::Normal, "another client's run asks nothing");
+        assert_eq!(next.failed_starts, 1, "and counts nothing");
+        assert_eq!(
+            next.run,
+            Some(RunMark {
+                state: RunState::Starting,
+                pid: 4242
+            }),
+            "its marker stays"
+        );
+    }
+
+    #[test]
+    fn a_guard_without_a_run_marker_reads_as_none() {
+        for (tag, text) in [
+            (
+                "v0-11-full",
+                r#"{"failed_starts":1,"last_panic":"boom","ui_set_aside":false}"#,
+            ),
+            ("v0-11-short", r#"{"failed_starts":1,"last_panic":"boom"}"#),
+        ] {
+            let dir = TestDir::new(tag);
+            dir.seed(text);
+
+            let guard = read_guard(&dir.0);
+            assert_eq!(guard.run, None, "{text}");
+            assert_eq!(guard.failed_starts, 1, "{text}");
+
+            let (mode, next) = decide(guard, |_| true);
+            assert_eq!(mode, StartMode::Ask, "the old count still asks: {text}");
+            assert_eq!(next.failed_starts, 1, "and no run is counted: {text}");
+        }
+    }
+
+    #[test]
+    fn one_failed_start_asks_about_the_tabs() {
+        let dir = seeded("one", 1);
+        assert_eq!(begin(&dir.0), StartMode::Ask);
+        assert_eq!(dir.guard()["failed_starts"], json!(1));
+    }
+
+    #[test]
+    fn two_failed_starts_ask_about_the_tabs() {
         let dir = seeded("two", 2);
         let ui = dir.0.join(UI_FILE);
         std::fs::write(&ui, r#"{"a":1}"#).expect("seed native-ui.json");
 
-        assert_eq!(begin(&dir.0), StartMode::CloseTabs);
+        assert_eq!(begin(&dir.0), StartMode::Ask);
 
         assert_eq!(
             dir.names(UI_COPY_PREFIX),
@@ -660,7 +1151,7 @@ mod tests {
         let copy = dir.0.join(&names[0]);
         assert_eq!(
             mode,
-            StartMode::CloseTabsAndResetUi {
+            StartMode::AskAndResetUi {
                 kept_ui: Some(copy.clone())
             }
         );
@@ -674,10 +1165,7 @@ mod tests {
     #[test]
     fn a_reset_with_no_ui_file_keeps_nothing() {
         let dir = seeded("nofile", 3);
-        assert_eq!(
-            begin(&dir.0),
-            StartMode::CloseTabsAndResetUi { kept_ui: None }
-        );
+        assert_eq!(begin(&dir.0), StartMode::AskAndResetUi { kept_ui: None });
         assert_eq!(dir.names(UI_COPY_PREFIX), Vec::<String>::new());
     }
 
@@ -694,7 +1182,7 @@ mod tests {
         let copy = dir.0.join(&names[0]);
         assert_eq!(
             first,
-            StartMode::CloseTabsAndResetUi {
+            StartMode::AskAndResetUi {
                 kept_ui: Some(copy.clone())
             }
         );
@@ -705,7 +1193,7 @@ mod tests {
 
         assert_eq!(
             later,
-            StartMode::CloseTabsAndResetUi { kept_ui: None },
+            StartMode::AskAndResetUi { kept_ui: None },
             "the fourth start sets nothing aside"
         );
         assert_eq!(dir.names(UI_COPY_PREFIX), names, "still the one copy");
@@ -733,7 +1221,7 @@ mod tests {
         let copy = dir.0.join(&names[0]);
         assert_eq!(
             first,
-            StartMode::CloseTabsAndResetUi {
+            StartMode::AskAndResetUi {
                 kept_ui: Some(copy.clone())
             }
         );
@@ -745,7 +1233,7 @@ mod tests {
         std::fs::write(&ui, "defaults").expect("the defaults the reset saved");
         assert_eq!(
             begin(&dir.0),
-            StartMode::CloseTabsAndResetUi { kept_ui: None },
+            StartMode::AskAndResetUi { kept_ui: None },
             "the second start at three sets nothing aside"
         );
         assert_eq!(
@@ -764,7 +1252,7 @@ mod tests {
 
         let mode = begin(&dir.0);
 
-        assert_eq!(mode, StartMode::CloseTabsAndResetUi { kept_ui: None });
+        assert_eq!(mode, StartMode::AskAndResetUi { kept_ui: None });
         assert!(
             !read_guard(&dir.0).ui_set_aside,
             "a reset that did not happen is not marked done"
@@ -777,10 +1265,7 @@ mod tests {
         let dir = seeded("many", 9);
         let ui = dir.0.join(UI_FILE);
         std::fs::write(&ui, r#"{"a":1}"#).expect("seed native-ui.json");
-        assert_eq!(
-            begin(&dir.0),
-            StartMode::CloseTabsAndResetUi { kept_ui: None }
-        );
+        assert_eq!(begin(&dir.0), StartMode::AskAndResetUi { kept_ui: None });
         assert_eq!(dir.names(UI_COPY_PREFIX), Vec::<String>::new());
         assert_eq!(
             std::fs::read_to_string(&ui).expect("read the file"),
@@ -814,7 +1299,7 @@ mod tests {
         assert_eq!(names.len(), 1, "{names:?}");
         assert_eq!(
             mode,
-            StartMode::CloseTabsAndResetUi {
+            StartMode::AskAndResetUi {
                 kept_ui: Some(dir.0.join(&names[0]))
             }
         );
@@ -836,6 +1321,11 @@ mod tests {
         );
         assert_eq!(dir.guard()["failed_starts"], json!(1));
         assert_eq!(dir.guard()["last_panic"], json!("first"));
+        assert_eq!(
+            dir.guard()["run"],
+            Value::Null,
+            "the count asks next time, and a marker would count the run again"
+        );
     }
 
     #[test]
@@ -849,7 +1339,15 @@ mod tests {
             0,
             "a stable run counts nothing"
         );
-        assert!(!dir.0.join(GUARD_FILE).exists());
+        assert_eq!(
+            dir.guard(),
+            json!({
+                "failed_starts": 0,
+                "last_panic": null,
+                "ui_set_aside": false,
+                "run": own_mark("crashed"),
+            })
+        );
     }
 
     #[test]
@@ -910,14 +1408,35 @@ mod tests {
     }
 
     #[test]
-    fn next_start_after_cases() {
-        assert_eq!(next_start_after(false, 5), NextStart::Unaffected);
-        assert_eq!(next_start_after(true, 0), NextStart::OpensNormally);
-        assert_eq!(next_start_after(true, 1), NextStart::OpensNormally);
-        assert_eq!(next_start_after(true, 2), NextStart::ClosesTabs);
-        assert_eq!(next_start_after(true, 3), NextStart::ClosesTabsAndResetsUi);
-        assert_eq!(next_start_after(true, 4), NextStart::ClosesTabs);
-        assert_eq!(next_start_after(true, 9), NextStart::ClosesTabs);
+    fn a_panic_after_the_start_asks_next_time() {
+        assert_eq!(next_start_after(false, 5), NextStart::AsksAboutTabs);
+        assert_eq!(next_start_after(false, 0), NextStart::AsksAboutTabs);
+    }
+
+    #[test]
+    fn a_first_failed_start_asks_next_time() {
+        assert_eq!(next_start_after(true, 1), NextStart::AsksAboutTabs);
+    }
+
+    #[test]
+    fn a_second_failed_start_asks_next_time() {
+        assert_eq!(next_start_after(true, 2), NextStart::AsksAboutTabs);
+    }
+
+    #[test]
+    fn a_third_failed_start_asks_and_resets_the_ui_next_time() {
+        assert_eq!(next_start_after(true, 3), NextStart::AsksAndResetsUi);
+    }
+
+    #[test]
+    fn later_failed_starts_ask_next_time() {
+        assert_eq!(next_start_after(true, 4), NextStart::AsksAboutTabs);
+        assert_eq!(next_start_after(true, 9), NextStart::AsksAboutTabs);
+    }
+
+    #[test]
+    fn an_uncounted_failed_start_still_asks_next_time() {
+        assert_eq!(next_start_after(true, 0), NextStart::AsksAboutTabs);
     }
 
     #[test]
@@ -963,43 +1482,31 @@ mod tests {
     }
 
     #[test]
-    fn panic_text_says_the_next_start_opens_normally() {
-        assert_eq!(
-            panic_text(
-                "boom",
-                NextStart::OpensNormally,
-                Path::new("C:/logs/native.log")
-            ),
-            "Rustling Tulip crashed while starting.\n\nboom\n\nYour sessions keep running. Start \
-             Rustling Tulip again to carry on; if it crashes again, it opens with your tabs \
-             closed. The log is at C:/logs/native.log."
-        );
-    }
-
-    #[test]
     fn panic_text_says_the_settings_reset_too() {
         assert_eq!(
             panic_text(
                 "boom",
-                NextStart::ClosesTabsAndResetsUi,
+                NextStart::AsksAndResetsUi,
                 Path::new("C:/logs/native.log")
             ),
-            "Rustling Tulip crashed while starting.\n\nboom\n\nThe next start opens with your \
-             tabs closed and your window and sidebar settings back at their defaults, with a \
-             copy of them kept. Your sessions keep running. The log is at C:/logs/native.log."
+            "Rustling Tulip crashed while starting.\n\nboom\n\nThe next start asks whether to \
+             open your tabs, and your window and sidebar settings go back to their defaults, \
+             with a copy of them kept. Your sessions keep running. The log is at \
+             C:/logs/native.log."
         );
     }
 
     #[test]
-    fn panic_text_during_start_says_the_tabs_close() {
+    fn panic_text_during_start_says_the_next_start_asks() {
         assert_eq!(
             panic_text(
                 "boom",
-                NextStart::ClosesTabs,
+                NextStart::AsksAboutTabs,
                 Path::new("C:/logs/native.log")
             ),
-            "Rustling Tulip crashed while starting.\n\nboom\n\nThe next start opens with your \
-             tabs closed, and your sessions keep running. The log is at C:/logs/native.log."
+            "Rustling Tulip crashed while starting.\n\nboom\n\nStart Rustling Tulip again to \
+             carry on. The next start asks whether to open your tabs. Your sessions keep \
+             running. The log is at C:/logs/native.log."
         );
     }
 
@@ -1064,28 +1571,42 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_says_only_what_happened() {
-        let plain = StartNotice::new(&StartMode::CloseTabs, None);
+    fn the_prompt_says_only_what_happened() {
+        let question = "Open your tabs as they were, or start without them? Your sessions keep \
+                        running either way, and starting without them keeps a copy of the \
+                        layout.";
+        assert_eq!(StartPrompt::new(&StartMode::Ask).lines(), [question]);
         assert_eq!(
-            plain.lines(),
-            [
-                "The last start crashed, so Rustling Tulip did not restore your tabs. Your \
-                 sessions are still running: pick one in the sidebar to show it in a pane."
-            ]
+            StartPrompt::new(&StartMode::AskAndResetUi { kept_ui: None }).lines(),
+            [question]
         );
-        let full = StartNotice::new(
-            &StartMode::CloseTabsAndResetUi {
-                kept_ui: Some(PathBuf::from("ui-copy")),
-            },
-            Some(PathBuf::from("layout-copy")),
-        );
+        let full = StartPrompt::new(&StartMode::AskAndResetUi {
+            kept_ui: Some(PathBuf::from("ui-copy")),
+        });
         assert_eq!(
-            full.lines()[1..],
+            full.lines(),
             [
-                "A copy of the old layout is in layout-copy.",
+                question,
                 "Your window and sidebar settings went back to their defaults too. A copy is in \
                  ui-copy.",
             ]
+        );
+        assert_eq!(PROMPT_TITLE, "The last start crashed");
+        assert_eq!(PROMPT_OPEN, "Open tabs");
+        assert_eq!(PROMPT_WITHOUT, "Start without tabs");
+    }
+
+    #[test]
+    fn the_toasts_name_the_copies() {
+        assert_eq!(STARTED_WITHOUT_TITLE, "Started without your tabs");
+        assert_eq!(
+            started_without_detail(Path::new("layout-copy")),
+            "A copy of the layout is in layout-copy."
+        );
+        assert_eq!(UI_RESET_TITLE, "Window and sidebar settings were reset");
+        assert_eq!(
+            ui_reset_detail(Path::new("ui-copy")),
+            "The last starts crashed. A copy of your settings is in ui-copy."
         );
     }
 }

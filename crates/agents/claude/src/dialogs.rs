@@ -120,6 +120,7 @@ pub(crate) fn read(rows: &[String]) -> ChatScreen {
     let dialog = parse_permission(rows, start)
         .or_else(|| parse_plan(rows, start))
         .or_else(|| parse_trust(rows, start))
+        .or_else(|| parse_mcp_server(rows, start))
         .or_else(|| parse_question(rows));
     match dialog {
         Some(Parsed::Prompt(prompt)) => ChatScreen {
@@ -287,14 +288,7 @@ fn parse_trust(rows: &[String], start: usize) -> Option<Parsed> {
     let Some(footer) = footer else {
         return Some(Parsed::HalfDrawn);
     };
-    let block_end = (start..footer)
-        .rev()
-        .find(|&index| !rows[index].trim().is_empty())
-        .map_or(footer, |index| index + 1);
-    let block_start = (start..block_end)
-        .rev()
-        .find(|&index| rows[index].trim().is_empty())
-        .map_or(start, |index| index + 1);
+    let (block_start, block_end) = options_block(rows, start, footer);
     let options = trust_options(&rows[block_start..block_end]);
     if options.is_empty() {
         return Some(Parsed::HalfDrawn);
@@ -308,8 +302,61 @@ fn parse_trust(rows: &[String], start: usize) -> Option<Parsed> {
     )))
 }
 
-/// The options of a trust dialog: a printed number when the build numbers
-/// them, else the row's 1-based position.
+/// The row that opens a new-MCP-server dialog, the server's name after it.
+const MCP_SERVER_ANCHOR: &str = "New MCP server found in this project:";
+
+/// A new-MCP-server dialog: `New MCP server found in this project:` and
+/// the server's name, the notice, the unnumbered options and the `Enter to
+/// confirm · Esc to cancel` footer.
+fn parse_mcp_server(rows: &[String], start: usize) -> Option<Parsed> {
+    let anchor = find(rows, start, |row| {
+        row.trim_start().starts_with(MCP_SERVER_ANCHOR)
+    })?;
+    let Some(footer) = find(rows, anchor + 1, |row| {
+        row.contains("Enter to confirm · Esc to cancel")
+    }) else {
+        return Some(Parsed::HalfDrawn);
+    };
+    let (block_start, block_end) = options_block(rows, anchor + 1, footer);
+    let options = trust_options(&rows[block_start..block_end]);
+    if options.is_empty() {
+        return Some(Parsed::HalfDrawn);
+    }
+    let name = rows[anchor]
+        .trim()
+        .strip_prefix(MCP_SERVER_ANCHOR)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let notice: Vec<&str> = rows[anchor + 1..block_start]
+        .iter()
+        .map(String::as_str)
+        .collect();
+    Some(Parsed::Prompt(prompt(
+        ChatPromptKind::McpServer,
+        name,
+        text_block(&notice, indent_of(&rows[anchor])),
+        options,
+    )))
+}
+
+/// The bounds of the options block over a dialog's `footer`: the run of
+/// non-blank rows that ends nearest above it, starting no higher than
+/// `from`.
+fn options_block(rows: &[String], from: usize, footer: usize) -> (usize, usize) {
+    let block_end = (from..footer)
+        .rev()
+        .find(|&index| !rows[index].trim().is_empty())
+        .map_or(footer, |index| index + 1);
+    let block_start = (from..block_end)
+        .rev()
+        .find(|&index| rows[index].trim().is_empty())
+        .map_or(from, |index| index + 1);
+    (block_start, block_end)
+}
+
+/// The options of a trust or new-MCP-server dialog: a printed number when
+/// the build numbers them, else the row's 1-based position.
 fn trust_options(rows: &[String]) -> Vec<ChatOption> {
     rows.iter()
         .zip(1..)
@@ -462,12 +509,17 @@ fn key_pairs_any(row: &str) -> Option<Vec<ChatOption>> {
 
 /// An `AskUserQuestion` step: the tab bar, the question row, its options
 /// down to the card's inner rule, then the `Enter to select` footer; or the
-/// review step when `Review your answers` follows the tab bar.
+/// review step when `Review your answers` follows the tab bar. A step whose
+/// tab bar has scrolled off the top of the grid reads through
+/// [`parse_question_without_bar`].
 fn parse_question(rows: &[String]) -> Option<Parsed> {
     let rules = rule_indices(rows);
-    let bar = (0..rows.len())
+    let Some(bar) = (0..rows.len())
         .rev()
-        .find(|&index| is_tab_bar(rows, &rules, index))?;
+        .find(|&index| is_tab_bar(rows, &rules, index))
+    else {
+        return parse_question_without_bar(rows);
+    };
     let mut tabs = question_tabs(&rows[bar]);
     let title = find(rows, bar + 1, |row| !row.trim().is_empty());
     if let Some(title) = title
@@ -508,6 +560,112 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
             found.options,
         )
     }))
+}
+
+/// A question step whose tab bar has scrolled off the top of the grid: its
+/// numbered options, a single question's footer and the `Chat about this`
+/// option every such step draws under its inner rule in view, the
+/// question's rows from the top of the dialog's visible part down to its
+/// first option. It has no tabs, which is what tells it apart from a dialog
+/// read with its bar.
+fn parse_question_without_bar(rows: &[String]) -> Option<Parsed> {
+    let footer = single_question_footer(rows)?;
+    let first_option = (0..footer).find(|&index| numbered(&rows[index]).is_some())?;
+    let end = option_end(rows, first_option, footer);
+    if !has_chat_about_this(rows, end, footer) {
+        return None;
+    }
+    let found = question_options(&rows[first_option..end]);
+    if found.options.is_empty() {
+        return Some(Parsed::HalfDrawn);
+    }
+    let start = question_start(rows, first_option);
+    Some(Parsed::Prompt(ChatPrompt {
+        questions: Vec::new(),
+        multi: found.multi,
+        cursor: found.cursor,
+        ..prompt(
+            ChatPromptKind::Question,
+            question_text(&rows[start..first_option]),
+            String::new(),
+            found.options,
+        )
+    }))
+}
+
+/// The row a barless dialog's footer starts on, when one shows: `Enter to
+/// select … Esc to cancel`, naming neither `Tab` (a multi-question card's
+/// footer) nor another Esc action (a select list's `Esc to go back`).
+fn single_question_footer(rows: &[String]) -> Option<usize> {
+    (0..rows.len())
+        .rev()
+        .find(|&index| is_single_question_footer(rows, index) && footer_is_last(rows, index))
+}
+
+/// A footer's whole text from `index`: the row itself and every non-blank
+/// row directly under it, up to the first blank row or the end of the grid,
+/// each trimmed and joined with one space, since a narrow pane wraps the
+/// footer onto a second row.
+fn footer_text(rows: &[String], index: usize) -> String {
+    let mut text = String::new();
+    for row in &rows[index..] {
+        let piece = row.trim();
+        if piece.is_empty() {
+            break;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(piece);
+    }
+    text
+}
+
+/// Whether the footer starting on `rows[index]` is a single question's:
+/// `Enter to select …` naming `Esc to cancel`, with no `Tab` in it, whether
+/// it shows on one row or wraps onto the row under it.
+fn is_single_question_footer(rows: &[String], index: usize) -> bool {
+    let text = footer_text(rows, index);
+    text.starts_with(QUESTION_FOOTER) && text.contains("Esc to cancel") && !text.contains("Tab")
+}
+
+/// Whether nothing but the footer's own wrapped tail, blank rows and rules
+/// sit under `footer`: an input box's `❯` row or a numbered list below it
+/// means the footer was quoted in the transcript, not drawn by a dialog.
+fn footer_is_last(rows: &[String], footer: usize) -> bool {
+    rows[footer + 1..].iter().all(|row| {
+        let text = row.trim();
+        !text.starts_with(CURSOR) && numbered(row).is_none()
+    })
+}
+
+/// The row a barless dialog's options end on: the first rule after
+/// `first_option`, or its footer when no rule shows.
+fn option_end(rows: &[String], first_option: usize, footer: usize) -> usize {
+    rule_indices(rows)
+        .into_iter()
+        .find(|&index| index > first_option && index < footer)
+        .unwrap_or(footer)
+}
+
+/// Whether the rows between a barless dialog's inner rule and its footer
+/// hold the numbered `Chat about this` option every `AskUserQuestion` step
+/// draws there: a footer quoted in the transcript has none.
+fn has_chat_about_this(rows: &[String], end: usize, footer: usize) -> bool {
+    (end..footer)
+        .any(|index| numbered(&rows[index]).is_some_and(|option| option.label == CHAT_ABOUT_THIS))
+}
+
+/// Where a barless dialog's visible part starts: its first `│`-gutter row,
+/// else the row after a tab bar still drawn at the top of the grid (its
+/// rule having scrolled off), else the grid's first row.
+fn question_start(rows: &[String], first_option: usize) -> usize {
+    let top = (0..first_option).find(|&index| !rows[index].trim().is_empty());
+    let bar = top.filter(|&index| rows[index].trim_start().starts_with([TAB_OPEN, TAB_DONE]));
+    let from = bar.map_or(0, |index| index + 1);
+    (from..first_option)
+        .find(|&index| rows[index].trim_start().starts_with('│'))
+        .unwrap_or(from)
 }
 
 /// A question wrapped over `rows` (from its title to its first option),
@@ -919,6 +1077,7 @@ pub(crate) fn recipe(
         ChatPromptKind::Permission
         | ChatPromptKind::Plan
         | ChatPromptKind::Trust
+        | ChatPromptKind::McpServer
         | ChatPromptKind::HeadsUp => {}
         ChatPromptKind::Unknown => return Err(AnswerRefusal::Unsupported),
     }
@@ -1005,10 +1164,13 @@ fn digit_for(prompt: &ChatPrompt, number: u32) -> Result<Key, AnswerRefusal> {
     Key::digit(number).ok_or(AnswerRefusal::TooManyOptions)
 }
 
-/// Choosing option `number`: its digit, or on a trust dialog, where digits
-/// do nothing, the arrows to it and Enter.
+/// Choosing option `number`: its digit, or on a trust or new-MCP-server
+/// dialog, whose options carry no digit, the arrows to it and Enter.
 fn option_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, AnswerRefusal> {
-    if prompt.kind == ChatPromptKind::Trust {
+    if matches!(
+        prompt.kind,
+        ChatPromptKind::Trust | ChatPromptKind::McpServer
+    ) {
         return trust_recipe(prompt, number);
     }
     if feedback_option(prompt) == Some(number) {
@@ -1022,8 +1184,8 @@ fn option_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, Answe
     Ok(one_step(vec![digit_for(prompt, number)?], expect))
 }
 
-/// Moving the trust dialog's cursor from where the reading shows it to
-/// option `number`, then Enter.
+/// Moving a trust or new-MCP-server dialog's cursor from where the reading
+/// shows it to option `number`, then Enter.
 fn trust_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, AnswerRefusal> {
     let mut steps: Vec<RecipeStep> = cursor_move(prompt, number)?.into_iter().collect();
     steps.push(RecipeStep {
@@ -1786,6 +1948,117 @@ mod tests {
         assert_eq!(read(&trust), half);
     }
 
+    /// A new-MCP-server dialog naming `rt-driver`, the cursor on its third
+    /// option.
+    fn mcp_server_dialog() -> Vec<String> {
+        let mut screen = vec![rule()];
+        screen.extend(rows(&[
+            "  New MCP server found in this project: rt-driver",
+            "",
+            "  MCP servers may execute code.",
+            "",
+            "    Use this MCP server",
+            "    Use this and all future MCP servers in this project",
+            "  ❯ Continue without using this MCP server",
+            "",
+            "  Enter to confirm · Esc to cancel",
+        ]));
+        screen
+    }
+
+    #[test]
+    fn an_mcp_server_dialog_reads_its_name_options_and_cursor() {
+        let screen = read(&mcp_server_dialog());
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        assert_eq!(
+            labels(&screen),
+            [
+                (1, "Use this MCP server".to_owned()),
+                (
+                    2,
+                    "Use this and all future MCP servers in this project".to_owned()
+                ),
+                (3, "Continue without using this MCP server".to_owned()),
+            ]
+        );
+        let prompt = screen.prompt.expect("an MCP server prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::McpServer);
+        assert_eq!(prompt.subject, "rt-driver");
+        assert_eq!(prompt.body, "MCP servers may execute code.");
+        assert_eq!(prompt.cursor, Some(3));
+    }
+
+    #[test]
+    fn an_mcp_server_option_moves_the_cursor_then_enters() {
+        let prompt = read(&mcp_server_dialog()).prompt.expect("a prompt");
+        let pick = |number| recipe(&prompt, &ChatAnswerKind::Option { number }).map(|r| r.steps);
+        assert_eq!(
+            pick(1),
+            Ok(vec![
+                RecipeStep {
+                    keys: vec![Key::Up, Key::Up],
+                    expect: ScreenExpect::OptionSelected(1),
+                },
+                RecipeStep {
+                    keys: vec![Key::Enter],
+                    expect: ScreenExpect::DialogGone,
+                },
+            ])
+        );
+        assert_eq!(
+            pick(3),
+            Ok(vec![RecipeStep {
+                keys: vec![Key::Enter],
+                expect: ScreenExpect::DialogGone,
+            }])
+        );
+    }
+
+    #[test]
+    fn a_trust_dialog_still_reads_as_trust_beside_the_mcp_parser() {
+        let mut screen = vec![rule()];
+        screen.extend(rows(&[
+            " Accessing workspace:",
+            "",
+            " C:\\proj",
+            "",
+            " ❯ 1. Yes, I trust this folder",
+            "   2. No, exit",
+            "",
+            " Enter to confirm · Esc to cancel",
+        ]));
+        let prompt = read(&screen).prompt.expect("a trust prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::Trust);
+        assert_eq!(prompt.subject, "C:\\proj");
+    }
+
+    #[test]
+    fn mcp_named_elsewhere_is_no_mcp_server_dialog() {
+        let transcript = boxed(
+            &[
+                "● The MCP server rt-driver is set up.",
+                "  New MCP server found in this project: rt-driver",
+            ],
+            &["> "],
+        );
+        let screen = read(&transcript);
+        assert_eq!(screen.prompt, None, "a transcript row is no dialog");
+        assert_ne!(screen.composer, ComposerState::Dialog);
+    }
+
+    #[test]
+    fn an_mcp_server_dialog_without_its_footer_is_half_drawn() {
+        let mut screen = mcp_server_dialog();
+        screen.truncate(screen.len() - 2);
+        assert_eq!(
+            read(&screen),
+            ChatScreen {
+                composer: ComposerState::Dialog,
+                prompt: None,
+            }
+        );
+    }
+
     #[test]
     fn can_amend_is_off_without_tab_to_amend() {
         let screen = read(&permission(
@@ -2048,6 +2321,295 @@ mod tests {
     /// The prompt `screen` shows.
     fn question(screen: &[String]) -> ChatPrompt {
         read(screen).prompt.expect("a question prompt")
+    }
+
+    /// A question taller than its grid, as Claude Code 2.1.319 draws it at
+    /// 100x24: the rule over its tab bar and the bar itself have scrolled off
+    /// the top, so only the question's rows and its options are in view.
+    #[test]
+    fn a_question_taller_than_the_grid_reads_without_its_bar() {
+        let mut screen = rows(&[
+            "",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike no?",
+            "",
+            "❯ 1. An option label of some length 1",
+            "     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo",
+            "     charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alph?",
+            "  2. An option label of some length 2",
+            "     golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo",
+            "     foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie del?",
+            "  3. An option label of some length 3",
+            "     juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel",
+            "     india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot g?",
+            "  4. An option label of some length 4",
+            "     mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo",
+            "     lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india j?",
+            "  5. Type something.",
+        ]);
+        screen.push("─".repeat(100));
+        screen.extend(rows(&[
+            "  6. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]));
+        let screen = read(&screen);
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.as_ref().expect("a question prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::Question);
+        assert!(prompt.questions.is_empty(), "the dialog has no bar to read");
+        assert!(
+            prompt.subject.ends_with("kilo lima mike no?"),
+            "the visible rows are the question's end: {}",
+            prompt.subject
+        );
+        assert_eq!(
+            labels(&screen),
+            [
+                (1, "An option label of some length 1".to_owned()),
+                (2, "An option label of some length 2".to_owned()),
+                (3, "An option label of some length 3".to_owned()),
+                (4, "An option label of some length 4".to_owned()),
+                (5, "Type something".to_owned()),
+            ]
+        );
+    }
+
+    /// The same tall question at 40 columns, where Claude Code wraps its
+    /// footer onto a second row: the `Esc` ends the first row and `to cancel`
+    /// starts the next, and the barless dialog still reads.
+    #[test]
+    fn a_tall_question_whose_footer_wraps_at_40_columns_reads_without_its_bar() {
+        let mut screen = rows(&[
+            "",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike no?",
+            "",
+            "❯ 1. An option label of some length 1",
+            "     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo",
+            "     charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alph?",
+            "  2. An option label of some length 2",
+            "     golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo",
+            "     foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie del?",
+            "  3. An option label of some length 3",
+            "     juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel",
+            "     india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot g?",
+            "  4. An option label of some length 4",
+            "     mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo",
+            "     lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india j?",
+            "  5. Type something.",
+        ]);
+        screen.push("─".repeat(100));
+        screen.extend(rows(&[
+            "  6. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc",
+            "to cancel",
+        ]));
+        let screen = read(&screen);
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.as_ref().expect("a question prompt");
+        assert!(prompt.questions.is_empty(), "the dialog has no bar to read");
+        assert_eq!(
+            labels(&screen),
+            [
+                (1, "An option label of some length 1".to_owned()),
+                (2, "An option label of some length 2".to_owned()),
+                (3, "An option label of some length 3".to_owned()),
+                (4, "An option label of some length 4".to_owned()),
+                (5, "Type something".to_owned()),
+            ]
+        );
+    }
+
+    /// The same tall question at 48 columns, where the first footer row ends
+    /// `… · Esc to` and the second brings `cancel`.
+    #[test]
+    fn a_tall_question_whose_footer_wraps_at_48_columns_reads_without_its_bar() {
+        let mut screen = rows(&[
+            "",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike no?",
+            "",
+            "❯ 1. An option label of some length 1",
+            "     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo",
+            "     charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alph?",
+            "  2. An option label of some length 2",
+            "     golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo",
+            "     foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie del?",
+            "  3. An option label of some length 3",
+            "     juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel",
+            "     india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot g?",
+            "  4. An option label of some length 4",
+            "     mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo",
+            "     lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india j?",
+            "  5. Type something.",
+        ]);
+        screen.push("─".repeat(100));
+        screen.extend(rows(&[
+            "  6. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to",
+            "cancel",
+        ]));
+        let screen = read(&screen);
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.as_ref().expect("a question prompt");
+        assert!(prompt.questions.is_empty(), "the dialog has no bar to read");
+        assert_eq!(
+            labels(&screen),
+            [
+                (1, "An option label of some length 1".to_owned()),
+                (2, "An option label of some length 2".to_owned()),
+                (3, "An option label of some length 3".to_owned()),
+                (4, "An option label of some length 4".to_owned()),
+                (5, "Type something".to_owned()),
+            ]
+        );
+    }
+
+    /// A multi-question card's footer wrapped the same way: its first row
+    /// keeps `Tab`, so the barless dialog stays unread.
+    #[test]
+    fn a_tall_multi_question_footer_that_wraps_stays_unread() {
+        let mut screen = rows(&[
+            "",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha",
+            "│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike no?",
+            "",
+            "❯ 1. An option label of some length 1",
+            "     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo",
+            "     charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alph?",
+            "  2. An option label of some length 2",
+            "     golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo",
+            "     foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie del?",
+            "  3. An option label of some length 3",
+            "     juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel",
+            "     india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot g?",
+            "  4. An option label of some length 4",
+            "     mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo",
+            "     lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india j?",
+            "  5. Type something.",
+        ]);
+        screen.push("─".repeat(100));
+        screen.extend(rows(&[
+            "  6. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc",
+            "to cancel",
+        ]));
+        assert!(
+            read(&screen).prompt.is_none(),
+            "a wrapped multi-question footer stays unread"
+        );
+    }
+
+    /// A multi-question card whose bar and the rows above it have scrolled
+    /// off the top: its footer still names `Tab`, so it stays unread without
+    /// its bar.
+    #[test]
+    fn a_multi_question_card_without_its_bar_reads_no_prompt() {
+        let wide = rule();
+        let screen = read(&rows(&[
+            "Which function should be added to calc.py next?",
+            "",
+            "❯ 1. sub",
+            "     Subtraction: returns a - b",
+            "  2. div",
+            "     Division: returns a / b (needs a decision on division by zero)",
+            "  3. pow",
+            "     Exponentiation: returns a ** b",
+            "  4. Type something.",
+            wide.as_str(),
+            "  5. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]));
+        assert!(
+            screen.prompt.is_none(),
+            "a multi-question card stays unread without its bar"
+        );
+    }
+
+    /// A reply that quotes a dialog's footer in the transcript, above an
+    /// idle input box: a footer alone is not a question.
+    #[test]
+    fn a_quoted_question_footer_in_an_idle_transcript_reads_no_question() {
+        let mut screen = rows(&[
+            "A reply that quotes a dialog:",
+            "",
+            "  1. Numbered point",
+            "  2. Another",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]);
+        screen.push(rule());
+        screen.extend(rows(&["❯", ""]));
+        screen.push(rule());
+        screen.extend(rows(&["? for shortcuts"]));
+        let screen = read(&screen);
+        assert!(screen.prompt.is_none(), "a quoted footer is not a dialog");
+        assert_eq!(screen.composer, ComposerState::Ready);
+    }
+
+    /// A select list's footer says `Esc to go back`, not `Esc to cancel`, so
+    /// it is not a question.
+    #[test]
+    fn a_select_list_whose_esc_goes_back_reads_no_question() {
+        let screen = read(&rows(&[
+            "Select a folder",
+            "",
+            "❯ 1. repo",
+            "  2. scratch",
+            "",
+            "Enter to select · Esc to go back",
+        ]));
+        assert!(
+            screen.prompt.is_none(),
+            "a select list's footer is not a question's"
+        );
+    }
+
+    /// A single question one row taller than its grid: only the rule over
+    /// its tab bar has scrolled off, so the bar is the grid's first row and
+    /// is not part of the question's text.
+    #[test]
+    fn a_question_with_only_its_top_rule_cut_off_reads_its_text() {
+        let mut screen = rows(&[
+            " ☐ Colour",
+            "",
+            "Which colour should the badge use?",
+            "",
+            "❯ 1. Red",
+            "  2. Blue",
+            "  3. Type something.",
+        ]);
+        screen.push(rule());
+        screen.extend(rows(&[
+            "  4. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]));
+        let screen = read(&screen);
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.as_ref().expect("a question prompt");
+        assert_eq!(prompt.subject, "Which colour should the badge use?");
+        assert!(
+            prompt.questions.is_empty(),
+            "the bar is not read without its rule"
+        );
     }
 
     #[test]

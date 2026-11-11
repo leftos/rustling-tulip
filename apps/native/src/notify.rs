@@ -1042,23 +1042,20 @@ impl RootView {
         }
     }
 
-    /// Plays the Needs you sound as chosen in Settings, unless it is off, as
-    /// Settings' Play previews it; the custom file is read and checked on a
-    /// background thread.
-    pub(crate) fn play_needs_you_sound(&self, cx: &gpui::App) {
-        self.play_sound(NotifyKind::NeedsYou, cx);
-    }
-
-    /// Plays the Finished sound as chosen in Settings, unless it is off, as
-    /// Settings' Play previews it; the custom file is read and checked on a
-    /// background thread.
-    pub(crate) fn play_finished_sound(&self, cx: &gpui::App) {
-        self.play_sound(NotifyKind::Finished, cx);
+    /// Plays `choice` once as `kind`'s sound, unless it is off: what Settings'
+    /// Play previews, the row's chosen sound whether or not it is saved yet; a
+    /// custom file is read and checked on a background thread.
+    pub(crate) fn preview_sound(&self, choice: ToastSound, kind: NotifyKind, cx: &gpui::App) {
+        self.play_choice(choice, kind, cx);
     }
 
     /// Plays `kind`'s chosen sound once, unless it is off.
     fn play_sound(&self, kind: NotifyKind, cx: &gpui::App) {
-        let choice = self.sound_choice(kind);
+        self.play_choice(self.sound_choice(kind), kind, cx);
+    }
+
+    /// Plays `choice` once as `kind`'s sound, unless it is off.
+    fn play_choice(&self, choice: ToastSound, kind: NotifyKind, cx: &gpui::App) {
         if choice == ToastSound::Off {
             return;
         }

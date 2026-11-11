@@ -121,6 +121,34 @@ pub const FEATURE_CLIENT_PRESENCE: &str = "client_presence";
 /// the connected daemon lists it.
 pub const FEATURE_TYPED_PROMPT_ANSWERS: &str = "typed_prompt_answers";
 
+/// `Welcome.features` entry: the daemon resumes a session from one
+/// [`ClientMessage::ResumeSession`], choosing by the session's state how. A
+/// client talking to a daemon without it sends the older recipe:
+/// [`ClientMessage::DuplicateSession`] with `carry_busy_excluded` and
+/// `same_checkout` for a parked or stopped session, and
+/// [`ClientMessage::ResumeAbandoned`] for an abandoned one.
+pub const FEATURE_RESUME_SESSION: &str = "resume_session";
+
+/// `Welcome.features` entry: the daemon launches a repo's or workspace's last
+/// spawn config from one [`ClientMessage::LaunchLast`].
+pub const FEATURE_LAUNCH_LAST: &str = "launch_last";
+
+/// `Welcome.features` entry: the daemon starts an interactive session in a
+/// repo or workspace from one [`ClientMessage::NewSession`].
+pub const FEATURE_NEW_SESSION: &str = "new_session";
+
+/// `Welcome.features` entry: the daemon reads [`SpawnRequest::extra_args`],
+/// passes them to an interactive agent spawn and saves them in its
+/// [`SpawnConfig`]. A daemon without it drops the field unread, so a client
+/// sends no extra arguments to it.
+pub const FEATURE_SPAWN_EXTRA_ARGS: &str = "spawn_extra_args";
+
+/// `Welcome.features` entry: the daemon answers a [`ClientMessage::LaunchPreset`]
+/// whose `job_id` names a job it still holds a snapshot of with that job's latest
+/// [`DaemonMessage::PresetLaunchJobUpdated`], to the sender only, and starts no
+/// second job, so a client may resend an unanswered launch with its job id.
+pub const FEATURE_PRESET_JOB_REPEAT: &str = "preset_job_repeat";
+
 /// `Welcome.features` entry: the daemon answers [`ClientMessage::RemoteUpdate`]:
 /// it updates itself to the newest release, or says why it cannot.
 pub const FEATURE_REMOTE_UPDATE: &str = "remote_update";
@@ -206,8 +234,6 @@ pub struct AgentDescriptor {
     #[serde(default)]
     pub image_paste: ImagePaste,
     pub caps: AgentCaps,
-    /// What a trusted launch passes, for the spawn dialog's note.
-    pub trust_note: Option<String>,
     pub texts: AgentTexts,
     pub fields: Vec<OptionField>,
     pub chips: Vec<ChipRule>,
@@ -218,6 +244,104 @@ pub struct AgentDescriptor {
     /// The runtime icon: SVG markup drawn in its own colours; none draws the generic shell glyph.
     #[serde(default)]
     pub icon: Option<String>,
+    /// The choice that runs the agent with its permission prompts bypassed; a saved or received
+    /// `dangerously_skip_permissions: true` becomes it. `None` when the agent has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bypass: Option<BypassChoice>,
+}
+
+impl AgentDescriptor {
+    /// Whether `options` hold the agent's bypass choice.
+    ///
+    /// Args:
+    ///     options: The agent's option values.
+    ///
+    /// Returns:
+    ///     True when the descriptor names a bypass choice and `options` hold it; false otherwise.
+    #[must_use]
+    pub fn bypasses(&self, options: &OptionValues) -> bool {
+        self.bypass.as_ref().is_some_and(|bypass| {
+            matches!(options.get(&bypass.field), Some(OptionValue::Text(value)) if *value == bypass.value)
+        })
+    }
+
+    /// Set the agent's bypass choice in `options`.
+    ///
+    /// Args:
+    ///     options: The agent's option values, changed in place.
+    ///
+    /// Returns:
+    ///     True when it changed the value; false when `options` already held the choice or the
+    ///     agent has none.
+    pub fn set_bypass(&self, options: &mut OptionValues) -> bool {
+        let Some(bypass) = &self.bypass else {
+            return false;
+        };
+        if self.bypasses(options) {
+            return false;
+        }
+        options.insert(
+            bypass.field.clone(),
+            OptionValue::Text(bypass.value.clone()),
+        );
+        true
+    }
+
+    /// Clear the agent's bypass choice from `options`.
+    ///
+    /// Args:
+    ///     options: The agent's option values, changed in place.
+    ///
+    /// Returns:
+    ///     True when `options` held the bypass choice and its field was removed; false when they
+    ///     did not or the agent has none.
+    pub fn clear_bypass(&self, options: &mut OptionValues) -> bool {
+        let Some(bypass) = &self.bypass else {
+            return false;
+        };
+        if !self.bypasses(options) {
+            return false;
+        }
+        options.remove(&bypass.field);
+        true
+    }
+}
+
+/// Fold the deprecated trusted flag into the agent's bypass choice.
+///
+/// A true flag sets the descriptor's bypass choice in the agent's options; the flag then becomes
+/// whether the options hold that choice. A plain shell, a missing descriptor or one for another
+/// agent, or a descriptor with no bypass choice ends with the flag false and the options untouched.
+///
+/// Args:
+///     flag: The saved or received `dangerously_skip_permissions`, rewritten in place.
+///     mode: The spawn's mode.
+///     agent: The spawn's agent and options.
+///     descriptor: The descriptor of the agent's plugin, when the host has it.
+///
+/// Returns:
+///     True when the flag or the options changed.
+pub fn fold_trusted(
+    flag: &mut bool,
+    mode: SessionMode,
+    agent: Option<&mut AgentSelection>,
+    descriptor: Option<&AgentDescriptor>,
+) -> bool {
+    let before = *flag;
+    let mut options_changed = false;
+    let bypasses = match (agent, descriptor) {
+        (Some(selection), Some(descriptor))
+            if mode != SessionMode::PlainShell && descriptor.id == selection.agent =>
+        {
+            if before {
+                options_changed = descriptor.set_bypass(&mut selection.options);
+            }
+            descriptor.bypasses(&selection.options)
+        }
+        _ => false,
+    };
+    *flag = bypasses;
+    options_changed || before != bypasses
 }
 
 /// What an agent paints into its terminal title besides a name: a leading
@@ -414,6 +538,8 @@ pub struct OptionField {
     /// On the agent's Settings page; its value is the spawn dialog's default.
     pub settings: bool,
     pub spawn: SpawnPlacement,
+    /// Deprecated: always false; older clients require it.
+    #[serde(default)]
     pub locked_when_trusted: bool,
     pub when: Vec<FieldRule>,
 }
@@ -445,6 +571,15 @@ pub struct Choice {
     /// The [`OptionValue::Text`] the choice stores.
     pub value: String,
     pub label: String,
+}
+
+/// The choice of one of an agent's fields that runs it with its permission prompts bypassed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BypassChoice {
+    /// The [`OptionField::id`] of a choice field.
+    pub field: String,
+    /// The [`Choice::value`] that bypasses the prompts.
+    pub value: String,
 }
 
 /// How a [`FieldKind::Choice`] field is drawn.
@@ -913,11 +1048,6 @@ pub struct SessionSnapshot {
     /// owning repo/workspace, then the app default.
     #[serde(default)]
     pub appearance: AppearanceOverrides,
-    /// True when the session was launched with approvals/permission prompts
-    /// bypassed (a trusted launch). Clients use this to keep elevated authority visible after the
-    /// spawn dialog closes.
-    #[serde(default)]
-    pub elevated_authority: bool,
     /// True when the session was spawned with `use_worktree = true`, i.e.
     /// the daemon created (or reused) a per-session git worktree under
     /// `<repo>.wt/<branch>`. Drives the close-context-menu's "delete
@@ -976,6 +1106,67 @@ pub struct SessionSnapshot {
     /// a role this build does not know, both read as [`SessionRole::Normal`].
     #[serde(default)]
     pub role: SessionRole,
+    /// The one word for the session's state, as the daemon computes it with
+    /// [`status_label`] from this snapshot's own fields; each client words it
+    /// its own way. A daemon that predates the field, and a label this build
+    /// does not know, both read as [`StatusLabel::Unknown`], and a client
+    /// then words `status` itself.
+    #[serde(default)]
+    pub status_label: StatusLabel,
+}
+
+/// A session's state as one label: its lifecycle (parked, abandoned,
+/// orphaned) first, then its status, with an idle session that has
+/// background work apart from a plain idle one.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusLabel {
+    /// Parked: the process stopped and the worktree is kept for a resume.
+    Inactive,
+    /// The previous daemon died mid-run and the agent process is gone.
+    Abandoned,
+    /// Still running, but reattached without its stdio.
+    Orphan,
+    /// Status [`SessionStatus::Spawning`].
+    Starting,
+    AwaitingInput,
+    Working,
+    /// Idle, with a background shell, subagent or wakeup still pending.
+    Background,
+    Idle,
+    Error,
+    /// Status [`SessionStatus::Stopped`], whatever its exit code.
+    Stopped,
+    /// From a daemon that predates the field, or a label this build does
+    /// not know: the client words the status itself.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// The label `snapshot`'s own fields give, first match wins: parked,
+/// abandoned, orphaned, then the status, with an idle session that has
+/// background work labelled [`StatusLabel::Background`].
+#[must_use]
+pub fn status_label(snapshot: &SessionSnapshot) -> StatusLabel {
+    if snapshot.is_inactive {
+        return StatusLabel::Inactive;
+    }
+    if snapshot.is_abandoned {
+        return StatusLabel::Abandoned;
+    }
+    if snapshot.is_orphan {
+        return StatusLabel::Orphan;
+    }
+    match snapshot.status {
+        SessionStatus::Spawning => StatusLabel::Starting,
+        SessionStatus::AwaitingInput => StatusLabel::AwaitingInput,
+        SessionStatus::Working => StatusLabel::Working,
+        SessionStatus::Idle if snapshot.background => StatusLabel::Background,
+        SessionStatus::Idle => StatusLabel::Idle,
+        SessionStatus::Error => StatusLabel::Error,
+        SessionStatus::Stopped => StatusLabel::Stopped,
+    }
 }
 
 /// What a session was spawned for. A role is fixed for the life of the
@@ -1039,6 +1230,10 @@ pub struct PendingQuestion {
     /// True when the prompt accepts more than one choice.
     #[serde(default)]
     pub multi_select: bool,
+    /// True when any option carries a preview, which only the agent's own
+    /// dialog in the pane draws, so a toast offers Go to pane, not answers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preview: bool,
 }
 
 /// What a waiting session's summary says it needs.
@@ -1281,6 +1476,14 @@ pub struct AgentNode {
     pub started_at: DateTime<Utc>,
     #[serde(default)]
     pub stuck: Option<StuckReason>,
+    /// A subagent's model, as a display name (`Opus 5.5`); `None` when
+    /// unknown or for other nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// A subagent's effort level (`high`); `None` when unknown or for other
+    /// nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(default)]
     pub children: Vec<AgentNode>,
 }
@@ -1584,11 +1787,6 @@ pub struct HistoryEntry {
     /// log. `None` for a recorded entry: its options are its `spawn_config`'s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<OptionValues>,
-    /// True when an imported session ran with permission prompts skipped,
-    /// read from its tracer log. A recorded entry leaves it false: its
-    /// `spawn_config` carries the flag.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub trusted: bool,
 }
 
 /// One workspace member bound to a specific worktree directory that already
@@ -1710,7 +1908,9 @@ pub struct SpawnRequest {
     pub target: SpawnTarget,
     pub mode: SessionMode,
     pub initial_prompt: Option<String>,
-    /// A trusted launch: the agent runs with its permission prompts skipped.
+    /// Deprecated: true exactly when `agent`'s options hold its descriptor's bypass choice
+    /// ([`fold_trusted`]); kept on the wire for peers that read or send it.
+    #[serde(default)]
     pub dangerously_skip_permissions: bool,
     /// The agent to run and its options; `None` exactly for a plain shell.
     pub agent: Option<AgentSelection>,
@@ -1731,6 +1931,11 @@ pub struct SpawnRequest {
     /// back, so a client that replays a config verbatim keeps working.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
+    /// Extra command-line arguments the user added to this spawn, already
+    /// split, passed after the agent's own arguments and the host's
+    /// launch-command extras; interactive agent spawns only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
     /// Keys whose rows this client considers secret whatever their name, set by
     /// the spawn dialog's per-row Secret toggle. The daemon seals the union of
     /// these and the rows its own name pattern catches, so a secret under a
@@ -1739,8 +1944,8 @@ pub struct SpawnRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_env_keys: Vec<String>,
     /// Optional scripted PTY input fed to the child after the PTY comes up.
-    /// When set on `SessionMode::Interactive`, the daemon omits the positional
-    /// prompt arg (the injector is expected to deliver the prompt instead).
+    /// When set on `SessionMode::Interactive`, the daemon does not pass the
+    /// prompt on the command line (the injector is expected to deliver it).
     /// A plain shell runs it as typed input. Ignored for headless sessions.
     #[serde(default)]
     pub prompt_injector: Option<PromptInjector>,
@@ -1772,6 +1977,9 @@ pub struct SpawnRequest {
 pub struct SpawnConfig {
     pub target: SpawnTarget,
     pub mode: SessionMode,
+    /// Deprecated: true exactly when `agent`'s options hold its descriptor's bypass choice
+    /// ([`fold_trusted`]); kept on the wire for peers that read or send it.
+    #[serde(default)]
     pub dangerously_skip_permissions: bool,
     /// See [`SpawnRequest::agent`].
     pub agent: Option<AgentSelection>,
@@ -1781,6 +1989,29 @@ pub struct SpawnConfig {
     /// was built, so a stored or echoed config carries no secret values.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
+    /// Extra command-line arguments the user added to this spawn, already
+    /// split, passed after the agent's own arguments and the host's
+    /// launch-command extras; interactive agent spawns only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+impl SpawnRequest {
+    /// Fold this request's deprecated trusted flag into its agent's bypass choice ([`fold_trusted`]).
+    ///
+    /// Args:
+    ///     descriptor: The descriptor of the request's agent, when the host has it.
+    ///
+    /// Returns:
+    ///     True when the flag or the options changed.
+    pub fn fold_trusted(&mut self, descriptor: Option<&AgentDescriptor>) -> bool {
+        fold_trusted(
+            &mut self.dangerously_skip_permissions,
+            self.mode,
+            self.agent.as_mut(),
+            descriptor,
+        )
+    }
 }
 
 impl SpawnTarget {
@@ -1830,9 +2061,54 @@ impl SpawnTarget {
             Self::Standalone { .. } => None,
         }
     }
+
+    /// Whether this target creates worktrees, so a replay needs a branch name
+    /// no other launch holds.
+    #[must_use]
+    pub fn uses_worktree(&self) -> bool {
+        matches!(
+            self,
+            Self::Single {
+                use_worktree: true,
+                ..
+            } | Self::Workspace {
+                use_worktree: true,
+                ..
+            }
+        )
+    }
+
+    /// Whether this target spawns into a registered folder that is not a git
+    /// repository: it runs in place whatever the stored config says.
+    #[must_use]
+    pub fn replays_in_place(&self, repos: &[RepoEntry]) -> bool {
+        match self {
+            Self::Single { repo_id, .. } => repos
+                .iter()
+                .find(|repo| &repo.id == repo_id)
+                .is_some_and(|repo| !repo.is_git),
+            Self::Workspace { .. } | Self::Standalone { .. } => false,
+        }
+    }
 }
 
 impl SpawnConfig {
+    /// Fold this config's deprecated trusted flag into its agent's bypass choice ([`fold_trusted`]).
+    ///
+    /// Args:
+    ///     descriptor: The descriptor of the config's agent, when the host has it.
+    ///
+    /// Returns:
+    ///     True when the flag or the options changed.
+    pub fn fold_trusted(&mut self, descriptor: Option<&AgentDescriptor>) -> bool {
+        fold_trusted(
+            &mut self.dangerously_skip_permissions,
+            self.mode,
+            self.agent.as_mut(),
+            descriptor,
+        )
+    }
+
     /// Capture the spawn-time config from a [`SpawnRequest`], dropping the
     /// fields a duplicate doesn't want to inherit.
     #[must_use]
@@ -1843,6 +2119,7 @@ impl SpawnConfig {
             dangerously_skip_permissions: req.dangerously_skip_permissions,
             agent: req.agent.clone(),
             extra_env: req.extra_env.clone(),
+            extra_args: req.extra_args.clone(),
         }
     }
 
@@ -1860,6 +2137,7 @@ impl SpawnConfig {
             dangerously_skip_permissions: self.dangerously_skip_permissions,
             agent: self.agent.clone(),
             extra_env: self.extra_env.clone(),
+            extra_args: self.extra_args.clone(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
@@ -1915,6 +2193,46 @@ impl SpawnConfig {
             | SpawnTarget::Standalone { .. } => {}
         }
         req
+    }
+
+    /// The repo or workspace a worktree config asks a fresh branch name
+    /// about; `None` when the config runs in place, outside a repo, or in a
+    /// folder that is no git repository.
+    #[must_use]
+    pub fn replay_suggest_target(&self, repos: &[RepoEntry]) -> Option<SuggestTarget> {
+        if !self.target.uses_worktree() || self.target.replays_in_place(repos) {
+            return None;
+        }
+        self.target.suggest_target()
+    }
+
+    /// The request a replay sends: the stored config as a duplicate, with the
+    /// fresh branch name a worktree launch waited for. A folder that is no git
+    /// repository runs in place, on no branch, whatever the stored config
+    /// says.
+    #[must_use]
+    pub fn to_replay_request(
+        &self,
+        repos: &[RepoEntry],
+        fresh_branch: Option<String>,
+    ) -> SpawnRequest {
+        let mut request = self.to_duplicate_request(fresh_branch);
+        let in_place = request.target.replays_in_place(repos);
+        if in_place
+            && let SpawnTarget::Single {
+                branch_name,
+                base_branch,
+                use_worktree,
+                existing_worktree,
+                ..
+            } = &mut request.target
+        {
+            branch_name.clear();
+            *base_branch = None;
+            *use_worktree = false;
+            *existing_worktree = None;
+        }
+        request
     }
 }
 
@@ -2643,8 +2961,6 @@ pub struct PresetEntry {
     /// [`RepoEntry::default_use_worktree`] at launch time.
     #[serde(default)]
     pub default_use_worktree: Option<bool>,
-    #[serde(default)]
-    pub dangerously_skip_permissions: bool,
     /// The agent the preset's sessions run and its options; `None` runs the
     /// daemon's default agent with its default options.
     #[serde(default)]
@@ -3129,6 +3445,9 @@ pub enum ChatPromptKind {
     Plan,
     /// A trust prompt for a folder the agent has not run in.
     Trust,
+    /// A new MCP server the project names, waiting to be used or passed
+    /// over.
+    McpServer,
     /// A heads-up notice the agent raised.
     HeadsUp,
     /// Forward-compat fallback: a kind the current build doesn't know.
@@ -4057,8 +4376,10 @@ pub enum ClientMessage {
     /// Clone an existing session: daemon reads its stored [`SpawnConfig`]
     /// and spawns a new session with the same agent, mode, target, model,
     /// permission mode, sandbox, skip-perms flag, and extra env vars. The
-    /// new session gets a freshly generated label and no initial prompt —
-    /// it's a fresh process with the same config, not a continuation.
+    /// new session gets a freshly generated label and no initial prompt.
+    /// A Duplicate is a fresh process with the same config; a Restart or a
+    /// Resume (`same_checkout`) continues the source's agent conversation
+    /// while its transcript exists.
     ///
     /// A duplicate of a *worktree* session lands on a fresh branch the daemon
     /// picks (and refuses any leftover under that name) rather than the
@@ -4084,6 +4405,43 @@ pub enum ClientMessage {
         /// of a parked one, whose source no longer holds the checkout.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         same_checkout: bool,
+    },
+    /// Resume a session that is not running; the daemon picks how by its
+    /// state. A parked or stopped session is rerun as a Restart is (a
+    /// [`ClientMessage::DuplicateSession`] with `carry_busy_excluded` and
+    /// `same_checkout`), and the client still places the new session and
+    /// discards the original; an abandoned one is resumed in place as
+    /// [`ClientMessage::ResumeAbandoned`] does. Success is the new session's
+    /// [`DaemonMessage::SessionUpdated`] echoing `request_id`; a refusal is a
+    /// [`DaemonMessage::Error`] or [`DaemonMessage::ActionFailed`] carrying
+    /// it. Sent only to a daemon listing [`FEATURE_RESUME_SESSION`].
+    ResumeSession {
+        session_id: String,
+        /// Echoed on the requester's [`DaemonMessage::SessionUpdated`] for
+        /// the new session and on a refusal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Launch `target`'s stored last spawn config again, as the daemon replays
+    /// it: a worktree config on a fresh branch name, a folder that is no git
+    /// repository in place. Journalled by `request_id` like `SpawnSession`.
+    LaunchLast {
+        target: ContainerRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Start an interactive session in `target` from its last agent and
+    /// options, never bypassing permission prompts, in a worktree on a fresh
+    /// branch name (a folder that is no git repository in place), with
+    /// `initial_prompt` as its first prompt. Journalled by `request_id` like
+    /// `SpawnSession`. A daemon lists [`FEATURE_NEW_SESSION`] in
+    /// `Welcome.features` when it handles it.
+    NewSession {
+        target: ContainerRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initial_prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Fetch the persisted [`SpawnConfig`] for a session so the spawn
     /// dialog can pre-fill all fields with the source's values. Replied
@@ -9545,6 +9903,8 @@ mod tests {
             state: AgentState::Finished,
             started_at: dashboard_time(2),
             stuck: None,
+            model: None,
+            effort: None,
             children: Vec::new(),
         };
         let dispatch = AgentNode {
@@ -9556,6 +9916,8 @@ mod tests {
             state: AgentState::Running,
             started_at: dashboard_time(0),
             stuck: Some(StuckReason::ToolFailures { count: 3 }),
+            model: None,
+            effort: None,
             children: vec![shell],
         };
         SessionFacts {
@@ -9660,6 +10022,42 @@ mod tests {
             !json.contains("activity"),
             "an agent with no counts sends none: {json}"
         );
+    }
+
+    #[test]
+    fn an_agent_node_round_trips_its_model_and_effort() {
+        let node = AgentNode {
+            key: "subagent:a1".to_string(),
+            kind: AgentKind::Subagent,
+            name: "look at the parser".to_string(),
+            task: String::new(),
+            activity: Vec::new(),
+            state: AgentState::Running,
+            started_at: dashboard_time(0),
+            stuck: None,
+            model: Some("Opus 5.5".to_string()),
+            effort: Some("high".to_string()),
+            children: Vec::new(),
+        };
+        let json = serde_json::to_string(&node).expect("serialize");
+        assert!(json.contains(r#""model":"Opus 5.5""#), "{json}");
+        assert!(json.contains(r#""effort":"high""#), "{json}");
+        let back: AgentNode = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, node);
+
+        let mut quiet = node.clone();
+        quiet.model = None;
+        quiet.effort = None;
+        let json = serde_json::to_string(&quiet).expect("serialize");
+        assert!(!json.contains("model"), "no model sends no key: {json}");
+        assert!(!json.contains("effort"), "no effort sends no key: {json}");
+
+        let bare: AgentNode = serde_json::from_str(
+            r#"{"key":"bg:b1","kind":"shell","name":"bg shell b1","state":"running","started_at":"2026-10-28T12:00:00Z"}"#,
+        )
+        .expect("a node without them decodes");
+        assert_eq!(bare.model, None);
+        assert_eq!(bare.effort, None);
     }
 
     #[test]
@@ -10277,7 +10675,6 @@ mod tests {
             branch_template: "bug/{date}/{index}".to_string(),
             session_label_template: Some("bug-{index}: {slug}".to_string()),
             default_use_worktree: Some(true),
-            dangerously_skip_permissions: true,
             agent: Some(AgentSelection {
                 agent: claude_id(),
                 options: OptionValues::new(),
@@ -10566,7 +10963,6 @@ mod tests {
         let preset: PresetEntry = serde_json::from_str(minimal).expect("parse minimal preset");
         assert_eq!(preset.id, "smoke");
         assert_eq!(preset.stagger_ms, 3000);
-        assert!(!preset.dangerously_skip_permissions);
         assert_eq!(preset.variables, Vec::<PresetVariable>::new());
         assert_eq!(preset.context_footer_lines, Vec::<FooterLine>::new());
         assert_eq!(preset.default_use_worktree, None);
@@ -10591,6 +10987,7 @@ mod tests {
             dangerously_skip_permissions: true,
             agent: Some(deepseek_selection()),
             extra_env: vec![],
+            extra_args: Vec::new(),
             prompt_injector: Some(PromptInjector {
                 steps: vec![
                     InjectorStep::Delay { ms: 6000 },
@@ -10640,6 +11037,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent: None,
             extra_env: vec![],
+            extra_args: Vec::new(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
@@ -10670,6 +11068,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent: Some(deepseek_selection()),
             extra_env: vec![],
+            extra_args: Vec::new(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
@@ -10679,10 +11078,15 @@ mod tests {
 
     #[test]
     fn clone_and_duplicate_keep_the_agent_selection() {
-        let req = claude_spawn_request();
+        let req = SpawnRequest {
+            extra_args: vec!["--debug".to_string()],
+            ..claude_spawn_request()
+        };
         let config = SpawnConfig::from_request(&req);
         assert_eq!(config.agent, Some(deepseek_selection()));
+        assert_eq!(config.extra_args, req.extra_args, "the capture keeps them");
         assert_eq!(config.to_clone_request().agent, Some(deepseek_selection()));
+        assert_eq!(config.to_clone_request().extra_args, req.extra_args);
         assert_eq!(
             config
                 .to_duplicate_request(Some("wt/brave-lynx".to_string()))
@@ -10735,6 +11139,7 @@ mod tests {
                 options: option_values(&[("model", text("sonnet-4"))]),
             }),
             extra_env: vec![("RT_TEST".to_string(), "1".to_string())],
+            extra_args: vec!["--debug".to_string(), "a b".to_string()],
         }
     }
 
@@ -10787,6 +11192,7 @@ mod tests {
         assert_eq!(req.mode, config.mode);
         assert_eq!(req.agent, config.agent);
         assert_eq!(req.extra_env, config.extra_env);
+        assert_eq!(req.extra_args, config.extra_args);
         assert!(req.dangerously_skip_permissions);
         assert_eq!(req.label, None);
         assert_eq!(req.initial_prompt, None);
@@ -11042,6 +11448,99 @@ mod tests {
             ),
             other => panic!("expected a workspace target, got {other:?}"),
         }
+    }
+
+    /// A registered repo `id` whose folder is a git repository, or a plain
+    /// folder when `is_git` is false.
+    fn replay_repo(id: &str, is_git: bool) -> RepoEntry {
+        RepoEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: format!("X:/dev/{id}"),
+            default_branch: None,
+            default_use_worktree: true,
+            is_git,
+            appearance: AppearanceOverrides::default(),
+            last_agent: None,
+            last_spawn_config: None,
+        }
+    }
+
+    #[test]
+    fn a_worktree_replay_takes_the_fresh_branch() {
+        let config = duplicate_source_config(single_target("wt/sleepy-otter", true));
+        let req = config.to_replay_request(&[replay_repo("r1", true)], Some("b2".to_string()));
+        assert_eq!(req.extra_args, config.extra_args, "a replay keeps them");
+        match req.target {
+            SpawnTarget::Single {
+                branch_name,
+                use_worktree,
+                ..
+            } => {
+                assert_eq!(branch_name, "b2");
+                assert!(use_worktree);
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_replay_of_a_plain_folder_runs_in_place() {
+        let config = duplicate_source_config(pinned_single_target("wt/sleepy-otter", "wt/pin"));
+        let req = config.to_replay_request(&[replay_repo("r1", false)], None);
+        match req.target {
+            SpawnTarget::Single {
+                branch_name,
+                base_branch,
+                use_worktree,
+                existing_worktree,
+                ..
+            } => {
+                assert_eq!(branch_name, "");
+                assert_eq!(base_branch, None);
+                assert!(!use_worktree);
+                assert_eq!(existing_worktree, None);
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_in_place_replay_asks_no_branch_name() {
+        let config = duplicate_source_config(single_target("main", false));
+        assert_eq!(
+            config.replay_suggest_target(&[replay_repo("r1", true)]),
+            None,
+            "an in-place launch runs on the branch it was saved with"
+        );
+    }
+
+    #[test]
+    fn a_worktree_replay_of_a_workspace_asks_about_it() {
+        let config = duplicate_source_config(SpawnTarget::Workspace {
+            workspace_id: "ws1".to_string(),
+            branch_name: "wt/sleepy-otter".to_string(),
+            base_branch: None,
+            use_worktree: true,
+            worktree_reuse: WorktreeReusePolicy::Reuse,
+            existing_worktrees: Vec::new(),
+        });
+        assert_eq!(
+            config.replay_suggest_target(&[]),
+            Some(SuggestTarget::Workspace {
+                workspace_id: "ws1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_worktree_replay_of_a_plain_folder_asks_no_branch_name() {
+        let config = duplicate_source_config(single_target("wt/sleepy-otter", true));
+        assert_eq!(
+            config.replay_suggest_target(&[replay_repo("r1", false)]),
+            None,
+            "a plain folder runs in place whatever the stored config says"
+        );
     }
 
     #[test]
@@ -12837,6 +13336,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent: Some(deepseek_selection()),
             extra_env: vec![],
+            extra_args: Vec::new(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: Some("req-1".to_string()),
@@ -12883,6 +13383,116 @@ mod tests {
             ),
             "{decoded:?}"
         );
+    }
+
+    #[test]
+    fn resume_session_round_trips() {
+        let old: ClientMessage =
+            serde_json::from_str(r#"{"type":"resume_session","session_id":"s1"}"#)
+                .expect("a message without request_id decodes");
+        assert!(
+            matches!(
+                &old,
+                ClientMessage::ResumeSession { session_id, request_id: None } if session_id == "s1"
+            ),
+            "{old:?}"
+        );
+        let msg = ClientMessage::ResumeSession {
+            session_id: "s1".to_string(),
+            request_id: Some("req-3".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"resume_session","session_id":"s1","request_id":"req-3"}"#
+        );
+        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(
+                &decoded,
+                ClientMessage::ResumeSession { session_id, request_id: Some(id) }
+                    if session_id == "s1" && id == "req-3"
+            ),
+            "{decoded:?}"
+        );
+        assert_eq!(FEATURE_RESUME_SESSION, "resume_session");
+    }
+
+    #[test]
+    fn launch_last_round_trips() {
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"launch_last","target":{"kind":"repo","id":"r1"},"request_id":"q1"}"#,
+        )
+        .expect("the message decodes");
+        assert!(
+            matches!(
+                &msg,
+                ClientMessage::LaunchLast { target: ContainerRef::Repo(id), request_id: Some(request) }
+                    if id == "r1" && request == "q1"
+            ),
+            "{msg:?}"
+        );
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"launch_last","target":{"kind":"repo","id":"r1"},"request_id":"q1"}"#
+        );
+        let without_id: ClientMessage = serde_json::from_str(
+            r#"{"type":"launch_last","target":{"kind":"workspace","id":"w1"}}"#,
+        )
+        .expect("a message without request_id decodes");
+        assert!(
+            matches!(
+                &without_id,
+                ClientMessage::LaunchLast { target: ContainerRef::Workspace(id), request_id: None }
+                    if id == "w1"
+            ),
+            "{without_id:?}"
+        );
+        let json = serde_json::to_string(&without_id).expect("serialize");
+        assert!(!json.contains("request_id"), "{json}");
+        assert_eq!(FEATURE_LAUNCH_LAST, "launch_last");
+        assert_eq!(FEATURE_PRESET_JOB_REPEAT, "preset_job_repeat");
+    }
+
+    #[test]
+    fn new_session_round_trips() {
+        let wire = r#"{"type":"new_session","target":{"kind":"repo","id":"r1"},"initial_prompt":"/nextup","request_id":"q1"}"#;
+        let msg: ClientMessage = serde_json::from_str(wire).expect("the message decodes");
+        assert!(
+            matches!(
+                &msg,
+                ClientMessage::NewSession {
+                    target: ContainerRef::Repo(id),
+                    initial_prompt: Some(prompt),
+                    request_id: Some(request),
+                } if id == "r1" && prompt == "/nextup" && request == "q1"
+            ),
+            "{msg:?}"
+        );
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(json, wire);
+        let bare: ClientMessage = serde_json::from_str(
+            r#"{"type":"new_session","target":{"kind":"workspace","id":"w1"}}"#,
+        )
+        .expect("a message without a prompt or request_id decodes");
+        assert!(
+            matches!(
+                &bare,
+                ClientMessage::NewSession {
+                    target: ContainerRef::Workspace(id),
+                    initial_prompt: None,
+                    request_id: None,
+                } if id == "w1"
+            ),
+            "{bare:?}"
+        );
+        let json = serde_json::to_string(&bare).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"new_session","target":{"kind":"workspace","id":"w1"}}"#
+        );
+        assert_eq!(FEATURE_NEW_SESSION, "new_session");
     }
 
     #[test]
@@ -13777,6 +14387,147 @@ mod tests {
     }
 
     #[test]
+    fn session_snapshot_without_status_label_decodes() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        assert_eq!(snapshot.status_label, StatusLabel::Unknown);
+        let json = serde_json::to_value(SessionSnapshot {
+            status_label: StatusLabel::AwaitingInput,
+            ..snapshot
+        })
+        .expect("encode");
+        assert_eq!(
+            json.get("status_label"),
+            Some(&serde_json::json!("awaiting_input"))
+        );
+        let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
+        assert_eq!(
+            back.status_label,
+            StatusLabel::AwaitingInput,
+            "the label round-trips"
+        );
+    }
+
+    #[test]
+    fn an_unknown_status_label_decodes_as_unknown() {
+        let json = SNAPSHOT_WITHOUT_STATUS_SINCE.replace(
+            r#""agent":"claude""#,
+            r#""agent":"claude","status_label":"some_future_label""#,
+        );
+        let snapshot: SessionSnapshot = serde_json::from_str(&json).expect("decodes");
+        assert_eq!(snapshot.status_label, StatusLabel::Unknown);
+    }
+
+    /// The fixture snapshot with `status`, every lifecycle flag off and no
+    /// background work.
+    fn labelled(status: SessionStatus) -> SessionSnapshot {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        SessionSnapshot { status, ..snapshot }
+    }
+
+    #[test]
+    fn status_label_inactive_wins_over_everything() {
+        let snapshot = SessionSnapshot {
+            is_inactive: true,
+            is_abandoned: true,
+            is_orphan: true,
+            ..labelled(SessionStatus::Working)
+        };
+        assert_eq!(status_label(&snapshot), StatusLabel::Inactive);
+    }
+
+    #[test]
+    fn status_label_abandoned_over_orphan() {
+        let snapshot = SessionSnapshot {
+            is_abandoned: true,
+            is_orphan: true,
+            ..labelled(SessionStatus::Working)
+        };
+        assert_eq!(status_label(&snapshot), StatusLabel::Abandoned);
+    }
+
+    #[test]
+    fn status_label_orphan_over_status() {
+        let snapshot = SessionSnapshot {
+            is_orphan: true,
+            ..labelled(SessionStatus::Idle)
+        };
+        assert_eq!(status_label(&snapshot), StatusLabel::Orphan);
+    }
+
+    #[test]
+    fn status_label_spawning_is_starting() {
+        assert_eq!(
+            status_label(&labelled(SessionStatus::Spawning)),
+            StatusLabel::Starting
+        );
+    }
+
+    #[test]
+    fn status_label_awaiting_input() {
+        assert_eq!(
+            status_label(&labelled(SessionStatus::AwaitingInput)),
+            StatusLabel::AwaitingInput
+        );
+    }
+
+    #[test]
+    fn status_label_working() {
+        for background in [false, true] {
+            let snapshot = SessionSnapshot {
+                background,
+                ..labelled(SessionStatus::Working)
+            };
+            assert_eq!(
+                status_label(&snapshot),
+                StatusLabel::Working,
+                "background {background}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_label_idle_with_background_work() {
+        let snapshot = SessionSnapshot {
+            background: true,
+            ..labelled(SessionStatus::Idle)
+        };
+        assert_eq!(status_label(&snapshot), StatusLabel::Background);
+    }
+
+    #[test]
+    fn status_label_idle() {
+        assert_eq!(
+            status_label(&labelled(SessionStatus::Idle)),
+            StatusLabel::Idle
+        );
+    }
+
+    #[test]
+    fn status_label_error() {
+        assert_eq!(
+            status_label(&labelled(SessionStatus::Error)),
+            StatusLabel::Error
+        );
+    }
+
+    #[test]
+    fn status_label_stopped_with_and_without_exit_code() {
+        for exit_code in [Some(0), Some(3), None] {
+            let snapshot = SessionSnapshot {
+                exit_code,
+                ..labelled(SessionStatus::Stopped)
+            };
+            assert_eq!(
+                status_label(&snapshot),
+                StatusLabel::Stopped,
+                "exit {exit_code:?}"
+            );
+        }
+    }
+
+    #[test]
     fn session_snapshot_status_seq_round_trips() {
         let mut snapshot: SessionSnapshot =
             serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
@@ -13863,6 +14614,16 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_question_without_preview_reads_false() {
+        // The JSON a daemon before previews sends.
+        let question: PendingQuestion = serde_json::from_str(
+            r#"{"question":"Which branch?","header":"","options":["main","dev"],"multi_select":false}"#,
+        )
+        .expect("a question from a daemon that predates previews");
+        assert!(!question.preview);
+    }
+
+    #[test]
     fn pending_input_round_trips() {
         let cases = vec![
             PendingInput::Question {
@@ -13873,6 +14634,7 @@ mod tests {
                         options: vec!["Tea".to_owned(), "Coffee".to_owned()],
                         option_descriptions: vec!["Hot leaves.".to_owned(), String::new()],
                         multi_select: true,
+                        preview: false,
                     },
                     PendingQuestion {
                         question: "Which editor?".to_owned(),
@@ -13880,6 +14642,7 @@ mod tests {
                         options: Vec::new(),
                         option_descriptions: Vec::new(),
                         multi_select: false,
+                        preview: false,
                     },
                 ],
             },
@@ -14061,6 +14824,40 @@ mod tests {
         assert!(json.contains(r#""secret_env_keys":["GH_PAT"]"#), "{json}");
     }
 
+    #[test]
+    fn extra_args_defaults_empty_and_is_not_serialized_when_empty() {
+        // A client that predates the field sends no `extra_args`.
+        let req: SpawnRequest = serde_json::from_str(
+            r#"{"label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent":{"agent":"claude","options":{}}}"#,
+        )
+        .expect("a request without extra_args decodes");
+        assert!(req.extra_args.is_empty(), "{req:?}");
+
+        let json = serde_json::to_value(&req).expect("encode");
+        assert!(
+            json.get("extra_args").is_none(),
+            "an empty list stays off the wire: {json}"
+        );
+
+        // A non-empty one round-trips.
+        let req = SpawnRequest {
+            extra_args: vec!["--debug".to_owned(), "a b".to_owned()],
+            ..req
+        };
+        let json = serde_json::to_string(&req).expect("encode");
+        assert!(json.contains(r#""extra_args":["--debug","a b"]"#), "{json}");
+
+        // A config saved without the field reads as no arguments, and an
+        // empty list stays out of what it writes.
+        let config: SpawnConfig = serde_json::from_str(
+            r#"{"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","dangerously_skip_permissions":false,"agent":null,"extra_env":[]}"#,
+        )
+        .expect("a config without extra_args decodes");
+        assert!(config.extra_args.is_empty(), "{config:?}");
+        let json = serde_json::to_value(&config).expect("encode");
+        assert!(json.get("extra_args").is_none(), "{json}");
+    }
+
     fn claude_id() -> AgentId {
         AgentId("claude".to_owned())
     }
@@ -14141,7 +14938,7 @@ mod tests {
                 shell_resume: true,
                 user_hooks: false,
             },
-            trust_note: Some("Trusted launch skips prompts.".to_owned()),
+            bypass: None,
             texts: AgentTexts {
                 shell_resume_label: "Shell running claude --resume".to_owned(),
                 no_conversation: "no conversation found".to_owned(),
@@ -14197,6 +14994,172 @@ mod tests {
             },
             icon: None,
         }
+    }
+
+    /// The sample descriptor with a permission-mode choice field and a bypass choice naming it.
+    fn bypass_descriptor() -> AgentDescriptor {
+        AgentDescriptor {
+            fields: vec![OptionField {
+                id: "permission_mode".to_owned(),
+                label: "Permission mode".to_owned(),
+                help: None,
+                kind: FieldKind::Choice {
+                    choices: ["default", "plan", "bypass_permissions"]
+                        .map(|value| Choice {
+                            value: value.to_owned(),
+                            label: value.to_owned(),
+                        })
+                        .to_vec(),
+                    style: ChoiceStyle::Dropdown,
+                },
+                default: OptionValue::Null,
+                settings: true,
+                spawn: SpawnPlacement::Main,
+                locked_when_trusted: false,
+                when: Vec::new(),
+            }],
+            bypass: Some(BypassChoice {
+                field: "permission_mode".to_owned(),
+                value: "bypass_permissions".to_owned(),
+            }),
+            ..sample_descriptor()
+        }
+    }
+
+    #[test]
+    fn clear_bypass_removes_only_the_bypass_choice() {
+        let descriptor = bypass_descriptor();
+        let mut bypass = option_values(&[
+            ("permission_mode", text("bypass_permissions")),
+            ("model", text("opus")),
+        ]);
+        assert!(descriptor.clear_bypass(&mut bypass));
+        assert_eq!(bypass, option_values(&[("model", text("opus"))]));
+
+        let mut plan = option_values(&[("permission_mode", text("plan"))]);
+        assert!(!descriptor.clear_bypass(&mut plan));
+        assert_eq!(plan, option_values(&[("permission_mode", text("plan"))]));
+
+        let without = AgentDescriptor {
+            bypass: None,
+            ..bypass_descriptor()
+        };
+        let mut held = option_values(&[("permission_mode", text("bypass_permissions"))]);
+        assert!(!without.clear_bypass(&mut held));
+        assert_eq!(
+            held,
+            option_values(&[("permission_mode", text("bypass_permissions"))])
+        );
+    }
+
+    #[test]
+    fn fold_trusted_follows_the_saved_flag() {
+        let descriptor = bypass_descriptor();
+        let bypass = option_values(&[("permission_mode", text("bypass_permissions"))]);
+        let plan = option_values(&[("permission_mode", text("plan"))]);
+        let selection = |options: &OptionValues| AgentSelection {
+            agent: claude_id(),
+            options: options.clone(),
+        };
+
+        for (start, returns) in [
+            (OptionValues::new(), true),
+            (plan.clone(), true),
+            (bypass.clone(), false),
+        ] {
+            let mut flag = true;
+            let mut sel = selection(&start);
+            let changed = fold_trusted(
+                &mut flag,
+                SessionMode::Interactive,
+                Some(&mut sel),
+                Some(&descriptor),
+            );
+            assert_eq!(changed, returns, "{start:?}");
+            assert!(flag, "{start:?}");
+            assert_eq!(sel.options, bypass, "{start:?}");
+        }
+
+        let mut flag = false;
+        let mut sel = selection(&plan);
+        assert!(!fold_trusted(
+            &mut flag,
+            SessionMode::Interactive,
+            Some(&mut sel),
+            Some(&descriptor)
+        ));
+        assert!(!flag);
+        assert_eq!(sel.options, plan);
+
+        let mut flag = false;
+        let mut sel = selection(&bypass);
+        assert!(fold_trusted(
+            &mut flag,
+            SessionMode::Headless,
+            Some(&mut sel),
+            Some(&descriptor)
+        ));
+        assert!(flag);
+        assert_eq!(sel.options, bypass);
+
+        let mut flag = true;
+        let mut sel = selection(&plan);
+        assert!(fold_trusted(
+            &mut flag,
+            SessionMode::PlainShell,
+            Some(&mut sel),
+            Some(&descriptor)
+        ));
+        assert!(!flag);
+        assert_eq!(sel.options, plan);
+
+        let no_bypass = AgentDescriptor {
+            bypass: None,
+            ..bypass_descriptor()
+        };
+        for described in [None, Some(&no_bypass)] {
+            let mut flag = true;
+            let mut sel = selection(&OptionValues::new());
+            assert!(fold_trusted(
+                &mut flag,
+                SessionMode::Interactive,
+                Some(&mut sel),
+                described
+            ));
+            assert!(!flag);
+        }
+    }
+
+    #[test]
+    fn a_spawn_request_without_the_trusted_flag_decodes_as_false() {
+        let req: SpawnRequest = serde_json::from_str(
+            r#"{"label":null,"target":{"kind":"standalone","cwd":"D:\\x"},"mode":"plain_shell",
+                "initial_prompt":null}"#,
+        )
+        .expect("a request without the flag decodes");
+        assert!(!req.dangerously_skip_permissions);
+        let config: SpawnConfig = serde_json::from_str(
+            r#"{"target":{"kind":"standalone","cwd":"D:\\x"},"mode":"interactive","agent":null}"#,
+        )
+        .expect("a config without the flag decodes");
+        assert!(!config.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn descriptor_bypass_round_trips_and_is_absent_when_none() {
+        let json = serde_json::to_value(sample_descriptor()).expect("encode");
+        assert!(json.get("bypass").is_none(), "{json}");
+        let back: AgentDescriptor = serde_json::from_value(json).expect("decode");
+        assert_eq!(back.bypass, None);
+
+        let descriptor = bypass_descriptor();
+        let json = serde_json::to_value(&descriptor).expect("encode");
+        assert_eq!(
+            json["bypass"],
+            serde_json::json!({"field": "permission_mode", "value": "bypass_permissions"})
+        );
+        let back: AgentDescriptor = serde_json::from_value(json).expect("decode");
+        assert_eq!(back, descriptor);
     }
 
     #[test]
@@ -14455,10 +15418,10 @@ mod tests {
     }
 
     #[test]
-    fn history_entry_round_trips_import_options_and_trust() {
+    fn history_entry_round_trips_import_options_and_ignores_trusted() {
         let json = format!(
             r#"{IMPORTED_ENTRY_PREFIX},"end_time_known":true,"import_rev":3,
-                "options":{{"model":"deepseek-flash","provider":"deepseek"}},"trusted":true}}"#
+                "options":{{"model":"deepseek-flash","provider":"deepseek"}}}}"#
         );
         let entry: HistoryEntry = assert_round_trip(&json);
         assert_eq!(
@@ -14468,13 +15431,17 @@ mod tests {
                 ("provider", text("deepseek")),
             ]))
         );
-        assert!(entry.trusted);
         assert_eq!(entry.agent, None);
+
+        let trusted = format!(r#"{IMPORTED_ENTRY_PREFIX},"trusted":true}}"#);
+        let decoded: HistoryEntry =
+            serde_json::from_str(&trusted).expect("an older entry's flag still decodes");
+        let encoded = serde_json::to_value(&decoded).expect("encode");
+        assert!(encoded.get("trusted").is_none(), "{encoded}");
 
         let bare: HistoryEntry =
             serde_json::from_str(&format!("{IMPORTED_ENTRY_PREFIX}}}")).expect("decode");
         assert_eq!(bare.options, None);
-        assert!(!bare.trusted);
         let encoded = serde_json::to_value(&bare).expect("encode");
         assert!(encoded.get("options").is_none(), "{encoded}");
         assert!(encoded.get("trusted").is_none(), "{encoded}");
@@ -15358,6 +16325,14 @@ mod tests {
         assert_eq!(kind, ChatPromptKind::Unknown);
         let known: ChatPromptKind = serde_json::from_str(r#""heads_up""#).expect("decode");
         assert_eq!(known, ChatPromptKind::HeadsUp);
+    }
+
+    #[test]
+    fn chat_prompt_kind_mcp_server_round_trips() {
+        let json = serde_json::to_string(&ChatPromptKind::McpServer).expect("encode");
+        assert_eq!(json, r#""mcp_server""#);
+        let kind: ChatPromptKind = serde_json::from_str(&json).expect("decode");
+        assert_eq!(kind, ChatPromptKind::McpServer);
     }
 
     #[test]

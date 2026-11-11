@@ -627,6 +627,36 @@ fn a_permission_toast_offers_allow_and_deny(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_long_permission_command_shows_whole_and_grows_the_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let long = json!({
+        "kind": "permission", "tool_name": "Bash",
+        "summary": "gh pr create --base main --head feat/remote-update \
+                    --title \"Remote update: a client updates a host, and a host its clients\" \
+                    --body \"Adds the countdown, the cancel and the restart\"",
+    });
+    let mut fixture = sessions(&["s2", "s3"]);
+    fixture.sessions[1] = waiting("s2", stamp(1), long);
+    fixture.sessions[2] = waiting("s3", stamp(1), permission());
+    let mut h = opened(cx, &dir, &fixture, json!({}));
+
+    h.send(needs_you("s2"));
+    h.send(needs_you("s3"));
+
+    let shown = h.toasts_shown();
+    assert_eq!(shown.len(), 2, "both toasts are up: {shown:?}");
+    assert!(
+        shown[0].height > shown[1].height,
+        "the long command's toast is taller: {shown:?}"
+    );
+    let mut toast = h.popout_window();
+    assert!(
+        drawn(&mut toast, "toast-command"),
+        "the long command is drawn"
+    );
+}
+
+#[gpui::test]
 fn a_single_choice_question_offers_its_options(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = raised(cx, &dir, question(&["main", "dev", "next"]));

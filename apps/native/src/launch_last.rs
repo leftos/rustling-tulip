@@ -6,9 +6,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use protocol::{RepoEntry, SpawnConfig, SpawnRequest, SpawnTarget, SuggestTarget, WorkspaceEntry};
+use protocol::{RepoEntry, SpawnConfig, SpawnRequest, SuggestTarget, WorkspaceEntry};
 
-use crate::spawn_form::OpenChoice;
 use crate::spawns::OpenIn;
 use crate::target::HostKey;
 
@@ -54,17 +53,6 @@ impl Placement {
             Self::Tab(id) => OpenIn::Tab(id.clone()),
         }
     }
-
-    /// The spawn dialog's Open-in choice this placement names, so a trusted
-    /// launch opens the dialog with the same tab preselected.
-    #[must_use]
-    pub(crate) fn open_choice(&self) -> OpenChoice {
-        match self {
-            Self::CurrentTab => OpenChoice::CurrentTab,
-            Self::NewTab => OpenChoice::NewTab,
-            Self::Tab(id) => OpenChoice::Tab(id.clone()),
-        }
-    }
 }
 
 /// The spawn config `container` last launched with, cloned; `None` when it
@@ -95,37 +83,7 @@ pub(crate) fn suggestion_target(
     config: &SpawnConfig,
     repos: &[RepoEntry],
 ) -> Option<SuggestTarget> {
-    if !uses_worktree(&config.target) || replays_in_place(&config.target, repos) {
-        return None;
-    }
-    config.target.suggest_target()
-}
-
-/// Whether `target` spawns into a registered folder that is not a git
-/// repository: it runs in place whatever the stored config says.
-fn replays_in_place(target: &SpawnTarget, repos: &[RepoEntry]) -> bool {
-    match target {
-        SpawnTarget::Single { repo_id, .. } => repos
-            .iter()
-            .find(|repo| &repo.id == repo_id)
-            .is_some_and(|repo| !repo.is_git),
-        SpawnTarget::Workspace { .. } | SpawnTarget::Standalone { .. } => false,
-    }
-}
-
-/// Whether a target creates worktrees, so a replay needs a branch name no
-/// other launch holds.
-fn uses_worktree(target: &SpawnTarget) -> bool {
-    matches!(
-        target,
-        SpawnTarget::Single {
-            use_worktree: true,
-            ..
-        } | SpawnTarget::Workspace {
-            use_worktree: true,
-            ..
-        }
-    )
+    config.replay_suggest_target(repos)
 }
 
 /// The request a replay sends: the stored config as a duplicate, with the
@@ -137,22 +95,7 @@ pub(crate) fn replay_request(
     repos: &[RepoEntry],
     fresh_branch: Option<String>,
 ) -> SpawnRequest {
-    let mut request = config.to_duplicate_request(fresh_branch);
-    if replays_in_place(&request.target, repos)
-        && let SpawnTarget::Single {
-            branch_name,
-            base_branch,
-            use_worktree,
-            existing_worktree,
-            ..
-        } = &mut request.target
-    {
-        branch_name.clear();
-        *base_branch = None;
-        *use_worktree = false;
-        *existing_worktree = None;
-    }
-    request
+    config.to_replay_request(repos, fresh_branch)
 }
 
 /// A launch waiting for the daemon's fresh branch name.
@@ -273,7 +216,7 @@ mod tests {
     )]
 
     use super::*;
-    use protocol::{AppearanceOverrides, SessionMode, WorktreeReusePolicy};
+    use protocol::{AppearanceOverrides, SessionMode, SpawnTarget, WorktreeReusePolicy};
 
     fn single(repo_id: &str, use_worktree: bool) -> SpawnTarget {
         SpawnTarget::Single {
@@ -304,6 +247,7 @@ mod tests {
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
             agent: Some(crate::agent_options::test_selection("claude", &[])),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         }
     }

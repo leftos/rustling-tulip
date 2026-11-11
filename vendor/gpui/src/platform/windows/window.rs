@@ -51,6 +51,8 @@ pub struct WindowsWindowState {
     pub renderer: DirectXRenderer,
 
     pub click_state: ClickState,
+    /// Whether the coming mouse-down is the press that brought the window forward.
+    pub pending_first_mouse: bool,
     pub current_cursor: Option<HCURSOR>,
     pub nc_button_pressed: Option<u32>,
 
@@ -115,6 +117,7 @@ impl WindowsWindowState {
         let system_key_handled = false;
         let hovered = false;
         let click_state = ClickState::new();
+        let pending_first_mouse = false;
         let nc_button_pressed = None;
         let fullscreen = None;
         let initial_placement = None;
@@ -137,6 +140,7 @@ impl WindowsWindowState {
             hovered,
             renderer,
             click_state,
+            pending_first_mouse,
             current_cursor,
             nc_button_pressed,
             display,

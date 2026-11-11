@@ -16,6 +16,7 @@ import type {
   PendingInput,
   RepoEntry,
   SessionSnapshot,
+  SpawnConfig,
   WorkspaceEntry,
 } from "./protocol";
 
@@ -27,6 +28,21 @@ const ZULU: RepoEntry = { id: "zz", name: "Zulu", path: "C:\\dev\\zulu", default
 const ZETA: RepoEntry = { id: "z", name: "Zeta", path: "C:\\dev\\zeta", default_branch: null };
 
 const WORKSPACE: WorkspaceEntry = { id: "w", name: "ws-one", member_repo_ids: ["z"] };
+
+/** A stored launch config for `ALPHA`, interactive unless told otherwise. */
+function spawnConfig(mode: SpawnConfig["mode"] = "interactive"): SpawnConfig {
+  return {
+    target: {
+      kind: "single",
+      repo_id: "a",
+      branch_name: "main",
+      base_branch: null,
+      use_worktree: true,
+    },
+    mode,
+    agent: null,
+  };
+}
 
 function session(id: string, overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
   return {
@@ -221,6 +237,17 @@ test("home_card_for_one_single_choice_question", () => {
   ]);
 });
 
+test("a preview question offers no choices", () => {
+  const preview: PendingInput = {
+    kind: "question",
+    questions: [{ question: "Which shape?", options: ["Current", "Other"], preview: true }],
+  };
+
+  const [card] = needsYou(modelFrom(sessions(awaiting("s1", preview))));
+  expect(card?.detail).toBe("Which shape?");
+  expect(card?.choices).toEqual([]);
+});
+
 test("home_card_for_a_permission", () => {
   const permission: PendingInput = {
     kind: "permission",
@@ -293,6 +320,91 @@ test("home_card_without_a_status_stamp_has_no_buttons", () => {
       },
     ]);
   }
+});
+
+test("home_first_session_list_is_sorted_by_label_then_id", () => {
+  const model = modelFrom(
+    withRepos(ALPHA),
+    sessions(
+      session("s3", { label: "c" }),
+      session("s1", { label: "A" }),
+      session("s2", { label: "b" }),
+    ),
+  );
+  expect(rowIds(model)).toEqual(["s1", "s2", "s3"]);
+
+  const tied = modelFrom(
+    withRepos(ALPHA),
+    sessions(session("s9", { label: "same" }), session("s4", { label: "Same" })),
+  );
+  expect(rowIds(tied)).toEqual(["s4", "s9"]);
+});
+
+test("home_a_session_named_after_the_first_list_goes_last", () => {
+  let model = modelFrom(
+    withRepos(ALPHA),
+    sessions(session("s2", { label: "b" }), session("s1", { label: "a" })),
+  );
+  model = homeStep(model, { type: "session_updated", session: session("s0", { label: "0" }) });
+  expect(rowIds(model)).toEqual(["s1", "s2", "s0"]);
+});
+
+test("home_a_later_session_list_keeps_the_rows_in_place", () => {
+  let model = modelFrom(
+    withRepos(ALPHA),
+    sessions(session("s2", { label: "b" }), session("s1", { label: "a" })),
+  );
+  model = homeStep(model, { type: "session_updated", session: session("s0", { label: "0" }) });
+  expect(rowIds(model)).toEqual(["s1", "s2", "s0"]);
+
+  // A resync resends the whole list: the rows stay where they are, a new
+  // session goes last.
+  model = homeStep(
+    model,
+    sessions(
+      session("s0", { label: "0" }),
+      session("s9", { label: "9" }),
+      session("s2", { label: "b" }),
+      session("s1", { label: "a" }),
+    ),
+  );
+  expect(rowIds(model)).toEqual(["s1", "s2", "s0", "s9"]);
+
+  // A later list without s2 drops it in place.
+  model = homeStep(
+    model,
+    sessions(
+      session("s9", { label: "9" }),
+      session("s1", { label: "a" }),
+      session("s0", { label: "0" }),
+    ),
+  );
+  expect(rowIds(model)).toEqual(["s1", "s0", "s9"]);
+
+  // A reconnect sorts the first list again.
+  model = homeStep(
+    reset(),
+    sessions(
+      session("s9", { label: "9" }),
+      session("s1", { label: "a" }),
+      session("s0", { label: "0" }),
+    ),
+  );
+  model = homeStep(model, withRepos(ALPHA));
+  expect(rowIds(model)).toEqual(["s0", "s9", "s1"]);
+});
+
+test("home_manual_order_wins_over_the_sorted_first_list", () => {
+  const model = modelFrom(
+    withRepos(ALPHA),
+    sessions(
+      session("s1", { label: "a" }),
+      session("s2", { label: "b" }),
+      session("s3", { label: "c" }),
+    ),
+    { type: "sessions_reordered", container_id: "a", ordered_ids: ["s3", "s1", "s2"] },
+  );
+  expect(rowIds(model)).toEqual(["s3", "s1", "s2"]);
 });
 
 test("home_removed_session_leaves_the_list_and_the_tray", () => {
@@ -395,4 +507,40 @@ test("home_other_prompt_with_no_message_says_waiting", () => {
       open: "Open",
     },
   ]);
+});
+
+test("home_a_repo_with_a_stored_launch_offers_it_on_its_group", () => {
+  const launched: RepoEntry = { ...ALPHA, last_spawn_config: spawnConfig() };
+  const model = modelFrom(withRepos(launched), sessions(session("s1")));
+
+  expect(homeGroups(model)[0]?.launch).toEqual({ kind: "repo", id: "a" });
+});
+
+test("home_a_headless_stored_launch_is_not_offered", () => {
+  const headless: RepoEntry = { ...ALPHA, last_spawn_config: spawnConfig("headless") };
+  const model = modelFrom(withRepos(headless), sessions(session("s1")));
+
+  expect(homeGroups(model)[0]?.launch).toBeNull();
+});
+
+test("home_a_container_without_a_stored_launch_offers_none", () => {
+  const model = modelFrom(
+    withRepos(ALPHA),
+    { type: "workspaces", workspaces: [{ ...WORKSPACE, last_spawn_config: spawnConfig() }] },
+    sessions(session("s1", { kind: "workspace", workspace_id: "w", members: [] }), session("s2")),
+  );
+
+  const [workspace, repo] = homeGroups(model);
+  expect(workspace?.launch).toEqual({ kind: "workspace", id: "w" });
+  expect(repo?.launch).toBeNull();
+});
+
+test("home_containers_with_a_launch_and_no_sessions_wait_in_launch_again", () => {
+  const launched: RepoEntry = { ...ALPHA, last_spawn_config: spawnConfig() };
+  const model = modelFrom(withRepos(launched, ZULU), sessions());
+
+  const groups = homeGroups(model);
+  expect(groups.map((group) => group.kind)).toEqual(["launch_again"]);
+  expect(groups[0]?.rows).toEqual([]);
+  expect(groups[0]?.containers).toEqual([{ name: "alpha", launch: { kind: "repo", id: "a" } }]);
 });

@@ -183,6 +183,9 @@ pub struct Hub {
     /// The session ids a recovery or a Resume is spawning for right now, so
     /// the two never start the same session twice.
     pub recovering: RecoveryClaims,
+    /// The spawn requests each device sent, so one a client resends after a
+    /// flaky link makes no second session.
+    pub spawn_journal: Arc<crate::spawn_journal::SpawnJournal>,
     /// True while the start-up resume of the sessions the last run lost is
     /// spawning them; idle exit holds off meanwhile.
     pub resume_in_flight: Arc<std::sync::atomic::AtomicBool>,
@@ -613,6 +616,7 @@ pub async fn run(
         keep_awake_mode: Arc::new(keep_awake_tx),
         keep_awake_status: keep_awake_status_rx,
         recovering: RecoveryClaims::default(),
+        spawn_journal: Arc::default(),
         resume_in_flight: Arc::default(),
         start_resume: Arc::default(),
         resume_reported: Arc::default(),
@@ -960,7 +964,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         }
         m @ (ClientMessage::PreviewWorkspaceSpawn { .. }
         | ClientMessage::PreviewSpawn { .. }
-        | ClientMessage::SpawnSession { .. }) => spawn::handle(hub, m, ctx).await?,
+        | ClientMessage::SpawnSession { .. }
+        | ClientMessage::LaunchLast { .. }
+        | ClientMessage::NewSession { .. }) => spawn::handle(hub, m, ctx).await?,
         m @ (ClientMessage::FetchRepo { .. }
         | ClientMessage::ListBranches { .. }
         | ClientMessage::ListWorktrees { .. }
@@ -982,6 +988,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::GetFileSnapshot { .. }) => git::handle(hub, m, ctx).await?,
         m @ (ClientMessage::ListSessions
         | ClientMessage::DuplicateSession { .. }
+        | ClientMessage::ResumeSession { .. }
         | ClientMessage::GetSpawnConfig { .. }
         | ClientMessage::RenameSession { .. }
         | ClientMessage::SetSessionBusyExcluded { .. }
@@ -1097,8 +1104,10 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             // Run the batch in a background task so the dispatcher returns
             // immediately and the connection stays responsive while sessions
             // spawn. Progress/failed messages stream back via the daemon-wide
-            // preset_events broadcast that every connected client forwards.
-            let hub = hub.clone();
+            // preset_events broadcast that every connected client forwards. A
+            // launch whose job id is a repeat of a job the daemon still holds
+            // is answered from that job's snapshot instead of starting a
+            // second batch.
             let args = crate::presets::LaunchArgs {
                 job_id,
                 target,
@@ -1109,9 +1118,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 max_panes_per_tab_override,
                 client_id: client_id.to_string(),
             };
-            tokio::spawn(async move {
-                crate::presets::launch(hub, args).await;
-            });
+            crate::presets::start(hub, args, out_tx);
         }
         ClientMessage::CancelPresetLaunch { job_id } => {
             let sender = hub.preset_cancellations.lock().await.get(&job_id).cloned();

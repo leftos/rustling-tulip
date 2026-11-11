@@ -1597,7 +1597,7 @@ mod tests {
                 "model".to_owned(),
                 protocol::OptionValue::Text("opus".to_owned()),
             )]),
-            trusted: true,
+            legacy_trusted: false,
             conversation_id: Some("conv-1".to_owned()),
             extra_dirs: vec![r"D:\b".to_owned()],
         };

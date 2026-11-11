@@ -20,7 +20,7 @@ use crate::html_media::{
     MAX_MEDIA_BATCH_BYTES, MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE, MEDIA_FETCHES_IN_FLIGHT,
 };
 use crate::links::TerminalLinkCandidate;
-use crate::open::OpenJob;
+use crate::open::{LinkAction, OpenJob};
 use crate::target::{HostKey, Target};
 
 /// A file under a repo root or one of its worktrees on the remote host, to
@@ -45,10 +45,10 @@ pub struct FetchRequest {
     pub column: Option<u32>,
     /// Whether the saved copy opens once the fetch is done.
     pub open_when_done: bool,
-    /// Whether the saved copy opens in the viewer when the viewer can show
-    /// it, rather than in the external app: a Ctrl+click on a link clears
-    /// it, and every open without that gesture sets it.
-    pub prefer_viewer: bool,
+    /// How the saved copy opens: in the viewer when the viewer can show it,
+    /// in the external app, or revealed in its folder. A link's click picks
+    /// it; every open without that gesture asks for the viewer.
+    pub action: LinkAction,
 }
 
 /// Characters Windows forbids in a file name.
@@ -190,7 +190,7 @@ pub fn parent_folder_request(file: &FetchRequest) -> FetchRequest {
         line: None,
         column: None,
         open_when_done: false,
-        prefer_viewer: false,
+        action: LinkAction::DefaultApp,
         ..file.clone()
     }
 }
@@ -1091,8 +1091,8 @@ pub struct PendingAsk {
     pub(crate) cwd: Option<String>,
     /// The session's own folders, the only ones a relative candidate joins.
     pub(crate) own_roots: Vec<Root>,
-    /// Whether the saved copy opens in the viewer (Ctrl+Shift+click).
-    pub(crate) prefer_viewer: bool,
+    /// How the saved copy opens, as the link's click asked.
+    pub(crate) action: LinkAction,
 }
 
 /// What a fetch's done toast offers once the fetch has ended.
@@ -1430,7 +1430,7 @@ impl FetchRegistry {
                 line: None,
                 column: None,
                 open_when_done: false,
-                prefer_viewer: page.prefer_viewer,
+                action: page.action,
             })
             .collect()
     }
@@ -1497,6 +1497,8 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use futures::channel::mpsc::unbounded;
+
+    use crate::LinkAction;
 
     use super::{
         AlreadyFetching, DoneAction, FetchEntry, FetchRegistry, FetchRequest, MediaBatch, MediaEnd,
@@ -1774,7 +1776,7 @@ mod tests {
             line: None,
             column: None,
             open_when_done: false,
-            prefer_viewer: true,
+            action: LinkAction::Viewer,
         };
         let target = download_path(Path::new("root"), host, "repo", rel).expect("a valid path");
         FetchEntry::new(HostKey::Local, host.to_owned(), request, target)
@@ -1791,7 +1793,7 @@ mod tests {
             line: None,
             column: None,
             open_when_done: true,
-            prefer_viewer: false,
+            action: LinkAction::DefaultApp,
         }
     }
 
@@ -1832,7 +1834,7 @@ mod tests {
         let file = FetchRequest {
             line: Some(12),
             column: Some(3),
-            prefer_viewer: true,
+            action: LinkAction::Viewer,
             ..reading("docs/sub/a.txt")
         };
 
@@ -1845,7 +1847,7 @@ mod tests {
                 line: None,
                 column: None,
                 open_when_done: false,
-                prefer_viewer: false,
+                action: LinkAction::DefaultApp,
                 ..file.clone()
             },
             "the folder holding the file, never opened"

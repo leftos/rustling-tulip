@@ -7,6 +7,7 @@
 use crate::fetch_link::{self, Root, RootStrip};
 use crate::file_fetch::{FetchRequest, display_host_path};
 use crate::links::split_path_position;
+use crate::open::LinkAction;
 use crate::spawn_form::human_size;
 use crate::target::HostKey;
 
@@ -261,7 +262,7 @@ impl FetchForm {
             line: target.line,
             column: target.column,
             open_when_done: true,
-            prefer_viewer: true,
+            action: LinkAction::Viewer,
         };
         self.phase = Phase::Starting;
         self.error = None;

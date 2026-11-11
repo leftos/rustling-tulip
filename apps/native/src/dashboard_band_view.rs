@@ -173,6 +173,7 @@ fn wait_row(
                 .gap(px(8.0))
                 .min_w(px(0.0))
                 .child(glyph_view(wait.glyph, GlyphSize::Leaf, &glyph_id, &t))
+                // One line: the band is a row of columns, so every row's cells line up.
                 .child(
                     truncating(
                         &format!("dashboard-band-label-{id}"),

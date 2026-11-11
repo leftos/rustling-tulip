@@ -1,8 +1,26 @@
 import { RECONNECTING_BAR, connectionBar } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
-import { disarm, errorFor, type HomeActions } from "./home-actions";
+import { containerKey, disarm, errorFor, presetKey, type HomeActions } from "./home-actions";
 import { homeGroups, needsYou, type HomeGroup, type HomeModel, type TrayCard } from "./home-model";
-import type { PromptChoice, SessionSnapshot, SessionStatus } from "./protocol";
+import {
+  LOST_JOB,
+  LOST_STATUS,
+  NEEDS_DESKTOP,
+  NO_PRESETS,
+  jobEnded,
+  jobFor,
+  phoneLaunch,
+  type HomePresets,
+  type PresetJob,
+} from "./home-presets";
+import type {
+  ContainerRef,
+  LaunchPresetSource,
+  PresetEntry,
+  PromptChoice,
+  SessionSnapshot,
+  SessionStatus,
+} from "./protocol";
 
 /**
  * What Home draws: a pure view model over the Home model, the actions state
@@ -25,6 +43,30 @@ export const NO_SESSIONS = "No sessions";
 
 /** What a card says while its answer is on its way to the daemon. */
 export const SENDING = "Sending…";
+
+/** What a group's Launch last button says, before and while its launch waits. */
+export const LAUNCH_LAST = "Launch last";
+export const LAUNCHING = "Launching…";
+
+/** A group's presets toggle, a preset's buttons, and what an ended job leaves on its row. */
+export const PRESETS = "Presets";
+export const LAUNCH_PRESET = "Launch";
+export const CANCEL = "Cancel";
+export const CANCELLED = "Cancelled";
+
+/** One Launch last button, as a group header or a Launch again row shows it. */
+export interface LaunchView {
+  readonly target: ContainerRef;
+  readonly label: "Launch last" | "Launching…";
+  readonly enabled: boolean;
+}
+
+/** One row of the Launch again group: a container with nothing running. */
+export interface LaunchRowView {
+  readonly name: string;
+  readonly launch: LaunchView | null;
+  readonly launchError: string | null;
+}
 
 /** One answer button of a Needs you card. */
 export interface CardButton {
@@ -76,10 +118,52 @@ export interface RowView {
   readonly error: string | null;
 }
 
+/** A preset row's Launch button, or its disabled `Needs the desktop` one. */
+export interface PresetLaunchView {
+  readonly label: "Launch" | "Needs the desktop";
+  readonly enabled: boolean;
+  /** What the launch sends as its source; null when the preset needs the desktop. */
+  readonly source: LaunchPresetSource | null;
+}
+
+/** One preset of a group's presets list. */
+export interface PresetRowView {
+  readonly presetId: string;
+  readonly name: string;
+  /** The row's button; null while the phone's job for it runs. */
+  readonly launch: PresetLaunchView | null;
+  /** `Launching 1/3` while the job runs; null otherwise. */
+  readonly progress: string | null;
+  /** The running job the row's Cancel stops; null when it offers none. */
+  readonly cancel: string | null;
+  /** The job's error, `Cancelled`, or why its launch was dropped; null when there is none. */
+  readonly note: string | null;
+}
+
+/** A repo's or workspace's presets: the toggle that opens the list, and the list. */
+export interface PresetsView {
+  readonly target: ContainerRef;
+  readonly label: "Presets";
+  readonly open: boolean;
+  readonly enabled: boolean;
+  /** The daemon's refusal of the list, verbatim; null when it listed or has not answered. */
+  readonly error: string | null;
+  /** The presets, while the list is open and listed; empty otherwise. */
+  readonly rows: readonly PresetRowView[];
+}
+
 /** A group of rows: a workspace, a repo, or one of the single buckets. */
 export interface GroupView {
   readonly name: string;
   readonly rows: readonly RowView[];
+  /** The group's presets; null for a group that is no repo or workspace. */
+  readonly presets: PresetsView | null;
+  /** The header's Launch last button; null when the group offers none. */
+  readonly launch: LaunchView | null;
+  /** The daemon's refusal text for this group's launch, when it refused one. */
+  readonly launchError: string | null;
+  /** The containers a Launch again group lists; empty for every other group. */
+  readonly launches: readonly LaunchRowView[];
 }
 
 /** What Home knows about the connection and where the tray stands. */
@@ -95,6 +179,8 @@ export interface HomeState {
   readonly index: number;
   /** A send has been refused since the last `ready`. */
   readonly offline: boolean;
+  /** The host's `Welcome.features` lists `launch_last`. */
+  readonly supportsLaunchLast: boolean;
 }
 
 /** Everything Home draws. */
@@ -173,14 +259,32 @@ export function updatedSession(actions: HomeActions, sessionId: string): HomeAct
   return actions.armed === sessionId ? disarm(actions) : actions;
 }
 
-/** Home for one model, actions state and connection state. */
-export function homeScreen(model: HomeModel, actions: HomeActions, state: HomeState): HomeScreen {
+/** What every group of one screen is drawn from. */
+interface GroupContext {
+  readonly model: HomeModel;
+  readonly actions: HomeActions;
+  readonly presets: HomePresets;
+  readonly actionsEnabled: boolean;
+  readonly supportsLaunchLast: boolean;
+}
+
+/** Home for one model, actions state, connection state and presets state. */
+export function homeScreen(
+  model: HomeModel,
+  actions: HomeActions,
+  state: HomeState,
+  presets: HomePresets = NO_PRESETS,
+): HomeScreen {
   const bar = homeBar(state);
   const actionsEnabled = bar !== RECONNECTING_BAR;
   const cards = needsYou(model);
   const at = cardIndex(cards, state.card, state.index);
   const shown = cards[at];
-  const groups = homeGroups(model).map((group) => groupView(group, actions, actionsEnabled));
+  const supportsLaunchLast = state.supportsLaunchLast;
+  const context: GroupContext = { model, actions, presets, actionsEnabled, supportsLaunchLast };
+  const groups = homeGroups(model)
+    .filter((group) => supportsLaunchLast || group.kind !== "launch_again")
+    .map((group) => groupView(group, context));
   return {
     visible: homeVisible(state.status, state.shown, state.paired),
     bar,
@@ -188,7 +292,8 @@ export function homeScreen(model: HomeModel, actions: HomeActions, state: HomeSt
     index: at,
     card: shown === undefined ? null : cardView(shown, cards, at, actions, actionsEnabled),
     groups,
-    // Before the first list the model is empty too, so only a loaded one says so.
+    // Before the first list the model is empty too, so only a loaded one says
+    // so; a Launch again group the host cannot show is no content either.
     empty: model.loaded && groups.length === 0 && shown === undefined ? NO_SESSIONS : null,
   };
 }
@@ -198,8 +303,39 @@ export function sameScreen(left: HomeScreen, right: HomeScreen): boolean {
   return sameValue(left, right);
 }
 
-/** The status word a row shows; an unknown status shows as the daemon sent it. */
-export function statusWord(status: SessionStatus): string {
+/**
+ * The status word a row shows, from the label the daemon computed; a daemon
+ * that sent no label, or one this build does not know, words the status.
+ */
+export function statusWord(session: SessionSnapshot): string {
+  switch (session.status_label) {
+    case "inactive":
+      return "Inactive";
+    case "abandoned":
+      return "Abandoned";
+    case "orphan":
+      return "Orphaned";
+    case "starting":
+      return "Starting";
+    case "awaiting_input":
+      return "Needs you";
+    case "working":
+      return "Working";
+    case "background":
+      return "Working in the background";
+    case "idle":
+      return "Idle";
+    case "error":
+      return "Error";
+    case "stopped":
+      return "Stopped";
+    default:
+      return statusOnlyWord(session.status);
+  }
+}
+
+/** The word for a status alone; an unknown status shows as the daemon sent it. */
+function statusOnlyWord(status: SessionStatus): string {
   switch (status) {
     case "working":
       return "Working";
@@ -211,6 +347,8 @@ export function statusWord(status: SessionStatus): string {
       return "Stopped";
     case "error":
       return "Error";
+    case "spawning":
+      return "Starting";
     default:
       return status;
   }
@@ -246,11 +384,111 @@ function cardView(
   };
 }
 
-function groupView(group: HomeGroup, actions: HomeActions, actionsEnabled: boolean): GroupView {
+function groupView(group: HomeGroup, context: GroupContext): GroupView {
+  const { actions, actionsEnabled, supportsLaunchLast } = context;
   return {
     name: group.name,
     rows: group.rows.map((session) => rowView(session, actions, actionsEnabled)),
+    presets: presetsView(group, context),
+    launch: launchView(group.launch, actions, actionsEnabled, supportsLaunchLast),
+    launchError: group.launch === null ? null : launchErrorFor(actions, group.launch),
+    launches: (group.containers ?? []).map((container) => ({
+      name: container.name,
+      launch: launchView(container.launch, actions, actionsEnabled, supportsLaunchLast),
+      launchError: launchErrorFor(actions, container.launch),
+    })),
   };
+}
+
+/** A repo's or workspace's presets toggle and its list; null for any other group. */
+function presetsView(group: HomeGroup, context: GroupContext): PresetsView | null {
+  if (group.kind !== "repo" && group.kind !== "workspace") {
+    return null;
+  }
+  const target: ContainerRef = { kind: group.kind, id: group.id };
+  const key = containerKey(target);
+  const open = context.presets.open.has(key);
+  const list = open ? context.presets.lists.get(key) : undefined;
+  return {
+    target,
+    label: PRESETS,
+    open,
+    enabled: context.actionsEnabled,
+    error: list?.kind === "refused" ? list.error : null,
+    rows:
+      list?.kind === "listed" ? list.entries.map((entry) => presetRow(entry, target, context)) : [],
+  };
+}
+
+/** One preset's row: its job's progress while that runs, else its button and its last outcome. */
+function presetRow(entry: PresetEntry, target: ContainerRef, context: GroupContext): PresetRowView {
+  const job = jobFor(context.presets, containerKey(target), entry.id);
+  const base = { presetId: entry.id, name: entry.name };
+  if (job !== undefined && isRunning(job)) {
+    const progress = `Launching ${job.launched}/${job.total}`;
+    return { ...base, launch: null, progress, cancel: job.jobId, note: null };
+  }
+  const key = presetKey(target, entry.id);
+  const source = phoneLaunch(entry, context.model.repos, context.presets.agents);
+  const pending = context.actions.presetLaunches.some(
+    (launch) => presetKey(launch.target, launch.presetId) === key,
+  );
+  const launch: PresetLaunchView =
+    source === null
+      ? { label: NEEDS_DESKTOP, enabled: false, source: null }
+      : { label: LAUNCH_PRESET, enabled: context.actionsEnabled && !pending, source };
+  // A job that has answered is newer than any dropped-launch note: its outcome wins.
+  const note =
+    job !== undefined && job.status !== null
+      ? jobNote(job)
+      : (context.actions.presetErrors.get(key) ?? null);
+  return { ...base, launch, progress: null, cancel: null, note };
+}
+
+/** A job that has answered and not ended: its progress shows, an unknown status's too. */
+function isRunning(job: PresetJob): boolean {
+  return job.status !== null && !jobEnded(job);
+}
+
+/** What an ended job leaves on its row: a failure's error, `Cancelled`, the lost-track text, or nothing. */
+function jobNote(job: PresetJob): string | null {
+  switch (job.status) {
+    case "failed":
+      return job.error;
+    case "cancelled":
+      return CANCELLED;
+    case LOST_STATUS:
+      return LOST_JOB;
+    default:
+      return null;
+  }
+}
+
+/** The Launch last button a container offers; null when the host cannot launch. */
+function launchView(
+  target: ContainerRef | null,
+  actions: HomeActions,
+  actionsEnabled: boolean,
+  supportsLaunchLast: boolean,
+): LaunchView | null {
+  if (target === null || !supportsLaunchLast) {
+    return null;
+  }
+  const pending = isLaunchPending(actions, target);
+  return {
+    target,
+    label: pending ? LAUNCHING : LAUNCH_LAST,
+    enabled: actionsEnabled && !pending,
+  };
+}
+
+function isLaunchPending(actions: HomeActions, target: ContainerRef): boolean {
+  const key = containerKey(target);
+  return actions.launches.some((launch) => containerKey(launch.target) === key);
+}
+
+function launchErrorFor(actions: HomeActions, target: ContainerRef): string | null {
+  return actions.launchErrors.get(containerKey(target)) ?? null;
 }
 
 function rowView(session: SessionSnapshot, actions: HomeActions, actionsEnabled: boolean): RowView {
@@ -258,7 +496,7 @@ function rowView(session: SessionSnapshot, actions: HomeActions, actionsEnabled:
   return {
     sessionId: session.id,
     label: displayLabel(session),
-    status: statusWord(session.status),
+    status: statusWord(session),
     stop: stop ? (actions.armed === session.id ? STOP_ARMED : STOP) : null,
     resume: resumeOffered(session),
     enabled: actionsEnabled,

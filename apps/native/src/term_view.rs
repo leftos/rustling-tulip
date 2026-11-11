@@ -31,7 +31,7 @@ use crate::hosts::HostSender;
 use crate::links::{LinkKind, LinkSegment, TerminalLink};
 use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
-use crate::open;
+use crate::open::{self, LinkAction};
 use crate::paste_upload;
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
 use crate::shell_marks::{ShellDot, ShellStatus};
@@ -362,17 +362,25 @@ const CLAIM_WINDOW: Duration = Duration::from_secs(5);
 /// Whether the pane may size its session's PTY: only once a layout pass has
 /// measured its real size, and only while it drives the session's size. A
 /// size it sends claims the session over other clients when the pane had
-/// input within [`CLAIM_WINDOW`], or when it is the first changed measure
+/// input within [`CLAIM_WINDOW`], when it is the first changed measure
 /// after this client resized the pane (the window, a split divider, the
-/// sidebar or a font size). An attach, a re-bind, a reconnect, a tab
-/// switch, a focus change and another client's layout or appearance change
-/// do not claim.
+/// sidebar or a font size), or when the user bound the pane's session in
+/// this client since the pane last sent a size. An attach, a reconnect, a
+/// tab switch, a focus change and another client's layout or appearance
+/// change do not claim.
 #[derive(Debug, Default, Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate fact a size send reads, cleared at its own moment"
+)]
 struct SizeGate {
     measured: bool,
     driving: bool,
     /// This client resized the pane, and the pane has not measured since.
     resized: bool,
+    /// The user bound this pane's session in this client, so the next size
+    /// the pane sends claims it.
+    bound: bool,
     /// When the pane last had keyboard or pointer input.
     last_input: Option<Instant>,
     /// Where the pointer last moved over the pane, so a move event at the
@@ -438,6 +446,24 @@ impl SizeGate {
         self.resized = false;
     }
 
+    /// The user bound this pane's session in this client: the next size the
+    /// pane sends claims.
+    fn mark_bound(&mut self) {
+        self.bound = true;
+    }
+
+    /// Takes whether the user bound this pane's session in this client, so
+    /// the size being sent claims it.
+    fn take_bound(&mut self) -> bool {
+        std::mem::take(&mut self.bound)
+    }
+
+    /// The pane changed hands or connections: a bind before it does not
+    /// claim what follows.
+    fn drop_bound(&mut self) {
+        self.bound = false;
+    }
+
     /// Returns whether to send the size now: when the pane takes over with
     /// a measured size.
     fn set_driving(&mut self, driving: bool) -> bool {
@@ -482,13 +508,22 @@ pub enum PaneEvent {
     Copied { text: String },
     /// Ctrl+click picked `link`; a path in it resolves against
     /// `base_dirs`, the folders of `session`, the pane's session.
-    /// `prefer_viewer`: Shift was held too, so a text file opens in the
-    /// viewer rather than the external app.
+    /// `action`: what the click asked a path to do; Ctrl+Shift+click asks
+    /// for the viewer.
     OpenLink {
         link: TerminalLink,
         base_dirs: Vec<String>,
         session: Option<String>,
-        prefer_viewer: bool,
+        action: LinkAction,
+    },
+    /// Ctrl+click picked the path `link`: the root opens the link menu at
+    /// `at`, in window coordinates, whose pick opens it as
+    /// [`PaneEvent::OpenLink`] would.
+    LinkMenu {
+        link: TerminalLink,
+        base_dirs: Vec<String>,
+        session: Option<String>,
+        at: Point<Pixels>,
     },
     /// Ctrl+hover reached a path with spaced readings: the root checks them
     /// in a pane that opens files here, and widens the link to the first
@@ -892,6 +927,14 @@ impl TerminalPane {
         self.size_gate.mark_resized();
     }
 
+    /// The user bound this pane's session in this client (the unbound pill,
+    /// Add to current tab, a drop on the pane or a tab pill): the next size
+    /// the pane sends claims the session, so the PTY takes the new pane's
+    /// size at once.
+    pub fn claim_next_size(&mut self) {
+        self.size_gate.mark_bound();
+    }
+
     /// Whether this pane answers its session's terminal queries, from
     /// history and live output alike. The others drop their answers.
     pub fn set_answers_queries(&mut self, answers: bool) {
@@ -1076,6 +1119,7 @@ impl TerminalPane {
         self.sync_deadline = None;
         self.size_gate.forget_input();
         self.size_gate.drop_resized();
+        self.size_gate.drop_bound();
     }
 
     /// Forget the attachment for a new connection, which starts unattached.
@@ -1092,6 +1136,7 @@ impl TerminalPane {
         self.sync_timer = None;
         self.sync_deadline = None;
         self.size_gate.drop_resized();
+        self.size_gate.drop_bound();
     }
 
     /// Whether the attached session takes input; a composition is only
@@ -1332,9 +1377,9 @@ impl TerminalPane {
     }
 
     /// Sends the terminal's size when the size gate allows, claimed when
-    /// `resized` (a shown pane's measured size changed) or the pane had
-    /// recent input.
-    fn send_resize(&self, resized: bool) {
+    /// `resized` (a shown pane's measured size changed), the pane had recent
+    /// input, or the user bound its session in this client.
+    fn send_resize(&mut self, resized: bool) {
         if !self.size_gate.allows() {
             return;
         }
@@ -1345,11 +1390,12 @@ impl TerminalPane {
         let (Ok(cols), Ok(rows)) = (u16::try_from(cols), u16::try_from(rows)) else {
             return;
         };
+        let bound = self.size_gate.take_bound();
         self.send(ClientMessage::Resize {
             session_id,
             cols,
             rows,
-            claim: resized || self.size_gate.claims((self.now)()),
+            claim: resized || self.size_gate.claims((self.now)()) || bound,
         });
     }
 
@@ -1608,10 +1654,10 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        // Ctrl+click on a link opens it (Ctrl+Shift+click in the viewer),
-        // ahead of a selection or a mouse report; its release then finds no
-        // gesture to end. Only the first press of a multi-click opens it;
-        // the later ones do nothing.
+        // Ctrl+click on a URL opens it and on a path opens the link menu
+        // (Ctrl+Shift+click views a path), ahead of a selection or a mouse
+        // report; its release then finds no gesture to end. Only the first
+        // press of a multi-click acts; the later ones do nothing.
         if event.button == MouseButton::Left
             && event.modifiers.secondary()
             && let Some(link) = self
@@ -1619,12 +1665,7 @@ impl TerminalPane {
                 .and_then(|cell| self.link_at(cell.row, cell.col))
         {
             if event.click_count == 1 {
-                cx.emit(PaneEvent::OpenLink {
-                    link,
-                    base_dirs: self.base_dirs.clone(),
-                    session: self.session_id().map(str::to_owned),
-                    prefer_viewer: event.modifiers.shift,
-                });
+                cx.emit(self.link_click(link, event));
             }
             cx.notify();
             return;
@@ -1633,8 +1674,13 @@ impl TerminalPane {
         // Ctrl+V does: the program never sees the press, so a program on
         // another host cannot answer it from that host's clipboard. With no
         // text on the clipboard it sends nothing, not Ctrl+V's `^V`, which
-        // such a program would answer the same way.
-        if event.button == MouseButton::Right && !event.modifiers.shift && self.tracker.idle() {
+        // such a program would answer the same way. A right-click that brings
+        // the window forward does neither: it only focuses.
+        if event.button == MouseButton::Right
+            && !event.modifiers.shift
+            && !event.first_mouse
+            && self.tracker.idle()
+        {
             let text = cx.read_from_clipboard().and_then(|item| item.text());
             if text.is_some_and(|text| !text.is_empty()) {
                 self.paste(cx);
@@ -1642,10 +1688,11 @@ impl TerminalPane {
             cx.notify();
             return;
         }
-        // The press that brings focus to a pane only focuses it: under mouse
-        // reporting it would otherwise reach the program, and a click meant to
-        // focus a pane could answer a question on screen.
-        if !self.focused_at_press && self.press_would_report(event) {
+        // The press that brings focus to a pane, or the window itself forward,
+        // only focuses: under mouse reporting it would otherwise reach the
+        // program, and a click meant to focus a pane or bring the window
+        // forward could answer a question on screen.
+        if (!self.focused_at_press || event.first_mouse) && self.press_would_report(event) {
             cx.notify();
             return;
         }
@@ -2298,16 +2345,42 @@ impl Render for TerminalPane {
     }
 }
 
-/// What the tip over a hovered link of `kind` says: a path opens or views,
-/// a URL only opens.
+/// What the tip over a hovered link of `kind` says: a path offers its menu
+/// or views, a URL only opens.
 fn link_tip_text(kind: LinkKind) -> &'static str {
     match kind {
-        LinkKind::Path => "Ctrl+click to open · Ctrl+Shift+click to view",
+        LinkKind::Path => "Ctrl+click for options · Ctrl+Shift+click to view",
         LinkKind::Url => "Ctrl+click to open",
     }
 }
 
 impl TerminalPane {
+    /// What a Ctrl+click `event` on `link` asks the root for: the link menu
+    /// for a path, at the click; else the open itself, in the viewer for a
+    /// Ctrl+Shift+click.
+    fn link_click(&self, link: TerminalLink, event: &MouseDownEvent) -> PaneEvent {
+        let base_dirs = self.base_dirs.clone();
+        let session = self.session_id().map(str::to_owned);
+        if matches!(link.kind, LinkKind::Path) && !event.modifiers.shift {
+            return PaneEvent::LinkMenu {
+                link,
+                base_dirs,
+                session,
+                at: event.position,
+            };
+        }
+        PaneEvent::OpenLink {
+            link,
+            base_dirs,
+            session,
+            action: if event.modifiers.shift {
+                LinkAction::Viewer
+            } else {
+                LinkAction::DefaultApp
+            },
+        }
+    }
+
     /// The tip naming the gestures of the link Ctrl+hover underlines, just
     /// below the hovered cell and kept inside the window.
     fn link_tip(&self, cx: &App) -> Option<AnyElement> {

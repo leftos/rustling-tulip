@@ -1,6 +1,6 @@
 //! The spawn dialog's form: target, runtime and the agent's Main fields,
-//! Open in, worktree new or existing, branch and base branch, trusted
-//! launch, the Advanced section (the agent's Advanced fields, extra
+//! Open in, worktree new or existing, branch and base branch, the
+//! Advanced section (the agent's Advanced fields, extra
 //! environment variables), the "Share this worktree?"
 //! confirm and the keyboard focus ring. `spawn_view` renders it and forwards
 //! input; the daemon requests it needs come back as messages.
@@ -21,7 +21,6 @@ use crate::agent_options::{AgentOptions, FieldEditor, FieldView};
 use crate::combobox::{ComboRow, Combobox};
 use crate::fuzzy::{self, Candidate, MatchKey};
 use crate::runtime_icon::{RuntimeIcon, agent_icon};
-use crate::sidebar::SpawnDefaults;
 use crate::spawn_preview::{Preview, PreviewKey, ReuseChoice};
 use crate::spawns::OpenIn;
 use crate::target::HostKey;
@@ -431,7 +430,6 @@ pub(crate) enum Control {
     Target(Target),
     Runtime(Runtime),
     OpenIn(OpenChoice),
-    Trusted,
     UseWorktree,
     Mode(WorktreeMode),
     Existing(String),
@@ -454,6 +452,8 @@ pub(crate) enum Control {
         field: String,
         value: String,
     },
+    /// The Extra arguments field.
+    Args,
     EnvKey(usize),
     EnvValue(usize),
     /// A secret row's Show / Hide button beside its masked value.
@@ -483,7 +483,6 @@ impl Control {
             Self::OpenIn(OpenChoice::CurrentTab) => "spawn-placement-current-tab".to_owned(),
             Self::OpenIn(OpenChoice::NewTab) => "spawn-placement-new-tab".to_owned(),
             Self::OpenIn(OpenChoice::Tab(id)) => format!("spawn-placement-tab-{id}"),
-            Self::Trusted => "spawn-skip-perms".to_owned(),
             Self::UseWorktree => "spawn-worktree".to_owned(),
             Self::Mode(WorktreeMode::New) => "spawn-worktree-mode-new".to_owned(),
             Self::Mode(WorktreeMode::Existing) => "spawn-worktree-mode-existing".to_owned(),
@@ -510,6 +509,7 @@ impl Control {
             Self::FieldSuggestion { field, value } => {
                 format!("{}-{}", field_selector(field), value.replace('_', "-"))
             }
+            Self::Args => "spawn-args".to_owned(),
             Self::EnvKey(index) => format!("spawn-env-key-{index}"),
             Self::EnvValue(index) => format!("spawn-env-value-{index}"),
             Self::EnvReveal(index) => format!("spawn-env-value-{index}-reveal"),
@@ -812,6 +812,39 @@ struct Advanced {
     /// A target move to another host dropped `${secret:…}` rows, sealed on
     /// that host; the env section's note says so until its next edit.
     secrets_dropped: Option<String>,
+    /// The Extra arguments field's text, as typed; kept while the field is
+    /// hidden, but sent only while it shows (see [`SpawnForm::extra_args`]).
+    args: String,
+}
+
+/// The line under the Extra arguments field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArgsNote {
+    /// The text does not split: it blocks Spawn.
+    UnclosedQuote,
+    /// The target's host does not list `spawn_extra_args`: the field is
+    /// disabled and nothing is sent.
+    HostTooOld,
+}
+
+impl ArgsNote {
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Self::UnclosedQuote => "The extra arguments have an unclosed quote.",
+            Self::HostTooOld => "This host is too old for extra arguments.",
+        }
+    }
+
+    /// Whether it is a problem that blocks Spawn, not a remark.
+    pub(crate) fn blocks_spawn(self) -> bool {
+        matches!(self, Self::UnclosedQuote)
+    }
+}
+
+/// `text` split into arguments by POSIX shell words, the rule the daemon
+/// splits the launch command's extra arguments by; blank text is none.
+pub(crate) fn split_extra_args(text: &str) -> Result<Vec<String>, ArgsNote> {
+    shell_words::split(text).map_err(|_| ArgsNote::UnclosedQuote)
 }
 
 /// Which runtime defaults the user has overridden.
@@ -871,7 +904,7 @@ struct Existing {
 #[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "the dialog's flags are independent — a locked target, a trusted launch, \
+    reason = "the dialog's flags are independent — a locked target, \
               the worktree toggle, the manager's share confirm and submitted — and each \
               reads on its own rather than as one lifecycle state"
 )]
@@ -895,10 +928,6 @@ pub(crate) struct SpawnForm {
     options: BTreeMap<AgentId, AgentChoice>,
     tabs: TabChoices,
     open_in: OpenChoice,
-    trusted: bool,
-    /// The Settings default launches trusted, so a trusted launch needs no
-    /// warning.
-    trusted_by_default: bool,
     use_worktree: bool,
     /// The user changed the worktree checkbox since the target loaded.
     worktree_chosen: bool,
@@ -930,7 +959,7 @@ pub(crate) struct SpawnForm {
     submitted: bool,
 }
 
-/// What a Shift-duplicate fills the dialog with, over the Spawn defaults:
+/// What a Shift-duplicate fills the dialog with, over the agent's Settings values:
 /// the source session's stored spawn config, when the daemon had one, and
 /// the Open-in choice the clicked Duplicate target names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -957,6 +986,9 @@ pub(crate) struct HostInputs {
     /// Whether the host is a remote host whose connection is not open: its
     /// targets are listed but cannot be picked.
     pub offline: bool,
+    /// Whether the host's daemon takes a spawn's own extra arguments (it
+    /// lists [`protocol::FEATURE_SPAWN_EXTRA_ARGS`]).
+    pub extra_args: bool,
 }
 
 impl HostInputs {
@@ -1040,8 +1072,6 @@ pub(crate) struct FormInputs<'a> {
     /// The session in the focused pane, with the host of that pane.
     pub focused: Option<(HostKey, &'a SessionSnapshot)>,
     pub tabs: TabChoices,
-    /// The saved Spawn defaults the trusted launch is seeded from.
-    pub spawn_defaults: SpawnDefaults,
     /// The target the dialog is held on, and the worktree it is pinned to.
     pub lock: Option<Lock>,
     /// The repo or workspace a jump selected in the sidebar, which the
@@ -1113,7 +1143,6 @@ impl SpawnForm {
         } else {
             OpenChoice::NewTab
         };
-        let defaults = inputs.spawn_defaults;
         let (agents, agent_settings) = host_in(&inputs.hosts, target.host())
             .map(|h| (h.agents.clone(), h.agent_settings.clone()))
             .unwrap_or_default();
@@ -1133,8 +1162,6 @@ impl SpawnForm {
             options: BTreeMap::new(),
             tabs: inputs.tabs,
             open_in,
-            trusted: defaults.opening_trusted(),
-            trusted_by_default: defaults.trusted,
             use_worktree: true,
             worktree_chosen: false,
             mode: WorktreeMode::New,
@@ -1193,7 +1220,7 @@ impl SpawnForm {
     }
 
     /// Fills the open dialog from a Shift-duplicate's `prefill`. It runs
-    /// after the Spawn defaults and the target's own defaults, so what the
+    /// after the agent's Settings values and the target's own defaults, so what the
     /// source session ran with wins, and the runtime and run mode count as
     /// chosen.
     /// Returns the requests it needs: a branch suggestion when it turned the
@@ -1248,7 +1275,6 @@ impl SpawnForm {
                 shell_or_agent: true,
             },
         };
-        self.trusted = config.dangerously_skip_permissions;
         match (agent, &source) {
             (Some(agent), Some(source)) if &agent == source => {
                 self.apply_source_options(config, &agent);
@@ -1263,6 +1289,7 @@ impl SpawnForm {
             .iter()
             .map(|(key, value)| EnvRow::prefilled(key, value))
             .collect();
+        self.advanced.args = shell_words::join(&config.extra_args);
         self.follow_advanced();
         if Target::from_spawn(self.target.host(), &config.target).as_ref() == Some(&self.target) {
             self.apply_branch_fields(&config.target, cache, now)
@@ -1301,8 +1328,8 @@ impl SpawnForm {
             .insert(agent.clone(), AgentChoice { options, touched });
     }
 
-    /// Advanced opens on the chosen agent's Advanced values or the env
-    /// rows, until the user opens or closes it.
+    /// Advanced opens on the chosen agent's Advanced values, extra
+    /// arguments or the env rows, until the user opens or closes it.
     fn follow_advanced(&mut self) {
         if self.advanced.chosen {
             return;
@@ -1310,8 +1337,10 @@ impl SpawnForm {
         let agent_set = self
             .chosen_agent()
             .is_some_and(|choice| choice.options.advanced_set());
-        self.advanced.open =
-            agent_set || !self.advanced.env.is_empty() || self.advanced.secrets_dropped.is_some();
+        self.advanced.open = agent_set
+            || !self.extra_args().is_empty()
+            || !self.advanced.env.is_empty()
+            || self.advanced.secrets_dropped.is_some();
     }
 
     /// The target moved to another host: the agents and their Settings
@@ -2653,7 +2682,6 @@ impl SpawnForm {
             Runtime::PlainShell => {
                 self.runtime.plain_shell = true;
                 self.runtime.touched.shell_or_agent = true;
-                self.trusted = false;
             }
         }
     }
@@ -2674,7 +2702,7 @@ impl SpawnForm {
     /// shell.
     pub(crate) fn option_fields(&self) -> Vec<FieldView> {
         self.chosen_agent()
-            .map(|choice| choice.options.fields(self.trusted()))
+            .map(|choice| choice.options.fields())
             .unwrap_or_default()
     }
 
@@ -2759,6 +2787,47 @@ impl SpawnForm {
             .filter(|field| field.placement == placement && !field.disabled)
             .flat_map(controls_of)
             .collect()
+    }
+
+    /// Whether the Extra arguments field shows: for an agent, not a plain
+    /// shell (the dialog spawns an agent interactive only).
+    pub(crate) fn args_shown(&self) -> bool {
+        !self.plain_shell()
+    }
+
+    /// Whether the target's host takes a spawn's own extra arguments.
+    pub(crate) fn args_supported(&self) -> bool {
+        host_in(&self.hosts, self.target.host()).is_some_and(|host| host.extra_args)
+    }
+
+    pub(crate) fn args_text(&self) -> &str {
+        &self.advanced.args
+    }
+
+    /// The user typed in the Extra arguments field.
+    pub(crate) fn edit_args(&mut self, text: &str) {
+        text.clone_into(&mut self.advanced.args);
+    }
+
+    /// The line under the shown Extra arguments field: the host is too old
+    /// for them, or the text does not split. `None` while it is hidden.
+    pub(crate) fn args_note(&self) -> Option<ArgsNote> {
+        if !self.args_shown() {
+            return None;
+        }
+        if !self.args_supported() {
+            return Some(ArgsNote::HostTooOld);
+        }
+        split_extra_args(&self.advanced.args).err()
+    }
+
+    /// The arguments the spawn sends: the field's text split, while the
+    /// field shows on a host that takes them; else none.
+    fn extra_args(&self) -> Vec<String> {
+        if !self.args_shown() || !self.args_supported() {
+            return Vec::new();
+        }
+        split_extra_args(&self.advanced.args).unwrap_or_default()
     }
 
     pub(crate) fn env_rows(&self) -> &[EnvRow] {
@@ -2942,32 +3011,6 @@ impl SpawnForm {
             .map(|tab| tab.name.as_str())
     }
 
-    /// Whether the trusted-launch checkbox shows (not for a plain shell).
-    pub(crate) fn trusted_shown(&self) -> bool {
-        !self.plain_shell()
-    }
-
-    pub(crate) fn trusted(&self) -> bool {
-        self.trusted && self.trusted_shown()
-    }
-
-    /// Whether the trusted-launch warning shows: Trusted is ticked and the
-    /// Settings default does not already launch trusted.
-    pub(crate) fn trusted_warning_shown(&self) -> bool {
-        self.trusted() && !self.trusted_by_default
-    }
-
-    /// The trusted-launch row's detail: the chosen agent's trust note.
-    pub(crate) fn trusted_detail(&self) -> Option<&str> {
-        let Runtime::Agent(agent) = self.runtime() else {
-            return None;
-        };
-        self.agents
-            .iter()
-            .find(|descriptor| descriptor.id == agent)
-            .and_then(|descriptor| descriptor.trust_note.as_deref())
-    }
-
     pub(crate) fn is_workspace(&self) -> bool {
         matches!(self.target, Target::Workspace { .. })
     }
@@ -3109,8 +3152,9 @@ impl SpawnForm {
         self.refs.fetch_failed
     }
 
-    /// Whether Spawn can go: a branch name or a picked worktree, and no env
-    /// row with a problem. A folder spawn asks for neither.
+    /// Whether Spawn can go: a branch name or a picked worktree, no env row
+    /// with a problem, and extra arguments that split. A folder spawn asks
+    /// for neither of the first two.
     pub(crate) fn can_submit(&self) -> bool {
         let located = if !self.git_choices_shown() {
             true
@@ -3119,7 +3163,7 @@ impl SpawnForm {
         } else {
             !self.branch.value.trim().is_empty()
         };
-        located && self.env_valid()
+        located && self.env_valid() && !self.args_note().is_some_and(ArgsNote::blocks_spawn)
     }
 
     /// The focusable controls, in the order they are drawn.
@@ -3143,20 +3187,10 @@ impl SpawnForm {
             );
         }
         ring.extend(self.worktree_controls());
-        ring.extend(self.run_controls());
         ring.extend(self.advanced_controls());
         ring.push(Control::Cancel);
         if self.can_submit() {
             ring.push(Control::Submit);
-        }
-        ring
-    }
-
-    /// Trusted launch, while it shows.
-    fn run_controls(&self) -> Vec<Control> {
-        let mut ring = Vec::new();
-        if self.trusted_shown() {
-            ring.push(Control::Trusted);
         }
         ring
     }
@@ -3168,6 +3202,9 @@ impl SpawnForm {
             return ring;
         }
         ring.extend(self.field_controls(SpawnPlacement::Advanced));
+        if self.args_shown() && self.args_supported() {
+            ring.push(Control::Args);
+        }
         for index in 0..self.advanced.env.len() {
             ring.extend(self.env_row_controls(index));
         }
@@ -3298,10 +3335,6 @@ impl SpawnForm {
                 self.open_in = choice.clone();
                 Vec::new()
             }
-            Control::Trusted => {
-                self.trusted = !self.trusted && self.trusted_shown();
-                Vec::new()
-            }
             Control::UseWorktree => self.toggle_use_worktree(cache, now),
             Control::Mode(mode) => self.set_mode(*mode),
             Control::Existing(key) => {
@@ -3319,6 +3352,7 @@ impl SpawnForm {
             Control::Branch
             | Control::Base
             | Control::FieldText(_)
+            | Control::Args
             | Control::EnvKey(_)
             | Control::EnvValue(_) => Vec::new(),
             Control::FieldChoice { .. }
@@ -3337,8 +3371,7 @@ impl SpawnForm {
         Outcome::Stay(messages)
     }
 
-    /// A press on an agent field's or an Advanced control. A field trusted
-    /// launch locks does not change while it is on.
+    /// A press on an agent field's or an Advanced control.
     fn press_option(&mut self, control: &Control) {
         if matches!(
             control,
@@ -3463,13 +3496,19 @@ impl SpawnForm {
         } else {
             SessionMode::Interactive
         };
+        let agent = self.agent_selection();
+        let bypasses = agent.as_ref().is_some_and(|selection| {
+            crate::agent_options::descriptor_for(&self.agents, &selection.agent)
+                .is_some_and(|descriptor| descriptor.bypasses(&selection.options))
+        });
         let request = SpawnRequest {
             label: None,
             target: self.spawn_target(),
             mode,
             initial_prompt: None,
-            dangerously_skip_permissions: self.trusted(),
-            agent: self.agent_selection(),
+            dangerously_skip_permissions: bypasses,
+            agent,
+            extra_args: self.extra_args(),
             extra_env: self.extra_env(),
             secret_env_keys: self.secret_env_keys(),
             prompt_injector: None,
@@ -3479,17 +3518,12 @@ impl SpawnForm {
         (request, self.placement(), self.worktree_default_change())
     }
 
-    /// The agent and the options it sends; `None` for a plain shell. A
-    /// trusted launch sends none of the fields it locks.
+    /// The agent and the options it sends; `None` for a plain shell.
     fn agent_selection(&self) -> Option<AgentSelection> {
         let Runtime::Agent(agent) = self.runtime() else {
             return None;
         };
-        let options = self
-            .options
-            .get(&agent)?
-            .options
-            .wire_values(self.trusted());
+        let options = self.options.get(&agent)?.options.wire_values();
         Some(AgentSelection { agent, options })
     }
 
@@ -3860,7 +3894,6 @@ mod tests {
         workspaces: Vec<WorkspaceEntry>,
         focused: Option<SessionSnapshot>,
         tabs: TabChoices,
-        spawn_defaults: SpawnDefaults,
         agents: Vec<AgentDescriptor>,
         agent_settings: BTreeMap<AgentId, OptionValues>,
         lock: Option<Lock>,
@@ -3879,6 +3912,7 @@ mod tests {
             agents: agent_registry::descriptors(),
             agent_settings: BTreeMap::new(),
             offline: false,
+            extra_args: true,
         }
     }
 
@@ -3889,7 +3923,6 @@ mod tests {
                 workspaces: Vec::new(),
                 focused: None,
                 tabs: tabs(Some("t1"), &[]),
-                spawn_defaults: SpawnDefaults::default(),
                 agents: agent_registry::descriptors(),
                 agent_settings: BTreeMap::new(),
                 lock: None,
@@ -3907,6 +3940,7 @@ mod tests {
                 agents: self.agents.clone(),
                 agent_settings: self.agent_settings.clone(),
                 offline: false,
+                extra_args: true,
             };
             std::iter::once(local)
                 .chain(self.others.iter().cloned())
@@ -3919,19 +3953,12 @@ mod tests {
             self
         }
 
-        /// The saved Spawn defaults the dialog opens over.
-        fn defaults(mut self, defaults: SpawnDefaults) -> Self {
-            self.spawn_defaults = defaults;
-            self
-        }
-
         fn open(&self, cache: &mut BranchCache) -> (SpawnForm, Vec<ClientMessage>) {
             SpawnForm::open(
                 FormInputs {
                     hosts: self.hosts(),
                     focused: self.focused.as_ref().map(|s| (HostKey::Local, s)),
                     tabs: self.tabs.clone(),
-                    spawn_defaults: self.spawn_defaults,
                     lock: self.lock.clone(),
                     preselected: None,
                 },
@@ -4005,14 +4032,6 @@ mod tests {
         let git = open_repo(repo("r1"));
         assert_eq!(git.branch(), "", "a git repo waits for its suggestion");
         assert!(!git.can_submit(), "and Spawn waits with it");
-    }
-
-    /// Every default on, so a case can tell the dialog read them.
-    fn all_defaults() -> SpawnDefaults {
-        SpawnDefaults {
-            trusted: true,
-            last_trusted: None,
-        }
     }
 
     fn press(form: &mut SpawnForm, control: &Control) -> Outcome {
@@ -4181,6 +4200,7 @@ mod tests {
             agents,
             agent_settings: settings,
             offline: false,
+            extra_args: true,
         }
     }
 
@@ -4548,40 +4568,18 @@ mod tests {
     }
 
     #[test]
-    fn plain_shell_hides_and_clears_trusted() {
-        let mut form = open_repo(repo("r1"));
-        press(&mut form, &Control::Trusted);
-        assert!(form.trusted());
-        assert!(form.controls().contains(&Control::Trusted));
-        press(&mut form, &Control::Runtime(Runtime::PlainShell));
-        assert!(!form.trusted_shown());
-        assert!(!form.controls().contains(&Control::Trusted));
-        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
-        assert!(!form.trusted(), "cleared, not just hidden");
-        press(&mut form, &Control::Trusted);
-        press(&mut form, &Control::Runtime(Runtime::PlainShell));
-        form.branch.value = "b".to_owned();
-        let (request, _, _) = form.build_request();
-        assert!(!request.dangerously_skip_permissions);
-        assert_eq!(request.mode, SessionMode::PlainShell);
-    }
-
-    #[test]
-    fn open_prefills_trusted_and_approval_from_defaults() {
+    fn open_prefills_the_permission_mode_from_settings() {
         let mut cache = BranchCache::default();
         let (form, _) = Setup::repos(vec![repo("r1")])
-            .defaults(all_defaults())
             .settings(claude_settings(&[("permission_mode", "plan")]))
             .open(&mut cache);
-        assert!(form.trusted(), "trusted launch pre-filled");
         assert_eq!(
             form.option_value("permission_mode"),
             Some(text("plan")),
-            "a locked field shows the value it keeps for later"
+            "the Settings value shows"
         );
 
         let (plain, _) = Setup::repos(vec![repo("r2")]).open(&mut cache);
-        assert!(!plain.trusted(), "off when no default is saved");
         assert_eq!(
             plain.option_value("permission_mode"),
             Some(OptionValue::Null)
@@ -4590,10 +4588,8 @@ mod tests {
 
     #[test]
     fn target_switch_keeps_user_choice_over_defaults() {
-        let (mut form, _) = Setup::repos(vec![repo("r1"), repo("r2")])
-            .defaults(all_defaults())
-            .open(&mut BranchCache::default());
-        press(&mut form, &Control::Trusted);
+        let (mut form, _) =
+            Setup::repos(vec![repo("r1"), repo("r2")]).open(&mut BranchCache::default());
         press(&mut form, &choice("permission_mode", "accept-edits"));
         assert_eq!(
             form.option_value("permission_mode"),
@@ -4609,38 +4605,22 @@ mod tests {
             Some(text("accept_edits")),
             "the user's approval choice survives the switch"
         );
-        assert!(!form.trusted(), "trusted stays as the user left it");
     }
 
     #[test]
     fn prefill_overrides_spawn_defaults() {
         let mut shell = repo("r1");
         shell.last_spawn_config = Some(config("claude", "plain_shell"));
-        let (mut form, _) = Setup::repos(vec![shell])
-            .defaults(all_defaults())
-            .open(&mut BranchCache::default());
+        let (mut form, _) = Setup::repos(vec![shell]).open(&mut BranchCache::default());
         assert_eq!(
             form.runtime(),
             Runtime::PlainShell,
             "the launch-last plain shell wins"
         );
-        assert!(!form.trusted(), "the saved trusted default does not show");
         form.branch.value = "b".to_owned();
         let (request, _, _) = form.build_request();
         assert!(!request.dangerously_skip_permissions);
         assert_eq!(request.mode, SessionMode::PlainShell);
-    }
-
-    #[test]
-    fn the_trusted_detail_is_the_agents_trust_note() {
-        let mut form = open_repo(repo("r1"));
-        assert_eq!(
-            form.trusted_detail(),
-            Some("Trusted launch passes --dangerously-skip-permissions.")
-        );
-        assert!(!form.trusted(), "trusted launch starts off");
-        press(&mut form, &Control::Runtime(Runtime::PlainShell));
-        assert_eq!(form.trusted_detail(), None, "a plain shell has no agent");
     }
 
     #[test]
@@ -4774,7 +4754,6 @@ mod tests {
                 hosts: vec![this_pc(vec![repo("r1")], Vec::new())],
                 focused: None,
                 tabs: TabChoices::default(),
-                spawn_defaults: SpawnDefaults::default(),
                 lock: None,
                 preselected: None,
             },
@@ -4910,7 +4889,6 @@ mod tests {
             workspaces: vec![workspace("w1", &["r1", "r2"])],
             focused: None,
             tabs: tabs(Some("t1"), &[]),
-            spawn_defaults: SpawnDefaults::default(),
             agents: agent_registry::descriptors(),
             agent_settings: BTreeMap::new(),
             lock: None,
@@ -4956,7 +4934,6 @@ mod tests {
             workspaces: vec![workspace("w1", &["r1", "r2"])],
             focused: None,
             tabs: tabs(None, &[]),
-            spawn_defaults: SpawnDefaults::default(),
             agents: agent_registry::descriptors(),
             agent_settings: BTreeMap::new(),
             lock: None,
@@ -5125,7 +5102,6 @@ mod tests {
                 Control::Branch,
                 Control::Random,
                 Control::Base,
-                Control::Trusted,
                 Control::AdvancedToggle,
                 Control::Cancel,
             ]
@@ -5607,6 +5583,75 @@ mod tests {
             .collect()
     }
 
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn extra_args_split_by_shell_words_into_the_request() {
+        let mut form = ready_form();
+        assert!(form.args_shown() && form.args_supported());
+        form.edit_args(r#"--a b "c d""#);
+        assert_eq!(form.args_note(), None);
+        assert_eq!(request_of(&form).extra_args, strings(&["--a", "b", "c d"]));
+        form.edit_args("   ");
+        assert_eq!(form.args_note(), None, "blank is no arguments");
+        assert_eq!(request_of(&form).extra_args, Vec::<String>::new());
+        assert!(form.can_submit());
+    }
+
+    #[test]
+    fn an_unclosed_quote_shows_the_note_and_blocks_spawn() {
+        let mut form = ready_form();
+        assert!(form.can_submit());
+        form.edit_args(r#"--name "a b"#);
+        assert_eq!(form.args_note(), Some(ArgsNote::UnclosedQuote));
+        assert_eq!(
+            ArgsNote::UnclosedQuote.text(),
+            "The extra arguments have an unclosed quote."
+        );
+        assert!(!form.can_submit(), "Spawn waits for the quote to close");
+        assert!(!form.controls().contains(&Control::Submit));
+    }
+
+    #[test]
+    fn a_plain_shell_hides_the_extra_args_and_sends_none() {
+        let mut form = ready_form();
+        form.edit_args("--debug");
+        press(&mut form, &Control::AdvancedToggle);
+        assert!(form.controls().contains(&Control::Args));
+        press(&mut form, &Control::Runtime(Runtime::PlainShell));
+        assert!(!form.args_shown());
+        assert_eq!(form.args_note(), None, "a hidden field shows no note");
+        assert!(form.can_submit(), "a hidden field blocks nothing");
+        assert!(!form.controls().contains(&Control::Args));
+        assert_eq!(request_of(&form).extra_args, Vec::<String>::new());
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
+        assert_eq!(form.args_text(), "--debug", "the text is kept");
+    }
+
+    #[test]
+    fn a_host_without_the_feature_disables_the_extra_args_and_sends_none() {
+        let mut form = ready_form();
+        for host in &mut form.hosts {
+            host.extra_args = false;
+        }
+        form.edit_args("--debug");
+        press(&mut form, &Control::AdvancedToggle);
+        assert!(!form.args_supported());
+        assert_eq!(form.args_note(), Some(ArgsNote::HostTooOld));
+        assert_eq!(
+            ArgsNote::HostTooOld.text(),
+            "This host is too old for extra arguments."
+        );
+        assert!(form.can_submit(), "the note does not block Spawn");
+        assert!(
+            !form.controls().contains(&Control::Args),
+            "nothing to type in"
+        );
+        assert_eq!(request_of(&form).extra_args, Vec::<String>::new());
+    }
+
     #[test]
     fn plain_shell_clears_to_interactive_and_sends_no_agent_extras() {
         let mut form = ready_form();
@@ -5643,25 +5688,20 @@ mod tests {
     }
 
     #[test]
-    fn trusted_suppresses_permission_mode() {
+    fn a_bypass_choice_sends_the_derived_flag() {
         let mut form = ready_form();
         press(&mut form, &Control::AdvancedToggle);
         press(&mut form, &choice("permission_mode", "accept-edits"));
-        let accept = Some("accept_edits".to_owned());
-        assert_eq!(mode_of(&request_of(&form)), accept);
-        press(&mut form, &Control::Trusted);
-        assert_eq!(mode_of(&request_of(&form)), None);
         assert!(
-            !form
-                .controls()
-                .contains(&choice("permission_mode", "cli-default"))
+            !request_of(&form).dangerously_skip_permissions,
+            "another mode sends no flag"
         );
-        press(&mut form, &choice("permission_mode", "plan"));
-        press(&mut form, &Control::Trusted);
-        assert_eq!(
-            mode_of(&request_of(&form)),
-            accept,
-            "kept for later, and a press while locked changes nothing"
+        press(&mut form, &choice("permission_mode", "bypass-permissions"));
+        let request = request_of(&form);
+        assert_eq!(mode_of(&request).as_deref(), Some("bypass_permissions"));
+        assert!(
+            request.dangerously_skip_permissions,
+            "the bypass choice sends the flag older daemons read"
         );
     }
 
@@ -6232,6 +6272,10 @@ mod tests {
                 Control::FieldText("model".to_owned()),
                 Control::FieldSuggestion {
                     field: "model".to_owned(),
+                    value: "fable".to_owned(),
+                },
+                Control::FieldSuggestion {
+                    field: "model".to_owned(),
                     value: "opus".to_owned(),
                 },
                 Control::FieldSuggestion {
@@ -6242,6 +6286,13 @@ mod tests {
                     field: "model".to_owned(),
                     value: "haiku".to_owned(),
                 },
+                choice("effort", "cli-default"),
+                choice("effort", "low"),
+                choice("effort", "medium"),
+                choice("effort", "high"),
+                choice("effort", "xhigh"),
+                choice("effort", "max"),
+                Control::Args,
                 Control::EnvAdd,
                 Control::Cancel,
                 Control::Submit,
@@ -6307,7 +6358,6 @@ mod tests {
             workspaces: vec![workspace("w1", &["r1", "r2"])],
             focused: None,
             tabs: TabChoices::default(),
-            spawn_defaults: SpawnDefaults::default(),
             agents: agent_registry::descriptors(),
             agent_settings: BTreeMap::new(),
             lock: None,
@@ -6373,7 +6423,6 @@ mod tests {
                     hosts: vec![this_pc(unknown.repos.clone(), Vec::new())],
                     focused: None,
                     tabs: TabChoices::default(),
-                    spawn_defaults: SpawnDefaults::default(),
                     lock: unknown.lock.clone(),
                     preselected: None,
                 },
@@ -6521,18 +6570,17 @@ mod tests {
         (form, sent)
     }
 
-    /// A dialog held on `r1`, over every Spawn default set and a Claude
-    /// permission mode in its Settings.
+    /// A dialog held on `r1`, over a Claude permission mode in its
+    /// Settings.
     fn duplicate_setup(r1: RepoEntry) -> Setup {
         let mut setup = Setup::repos(vec![r1, repo("r2")])
-            .defaults(all_defaults())
             .settings(claude_settings(&[("permission_mode", "plan")]));
         setup.lock = Some(Lock::for_target(Target::repo(&HostKey::Local, "r1")));
         setup
     }
 
-    /// The dialog a Shift-duplicate opens on `r1`, over every Spawn default
-    /// set, with `config` applied.
+    /// The dialog a Shift-duplicate opens on `r1`, over its Settings, with
+    /// `config` applied.
     fn duplicated(config: SpawnConfig) -> SpawnForm {
         duplicate_on(&duplicate_setup(repo("r1")), config).0
     }
@@ -6540,7 +6588,6 @@ mod tests {
     #[test]
     fn a_duplicate_prefill_beats_the_agent_settings() {
         let claude = duplicated(stored_config(&json!({})));
-        assert!(!claude.trusted(), "the source was not trusted");
         assert_eq!(
             claude.option_value("permission_mode"),
             Some(OptionValue::Null),
@@ -6572,7 +6619,11 @@ mod tests {
             "extra_env": [["API_TOKEN", "${env:API_TOKEN}"], ["LEVEL", "3"]],
         })));
         assert_eq!(form.runtime(), Runtime::Agent(claude_id()));
-        assert!(form.trusted());
+        assert_eq!(
+            form.option_value("permission_mode"),
+            Some(OptionValue::Null),
+            "the flag alone sets no mode: daemon configs arrive folded"
+        );
         assert_eq!(form.option_value("model"), Some(text("sonnet")));
         assert!(form.advanced_open(), "the prefilled Advanced values show");
         assert_eq!(
@@ -6584,6 +6635,14 @@ mod tests {
         );
         let shell = duplicated(stored_config(&json!({ "mode": "plain_shell" })));
         assert_eq!(shell.runtime(), Runtime::PlainShell);
+    }
+
+    #[test]
+    fn a_duplicate_prefill_shows_the_extra_args_joined_and_sends_them_back() {
+        let form = duplicated(stored_config(&json!({ "extra_args": ["--x", "a b"] })));
+        assert_eq!(form.args_text(), "--x 'a b'");
+        assert!(form.advanced_open(), "the prefilled arguments show");
+        assert_eq!(request_of(&form).extra_args, strings(&["--x", "a b"]));
     }
 
     /// A stored in-place launch on `r1`'s `dev`.
@@ -7084,7 +7143,9 @@ mod tests {
             model(&form),
             Some(FieldEditor::Model {
                 placeholder: Some("CLI default".to_owned()),
-                suggestions: ["opus", "sonnet", "haiku"].map(str::to_owned).to_vec(),
+                suggestions: ["fable", "opus", "sonnet", "haiku"]
+                    .map(str::to_owned)
+                    .to_vec(),
             })
         );
         press(&mut form, &choice("provider", "deepseek"));

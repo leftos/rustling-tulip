@@ -145,6 +145,13 @@ pub struct SubagentNode {
     /// What it was asked to do: its launch's description, else its first
     /// prompt's first line.
     pub description: Option<String>,
+    /// The model it ran on, as a display name (`Opus 5.5`): its newest
+    /// reply's model, else the model its launch asked for; `None` when
+    /// neither is known.
+    pub model: Option<String>,
+    /// Its effort level (`high`): its newest reply's, else the one its launch
+    /// asked for; `None` when neither is known.
+    pub effort: Option<String>,
     /// The time of the first record read from its transcript.
     pub started_at: Option<DateTime<Utc>>,
     /// When it ended; `None` while it runs.

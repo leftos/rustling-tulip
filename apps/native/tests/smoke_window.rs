@@ -41,8 +41,11 @@ use windows::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,
 };
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PW_CLIENTONLY, PrintWindow};
+use windows::Win32::System::StationsAndDesktops::{
+    GetThreadDesktop, GetUserObjectInformationW, UOI_NAME,
+};
 use windows::Win32::System::Threading::{
-    OpenThread, ResumeThread, SuspendThread, THREAD_SUSPEND_RESUME,
+    GetCurrentThreadId, OpenThread, ResumeThread, SuspendThread, THREAD_SUSPEND_RESUME,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
@@ -51,10 +54,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MAPVK_VK_TO_VSC, MapVirtualKeyW, VIRTUAL_KEY, VK_OEM_MINUS, VK_OEM_PERIOD, VK_RETURN, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_HWNDPREV, GWL_EXSTYLE, GetClientRect, GetForegroundWindow, GetWindow,
-    GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible, PW_RENDERFULLCONTENT,
-    PostMessageW, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WS_EX_NOACTIVATE,
+    EnumWindows, GW_HWNDPREV, GWL_EXSTYLE, GetClassNameW, GetClientRect, GetDlgItemTextW,
+    GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
+    IsWindowVisible, PW_RENDERFULLCONTENT, PostMessageW, WM_CLOSE, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WS_EX_NOACTIVATE,
 };
 use windows::core::BOOL;
 
@@ -1020,6 +1023,152 @@ fn smoke_window_opens_cloaked_unfocused_and_connects() {
     assert_out_of_the_way(smoke.hwnd);
 }
 
+/// The class name of a Windows message box's dialog window.
+const MESSAGE_BOX_CLASS: &str = "#32770";
+/// The caption `start_guard::show_panic_box` gives its box.
+const MESSAGE_BOX_TITLE: &str = "Rustling Tulip";
+/// The dialog control id of a message box's message text.
+const MESSAGE_BOX_ID: i32 = 0xFFFF;
+/// The text the crash-box spec shows, so the box cannot be mistaken for a
+/// real crash report.
+const CRASH_BOX_TEXT: &str = "smoke: the crash box";
+/// A hang guard on the crash box appearing or closing, not an expected
+/// duration.
+const CRASH_BOX_TIMEOUT: Duration = Duration::from_secs(120);
+
+unsafe extern "system" fn collect_message_box(hwnd: HWND, found: LPARAM) -> BOOL {
+    // SAFETY: `found` is the `(u32, Option<HWND>)` `find_message_box` passes,
+    // alive for the whole `EnumWindows` call.
+    let found = unsafe { &mut *(found.0 as *mut (u32, Option<HWND>)) };
+    let mut pid = 0;
+    // SAFETY: plain queries on a window handle EnumWindows just gave us.
+    let visible = unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&raw mut pid));
+        IsWindowVisible(hwnd).as_bool()
+    };
+    if pid != found.0 || !visible {
+        return BOOL(1);
+    }
+    let mut class = [0u16; 64];
+    // SAFETY: the buffer is sized for any class name; a longer one is
+    // truncated rather than overrun.
+    let len = unsafe { GetClassNameW(hwnd, &mut class) };
+    let Ok(len) = usize::try_from(len) else {
+        return BOOL(1);
+    };
+    if String::from_utf16_lossy(&class[..len]) != MESSAGE_BOX_CLASS {
+        return BOOL(1);
+    }
+    let mut title = [0u16; 256];
+    // SAFETY: the buffer is sized for the box's caption; a longer one is
+    // truncated rather than overrun.
+    let len = unsafe { GetWindowTextW(hwnd, &mut title) };
+    let Ok(len) = usize::try_from(len) else {
+        return BOOL(1);
+    };
+    if String::from_utf16_lossy(&title[..len]) == MESSAGE_BOX_TITLE {
+        found.1 = Some(hwnd);
+        return BOOL(0);
+    }
+    BOOL(1)
+}
+
+/// The crash message box this process shows, once it has one: a box thread
+/// that ends without one fails at once, not with the hang guard.
+fn find_message_box(pid: u32, shown: &std::thread::JoinHandle<()>) -> HWND {
+    let deadline = Instant::now() + CRASH_BOX_TIMEOUT;
+    loop {
+        let mut found: (u32, Option<HWND>) = (pid, None);
+        // SAFETY: the callback only writes through the pointer to `found`,
+        // which outlives the call. EnumWindows reports an error when the
+        // callback stops it early, so its result is not the signal.
+        let _ = unsafe { EnumWindows(Some(collect_message_box), LPARAM(&raw mut found as isize)) };
+        if let Some(hwnd) = found.1 {
+            return hwnd;
+        }
+        assert!(
+            !shown.is_finished(),
+            "the crash message box thread ended without showing a box"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "hung: no crash message box for pid {pid} within {CRASH_BOX_TIMEOUT:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The message the box shows, read from its text control.
+fn message_box_text(hwnd: HWND) -> Option<String> {
+    let mut text = [0u16; 1024];
+    // SAFETY: the buffer is sized for a message box's text; a longer one is
+    // truncated rather than overrun.
+    let len = unsafe { GetDlgItemTextW(hwnd, MESSAGE_BOX_ID, &mut text) };
+    let len = usize::try_from(len).ok()?;
+    Some(String::from_utf16_lossy(&text[..len]))
+}
+
+/// The name of the desktop this thread's windows open on, such as `Default`.
+fn desktop_name() -> String {
+    let mut buf = [0u16; 128];
+    // SAFETY: reads this thread's own desktop handle, which is not ours to
+    // close, and copies its name into a buffer of the size passed.
+    let name = unsafe {
+        let desk = GetThreadDesktop(GetCurrentThreadId()).expect("read this thread's desktop");
+        GetUserObjectInformationW(
+            HANDLE(desk.0),
+            UOI_NAME,
+            Some(buf.as_mut_ptr().cast()),
+            u32::try_from(size_of::<[u16; 128]>()).expect("the buffer size fits a u32"),
+            None,
+        )
+        .expect("read this thread's desktop name");
+        buf
+    };
+    let end = name
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(name.len());
+    String::from_utf16_lossy(&name[..end])
+}
+
+/// Waits for the box's thread to end, failing as a hang past the guard.
+fn join_box_thread(shown: std::thread::JoinHandle<()>) {
+    let deadline = Instant::now() + CRASH_BOX_TIMEOUT;
+    while !shown.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "hung: the crash message box did not close within {CRASH_BOX_TIMEOUT:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    shown.join().expect("the crash box thread ended");
+}
+
+#[test]
+#[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+fn the_crash_message_box_shows_its_text_and_closes() {
+    assert!(
+        !desktop_name().eq_ignore_ascii_case("Default"),
+        "refused: the crash message box would open on the interactive desktop; run it through \
+         .\\rt.ps1 native-smoke, which the gate routes to a hidden desktop"
+    );
+    let shown = std::thread::spawn(|| {
+        rustling_tulip_native::start_guard::show_panic_box(CRASH_BOX_TEXT);
+    });
+    let hwnd = find_message_box(std::process::id(), &shown);
+    let text = message_box_text(hwnd).expect("the crash box has no static text");
+    assert!(
+        text.contains(CRASH_BOX_TEXT),
+        "the crash box showed {text:?}, not {CRASH_BOX_TEXT:?}"
+    );
+    // SAFETY: posts a close to a live dialog this process owns; its thread
+    // then returns from `MessageBoxW`.
+    unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+        .expect("close the crash box");
+    join_box_thread(shown);
+}
+
 #[test]
 #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
 fn smoke_window_has_noactivate_and_sits_below_foreground() {
@@ -1466,11 +1615,7 @@ mod driven {
 
     #[test]
     #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
-    #[expect(
-        clippy::panic,
-        reason = "a client that exits now fails the spec at once"
-    )]
-    fn two_panics_at_start_close_the_tabs_on_the_next_start() {
+    fn two_panics_at_start_ask_about_the_tabs_on_the_next_start() {
         let mut daemon = LiveDaemon::start("smoke-safe-start");
         let (client_id, tab_id) = seed_dashboard_tab(&mut daemon);
         let config = daemon.config_dir();
@@ -1504,13 +1649,10 @@ mod driven {
         let mut retried = launch_driven_client(&daemon);
         let mut retried_driver = Driver::connect(retried.0.id());
         retried_driver.ok("ping", &json!({}));
-        retried_driver.wait(
-            &json!({"state": "tabs.0.id", "equals": tab_id.as_str()}),
-            "the retried start shows the saved tab",
-        );
+        wait_start_prompt(&mut retried_driver, &mut retried);
         assert!(
             !layout_is_empty(&config, &client_id),
-            "the retried start keeps the tab"
+            "the retried start keeps the tab while it asks"
         );
         assert!(
             layout_copies(&config).is_empty(),
@@ -1530,20 +1672,53 @@ mod driven {
         assert_eq!(guard["failed_starts"], json!(2), "{guard}");
 
         let mut third = launch_driven_client(&daemon);
+        let mut third_driver = Driver::connect(third.0.id());
+        third_driver.ok("ping", &json!({}));
+        wait_start_prompt(&mut third_driver, &mut third);
+        assert!(
+            !layout_is_empty(&config, &client_id),
+            "nothing is closed before the user chooses"
+        );
+        assert!(
+            std::fs::read_to_string(config.join("state.json"))
+                .expect("read state.json")
+                .contains(&tab_id),
+            "the saved layout still holds the seeded tab"
+        );
+        assert!(
+            layout_copies(&config).is_empty(),
+            "nothing is set aside before the user chooses"
+        );
+    }
+
+    /// Waits until the start-after-a-crash prompt is painted, then checks
+    /// that no tab draws behind it.
+    #[expect(
+        clippy::panic,
+        reason = "a client that exits now fails the spec at once"
+    )]
+    fn wait_start_prompt(driver: &mut Driver, client: &mut Client) {
         let deadline = Instant::now() + SAFE_START_TIMEOUT;
-        while !layout_is_empty(&config, &client_id) {
-            if let Some(status) = third.0.try_wait().expect("poll the client") {
-                panic!("the client exited during the safe start: {status}");
+        loop {
+            let found = driver.ok("find", &json!({"prefix": "start-prompt-without"}));
+            let shown = found.as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["name"] == json!("start-prompt-without"))
+            });
+            if shown {
+                break;
+            }
+            if let Some(status) = client.0.try_wait().expect("poll the client") {
+                panic!("the client exited before it asked about the tabs: {status}");
             }
             assert!(
                 Instant::now() < deadline,
-                "hung: the layout still holds tabs {SAFE_START_TIMEOUT:?} into the safe start"
+                "hung: no prompt {SAFE_START_TIMEOUT:?} into the start"
             );
             std::thread::sleep(Duration::from_millis(100));
         }
-        let copies = layout_copies(&config);
-        assert_eq!(copies.len(), 1, "{copies:?}");
-        assert!(copies[0].contains(&tab_id), "{copies:?}");
+        let state = driver.ok("state", &json!({}));
+        assert_eq!(state["tabs"], json!([]), "no tab draws behind the prompt");
     }
 
     fn number(value: &Value) -> f64 {
@@ -2021,6 +2196,8 @@ mod driven {
         driver.ok("click", &json!({"element": "settings-tab-notifications"}));
         scroll_into_view(driver, TOAST_STYLE_APP);
         driver.ok("click", &json!({"element": TOAST_STYLE_APP}));
+        scroll_into_view(driver, "settings-apply");
+        driver.ok("click", &json!({"element": "settings-apply"}));
         let saved = smoke.daemon.config_dir().join("native-ui.json");
         let deadline = Instant::now() + super::CONNECT_TIMEOUT;
         loop {

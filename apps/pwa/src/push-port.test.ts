@@ -1,6 +1,13 @@
 import { expect, test } from "vitest";
 
-import { FAKE_KEYS, memoryPushPort } from "./push-port";
+import {
+  browserPushPort,
+  FAKE_KEYS,
+  memoryPushPort,
+  readyWithin,
+  WORKER_NOT_READY,
+  WORKER_READY_MS,
+} from "./push-port";
 
 test("a memory port starts where the test puts it", async () => {
   const port = memoryPushPort({ supported: false, installed: false, permission: "denied" });
@@ -20,6 +27,35 @@ test("an undecided permission becomes granted on the ask", async () => {
 test("a denied permission stays denied", async () => {
   const port = memoryPushPort({ permission: "denied" });
   expect(await port.requestPermission()).toBe("denied");
+});
+
+test("readyWithin settles with the registration when it is ready first", async () => {
+  const registration = { scope: "test" };
+  const never = (): Promise<void> => new Promise<void>(() => {});
+  await expect(readyWithin(Promise.resolve(registration), WORKER_READY_MS, never)).resolves.toBe(
+    registration,
+  );
+});
+
+test("readyWithin rejects with WORKER_NOT_READY when the worker never gets ready", async () => {
+  const failure = await readyWithin(new Promise<never>(() => {}), 25, async () => {}).catch(
+    (error: unknown) => error,
+  );
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toBe(WORKER_NOT_READY);
+});
+
+test("a browser port whose worker never gets ready fails subscribe and current", async () => {
+  const slept: number[] = [];
+  const port = browserPushPort({
+    ready: () => new Promise(() => {}),
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+  await expect(port.subscribe("vapid-key")).rejects.toThrow(WORKER_NOT_READY);
+  await expect(port.current()).rejects.toThrow(WORKER_NOT_READY);
+  expect(slept).toEqual([WORKER_READY_MS, WORKER_READY_MS]);
 });
 
 test("subscribe holds the keys it makes and unsubscribe drops them", async () => {

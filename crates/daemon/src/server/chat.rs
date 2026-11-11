@@ -193,8 +193,8 @@ mod tests {
     use crate::summarizer::service::test_support::{FAKE_NOTIFICATION, FakeCaller};
     use protocol::{
         ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, DaemonMessage,
-        PendingInput, SessionMode, SessionStatus, SpawnConfig, SpawnTarget, StretchLine,
-        SummarizerSettings, SummarySource,
+        PendingInput, PendingQuestion, SessionMode, SessionStatus, SpawnConfig, SpawnTarget,
+        StretchLine, SummarizerSettings, SummarySource,
     };
     use std::collections::HashSet;
     use std::io::Write as _;
@@ -217,6 +217,9 @@ mod tests {
     /// The plan text a test's hook carries.
     const PLAN_TEXT: &str =
         "Add div to calc.py\n\n1. Add a plain div to calc.py.\n2. Test division by zero.";
+    /// A question taller than its 100x24 grid, whose rule and tab bar have
+    /// scrolled off the top, so the plugin reads only the rows still shown.
+    const TALL_QUESTION: &str = include_str!("../screen/fixtures/v2319-ask-tall-100x24.txt");
 
     /// A hub with one client connected, so tails read, holding Claude session
     /// `s1` in a scratch project folder whose Claude home is in the scratch
@@ -246,6 +249,7 @@ mod tests {
                 mode: SessionMode::Interactive,
                 dangerously_skip_permissions: false,
                 agent: None,
+                extra_args: Vec::new(),
                 extra_env: extra_env.clone(),
             });
             hub.sessions.insert(record);
@@ -1078,6 +1082,24 @@ mod tests {
         });
     }
 
+    /// Leave `s1`'s record waiting for `asked`'s answer, its screen `text`.
+    fn question_waiting(fx: &Fixture, text: &str, asked: &str) {
+        fx.hub.sessions.update("s1", |record| {
+            record.screen = Some(Arc::new(Mutex::new(screen_from(text))));
+            record.status = SessionStatus::AwaitingInput;
+            record.pending_input = Some(PendingInput::Question {
+                questions: vec![PendingQuestion {
+                    question: asked.to_owned(),
+                    header: String::new(),
+                    options: Vec::new(),
+                    option_descriptions: Vec::new(),
+                    multi_select: false,
+                    preview: false,
+                }],
+            });
+        });
+    }
+
     #[tokio::test]
     async fn a_plan_card_takes_the_hooks_text_before_the_screen() {
         let unfilled = read_prompt(PLAN_SCROLLED).expect("the plan dialog is read");
@@ -1205,6 +1227,63 @@ mod tests {
             }
             other => panic!("expected a ChatScreenChanged, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_tall_question_card_takes_the_hooks_whole_question() {
+        let unfilled = read_prompt(TALL_QUESTION).expect("the tall question is read");
+        assert_eq!(unfilled.kind, ChatPromptKind::Question);
+        assert!(unfilled.questions.is_empty(), "the tab bar is off screen");
+        assert!(
+            !unfilled.subject.is_empty(),
+            "only the question's end is on screen"
+        );
+        let asked = format!("zulu yankee xray {}", unfilled.subject);
+
+        let fx = Fixture::new("question-card-first", None);
+        question_waiting(&fx, TALL_QUESTION, &asked);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let (_, _, screen, _) = next_chat(&mut a_rx).await;
+        let prompt = screen.prompt.expect("the question is read");
+        assert_eq!(prompt.kind, ChatPromptKind::Question);
+        assert_eq!(prompt.subject, asked, "the card shows the whole question");
+    }
+
+    #[tokio::test]
+    async fn a_tall_question_card_keeps_its_rows_when_the_hook_asks_something_else() {
+        let unfilled = read_prompt(TALL_QUESTION).expect("the tall question is read");
+        assert!(!unfilled.subject.is_empty(), "the rows are on screen");
+
+        let fx = Fixture::new("question-card-other", None);
+        question_waiting(&fx, TALL_QUESTION, "Where should the next release go?");
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let (_, _, screen, _) = next_chat(&mut a_rx).await;
+        let prompt = screen.prompt.expect("the question is read");
+        assert_eq!(
+            prompt.subject, unfilled.subject,
+            "the rows as read, never another question's text"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_question_card_read_with_its_bar_keeps_its_own_subject() {
+        let unfilled = read_prompt(QUESTION).expect("the question is read");
+        assert!(!unfilled.questions.is_empty(), "the bar is in view");
+        assert!(!unfilled.subject.is_empty(), "the question is on screen");
+        let asked = format!("{} And what about the tests?", unfilled.subject);
+
+        let fx = Fixture::new("question-card-bar", None);
+        question_waiting(&fx, QUESTION, &asked);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let (_, _, screen, _) = next_chat(&mut a_rx).await;
+        let prompt = screen.prompt.expect("the question is read");
+        assert_eq!(
+            prompt.subject, unfilled.subject,
+            "a dialog drawn with its bar already holds the whole question"
+        );
     }
 
     #[tokio::test]
@@ -2105,6 +2184,26 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_chat_send_while_the_first_prompt_is_held_is_refused() {
+            let (fx, mut term) = Fixture::with_terminal("send-first-prompt-held", None, V176);
+            term.pty.set_first_prompt_held(true);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hello there").await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(
+                    BUSY,
+                    "This session's first prompt is still waiting to be typed."
+                )
+            );
+            assert_eq!(
+                term.typed_now(),
+                Vec::<Vec<u8>>::new(),
+                "nothing reaches the terminal ahead of the first prompt"
+            );
+        }
+
+        #[tokio::test]
         async fn a_ready_box_gets_the_paste_then_enter() {
             let (fx, mut term) = Fixture::with_terminal("send-ready", Some("conv-a"), V176);
             fx.append("conv-a", &[user(1)]);
@@ -2554,6 +2653,8 @@ mod tests {
             use protocol::{ChatAnswerKind, SessionStatus};
 
             const V01: &str = include_str!("../screen/fixtures/v01-start.txt");
+            const MCP_SERVER: &str =
+                include_str!("../screen/fixtures/claude--mcp-server-prompt.txt");
             const V21: &str = include_str!("../screen/fixtures/v21-perm-bash.txt");
             const V22: &str = include_str!("../screen/fixtures/v22-perm-bash.txt");
             const V23: &str = include_str!("../screen/fixtures/v23-amend-open.txt");
@@ -2782,6 +2883,28 @@ mod tests {
                     " ❯ Yes, I trust this folder",
                 );
                 a.term.show(&on_yes).await;
+                a.typed(ENTER, "then Enter").await;
+                a.waits("the Enter");
+                a.term.show(C32).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn mcp_server_moves_its_cursor_then_enters() {
+                let mut a = answer_on("answer-mcp-server", MCP_SERVER, option(1)).await;
+                a.typed(UP, "Up to the second row").await;
+                a.typed(UP, "Up to the first row").await;
+                a.waits("the Ups");
+                let on_use = edited(
+                    &edited(
+                        MCP_SERVER,
+                        "  ❯ Continue without using this MCP server",
+                        "    Continue without using this MCP server",
+                    ),
+                    "    Use this MCP server",
+                    "  ❯ Use this MCP server",
+                );
+                a.term.show(&on_use).await;
                 a.typed(ENTER, "then Enter").await;
                 a.waits("the Enter");
                 a.term.show(C32).await;

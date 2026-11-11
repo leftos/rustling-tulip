@@ -1,37 +1,76 @@
 //! Reading a Claude session back from the tracer log of a run the app did
 //! not record.
 
-use crate::options::ClaudeProvider;
+use crate::options::{ClaudeProvider, Effort, PermissionMode};
 use crate::{ClaudeOptions, provider_for_model};
 use agent_api::{ImportedRun, TracerRun};
 use std::path::Path;
 
-/// The import revision: revision 3 stores the run's options and trust on the
-/// history entry, so every older import is read again from its tracer log.
+/// The import revision: revision 3 stores the run's options on the history
+/// entry, so every older import is read again from its tracer log.
 pub(crate) const IMPORT_REV: u32 = 3;
 
 /// The Claude run `run` describes: its program's file stem starts with
 /// `claude`. Its `--add-dir`s are its extra folders, its last `--model` its
-/// model and the provider whose table names that model, and
-/// `--dangerously-skip-permissions` makes it trusted.
+/// model and the provider whose table names that model, and its last
+/// `--permission-mode <value>` its permission mode (an unknown value none);
+/// `--dangerously-skip-permissions` makes it Bypass permissions whatever
+/// `--permission-mode` says. Its last `--effort <level>` is its effort (an
+/// unknown level [`Effort::Unknown`]).
 pub(crate) fn import_tracer_run(run: &TracerRun<'_>) -> Option<ImportedRun<ClaudeOptions>> {
     if !program_stem(run.program)?.starts_with("claude") {
         return None;
     }
     let model = model_arg(run.args);
+    let bypass = run
+        .args
+        .iter()
+        .any(|arg| arg == "--dangerously-skip-permissions");
+    let permission_mode = if bypass {
+        Some(PermissionMode::BypassPermissions)
+    } else {
+        permission_mode_arg(run.args)
+    };
     Some(ImportedRun {
         program_name: "claude".to_owned(),
         extra_dirs: add_dir_args(run.args),
         options: ClaudeOptions {
-            permission_mode: None,
+            permission_mode,
             provider: imported_provider(model.as_deref()),
             model,
+            effort: effort_arg(run.args),
         },
-        trusted: run
-            .args
-            .iter()
-            .any(|arg| arg == "--dangerously-skip-permissions"),
     })
+}
+
+/// The level of the last `--effort <level>` in `args`, read through
+/// [`Effort`]'s serde names; a level no build knows is [`Effort::Unknown`].
+fn effort_arg(args: &[String]) -> Option<Effort> {
+    let value = args
+        .windows(2)
+        .filter(|pair| pair[0] == "--effort")
+        .map(|pair| pair[1].clone())
+        .next_back()?;
+    serde_json::from_value(serde_json::Value::String(value)).ok()
+}
+
+/// The mode of the last `--permission-mode <value>` in `args`, read back
+/// through [`PermissionMode::as_cli_arg`]; `None` without one or for a value
+/// no mode writes.
+fn permission_mode_arg(args: &[String]) -> Option<PermissionMode> {
+    let value = args
+        .windows(2)
+        .filter(|pair| pair[0] == "--permission-mode")
+        .map(|pair| pair[1].as_str())
+        .next_back()?;
+    [
+        PermissionMode::Default,
+        PermissionMode::AcceptEdits,
+        PermissionMode::BypassPermissions,
+        PermissionMode::Plan,
+    ]
+    .into_iter()
+    .find(|mode| mode.as_cli_arg() == value)
 }
 
 /// The provider an imported session that ran `model` was on.
@@ -75,7 +114,7 @@ fn model_arg(args: &[String]) -> Option<String> {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use crate::options::ClaudeProvider;
+    use crate::options::{ClaudeProvider, Effort, PermissionMode};
     use crate::{ClaudeOptions, ClaudePlugin};
     use agent_api::{Agent, ImportedRun, TracerRun};
 
@@ -113,17 +152,71 @@ mod tests {
                 program_name: "claude".to_string(),
                 extra_dirs: args(&[r"D:\yaat-server", r"D:\yaat-web"]),
                 options: ClaudeOptions {
-                    permission_mode: None,
+                    permission_mode: Some(PermissionMode::BypassPermissions),
                     provider: ClaudeProvider::Anthropic,
                     model: Some("opus".to_string()),
+                    effort: None,
                 },
-                trusted: true,
             }
         );
         let bare = import("claude", &[]).expect("a bare claude imports");
         assert_eq!(bare.extra_dirs, Vec::<String>::new());
         assert_eq!(bare.options, ClaudeOptions::default());
-        assert!(!bare.trusted);
+        assert_eq!(bare.options.permission_mode, None);
+    }
+
+    #[test]
+    fn import_reads_the_permission_mode() {
+        let mode = |list: &[&str]| {
+            import("claude", list)
+                .expect("claude imports")
+                .options
+                .permission_mode
+        };
+        assert_eq!(
+            mode(&[
+                "--permission-mode",
+                "bypassPermissions",
+                "--session-id",
+                "X"
+            ]),
+            Some(PermissionMode::BypassPermissions),
+            "this build's bypass launch"
+        );
+        assert_eq!(
+            mode(&["--permission-mode", "plan"]),
+            Some(PermissionMode::Plan)
+        );
+        assert_eq!(
+            mode(&["--permission-mode", "sideways"]),
+            None,
+            "an unknown value leaves the mode unset"
+        );
+        assert_eq!(
+            mode(&[
+                "--permission-mode",
+                "plan",
+                "--dangerously-skip-permissions"
+            ]),
+            Some(PermissionMode::BypassPermissions),
+            "the skip flag wins"
+        );
+    }
+
+    #[test]
+    fn import_reads_the_effort() {
+        let effort = |list: &[&str]| {
+            import("claude", list)
+                .expect("claude imports")
+                .options
+                .effort
+        };
+        assert_eq!(
+            effort(&["--model", "opus", "--effort", "high"]),
+            Some(Effort::High)
+        );
+        assert_eq!(effort(&["--effort", "turbo"]), Some(Effort::Unknown));
+        assert_eq!(effort(&[]), None);
     }
 
     #[test]

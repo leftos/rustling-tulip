@@ -7,7 +7,7 @@ use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
     AnyElement, App, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId, Entity,
     Focusable as _, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful,
-    Subscription, Window, anchored, deferred, div, prelude::*, px, svg,
+    StyledText, Subscription, Window, anchored, deferred, div, prelude::*, px, svg,
 };
 use protocol::{
     ClientMessage, MergeLayout, RearrangeLayout, SessionMode, SessionStatus, TabContent, TabEntry,
@@ -16,6 +16,7 @@ use protocol::{
 use crate::activity_bar::badge_text;
 use crate::assets::{DASHBOARD_ICON, TAB_CLOSE_ICON, TAB_NEW_ICON};
 use crate::drag::{self, DragPayload, Side};
+use crate::ellipsis::ellipsized;
 use crate::fonts;
 use crate::grid_view::HostLabel;
 use crate::overlay_owner::Overlay;
@@ -33,8 +34,12 @@ use crate::undo;
 use crate::viewer_tab::display_name;
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
+/// The tab strip's height: a fixed bar at the window's edge.
 const TAB_BAR_HEIGHT: f32 = 38.0;
+/// The rename field's width: an input, sized to a tab's name.
 const RENAME_WIDTH: f32 = 140.0;
+/// The widest a pill's label draws; a longer name ends in `…`.
+const PILL_LABEL_MAX_WIDTH: f32 = 240.0;
 /// The busy pill's height and text size.
 const BUSY_PILL_HEIGHT: f32 = 18.0;
 const BUSY_PILL_TEXT_SIZE: f32 = 10.5;
@@ -571,6 +576,9 @@ fn tab_menu_line(line: MenuLine, tab_id: &str, cx: &mut Context<RootView>) -> An
 pub(crate) struct Rename {
     tab_id: String,
     input: Entity<TextInput>,
+    /// The name the box started from: the tab's shown name when it opened.
+    /// Confirming it unchanged stores nothing.
+    seed: String,
     _subscriptions: [Subscription; 2],
 }
 
@@ -644,8 +652,11 @@ impl RootView {
         let [badge, icon, need_badge] = self.pill_marks(tab, &t, cx);
         let rename = self.renaming.as_ref().filter(|r| r.tab_id == tab.id);
         let label = match rename {
-            Some(rename) => div().w(px(RENAME_WIDTH)).child(rename.input.clone()),
-            None => div().whitespace_nowrap().child(pill_label(tab)),
+            Some(rename) => div()
+                .w(px(RENAME_WIDTH))
+                .child(rename.input.clone())
+                .into_any_element(),
+            None => self.pill_label_element(tab),
         };
         let (click_id, middle_id, menu_id) = (tab.id.clone(), tab.id.clone(), tab.id.clone());
         let on_click = cx.listener(move |this, event: &ClickEvent, window, cx| {
@@ -729,6 +740,25 @@ impl RootView {
             .into_any_element()
     }
 
+    /// `tab`'s pill label: at most [`PILL_LABEL_MAX_WIDTH`] wide, ending in
+    /// `…` when cut, the whole label in its tooltip.
+    fn pill_label_element(&self, tab: &TabEntry) -> AnyElement {
+        let text = pill_label(tab, &self.sidebar.tab_display_name(tab));
+        let name = format!("tab-label-{}", tab.id);
+        let shared = SharedString::from(text);
+        div()
+            .id(ElementId::Name(SharedString::from(name.clone())))
+            .relative()
+            .flex_none()
+            .min_w(px(0.0))
+            .max_w(px(PILL_LABEL_MAX_WIDTH))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .tooltip(tooltip(shared.clone()))
+            .children(ellipsized(&name, shared.clone(), StyledText::new(shared)))
+            .into_any_element()
+    }
+
     /// The remote host every pane of `tab` that shows a session is on;
     /// `None` when a pane is on This PC, the panes span hosts, or none
     /// shows a session.
@@ -760,7 +790,7 @@ impl RootView {
     {
         let root = cx.entity().downgrade();
         let tab_id = tab.id.clone();
-        let label: SharedString = pill_label(tab).into();
+        let label: SharedString = pill_label(tab, &self.sidebar.tab_display_name(tab)).into();
         let badge = self.tab_badge(&tab.id);
         move |_, offset, _, cx| {
             let dragged = tab_id.clone();
@@ -816,7 +846,9 @@ impl RootView {
     /// What `tab_id`'s pill reads while it is not being renamed.
     #[must_use]
     pub fn tab_pill_label(&self, tab_id: &str) -> Option<String> {
-        self.tabs.tab(tab_id).map(pill_label)
+        self.tabs
+            .tab(tab_id)
+            .map(|tab| pill_label(tab, &self.sidebar.tab_display_name(tab)))
     }
 
     /// Whether `tab_id`'s pill shows the no-drop state: a pane drag is under
@@ -1073,6 +1105,7 @@ impl RootView {
             || self.open_in_main(Overlay::SessionMenu)
             || self.container_menu.is_some()
             || self.open_in_main(Overlay::ShellMenu)
+            || self.open_in_main(Overlay::LinkMenu)
             || self.sc_picker_open
             || self.changes.file_menu.is_some()
             || self.flyout_open
@@ -1133,7 +1166,8 @@ impl RootView {
         let close = self.tabs.close_confirm.click(&tab);
         if close {
             if let Some(snapshot) = self.tab_snapshot(&tab.id, None) {
-                self.record_undo(undo::closed_tab_message(&tab.name), vec![snapshot], cx);
+                let name = self.sidebar.tab_display_name(&tab);
+                self.record_undo(undo::closed_tab_message(&name), vec![snapshot], cx);
             }
             self.tabs.mark_closing(&tab.id);
             self.send_to(&HostKey::Local, ClientMessage::CloseTab { tab_id: tab.id });
@@ -1142,9 +1176,14 @@ impl RootView {
     }
 
     fn start_rename(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.tabs.tab(tab_id).map(|tab| tab.name.clone()) else {
+        let Some(name) = self
+            .tabs
+            .tab(tab_id)
+            .map(|tab| self.sidebar.tab_display_name(tab))
+        else {
             return;
         };
+        let seed = name.clone();
         let input = cx.new(|cx| TextInput::new(name, "Tab name", cx));
         let events = cx.subscribe_in(
             &input,
@@ -1165,6 +1204,7 @@ impl RootView {
         self.renaming = Some(Rename {
             tab_id: tab_id.to_owned(),
             input,
+            seed,
             _subscriptions: [events, blur],
         });
         cx.notify();
@@ -1177,10 +1217,7 @@ impl RootView {
             return;
         };
         let name = rename.input.read(cx).text().trim().to_owned();
-        let changed = self
-            .tabs
-            .tab(&rename.tab_id)
-            .is_some_and(|tab| tab.name != name);
+        let changed = self.tabs.tab(&rename.tab_id).is_some() && rename.seed.trim() != name;
         if end != RenameEnd::Cancel && changed && !name.is_empty() {
             self.send_to(
                 &HostKey::Local,
@@ -1234,13 +1271,14 @@ impl PillLook {
     }
 }
 
-/// A tab's name; a diff tab's is marked Δ, and a viewer tab's is its file's
-/// name.
-pub(crate) fn pill_label(tab: &TabEntry) -> String {
+/// A tab's pill text from `name`, the name it shows
+/// (`SidebarModel::tab_display_name`); a diff tab's is marked Δ, and a
+/// viewer tab's is its file's name.
+pub(crate) fn pill_label(tab: &TabEntry, name: &str) -> String {
     match &tab.content {
-        TabContent::Diff { .. } => format!("Δ {}", tab.name),
+        TabContent::Diff { .. } => format!("Δ {name}"),
         TabContent::Viewer { path } => display_name(path).to_owned(),
-        TabContent::Grid { .. } | TabContent::Dashboard | TabContent::Unknown => tab.name.clone(),
+        TabContent::Grid { .. } | TabContent::Dashboard | TabContent::Unknown => name.to_owned(),
     }
 }
 

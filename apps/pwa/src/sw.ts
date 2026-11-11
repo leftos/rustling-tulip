@@ -17,16 +17,22 @@ declare global {
   }
 }
 
-// The shell cache: the page and its manifest, precached on install so an
-// installed app opens while the phone is offline.
+// The shell cache: the page, its manifest and the build's hashed assets,
+// precached on install so an installed app opens styled and scripted while the
+// phone is offline.
 const CACHE_NAME = "rt-shell-v1";
 const CACHE_PREFIX = "rt-shell-";
+
+// The build's asset list. `vite.config.ts`'s `rt-precache` plugin rewrites this
+// literal in place with the JSON of the build's hashed assets; a worker served
+// unbuilt, as under `vite dev`, still carries the sentinel.
+const PRECACHE_JSON = "__RT_PRECACHE__";
 
 self.addEventListener("install", (event: ExtendableEvent) => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(CACHE_NAME);
-      await cache.addAll([PAGE_URL, MANIFEST_URL]);
+      await cache.addAll([PAGE_URL, MANIFEST_URL, ...buildAssets()]);
       await self.skipWaiting();
     })(),
   );
@@ -114,6 +120,15 @@ self.addEventListener("notificationclick", (event: NotificationEvent) => {
     })(),
   );
 });
+
+// The build's hashed assets, parsed from the literal the build wrote into this
+// script; a worker served unbuilt has none.
+function buildAssets(): string[] {
+  if (!PRECACHE_JSON.startsWith("[")) {
+    return [];
+  }
+  return JSON.parse(PRECACHE_JSON) as string[];
+}
 
 // A hashed asset never changes under its name, so the first copy is the one
 // served from then on.

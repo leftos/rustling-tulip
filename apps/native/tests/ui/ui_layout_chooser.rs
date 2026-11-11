@@ -253,3 +253,21 @@ fn tabs_closes_it(cx: &mut TestAppContext) {
     assert!(!chooser_open(&mut h));
     assert!(h.sent().is_empty(), "no arrangement was chosen");
 }
+
+#[gpui::test]
+fn shortcuts_work_after_start_empty_closes_the_chooser(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    h.send(init_required(2, Vec::new()));
+    assert!(chooser_open(&mut h));
+    h.keys("enter");
+    assert!(
+        !chooser_open(&mut h),
+        "Start empty has the focus and closes it"
+    );
+    h.keys("ctrl-n");
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "a shortcut works again once the chooser closes with no tab to give the keyboard to"
+    );
+}

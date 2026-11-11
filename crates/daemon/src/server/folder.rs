@@ -32,7 +32,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// A `FetchFile`, `FetchFolder` or `StatPath` request's target.
 struct Request {
@@ -296,6 +296,9 @@ async fn file_worker(
     token: CancellationToken,
 ) -> Option<DaemonMessage> {
     let request = request.listed(&hub).await;
+    let repo_id = request.repo_id.clone();
+    let worktree_path = request.worktree_path.clone();
+    let rel = request.path.clone();
     let confined = tokio::task::spawn_blocking(move || {
         let root = target_root(&hub, &request)?;
         file_fetch::confine_path(&root, &request.path)
@@ -304,6 +307,14 @@ async fn file_worker(
     match confined {
         Ok(Ok(path)) => file_fetch::stream_file(id, path, tx, token).await,
         Ok(Err(err)) => {
+            info!(
+                %id,
+                %repo_id,
+                worktree_path = worktree_path.as_deref().unwrap_or_default(),
+                rel = %rel,
+                error = %format!("{err:#}"),
+                "file fetch failed"
+            );
             let error = format!("{err:#}");
             Some(DaemonMessage::FileFetchError { id, error })
         }

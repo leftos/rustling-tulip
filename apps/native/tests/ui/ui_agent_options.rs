@@ -314,31 +314,6 @@ fn a_when_rule_hides_a_field_and_drops_its_value(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn trusted_launch_locks_the_locked_fields_and_sends_none(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = harness(cx, &dir, vec![claude()]);
-    open(&mut h);
-    h.click_on("spawn-advanced");
-    h.click_on("spawn-opt-permission-mode-plan");
-    assert!(selected(&mut h).contains(&"spawn-opt-permission-mode-plan".to_owned()));
-    h.click_on("spawn-skip-perms");
-    assert!(
-        !ring(&mut h)
-            .iter()
-            .any(|control| control.starts_with("spawn-opt-permission-mode-")),
-        "a locked field leaves the focus ring"
-    );
-    h.click_on("spawn-opt-permission-mode-default");
-    let request = submit(&mut h);
-    assert!(request.dangerously_skip_permissions);
-    assert_eq!(
-        options_of(&request),
-        OptionValues::new(),
-        "a trusted launch sends no permission mode"
-    );
-}
-
-#[gpui::test]
 fn an_unknown_field_kind_is_a_disabled_row(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = harness(cx, &dir, vec![future_agent()]);
@@ -375,54 +350,6 @@ fn switching_runtime_keeps_each_agents_values(cx: &mut TestAppContext) {
     assert!(selected(&mut h).contains(&"spawn-opt-mode-slow".to_owned()));
     let request = submit(&mut h);
     assert_eq!(options_of(&request), values(&[("mode", text("slow"))]));
-}
-
-#[gpui::test]
-fn the_trust_note_is_the_descriptors(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = harness(cx, &dir, vec![claude(), test_agent()]);
-    open(&mut h);
-    assert_eq!(
-        h.root(|root, _| root.spawn_dialog_trust_note()),
-        claude().trust_note
-    );
-    h.click_on("spawn-agent-test-agent");
-    assert_eq!(
-        h.root(|root, _| root.spawn_dialog_trust_note()),
-        None,
-        "an agent with no trust note shows no detail"
-    );
-}
-
-#[gpui::test]
-fn a_locked_text_field_takes_no_typing(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut agent = test_agent();
-    for field in &mut agent.fields {
-        if field.id == "profile" {
-            field.locked_when_trusted = true;
-        }
-    }
-    let mut h = harness(cx, &dir, vec![agent]);
-    open(&mut h);
-    tab_to(&mut h, "spawn-opt-profile");
-    h.keys("w o r k");
-    h.click_on("spawn-skip-perms");
-    assert!(
-        !ring(&mut h).contains(&"spawn-opt-profile".to_owned()),
-        "a locked field takes no focus"
-    );
-    h.click_on("spawn-opt-profile");
-    h.keys("x y");
-    assert_eq!(
-        h.root(|root, cx| root.spawn_dialog_option_text("profile", cx))
-            .as_deref(),
-        Some("work"),
-        "a locked field takes no typing"
-    );
-    h.click_on("spawn-skip-perms");
-    let request = submit(&mut h);
-    assert_eq!(options_of(&request), values(&[("profile", text("work"))]));
 }
 
 #[gpui::test]

@@ -15,13 +15,11 @@ use std::path::Path;
 pub(crate) fn map_hook_event(
     body: &serde_json::Value,
     spawn: Option<&ClaudeOptions>,
-    trusted: bool,
 ) -> Option<HookReport> {
     let mut report = hook_vocabulary::map(body)?;
     let details = hook_vocabulary::details(body);
     if details.event == "UserPromptSubmit" {
-        report.permission_mismatch =
-            mode_mismatch(spawn, trusted, details.permission_mode.as_deref());
+        report.permission_mismatch = mode_mismatch(spawn, details.permission_mode.as_deref());
     }
     Some(report)
 }
@@ -29,17 +27,12 @@ pub(crate) fn map_hook_event(
 /// The spawn's permission mode and the hook's report, when they differ.
 ///
 /// Only a spawn that passed `--permission-mode` states an expected mode: a
-/// spawn with no flag, or a trusted one running with
-/// `--dangerously-skip-permissions`, has nothing to compare against. The
-/// CLI's `"auto"` is a mode the daemon never passes, so it never mismatches.
+/// spawn with no flag has nothing to compare against. The CLI's `"auto"` is a
+/// mode the daemon never passes, so it never mismatches.
 fn mode_mismatch(
     spawn: Option<&ClaudeOptions>,
-    trusted: bool,
     reported: Option<&str>,
 ) -> Option<(String, String)> {
-    if trusted {
-        return None;
-    }
     let mode = spawn?.permission_mode?;
     let reported = reported?;
     if reported == "auto" || reported == mode.as_cli_arg() {
@@ -479,27 +472,20 @@ mod tests {
     use agent_api::UserHooksState;
     use serde_json::{Value, json};
 
-    /// A spawn's options and whether it was trusted.
-    struct Spawn {
-        opts: ClaudeOptions,
-        trusted: bool,
-    }
-
-    /// A spawn that passed `mode` as `--permission-mode`, or none; `yolo`
-    /// spawns it trusted.
-    fn spawn_with(mode: Option<PermissionMode>, yolo: bool) -> Spawn {
-        Spawn {
-            opts: ClaudeOptions {
-                permission_mode: mode,
-                ..ClaudeOptions::default()
-            },
-            trusted: yolo,
+    /// A spawn that passed `mode` as `--permission-mode`, or none.
+    fn spawn_with(mode: Option<PermissionMode>) -> ClaudeOptions {
+        ClaudeOptions {
+            permission_mode: mode,
+            ..ClaudeOptions::default()
         }
     }
 
     /// The mismatch `spawn` and a reported mode make.
-    fn permission_mismatch(spawn: &Spawn, reported: Option<&str>) -> Option<(String, String)> {
-        mode_mismatch(Some(&spawn.opts), spawn.trusted, reported)
+    fn permission_mismatch(
+        spawn: &ClaudeOptions,
+        reported: Option<&str>,
+    ) -> Option<(String, String)> {
+        mode_mismatch(Some(spawn), reported)
     }
 
     /// The hook payload `body`, as the route hands it to the plugin.
@@ -509,16 +495,15 @@ mod tests {
 
     /// The permission mismatch the report for `body` carries, for a session
     /// spawned as `spawn`.
-    fn apply_details(spawn: &mut Spawn, body: &Value) -> Option<(String, String)> {
-        map_hook_event(body, Some(&spawn.opts), spawn.trusted)
-            .and_then(|report| report.permission_mismatch)
+    fn apply_details(spawn: &mut ClaudeOptions, body: &Value) -> Option<(String, String)> {
+        map_hook_event(body, Some(spawn)).and_then(|report| report.permission_mismatch)
     }
 
     /// The prompt route answers the pair `apply_signal` warns about, from the
     /// payload and the spawn's flag.
     #[test]
     fn user_prompt_submit_answers_the_permission_mismatch() {
-        let mut rec = spawn_with(Some(PermissionMode::Plan), false);
+        let mut rec = spawn_with(Some(PermissionMode::Plan));
         let differing = json!({
             "hook_event_name": "UserPromptSubmit",
             "permission_mode": "default",
@@ -536,7 +521,7 @@ mod tests {
 
     #[test]
     fn permission_mismatch_reports_a_different_mode() {
-        let spawn = spawn_with(Some(PermissionMode::Plan), false);
+        let spawn = spawn_with(Some(PermissionMode::Plan));
         assert_eq!(
             permission_mismatch(&spawn, Some("default")),
             Some(("plan".to_owned(), "default".to_owned()))
@@ -546,7 +531,7 @@ mod tests {
 
     #[test]
     fn permission_mismatch_ignores_auto_and_missing_reports() {
-        let spawn = spawn_with(Some(PermissionMode::Plan), false);
+        let spawn = spawn_with(Some(PermissionMode::Plan));
         assert_eq!(permission_mismatch(&spawn, Some("auto")), None);
         assert_eq!(permission_mismatch(&spawn, None), None);
     }
@@ -554,17 +539,17 @@ mod tests {
     #[test]
     fn permission_mismatch_needs_a_flagged_spawn() {
         assert_eq!(
-            permission_mismatch(&spawn_with(None, false), Some("plan")),
+            permission_mismatch(&spawn_with(None), Some("plan")),
             None,
             "no --permission-mode means nothing to compare against"
         );
         assert_eq!(
             permission_mismatch(
-                &spawn_with(Some(PermissionMode::Plan), true),
-                Some("default")
+                &spawn_with(Some(PermissionMode::BypassPermissions)),
+                Some("bypassPermissions")
             ),
             None,
-            "yolo passes no flag either"
+            "a bypass spawn reporting bypassPermissions matches"
         );
     }
 
@@ -969,7 +954,7 @@ mod tests {
 
     #[test]
     fn captured_message_display_reports_no_status() {
-        assert_eq!(map_hook_event(&message_display_body(), None, false), None);
+        assert_eq!(map_hook_event(&message_display_body(), None), None);
     }
 
     #[test]

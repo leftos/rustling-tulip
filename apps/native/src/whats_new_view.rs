@@ -13,6 +13,7 @@ use crate::driver_id::DriverId as _;
 use crate::notice_view::modal_panel;
 use crate::open::OpenJob;
 use crate::open_view::Then;
+use crate::scrollbar::{Scrollbar, Thumb};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::target::HostKey;
 use crate::ui_theme::theme;
@@ -86,6 +87,13 @@ impl RootView {
         })
     }
 
+    /// The What's new body's scrollbar thumb as the last frame laid it out,
+    /// or `None` while the notes fit.
+    #[must_use]
+    pub fn whats_new_scroll_thumb(&self) -> Option<Thumb> {
+        self.whats_new_scroll.thumb()
+    }
+
     /// Opens the window on `notes`, the changelog up to `version`, already
     /// in hand.
     pub(crate) fn open_whats_new(
@@ -100,6 +108,7 @@ impl RootView {
             notes: Notes::shown(notes),
             _fetch: None,
         });
+        self.whats_new_scroll = Scrollbar::default();
         self.whats_new_focus.focus(window);
         cx.notify();
     }
@@ -124,6 +133,7 @@ impl RootView {
             notes: Notes::Loading,
             _fetch: Some(task),
         });
+        self.whats_new_scroll = Scrollbar::default();
         self.whats_new_focus.focus(window);
         cx.notify();
     }
@@ -254,11 +264,17 @@ impl RootView {
             )
             .child(
                 div()
-                    .id("whats-new-body")
-                    .driver_id(|| "whats-new-body".to_owned())
-                    .max_h(px(BODY_MAX_HEIGHT))
-                    .overflow_y_scroll()
-                    .child(body),
+                    .relative()
+                    .child(
+                        div()
+                            .id("whats-new-body")
+                            .driver_id(|| "whats-new-body".to_owned())
+                            .max_h(px(BODY_MAX_HEIGHT))
+                            .overflow_y_scroll()
+                            .track_scroll(self.whats_new_scroll.handle())
+                            .child(body),
+                    )
+                    .child(self.whats_new_scroll.overlay()),
             )
             .child(
                 div()

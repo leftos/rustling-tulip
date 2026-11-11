@@ -305,10 +305,11 @@ impl RootView {
             .iter()
             .filter(|tab| tab.id != menu.tab_id && matches!(tab.content, TabContent::Grid { .. }))
             .map(|tab| {
+                let name = self.sidebar.tab_display_name(tab);
                 Some(MenuRow {
                     selector: format!("empty-pane-move-{}", tab.id),
-                    label: tab.name.clone(),
-                    tip: Some(format!("Move this pane into \"{}\"", tab.name)),
+                    tip: Some(format!("Move this pane into \"{name}\"")),
+                    label: name,
                     action: MenuAction::MoveTo(tab.id.clone()),
                 })
             })
@@ -697,7 +698,7 @@ impl RootView {
         self.tabs.note_layout_request(&message);
         self.send_to(&HostKey::Local, message);
         if drop.swap {
-            self.tabs.focus_pane(&drop.dst_tab_id, &drop.dst_pane_id);
+            self.set_focused_pane(&drop.dst_tab_id, &drop.dst_pane_id, cx);
         }
     }
 

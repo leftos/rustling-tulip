@@ -19,10 +19,10 @@ A worktree session is usually about one GitHub issue or one pull request, but no
 - `SpawnRequest` (`crates/protocol/src/lib.rs`) carries no link. `SpawnConfig::from_request` captures the replayable subset; it is stored in `meta.json` (`orphan::meta_from_record`), `history/<id>.json` (`HistoryEntry.spawn_config`) and `state.json` (`last_spawn_config`), and replayed by `to_clone_request` (Restart, `resume_abandoned`, Recover's `history::claude_request`, Launch last) and `to_duplicate_request` (`server::duplicate_session`).
 
   `SpawnConfig` has a hand-written `Deserialize` through a `Helper` struct, so a new field is added there too.
-- `SessionSnapshot` derives spawn-config facts in `SessionRecord::snapshot` (`crates/daemon/src/session.rs`), as `elevated_authority` does.
+- `SessionSnapshot` derives spawn-config facts in `SessionRecord::snapshot` (`crates/daemon/src/session.rs`), as its other spawn-config facts are.
 - No code runs `gh` today. Git runs through `git.rs::run_git_inner`: `Command::new("git")`, `stdin(null)`, piped output, `CREATE_NO_WINDOW` on Windows, `NON_INTERACTIVE_ENV` plus `kill_on_drop` for network calls, begin/slow timing logs. `git_inspect::parse_forge` already maps an origin URL to `https://github.com/<owner>/<repo>` and forge `github`.
 - `git_watch.rs` watches `.git/refs/**` per repo and parks while `Hub.client_count` is 0.
-- Native: `PaneHeaderParts.chips` (`grid_view.rs` `header_parts`) is a `Vec<HeaderChip>` (`kind: HeaderChipKind`, `text`, `tip`); `sidebar::Leaf` has `runtime`, `trusted` and `state` tags; `apps/native/src/open.rs` opens a URL through `ShellExecuteExW`; `combobox.rs` is the branch picker's pure list state.
+- Native: `PaneHeaderParts.chips` (`grid_view.rs` `header_parts`) is a `Vec<HeaderChip>` (`kind: HeaderChipKind`, `text`, `tip`); `sidebar::Leaf` has `runtime` and `state` tags; `apps/native/src/open.rs` opens a URL through `ShellExecuteExW`; `combobox.rs` is the branch picker's pure list state.
 
 ### Protocol (additive)
 
@@ -50,7 +50,7 @@ A worktree session is usually about one GitHub issue or one pull request, but no
 
   It also has `chip(link, pr) -> Option<LinkChip { text, tip, url }>`: `#412` for an issue with no PR, `#1187 draft` / `#1187 open` / `#1187 merged` / `#1187 closed` for a PR (its own or the one found for the branch), the tip "<owner>/<repo>#<n> <title>\n<state>\n<url>".
 - Spawn dialog (`spawn_form.rs`, `spawn_view.rs`): a "Link" field under Branch for repo and workspace targets, hidden for standalone shells, in PT.8b's field layout, with a results list drawn like the branch combobox. Picking a row shows the link as a chip with a clear button; `build_request` sends `link`. Launch last and the Shift-duplicate prefill carry it per Open question 6. `net.rs` routes `IssueLookup` to the open form by `request_id`, dropping stale replies.
-- Chips, Petal style (20 px, 5 px radius, Geist Mono 11 px at 400, `CHIP` ground, `TEXT_2` text; no new token, PT.2 froze `palette.rs`): on the pane header after the runtime and trusted chips (`header_parts`), and in the leaf's chip row (Comfortable) or inline (Compact). A click opens the URL through `open.rs`; the leaf and header tooltips carry the tip. An `Unknown` kind or state shows `#<n>` with no state word.
+- Chips, Petal style (20 px, 5 px radius, Geist Mono 11 px at 400, `CHIP` ground, `TEXT_2` text; no new token, PT.2 froze `palette.rs`): on the pane header after the runtime chip (`header_parts`), and in the leaf's chip row (Comfortable) or inline (Compact). A click opens the URL through `open.rs`; the leaf and header tooltips carry the tip. An `Unknown` kind or state shows `#<n>` with no state word.
 
 ## Steps
 

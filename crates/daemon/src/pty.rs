@@ -10,6 +10,7 @@
 
 use portable_pty::ChildKiller;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
@@ -208,6 +209,9 @@ pub struct PtyHandle {
     pid: Option<u32>,
     /// One typist at a time on this PTY.
     typing: Arc<TypingLane>,
+    /// Whether an injector chain holds the agent's first prompt, not yet
+    /// typed.
+    first_prompt_held: AtomicBool,
 }
 
 impl PtyHandle {
@@ -221,6 +225,7 @@ impl PtyHandle {
             killer: Mutex::new(Some(parts.killer)),
             pid: parts.pid,
             typing: Arc::new(TypingLane::default()),
+            first_prompt_held: AtomicBool::new(false),
         }
     }
 
@@ -228,6 +233,18 @@ impl PtyHandle {
     #[must_use]
     pub fn typing(&self) -> &Arc<TypingLane> {
         &self.typing
+    }
+
+    /// Whether an injector chain holds the agent's first prompt, not yet
+    /// typed; a chat send is refused meanwhile.
+    #[must_use]
+    pub fn first_prompt_held(&self) -> bool {
+        self.first_prompt_held.load(Ordering::SeqCst)
+    }
+
+    /// Mark the agent's first prompt as held by its chain, or no longer.
+    pub fn set_first_prompt_held(&self, held: bool) {
+        self.first_prompt_held.store(held, Ordering::SeqCst);
     }
 
     pub fn write_input(&self, data: Vec<u8>) {

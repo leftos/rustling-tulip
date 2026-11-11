@@ -90,6 +90,8 @@ mod keys;
 pub mod launch_last;
 mod layout_chooser;
 mod layout_chooser_view;
+mod link_menu;
+mod link_menu_view;
 mod links;
 pub mod logging;
 mod md_blocks;
@@ -140,6 +142,8 @@ mod scrollback_load;
 mod scrollbar;
 mod section;
 mod session_actions;
+#[cfg(windows)]
+mod session_end;
 mod session_menu;
 mod settings_search;
 mod settings_view;
@@ -170,6 +174,7 @@ mod summary_view;
 pub mod syntax;
 mod tab_bar;
 mod tab_menu;
+mod tab_name;
 mod tabs;
 pub mod target;
 mod taskbar_badge;
@@ -249,6 +254,7 @@ use crate::footer::{CountSpan, StopConfirm, flyout_rows, status_counts};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::host_path_prompt_view::HostPathDialog;
 use crate::hosts::{HostConn, Hosts, PaneForgets};
+use crate::link_menu::LinkMenu;
 use crate::needs_you_view::moves_needs_you;
 use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
@@ -273,14 +279,14 @@ use crate::sidebar::{
     save_ui_state,
 };
 use crate::source_control::ScModel;
-use crate::spawn_form::{BranchCache, Lock, Prefill, Target};
+use crate::spawn_form::{BranchCache, Lock, Target};
 use crate::spawn_view::{SpawnEntry, SpawnModal};
 use crate::spawns::PendingSpawns;
 use crate::stash_view::StashUi;
 use crate::status_glyph::{GlyphSize, glyph_view};
 use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{
-    HostedSession, PaneTarget, Placement, SessionRef, TabsModel, auto_grid_resends,
+    BindTarget, HostedSession, PaneTarget, Placement, SessionRef, TabsModel, auto_grid_resends,
     find_tab_containing_session, is_auto_grid, tab_pills,
 };
 use crate::target::HostKey;
@@ -335,7 +341,7 @@ pub use crate::notices::{
     ToastKind, ToastSpec, toast_action_selector,
 };
 pub use crate::notify::{Notifier, NotifyState, PairingActionSink};
-pub use crate::open::{OpenFailure, Opener};
+pub use crate::open::{LinkAction, OpenFailure, Opener};
 pub use crate::pairing::{
     DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix, WaitingRow,
     approve_message, deny_message,
@@ -393,11 +399,6 @@ const UI_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const AUTO_GRID_RESIZE_DEBOUNCE: Duration = Duration::from_millis(250);
 /// The toast a session appearance change the daemon refused raises.
 const APPEARANCE_FAILED_TITLE: &str = "Couldn't change the appearance";
-/// The toast a launch-last replay of a trusted config raises before the
-/// spawn dialog opens.
-const TRUSTED_LAUNCH_TITLE: &str = "Review trusted launch";
-/// The notice a trusted launch shows when its dialog cannot open.
-const TRUSTED_LAUNCH_FAILED_TITLE: &str = "Couldn't review the trusted launch";
 /// The toast a launch-last branch wait raises when the daemon stays silent.
 const LAUNCH_LAST_TIMEOUT_TITLE: &str = "Couldn't pick a branch name for launch-last";
 const LAUNCH_LAST_TIMEOUT_DETAIL: &str =
@@ -549,6 +550,8 @@ pub fn open_main_window(
             if offscreen {
                 offscreen::show_cloaked(window, WINDOW_SIZE);
             }
+            #[cfg(windows)]
+            session_end::install(window);
             let root = cx.new(|cx| RootView::new(wanted_session, start_mode, window, cx));
             if drive {
                 start_driver(window, &root, cx);
@@ -558,6 +561,7 @@ pub fn open_main_window(
     );
     if let Err(err) = opened {
         tracing::error!("opening window: {err:#}");
+        start_guard::note_window_failed();
         cx.quit();
         return;
     }
@@ -789,11 +793,11 @@ const UI_TEXT_SIZE: f32 = 12.0;
 /// How far a divider press must travel before it resizes the split; anything
 /// shorter is a click on the handle and sends nothing.
 const DIVIDER_DRAG_THRESHOLD: f32 = 3.0;
-/// The footer's height in logical pixels.
+/// The footer's height in logical pixels: a fixed strip at the window's edge.
 pub const FOOTER_HEIGHT: f32 = 28.0;
 /// Text size of the footer's counts and status text.
 const FOOTER_TEXT_SIZE: f32 = 11.5;
-/// The footer's daemon pill: its height and text size.
+/// The footer's daemon pill: its height and text size; it fits inside the fixed footer strip.
 const FOOTER_PILL_HEIGHT: f32 = 20.0;
 const FOOTER_PILL_TEXT_SIZE: f32 = 11.0;
 /// Space between the footer's pill and its counts, and between two counts.
@@ -1012,6 +1016,8 @@ pub struct RootView {
     menu: Option<SessionMenu>,
     /// The gutter-dot command menu, while open.
     shell_menu: Option<ShellMenu>,
+    /// The menu a Ctrl+click on a path link opened, while open.
+    link_menu: Option<LinkMenu>,
     /// The open menu's keyboard focus, so Esc reaches it.
     menu_focus: FocusHandle,
     /// The repo or workspace context menu, while open.
@@ -1195,6 +1201,8 @@ pub struct RootView {
     /// The What's new window, while open.
     whats_new: Option<WhatsNew>,
     whats_new_focus: FocusHandle,
+    /// The What's new body's scrollbar, reset each time the window opens.
+    whats_new_scroll: scrollbar::Scrollbar,
     /// Quick-shell folders waiting for the spawn they came with to land.
     quick_shell_saves: PendingQuickShell,
     /// Branch names the daemon suggested, per repo or workspace.
@@ -1207,11 +1215,6 @@ pub struct RootView {
     quit_focus: FocusHandle,
     /// The first-connect layout chooser, while open.
     layout_chooser: Option<layout_chooser::LayoutChooser>,
-    /// The host whose daemon asked for the open layout chooser's answer.
-    layout_chooser_host: HostKey,
-    /// Other hosts' layout questions waiting while one host's chooser shows,
-    /// in arrival order.
-    layout_questions: Vec<layout_chooser_view::LayoutQuestion>,
     /// The layout chooser's keyboard focus.
     chooser_focus: FocusHandle,
     /// The arrangement the chooser picked, applied to the daemon's next tab
@@ -1224,8 +1227,9 @@ pub struct RootView {
     /// The mode a safe start still has to act on, until This PC's first tab
     /// list or layout question comes.
     pending_safe_start: start_guard::StartMode,
-    /// The notice a safe start raised, until it is dismissed.
-    start_notice: Option<start_guard::StartNotice>,
+    /// The prompt a start after a crashed one raised, and the tab list it
+    /// holds undrawn, until the user chooses.
+    start_notice: Option<start_guard_view::HeldStart>,
     start_notice_focus: FocusHandle,
     stable_timer_started: bool,
     /// The tabs a safe start closed, until the daemon has no record of them.
@@ -1555,9 +1559,6 @@ impl RootView {
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
         start_guard::set_safe_start_pending(start_mode != start_guard::StartMode::Normal);
-        if start_mode != start_guard::StartMode::Normal {
-            start_guard_view::drop_restored_views(&mut ui);
-        }
         if ui.general.detailed_logging {
             let outcome = crate::logging::set_detailed(true);
             crate::logging::log_outcome(outcome, true);
@@ -1659,6 +1660,7 @@ impl RootView {
             paths,
             menu: None,
             shell_menu: None,
+            link_menu: None,
             menu_focus: cx.focus_handle(),
             container_menu: None,
             more_menu: sidebar_view::MoreMenu::Closed,
@@ -1731,6 +1733,7 @@ impl RootView {
             host_path_focus: cx.focus_handle(),
             whats_new: None,
             whats_new_focus: cx.focus_handle(),
+            whats_new_scroll: scrollbar::Scrollbar::default(),
             shell_generation: 0,
             quick_shell_saves: PendingQuickShell::default(),
             branch_cache: BranchCache::default(),
@@ -1738,8 +1741,6 @@ impl RootView {
             exit: None,
             quit_focus: cx.focus_handle(),
             layout_chooser: None,
-            layout_chooser_host: HostKey::Local,
-            layout_questions: Vec::new(),
             chooser_focus: cx.focus_handle(),
             pending_arrangement: None,
             cleanup_failed: cleanup_failed::CleanupQueue::default(),
@@ -1829,6 +1830,10 @@ impl RootView {
         view.watch_presence(window, cx);
         view.connect_saved_hosts(window, cx);
         view.watch_taskbar_button(window, cx);
+        // A window nothing has clicked in has no focused element, and the
+        // app's shortcuts are capture listeners under the root: the root
+        // takes the keyboard so they run until a pane or a dialog does.
+        view.root_focus.focus(window);
         view
     }
 
@@ -2384,7 +2389,7 @@ impl RootView {
         };
         popouts::title(
             key,
-            self.tabs.tabs(),
+            &self.sidebar.shown_tabs(self.tabs.tabs()),
             self.sidebar.sessions_of(&host),
             self.sidebar.label_agents(&host),
         )
@@ -2639,7 +2644,7 @@ impl RootView {
     /// The tab pill of each sidebar leaf, by host and session id: the panes
     /// that show that host's session.
     pub(crate) fn leaf_pills(&self) -> HashMap<SessionRef, TabPill> {
-        tab_pills(self.tabs.tabs())
+        tab_pills(&self.sidebar.shown_tabs(self.tabs.tabs()))
     }
 
     /// Groups the sessions panel by `view`, saving the choice when it
@@ -2673,6 +2678,10 @@ impl RootView {
         }
         let request_id = new_request_id();
         self.tabs.arm_create(&request_id);
+        self.tabs.arm_bind(
+            &SessionRef::new(host.clone(), id),
+            BindTarget::Request(request_id.clone()),
+        );
         self.send_to(
             &HostKey::Local,
             Placement::NewTab.message(host, id, Some(request_id)),
@@ -3336,28 +3345,10 @@ impl RootView {
             self.push_toast(ToastKind::Warning, HEADLESS_UNSUPPORTED_TIP, None, cx);
             return;
         }
-        let Some(target) = Target::from_spawn(&host, &config.target) else {
-            return;
-        };
-        let placement = self.launch_last_placement(placement);
-        // With trusted launch the Settings default, trust is already granted
-        // and the replay needs no review.
-        if config.dangerously_skip_permissions && !self.sidebar.ui_state().spawn.trusted {
-            let prefill = Prefill {
-                config: Some(config),
-                open_in: Some(placement.open_choice()),
-            };
-            if self.open_prefilled_dialog(
-                Some(Lock::for_target(target)),
-                prefill,
-                TRUSTED_LAUNCH_FAILED_TITLE,
-                window,
-                cx,
-            ) {
-                self.push_toast(ToastKind::Warning, TRUSTED_LAUNCH_TITLE, None, cx);
-            }
+        if Target::from_spawn(&host, &config.target).is_none() {
             return;
         }
+        let placement = self.launch_last_placement(placement);
         if let Some(target) = launch_last::suggestion_target(&config, self.sidebar.repos_of(&host))
         {
             let (generation, request_id) =
@@ -3514,7 +3505,7 @@ impl RootView {
                 .iter()
                 .map(|tab| quick_jump::TabInput {
                     id: tab.id.clone(),
-                    label: crate::tab_bar::pill_label(tab),
+                    label: crate::tab_bar::pill_label(tab, &self.sidebar.tab_display_name(tab)),
                     host_name: local_name.clone(),
                 })
                 .collect(),
@@ -3630,7 +3621,7 @@ impl RootView {
             return;
         }
         if self.is_tab_popped(tab_id) {
-            self.tabs.set_focused(tab_id, pane_id);
+            self.set_focused_pane(tab_id, pane_id, cx);
             self.focus_history.record(tab_id, Some(pane_id));
             self.update_pane_roles(cx);
             self.activate_popout(
@@ -3800,6 +3791,13 @@ impl RootView {
             Placement::Pane { .. } => None,
         };
         let msg = placement.message(host, &session.id, request_id);
+        // The message arms the bind, so the pane the session lands in claims
+        // its size at once instead of keeping its old viewport: a new tab or
+        // a split by its request id, a replaced session by its pane.
+        if let Some(target) = tabs::bind_target(&msg) {
+            self.tabs
+                .arm_bind(&SessionRef::new(host.clone(), session.id.clone()), target);
+        }
         self.tabs.note_layout_request(&msg);
         self.send_to(&HostKey::Local, msg);
     }
@@ -4852,14 +4850,12 @@ impl RootView {
         if self.on_vscode_message(host, &msg, window, cx) {
             return;
         }
-        // Tabs are This PC's layout: a remote host's tab list only ends its
-        // own layout question.
-        if let DaemonMessage::Tabs { tabs } = &msg {
-            if *host == HostKey::Local {
-                self.on_tab_list(tabs, window, cx);
-            } else {
-                self.close_layout_chooser_of(host, window, cx);
-            }
+        // Tabs are This PC's layout: a remote host's tab list draws nothing
+        // here.
+        if let DaemonMessage::Tabs { tabs } = &msg
+            && *host == HostKey::Local
+        {
+            self.on_tab_list(tabs, window, cx);
         }
         if self.fold_tabs_and_drop_stale_menus(host, &msg, window, cx) {
             return;
@@ -5619,6 +5615,7 @@ impl RootView {
             return;
         }
         if self.on_container_menu_key(ks, window, cx)
+            || self.on_link_menu_key(ks, window, cx)
             || self.on_container_row_key(ks, window, cx)
             || self.on_dashboard_toggle_key(ks, event.is_held, window, cx)
         {
@@ -5766,6 +5763,11 @@ impl RootView {
             && ks.key == "escape"
         {
             self.close_shell_menu(window, cx);
+        } else if self.link_menu.is_some()
+            && self.overlays.shows(Overlay::LinkMenu, here)
+            && ks.key == "escape"
+        {
+            self.close_link_menu(window, cx);
         } else if self.sc_picker_open && ks.key == "escape" {
             self.close_sc_picker(window, cx);
         } else if self.changes.file_menu.is_some() && ks.key == "escape" {
@@ -6143,6 +6145,7 @@ impl Render for RootView {
             .children(self.dashboard_band_layer(cx))
             .children(self.session_menu_layer(here, cx).into_iter().flatten())
             .children(self.shell_menu_layer(here, cx).into_iter().flatten())
+            .children(self.link_menu_layer(here, cx).into_iter().flatten())
             .children(self.tab_menu_layer(cx).into_iter().flatten())
             .children(self.pane_menu_layers(here, cx))
             .children(self.container_menu_layer(cx).into_iter().flatten())
@@ -6300,12 +6303,15 @@ impl RootView {
                     .into_iter()
                     .map(|span| footer_count(span, &theme(cx))),
             )
-            .child(
-                ellipsis::truncating("footer-status", StyledText::new(self.footer_status()))
+            .child({
+                let status = self.footer_status();
+                ellipsis::truncating("footer-status", StyledText::new(status.clone()))
+                    .id("footer-status")
                     .driver_id(|| "footer-status".to_owned())
                     .flex_1()
-                    .text_right(),
-            )
+                    .text_right()
+                    .when(!status.is_empty(), |line| line.tooltip(tooltip(status)))
+            })
             .children(self.accounts_chip(cx))
             .children(self.update_footer(cx))
             .children(self.version_footer())
@@ -6350,6 +6356,7 @@ impl RootView {
             .absolute()
             .left(px(PADDING))
             .bottom(ui_px(cx, FOOTER_HEIGHT) + px(4.0))
+            // Capped at a window-edge width; its rows wrap.
             .w(px(320.0))
             .flex()
             .flex_col()
@@ -6543,6 +6550,7 @@ fn connecting_overlay(
         .gap(px(16.0))
         .px(px(40.0))
         .py(px(32.0))
+        // A window-edge width; the overlay's text wraps.
         .min_w(px(280.0))
         .bg(gpui::rgb(t.modal))
         .border_1()

@@ -699,6 +699,7 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
                 options: vec!["Tea".to_owned(), "Coffee".to_owned()],
                 option_descriptions: vec![String::new(), String::new()],
                 multi_select: false,
+                preview: false,
             }],
         }),
         "the question the hook reported"

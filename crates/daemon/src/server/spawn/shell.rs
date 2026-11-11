@@ -774,8 +774,10 @@ fn quote_args(family: ShellFamily, args: &[String]) -> Option<String> {
 
 /// The agent's command as `family` types it: `argv` quoted (see
 /// [`quote_command_line`]), or the user's program word bare followed by
-/// `argv` quoted, then the user's extra arguments verbatim. `None` when cmd
-/// cannot carry an argument, or the extras hold `%` or `!`, which cmd expands.
+/// `argv` quoted, then the user's extra arguments verbatim, then the spawn's
+/// own extra arguments quoted. `None` when cmd cannot carry an argument, the
+/// extras hold `%` or `!`, which cmd expands, or the spawn has arguments the
+/// extras could swallow or redirect (see [`extras_carry_spawn_args`]).
 pub(super) fn typed_command(
     family: ShellFamily,
     argv: &[String],
@@ -785,6 +787,7 @@ pub(super) fn typed_command(
     if matches!(family, ShellFamily::Cmd) && extra.contains(['%', '!']) {
         return None;
     }
+    let suffix = spawn_args_suffix(family, extra, typed.spawn_args)?;
     let mut line = match typed.program_word {
         None => quote_command_line(family, argv)?,
         Some(word) if argv.is_empty() => typed_program_word(family, word),
@@ -798,7 +801,39 @@ pub(super) fn typed_command(
         line.push(' ');
         line.push_str(extra);
     }
+    if !suffix.is_empty() {
+        line.push(' ');
+        line.push_str(&suffix);
+    }
     Some(line)
+}
+
+/// The spawn's own `args` as `family` types them after the trimmed
+/// launch-command `extra`, quoted and joined (empty without any); `None` when
+/// cmd cannot carry one or `extra` could swallow or redirect them (see
+/// [`extras_carry_spawn_args`]), so the spawn falls back to the direct
+/// launch.
+fn spawn_args_suffix(family: ShellFamily, extra: &str, args: &[String]) -> Option<String> {
+    if args.is_empty() {
+        return Some(String::new());
+    }
+    if !extra.is_empty() && !extras_carry_spawn_args(extra) {
+        return None;
+    }
+    quote_args(family, args)
+}
+
+/// Whether arguments typed after the verbatim launch-command `extra` still
+/// reach the agent: the extras end in no comment or line continuation (a word
+/// typed after them splits as itself) and hold no command separator,
+/// backtick, redirect or PowerShell block comment (`;`, `|`, `&`, `` ` ``,
+/// `<`, `>`, which `<#` starts with).
+fn extras_carry_spawn_args(extra: &str) -> bool {
+    if extra.contains([';', '|', '&', '`', '<', '>']) {
+        return false;
+    }
+    shell_words::split(&format!("{extra} x"))
+        .is_ok_and(|words| words.last().is_some_and(|word| word == "x"))
 }
 
 /// The line that runs `command` from `cwd` in `family`: a change to `cwd`,
@@ -959,7 +994,7 @@ fn refused_cmd_shim_arg(
     program: &str,
     prepend: &[String],
     plugin_args: &[String],
-    extra: &[String],
+    extras: &[(&[String], &'static str)],
     initial_prompt: Option<&str>,
 ) -> Option<(char, &'static str)> {
     let leading = std::iter::once(program)
@@ -972,9 +1007,9 @@ fn refused_cmd_shim_arg(
             .map(String::as_str);
         (arg.as_str(), plugin_arg_name(arg, previous, initial_prompt))
     });
-    let extras = extra
+    let extras = extras
         .iter()
-        .map(|arg| (arg.as_str(), "a launch-command argument"));
+        .flat_map(|(args, name)| args.iter().map(|arg| (arg.as_str(), *name)));
     leading
         .chain(own)
         .chain(extras)
@@ -1068,6 +1103,9 @@ pub(super) struct TypedCommand<'a> {
     pub(super) program_word: Option<&'a str>,
     /// Extra arguments typed verbatim after the agent's own; blank for none.
     pub(super) extra: &'a str,
+    /// The spawn's own extra arguments, already split, each quoted for the
+    /// shell and typed after [`Self::extra`].
+    pub(super) spawn_args: &'a [String],
 }
 
 /// The program and extra arguments an interactive spawn launches its agent
@@ -1085,14 +1123,25 @@ pub(super) struct AgentCommandChoice {
     pub(super) extra_args: Vec<String>,
     /// The extra arguments as stored, trimmed, for the typed shell form.
     pub(super) extra_text: String,
+    /// The spawn's own extra arguments, passed after [`Self::extra_args`].
+    pub(super) spawn_args: Vec<String>,
     /// The plugin's program override variable, which a refusal's hint names.
     pub(super) program_env_var: &'static str,
 }
 
 impl AgentCommandChoice {
+    /// This choice with the spawn's own extra arguments `args`, which follow
+    /// the launch command's.
+    #[must_use]
+    pub(super) fn with_spawn_args(mut self, args: &[String]) -> Self {
+        self.spawn_args = args.to_vec();
+        self
+    }
+
     /// The direct spawn's arguments for the resolved `program`: the
     /// resolver's leading `prepend`, the plugin's own `plugin_args` (which
-    /// carry `initial_prompt`), then the extra arguments.
+    /// carry `initial_prompt`), then the launch command's extra arguments,
+    /// then the spawn's own.
     ///
     /// # Errors
     ///
@@ -1110,7 +1159,10 @@ impl AgentCommandChoice {
                 program,
                 &prepend,
                 &plugin_args,
-                &self.extra_args,
+                &[
+                    (&self.extra_args, "a launch-command argument"),
+                    (&self.spawn_args, "an extra argument of this spawn"),
+                ],
                 initial_prompt,
             )
         {
@@ -1132,6 +1184,7 @@ impl AgentCommandChoice {
         let mut args = prepend;
         args.extend(plugin_args);
         args.extend(self.extra_args.iter().cloned());
+        args.extend(self.spawn_args.iter().cloned());
         Ok(args)
     }
 }
@@ -1169,6 +1222,7 @@ pub(super) fn choose_agent_command(
         typed_verbatim,
         extra_args,
         extra_text: setting.args.trim().to_owned(),
+        spawn_args: Vec::new(),
         program_env_var: plugin.program_env_var(),
     })
 }
@@ -1196,15 +1250,18 @@ pub(super) fn plan_launch(
         Some(_) => None,
         None => agent.argv.first().map(String::as_str),
     };
+    // The spawn's own arguments are quoted like the plugin's, so the same
+    // checks read them.
+    let quoted_args = || agent.argv.iter().chain(agent.typed.spawn_args);
     let legacy_refused = legacy_argument_passing(&shell.program, resolved_program)
-        && agent.argv.iter().any(|arg| mangled_by_legacy_parsing(arg));
+        && quoted_args().any(|arg| mangled_by_legacy_parsing(arg));
     // A shell other than cmd hands the arguments to cmd.exe as they are, and
     // cmd would act on its metacharacters; the direct spawn refuses them.
     // `agent.program` is checked, not argv's first word, so a program word
     // typed verbatim that resolves to a batch file counts too.
     let cmd_refused = family != ShellFamily::Cmd
         && runs_through_cmd(agent.program)
-        && agent.argv.iter().any(|arg| cmd_shim_refuses(arg).is_some());
+        && quoted_args().any(|arg| cmd_shim_refuses(arg).is_some());
     let line = typed_command(family, agent.argv, agent.typed)
         .and_then(|command| launch_line(family, agent.cwd, &command))
         .filter(|_| !legacy_refused && !cmd_refused);
@@ -1509,7 +1566,7 @@ const ZSH_INIT_SCRIPT: &str = include_str!("../../../shell-init/zsh-init.zshrc")
 mod launch_tests {
     use super::{
         AgentLaunch, Launch, ShellFamily, ShellProgram, TypedCommand, cmd_shim_refuses, fish_quote,
-        launch_line, nu_quote, plan_launch, quote_command_line,
+        launch_line, nu_quote, plan_launch, quote_args, quote_command_line, typed_command,
     };
     use base64::Engine as _;
     use protocol::{InjectorStartup, InjectorStep, PromptInjector};
@@ -1566,6 +1623,7 @@ mod launch_tests {
         let typed = TypedCommand {
             program_word: Some("cl"),
             extra: r#" --debug "a b" "#,
+            spawn_args: &[],
         };
         assert_eq!(
             typed_line_with(shell("pwsh.exe", "pwsh"), &plugin_args, typed).as_deref(),
@@ -1603,6 +1661,7 @@ mod launch_tests {
             let typed = TypedCommand {
                 program_word: None,
                 extra: blank,
+                spawn_args: &[],
             };
             assert_eq!(
                 typed_line_with(shell("pwsh.exe", "pwsh"), &argv, typed).as_deref(),
@@ -1629,6 +1688,7 @@ mod launch_tests {
         let typed = TypedCommand {
             program_word: None,
             extra: "--debug",
+            spawn_args: &[],
         };
         assert_eq!(
             typed_line_with(shell("pwsh.exe", "pwsh"), &argv, typed).as_deref(),
@@ -1647,6 +1707,135 @@ mod launch_tests {
     }
 
     #[test]
+    fn a_typed_line_quotes_the_spawns_extra_args_after_the_launch_command_extras() {
+        let plugin_args = strings(&["--model", "opus"]);
+        let spawn_args = strings(&["--name", "a b"]);
+        let typed = TypedCommand {
+            program_word: Some("cl"),
+            extra: " --debug ",
+            spawn_args: &spawn_args,
+        };
+        assert_eq!(
+            typed_line_with(shell("pwsh.exe", "pwsh"), &plugin_args, typed).as_deref(),
+            Some(
+                r"Set-Location -LiteralPath 'C:\work\repo'; cl '--model' 'opus' --debug '--name' 'a b'"
+            ),
+            "PowerShell quotes each of the spawn's arguments after the verbatim extras"
+        );
+        assert_eq!(
+            typed_line_with(shell("cmd.exe", "cmd"), &plugin_args, typed).as_deref(),
+            Some(r#"cd /d "C:\work\repo" && cl --model opus --debug --name "a b""#)
+        );
+        assert_eq!(
+            typed_line_with(shell("/bin/bash", "bash"), &plugin_args, typed).as_deref(),
+            Some(r"cd -- 'C:\work\repo' && cl '--model' 'opus' --debug '--name' 'a b'")
+        );
+        let blank = TypedCommand {
+            program_word: None,
+            extra: "",
+            spawn_args: &spawn_args,
+        };
+        assert_eq!(
+            typed_line_with(
+                shell("pwsh.exe", "pwsh"),
+                &strings(&[r"C:\bin\claude.exe", "--model", "opus"]),
+                blank
+            )
+            .as_deref(),
+            Some(
+                r"Set-Location -LiteralPath 'C:\work\repo'; & 'C:\bin\claude.exe' '--model' 'opus' '--name' 'a b'"
+            ),
+            "without launch-command extras they follow the agent's own arguments"
+        );
+    }
+
+    #[test]
+    fn a_spawns_extra_args_the_shell_cannot_carry_fall_back_to_the_direct_launch() {
+        let plugin_args = strings(&["--model", "opus"]);
+        let percent = strings(&["--name", "%USERNAME%"]);
+        let in_cmd = TypedCommand {
+            program_word: Some("cl"),
+            extra: "",
+            spawn_args: &percent,
+        };
+        assert!(
+            typed_line_with(shell("cmd.exe", "cmd"), &plugin_args, in_cmd).is_none(),
+            "cmd would expand the spawn's argument"
+        );
+        let quote = strings(&[r#"say "hi""#]);
+        let legacy = TypedCommand {
+            program_word: Some("cl"),
+            extra: "",
+            spawn_args: &quote,
+        };
+        assert!(
+            typed_line_with(shell("powershell.exe", "powershell"), &plugin_args, legacy).is_none(),
+            "Windows PowerShell's legacy argument passing would mangle the spawn's argument"
+        );
+        let amp = strings(&[r"C:\dev\R&D"]);
+        let through_cmd = AgentLaunch {
+            program: r"C:\tools\mytool.cmd",
+            typed: TypedCommand {
+                program_word: Some("mytool"),
+                extra: "",
+                spawn_args: &amp,
+            },
+            ..agent(&plugin_args, None)
+        };
+        assert!(
+            matches!(
+                plan_launch(true, Some(shell("pwsh.exe", "pwsh")), through_cmd),
+                Launch::Direct
+            ),
+            "pwsh hands the spawn's & to the cmd.exe that runs mytool.cmd"
+        );
+        let spawn_args = strings(&["--name", "a"]);
+        let families = [
+            (ShellFamily::PowerShell, "--debug `"),
+            (ShellFamily::Posix, r"--debug \"),
+            (ShellFamily::Fish, r"--debug \"),
+            (ShellFamily::Nushell, r"--debug \"),
+        ];
+        for (family, continuation) in families {
+            for extra in [
+                "--debug #note",
+                "--debug ;",
+                "--debug |",
+                "--debug &",
+                "--debug <# note",
+                "--debug >",
+                "--debug 2>",
+                continuation,
+            ] {
+                let typed = TypedCommand {
+                    program_word: Some("cl"),
+                    extra,
+                    spawn_args: &spawn_args,
+                };
+                assert_eq!(
+                    typed_command(family, &plugin_args, typed),
+                    None,
+                    "{family:?} extras {extra:?} would swallow or redirect the spawn's arguments"
+                );
+            }
+            let plain = TypedCommand {
+                program_word: Some("cl"),
+                extra: "--debug",
+                spawn_args: &spawn_args,
+            };
+            let line = typed_command(family, &plugin_args, plain)
+                .unwrap_or_else(|| panic!("{family:?} types plain extras"));
+            assert!(
+                line.ends_with(&format!(
+                    "--debug {}",
+                    quote_args(family, &spawn_args).unwrap_or_default()
+                )),
+                "{family:?}: the spawn's arguments follow plain extras: {line}"
+            );
+        }
+    }
+
+    #[test]
     fn cmd_falls_back_to_the_direct_launch_on_percent_or_bang_in_the_extras() {
         let plugin_args = strings(&["--model", "opus"]);
         for extra in ["--name %USERNAME%", "--say hi!"] {
@@ -1659,6 +1848,7 @@ mod launch_tests {
                 let typed = TypedCommand {
                     program_word,
                     extra,
+                    spawn_args: &[],
                 };
                 assert!(
                     typed_line_with(shell("cmd.exe", "cmd"), &argv, typed).is_none(),
@@ -1831,6 +2021,7 @@ mod launch_tests {
         let typed = TypedCommand {
             program_word: Some("mytool"),
             extra: "",
+            spawn_args: &[],
         };
         let through_cmd = AgentLaunch {
             program: r"C:\tools\mytool.cmd",
@@ -2260,6 +2451,35 @@ mod launch_command_tests {
             argv,
             ["/d", "/c", "--model", "opus", "--debug", "a b", "c d"]
         );
+    }
+
+    #[test]
+    fn a_spawns_extra_args_follow_the_launch_command_extras() {
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
+        let chosen = choose_agent_command(plugin, &command("", "--debug"), &no_env)
+            .expect("the command splits")
+            .with_spawn_args(&["--name".to_owned(), "a b".to_owned()]);
+        let argv = chosen
+            .direct_args(
+                r"C:\bin\claude.exe",
+                Vec::new(),
+                vec!["--model".to_owned(), "opus".to_owned()],
+                None,
+            )
+            .expect("an .exe takes every argument");
+        assert_eq!(
+            argv,
+            ["--model", "opus", "--debug", "--name", "a b"],
+            "the plugin's argv, then the host's extras, then the spawn's own"
+        );
+
+        let refused = choose_agent_command(plugin, &command("", ""), &no_env)
+            .expect("a blank command splits")
+            .with_spawn_args(&[r"C:\dev\R&D".to_owned()])
+            .direct_args(r"C:\npm\claude.cmd", Vec::new(), Vec::new(), None)
+            .expect_err("cmd.exe would act on the spawn's &");
+        assert_eq!(refused.argument, "an extra argument of this spawn");
     }
 
     #[test]

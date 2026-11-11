@@ -409,6 +409,7 @@ mod tests {
                     options: vec!["A".to_owned(), "B".to_owned()],
                     option_descriptions: vec![String::new(), String::new()],
                     multi_select: false,
+                    preview: false,
                 }],
             })
         );
@@ -867,7 +868,7 @@ mod tests {
     fn report(event: &serde_json::Value) -> agent_api::HookReport {
         agent_registry::plugin(&agent_registry::default_agent())
             .expect("Claude is registered")
-            .map_hook_event(event, None, false)
+            .map_hook_event(event, None)
             .expect("the body maps to a report")
     }
 

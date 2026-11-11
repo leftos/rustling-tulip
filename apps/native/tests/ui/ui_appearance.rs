@@ -58,6 +58,28 @@ fn header_fill_of(h: &mut Harness<'_>, pane_id: &str) -> u32 {
         .expect("the pane is in a tab")
 }
 
+fn header_fade_of(h: &mut Harness<'_>, pane_id: &str) -> (u32, u32) {
+    let pane_id = pane_id.to_owned();
+    h.root(move |root, cx| root.pane_header_fade(&pane_id, cx))
+        .expect("the pane is in a tab")
+}
+
+/// `from` moved `amount` of the way to `toward`, channel by channel, as the
+/// app's `theme::mix` does.
+fn mix(from: u32, toward: u32, amount: f64) -> u32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a weighted average of two channels is a 0-255 value"
+    )]
+    let channel = |shift: u32| {
+        let a = (from >> shift) & 0xff;
+        let b = (toward >> shift) & 0xff;
+        (f64::from(a) + (f64::from(b) - f64::from(a)) * amount).round() as u8
+    };
+    (u32::from(channel(16)) << 16) | (u32::from(channel(8)) << 8) | u32::from(channel(0))
+}
+
 /// What pane `pane_id` fills: its terminal's area and the ring around it.
 fn fills_of(h: &mut Harness<'_>, pane_id: &str) -> (u32, u32) {
     let pane_id = pane_id.to_owned();
@@ -480,16 +502,31 @@ fn a_session_list_keeps_the_sends_in_flight_of_the_sessions_it_holds(cx: &mut Te
 }
 
 #[gpui::test]
-fn a_program_background_fills_the_grid_and_an_unset_ring(cx: &mut TestAppContext) {
+fn a_program_background_fills_the_grid_under_the_accent_band(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = focused(cx, &dir, &Fixture::single(session("s1").build()));
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s1")),
+    );
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = focused(cx, &dir, &fixture);
 
     h.pty("s1", b"\x1b]11;rgb:12/34/56\x07");
 
     assert_eq!(
         fills_of(&mut h, "p1"),
+        (0x123456, BUILTIN_ACCENT),
+        "OSC 11 sets the terminal background, and the focused pane's band is its accent"
+    );
+    assert_eq!(
+        fills_of(&mut h, "p2"),
         (0x123456, 0x123456),
-        "OSC 11 sets the terminal background, and no frame follows it"
+        "an unfocused pane's unset ring follows the program's background"
     );
 }
 
@@ -501,12 +538,12 @@ fn resetting_the_program_background_returns_to_the_configured_one(cx: &mut TestA
     let mut h = focused(cx, &dir, &Fixture::single(paper));
 
     h.pty("s1", b"\x1b]11;rgb:12/34/56\x07");
-    assert_eq!(fills_of(&mut h, "p1"), (0x123456, 0x123456));
+    assert_eq!(fills_of(&mut h, "p1"), (0x123456, BUILTIN_ACCENT));
 
     h.pty("s1", b"\x1b]111\x07");
     assert_eq!(
         fills_of(&mut h, "p1"),
-        (PAPER, PAPER),
+        (PAPER, BUILTIN_ACCENT),
         "OSC 111 drops the program's background for the configured one"
     );
 }
@@ -559,13 +596,182 @@ fn the_grid_paints_the_terminal_background_and_the_ring_the_frame(cx: &mut TestA
 #[gpui::test]
 fn an_unset_frame_follows_the_terminal_background(cx: &mut TestAppContext) {
     let dir = TestDir::new();
+    let paper = || {
+        let mut s = session("s1").build();
+        s.appearance.terminal_background_color = Some("#f6f4ef".to_owned());
+        s
+    };
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s1")),
+    );
+    let fixture = Fixture {
+        sessions: vec![paper()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = focused(cx, &dir, &fixture);
+    assert_eq!(
+        fills_of(&mut h, "p2"),
+        (PAPER, PAPER),
+        "an unfocused pane with no frame follows the terminal's background"
+    );
+}
+
+#[gpui::test]
+fn a_focused_theme_pane_draws_its_accent_band(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
     let mut paper = session("s1").build();
     paper.appearance.terminal_background_color = Some("#f6f4ef".to_owned());
     let mut h = focused(cx, &dir, &Fixture::single(paper));
     assert_eq!(
         fills_of(&mut h, "p1"),
-        (PAPER, PAPER),
-        "no level sets a frame, so the ring is the terminal's background"
+        (PAPER, BUILTIN_ACCENT),
+        "a Theme pane's band is the theme accent while it has the focus"
+    );
+}
+
+#[gpui::test]
+fn an_unfocused_chosen_colour_pane_draws_no_band(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        sessions: vec![
+            session("s1").in_repo("r1").build(),
+            accented("s2", "#22c55e"),
+        ],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = focused(cx, &dir, &fixture);
+    assert_eq!(
+        fills_of(&mut h, "p2"),
+        (BUILTIN_BACKGROUND, BUILTIN_BACKGROUND),
+        "a chosen colour keeps no band while its pane is unfocused"
+    );
+}
+
+#[gpui::test]
+fn every_header_fades_its_accent_the_same_focused_or_not(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        sessions: vec![
+            session("s1").in_repo("r1").build(),
+            accented("s2", "#22c55e"),
+        ],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = focused(cx, &dir, &fixture);
+
+    assert_eq!(
+        header_fade_of(&mut h, "p1"),
+        (mix(RAISED, BUILTIN_ACCENT, 0.22), RAISED),
+        "the focused Theme header washes the accent over its raised fill"
+    );
+    assert_eq!(
+        header_fade_of(&mut h, "p2"),
+        (mix(SURFACE, 0x22c55e, 0.22), SURFACE),
+        "an unfocused pane fades its own accent the same way over its surface"
+    );
+}
+
+#[gpui::test]
+fn the_band_moves_to_the_pane_a_click_focuses(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        sessions: vec![
+            session("s1").in_repo("r1").build(),
+            session("s2").in_repo("r1").build(),
+        ],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = focused(cx, &dir, &fixture);
+    assert_eq!(
+        fills_of(&mut h, "p1"),
+        (BUILTIN_BACKGROUND, BUILTIN_ACCENT),
+        "the focused pane starts with the band"
+    );
+
+    // The window starts inactive and raises no focus events until it is
+    // activated, as a click on the desktop would.
+    h.cx.update(|window, _| window.activate_window());
+    let at = h.cell_center("p2", 0, 0);
+    h.click(at, Modifiers::none());
+    assert_eq!(
+        fills_of(&mut h, "p2"),
+        (BUILTIN_BACKGROUND, BUILTIN_ACCENT),
+        "the clicked pane takes the band"
+    );
+    assert_eq!(
+        fills_of(&mut h, "p1"),
+        (BUILTIN_BACKGROUND, BUILTIN_BACKGROUND),
+        "the pane it left keeps none"
+    );
+}
+
+#[gpui::test]
+fn the_band_follows_focus_when_a_new_session_opens_in_another_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        sessions: vec![
+            session("s1").in_repo("r1").build(),
+            session("s2").in_repo("r1").exited(1).build(),
+        ],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = focused(cx, &dir, &fixture);
+    assert_eq!(
+        fills_of(&mut h, "p1"),
+        (BUILTIN_BACKGROUND, BUILTIN_ACCENT),
+        "the focused pane starts with the band"
+    );
+
+    h.click_on("exited-new-session-p2");
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "the New session dialog opened"
+    );
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "the pane the dialog opened on"
+    );
+    assert_eq!(
+        fills_of(&mut h, "p2"),
+        (BUILTIN_BACKGROUND, BUILTIN_ACCENT),
+        "and it wears the band"
+    );
+    assert_eq!(
+        fills_of(&mut h, "p1"),
+        (BUILTIN_BACKGROUND, BUILTIN_BACKGROUND),
+        "the pane it left keeps none"
     );
 }
 
@@ -605,8 +811,8 @@ fn inherit_clears_the_session_accent(cx: &mut TestAppContext) {
     );
     assert_eq!(
         fills_of(&mut h, "p1"),
-        (BUILTIN_BACKGROUND, BUILTIN_BACKGROUND),
-        "the cleared frame follows the terminal's background"
+        (BUILTIN_BACKGROUND, 0x22c55e),
+        "the cleared frame falls back to the resolved accent while the pane holds the focus"
     );
 
     open_accent_menu(&mut h, "s1");

@@ -137,9 +137,8 @@ pub fn entry_from_record(
         end_time_known: true,
         import_rev: 0,
         busy_excluded: rec.busy_excluded,
-        // The options and the trusted flag ride in the spawn config.
+        // The options ride in the spawn config.
         options: None,
-        trusted: false,
     }
 }
 
@@ -174,9 +173,8 @@ pub fn entry_from_meta(
         end_time_known: !matches!(end, SessionEnd::TracerLost),
         import_rev: 0,
         busy_excluded: meta.busy_excluded,
-        // The options and the trusted flag ride in the spawn config.
+        // The options ride in the spawn config.
         options: None,
-        trusted: false,
     }
 }
 
@@ -419,13 +417,35 @@ pub fn record_session_end(
 
 fn read_entry(path: &std::path::Path) -> anyhow::Result<HistoryEntry> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|err| {
+    let mut entry: HistoryEntry = serde_json::from_slice(&bytes).map_err(|err| {
         anyhow::anyhow!(
             "parsing {}: {}",
             path.display(),
             crate::logging::json_error_at(&err)
         )
-    })
+    })?;
+    fold_trusted_entry(&mut entry, &bytes);
+    Ok(entry)
+}
+
+/// Fold the trusted flags an entry from an older release carries into its agent's bypass choice:
+/// its spawn config's `dangerously_skip_permissions`, and an import's top-level `trusted`, read
+/// from the raw `bytes` since the entry no longer has the field.
+fn fold_trusted_entry(entry: &mut HistoryEntry, bytes: &[u8]) {
+    if let Some(config) = entry.spawn_config.as_mut() {
+        crate::trusted_fold::fold_config(config);
+    }
+    let trusted = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("trusted").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false);
+    if trusted && let Some(agent) = &entry.agent {
+        // Only a fold that sets the bypass choice gives an entry options it did not record.
+        let mut options = entry.options.clone().unwrap_or_default();
+        if crate::trusted_fold::fold_options(agent, true, &mut options) {
+            entry.options = Some(options);
+        }
+    }
 }
 
 /// What one pass over the history dir saw.
@@ -756,7 +776,6 @@ fn entry_from_tracer_log(
         // A tracer log does not record the flag; an imported session counts.
         busy_excluded: false,
         options: None,
-        trusted: false,
     };
     if let Some(note) = &summary.agent_note {
         if let Some(plugin) = agent_registry::plugin(&note.agent) {
@@ -788,7 +807,6 @@ fn entry_from_tracer_log(
             program_name: Some(imported.program_name),
             import_rev: plugin.import_rev(),
             options: Some(imported.options),
-            trusted: imported.trusted,
             ..shell
         });
     }
@@ -802,8 +820,9 @@ fn entry_from_tracer_log(
 }
 
 /// The agent entry a shell-hosted session's agent note describes, built on
-/// the log's `shell` entry: the note's agent, options, trust and
-/// conversation, matched to its folders like a recognised run.
+/// the log's `shell` entry: the note's agent, options (with an older note's
+/// trust folded into the bypass choice) and conversation, matched to its
+/// folders like a recognised run.
 fn entry_from_agent_note(
     note: &AgentNote,
     plugin: &dyn AgentPlugin,
@@ -812,6 +831,8 @@ fn entry_from_agent_note(
 ) -> HistoryEntry {
     let cwd = shell.primary_cwd.clone().unwrap_or_default();
     let (kind, workspace_id) = match_target(&cwd, &note.extra_dirs, registered);
+    let mut options = note.options.clone();
+    crate::trusted_fold::fold_options(&note.agent, note.legacy_trusted, &mut options);
     HistoryEntry {
         kind,
         mode: SessionMode::Interactive,
@@ -821,8 +842,7 @@ fn entry_from_agent_note(
         current_cwd: None,
         program_name: Some(plugin.descriptor().tag.clone()),
         import_rev: plugin.import_rev(),
-        options: Some(note.options.clone()),
-        trusted: note.trusted,
+        options: Some(options),
         conversation_id: note.conversation_id.clone(),
         ..shell
     }
@@ -1037,9 +1057,6 @@ pub struct RecoveryPlan {
     /// `hook_agent`, which its hook plan and resume command take; empty for
     /// every other plan.
     pub hook_options: OptionValues,
-    /// Whether the run a recovered shell resumes in `hook_agent` was trusted;
-    /// false for every other plan.
-    pub hook_trusted: bool,
 }
 
 impl RecoveryPlan {
@@ -1138,7 +1155,6 @@ pub fn plan_recovery(
             hook_agent: None,
             resume_conversation: None,
             hook_options: OptionValues::new(),
-            hook_trusted: false,
         },
         RecoverAs::Agent => {
             let spawn = recovered_spawn(entry, item, plugins)?;
@@ -1149,7 +1165,6 @@ pub fn plan_recovery(
                 hook_agent: None,
                 resume_conversation: None,
                 hook_options: OptionValues::new(),
-                hook_trusted: false,
             }
         }
         RecoverAs::RegisterRepoThenAgent { path } => {
@@ -1186,7 +1201,6 @@ pub fn plan_recovery(
                 hook_agent: None,
                 resume_conversation: None,
                 hook_options: OptionValues::new(),
-                hook_trusted: false,
             }
         }
         RecoverAs::ShellResume => {
@@ -1198,7 +1212,6 @@ pub fn plan_recovery(
                 hook_agent: Some(spawn.selection.agent),
                 resume_conversation: Some(conversation.to_owned()),
                 hook_options: spawn.selection.options,
-                hook_trusted: spawn.dangerously_skip_permissions,
             }
         }
     };
@@ -1220,10 +1233,9 @@ fn existing_conversation<'a>(
     Ok(id)
 }
 
-/// The agent and options a recovery of an entry spawns with, and its trust.
+/// The agent and options a recovery of an entry spawns with.
 struct RecoveredSpawn {
     selection: AgentSelection,
-    dangerously_skip_permissions: bool,
 }
 
 /// The agent a recovery of `entry` runs: the one it ran, or the default agent
@@ -1245,34 +1257,32 @@ fn recovered_spawn(
     item: &RecoverItem,
     plugins: PluginLookup,
 ) -> Result<RecoveredSpawn, String> {
-    let (agent, plugin, options, trusted) = recovery_setup(entry, plugins)?;
+    let (agent, plugin, options) = recovery_setup(entry, plugins)?;
     if item.how == RecoverAs::ShellResume {
         shell_resume_command(plugin, &options, required_conversation(item)?)?;
     }
     Ok(RecoveredSpawn {
         selection: AgentSelection { agent, options },
-        dangerously_skip_permissions: trusted,
     })
 }
 
-/// The agent a recovery of `entry` runs, its plugin, the options the plugin
-/// gives for what the entry recorded, and whether it ran trusted. The error
-/// is what the client shows when the recovery cannot start.
+/// The agent a recovery of `entry` runs, its plugin, and the options the
+/// plugin gives for what the entry recorded. The error is what the client
+/// shows when the recovery cannot start.
 fn recovery_setup(
     entry: &HistoryEntry,
     plugins: PluginLookup,
-) -> Result<(AgentId, &'static dyn AgentPlugin, OptionValues, bool), String> {
+) -> Result<(AgentId, &'static dyn AgentPlugin, OptionValues), String> {
     let agent = recovery_agent(entry);
     let plugin =
         plugins(&agent).ok_or_else(|| format!("no agent plugin `{}` is registered", agent.0))?;
-    let (recorded, trusted) = recorded_options(entry);
+    let recorded = recorded_options(entry);
     let options = plugin
         .recovery_options(&RecoveredRun {
             recorded: recorded.as_ref(),
-            trusted,
         })
         .map_err(|err| err.to_string())?;
-    Ok((agent, plugin, options, trusted))
+    Ok((agent, plugin, options))
 }
 
 /// The program and arguments a shell types to resume `conversation` with
@@ -1312,25 +1322,24 @@ fn shell_resume_applies(
         return false;
     };
     recovery_setup(entry, plugins)
-        .and_then(|(_, plugin, options, _)| shell_resume_command(plugin, &options, conversation))
+        .and_then(|(_, plugin, options)| shell_resume_command(plugin, &options, conversation))
         .is_ok()
 }
 
-/// The options `entry` recorded and whether it ran trusted. An agent spawn
-/// config gives its selection's options and its skip flag. A plain shell's
-/// config, whose flags never reached an agent, or no config gives the options
-/// and trust an import read from its tracer log, `None` when it read none.
-fn recorded_options(entry: &HistoryEntry) -> (Option<OptionValues>, bool) {
+/// The options `entry` recorded. An agent spawn config gives its selection's
+/// options. A plain shell's config, whose options never reached an agent, or
+/// no config gives the options an import read from its tracer log, `None`
+/// when it read none.
+fn recorded_options(entry: &HistoryEntry) -> Option<OptionValues> {
     if let Some(config) = &entry.spawn_config
         && config.mode != SessionMode::PlainShell
     {
-        let options = config
+        return config
             .agent
             .as_ref()
             .map(|selection| selection.options.clone());
-        return (options, config.dangerously_skip_permissions);
     }
-    (entry.options.clone(), entry.trusted)
+    entry.options.clone()
 }
 
 fn required_conversation(item: &RecoverItem) -> Result<&str, String> {
@@ -1357,7 +1366,8 @@ fn agent_request(
     };
     let mut request = recorded_request(entry, config, folder, registered);
     request.agent = Some(spawn.selection);
-    request.dangerously_skip_permissions = spawn.dangerously_skip_permissions;
+    // The spawn intake derives the flag from the options' bypass choice.
+    request.dangerously_skip_permissions = false;
     request.mode = SessionMode::Interactive;
     request.resume_conversation = Some(conversation.to_owned());
     request
@@ -1616,9 +1626,14 @@ fn folder_agent(
         target,
         mode: SessionMode::Interactive,
         initial_prompt: None,
-        dangerously_skip_permissions: spawn.dangerously_skip_permissions,
+        // The spawn intake derives the flag from the options' bypass choice.
+        dangerously_skip_permissions: false,
         agent: Some(spawn.selection),
         extra_env: recorded_env(entry).to_vec(),
+        extra_args: entry
+            .spawn_config
+            .as_ref()
+            .map_or_else(Vec::new, |config| config.extra_args.clone()),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
         request_id: None,
@@ -1640,6 +1655,7 @@ fn shell_request(entry: &HistoryEntry, folder: &str) -> SpawnRequest {
         initial_prompt: None,
         dangerously_skip_permissions: false,
         agent: None,
+        extra_args: Vec::new(),
         extra_env: recorded_env(entry).to_vec(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
@@ -1983,7 +1999,6 @@ pub(crate) mod test_support {
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
-            hook_trusted: false,
             resumed_from: Vec::new(),
         }
     }
@@ -2121,7 +2136,7 @@ mod tests {
         });
         let report = agent_registry::plugin(&agent_registry::default_agent())
             .expect("Claude is registered")
-            .map_hook_event(&body, None, false)
+            .map_hook_event(&body, None)
             .expect("a start is mapped");
         crate::hook_status::apply_details(&mut rec, &report, 1_700_000_000_000_000_000);
         assert_eq!(
@@ -2244,14 +2259,21 @@ mod tests {
             entry.busy_excluded,
             "a session excluded from the busy count stays excluded"
         );
+        let opus_bypass = protocol::OptionValues::from([
+            (
+                "model".to_owned(),
+                protocol::OptionValue::Text("opus".to_owned()),
+            ),
+            (
+                "permission_mode".to_owned(),
+                protocol::OptionValue::Text("bypass_permissions".to_owned()),
+            ),
+        ]);
         assert_eq!(
             entry.options,
-            Some(protocol::OptionValues::from([(
-                "model".to_owned(),
-                protocol::OptionValue::Text("opus".to_owned())
-            )]))
+            Some(opus_bypass.clone()),
+            "the entry's trusted flag loads as the bypass choice"
         );
-        assert!(entry.trusted);
 
         let spawn = entry
             .spawn_config
@@ -2259,6 +2281,11 @@ mod tests {
             .expect("the entry keeps the config it was spawned with");
         assert_eq!(spawn.mode, SessionMode::Interactive);
         assert!(spawn.dangerously_skip_permissions);
+        assert_eq!(
+            spawn.agent.as_ref().map(|selection| &selection.options),
+            Some(&opus_bypass),
+            "the config's trusted flag loads as the bypass choice"
+        );
         assert!(
             matches!(
                 &spawn.target,
@@ -2668,7 +2695,10 @@ mod import_tests {
         assert_eq!(entry.source, HistorySource::TracerLog);
         assert_eq!(entry.label, "");
         assert_eq!(entry.conversation_id, None);
-        assert!(entry.trusted);
+        assert_eq!(
+            option_of(&entry, "permission_mode"),
+            Some(&text("bypass_permissions"))
+        );
         assert_eq!(option_of(&entry, "model"), Some(&OptionValue::Null));
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
@@ -2733,7 +2763,11 @@ mod import_tests {
 
         for (id, _, skip, model) in cases {
             let entry = only(&dirs, id);
-            assert_eq!(entry.trusted, skip, "{id}");
+            assert_eq!(
+                option_of(&entry, "permission_mode") == Some(&text("bypass_permissions")),
+                skip,
+                "{id}"
+            );
             assert_eq!(option_of(&entry, "model"), Some(&model), "{id}");
         }
         let _ = std::fs::remove_dir_all(&dirs.config);
@@ -2808,7 +2842,10 @@ mod import_tests {
         assert_eq!(entry.members, [] as [protocol::SessionMember; 0]);
         assert_eq!(entry.spawn_config, None);
         assert_eq!(entry.end, SessionEnd::Exited { code: 0 });
-        assert!(!entry.trusted);
+        assert_ne!(
+            option_of(&entry, "permission_mode"),
+            Some(&text("bypass_permissions"))
+        );
         assert_eq!(entry.options, None);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
@@ -2882,6 +2919,13 @@ mod import_tests {
         ])
     }
 
+    /// [`deepseek_options`] with the bypass choice a trusted note folds into.
+    fn deepseek_bypass_options() -> OptionValues {
+        let mut options = deepseek_options();
+        options.insert("permission_mode".to_owned(), text("bypass_permissions"));
+        options
+    }
+
     /// A trusted Claude note on the `deepseek` provider with `conversation_id` and the
     /// second workspace member as its extra folder.
     fn claude_note(conversation_id: Option<&str>) -> serde_json::Value {
@@ -2904,7 +2948,10 @@ mod import_tests {
         assert_eq!(entry.members, [] as [protocol::SessionMember; 0]);
         assert_eq!(entry.current_cwd.as_deref(), Some(r"D:\yaat"));
         assert_eq!(entry.options, None);
-        assert!(!entry.trusted);
+        assert_ne!(
+            option_of(entry, "permission_mode"),
+            Some(&text("bypass_permissions"))
+        );
         assert_eq!(entry.conversation_id, None);
         assert_eq!(entry.import_rev, SHELL_IMPORT_REV);
     }
@@ -2921,8 +2968,11 @@ mod import_tests {
             agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
         assert_eq!(entry.mode, SessionMode::Interactive);
         assert_eq!(entry.agent, Some(agent_registry::default_agent()));
-        assert_eq!(entry.options, Some(deepseek_options()));
-        assert!(entry.trusted);
+        assert_eq!(
+            entry.options,
+            Some(deepseek_bypass_options()),
+            "the note's trust is the bypass choice"
+        );
         assert_eq!(entry.conversation_id.as_deref(), Some(SHELL_HOSTED_CONV));
         assert_eq!(
             entry.program_name.as_deref(),
@@ -2963,7 +3013,7 @@ mod import_tests {
         let entry = only(&dirs, id);
         assert_eq!(entry.mode, SessionMode::Interactive);
         assert_eq!(entry.agent, Some(agent_registry::default_agent()));
-        assert_eq!(entry.options, Some(deepseek_options()));
+        assert_eq!(entry.options, Some(deepseek_bypass_options()));
         assert_eq!(entry.conversation_id, None);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
@@ -2996,7 +3046,10 @@ mod import_tests {
 
         let entry = only(&dirs, id);
         assert_eq!(entry.spawn_config, None, "an import stays config-less");
-        assert!(entry.trusted);
+        assert_eq!(
+            option_of(&entry, "permission_mode"),
+            Some(&text("bypass_permissions"))
+        );
         assert_eq!(option_of(&entry, "model"), Some(&text("sonnet")));
         assert_eq!(option_of(&entry, "provider"), Some(&text("anthropic")));
         let item = RecoverItem {
@@ -3017,9 +3070,13 @@ mod import_tests {
         )
         .expect("plan")
         .request;
-        assert!(
-            request.dangerously_skip_permissions,
-            "the trust is replayed"
+        assert_eq!(
+            request
+                .agent
+                .as_ref()
+                .and_then(|selection| selection.options.get("permission_mode")),
+            Some(&text("bypass_permissions")),
+            "the trust is replayed as the bypass choice"
         );
         assert_eq!(
             request
@@ -3332,7 +3389,11 @@ mod recovery_tests {
             },
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: true,
-            agent: Some(claude(&[("model", "opus")])),
+            agent: Some(claude(&[
+                ("model", "opus"),
+                ("permission_mode", "bypass_permissions"),
+            ])),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         }
     }
@@ -3576,7 +3637,7 @@ mod recovery_tests {
         assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
         assert_eq!(req.mode, SessionMode::Interactive);
         assert_eq!(selected_agent(&req), Some(agent_registry::default_agent()));
-        assert!(req.dangerously_skip_permissions);
+        assert_eq!(option(&req, "permission_mode"), text("bypass_permissions"));
         assert_eq!(model_of(&req), Some("opus"));
         assert_eq!(req.initial_prompt, None);
         assert_eq!(req.prompt_injector, None);
@@ -3751,7 +3812,11 @@ mod recovery_tests {
                 .expect("plan")
                 .request;
             assert_eq!(option(&request, "provider"), text("anthropic"), "{how:?}");
-            assert!(!request.dangerously_skip_permissions, "{how:?}");
+            assert_ne!(
+                option(&request, "permission_mode"),
+                text("bypass_permissions"),
+                "{how:?}"
+            );
             assert_eq!(model_of(&request), None, "{how:?}");
         }
     }
@@ -3761,7 +3826,7 @@ mod recovery_tests {
         let mut entry = recorded_deepseek(vec![member("", r"D:\foo")]);
         if let Some(config) = entry.spawn_config.as_mut() {
             config.agent = Some(claude(&[
-                ("permission_mode", "plan"),
+                ("permission_mode", "bypass_permissions"),
                 ("provider", "deepseek"),
                 ("model", "deepseek-pro"),
             ]));
@@ -3772,8 +3837,11 @@ mod recovery_tests {
                 .expect("plan")
                 .request;
             assert_eq!(option(&request, "provider"), text("deepseek"), "{how:?}");
-            assert_eq!(option(&request, "permission_mode"), text("plan"), "{how:?}");
-            assert!(request.dangerously_skip_permissions, "{how:?}");
+            assert_eq!(
+                option(&request, "permission_mode"),
+                text("bypass_permissions"),
+                "{how:?}"
+            );
             assert_eq!(model_of(&request), Some("deepseek-pro"), "{how:?}");
         }
     }
@@ -3787,7 +3855,7 @@ mod recovery_tests {
         let mut entry = recorded_deepseek(members.clone());
         if let Some(config) = entry.spawn_config.as_mut() {
             config.agent = Some(claude(&[
-                ("permission_mode", "plan"),
+                ("permission_mode", "bypass_permissions"),
                 ("provider", "deepseek"),
                 ("model", "deepseek-pro"),
             ]));
@@ -3797,9 +3865,11 @@ mod recovery_tests {
             .expect("plan")
             .request;
         assert_eq!(option(&recorded, "provider"), text("deepseek"));
-        assert_eq!(option(&recorded, "permission_mode"), text("plan"));
+        assert_eq!(
+            option(&recorded, "permission_mode"),
+            text("bypass_permissions")
+        );
         assert_eq!(model_of(&recorded), Some("deepseek-pro"));
-        assert!(recorded.dangerously_skip_permissions);
 
         let imported = plan(&imported_deepseek(members), &item(register, Some(CONV)))
             .expect("plan")
@@ -4003,12 +4073,10 @@ mod recovery_tests {
             ("sandbox".to_owned(), protocol::OptionValue::Bool(true)),
         ]);
         entry.options = Some(recorded.clone());
-        entry.trusted = true;
         let plugin: &dyn AgentPlugin = &*SHELL_RESUME_SOME;
         let expected = plugin
             .recovery_options(&RecoveredRun {
                 recorded: Some(&recorded),
-                trusted: true,
             })
             .expect("the recorded options decode");
         assert_eq!(expected.get("mode").cloned(), text("recovered-mode"));
@@ -4027,7 +4095,6 @@ mod recovery_tests {
         .expect("plan");
 
         assert_eq!(plan.hook_options, expected);
-        assert!(plan.hook_trusted, "the recovered run's trust is carried");
         for how in [RecoverAs::Shell, RecoverAs::Agent] {
             let other = plan_recovery(
                 &entry,
@@ -4038,7 +4105,6 @@ mod recovery_tests {
             )
             .expect("plan");
             assert!(other.hook_options.is_empty(), "{how:?}");
-            assert!(!other.hook_trusted, "{how:?}");
         }
     }
 
@@ -4058,6 +4124,7 @@ mod recovery_tests {
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
             agent: Some(claude(&[])),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         }
     }
@@ -4297,14 +4364,17 @@ mod recovery_tests {
             Some(agent_registry::default_agent())
         );
         assert_eq!(plan.request.resume_conversation.as_deref(), Some(CONV));
-        assert!(!plan.request.dangerously_skip_permissions);
+        assert_ne!(
+            option(&plan.request, "permission_mode"),
+            text("bypass_permissions")
+        );
     }
 
     #[test]
     fn folder_only_and_register_paths_replay_the_recorded_flags() {
         let mut entry = folder_only(vec![member("", r"D:\foo")]);
-        entry.trusted = true;
-        entry.options = Some(claude(&[("model", "opus")]).options);
+        entry.options =
+            Some(claude(&[("model", "opus"), ("permission_mode", "bypass_permissions")]).options);
         let register = RecoverAs::RegisterRepoThenAgent {
             path: r"D:\foo".to_owned(),
         };
@@ -4312,7 +4382,11 @@ mod recovery_tests {
             let req = plan(&entry, &item(how.clone(), Some(CONV)))
                 .expect("plan")
                 .request;
-            assert!(req.dangerously_skip_permissions, "{how:?}");
+            assert_eq!(
+                option(&req, "permission_mode"),
+                text("bypass_permissions"),
+                "{how:?}"
+            );
             assert_eq!(model_of(&req), Some("opus"), "{how:?}");
         }
     }
@@ -4454,7 +4528,11 @@ mod recovery_tests {
             },
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: true,
-            agent: Some(claude(&[("model", "opus")])),
+            agent: Some(claude(&[
+                ("model", "opus"),
+                ("permission_mode", "bypass_permissions"),
+            ])),
+            extra_args: Vec::new(),
             extra_env: Vec::new(),
         });
 
@@ -4468,9 +4546,10 @@ mod recovery_tests {
             Some("opus"),
             "the recorded options are kept"
         );
-        assert!(
-            req.dangerously_skip_permissions,
-            "the recorded flags are kept"
+        assert_eq!(
+            option(&req, "permission_mode"),
+            text("bypass_permissions"),
+            "the recorded bypass choice is kept"
         );
         assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
     }

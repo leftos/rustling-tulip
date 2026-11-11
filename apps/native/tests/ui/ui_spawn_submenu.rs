@@ -41,6 +41,7 @@ fn config(mode: SessionMode) -> SpawnConfig {
         mode,
         dangerously_skip_permissions: false,
         agent,
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
     }
 }
@@ -233,10 +234,9 @@ fn assert_row_replays_the_stored_config(cx: &mut TestAppContext, row: &str) {
     let request = spawned(&mut h);
     assert_eq!(request.target, stored.target, "{row}: the stored target");
     assert_eq!(request.mode, stored.mode, "{row}: the stored mode");
-    assert_eq!(request.agent, stored.agent, "{row}: the stored agent");
     assert_eq!(
-        request.dangerously_skip_permissions, stored.dangerously_skip_permissions,
-        "{row}: the stored trust"
+        request.agent, stored.agent,
+        "{row}: the stored agent and its options"
     );
     assert_eq!(
         placed_tab(&mut h, &request).as_deref(),

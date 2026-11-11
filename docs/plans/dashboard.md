@@ -147,7 +147,7 @@ The daemon words rules 2 to 6 (ages `<1m`, `5m`, `1h05m`) in `crates/daemon/src/
 
 ### Nested rows
 
-Under a Working row (and, planned in RT-789, in By status under any row whose drawer is open), one row per node of its agent tree below the main agent, indented by depth with a `└` branch: the node's glyph and name (a subagent's description, a dispatch run's title with a `dispatch` tag, `bg shell <id>`, `Monitor <id>`, `In gate · heavy 1`), what it runs now or its task (`Running Bash · 1m: <command>`, `finished · 2 findings, both fixed`, `exited 1 · 12m`), its own stuck flag, and its age.
+Under a Working row (and, planned in RT-789, in By status under any row whose drawer is open), one row per node of its agent tree below the main agent, indented by depth with a `└` branch: the node's glyph and name (a subagent's description, a dispatch run's title with a `dispatch` tag, `bg shell <id>`, `Monitor <id>`, `In gate · heavy 1`), a subagent's model and effort after its name when known (`Opus 5.5 · high`), what it runs now or its task (`Running Bash · 1m: <command>`, `finished · 2 findings, both fixed`, `exited 1 · 12m`), its own stuck flag, and its age.
 
 In By status a dispatch run's row also carries its own activity track. Finished nodes stay listed, dimmed, while their session's turn lasts.
 

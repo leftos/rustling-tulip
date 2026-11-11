@@ -59,13 +59,9 @@ pub(crate) struct PreCreateSpec {
 }
 
 /// Run `spec` and answer the plain conversation id `parse` reads from its
-/// stdout, or `None` when the run gives none within [`PRE_CREATE_TIMEOUT`].
-pub(crate) async fn pre_create(spec: PreCreateSpec, parse: Parse) -> Option<String> {
-    run_until(spec, parse, tokio::time::sleep(PRE_CREATE_TIMEOUT)).await
-}
-
-/// [`pre_create`] with its deadline as the future `expire`: the run ends with
-/// no id once `expire` resolves.
+/// stdout, or `None` when the run gives none before its deadline `expire`
+/// resolves: the spawn passes [`PRE_CREATE_TIMEOUT`] there, and a test passes
+/// a deadline it drives itself.
 pub(crate) async fn run_until(
     spec: PreCreateSpec,
     parse: Parse,

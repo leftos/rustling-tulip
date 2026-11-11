@@ -1,4 +1,12 @@
-import type { ClientMessage, DaemonMessage, PromptChoice, SessionSnapshot } from "./protocol";
+import type {
+  ClientMessage,
+  ContainerRef,
+  DaemonMessage,
+  LaunchPresetSource,
+  PresetTarget,
+  PromptChoice,
+  SessionSnapshot,
+} from "./protocol";
 
 /** The three things the Home screen sends about a session. */
 export type ActionKind = "answer" | "stop" | "resume";
@@ -9,12 +17,65 @@ export interface PendingRequest {
   readonly requestId: string | null;
   readonly sessionId: string;
   readonly action: ActionKind;
+  /**
+   * A resume whose landing leaves the original for the phone to discard: a
+   * parked or stopped session's rerun. An abandoned session's resume
+   * replaces it on the host, so there is nothing to discard. Absent on
+   * answers.
+   */
+  readonly discardsOriginal?: boolean;
+}
+
+/** A Launch last on its way: one per container, kept until the daemon answers it. */
+export interface PendingLaunch {
+  readonly requestId: string;
+  readonly target: ContainerRef;
+  /** When the request's first send went out, ms since the epoch: the daemon's journal clock. */
+  readonly sentAt: number;
+  /** When the latest send, the first or a resend, went out: the answer clock. */
+  readonly lastSentAt: number;
+}
+
+/** A preset launch the phone asks for: the preset, its container, and the source it fills. */
+export interface PresetLaunchRequest {
+  readonly target: ContainerRef;
+  readonly presetId: string;
+  readonly source: LaunchPresetSource;
 }
 
 /**
+ * A preset launch on its way: one per preset per container, kept until the
+ * job's first update answers it. Its job id is its journal key on the host.
+ */
+export interface PendingPresetLaunch extends PresetLaunchRequest {
+  readonly jobId: string;
+  /** When the launch's first send went out, ms since the epoch: the journal clock. */
+  readonly sentAt: number;
+  /** When the latest send, the first or a resend, went out: the answer clock. */
+  readonly lastSentAt: number;
+}
+
+/**
+ * How long the daemon's spawn journal remembers a request id. A resend later
+ * than this is a new request and spawns a second session.
+ */
+export const LAUNCH_RESEND_LIMIT_MS = 9 * 60 * 1000;
+
+/**
+ * How long an unanswered launch waits for its echo. The daemon keeps quiet to
+ * a repeat while the first spawn still runs, and that spawn's echo went to
+ * the connection that has since died.
+ */
+export const LAUNCH_ANSWER_LIMIT_MS = 60 * 1000;
+
+/** What a container says when its launch may have started a session anyway. */
+export const LAUNCH_MAYBE_STARTED =
+  "This launch may have started a session. Check the list before launching again.";
+
+/**
  * What the Home screen keeps between taps: the requests on their way, the
- * Stop waiting for its confirming second tap, and the daemon's refusal text
- * per session.
+ * Stop waiting for its confirming second tap, the daemon's refusal text per
+ * session, and the launches the daemon has not answered yet.
  */
 export interface HomeActions {
   readonly pending: readonly PendingRequest[];
@@ -22,10 +83,50 @@ export interface HomeActions {
   readonly armed: string | null;
   /** The daemon's refusal text per session, shown on its row or card. */
   readonly errors: ReadonlyMap<string, string>;
+  /** The launches waiting for the daemon, one per container. */
+  readonly launches: readonly PendingLaunch[];
+  /** The daemon's refusal text per container, keyed by `containerKey`. */
+  readonly launchErrors: ReadonlyMap<string, string>;
+  /** The preset launches waiting for their job's first update, one per preset per container. */
+  readonly presetLaunches: readonly PendingPresetLaunch[];
+  /** Why a preset's launch was dropped, keyed by `presetKey`. */
+  readonly presetErrors: ReadonlyMap<string, string>;
 }
 
 /** The state before any tap: what `reset` returns. */
-export const NO_ACTIONS: HomeActions = { pending: [], armed: null, errors: new Map() };
+export const NO_ACTIONS: HomeActions = {
+  pending: [],
+  armed: null,
+  errors: new Map(),
+  launches: [],
+  launchErrors: new Map(),
+  presetLaunches: [],
+  presetErrors: new Map(),
+};
+
+/** What the phone says when the host no longer lists `launch_last`. */
+export const UNSUPPORTED_LAUNCH = "This host can't launch from the phone.";
+
+/** What a preset says when its unanswered launch cannot be resent: the host lacks `preset_job_repeat`. */
+export const UNSUPPORTED_PRESET_RESEND =
+  "This host can't resend a preset launch; check the desktop.";
+
+/** The key a preset's pending launch and its dropped-launch text are filed under. */
+export function presetKey(target: ContainerRef, presetId: string): string {
+  return `${containerKey(target)}/${presetId}`;
+}
+
+/** The key a launch's pending record and its refusal text are filed under. */
+export function containerKey(target: ContainerRef): string {
+  return `${target.kind}:${target.id}`;
+}
+
+/** A container as the preset messages name it. */
+export function presetTarget(target: ContainerRef): PresetTarget {
+  return target.kind === "repo"
+    ? { kind: "repo", repo_id: target.id }
+    : { kind: "workspace", workspace_id: target.id };
+}
 
 /** The state a screen starts from on every `ready`, since no reply is coming. */
 export function reset(): HomeActions {
@@ -99,17 +200,33 @@ export function disarm(state: HomeActions): HomeActions {
  * is never rerun, a running one has nothing to resume, and a tap while a
  * resume is still pending sends nothing. An abandoned session resumes from
  * the config the daemon captured; a stopped or parked one reruns in its own
- * checkout, keeping its "don't count as busy".
+ * checkout, keeping its "don't count as busy". A host listing
+ * `resume_session` gets one `ResumeSession` for either and picks how; an
+ * older host gets `ResumeAbandoned` or the duplicate recipe.
  */
 export function resume(
   state: HomeActions,
   newRequestId: NewRequestId,
   session: SessionSnapshot,
+  supportsResumeSession: boolean,
 ): ActionResult {
   if (session.mode === "headless" || isPending(state, session.id, "resume")) {
     return { message: null, state };
   }
-  if (session.is_abandoned === true) {
+  const abandoned = session.is_abandoned === true;
+  if (supportsResumeSession && (abandoned || isStopped(session))) {
+    const requestId = newRequestId();
+    return {
+      message: { type: "resume_session", session_id: session.id, request_id: requestId },
+      state: withPending(clearError(state, session.id), {
+        requestId,
+        sessionId: session.id,
+        action: "resume",
+        discardsOriginal: !abandoned,
+      }),
+    };
+  }
+  if (abandoned) {
     // `ResumeAbandoned` carries no request id, so a failure naming none cannot
     // be matched to this session; the record clears on the session's next
     // update or on `reset`.
@@ -119,6 +236,7 @@ export function resume(
         requestId: null,
         sessionId: session.id,
         action: "resume",
+        discardsOriginal: false,
       }),
     };
   }
@@ -138,6 +256,7 @@ export function resume(
       requestId,
       sessionId: session.id,
       action: "resume",
+      discardsOriginal: true,
     }),
   };
 }
@@ -145,6 +264,215 @@ export function resume(
 /** The refusal text shown for `sessionId`, if the daemon last refused it. */
 export function errorFor(state: HomeActions, sessionId: string): string | null {
   return state.errors.get(sessionId) ?? null;
+}
+
+/**
+ * Launch the container's stored last spawn config again, or nothing while its
+ * earlier tap still waits for the daemon. The launch is recorded, with `now`
+ * as its first send, before the send, so a tap that reaches no daemon is
+ * resent on the next reconnect.
+ */
+export function launchLast(
+  state: HomeActions,
+  target: ContainerRef,
+  newRequestId: NewRequestId,
+  now: number,
+): ActionResult {
+  const key = containerKey(target);
+  if (state.launches.some((launch) => containerKey(launch.target) === key)) {
+    return { message: null, state };
+  }
+  const requestId = newRequestId();
+  return {
+    message: { type: "launch_last", target, request_id: requestId },
+    state: {
+      ...state,
+      launches: [...state.launches, { requestId, target, sentAt: now, lastSentAt: now }],
+      launchErrors: withoutLaunchError(state.launchErrors, key),
+    },
+  };
+}
+
+/**
+ * The state a screen starts from on every `ready`: the requests on their way
+ * are gone, but a pending launch still waits for an answer and is resent.
+ */
+export function keepLaunches(old: HomeActions): HomeActions {
+  return { ...NO_ACTIONS, launches: old.launches, presetLaunches: old.presetLaunches };
+}
+
+/**
+ * Launch a preset, or nothing while its earlier launch from this container
+ * still waits for its job's first update. The phone mints the job id, and
+ * records the launch before the send, so a tap that reaches no daemon is
+ * resent on the next reconnect.
+ */
+export function launchPreset(
+  state: HomeActions,
+  request: PresetLaunchRequest,
+  newRequestId: NewRequestId,
+  now: number,
+): ActionResult {
+  const key = presetKey(request.target, request.presetId);
+  if (state.presetLaunches.some((launch) => presetKey(launch.target, launch.presetId) === key)) {
+    return { message: null, state };
+  }
+  const launch: PendingPresetLaunch = {
+    ...request,
+    jobId: `phone-${newRequestId()}`,
+    sentAt: now,
+    lastSentAt: now,
+  };
+  return {
+    message: presetLaunchMessage(launch),
+    state: {
+      ...state,
+      presetLaunches: [...state.presetLaunches, launch],
+      presetErrors: withoutLaunchError(state.presetErrors, key),
+    },
+  };
+}
+
+/**
+ * The `launch_preset` for a launch under its job id: no variable values, the
+ * preset's own worktree and tab settings, and no client id, so its tabs land
+ * in the daemon's default layout.
+ */
+export function presetLaunchMessage(
+  launch: PresetLaunchRequest & { readonly jobId: string },
+): ClientMessage {
+  return {
+    type: "launch_preset",
+    job_id: launch.jobId,
+    target: presetTarget(launch.target),
+    preset_id: launch.presetId,
+    source: launch.source,
+    variable_values: [],
+    use_worktree_override: null,
+    max_panes_per_tab_override: null,
+  };
+}
+
+/**
+ * The messages a reconnect sends for the preset launches still waiting. A
+ * host listing `preset_job_repeat` gets each one again with its job id, so
+ * its journal starts one job: a launch older than the journal is dropped
+ * instead. Any other host gets nothing, and each preset says why.
+ */
+export function resendPresetLaunches(
+  state: HomeActions,
+  supportsRepeat: boolean,
+  now: number,
+): LaunchResend {
+  if (state.presetLaunches.length === 0) {
+    return { messages: [], state };
+  }
+  const presetErrors = new Map(state.presetErrors);
+  const messages: ClientMessage[] = [];
+  const presetLaunches: PendingPresetLaunch[] = [];
+  for (const launch of state.presetLaunches) {
+    const key = presetKey(launch.target, launch.presetId);
+    if (!supportsRepeat) {
+      presetErrors.set(key, UNSUPPORTED_PRESET_RESEND);
+    } else if (now - launch.sentAt >= LAUNCH_RESEND_LIMIT_MS) {
+      presetErrors.set(key, LAUNCH_MAYBE_STARTED);
+    } else {
+      const resent = { ...launch, lastSentAt: now };
+      presetLaunches.push(resent);
+      messages.push(presetLaunchMessage(resent));
+    }
+  }
+  return { messages, state: { ...state, presetLaunches, presetErrors } };
+}
+
+/**
+ * Drops the preset launches whose job never answered, a minute after their
+ * latest send, each preset saying it may have started sessions anyway;
+ * returns the state itself when every launch is still waiting.
+ */
+export function expirePresetLaunches(state: HomeActions, now: number): HomeActions {
+  if (state.presetLaunches.length === 0) {
+    return state;
+  }
+  const presetErrors = new Map(state.presetErrors);
+  const presetLaunches: PendingPresetLaunch[] = [];
+  for (const launch of state.presetLaunches) {
+    if (now - launch.lastSentAt >= LAUNCH_ANSWER_LIMIT_MS) {
+      presetErrors.set(presetKey(launch.target, launch.presetId), LAUNCH_MAYBE_STARTED);
+    } else {
+      presetLaunches.push(launch);
+    }
+  }
+  return presetLaunches.length === state.presetLaunches.length
+    ? state
+    : { ...state, presetLaunches, presetErrors };
+}
+
+/** The state once a job has answered: its pending launch is gone; the state itself for any other job. */
+function answerPresetLaunch(state: HomeActions, jobId: string | undefined): FoldResult {
+  const presetLaunches = state.presetLaunches.filter((launch) => launch.jobId !== jobId);
+  return presetLaunches.length === state.presetLaunches.length
+    ? { state, effects: [] }
+    : { state: { ...state, presetLaunches }, effects: [] };
+}
+
+/** What a reconnect leaves to send: the pending launches, each with its id. */
+export interface LaunchResend {
+  readonly messages: readonly ClientMessage[];
+  readonly state: HomeActions;
+}
+
+/**
+ * The messages a reconnect sends for the launches still waiting. A host that
+ * launches gets each one again with its earlier id, so the daemon's journal
+ * makes one session: a launch older than the journal is dropped instead,
+ * since a resend would make a second session. An older host gets nothing,
+ * its launches are dropped, and each container shows why.
+ */
+export function resendLaunches(
+  state: HomeActions,
+  supportsLaunchLast: boolean,
+  now: number,
+): LaunchResend {
+  if (state.launches.length === 0) {
+    return { messages: [], state };
+  }
+  const launchErrors = new Map(state.launchErrors);
+  const messages: ClientMessage[] = [];
+  const launches: PendingLaunch[] = [];
+  for (const launch of state.launches) {
+    const key = containerKey(launch.target);
+    if (!supportsLaunchLast) {
+      launchErrors.set(key, UNSUPPORTED_LAUNCH);
+    } else if (now - launch.sentAt >= LAUNCH_RESEND_LIMIT_MS) {
+      launchErrors.set(key, LAUNCH_MAYBE_STARTED);
+    } else {
+      launches.push({ ...launch, lastSentAt: now });
+      messages.push({ type: "launch_last", target: launch.target, request_id: launch.requestId });
+    }
+  }
+  return { messages, state: { ...state, launches, launchErrors } };
+}
+
+/**
+ * Drops the launches whose answer never came, a minute after their latest
+ * send, each container saying it may have started a session anyway. Sends
+ * nothing; returns the state itself when every launch is still waiting.
+ */
+export function expireLaunches(state: HomeActions, now: number): HomeActions {
+  if (state.launches.length === 0) {
+    return state;
+  }
+  const launchErrors = new Map(state.launchErrors);
+  const launches: PendingLaunch[] = [];
+  for (const launch of state.launches) {
+    if (now - launch.lastSentAt >= LAUNCH_ANSWER_LIMIT_MS) {
+      launchErrors.set(containerKey(launch.target), LAUNCH_MAYBE_STARTED);
+    } else {
+      launches.push(launch);
+    }
+  }
+  return launches.length === state.launches.length ? state : { ...state, launches, launchErrors };
 }
 
 /**
@@ -166,24 +494,37 @@ export function foldReply(state: HomeActions, message: DaemonMessage): FoldResul
       return refuse(state, message.request_id ?? null, message.detail);
     case "session_updated":
       return onSessionUpdated(state, message.session, message.request_id ?? null);
+    case "preset_launch_job_updated":
+      return answerPresetLaunch(state, message.job.job_id);
+    case "preset_launch_failed":
+      return answerPresetLaunch(state, message.job_id);
     default:
       return { state, effects: [] };
   }
 }
 
-/** A refusal echoing `requestId`: the session's error text and its record freed. */
+/** A refusal echoing `requestId`: the session's or the launch's error text, its record freed. */
 function refuse(state: HomeActions, requestId: string | null, text: string): FoldResult {
   if (requestId === null) {
     return { state, effects: [] };
   }
   const request = findRequest(state, requestId);
-  if (request === undefined) {
+  if (request !== undefined) {
+    const errors = new Map(state.errors);
+    errors.set(request.sessionId, text);
+    return {
+      state: { ...state, pending: withoutRequest(state, requestId), errors },
+      effects: [],
+    };
+  }
+  const launch = findLaunch(state, requestId);
+  if (launch === undefined) {
     return { state, effects: [] };
   }
-  const errors = new Map(state.errors);
-  errors.set(request.sessionId, text);
+  const launchErrors = new Map(state.launchErrors);
+  launchErrors.set(containerKey(launch.target), text);
   return {
-    state: { ...state, pending: withoutRequest(state, requestId), errors },
+    state: { ...state, launches: withoutLaunch(state, requestId), launchErrors },
     effects: [],
   };
 }
@@ -196,9 +537,10 @@ function onSessionUpdated(
 ): FoldResult {
   const landed = requestId === null ? undefined : findRequest(state, requestId);
   const done = requestId === null ? state : forgetRequest(state, requestId);
-  const idle = forgetSessionRequests(done, session.id);
+  const settled = requestId === null ? done : forgetLaunch(done, requestId);
+  const idle = forgetSessionRequests(settled, session.id);
   const discardOriginal =
-    landed?.action === "resume" && landed.requestId !== null
+    landed?.action === "resume" && landed.discardsOriginal === true
       ? [{ type: "discard_session" as const, session_id: landed.sessionId, cleanup: [] }]
       : [];
   return { state: clearError(idle, session.id), effects: discardOriginal };
@@ -226,6 +568,42 @@ function withoutRequest(state: HomeActions, requestId: string): readonly Pending
 function forgetRequest(state: HomeActions, requestId: string): HomeActions {
   const pending = withoutRequest(state, requestId);
   return pending.length === state.pending.length ? state : { ...state, pending };
+}
+
+function findLaunch(state: HomeActions, requestId: string): PendingLaunch | undefined {
+  return state.launches.find((launch) => launch.requestId === requestId);
+}
+
+function withoutLaunch(state: HomeActions, requestId: string): readonly PendingLaunch[] {
+  return state.launches.filter((launch) => launch.requestId !== requestId);
+}
+
+function forgetLaunch(state: HomeActions, requestId: string): HomeActions {
+  const launches = withoutLaunch(state, requestId);
+  return launches.length === state.launches.length ? state : { ...state, launches };
+}
+
+/**
+ * Drops a preset's dropped-launch note once its job has answered, so the
+ * job's own outcome shows; `key` null, or a key with no note, returns the state itself.
+ */
+export function forgetPresetError(state: HomeActions, key: string | null): HomeActions {
+  if (key === null || !state.presetErrors.has(key)) {
+    return state;
+  }
+  return { ...state, presetErrors: withoutLaunchError(state.presetErrors, key) };
+}
+
+function withoutLaunchError(
+  errors: ReadonlyMap<string, string>,
+  key: string,
+): ReadonlyMap<string, string> {
+  if (!errors.has(key)) {
+    return errors;
+  }
+  const next = new Map(errors);
+  next.delete(key);
+  return next;
 }
 
 /** Drops the session's waits that no reply can end: answers and abandoned resumes. */

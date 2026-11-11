@@ -144,6 +144,44 @@ export const FEATURE_CLIENT_PRESENCE = "client_presence";
 export const FEATURE_TYPED_PROMPT_ANSWERS = "typed_prompt_answers";
 
 /**
+ * `Welcome.features` entry: the daemon resumes a session from one
+ * [`ClientMessage::ResumeSession`], choosing by the session's state how. A
+ * client talking to a daemon without it sends the older recipe:
+ * [`ClientMessage::DuplicateSession`] with `carry_busy_excluded` and
+ * `same_checkout` for a parked or stopped session, and
+ * [`ClientMessage::ResumeAbandoned`] for an abandoned one.
+ */
+export const FEATURE_RESUME_SESSION = "resume_session";
+
+/**
+ * `Welcome.features` entry: the daemon launches a repo's or workspace's last
+ * spawn config from one [`ClientMessage::LaunchLast`].
+ */
+export const FEATURE_LAUNCH_LAST = "launch_last";
+
+/**
+ * `Welcome.features` entry: the daemon starts an interactive session in a
+ * repo or workspace from one [`ClientMessage::NewSession`].
+ */
+export const FEATURE_NEW_SESSION = "new_session";
+
+/**
+ * `Welcome.features` entry: the daemon reads [`SpawnRequest::extra_args`],
+ * passes them to an interactive agent spawn and saves them in its
+ * [`SpawnConfig`]. A daemon without it drops the field unread, so a client
+ * sends no extra arguments to it.
+ */
+export const FEATURE_SPAWN_EXTRA_ARGS = "spawn_extra_args";
+
+/**
+ * `Welcome.features` entry: the daemon answers a [`ClientMessage::LaunchPreset`]
+ * whose `job_id` names a job it still holds a snapshot of with that job's latest
+ * [`DaemonMessage::PresetLaunchJobUpdated`], to the sender only, and starts no
+ * second job, so a client may resend an unanswered launch with its job id.
+ */
+export const FEATURE_PRESET_JOB_REPEAT = "preset_job_repeat";
+
+/**
  * `Welcome.features` entry: the daemon answers [`ClientMessage::RemoteUpdate`]:
  * it updates itself to the newest release, or says why it cannot.
  */
@@ -231,8 +269,6 @@ export interface AgentDescriptor {
   /** What a paste with no text on the clipboard sends, so the agent pastes its host's clipboard image. */
   image_paste?: ImagePaste;
   caps: AgentCaps;
-  /** What a trusted launch passes, for the spawn dialog's note. */
-  trust_note: string | null;
   texts: AgentTexts;
   fields: OptionField[];
   chips: ChipRule[];
@@ -243,6 +279,11 @@ export interface AgentDescriptor {
   title?: TitleRules;
   /** The runtime icon: SVG markup drawn in its own colours; none draws the generic shell glyph. */
   icon?: string | null;
+  /**
+   * The choice that runs the agent with its permission prompts bypassed; a saved or received
+   * `dangerously_skip_permissions: true` becomes it. `None` when the agent has none.
+   */
+  bypass?: BypassChoice | null;
 }
 
 /**
@@ -400,7 +441,8 @@ export interface OptionField {
   /** On the agent's Settings page; its value is the spawn dialog's default. */
   settings: boolean;
   spawn: SpawnPlacement;
-  locked_when_trusted: boolean;
+  /** Deprecated: always false; older clients require it. */
+  locked_when_trusted?: boolean;
   when: FieldRule[];
 }
 
@@ -416,6 +458,14 @@ export interface Choice {
   /** The [`OptionValue::Text`] the choice stores. */
   value: string;
   label: string;
+}
+
+/** The choice of one of an agent's fields that runs it with its permission prompts bypassed. */
+export interface BypassChoice {
+  /** The [`OptionField::id`] of a choice field. */
+  field: string;
+  /** The [`Choice::value`] that bypasses the prompts. */
+  value: string;
 }
 
 /** How a [`FieldKind::Choice`] field is drawn. */
@@ -754,12 +804,6 @@ export interface SessionSnapshot {
    */
   appearance?: AppearanceOverrides;
   /**
-   * True when the session was launched with approvals/permission prompts
-   * bypassed (a trusted launch). Clients use this to keep elevated authority visible after the
-   * spawn dialog closes.
-   */
-  elevated_authority?: boolean;
-  /**
    * True when the session was spawned with `use_worktree = true`, i.e.
    * the daemon created (or reused) a per-session git worktree under
    * `<repo>.wt/<branch>`. Drives the close-context-menu's "delete
@@ -826,7 +870,38 @@ export interface SessionSnapshot {
    * a role this build does not know, both read as [`SessionRole::Normal`].
    */
   role?: SessionRole;
+  /**
+   * The one word for the session's state, as the daemon computes it with
+   * [`status_label`] from this snapshot's own fields; each client words it
+   * its own way. A daemon that predates the field, and a label this build
+   * does not know, both read as [`StatusLabel::Unknown`], and a client
+   * then words `status` itself.
+   */
+  status_label?: StatusLabel;
 }
+
+/**
+ * A session's state as one label: its lifecycle (parked, abandoned,
+ * orphaned) first, then its status, with an idle session that has
+ * background work apart from a plain idle one.
+ */
+export type StatusLabel =
+  /** Parked: the process stopped and the worktree is kept for a resume. */
+  | "inactive"
+  /** The previous daemon died mid-run and the agent process is gone. */
+  | "abandoned"
+  /** Still running, but reattached without its stdio. */
+  | "orphan"
+  /** Status [`SessionStatus::Spawning`]. */
+  | "starting"
+  | "awaiting_input"
+  | "working"
+  /** Idle, with a background shell, subagent or wakeup still pending. */
+  | "background"
+  | "idle"
+  | "error"
+  /** Status [`SessionStatus::Stopped`], whatever its exit code. */
+  | "stopped";
 
 /**
  * What a session was spawned for. A role is fixed for the life of the
@@ -883,6 +958,11 @@ export interface PendingQuestion {
   option_descriptions?: string[];
   /** True when the prompt accepts more than one choice. */
   multi_select?: boolean;
+  /**
+   * True when any option carries a preview, which only the agent's own
+   * dialog in the pane draws, so a toast offers Go to pane, not answers.
+   */
+  preview?: boolean;
 }
 
 /** What a waiting session's summary says it needs. */
@@ -1072,6 +1152,16 @@ export interface AgentNode {
   state: AgentState;
   started_at: string;
   stuck?: StuckReason | null;
+  /**
+   * A subagent's model, as a display name (`Opus 5.5`); `None` when
+   * unknown or for other nodes.
+   */
+  model?: string | null;
+  /**
+   * A subagent's effort level (`high`); `None` when unknown or for other
+   * nodes.
+   */
+  effort?: string | null;
   children?: AgentNode[];
 }
 
@@ -1294,12 +1384,6 @@ export interface HistoryEntry {
    * log. `None` for a recorded entry: its options are its `spawn_config`'s.
    */
   options?: OptionValues | null;
-  /**
-   * True when an imported session ran with permission prompts skipped,
-   * read from its tracer log. A recorded entry leaves it false: its
-   * `spawn_config` carries the flag.
-   */
-  trusted?: boolean;
 }
 
 /**
@@ -1412,8 +1496,11 @@ export interface SpawnRequest {
   target: SpawnTarget;
   mode: SessionMode;
   initial_prompt: string | null;
-  /** A trusted launch: the agent runs with its permission prompts skipped. */
-  dangerously_skip_permissions: boolean;
+  /**
+   * Deprecated: true exactly when `agent`'s options hold its descriptor's bypass choice
+   * ([`fold_trusted`]); kept on the wire for peers that read or send it.
+   */
+  dangerously_skip_permissions?: boolean;
   /** The agent to run and its options; `None` exactly for a plain shell. */
   agent: AgentSelection | null;
   /**
@@ -1435,6 +1522,12 @@ export interface SpawnRequest {
    */
   extra_env?: [string, string][];
   /**
+   * Extra command-line arguments the user added to this spawn, already
+   * split, passed after the agent's own arguments and the host's
+   * launch-command extras; interactive agent spawns only.
+   */
+  extra_args?: string[];
+  /**
    * Keys whose rows this client considers secret whatever their name, set by
    * the spawn dialog's per-row Secret toggle. The daemon seals the union of
    * these and the rows its own name pattern catches, so a secret under a
@@ -1444,8 +1537,8 @@ export interface SpawnRequest {
   secret_env_keys?: string[];
   /**
    * Optional scripted PTY input fed to the child after the PTY comes up.
-   * When set on `SessionMode::Interactive`, the daemon omits the positional
-   * prompt arg (the injector is expected to deliver the prompt instead).
+   * When set on `SessionMode::Interactive`, the daemon does not pass the
+   * prompt on the command line (the injector is expected to deliver it).
    * A plain shell runs it as typed input. Ignored for headless sessions.
    */
   prompt_injector?: PromptInjector | null;
@@ -1480,7 +1573,11 @@ export interface SpawnRequest {
 export interface SpawnConfig {
   target: SpawnTarget;
   mode: SessionMode;
-  dangerously_skip_permissions: boolean;
+  /**
+   * Deprecated: true exactly when `agent`'s options hold its descriptor's bypass choice
+   * ([`fold_trusted`]); kept on the wire for peers that read or send it.
+   */
+  dangerously_skip_permissions?: boolean;
   /** See [`SpawnRequest::agent`]. */
   agent: AgentSelection | null;
   /**
@@ -1490,6 +1587,12 @@ export interface SpawnConfig {
    * was built, so a stored or echoed config carries no secret values.
    */
   extra_env?: [string, string][];
+  /**
+   * Extra command-line arguments the user added to this spawn, already
+   * split, passed after the agent's own arguments and the host's
+   * launch-command extras; interactive agent spawns only.
+   */
+  extra_args?: string[];
 }
 
 export interface CleanupAction {
@@ -2076,7 +2179,6 @@ export interface PresetEntry {
    * [`RepoEntry::default_use_worktree`] at launch time.
    */
   default_use_worktree?: boolean | null;
-  dangerously_skip_permissions?: boolean;
   /**
    * The agent the preset's sessions run and its options; `None` runs the
    * daemon's default agent with its default options.
@@ -2487,6 +2589,11 @@ export type ChatPromptKind =
   | "plan"
   /** A trust prompt for a folder the agent has not run in. */
   | "trust"
+  /**
+   * A new MCP server the project names, waiting to be used or passed
+   * over.
+   */
+  | "mcp_server"
   /** A heads-up notice the agent raised. */
   | "heads_up";
 
@@ -3212,8 +3319,10 @@ export type ClientMessage =
    * Clone an existing session: daemon reads its stored [`SpawnConfig`]
    * and spawns a new session with the same agent, mode, target, model,
    * permission mode, sandbox, skip-perms flag, and extra env vars. The
-   * new session gets a freshly generated label and no initial prompt —
-   * it's a fresh process with the same config, not a continuation.
+   * new session gets a freshly generated label and no initial prompt.
+   * A Duplicate is a fresh process with the same config; a Restart or a
+   * Resume (`same_checkout`) continues the source's agent conversation
+   * while its transcript exists.
    *
    * A duplicate of a *worktree* session lands on a fresh branch the daemon
    * picks (and refuses any leftover under that name) rather than the
@@ -3236,6 +3345,36 @@ export type ClientMessage =
    * of a parked one, whose source no longer holds the checkout.
    */
   | { type: "duplicate_session"; session_id: string; request_id?: string | null; carry_busy_excluded?: boolean; same_checkout?: boolean }
+  /**
+   * Resume a session that is not running; the daemon picks how by its
+   * state. A parked or stopped session is rerun as a Restart is (a
+   * [`ClientMessage::DuplicateSession`] with `carry_busy_excluded` and
+   * `same_checkout`), and the client still places the new session and
+   * discards the original; an abandoned one is resumed in place as
+   * [`ClientMessage::ResumeAbandoned`] does. Success is the new session's
+   * [`DaemonMessage::SessionUpdated`] echoing `request_id`; a refusal is a
+   * [`DaemonMessage::Error`] or [`DaemonMessage::ActionFailed`] carrying
+   * it. Sent only to a daemon listing [`FEATURE_RESUME_SESSION`].
+   *
+   * `request_id`: Echoed on the requester's [`DaemonMessage::SessionUpdated`] for
+   * the new session and on a refusal.
+   */
+  | { type: "resume_session"; session_id: string; request_id?: string | null }
+  /**
+   * Launch `target`'s stored last spawn config again, as the daemon replays
+   * it: a worktree config on a fresh branch name, a folder that is no git
+   * repository in place. Journalled by `request_id` like `SpawnSession`.
+   */
+  | { type: "launch_last"; target: ContainerRef; request_id?: string | null }
+  /**
+   * Start an interactive session in `target` from its last agent and
+   * options, never bypassing permission prompts, in a worktree on a fresh
+   * branch name (a folder that is no git repository in place), with
+   * `initial_prompt` as its first prompt. Journalled by `request_id` like
+   * `SpawnSession`. A daemon lists [`FEATURE_NEW_SESSION`] in
+   * `Welcome.features` when it handles it.
+   */
+  | { type: "new_session"; target: ContainerRef; initial_prompt?: string | null; request_id?: string | null }
   /**
    * Fetch the persisted [`SpawnConfig`] for a session so the spawn
    * dialog can pre-fill all fields with the source's values. Replied

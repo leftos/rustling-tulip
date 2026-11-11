@@ -19,9 +19,9 @@ use self::history::UsageHistory;
 use agent_api::accounts::{AccountEventRow, EngineTick};
 use agent_api::{
     AccountKindRow, AccountRef, AccountRow, AccountsConfig, AccountsError, AccountsFailure,
-    AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, AutoSwitchRules, FleetRow,
-    FleetWindowRow, LoginCapture, LoginCommand, PollReport, PollScope, SwitchReport, UsageRow,
-    UsageStatus, UsageWindowRow,
+    AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, AutoSwitchRules,
+    ExtraUsageRow, FleetRow, FleetWindowRow, LoginCapture, LoginCommand, ModelLimitRow, PollReport,
+    PollScope, SwitchReport, UsageRow, UsageStatus, UsageWindowRow,
 };
 use chrono::{DateTime, Utc};
 use claude_accounts::engine::{
@@ -1583,14 +1583,55 @@ fn account_row(record: AccountRecord, active: Option<u32>, entry: &UsageEntry) -
             status,
             five_hour: entry.five_hour.as_ref().map(window_row),
             seven_day: entry.seven_day.as_ref().map(window_row),
-            model_limits: Vec::new(),
-            extra_usage: None,
+            model_limits: model_limit_rows(entry.last_good.as_ref()),
+            extra_usage: extra_usage_row(entry.last_good.as_ref()),
             fetched_at: entry
                 .fetched_at
                 .and_then(|at| chrono_time(at.as_nanosecond())),
             error: entry.last_error.clone(),
         },
     }
+}
+
+/// The per-model limits of a reading, in the order the answer listed them.
+fn model_limit_rows(last_good: Option<&Value>) -> Vec<ModelLimitRow> {
+    let Some(Value::Array(scoped)) = last_good.and_then(|reading| reading.get("scoped")) else {
+        return Vec::new();
+    };
+    scoped
+        .iter()
+        .filter_map(|limit| {
+            Some(ModelLimitRow {
+                model: limit.get("name")?.as_str()?.to_owned(),
+                pct: limit.get("pct")?.as_f64()?,
+                resets_at: limit
+                    .get("resets_at")
+                    .and_then(Value::as_str)
+                    .and_then(|text| text.parse::<jiff::Timestamp>().ok())
+                    .and_then(|at| chrono_time(at.as_nanosecond())),
+            })
+        })
+        .collect()
+}
+
+/// The extra-usage switches of a reading, with the spend's cap when it holds one.
+fn extra_usage_row(last_good: Option<&Value>) -> Option<ExtraUsageRow> {
+    let Value::Object(reading) = last_good? else {
+        return None;
+    };
+    let Value::Object(extra) = reading.get("extra_usage")? else {
+        return None;
+    };
+    let flag = |key: &str| extra.get(key).and_then(Value::as_bool).unwrap_or(false);
+    Some(ExtraUsageRow {
+        enabled: flag("enabled"),
+        user_disabled: flag("user_disabled"),
+        spend_limit_reached: flag("spend_limit_reached"),
+        limit: reading
+            .get("spend")
+            .and_then(|spend| spend.get("limit"))
+            .and_then(Value::as_f64),
+    })
 }
 
 fn window_row(window: &UsageWindow) -> UsageWindowRow {

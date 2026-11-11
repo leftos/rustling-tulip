@@ -88,8 +88,6 @@ pub(crate) const HOST_TAILNET_ICON: &str = "icons/host-tailnet.svg";
 pub(crate) const HOST_SSH_ICON: &str = "icons/host-ssh.svg";
 /// A check mark: the Connections picker's passed Test connection.
 pub(crate) const CHECK_ICON: &str = "icons/check.svg";
-/// The pane header's trusted chip: a shield.
-pub(crate) const SHIELD_ICON: &str = "icons/shield.svg";
 
 /// The runtime icon of PowerShell 7 and later.
 pub(crate) const RUNTIME_PWSH_ICON: &str = "icons/runtime-pwsh.svg";
@@ -141,7 +139,7 @@ fn agent_icon_bytes(path: &str) -> Option<Cow<'static, [u8]>> {
 }
 
 /// Every bundled asset, by the path the views ask for it under.
-const ASSETS: [(&str, &[u8]); 43] = [
+const ASSETS: [(&str, &[u8]); 42] = [
     (
         SESSIONS_ICON,
         include_bytes!("../assets/icons/sessions.svg"),
@@ -276,7 +274,6 @@ const ASSETS: [(&str, &[u8]); 43] = [
         include_bytes!("../assets/icons/host-ssh.svg"),
     ),
     (CHECK_ICON, include_bytes!("../assets/icons/check.svg")),
-    (SHIELD_ICON, include_bytes!("../assets/icons/shield.svg")),
     (
         RUNTIME_PWSH_ICON,
         include_bytes!("../assets/icons/runtime-pwsh.svg"),

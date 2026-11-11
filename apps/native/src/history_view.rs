@@ -29,9 +29,11 @@ use crate::{Drag, RootView, drag_handle, tooltip};
 /// The forge button's label.
 pub const FORGE_LABEL: &str = "Open in forge";
 const HISTORY_LABEL: &str = "History";
+/// A commit row's height: one line in a scrolling list.
 const ROW_HEIGHT: f32 = 22.0;
 const ROW_PADDING: f32 = 8.0;
 const BUTTON_HEIGHT: f32 = 18.0;
+/// The author column's width: fixed so every row's columns line up.
 const AUTHOR_WIDTH: f32 = 90.0;
 
 impl RootView {

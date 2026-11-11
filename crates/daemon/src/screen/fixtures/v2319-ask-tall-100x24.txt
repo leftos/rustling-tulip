@@ -1,0 +1,24 @@
+
+│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha
+│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha
+│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha
+│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha
+│ bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike no?
+
+❯ 1. An option label of some length 1
+     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo
+     charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alph?
+  2. An option label of some length 2
+     golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo
+     foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie del?
+  3. An option label of some length 3
+     juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel
+     india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot g?
+  4. An option label of some length 4
+     mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo
+     lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india j?
+  5. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

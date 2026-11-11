@@ -435,20 +435,28 @@ fn check_agent_command(reserved: &[&str], command: &AgentCommand) -> Result<(), 
     let tokens = shell_words::split(&command.args).map_err(|_| {
         LaunchRefusal::Args("The extra arguments have an unclosed quote.".to_owned())
     })?;
-    for token in &tokens {
-        for flag in reserved {
+    match refused_reserved_arg(&tokens, reserved) {
+        Some(message) => Err(LaunchRefusal::Args(message)),
+        None => Ok(()),
+    }
+}
+
+/// Why `tokens`, extra arguments already split, are refused: the first one
+/// naming a flag in `reserved` (the flag itself, or a long flag followed by
+/// `=`). `None` when every token may be passed. Each caller refuses control
+/// characters itself, in its own words.
+pub(crate) fn refused_reserved_arg(tokens: &[String], reserved: &[&str]) -> Option<String> {
+    tokens.iter().find_map(|token| {
+        reserved.iter().find_map(|flag| {
             let with_value = flag.starts_with("--")
                 && token
                     .strip_prefix(flag)
                     .is_some_and(|rest| rest.starts_with('='));
-            if token == flag || with_value {
-                return Err(LaunchRefusal::Args(format!(
-                    "{flag} is set by rustling-tulip; remove it from the extra arguments."
-                )));
-            }
-        }
-    }
-    Ok(())
+            (token == flag || with_value).then(|| {
+                format!("{flag} is set by rustling-tulip; remove it from the extra arguments.")
+            })
+        })
+    })
 }
 
 /// Every registered agent's launch command, blank when unset, each naming
@@ -1152,6 +1160,51 @@ mod tests {
             None,
             "a flag that only starts like a reserved one is allowed"
         );
+    }
+
+    fn tokens(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn extra_args_naming_a_reserved_flag_are_refused() {
+        assert_eq!(
+            refused_reserved_arg(&tokens(&["--debug", "--model", "opus"]), &["--model", "-p"]),
+            Some(
+                "--model is set by rustling-tulip; remove it from the extra arguments.".to_owned()
+            )
+        );
+        assert_eq!(
+            refused_reserved_arg(&tokens(&["-p"]), &["--model", "-p"]),
+            Some("-p is set by rustling-tulip; remove it from the extra arguments.".to_owned())
+        );
+    }
+
+    #[test]
+    fn extra_args_naming_a_long_flag_with_its_value_are_refused() {
+        assert_eq!(
+            refused_reserved_arg(&tokens(&["--model=x"]), &["--model", "-p"]),
+            Some(
+                "--model is set by rustling-tulip; remove it from the extra arguments.".to_owned()
+            )
+        );
+        assert_eq!(
+            refused_reserved_arg(&tokens(&["-p=x"]), &["--model", "-p"]),
+            None,
+            "only a long flag takes the `=` form"
+        );
+    }
+
+    #[test]
+    fn extra_args_without_a_reserved_flag_pass() {
+        assert_eq!(
+            refused_reserved_arg(
+                &tokens(&["--debug", "--models=x", "a b"]),
+                &["--model", "-p"]
+            ),
+            None
+        );
+        assert_eq!(refused_reserved_arg(&[], &["--model"]), None);
     }
 
     /// The next agent-commands broadcast on the state stream.

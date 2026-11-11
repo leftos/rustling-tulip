@@ -11,7 +11,6 @@ use gpui::{
 };
 
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
-use crate::ellipsis::truncating;
 use crate::notice_view::{CLOSE_SIZE, toast_frame};
 use crate::tabs::SessionRef;
 use crate::target::HostKey;
@@ -244,11 +243,11 @@ fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
         this.dismiss_undo(id, cx);
     }));
-    let message = truncating(
-        &format!("undo-entry-{id}-message"),
-        StyledText::new(entry.message.clone()),
-    )
-    .flex_1();
+    let message = div()
+        .flex_1()
+        .min_w(px(0.0))
+        .debug_selector(move || format!("undo-entry-{id}-message"))
+        .child(StyledText::new(entry.message.clone()));
     let name = format!("undo-entry-{id}");
     toast_frame(
         crate::fonts::ui_text_size(cx),

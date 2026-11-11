@@ -62,6 +62,7 @@ pub fn daemon_features() -> Vec<String> {
     vec![
         protocol::FEATURE_AGENT_COMMANDS.to_owned(),
         protocol::FEATURE_DETAILED_LOGGING.to_owned(),
+        protocol::FEATURE_SPAWN_EXTRA_ARGS.to_owned(),
     ]
 }
 
@@ -658,11 +659,6 @@ impl SessionBuilder {
         self.set("label", json!(label))
     }
 
-    /// Launched with approval prompts bypassed.
-    pub fn trusted(self) -> Self {
-        self.set("elevated_authority", json!(true))
-    }
-
     /// Showing `chips`, as the daemon evaluates them from the session's
     /// agent options.
     pub fn agent_chips(self, chips: Value) -> Self {
@@ -828,6 +824,12 @@ pub fn account(number: u32, alias: &str) -> AccountBuilder {
 pub struct AccountBuilder(protocol::AccountSnapshot);
 
 impl AccountBuilder {
+    /// Its email, in place of `{alias}@example.com`.
+    pub fn email(mut self, email: &str) -> Self {
+        email.clone_into(&mut self.0.email);
+        self
+    }
+
     /// The account in use.
     pub fn active(mut self) -> Self {
         self.0.active = true;
@@ -859,6 +861,16 @@ impl AccountBuilder {
         if let Some(window) = &mut self.0.seven_day {
             window.pct = pct;
         }
+        self
+    }
+
+    /// With a per-model limit of `pct` for `model`, no reset time.
+    pub fn model_limit(mut self, model: &str, pct: f64) -> Self {
+        self.0.model_limits.push(protocol::AccountModelLimit {
+            model: model.to_owned(),
+            pct,
+            resets_at: None,
+        });
         self
     }
 
@@ -2594,6 +2606,22 @@ impl<'h, 'a> HostHandle<'h, 'a> {
         });
     }
 
+    /// [`Self::connect_keeping_sent`], its daemon listing `agents` in place
+    /// of the registry's (an older daemon's descriptors, say).
+    pub fn connect_listing(&mut self, agents: Vec<protocol::AgentDescriptor>) {
+        let target = self.target.clone();
+        self.event(NetEvent::State(connected_to(
+            target,
+            8787,
+            daemon_features(),
+        )));
+        self.send(welcome(PROTOCOL));
+        self.send(DaemonMessage::Agents { agents });
+        self.send(DaemonMessage::AgentSettings {
+            settings: BTreeMap::new(),
+        });
+    }
+
     /// Every message the client sent on this host's connection since the
     /// last call.
     pub fn sent(&mut self) -> Vec<ClientMessage> {
@@ -3664,6 +3692,10 @@ impl<'a> Harness<'a> {
                 root.shell_menu_open()
             } else if selector.starts_with("shell-menu-") {
                 root.shell_menu_rows().contains(&selector)
+            } else if selector == "link-menu" {
+                root.link_menu_open()
+            } else if selector.starts_with("link-menu-") {
+                root.link_menu_row_label(&selector).is_some()
             } else if selector == "shell-clear-default" {
                 root.shell_dialog_clears_default()
             } else if selector.starts_with("shell-") {
@@ -3707,6 +3739,13 @@ impl<'a> Harness<'a> {
     pub fn click(&mut self, at: Point<Pixels>, modifiers: Modifiers) {
         self.cx.simulate_click(at, modifiers);
         self.cx.run_until_parked();
+    }
+
+    /// Ctrl+clicks a path link at `at` and picks the menu's first entry, as
+    /// a Ctrl+click alone did before the link menu.
+    pub fn pick_link(&mut self, at: Point<Pixels>) {
+        self.click(at, Modifiers::secondary_key());
+        self.keys("enter");
     }
 
     /// Runs `change` on the root view, then lets the view settle.

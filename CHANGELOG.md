@@ -6,6 +6,17 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- A session's screen on the phone shows its running subagents, background shells and next wake-up, as the desktop's strip does.
+- A tab you haven't named shows the repos and workspaces of the sessions in it, everywhere its name appears; a tab you renamed keeps its name.
+- An account's Fable 7-day limit shows beside its overall 7-day one in Accounts and Settings, whenever it is in use.
+- The Dashboard shows each subagent's model and effort level after its name, such as "Opus 5.5 · high".
+- Ctrl+clicking a file path in a terminal offers a menu: open it in its default app, open it in the viewer, or open its folder.
+- On the phone's Home, Launch last starts a repo's or workspace's last launch again; a dropped connection never starts it twice or reports a launch that started as failed.
+- The phone's answer sheet for a plan shows the plan itself above its buttons, scrolling on its own when it is long.
+- Choose Claude's effort level, from Low to Max, when starting a session or as a default in Settings; Fable is offered among Claude's models.
+- Claude's question about a new MCP server in a project shows as a card in Chat and on the phone, with its three choices as buttons.
+- Add your own command-line arguments to a session in the spawn dialog's Advanced section; Duplicate and Launch last repeat them.
+- On the phone's Home, Presets lists a repo's or workspace's presets and launches those that need no typing, showing each launch's progress.
 - Connections and Settings show the release each host runs, and mark a host on an older release than this app as Behind.
 - When another device updates this PC, the app counts down 10 seconds, says who asked, offers Cancel, then reopens after the update.
 - Update a computer on an older release, over the tailnet or SSH, from the Connections dialog: confirm, and a notice follows it until it returns.
@@ -14,12 +25,51 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- In a narrow pane, the branch name keeps a few characters before the session's name starts to shorten, instead of shrinking to a sliver.
+- On the phone, a chat scrolled to the bottom stays there when the keyboard, the key bar or the Keys and Quick docks open.
+- The phone's Home lists a group's sessions in the same order as the desktop each time it connects, instead of a new order after a relaunch.
+- A session started with a first message in a folder Claude hasn't trusted yet waits until you answer Claude's question about trusting the folder, from Chat or the phone, then sends it, instead of closing Claude.
+- Play in Settings › Notifications plays the sound you just picked, instead of the one saved before.
+- When resuming an abandoned session fails, the phone shows why on that session's row.
+- Keyboard shortcuts work in a window with no tabs before the first click, including right after choosing Start empty.
+- Connecting to another computer no longer offers a layout choice that opened nothing; its sessions start in an empty layout.
+- `rustling-tulipd spawn --repo` refuses a repo that belongs to a workspace, naming the workspace, instead of making a session filed under Detached.
+- The phone shows a session with subagents or background shells running as Working in the background instead of Idle, and a starting, inactive, abandoned or orphaned session by name.
+- A session you place in a pane takes that pane's size at once, instead of keeping its old size until the pointer moves over it.
+- A session whose task name is too long for its pane no longer reads as finished mid-turn, so no false Finished notice fires.
+- A question whose answers have previews no longer offers answer buttons in a toast or on the Dashboard that could only fail; it offers Go to pane.
+- The What's new window shows a scrollbar when its notes run longer than it can show.
 - A damaged settings file no longer copies its contents, which could include a secret, into the log.
-- A click that focuses a pane or dismisses the jump palette no longer reaches the program, so it can't answer a question on screen.
-- After opening with your tabs closed, a reconnect no longer brings them back, and quitting before that happens no longer skips it next time.
+- A click that focuses a pane or the window, or dismisses the jump palette, no longer reaches the program, so it can't answer a question.
 - A settings file that isn't valid text keeps a copy instead of being overwritten, and a failed reset of your settings is tried again.
 - A tap in the phone's terminal no longer drops a session out of Needs you while its question is still up.
+- Keys typed into the phone's terminal while it can't send now show Offline on the session bar, as a chat send does.
+- A phone app put away just as its host refused its pairing waits until it is opened again before it reconnects.
+- Switching the phone's session screen to Terminal and back keeps the chat where you had scrolled it, instead of jumping to the newest row.
+- While a reply streams on the phone, earlier answers keep their sideways scroll and any text you selected in them.
+- A session left open in the phone's terminal no longer wakes the phone four times a second once it has loaded.
+- The phone's Notifications switch no longer spins forever when the app's service worker never started; it says to reopen the app.
+- The phone app opened offline right after installing it now loads styled and working, instead of as a bare page.
+- A permission toast shows its whole command, wrapping it and growing to fit, instead of cutting it to one line.
+- The Needs you list shows a session's whole question, wrapping it, instead of cutting it to one line.
+- Accounts and Settings › Accounts show an account's whole email and reset times, wrapping them, instead of cutting them off.
+- The undo shelf shows its whole message, wrapping it, instead of cutting it to one line.
+- The Dashboard shows the whole of what a session is doing or waiting on, wrapping it, instead of cutting it to one line.
+- A long footer status shows in full on hover, and long names in the jump palette and Themes end in "…" instead of cutting mid-letter.
+- Unfocused panes dim alike whether their accent comes from the theme or a chosen colour, and each pane's header carries a fade of its accent.
+- A question too tall for its pane can be answered from a toast or the Dashboard instead of being refused, and its Chat card shows the whole question.
 - The Connections dialog's rows and headings no longer run together when the Add host form leaves them little room; the list scrolls instead.
+
+### Changed
+
+- After the client crashes, is ended from Task Manager or loses power, the next start asks whether to open your saved tabs or start without them.
+- The Trusted checkbox is gone: choose Bypass permissions instead, and Launch last relaunches it without asking you to confirm; saved trusted launches carry over.
+
+## v0.11.2-alpha
+
+### Fixed
+
+- Ctrl+clicking a path written in parentheses before a colon, such as `(X:\dev\page.html):`, opens the file instead of failing to find it.
 
 ## v0.11.1-alpha
 

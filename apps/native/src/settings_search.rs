@@ -247,7 +247,7 @@ pub(crate) fn names(selector: &str, agents: &[AgentDescriptor]) -> bool {
     agents.iter().any(|descriptor| {
         let options = AgentOptions::new(descriptor.clone(), None);
         options
-            .settings_fields(false)
+            .settings_fields()
             .iter()
             .enumerate()
             .any(|(index, view)| {
@@ -302,7 +302,6 @@ fn fixed_entries() -> Vec<Entry> {
     let mut entries = general_entries();
     entries.extend(notifications_entries());
     entries.extend(dashboard_entries());
-    entries.extend(spawn_defaults_entries());
     entries.extend(worktrees_entries());
     entries.extend(remote_access_entries());
     entries.extend(accounts_entries());
@@ -572,17 +571,6 @@ fn dashboard_entries() -> Vec<Entry> {
     ]
 }
 
-/// The Spawn defaults tab's row.
-fn spawn_defaults_entries() -> Vec<Entry> {
-    vec![entry(
-        SettingsTab::SpawnDefaults,
-        "settings-spawn-trusted",
-        "Trusted launch by default",
-        "Spawn defaults",
-        Gate::Always,
-    )]
-}
-
 /// The Worktrees tab's rows: the path and the buttons that act on it.
 fn worktrees_entries() -> Vec<Entry> {
     vec![
@@ -831,7 +819,7 @@ fn agent_entries(agents: &[AgentDescriptor]) -> Vec<Entry> {
         .flat_map(|descriptor| {
             let tab = SettingsTab::Agent(intern(descriptor.id.0.clone()));
             let options = AgentOptions::new(descriptor.clone(), None);
-            let fields = options.settings_fields(false);
+            let fields = options.settings_fields();
             let rows: Vec<Entry> = fields
                 .iter()
                 .enumerate()
@@ -1247,7 +1235,7 @@ mod tests {
         for descriptor in agent_registry::descriptors() {
             let tab = SettingsTab::Agent(intern(descriptor.id.0.clone()));
             let options = AgentOptions::new(descriptor.clone(), None);
-            let fields = options.settings_fields(false);
+            let fields = options.settings_fields();
             assert!(
                 !fields.is_empty(),
                 "{} marks no Settings field",
@@ -1290,7 +1278,7 @@ mod tests {
         );
         for descriptor in agent_registry::descriptors() {
             let options = AgentOptions::new(descriptor.clone(), None);
-            for (index, view) in options.settings_fields(false).iter().enumerate() {
+            for (index, view) in options.settings_fields().iter().enumerate() {
                 // A choice field draws one row, and the catalogue names its
                 // first choice.
                 if let Some(control) = field_controls(&descriptor.tag, index, view).first() {

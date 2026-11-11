@@ -178,6 +178,8 @@ pub(crate) struct Notice {
 pub(crate) struct AgentCall {
     pub(crate) description: Option<String>,
     pub(crate) agent_type: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
 }
 
 /// What a reader has gathered from the lines it read.
@@ -213,6 +215,10 @@ pub(crate) struct State {
     pub(crate) cost_usd: f64,
     /// The newest main-thread reply's model and context tokens.
     context: Option<(String, u64)>,
+    /// The newest sidechain reply's model id, as its record named it.
+    pub(crate) sidechain_model: Option<String>,
+    /// The newest assistant record's effort level.
+    pub(crate) effort: Option<String>,
     pub(crate) failure_run: u32,
     pub(crate) first_prompt: Option<String>,
     pub(crate) first_record_at: Option<DateTime<Utc>>,
@@ -341,6 +347,8 @@ impl State {
                 let call = AgentCall {
                     description: text("description"),
                     agent_type: text("subagent_type"),
+                    model: text("model"),
+                    effort: text("effort"),
                 };
                 self.agent_calls.insert(id.to_owned(), call);
             }
@@ -356,16 +364,25 @@ impl State {
         }
     }
 
-    /// Adds an assistant record's usage to the tokens and cost, a message id
-    /// already seen adding only what its largest usage grew by; a main-thread
-    /// reply (no sidechain, no made-up model) also becomes the context
-    /// reading.
+    /// Keeps the newest model and effort a record carries for a subagent's
+    /// node, and adds an assistant record's usage to the tokens and cost, a
+    /// message id already seen adding only what its largest usage grew by; a
+    /// main-thread reply (no sidechain, no made-up model) also becomes the
+    /// context reading.
     fn merge_usage(&mut self, record: &Value) {
         let message = &record["message"];
+        let model = message["model"].as_str();
+        if record["isSidechain"] == true
+            && let Some(sidechain) = model.filter(|model| *model != SYNTHETIC_MODEL)
+        {
+            self.sidechain_model = Some(sidechain.to_owned());
+        }
+        if let Some(effort) = record["effort"].as_str() {
+            self.effort = Some(effort.to_owned());
+        }
         let Some(usage) = usage_of(&message["usage"]) else {
             return;
         };
-        let model = message["model"].as_str();
         if let Some(model) = model.filter(|model| *model != SYNTHETIC_MODEL)
             && record["isSidechain"] != true
         {
@@ -603,6 +620,46 @@ pub(crate) fn ended_state(status: Option<&str>) -> Option<AgentState> {
     }
 }
 
+/// A model id as a display name: `claude-opus-5-5` is `Opus 5.5`, and
+/// `claude-sonnet-4-20250514` is `Sonnet 4`; any id that fits neither shape
+/// is shown as it is.
+pub(crate) fn model_display(id: &str) -> String {
+    let parts: Vec<&str> = id.split('-').collect();
+    let ["claude", family, major, rest @ ..] = parts.as_slice() else {
+        return id.to_owned();
+    };
+    if family.is_empty() || !is_digits(major) {
+        return id.to_owned();
+    }
+    let family = capitalize(family);
+    let minor = match rest {
+        [] => return format!("{family} {major}"),
+        [date] if is_date(date) => return format!("{family} {major}"),
+        [minor, ..] if is_digits(minor) => minor,
+        _ => return id.to_owned(),
+    };
+    format!("{family} {major}.{minor}")
+}
+
+/// Whether `text` is all ASCII digits.
+fn is_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether `text` looks like the eight-digit date on a model id.
+fn is_date(text: &str) -> bool {
+    text.len() == 8 && is_digits(text)
+}
+
+/// `text` with its first character upper-cased.
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    format!("{}{}", first.to_uppercase(), chars.as_str())
+}
+
 /// Adds `id` to the recent ids, forgetting the oldest past [`RECENT_IDS`].
 fn remember(recent: &mut VecDeque<String>, id: String) {
     recent.push_back(id);
@@ -736,7 +793,7 @@ fn next_line_start(file: &mut File, position: u64) -> io::Result<u64> {
     reason = "a test that cannot write its scratch transcript must fail loudly"
 )]
 pub(crate) mod tests {
-    use super::TranscriptReader;
+    use super::{TranscriptReader, model_display};
     use agent_api::{ActivityReader, ActivitySnapshot, BackgroundTask, EndedTask, OpenCall};
     use chrono::{DateTime, Utc};
     use protocol::AgentState;
@@ -1164,5 +1221,22 @@ pub(crate) mod tests {
         assert_eq!(again.agent_call_ids, [] as [&str; 0]);
         assert_eq!(again.minute_counts.iter().sum::<u16>(), 2);
         assert_eq!(again.first_prompt.as_deref(), Some("Fix the build"));
+    }
+
+    #[test]
+    fn model_display_names_each_id_shape() {
+        let cases = [
+            ("claude-opus-5-5", "Opus 5.5"),
+            ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+            ("claude-sonnet-4-20250514", "Sonnet 4"),
+            ("claude-sonnet-4", "Sonnet 4"),
+            ("fable", "fable"),
+            ("gpt-x", "gpt-x"),
+            ("claude-", "claude-"),
+        ];
+
+        for (id, shown) in cases {
+            assert_eq!(model_display(id), shown, "id {id}");
+        }
     }
 }

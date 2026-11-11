@@ -12,7 +12,7 @@ use base64::Engine as _;
 use protocol::{
     AgentDescriptor, AgentId, AgentSelection, ClientMessage, DaemonMessage, OptionValues,
     RepoEntry, SessionMode, SessionSnapshot, SessionStatus, SpawnRequest, SpawnTarget,
-    WorktreeReusePolicy,
+    WorkspaceEntry, WorktreeReusePolicy,
 };
 use regex::Regex;
 use std::io::Write;
@@ -38,6 +38,7 @@ pub(super) struct WaitRequest<'a> {
 struct Known {
     agents: Vec<AgentDescriptor>,
     repos: Vec<RepoEntry>,
+    workspaces: Vec<WorkspaceEntry>,
 }
 
 /// The session `session_id` names in `sessions`, or `not_found`.
@@ -67,17 +68,19 @@ async fn dump_screen(connection: &mut Connection, session_id: &str) -> Result<()
     .await
 }
 
-/// The agents and repos the daemon pushes before its `Sessions`.
+/// The agents, repos and workspaces the daemon pushes before its `Sessions`.
 async fn initial_known(connection: &mut Connection) -> Result<Known, Failure> {
     let mut known = Known {
         agents: Vec::new(),
         repos: Vec::new(),
+        workspaces: Vec::new(),
     };
     loop {
         match connection.next_message().await {
             None => return Err(closed_early("the sessions")),
             Some(DaemonMessage::Agents { agents }) => known.agents = agents,
             Some(DaemonMessage::Repos { repos }) => known.repos = repos,
+            Some(DaemonMessage::Workspaces { workspaces }) => known.workspaces = workspaces,
             Some(DaemonMessage::Sessions { .. }) => return Ok(known),
             Some(_) => {}
         }
@@ -109,6 +112,7 @@ fn agent_selection(
 async fn spawn_target(
     connection: &mut Connection,
     repos: &[RepoEntry],
+    workspaces: &[WorkspaceEntry],
     place: &Place,
 ) -> Result<SpawnTarget, Failure> {
     match place {
@@ -130,6 +134,19 @@ async fn spawn_target(
                         format!("unknown repo: {name}"),
                     )
                 })?;
+            if let Some(workspace) = workspaces
+                .iter()
+                .find(|workspace| workspace.member_repo_ids.contains(&repo.id))
+            {
+                return Err(Failure::refused(
+                    Some(protocol::error_codes::INVALID_REQUEST.to_owned()),
+                    format!(
+                        "{} is a member of workspace {}; its sessions belong to the workspace. \
+                         Spawn in the workspace from the app.",
+                        repo.name, workspace.name
+                    ),
+                ));
+            }
             let branch_name = current_branch(connection, repo).await?;
             Ok(SpawnTarget::Single {
                 repo_id: repo.id.clone(),
@@ -201,7 +218,7 @@ pub(super) async fn spawn(
 ) -> Result<String, Failure> {
     let known = initial_known(connection).await?;
     let agent = agent_selection(&known.agents, options.agent.as_deref())?;
-    let target = spawn_target(connection, &known.repos, &options.place).await?;
+    let target = spawn_target(connection, &known.repos, &known.workspaces, &options.place).await?;
     let mode = if agent.is_some() {
         SessionMode::Interactive
     } else {
@@ -214,6 +231,7 @@ pub(super) async fn spawn(
         initial_prompt: options.prompt.clone(),
         dangerously_skip_permissions: false,
         agent,
+        extra_args: Vec::new(),
         extra_env: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,

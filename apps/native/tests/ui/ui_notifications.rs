@@ -1579,6 +1579,44 @@ fn choosing_a_sound_writes_it_and_play_previews_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn play_previews_the_chosen_sound_before_it_is_applied(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "needs_you_sound": "default" }));
+    let mut h = on_notifications_tab(cx, &dir);
+    choose_sound(
+        &mut h,
+        NEEDS_YOU_FIELD,
+        "settings-sound-option-bell_rising_fifth",
+    );
+    assert!(h.sounds().is_empty(), "choosing a sound does not play it");
+    h.click_on("settings-needs-you-sound-play");
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled(BundledSound::BellRisingFifth)],
+        "Play previews the chosen sound, not the saved one"
+    );
+}
+
+#[gpui::test]
+fn play_previews_the_finished_rows_chosen_sound(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "finished_sound": "default" }));
+    let mut h = on_notifications_tab(cx, &dir);
+    choose_sound(
+        &mut h,
+        FINISHED_FIELD,
+        "settings-sound-option-mallet_rising_third",
+    );
+    assert!(h.sounds().is_empty(), "choosing a sound does not play it");
+    h.click_on("settings-finished-sound-play");
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled(BundledSound::MalletRisingThird)],
+        "Play previews the chosen sound, not the saved one"
+    );
+}
+
+#[gpui::test]
 fn the_sound_list_is_walked_by_keys(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = on_notifications_tab(cx, &dir);

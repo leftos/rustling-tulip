@@ -23,6 +23,7 @@ use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{FOOTER_HEIGHT, RootView, UI_TEXT_SIZE};
 
+/// The toast stack's width: a cap at the window's edge; its text wraps.
 const TOAST_WIDTH: f32 = 320.0;
 /// Every modal dialog shares one width so they line up; long text wraps inside it.
 const MODAL_WIDTH: f32 = 440.0;

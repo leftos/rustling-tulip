@@ -18,12 +18,8 @@ use protocol::{
     ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, SpawnConfig, SpawnTarget,
     SplitDirection, SuggestTarget, TabEntry, WorktreeReusePolicy,
 };
-use rustling_tulip_native::launch_last;
-use rustling_tulip_native::target::HostKey;
 use rustling_tulip_native::{RootView, ToastKind};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
-
-const TRUSTED_WARNING: &str = "Review trusted launch";
 
 /// Whether the element tagged `selector` has been painted on screen.
 fn painted(h: &mut Harness<'_>, selector: &str) -> bool {
@@ -40,19 +36,40 @@ fn toasts(h: &mut Harness<'_>) -> Vec<(ToastKind, String)> {
     })
 }
 
-/// Whether a trusted launch's warning has been shown.
-fn warned_trusted(h: &mut Harness<'_>) -> bool {
+/// Whether a Warning toast has been shown.
+fn warned(h: &mut Harness<'_>) -> bool {
     toasts(h)
         .iter()
-        .any(|(kind, title)| *kind == ToastKind::Warning && title == TRUSTED_WARNING)
+        .any(|(kind, _)| *kind == ToastKind::Warning)
 }
 
-/// The failure notice on screen: its title and detail.
-fn failure_notice(h: &mut Harness<'_>) -> Option<(String, String)> {
-    h.root(|root, _| {
-        root.action_failed()
-            .map(|notice| (notice.title.clone(), notice.detail.clone()))
-    })
+/// [`config`] in Bypass permissions mode, with the flag older daemons read.
+fn bypass_config(target: SpawnTarget) -> SpawnConfig {
+    let mut stored = config(target);
+    stored.dangerously_skip_permissions = true;
+    if let Some(agent) = stored.agent.as_mut() {
+        agent.options.insert(
+            "permission_mode".to_owned(),
+            protocol::OptionValue::Text("bypass_permissions".to_owned()),
+        );
+    }
+    stored
+}
+
+/// The permission mode of each spawn among `sent`.
+fn spawned_modes(sent: &[ClientMessage]) -> Vec<Option<protocol::OptionValue>> {
+    sent.iter()
+        .filter_map(|message| match message {
+            ClientMessage::SpawnSession(request) => Some(
+                request
+                    .agent
+                    .as_ref()
+                    .and_then(|agent| agent.options.get("permission_mode"))
+                    .cloned(),
+            ),
+            _ => None,
+        })
+        .collect()
 }
 
 /// One press and release pair carrying `count`, as the platform reports the
@@ -114,6 +131,7 @@ fn config(target: SpawnTarget) -> SpawnConfig {
         mode: SessionMode::Interactive,
         dangerously_skip_permissions: false,
         agent: Some(serde_json::from_value(serde_json::json!({ "agent": "claude", "options": { "permission_mode": "accept_edits", "model": "opus" } })).expect("agent selection")),
+        extra_args: Vec::new(),
         extra_env: vec![("A".to_owned(), "1".to_owned())],
     }
 }
@@ -491,73 +509,27 @@ fn launch_last_without_a_config_opens_the_locked_dialog(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn launch_last_with_a_trusted_config_prefills_the_dialog_and_warns(cx: &mut TestAppContext) {
+fn launch_last_with_a_bypass_config_spawns_at_once_without_asking(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut stored = config(single_target(false));
-    stored.dangerously_skip_permissions = true;
-    let mut h = harness(cx, &dir, stored);
-
-    let row = h.center("container-repo:r1");
-    h.double_click(row);
-
-    assert!(
-        h.root(|root, _| root.spawn_dialog_open()),
-        "a trusted config opens the full dialog"
-    );
-    let chosen = h.root(|root, _| root.spawn_dialog_selected());
-    assert!(
-        chosen.contains(&"spawn-target-repo-r1".to_owned()),
-        "on the row's repo: {chosen:?}"
-    );
-    assert!(
-        chosen.contains(&"spawn-skip-perms".to_owned()),
-        "with trusted launch prefilled: {chosen:?}"
-    );
-    assert_eq!(
-        h.root(RootView::spawn_dialog_branch).as_deref(),
-        Some("feat/x"),
-        "an in-place prefill keeps the saved branch"
-    );
-    assert!(
-        warned_trusted(&mut h),
-        "the dialog is preceded by the Review trusted launch warning"
-    );
-    assert_eq!(
-        spawn_count(&h.sent()),
-        0,
-        "the trusted launch waits in the dialog"
-    );
-}
-
-#[gpui::test]
-fn a_trusted_launch_last_spawns_at_once_when_trusted_is_the_default(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    std::fs::write(
-        dir.path().join("native-ui.json"),
-        serde_json::json!({ "spawn": { "trusted": true } }).to_string(),
-    )
-    .unwrap_or_else(|err| panic!("seed native-ui.json: {err}"));
-    let mut stored = config(single_target(false));
-    stored.dangerously_skip_permissions = true;
-    let mut h = harness(cx, &dir, stored);
+    let mut h = harness(cx, &dir, bypass_config(single_target(false)));
 
     let row = h.center("container-repo:r1");
     h.double_click(row);
 
     assert!(
         !h.root(|root, _| root.spawn_dialog_open()),
-        "the Settings default already granted trust: no review dialog"
+        "a bypass config opens no review dialog"
     );
-    assert!(!warned_trusted(&mut h), "and no review warning");
+    assert!(!warned(&mut h), "and raises no warning");
     let sent = h.sent();
-    let trusted: Vec<bool> = sent
-        .iter()
-        .filter_map(|message| match message {
-            ClientMessage::SpawnSession(request) => Some(request.dangerously_skip_permissions),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(trusted, [true], "one trusted replay is sent: {sent:?}");
+    assert_eq!(spawn_count(&sent), 1, "one replay is sent: {sent:?}");
+    assert_eq!(
+        spawned_modes(&sent),
+        [Some(protocol::OptionValue::Text(
+            "bypass_permissions".to_owned()
+        ))],
+        "the replay runs in Bypass permissions mode"
+    );
 }
 
 #[gpui::test]
@@ -697,95 +669,6 @@ fn a_consumed_suggestion_does_not_seed_the_next_dialog(cx: &mut TestAppContext) 
             } if repo_id == "r1"
         )),
         "so the dialog asks for a fresh name"
-    );
-}
-
-#[gpui::test]
-fn a_trusted_launch_with_a_dialog_open_shows_no_warning(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut stored = config(single_target(false));
-    stored.dangerously_skip_permissions = true;
-    let mut h = harness(cx, &dir, stored);
-
-    h.click_on("sidebar-add-session");
-    assert!(
-        h.root(|root, _| root.spawn_dialog_open()),
-        "the first dialog opened"
-    );
-
-    h.root_update(|root, window, cx| {
-        root.launch_last_row(
-            &HostKey::Local,
-            launch_last::Container::Repo("r1"),
-            launch_last::Placement::CurrentTab,
-            window,
-            cx,
-        );
-    });
-
-    assert!(
-        h.root(|root, _| root.spawn_dialog_open()),
-        "the open dialog stays"
-    );
-    assert!(
-        !warned_trusted(&mut h),
-        "no warning for a dialog that never opened"
-    );
-    assert!(
-        !h.root(|root, _| root.spawn_dialog_selected())
-            .contains(&"spawn-skip-perms".to_owned()),
-        "and the open dialog was not replaced by the trusted one"
-    );
-    assert_eq!(
-        failure_notice(&mut h),
-        Some((
-            "Couldn't review the trusted launch".to_owned(),
-            "Couldn't open the spawn dialog: another dialog is open".to_owned()
-        )),
-        "the refused launch says why"
-    );
-}
-
-#[gpui::test]
-fn a_trusted_launch_refused_by_an_open_dialog_says_why(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut stored = config(single_target(false));
-    stored.dangerously_skip_permissions = true;
-    let mut h = harness(cx, &dir, stored);
-
-    h.click_on("sidebar-add-session");
-    assert!(
-        h.root(|root, _| root.spawn_dialog_open()),
-        "the first dialog opened"
-    );
-
-    h.root_update(|root, window, cx| {
-        root.launch_last_row(
-            &HostKey::Local,
-            launch_last::Container::Repo("r1"),
-            launch_last::Placement::CurrentTab,
-            window,
-            cx,
-        );
-    });
-
-    assert!(
-        !h.root(|root, _| root.spawn_dialog_selected())
-            .contains(&"spawn-skip-perms".to_owned()),
-        "the open dialog kept its own configuration"
-    );
-    assert!(
-        !warned_trusted(&mut h),
-        "no warning for a dialog that never opened"
-    );
-    assert_eq!(spawn_count(&h.sent()), 0, "nothing spawned");
-    assert_eq!(
-        failure_notice(&mut h),
-        Some((
-            "Couldn't review the trusted launch".to_owned(),
-            "Couldn't open the spawn dialog: another dialog is open".to_owned()
-        )),
-        "the refused launch says why"
     );
 }
 
@@ -1023,11 +906,9 @@ fn container_launch_edit_first_opens_the_prefilled_dialog(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn a_trusted_launch_from_the_submenu_preselects_the_chosen_tab(cx: &mut TestAppContext) {
+fn a_bypass_launch_from_the_submenu_spawns_at_once(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut stored = config(single_target(false));
-    stored.dangerously_skip_permissions = true;
-    let mut h = two_tabs(cx, &dir, Some(stored));
+    let mut h = two_tabs(cx, &dir, Some(bypass_config(single_target(false))));
     h.sent();
 
     h.right_click_on("container-repo:r1");
@@ -1035,23 +916,17 @@ fn a_trusted_launch_from_the_submenu_preselects_the_chosen_tab(cx: &mut TestAppC
     h.click_on("container-launch-last-new");
 
     assert!(
-        h.root(|root, _| root.spawn_dialog_open()),
-        "a trusted config opens the full dialog"
+        !h.root(|root, _| root.spawn_dialog_open()),
+        "a bypass config opens no review dialog"
     );
-    let chosen = h.root(|root, _| root.spawn_dialog_selected());
-    assert!(
-        chosen.contains(&"spawn-placement-new-tab".to_owned()),
-        "the submenu's New tab stays chosen: {chosen:?}"
-    );
-    assert!(
-        chosen.contains(&"spawn-skip-perms".to_owned()),
-        "with trusted launch prefilled: {chosen:?}"
-    );
-    assert!(warned_trusted(&mut h), "the warning still shows");
+    assert!(!warned(&mut h), "and raises no warning");
+    let sent = h.sent();
     assert_eq!(
-        spawn_count(&h.sent()),
-        0,
-        "the trusted launch waits in the dialog"
+        spawned_modes(&sent),
+        [Some(protocol::OptionValue::Text(
+            "bypass_permissions".to_owned()
+        ))],
+        "one replay runs in Bypass permissions mode: {sent:?}"
     );
 }
 

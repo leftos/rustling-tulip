@@ -61,11 +61,13 @@ pub(crate) const POP_OUT_TIP: &str = "Open this pane in a window of its own";
 /// What a session pop-out's Close window does.
 const CLOSE_WINDOW_TIP: &str = "Close this window; the session is left as it is";
 
+/// The menu's width: capped; its rows keep one line and their tooltips carry the whole summary.
 pub(crate) const MENU_WIDTH: f32 = 240.0;
 /// The share of the window's height a menu may take before its rows scroll,
 /// as the data lists take before theirs do.
 pub(crate) const MENU_MAX_SHARE: f32 = 0.6;
 const NEW_SESSION_TIP: &str = "Open the spawn dialog; the new session takes over this pane";
+/// A dialog's width: a window-like cap; its text wraps inside it.
 const DIALOG_WIDTH: f32 = 440.0;
 
 /// `panel` centred over a tinted layer that takes every click beneath it, and
@@ -1005,14 +1007,14 @@ impl RootView {
     fn duplicate_menu_lines(&self) -> Option<Vec<SubmenuLine<DuplicateTarget>>> {
         self.actions_menu()
             .filter(|menu| menu.submenu == Submenu::Duplicate)
-            .map(|_| duplicate_lines(self.tabs.tabs()))
+            .map(|_| duplicate_lines(&self.sidebar.shown_tabs(self.tabs.tabs())))
     }
 
     /// The Move to submenu's lines while it is open.
     fn move_menu_lines(&self) -> Option<Vec<SubmenuLine<MoveTarget>>> {
         self.actions_menu()
             .filter(|menu| menu.submenu == Submenu::MoveTo)
-            .map(|menu| move_lines(self.tabs.tabs(), &menu.session_id))
+            .map(|menu| move_lines(&self.sidebar.shown_tabs(self.tabs.tabs()), &menu.session_id))
     }
 
     /// The selectors of the menu's rows as shown now, in the groups its
@@ -1488,7 +1490,7 @@ impl RootView {
             .filter(|tab| tab.grid().is_some())
             .map(|tab| SubmenuLine::Choice {
                 selector: format!("{CONTAINER_LAUNCH_LAST_TAB_PREFIX}{}", tab.id),
-                label: tab.name.clone(),
+                label: self.sidebar.tab_display_name(tab),
                 choice: ContainerLaunch::Placement(launch_last::Placement::Tab(tab.id.clone())),
             })
             .collect();
@@ -1730,7 +1732,10 @@ impl RootView {
         };
         let host = container.host();
         self.close_container_menu(window, cx);
-        let tabs = TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id());
+        let tabs = TabChoices::from_tabs(
+            &self.sidebar.shown_tabs(self.tabs.tabs()),
+            self.tabs.active_id(),
+        );
         let open_in = current_tab_open_in(&tabs);
         self.spawn_on(&host, standalone_shell_request(Some(folder)), open_in, cx);
     }
@@ -2286,8 +2291,9 @@ impl RootView {
             Some(self.prefills.request(pending))
         } else {
             let request_id = crate::new_request_id();
+            let resume_session = self.supports_resume_session(&host);
             self.duplicates
-                .request(&host, session_id, request_id, target)
+                .request(&host, session_id, request_id, target, resume_session)
         };
         if let Some(request) = request {
             self.send_duplicate(&host, request, cx);
@@ -2305,6 +2311,10 @@ impl RootView {
         if let ClientMessage::DuplicateSession {
             request_id: Some(request_id),
             ..
+        }
+        | ClientMessage::ResumeSession {
+            request_id: Some(request_id),
+            ..
         } = &request
         {
             self.duplicates.fail(request_id);
@@ -2312,9 +2322,16 @@ impl RootView {
         self.push_offline_toast(host, cx);
     }
 
+    /// Whether `host` resumes a session from one `ResumeSession`; an older
+    /// host gets the duplicate recipe instead.
+    fn supports_resume_session(&self, host: &HostKey) -> bool {
+        self.conn_of(host)
+            .is_some_and(|conn| conn.supports(protocol::FEATURE_RESUME_SESSION))
+    }
+
     /// The spawn config a Shift-duplicate asked for arrived: the dialog
     /// opens held on the config's repo or workspace, else the source's,
-    /// filled from it over the Spawn defaults. When the dialog cannot open
+    /// filled from it over the agent's Settings values. When the dialog cannot open
     /// (the repo left, another dialog is open), a notice says why. A reply
     /// no Shift-duplicate waits for is dropped.
     pub(crate) fn on_spawn_config(
@@ -2482,7 +2499,9 @@ impl RootView {
         }
         cx.notify();
         self.confirm.disarm();
-        match plan(action, &session, self.is_shown(host, session_id)) {
+        let resume_session = self.supports_resume_session(host);
+        let shown = self.is_shown(host, session_id);
+        match plan(action, &session, shown, resume_session) {
             Step::ConfirmWorktreeDelete => {
                 self.close_session_menu(window, cx);
                 self.open_delete_dialog_on(host, session_id, ConfirmOwner::Menu, window, cx);
@@ -2503,9 +2522,9 @@ impl RootView {
                 } else {
                     DuplicateTarget::Restart
                 };
-                if let Some(request) = self
-                    .duplicates
-                    .request(&host, session_id, request_id, target)
+                if let Some(request) =
+                    self.duplicates
+                        .request(&host, session_id, request_id, target, resume_session)
                 {
                     self.send_duplicate(&host, request, cx);
                     self.close_session_menu(window, cx);
@@ -4245,6 +4264,7 @@ impl RootView {
         self.close_more_menu(window, cx);
         self.close_empty_pane_menu(window, cx);
         self.close_pane_overflow_menu(window, cx);
+        self.close_link_menu(window, cx);
         self.overlays
             .opened(Overlay::ShellMenu, window.window_handle().window_id());
         self.shell_menu = Some(ShellMenu {
@@ -4260,14 +4280,15 @@ impl RootView {
         cx.notify();
     }
 
-    /// Closes the gutter menu and hands the keyboard back to the terminal of
-    /// the window it was open in.
+    /// Closes the shell-integration dot menu and the link menu, handing the
+    /// keyboard back to the terminal of the window each was open in.
     pub(crate) fn close_shell_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.shell_menu.take().is_some() {
             let owner = self.overlays.owner(Overlay::ShellMenu);
             self.hand_back_focus(owner, window, cx);
             cx.notify();
         }
+        self.close_link_menu(window, cx);
     }
 
     /// Whether `menu`'s command can be typed again: it is not empty, its

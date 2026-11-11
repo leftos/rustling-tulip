@@ -489,3 +489,36 @@ fn right_click_on_a_row_opens_the_session_menu(cx: &mut TestAppContext) {
     assert_eq!(menu_of(&mut h), None, "Escape closes it");
     assert_eq!(activity(&mut h), Activity::NeedsYou, "the panel stays");
 }
+
+/// `s1` asking in r1 under the terminal title `title`, which its row shows as
+/// its label and in its detail, with the Needs You panel open.
+fn asking<'a>(cx: &'a mut TestAppContext, dir: &TestDir, title: &str) -> Harness<'a> {
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1")],
+        sessions: vec![
+            session("s1")
+                .in_repo("r1")
+                .terminal_title(title)
+                .status("awaiting_input")
+                .status_since(Utc::now())
+                .build(),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.click_on("activity-needs-you");
+    h
+}
+
+#[gpui::test]
+fn needs_you_view_row_detail_wraps_whole(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let title = format!("Title{}", "-and-then-some-more".repeat(30));
+    let mut h = asking(cx, &dir, &title);
+    let label = h.bounds("needs-you-row-s1-label");
+    let detail = h.bounds("needs-you-row-s1-detail");
+    assert!(
+        detail.size.height > label.size.height * 2.0,
+        "a long question wraps over several lines: label {label:?}, detail {detail:?}"
+    );
+}

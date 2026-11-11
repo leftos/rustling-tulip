@@ -16,6 +16,57 @@ export interface PushKeys {
 export type PushPermission = "default" | "granted" | "denied";
 
 /**
+ * What a browser step fails with when the page's service worker never becomes
+ * active. The panel shows it as it is, like a browser step's own failure text.
+ */
+export const WORKER_NOT_READY =
+  "The app's service worker didn't start; close and reopen the app, then try again.";
+
+/** How long a browser step waits for the service worker to become active. */
+export const WORKER_READY_MS = 10_000;
+
+/** What {@link browserPushPort} needs from its surroundings: an active worker and a timer. */
+export interface PushPortEnv {
+  /** The page's active service worker; a page that never registers one leaves it unsettled. */
+  ready(): Promise<ServiceWorkerRegistration>;
+  /** Resolves after `ms` milliseconds. */
+  sleep(ms: number): Promise<void>;
+}
+
+/** The page's own browser: its service worker and a real timer. */
+export function browserPushEnv(): PushPortEnv {
+  return {
+    ready: () => navigator.serviceWorker.ready,
+    sleep: (ms) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ms);
+      }),
+  };
+}
+
+/** Whichever of the two settles {@link readyWithin}: the value, or the wait running out. */
+type ReadyOutcome<T> = { readonly arrived: true; readonly value: T } | { readonly arrived: false };
+
+/**
+ * `ready` when it settles first, else a rejection with {@link WORKER_NOT_READY}
+ * once `sleep(ms)` resolves, so a page whose service worker never activates
+ * fails its browser step instead of leaving it out forever.
+ */
+export async function readyWithin<T>(
+  ready: Promise<T>,
+  ms: number,
+  sleep: (ms: number) => Promise<void>,
+): Promise<T> {
+  const arrived: Promise<ReadyOutcome<T>> = ready.then((value) => ({ arrived: true, value }));
+  const expired: Promise<ReadyOutcome<T>> = sleep(ms).then(() => ({ arrived: false }));
+  const first = await Promise.race([arrived, expired]);
+  if (!first.arrived) {
+    throw new Error(WORKER_NOT_READY);
+  }
+  return first.value;
+}
+
+/**
  * The phone's push side behind one seam, like `TokenStore` and `ScannerEnv`:
  * the page runs {@link browserPushPort}, and a test hands the panel
  * {@link memoryPushPort}. Subscribing needs the user's tap, so the port never
@@ -37,19 +88,23 @@ export interface PushPort {
   unsubscribe(): Promise<void>;
 }
 
-/** The push API of the page's own browser, over its service worker and `Notification`. */
-export function browserPushPort(): PushPort {
+/**
+ * The push API of the page's own browser, over its service worker and
+ * `Notification`. `env` carries the worker and the timer, which a test scripts
+ * so it can drive a worker that never activates.
+ */
+export function browserPushPort(env: PushPortEnv = browserPushEnv()): PushPort {
   return {
     supported: () => typeof PushManager !== "undefined" && typeof Notification !== "undefined",
     installed: () => isInstalled(navigator),
     permission: () => Notification.permission,
     requestPermission: async () => Notification.requestPermission(),
     current: async () => {
-      const held = await subscription();
+      const held = await subscription(env);
       return held === null ? null : keysOf(held);
     },
     subscribe: async (vapidPublicKey) => {
-      const registration = await navigator.serviceWorker.ready;
+      const registration = await readyWithin(env.ready(), WORKER_READY_MS, env.sleep);
       const created = await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: base64urlToBytes(vapidPublicKey),
@@ -57,7 +112,7 @@ export function browserPushPort(): PushPort {
       return keysOf(created);
     },
     unsubscribe: async () => {
-      const held = await subscription();
+      const held = await subscription(env);
       if (held !== null) {
         await held.unsubscribe();
       }
@@ -133,8 +188,8 @@ export function memoryPushPort(options: MemoryPushOptions = {}): MemoryPushPort 
 }
 
 /** The phone's subscription now, once its service worker is active. */
-async function subscription(): Promise<PushSubscription | null> {
-  const registration = await navigator.serviceWorker.ready;
+async function subscription(env: PushPortEnv): Promise<PushSubscription | null> {
+  const registration = await readyWithin(env.ready(), WORKER_READY_MS, env.sleep);
   return registration.pushManager.getSubscription();
 }
 

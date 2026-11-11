@@ -191,6 +191,7 @@ pub(super) fn build_test_hub(
         keep_awake_mode: Arc::new(keep_awake_mode),
         keep_awake_status,
         recovering: RecoveryClaims::default(),
+        spawn_journal: Arc::default(),
         resume_in_flight: Arc::default(),
         start_resume: Arc::default(),
         resume_reported: Arc::default(),
@@ -431,7 +432,6 @@ pub(crate) fn idle_record(id: &str) -> SessionRecord {
         work: crate::background_work::BackgroundWork::default(),
         hook_agent: None,
         hook_options: protocol::OptionValues::new(),
-        hook_trusted: false,
         resumed_from: Vec::new(),
     }
 }
@@ -1144,6 +1144,7 @@ pub(super) fn env_spawn(
             options: validated_claude(&OptionValues::new()),
         }),
         extra_env,
+        extra_args: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
         request_id: request_id.map(str::to_owned),

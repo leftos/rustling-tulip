@@ -63,7 +63,9 @@ pub struct TracerLogSummary {
 pub struct AgentNote {
     pub agent: AgentId,
     pub options: OptionValues,
-    pub trusted: bool,
+    /// What notes older releases wrote; read only, an import folds it into the bypass choice.
+    #[serde(default, rename = "trusted", skip_serializing)]
+    pub legacy_trusted: bool,
     /// The agent conversation, when the daemon knew it at spawn.
     pub conversation_id: Option<String>,
     /// The session's folders after its working directory.
@@ -548,7 +550,12 @@ mod tests {
                 ("effort".to_owned(), OptionValue::Null),
             ])
         );
-        assert!(note.trusted);
+        assert!(note.legacy_trusted, "an older note's trust is read");
+        let written = serde_json::to_value(&note).expect("serialize the note");
+        assert!(
+            written.get("trusted").is_none(),
+            "a note is written without the trusted key: {written}"
+        );
         assert_eq!(note.conversation_id.as_deref(), Some("conv-1"));
         assert_eq!(note.extra_dirs, [r"D:\b c"]);
         assert_eq!(summary.program, "pwsh.exe", "the spawn line still reads");

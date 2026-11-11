@@ -452,7 +452,7 @@ mod tests {
         reason = "one row per capture; the table is the test"
     )]
     fn every_fixture_reads_its_dialog() {
-        use ChatPromptKind::{HeadsUp, Plan, Review, Trust};
+        use ChatPromptKind::{HeadsUp, McpServer, Plan, Review, Trust};
         use ComposerState::{Draft, Ready, Working};
         let mut q2_typed = Q2_OPTIONS.to_vec();
         q2_typed[4] = (5, "fuzz tests");
@@ -571,6 +571,26 @@ mod tests {
                     &[(1, "Yes, I trust this folder"), (2, "No, exit")],
                     Some(1),
                 ),
+            ),
+            (
+                "claude--mcp-server-prompt",
+                include_str!("fixtures/claude--mcp-server-prompt.txt"),
+                Expected {
+                    body: Some(
+                        "MCP servers may execute code or access system resources. All tool \
+                         calls require approval. Learn more in the MCP\ndocumentation.",
+                    ),
+                    ..dialog(
+                        McpServer,
+                        "rt-driver",
+                        &[
+                            (1, "Use this MCP server"),
+                            (2, "Use this and all future MCP servers in this project"),
+                            (3, "Continue without using this MCP server"),
+                        ],
+                        Some(3),
+                    )
+                },
             ),
             (
                 "v152-learn-more",
@@ -1166,6 +1186,14 @@ mod tests {
         let image = "[Image #1] what colour is this square? Reply with one word.";
         let cases: Vec<(&str, &str, ViewReading)> = vec![
             (
+                "claude--mcp-server-prompt",
+                include_str!("fixtures/claude--mcp-server-prompt.txt"),
+                ViewReading {
+                    dialog: true,
+                    ..main_view(&[])
+                },
+            ),
+            (
                 "v71",
                 include_str!("fixtures/v71-agents-running.txt"),
                 main_view(&P71),
@@ -1602,6 +1630,7 @@ mod tests {
         let v51 = include_str!("fixtures/v51-plan-dialog.txt");
         let v01 = include_str!("fixtures/v01-start.txt");
         let collie_trust = include_str!("fixtures/claude--trust-prompt.txt");
+        let mcp_server = include_str!("fixtures/claude--mcp-server-prompt.txt");
         let v152 = include_str!("fixtures/v152-learn-more.txt");
         let v23 = include_str!("fixtures/v23-amend-open.txt");
         let v52 = include_str!("fixtures/v52-plan-feedback-open.txt");
@@ -1683,6 +1712,21 @@ mod tests {
                     (vec![Key::Down], OptionSelected(2)),
                     (vec![Key::Enter], DialogGone),
                 ]),
+            ),
+            (
+                "claude--mcp-server-prompt",
+                mcp_server,
+                option(1),
+                Ok(vec![
+                    (vec![Key::Up, Key::Up], OptionSelected(1)),
+                    (vec![Key::Enter], DialogGone),
+                ]),
+            ),
+            (
+                "claude--mcp-server-prompt",
+                mcp_server,
+                option(3),
+                Ok(vec![(vec![Key::Enter], DialogGone)]),
             ),
             (
                 "v152-learn-more",

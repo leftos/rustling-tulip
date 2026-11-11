@@ -228,6 +228,23 @@ test("machine_not_approved_stays_put_when_hidden", () => {
   });
 });
 
+test("machine_a_hide_while_a_refused_token_is_dropped_waits_for_visible_to_redial", () => {
+  const refused = step(READY, {
+    type: "message",
+    message: { type: "device_pair_failed", reason: DEVICE_NOT_APPROVED },
+  });
+  const hidden = step(refused.state, { type: "hiddenEvent" });
+
+  // The socket is already closed, so only the timer a hide cancels is left.
+  expect(hidden.state).toEqual({ name: "hidden" });
+  expect(hidden.effects).toEqual([{ type: "clearTimer" }, { type: "status", state: "hidden" }]);
+  expect(step(hidden.state, { type: "tokenChanged" })).toEqual({
+    state: hidden.state,
+    effects: [],
+  });
+  expect(step(hidden.state, { type: "visible" }).effects).toContainEqual({ type: "open" });
+});
+
 test("machine_token_changed_on_an_open_pairing_channel_loses_its_request", () => {
   const { state, effects } = step({ name: "pairing", connected: true }, { type: "tokenChanged" });
 
@@ -256,7 +273,7 @@ test("machine_stored_token_refused_as_not_approved_is_dropped_for_the_visit", ()
     message: { type: "device_pair_failed", reason: "device not approved" },
   });
 
-  expect(refused.state).toEqual({ name: "notApproved" });
+  expect(refused.state).toEqual({ name: "notApproved", redial: true });
   expect(refused.effects).toEqual([
     { type: "close" },
     { type: "dropToken" },
@@ -1009,6 +1026,28 @@ test("connection_refusal_for_another_reason_is_not_approved_and_keeps_the_token"
   expect(clear).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(WELCOME_TIMEOUT_MS * 10);
   expect(sockets).toHaveLength(1);
+});
+
+test("connection_a_hide_while_a_refused_token_is_dropped_waits_for_visible", async () => {
+  const { connection, sockets, notices, visibility } = harness();
+
+  connection.start();
+  await flush();
+  const first = socketAt(sockets, 0);
+  first.open();
+  first.receive(WELCOME);
+  first.receive({ type: "device_pair_failed", reason: DEVICE_NOT_APPROVED });
+  // The hide lands before the queued `tokenChanged` redial runs.
+  visibility.hide();
+
+  expect(lastStatus(notices)).toBe("hidden");
+  await flush();
+  await vi.advanceTimersByTimeAsync(WELCOME_TIMEOUT_MS * 10);
+  expect(sockets).toHaveLength(1);
+
+  visibility.show();
+  await flush();
+  expect(sockets).toHaveLength(2);
 });
 
 test("connection_dropped_token_is_not_presented_again_in_the_same_visit", async () => {

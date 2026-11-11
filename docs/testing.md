@@ -48,7 +48,9 @@ The native client has three test tiers, and the driver MCP server has a live spe
   A failed live spec's `daemon.log` and `tracer-<id>.log` stay on the builder under `D:\gate-remote\work\<tree>\.tmp\native-e2e\<test>-<pid>\config\logs\` and can be read over ssh; the gate's own log carries a per-process spawn and exit trace, which shows grandchildren that outlive their parent.
 - **OS smoke** — `.\rt.ps1 native-smoke`: builds daemon + tracer in test-release and launches the native client exe, built with `--features driver`, in a cloaked window that never takes focus, under `nextest --run-ignored only` (`tests/smoke_window.rs` and `tests/ellipsis_real_text.rs`) and checks it connects and that posted keys reach the shell. The `driven::` specs launch it as a driven run and prove the driver's posted `click`, `drag`, `wheel` and right-click on the real exe. `native-smoke` takes no test filter and leaves out the live no-focus checks, which have their own verb: `.\rt.ps1 native-drive-check [-HandsOff]` runs only the `live_drive_` specs. `driven::live_drive_leaves_the_foreground_and_cursor_alone` fails unless a scripted drive (click, type_text, key, drag, wheel, screenshot) leaves the desktop's foreground window and cursor where they were, or when the desktop has no foreground window to compare.
 
-  `driven::live_drive_app_toasts_show_on_top_without_focus` launches the driven client with `RUSTLING_TULIP_DRIVER_TOASTS=1`, picks the app's own toasts in Settings (scrolling the page with `wheel` until the choice shows), makes a fake Claude session ask a permission, and fails unless a toast window of the client shows visible, topmost, `WS_EX_NOACTIVATE` and not cloaked, with the foreground window and cursor unmoved. `.gate/desktop.toml` `patterns` routes it to a builder's logged-on desktop; run on this PC it refuses unless `-HandsOff` says you have stopped using the mouse and keyboard. A failed spec of either verb a failed spec keeps its dir under `.tmp/native-e2e/<test>-<pid>/`, whose `sessions/<id>/scrollback.bin` is the exact PTY output.
+  `the_crash_message_box_shows_its_text_and_closes` shows the Windows crash message box from inside the test process and proves its dialog carries the message's text before closing it. It refuses on the interactive desktop, failing at once instead of opening its box there.
+
+  `driven::live_drive_app_toasts_show_on_top_without_focus` launches the driven client with `RUSTLING_TULIP_DRIVER_TOASTS=1`, picks the app's own toasts in Settings (scrolling the page with `wheel` until the choice shows), makes a fake Claude session ask a permission, and fails unless a toast window of the client shows visible, topmost, `WS_EX_NOACTIVATE` and not cloaked, with the foreground window and cursor unmoved. `.gate/desktop.toml` `patterns` routes it to a builder's logged-on desktop; run on this PC it refuses unless `-HandsOff` says you have stopped using the mouse and keyboard. A failed spec of either verb keeps its dir under `.tmp/native-e2e/<test>-<pid>/`, whose `sessions/<id>/scrollback.bin` is the exact PTY output.
 
 The driver MCP server's other specs (`tools/rt-driver-mcp/tests/server.rs`) run in the normal nextest run. Its live spec, `driver_mcp_launch_ping_screenshot_stop`, is `#[ignore]`d: it launches a real driven client and needs the daemon, tracer and driver client built in test-release. `tools/rt-driver-mcp/live-check.ps1` builds them and runs the ignored specs, so run it as one gate job with `--slot heavy`, since it builds: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/<name>.log --timeout 3600 --slot heavy -- pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1`.
 
@@ -87,7 +89,7 @@ Sending `/compact` to a session from Git Bash needs `MSYS_NO_PATHCONV=1`, or the
 
 On a daemon that is not serving the tailnet listener, the debug line `no push is sent kind=Finished` shows the real trigger's decision for each Finished.
 
-`AnswerPrompt` with `allow` on a question probes `dialog_for` without typing anything: the reply is "does not fit" when the dialog passed and "no longer up" when it did not, so one dialog can be probed at every grid size.
+`AnswerPrompt` with `allow` on a question probes `dialog_for` without typing anything: the reply is "does not fit" when the dialog passed and "Couldn't read this prompt; answer it in its pane." when it did not, so one dialog can be probed at every grid size.
 
 Such a rig's `cargo build` goes through the gate without `--local`: a routed build brings `target/debug/*.exe` back to this PC. `--local` fits the rig's own run, which drives this PC's processes.
 
@@ -122,7 +124,9 @@ The views:
 - `multi-host`: the sidebar grouped by host: This PC, "box" online with a repo and a session in the first tab's second pane, and "lab" offline.
 - `spawn-hosts`: the spawn dialog over those two hosts with its closed Target field.
 - `open-shell`: the Open a shell dialog with a folder path too long for its field, scrolled to the caret at its end.
-- `safe-start`: the modal a start after two crashed ones raises, "Opened with your tabs closed", over the window with no tab drawn.
+- `safe-start`: the prompt a start after a crashed one raises, "The last start crashed" with Open tabs and Start without tabs, over the window with no tab drawn.
+- `panes-accent`: four panes in a 2x2 grid, the Theme pane focused, beside the Rose, Periwinkle and Lilac panes a chosen colour stores an accent and a frame for.
+- `panes-accent-chosen`: the same grid with the Periwinkle pane focused.
 - `settings-hosts`: Settings on the Claude page with the host selector showing This PC and a remote host on 0.9.0 wearing the Behind tag.
 - `settings-accounts`: Settings on the Accounts tab, scrolled to the auto-switch block and its forecast.
 - `settings-sounds`: Settings on the Notifications tab with the Needs you sound list open.

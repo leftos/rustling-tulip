@@ -11,7 +11,7 @@ use std::path::Path;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable, FontWeight,
     KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, ScrollHandle, SharedString, Stateful,
-    Subscription, WeakEntity, Window, div, prelude::*, px, relative,
+    StyledText, Subscription, WeakEntity, Window, div, prelude::*, px, relative,
 };
 
 use crate::appearance::packed;
@@ -30,7 +30,9 @@ use crate::themes::{ContrastBadge, ThemeEditor, ThemeRow, ThemesDialog, badge_in
 use crate::ui_theme::{UiTheme, theme};
 use crate::{FileFilter, RootView};
 
+/// The modal's width: a fixed-size window-like cap; its lists scroll inside.
 const WIDTH: f32 = 860.0;
+/// The modal's height: a fixed-size window-like cap; its lists scroll inside.
 const HEIGHT: f32 = 600.0;
 const EDIT_WIDTH: f32 = 1040.0;
 const EDIT_HEIGHT: f32 = 680.0;
@@ -783,14 +785,10 @@ fn theme_row(
         .items_center()
         .justify_between()
         .gap(px(8.0))
-        .child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(row.entry.name.clone()),
-        )
+        .child(crate::ellipsis::truncating(
+            &format!("{selector}-name"),
+            StyledText::new(row.entry.name.clone()),
+        ))
         .when(modal.dialog.in_use == index, |line| {
             line.child(
                 div()
@@ -1987,6 +1985,7 @@ fn token_row(
     let t = theme(cx);
     let offset = fonts::ui_text_size(cx);
     let selector = format!("themes-token-{}", row.name);
+    let label_id = format!("{selector}-label");
     let selected = editor.cursor == index;
     div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
@@ -2005,15 +2004,7 @@ fn token_row(
         .when(selected, |line| line.bg(gpui::rgb(t.selection)))
         .hover(|style| style.bg(gpui::rgb(t.popover_hover)))
         .child(token_swatch(row, &editor.working, &t))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(row.label),
-        )
+        .child(crate::ellipsis::truncating(&label_id, StyledText::new(row.label)).flex_1())
         .child(
             div()
                 .flex_none()

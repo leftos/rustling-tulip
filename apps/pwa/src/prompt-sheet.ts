@@ -69,6 +69,8 @@ export interface Sheet {
   /** The prompt's id, the one an answer carries. */
   readonly id: string;
   readonly kind: ChatPromptKind;
+  /** The plan text a plan prompt approves; null for any other kind or no text. */
+  readonly plan: string | null;
   /** The prompt's subject, or its body when it has none. */
   readonly title: string;
   readonly buttons: readonly SheetButton[];
@@ -100,9 +102,10 @@ const SHEET_KEY_BYTES: Record<SheetKey, NamedKey> = {
 /**
  * The sheet the prompt up on `screen` raises, or null when no prompt is up:
  * its title, its kind and one button per option, in the prompt's own order,
- * plus the action buttons its kind offers.
+ * plus the action buttons its kind offers. `plan` is the plan text a plan
+ * prompt approves; a plan on any other kind of prompt is dropped.
  */
-export function sheetFor(screen: ChatScreen | null): Sheet | null {
+export function sheetFor(screen: ChatScreen | null, plan: string | null): Sheet | null {
   const prompt = screen?.prompt ?? null;
   if (prompt === null) {
     return null;
@@ -110,9 +113,15 @@ export function sheetFor(screen: ChatScreen | null): Sheet | null {
   return {
     id: prompt.id,
     kind: prompt.kind,
+    plan: planFor(prompt, plan),
     title: prompt.subject.trim() === "" ? prompt.body : prompt.subject,
     buttons: buttonsFor(prompt),
   };
+}
+
+/** The plan text `prompt` shows: the given text on a plan prompt with words in it, else null. */
+function planFor(prompt: ChatPrompt, plan: string | null): string | null {
+  return prompt.kind === "plan" && plan !== null && plan.trim() !== "" ? plan : null;
 }
 
 /**
@@ -253,6 +262,7 @@ function buttonsFor(prompt: ChatPrompt): SheetButton[] {
       return planButtons(prompt);
     case "review":
     case "trust":
+    case "mcp_server":
     case "heads_up":
       return (prompt.options ?? []).map((choice) =>
         optionButton(choice, optionAction(choice.number)),
