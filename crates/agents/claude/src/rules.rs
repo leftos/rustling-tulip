@@ -55,8 +55,9 @@ const HOOKS_RUNNING: &str = r"^\s*[·✢*✶✻✽✳]\s+\S.*\(running \p{L}+ ho
 /// drawn as Claude Code 2.1.317 renders it: `· 1 shell`/`· N shells`,
 /// `· 1 monitor`/`· N monitors`, `· 1 MCP task`/`· N MCP tasks`, or
 /// `· N background tasks` when several kinds run together. Shells and monitors
-/// share an item, joined with a comma (`· 1 shell, 2 monitors`).
-const BACKGROUND_SHELLS: &str = r"^\s*(?:⏵⏵|⏸) .* · \d+ (?:shells?|monitors?|MCP tasks?|background tasks?)(?:, \d+ (?:shells?|monitors?))*(?: ·.*)?\s*$";
+/// share an item, joined with a comma (`· 1 shell, 2 monitors`). The vim
+/// editor mode's `-- INSERT -- ` marker heads the line in insert mode.
+const BACKGROUND_SHELLS: &str = r"^\s*(?:-- INSERT -- )?(?:⏵⏵|⏸) .* · \d+ (?:shells?|monitors?|MCP tasks?|background tasks?)(?:, \d+ (?:shells?|monitors?))*(?: ·.*)?\s*$";
 
 /// A running subagent's row in the panel under the prompt box: the hollow
 /// marker, the agent type, its task when the width leaves room for one, then
@@ -84,6 +85,12 @@ const DIALOG_REGION: ScreenRegion = ScreenRegion::FromLastMarkedRow {
     or_marker: Some('!'),
     rows: 24,
 };
+
+/// A question's footer row: `Enter to select ·`, headed by the vim mode's
+/// insert marker on `Type something`; in a narrow pane that marker's head row
+/// ends at `Enter to` or at `Enter to select`, its tail on the row beneath.
+const QUESTION_FOOTER: &str =
+    r"^\s*(?:(?:-- INSERT -- · )?Enter to select ·|-- INSERT -- · Enter to(?: select)?\s*$)";
 
 /// Claude's screen rules, in descending priority order.
 static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
@@ -137,7 +144,7 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             region: DIALOG_REGION,
             // A narrow pane wraps the footer, cutting off its `Esc to cancel`;
             // the vim mode's insert marker heads it on `Type something`, with no Esc.
-            matcher: LineMatcher::Regex(r"^\s*(?:-- INSERT -- · )?Enter to select ·".to_string()),
+            matcher: LineMatcher::Regex(QUESTION_FOOTER.to_string()),
             // An Esc that does anything but cancel: a list, not a question.
             not: vec![LineMatcher::Regex(
                 r"^\s*(?:-- INSERT -- · )?Enter to select ·.*Esc to\s+(?:[^c\s]|c[^a\s])"

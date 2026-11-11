@@ -1,0 +1,32 @@
+  with the options Red and
+  Blue. Do nothing else.
+
+● User declined to answer
+  questions
+  ⎿  · Which color? (Red /
+     Blue)
+
+✻ Sautéed for 2s · done 1:31
+  AM
+
+❯ Use the AskUserQuestion
+  tool to ask me one
+  question: "Which shape?"
+  with the options Square and
+  Circle. Do nothing else.
+──────────────────────────────
+ ☐ Shape
+
+Which shape?
+
+  1. Square
+     Pick square.
+  2. Circle
+     Pick circle.
+❯ 3. Type something.
+──────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to
+navigate · ctrl+g to edit in
+Notepad · Esc to cancel

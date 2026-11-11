@@ -1484,6 +1484,77 @@ mod tests {
         assert_eq!(reading.rule.as_deref(), Some("dialog_question"));
     }
 
+    /// The `-- INSERT -- ` head the vim editor mode draws on the mode line
+    /// changes nothing about the shell it counts.
+    #[test]
+    fn a_vim_insert_mode_line_with_a_shell_reads_background() {
+        let capture = include_str!("fixtures/v2322-vim-bg-shell-insert-w120.txt");
+        assert!(
+            capture.contains("-- INSERT -- ⏸ manual mode on · 1 shell · ← 3 agents"),
+            "the capture heads the mode line with the vim marker"
+        );
+        assert_eq!(
+            read_background_claude(capture).as_deref(),
+            Some("background_shell")
+        );
+    }
+
+    /// The normal mode line counts the shell the same way.
+    #[test]
+    fn a_vim_normal_mode_line_with_a_shell_reads_background() {
+        let capture = include_str!("fixtures/v2322-vim-bg-shell-normal-w120.txt");
+        assert!(
+            capture.contains("⏸ manual mode on · 1 shell · ← 3 agents"),
+            "the capture draws the normal mode line"
+        );
+        assert_eq!(
+            read_background_claude(capture).as_deref(),
+            Some("background_shell")
+        );
+    }
+
+    /// A narrow pane wraps the vim footer, its head row ending at
+    /// `Enter to select`: the question still reads as a dialog.
+    #[test]
+    fn a_vim_question_at_30_columns_reads_as_a_dialog() {
+        let capture = include_str!("fixtures/v2322-ask-vim-insert-w30.txt");
+        assert!(
+            capture.contains("\n-- INSERT -- · Enter to select\n"),
+            "the capture's footer row ends at the footer's head"
+        );
+        let reading = read_claude(&screen_from(capture));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::AwaitingInput));
+        assert_eq!(reading.rule.as_deref(), Some("dialog_question"));
+    }
+
+    /// At 24 columns the footer's head row ends at `Enter to`, its `select`
+    /// starting the wrapped row under it.
+    #[test]
+    fn a_vim_question_at_24_columns_reads_as_a_dialog() {
+        let capture = include_str!("fixtures/v2322-ask-vim-insert-w24.txt");
+        assert!(
+            capture.contains("\n-- INSERT -- · Enter to\n"),
+            "the capture's footer row ends at `Enter to`"
+        );
+        let reading = read_claude(&screen_from(capture));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::AwaitingInput));
+        assert_eq!(reading.rule.as_deref(), Some("dialog_question"));
+    }
+
+    /// The normal mode footer wraps the same way at 24 columns and still
+    /// reads as a dialog.
+    #[test]
+    fn a_vim_normal_question_at_24_columns_reads_as_a_dialog() {
+        let capture = include_str!("fixtures/v2322-ask-vim-normal-w24.txt");
+        assert!(
+            capture.contains("\nEnter to select · ↑/↓ to\n"),
+            "the capture wraps the footer's head"
+        );
+        let reading = read_claude(&screen_from(capture));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::AwaitingInput));
+        assert_eq!(reading.rule.as_deref(), Some("dialog_question"));
+    }
+
     /// Text typed on the `Type something` row keeps the vim footer, and the
     /// dialog stays up.
     #[test]

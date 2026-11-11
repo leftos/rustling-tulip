@@ -89,6 +89,10 @@ const QUESTION_FOOTER: &str = "Enter to select";
 /// The vim editor mode's marker heading a question's footer in insert mode.
 const VIM_INSERT_HEAD: &str = "-- INSERT -- · ";
 
+/// The head of a vim question footer a narrow pane cuts at its wrap: the
+/// rest of the footer sits on the rows under it.
+const ENTER_TO: &str = "Enter to";
+
 /// The title row of the review step, and the row above its options.
 const REVIEW_TITLE: &str = "Review your answers";
 const REVIEW_READY: &str = "Ready to submit your answers?";
@@ -533,9 +537,7 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
     {
         return Some(parse_review(rows, title, tabs));
     }
-    let Some(footer) = find(rows, bar + 1, |row| {
-        without_vim_insert(row.trim_start()).starts_with(QUESTION_FOOTER)
-    }) else {
+    let Some(footer) = find(rows, bar + 1, |row| question_footer_body(row).is_some()) else {
         return Some(Parsed::HalfDrawn);
     };
     let Some(title) = title.filter(|&title| title < footer) else {
@@ -633,7 +635,9 @@ fn footer_text(rows: &[String], index: usize) -> String {
 /// mode's `-- INSERT --`, it names no Esc at all.
 fn is_single_question_footer(rows: &[String], index: usize) -> bool {
     let text = footer_text(rows, index);
-    let body = without_vim_insert(&text);
+    let Some(body) = question_footer_body(&text) else {
+        return false;
+    };
     let vim_insert = body.len() < text.len();
     let esc_cancels = body.contains("Esc to cancel") || (vim_insert && !body.contains("Esc to"));
     body.starts_with(QUESTION_FOOTER) && esc_cancels && !body.contains("Tab")
@@ -643,6 +647,18 @@ fn is_single_question_footer(rows: &[String], index: usize) -> bool {
 /// the vim editor mode while the cursor sits on `Type something`.
 fn without_vim_insert(footer: &str) -> &str {
     footer.strip_prefix(VIM_INSERT_HEAD).unwrap_or(footer)
+}
+
+/// The body of the question footer `row` heads, its vim marker dropped:
+/// `Some` when the row opens the footer on its own, or — headed by the marker
+/// in a narrow pane — ends at `Enter to` or `Enter to select`, its tail on
+/// the rows under it.
+fn question_footer_body(row: &str) -> Option<&str> {
+    let row = row.trim_start();
+    let body = without_vim_insert(row);
+    let vim_insert = body.len() < row.len();
+    let opens = body.starts_with(QUESTION_FOOTER);
+    (opens || (vim_insert && body.trim_end() == ENTER_TO)).then_some(body)
 }
 
 /// Whether nothing but the footer's own wrapped tail, blank rows and rules
@@ -2687,6 +2703,76 @@ mod tests {
             assert_eq!(
                 labels(&screen)[..2],
                 [(1, "Red".to_owned()), (2, "Blue".to_owned())],
+                "{name}"
+            );
+        }
+    }
+
+    /// A narrow pane wraps the vim insert mode's footer: at 30 columns its
+    /// head row ends at `Enter to select`, its tail on the rows under it,
+    /// and the question still reads with its options.
+    #[test]
+    fn a_vim_question_wrapped_at_30_columns_reads_its_options() {
+        let dialog = rows(&[
+            "Which shape?",
+            "",
+            "  1. Square",
+            "     Pick square.",
+            "  2. Circle",
+            "     Pick circle.",
+            "❯ 3. Type something.",
+            "──────────────────────────────",
+            "  4. Chat about this",
+            "",
+            "-- INSERT -- · Enter to select",
+            "· ↑/↓ to navigate · ctrl+g to",
+            "edit in Notepad",
+        ]);
+        let mut with_bar = vec![rule(), " ☐ Shape".to_owned(), String::new()];
+        with_bar.extend(dialog.iter().cloned());
+        for (name, screen) in [("with bar", with_bar), ("without bar", dialog)] {
+            let screen = read(&screen);
+            assert_eq!(screen.composer, ComposerState::Dialog, "{name}");
+            let prompt = screen.prompt.as_ref().expect("a question prompt");
+            assert_eq!(prompt.subject, "Which shape?", "{name}");
+            assert_eq!(
+                labels(&screen)[..2],
+                [(1, "Square".to_owned()), (2, "Circle".to_owned())],
+                "{name}"
+            );
+        }
+    }
+
+    /// At 24 columns the head row ends at `Enter to`, its `select` opening
+    /// the wrapped row under it, and the question still reads.
+    #[test]
+    fn a_vim_question_wrapped_at_24_columns_reads_its_options() {
+        let dialog = rows(&[
+            "Which shape?",
+            "",
+            "  1. Square",
+            "     Pick square.",
+            "  2. Circle",
+            "     Pick circle.",
+            "❯ 3. Type something.",
+            "────────────────────────",
+            "  4. Chat about this",
+            "",
+            "-- INSERT -- · Enter to",
+            "select · ↑/↓ to navigate",
+            "· ctrl+g to edit in",
+            "Notepad",
+        ]);
+        let mut with_bar = vec![rule(), " ☐ Shape".to_owned(), String::new()];
+        with_bar.extend(dialog.iter().cloned());
+        for (name, screen) in [("with bar", with_bar), ("without bar", dialog)] {
+            let screen = read(&screen);
+            assert_eq!(screen.composer, ComposerState::Dialog, "{name}");
+            let prompt = screen.prompt.as_ref().expect("a question prompt");
+            assert_eq!(prompt.subject, "Which shape?", "{name}");
+            assert_eq!(
+                labels(&screen)[..2],
+                [(1, "Square".to_owned()), (2, "Circle".to_owned())],
                 "{name}"
             );
         }
