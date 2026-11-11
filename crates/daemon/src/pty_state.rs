@@ -408,6 +408,11 @@ struct Confirm {
     burst_from: Option<Instant>,
     /// Checks before this instant are skipped.
     hold_until: Instant,
+    /// Another writer's move started the hold that runs until `hold_until`:
+    /// its checks still hand the grid to the chat mirror. False for the
+    /// starting, resize and lagged-output holds, whose frames may be half
+    /// drawn, reflowed or missing rows.
+    chat_through_hold: bool,
     /// The record and status the last executed check asked to publish at
     /// once but could not, because output had not settled.
     candidate: Option<(StatusRead, SessionStatus)>,
@@ -444,6 +449,7 @@ impl Confirm {
             check_at: None,
             burst_from: None,
             hold_until: start + FOREIGN_WRITE_HOLD,
+            chat_through_hold: false,
             candidate: None,
         }
     }
@@ -477,10 +483,12 @@ impl Confirm {
     }
 
     /// Drop the window and any candidate, leave the screen unread for
-    /// [`FOREIGN_WRITE_HOLD`] from `now`, and read it once the hold ends.
+    /// [`FOREIGN_WRITE_HOLD`] from `now`, and read it once the hold ends. The
+    /// chat mirror is not fed through it unless the caller says so after.
     fn hold(&mut self, now: Instant) {
         self.window = None;
         self.candidate = None;
+        self.chat_through_hold = false;
         self.hold_until = now + FOREIGN_WRITE_HOLD;
         self.check_at = Some(self.hold_until);
     }
@@ -826,19 +834,46 @@ impl ScreenWatch {
     /// the hold still has its edge. Anything else on the grid changes nothing
     /// until a reading.
     fn note_held_off_dialog(&mut self) {
-        let Some(agent) = self.session_agent() else {
+        self.look_during_hold(false);
+    }
+
+    /// Look at the grid while a hold keeps it from being read: note a dialog
+    /// on it ([`Self::note_held_off_dialog`]) and, with `feed_chat`, hand it
+    /// to the chat mirror under the same lock, unless its size changed since
+    /// the last executed check. Nothing else: no rule writes a status, and
+    /// the size the next check compares against stays as it was.
+    fn look_during_hold(&mut self, feed_chat: bool) {
+        let agent = self.session_agent();
+        let dialog = {
+            let screen = crate::sync::lock(&self.screen);
+            if feed_chat && self.size.is_none_or(|last| last == screen.size()) {
+                self.chat.observe(&screen);
+            }
+            agent.and_then(|agent| {
+                crate::screen::dialogs::read_view(&agent, &screen)
+                    .filter(|_| reads_dialog(&self.rules.read(&screen)))
+            })
+        };
+        let Some(view) = dialog else {
             return;
         };
-        let screen = crate::sync::lock(&self.screen);
-        let Some(view) = crate::screen::dialogs::read_view(&agent, &screen) else {
-            return;
-        };
-        if !reads_dialog(&self.rules.read(&screen)) {
-            return;
-        }
         self.prompt_dialog_read = true;
         if view.agent_in_view.is_some() {
             self.subagent_dialog = view.agent_in_view;
+        }
+    }
+
+    /// A check inside a hold: the next one is due when the output settles,
+    /// or at the hold's end, whichever comes first. In a hold another
+    /// writer's move started, an agent's screen goes to the chat mirror on
+    /// every check, settled or at the burst's max wait, as a check outside a
+    /// hold would read it. The status rules wait for the hold to end.
+    fn check_during_hold(&mut self, quiet: bool, settled_at: Option<Instant>, mode: Mode) {
+        let hold_until = self.confirm.hold_until;
+        let settle = settled_at.filter(|_| !quiet);
+        self.confirm.check_at = Some(settle.map_or(hold_until, |at| at.min(hold_until)));
+        if mode != Mode::Shell {
+            self.look_during_hold(self.confirm.chat_through_hold);
         }
     }
 
@@ -854,12 +889,10 @@ impl ScreenWatch {
         let quiet = settled_at.is_none_or(|at| now >= at);
         self.confirm.burst_from = (!quiet).then_some(now);
         if now < self.confirm.hold_until {
-            self.confirm.check_at = Some(self.confirm.hold_until);
-            if mode != Mode::Shell {
-                self.note_held_off_dialog();
-            }
+            self.check_during_hold(quiet, settled_at, mode);
             return Err(Checked::Done);
         }
+        self.confirm.chat_through_hold = false;
         let Some(read) = record_status(&self.registry, &self.session_id) else {
             return Err(Checked::Gone);
         };
@@ -1352,7 +1385,8 @@ impl ScreenWatch {
     /// a subagent's dialog on the grid is noted now. A move off
     /// `AwaitingInput` while the screen showed the dialog (a chat answer)
     /// disarms the dialog edge, since the dialog stays painted until the
-    /// agent redraws.
+    /// agent redraws. The chat mirror still gets the grid at the next settle
+    /// point inside the hold: at once when the output is already quiet.
     fn foreign_write(&mut self, before: Option<StatusRead>, now: Instant) {
         self.note_held_off_dialog();
         let awaiting = |read: Option<StatusRead>| {
@@ -1363,6 +1397,11 @@ impl ScreenWatch {
             self.dialog_edge_armed = false;
         }
         self.confirm.hold(now);
+        self.confirm.chat_through_hold = true;
+        let settled = self
+            .last_output
+            .map_or(now, |at| (at + CHECK_DEBOUNCE).max(now));
+        self.confirm.read_by(settled);
     }
 }
 
@@ -2370,10 +2409,10 @@ mod tests {
 )]
 mod hysteresis_tests {
     use super::{
-        AgentReading, AgentStreams, CHECK_DEBOUNCE, CONFIRM_SPACING, FOREIGN_WRITE_HOLD,
-        IDLE_WITHOUT_STOP, LAUNCH_HOLD, SHELL_IDLE_AFTER, ScreenWrite, ShellLaunch, ShellStreams,
-        State, TITLE_QUIET_LIMIT, agent_reading, apply_screen_status, hand_shell_back,
-        on_plain_shell_transition, record_status, watch, watch_plain_shell,
+        AgentReading, AgentStreams, CHECK_DEBOUNCE, CHECK_MAX_WAIT, CONFIRM_SPACING,
+        FOREIGN_WRITE_HOLD, IDLE_WITHOUT_STOP, LAUNCH_HOLD, SHELL_IDLE_AFTER, ScreenWrite,
+        ShellLaunch, ShellStreams, State, TITLE_QUIET_LIMIT, agent_reading, apply_screen_status,
+        hand_shell_back, on_plain_shell_transition, record_status, watch, watch_plain_shell,
     };
     use crate::paths::Dirs;
     use crate::screen::fixture_screen::screen_from;
@@ -2568,6 +2607,8 @@ mod hysteresis_tests {
         attention: mpsc::UnboundedReceiver<super::AttentionEvent>,
         /// The grid an agent session's watcher feeds and reads.
         screen: SharedScreen,
+        /// The chat mirror the watcher's tap feeds.
+        chat: crate::chat_mirror::ChatMirror,
     }
 
     const SESSION: &str = "s1";
@@ -2626,12 +2667,12 @@ mod hysteresis_tests {
         record.screen = Some(Arc::clone(&screen));
         let registry = SessionRegistry::new(dirs);
         registry.insert(record);
-        let chat = crate::chat_mirror::ChatMirror::new(
+        let mirror = crate::chat_mirror::ChatMirror::new(
             Arc::clone(&registry),
             crate::hook_status::LiveLines::default(),
             Arc::new(tokio::sync::watch::channel(0usize).0),
-        )
-        .tap(SESSION, &agent_registry::default_agent());
+        );
+        let chat = mirror.tap(SESSION, &agent_registry::default_agent());
         let (output, output_rx) = broadcast::channel(64);
         let (input, input_rx) = mpsc::unbounded_channel();
         let (attention_tx, attention_rx) = mpsc::unbounded_channel();
@@ -2672,10 +2713,32 @@ mod hysteresis_tests {
             _input: unread_input,
             attention: attention_rx,
             screen,
+            chat: mirror,
         }
     }
 
     impl Harness {
+        /// Load the session's chat as a client does; the receiver keeps the
+        /// loader's outbox open.
+        fn load_chat(&self) -> mpsc::UnboundedReceiver<protocol::DaemonMessage> {
+            let (out_tx, out_rx) = mpsc::unbounded_channel();
+            self.chat
+                .load(SESSION, None, 1, &out_tx)
+                .expect("the chat loads");
+            out_rx
+        }
+
+        /// Whether the loaded chat shows a prompt card.
+        fn chat_shows_prompt(&self) -> bool {
+            self.chat.current_prompt(SESSION).is_some()
+        }
+
+        /// Draw `bytes` on the grid with no output event: a frame whose
+        /// output has already settled, which no check has read yet.
+        fn draw_quietly(&self, bytes: &[u8]) {
+            self.screen.lock().expect("grid lock").feed(bytes);
+        }
+
         fn status(&self) -> SessionStatus {
             let rec = self.registry.get(SESSION).expect("session registered");
             let guard = rec.lock().expect("record lock");
@@ -7164,7 +7227,8 @@ mod hysteresis_tests {
             !has_pending(&h),
             "painted in the hold: prompt still pending"
         );
-        // Painted just before the hold, whose start drops the debounced check.
+        // Painted just before the hold, whose start replaces the debounced
+        // check with one that only notes the dialog and feeds the chat.
         let h = start_record(
             "agent-view-before-hold",
             false,
@@ -7179,6 +7243,204 @@ mod hysteresis_tests {
         advance(Duration::from_secs(2)).await;
         assert_eq!(h.status(), SessionStatus::Idle, "painted before the hold");
         assert!(!has_pending(&h), "painted before the hold: still pending");
+    }
+
+    /// A dialog already whole and quiet on the grid when a main hook moves
+    /// the record reaches the chat at the next settle point, inside the hold,
+    /// while the status stays as the hook left it.
+    #[tokio::test(start_paused = true)]
+    async fn a_dialog_drawn_before_a_hook_reaches_the_chat_during_the_hold() {
+        let mut h = start_record(
+            "chat-hold-drawn",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        let _loader = h.load_chat();
+        h.draw_quietly(&permission_frame());
+        assert!(!h.chat_shows_prompt(), "no check has read the dialog yet");
+        h.set_record(main_stamp);
+        settle().await;
+        advance(CHECK_DEBOUNCE + ms(10)).await;
+        assert!(h.chat_shows_prompt(), "the chat waited out the hold");
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the screen wrote a status"
+        );
+        assert!(!has_pending(&h), "the screen raised a prompt");
+        assert_eq!(h.attentions(), 0, "the screen raised Attention in the hold");
+    }
+
+    /// A dialog whose tool marker blinks every frame never lets the output
+    /// settle: the burst's max-wait check inside the hold still feeds it to
+    /// the chat, long before the hold ends.
+    #[tokio::test(start_paused = true)]
+    async fn a_blinking_dialog_reaches_the_chat_during_the_hold() {
+        let h = start_record(
+            "chat-hold-blinking",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        let _loader = h.load_chat();
+        h.chunk(permission_frame());
+        settle().await;
+        h.set_record(main_stamp);
+        settle().await;
+        let mut since_hook = Duration::ZERO;
+        while since_hook < CHECK_MAX_WAIT + CHECK_DEBOUNCE {
+            advance(ms(30)).await;
+            since_hook += ms(30);
+            h.chunk(permission_frame());
+        }
+        settle().await;
+        assert!(
+            h.chat_shows_prompt(),
+            "the blinking dialog waited out the hold"
+        );
+        assert!(
+            since_hook < FOREIGN_WRITE_HOLD / 2,
+            "the hold had long ended"
+        );
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the screen wrote a status"
+        );
+        assert!(!has_pending(&h), "the screen raised a prompt");
+    }
+
+    /// A resize's hold feeds the chat nothing: the frame under the new size
+    /// may be reflowed, so the chat keeps the old screen until the hold ends.
+    #[tokio::test(start_paused = true)]
+    async fn a_resize_hold_feeds_the_chat_nothing() {
+        let h = start_record(
+            "chat-hold-resize",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        let _loader = h.load_chat();
+        h.chunk(permission_frame());
+        advance(CHECK_DEBOUNCE + ms(10)).await;
+        assert!(h.chat_shows_prompt(), "the dialog never reached the chat");
+        crate::sync::lock(&h.screen).resize(160, ROWS);
+        h.chunk(idle_frame(&[]));
+        // The check at 40 ms finds the new size and holds until 740 ms.
+        advance(ms(100)).await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(200)).await;
+        assert!(
+            h.chat_shows_prompt(),
+            "the chat was fed in the resize's hold"
+        );
+        advance(FOREIGN_WRITE_HOLD).await;
+        assert!(
+            !h.chat_shows_prompt(),
+            "the hold's end check fed the chat nothing"
+        );
+    }
+
+    /// The watcher's starting hold (a reattached session's replay) feeds the
+    /// chat nothing until it ends.
+    #[tokio::test(start_paused = true)]
+    async fn the_starting_hold_feeds_the_chat_nothing() {
+        let h = start_record(
+            "chat-hold-start",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        settle().await;
+        let _loader = h.load_chat();
+        h.chunk(permission_frame());
+        advance(CHECK_DEBOUNCE + ms(10)).await;
+        assert!(
+            !h.chat_shows_prompt(),
+            "the chat was fed in the starting hold"
+        );
+        pass_hold().await;
+        assert!(
+            h.chat_shows_prompt(),
+            "the hold's end check fed the chat nothing"
+        );
+    }
+
+    /// A dialog drawn in two chunks during a hold reaches the chat once the
+    /// second chunk's output settles, still inside the hold.
+    #[tokio::test(start_paused = true)]
+    async fn output_during_a_hold_reaches_the_chat_once_it_settles() {
+        let h = start_record(
+            "chat-hold-output",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        let _loader = h.load_chat();
+        h.set_record(main_stamp);
+        settle().await;
+        let bytes = permission_frame();
+        let mid = bytes.len() / 2;
+        let cut = bytes[mid..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(mid, |at| mid + at + 1);
+        h.chunk(bytes[..cut].to_vec());
+        advance(CHECK_DEBOUNCE / 2).await;
+        h.chunk(bytes[cut..].to_vec());
+        // No check runs between the chunks: the second one moved the check
+        // on to its own settle point.
+        advance(CHECK_DEBOUNCE + CHECK_DEBOUNCE / 2).await;
+        assert!(
+            h.chat_shows_prompt(),
+            "the settled dialog never reached the chat"
+        );
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the screen wrote a status"
+        );
+    }
+
+    /// The chat fed during a hold writes no status: an idle box drawn over
+    /// the dialog demotes `AwaitingInput` only once the hold has ended.
+    #[tokio::test(start_paused = true)]
+    async fn a_hold_still_holds_status_writes_while_the_chat_is_fed() {
+        let h = start_record(
+            "chat-hold-status",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
+        pass_hold().await;
+        let _loader = h.load_chat();
+        h.chunk(permission_frame());
+        advance(CHECK_DEBOUNCE + ms(10)).await;
+        assert!(h.chat_shows_prompt(), "the dialog never reached the chat");
+        h.set_record(main_stamp);
+        settle().await;
+        h.chunk(idle_frame(&[]));
+        advance(CHECK_DEBOUNCE + ms(10)).await;
+        assert!(
+            !h.chat_shows_prompt(),
+            "the idle box never reached the chat"
+        );
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "written in the hold"
+        );
+        advance(FOREIGN_WRITE_HOLD.saturating_sub(CHECK_DEBOUNCE + ms(20))).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "written in the hold"
+        );
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the hold's end check never ran"
+        );
     }
 
     /// A hook landing between a reading and its clear refuses the clear, and
