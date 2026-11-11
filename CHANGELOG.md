@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone's Home, starting Launch last or New session clears an earlier refusal of the other kind shown for that repo or workspace.
 - A Claude session in bash mode whose reply quotes a question's footer reads as idle, not as waiting on you, and Chat shows no question for it.
 - With Claude's vim editor mode on, a session running a background shell reads as background, and a question in a narrow pane reads as waiting on you.
+- A session whose subagent asks for permission keeps waiting on you until you answer, without a brief false Idle and a second alert before the dialog draws.
 
 ### Changed
 

@@ -12,7 +12,9 @@
 //! never touches the record.
 
 use crate::server::Hub;
-use crate::session::{PendingInsert, SessionRecord, TurnAlert, TurnEnd, push_recent_action};
+use crate::session::{
+    PendingInsert, PromptOwner, PromptRaise, SessionRecord, TurnAlert, TurnEnd, push_recent_action,
+};
 use agent_api::{AgentPlugin, HookReport, LiveLine, PendingUpdate};
 use chrono::{DateTime, Local};
 use protocol::{AgentId, SessionStatus};
@@ -421,21 +423,7 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
             })
             .is_some_and(|status| crate::pty_state::apply_status(record, status))
     };
-    // Whose prompt it is goes with it: a subagent's view ends only a prompt
-    // a subagent's hook raised.
-    match &report.pending {
-        PendingUpdate::Clear => record.clear_pending(),
-        PendingUpdate::Set(pending) => {
-            record.pending_input = Some(pending.clone());
-            record.pending_from_subagent = report.subagent;
-        }
-        PendingUpdate::KeepOr(pending) => {
-            if record.pending_input.is_none() {
-                record.pending_input = Some(pending.clone());
-                record.pending_from_subagent = report.subagent;
-            }
-        }
-    }
+    apply_pending(record, report, event_time);
     Applied {
         entered_awaiting,
         status_change: None,
@@ -444,6 +432,66 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
         turn_report: turn_report(record, report),
         turn_alert,
     }
+}
+
+/// Write what `report` says about the pending prompt. Whose prompt it is goes
+/// with it: a subagent's view ends only a prompt that is not main's. A `Set`
+/// records its raise, which the screen watcher's draw guard counts from; one
+/// that replaces the same tool's prompt from the same agent (a question's
+/// `PermissionRequest` after its `PreToolUse`) keeps the first raise. A
+/// `KeepOr` fill records none, and one with no `agent_id` cannot say whose
+/// prompt it fills.
+fn apply_pending(record: &mut SessionRecord, report: &HookReport, event_time: u128) {
+    match &report.pending {
+        PendingUpdate::Clear => record.clear_pending(),
+        PendingUpdate::Set(pending) => {
+            let owner = if report.subagent {
+                PromptOwner::Subagent
+            } else {
+                PromptOwner::Main
+            };
+            let tool = agent_api::hook_vocabulary::pending_tool(pending);
+            let same_prompt = tool.is_some()
+                && record.pending_owner == owner
+                && record
+                    .pending_input
+                    .as_ref()
+                    .is_some_and(|old| agent_api::hook_vocabulary::pending_tool(old) == tool);
+            let raise = record
+                .pending_raise
+                .filter(|_| same_prompt)
+                .unwrap_or(PromptRaise {
+                    event_time,
+                    at: tokio::time::Instant::now(),
+                });
+            record.pending_input = Some(pending.clone());
+            record.pending_owner = owner;
+            record.pending_raise = Some(raise);
+        }
+        PendingUpdate::KeepOr(pending) => {
+            if record.pending_input.is_none() {
+                record.pending_input = Some(pending.clone());
+                record.pending_owner = if report.subagent {
+                    PromptOwner::Subagent
+                } else {
+                    PromptOwner::Unknown
+                };
+                record.pending_raise = None;
+            }
+        }
+    }
+}
+
+/// Whether `report` is main's turn end (a `Stop` or a `StopFailure`) over a
+/// wait that is not main's own prompt: one a subagent raised, one a
+/// label-less notification filled, or one the screen raised with nothing
+/// pending. Main's turn ending answers none of them.
+fn spares_a_wait_not_mains(record: &SessionRecord, report: &HookReport) -> bool {
+    let main_turn_end =
+        !report.subagent && (report.background.is_some() || report.failure.is_some());
+    main_turn_end
+        && record.status == SessionStatus::AwaitingInput
+        && (record.pending_input.is_none() || record.pending_owner != PromptOwner::Main)
 }
 
 /// Whether an event must leave the record's status and pending input alone,
@@ -461,7 +509,13 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
 /// `PreToolUse`, and clearing the question there let the `permission_prompt`
 /// notification 6 s later word a permission its prompt never asked for. A
 /// `PostToolUse` that names no tool clears as it always has.
+///
+/// Main's turn end leaves any wait that is not main's own prompt alone
+/// ([`spares_a_wait_not_mains`]).
 fn leaves_pending_alone(record: &SessionRecord, report: &HookReport) -> bool {
+    if spares_a_wait_not_mains(record, report) {
+        return true;
+    }
     let Some(pending) = record.pending_input.as_ref() else {
         return false;
     };
@@ -1158,16 +1212,17 @@ mod tests {
     }
 
     #[test]
-    fn a_subagent_raised_prompt_is_marked_as_the_subagents() {
+    fn a_subagent_raised_prompt_is_owned_by_the_subagent() {
         let record = record_with_a_subagents_prompt();
         assert_eq!(record.status, SessionStatus::AwaitingInput);
         assert!(
             record.pending_input.is_some(),
             "the subagent's prompt is pending"
         );
-        assert!(
-            record.pending_from_subagent,
-            "none pending: marked as the subagent's"
+        assert_eq!(
+            record.pending_owner,
+            PromptOwner::Subagent,
+            "none pending: owned by the subagent"
         );
 
         // Over a stale value beside another status, the subagent's replaces it.
@@ -1175,14 +1230,15 @@ mod tests {
         stale.status = SessionStatus::Working;
         apply_body(&mut stale, 2, &subagent_permission_request());
         assert_eq!(stale.status, SessionStatus::AwaitingInput);
-        assert!(
-            stale.pending_from_subagent,
-            "stale value: marked as the subagent's"
+        assert_eq!(
+            stale.pending_owner,
+            PromptOwner::Subagent,
+            "stale value: owned by the subagent"
         );
     }
 
     #[test]
-    fn a_main_prompt_is_not_marked_as_a_subagents() {
+    fn a_main_prompt_is_owned_by_main() {
         let mut working = crate::history::test_support::record("s1", SessionMode::Interactive);
         working.status = SessionStatus::Working;
         working.last_hook_time = Some(1);
@@ -1190,33 +1246,36 @@ mod tests {
         apply_body(&mut working, 2, &main_permission_request());
         assert_eq!(working.status, SessionStatus::AwaitingInput);
         assert!(working.pending_input.is_some(), "main's prompt is pending");
-        assert!(
-            !working.pending_from_subagent,
-            "main's prompt marked as a subagent's"
+        assert_eq!(
+            working.pending_owner,
+            PromptOwner::Main,
+            "main's prompt owned by a subagent"
         );
 
-        // Main's prompt replacing a stale subagent's value takes the mark off.
+        // Main's prompt replacing a stale subagent's value takes it over.
         let mut stale = record_with_a_subagents_prompt();
         stale.status = SessionStatus::Working;
         apply_body(&mut stale, 3, &main_permission_request());
         assert_eq!(stale.status, SessionStatus::AwaitingInput);
-        assert!(
-            !stale.pending_from_subagent,
-            "main's prompt kept the subagent's mark"
+        assert_eq!(
+            stale.pending_owner,
+            PromptOwner::Main,
+            "main's prompt kept the subagent as its owner"
         );
 
         // A subagent's event over main's open prompt leaves it main's.
         let mut open = record_with_open_prompt();
         apply_body(&mut open, 2, &subagent_permission_request());
         assert_eq!(open.pending_input, Some(main_prompt()));
-        assert!(
-            !open.pending_from_subagent,
-            "a subagent's event marked main's prompt"
+        assert_eq!(
+            open.pending_owner,
+            PromptOwner::Main,
+            "a subagent's event took main's prompt over"
         );
     }
 
     #[test]
-    fn a_subagents_keep_or_fills_an_empty_prompt_with_its_mark() {
+    fn a_subagents_keep_or_fills_an_empty_prompt_as_its_own() {
         let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
         record.status = SessionStatus::Working;
         record.last_hook_time = Some(1);
@@ -1236,14 +1295,15 @@ mod tests {
             record.pending_input.is_some(),
             "the empty slot was not filled"
         );
-        assert!(
-            record.pending_from_subagent,
-            "the subagent's prompt is not marked"
+        assert_eq!(
+            record.pending_owner,
+            PromptOwner::Subagent,
+            "the subagent's prompt is not owned by it"
         );
     }
 
     #[test]
-    fn clearing_a_prompt_clears_its_subagent_mark() {
+    fn clearing_a_prompt_resets_its_owner() {
         // A main hook that ends the prompt.
         let mut record = record_with_a_subagents_prompt();
         apply_body(
@@ -1252,16 +1312,172 @@ mod tests {
             &json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"}),
         );
         assert_eq!(record.pending_input, None);
-        assert!(
-            !record.pending_from_subagent,
-            "a main hook's clear kept the mark"
+        assert_eq!(
+            record.pending_owner,
+            PromptOwner::Main,
+            "a main hook's clear kept the owner"
         );
 
         // The helper every other clearing path calls.
         let mut direct = record_with_a_subagents_prompt();
         direct.clear_pending();
         assert_eq!(direct.pending_input, None);
-        assert!(!direct.pending_from_subagent, "clear_pending kept the mark");
+        assert_eq!(
+            direct.pending_owner,
+            PromptOwner::Main,
+            "clear_pending kept the owner"
+        );
+    }
+
+    /// A main `Stop` with no running work.
+    fn bare_main_stop() -> Value {
+        json!({
+            "hook_event_name": "Stop",
+            "last_assistant_message": "started",
+            "background_tasks": [],
+            "session_crons": [],
+        })
+    }
+
+    /// A `permission_prompt` notification with no `agent_id`.
+    fn label_less_notification() -> Value {
+        json!({
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+            "message": "Claude needs your permission",
+        })
+    }
+
+    /// Main's turn ending is not the answer to a subagent's prompt: the
+    /// prompt stays waiting, and the turn's report is still taken.
+    #[test]
+    fn a_main_stop_leaves_a_subagents_prompt_waiting() {
+        let mut record = record_with_a_subagents_prompt();
+        let applied = apply_body(&mut record, 3, &bare_main_stop());
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert!(
+            record.pending_input.is_some(),
+            "main's Stop ended the subagent's prompt"
+        );
+        assert_eq!(record.pending_owner, PromptOwner::Subagent);
+        assert_eq!(applied.turn_report.as_deref(), Some("started"));
+    }
+
+    #[test]
+    fn a_stop_failure_leaves_a_subagents_prompt_waiting() {
+        let mut record = record_with_a_subagents_prompt();
+        let body = json!({"hook_event_name": "StopFailure", "error": "rate_limit"});
+        apply_body(&mut record, 3, &body);
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert!(
+            record.pending_input.is_some(),
+            "main's StopFailure ended the subagent's prompt"
+        );
+        assert_eq!(record.pending_owner, PromptOwner::Subagent);
+    }
+
+    #[test]
+    fn a_main_stop_still_ends_mains_own_stale_prompt() {
+        let mut record = record_with_open_prompt();
+        apply_body(&mut record, 2, &bare_main_stop());
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert_eq!(record.pending_input, None);
+    }
+
+    /// A wait the screen raised names no prompt, so it may be a subagent's
+    /// dialog: main's turn end leaves it to the screen.
+    #[test]
+    fn a_main_stop_leaves_a_screen_raised_wait() {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::AwaitingInput;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        apply_body(&mut record, 2, &bare_main_stop());
+        assert_eq!(
+            record.status,
+            SessionStatus::AwaitingInput,
+            "main's Stop ended a wait the screen raised"
+        );
+    }
+
+    #[test]
+    fn a_label_less_notification_keeps_a_subagents_prompt_and_owner() {
+        let mut record = record_with_a_subagents_prompt();
+        apply_body(&mut record, 3, &label_less_notification());
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert!(
+            matches!(
+                &record.pending_input,
+                Some(PendingInput::Permission { tool_name, .. }) if tool_name == "Write"
+            ),
+            "the notification relabelled the prompt: {:?}",
+            record.pending_input
+        );
+        assert_eq!(record.pending_owner, PromptOwner::Subagent);
+    }
+
+    #[test]
+    fn a_label_less_notification_fills_an_empty_prompt_as_unknown() {
+        let mut record = turn_record();
+        apply_body(&mut record, 2, &label_less_notification());
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert!(
+            matches!(record.pending_input, Some(PendingInput::Other { .. })),
+            "the empty slot was not filled: {:?}",
+            record.pending_input
+        );
+        assert_eq!(
+            record.pending_owner,
+            PromptOwner::Unknown,
+            "a label-less notification named the prompt's owner"
+        );
+    }
+
+    /// The raise a `Set` writes, kept across its own tool's later `Set`.
+    fn raise_time(record: &SessionRecord) -> Option<u128> {
+        record.pending_raise.map(|raise| raise.event_time)
+    }
+
+    #[test]
+    fn a_set_records_its_raise_and_keep_or_records_none() {
+        let mut record = turn_record();
+        apply_body(&mut record, 2, &main_permission_request());
+        assert_eq!(raise_time(&record), Some(2), "the Set recorded no raise");
+
+        // A question's `PermissionRequest` after its own `PreToolUse` is the
+        // same prompt: the raise stays the first one's.
+        let mut asked = record_asking_a_question();
+        assert_eq!(raise_time(&asked), Some(2));
+        apply_body(
+            &mut asked,
+            3,
+            &json!({
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "AskUserQuestion",
+                "tool_input": {"questions": []},
+            }),
+        );
+        assert_eq!(raise_time(&asked), Some(2), "the same prompt was restamped");
+
+        // Another tool's prompt is a new raise.
+        apply_body(&mut asked, 4, &main_permission_request());
+        assert_eq!(raise_time(&asked), Some(4), "another tool kept the raise");
+
+        let mut filled = turn_record();
+        apply_body(&mut filled, 2, &label_less_notification());
+        assert!(
+            filled.pending_input.is_some(),
+            "the empty slot was not filled"
+        );
+        assert_eq!(raise_time(&filled), None, "a KeepOr fill recorded a raise");
+    }
+
+    #[test]
+    fn clear_pending_clears_the_raise() {
+        let mut record = record_with_a_subagents_prompt();
+        assert_eq!(raise_time(&record), Some(2), "the Set recorded no raise");
+        record.clear_pending();
+        assert_eq!(record.pending_raise, None);
     }
 
     #[test]

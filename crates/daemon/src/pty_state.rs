@@ -28,7 +28,7 @@ use crate::pty::PtyHandle;
 use crate::screen::SharedScreen;
 use crate::screen::rules::{self, CompiledRules, Reading, ScreenState, Verdict};
 use crate::session::{
-    SessionEvent, SessionRecord, SessionRegistry, ShownAgent, push_recent_action,
+    PromptOwner, SessionEvent, SessionRecord, SessionRegistry, ShownAgent, push_recent_action,
 };
 use crate::typing_lane::{Holder, TypingTurn};
 use crate::view_drive::{DRIVE_LIMIT, KEY_WAIT, ReturnAction, ViewReturn};
@@ -105,6 +105,13 @@ const INTERRUPT_RULE: &str = "idle_interrupted";
 /// the status or the hook stamp, and after it starts: the grid may still show
 /// the frame from before the change.
 const FOREIGN_WRITE_HOLD: Duration = Duration::from_millis(700);
+
+/// How long after a hook raised a prompt the screen may not end it unless a
+/// reading or a hold's look has seen a dialog for it: a dialog draws seconds
+/// after its async hook, so the screen between the two still shows what came
+/// before. The slowest measured draw took about 3 s; the deadline leaves room
+/// for a loaded machine.
+const DIALOG_DRAW_DEADLINE: Duration = Duration::from_secs(10);
 
 /// How long a shell the spawn typed an agent's launch line into keeps its
 /// classifier off, unless the agent shows on screen or its hooks take over
@@ -312,6 +319,10 @@ struct ScreenWatch {
     /// reading that finds nothing waiting and by this watcher's own end of
     /// the prompt.
     prompt_dialog_read: bool,
+    /// The hook raise (its event time) the two fields above were read for;
+    /// `None` for a prompt no hook raised. A read or look over another raise
+    /// forgets them first ([`Self::key_dialog_memory`]).
+    prompt_raise: Option<u128>,
     /// Whether the record's background flag is this watcher's own write: the
     /// screen clears only a flag it set. Any other writer's change to the
     /// record, and any status change, drops it.
@@ -580,6 +591,7 @@ impl ScreenWatch {
             dialog_edge_armed: true,
             subagent_dialog: None,
             prompt_dialog_read: false,
+            prompt_raise: None,
             screen_set_background: false,
             turn_end: TurnEndWatch::default(),
             view_return: ViewReturn::default(),
@@ -770,7 +782,11 @@ impl ScreenWatch {
     /// overlay as a dialog, and a reading the plugin still calls a dialog
     /// keeps it: a footer no rule knows, its dialog still up. A clear refused
     /// because the record moved since `read` keeps the edge for the next
-    /// reading. The dialog read is forgotten once nothing waits.
+    /// reading. The dialog read is forgotten once nothing waits, and when
+    /// `read` names another hook raise than the one it was read for. A
+    /// hook-raised prompt with no dialog read ends here only once its draw
+    /// deadline has passed ([`Self::undrawn`]); until then a read is due at
+    /// that deadline.
     fn follow_subagent_dialog(
         &mut self,
         read: StatusRead,
@@ -779,6 +795,7 @@ impl ScreenWatch {
         quiet: bool,
     ) {
         let in_view = agent_view.and_then(|view| view.agent_in_view.as_deref());
+        self.key_dialog_memory(read.raise);
         self.forget_spent_prompt(read);
         if reads_dialog(reading) {
             self.subagent_dialog = in_view.map(str::to_owned);
@@ -789,6 +806,10 @@ impl ScreenWatch {
             return;
         };
         if agent_view.is_some_and(|view| view.dialog) {
+            return;
+        }
+        if !seen && let Some(deadline) = self.undrawn(read, Instant::now()) {
+            self.confirm.read_by(deadline);
             return;
         }
         let mut refused = false;
@@ -805,6 +826,43 @@ impl ScreenWatch {
         if ended {
             self.prompt_dialog_read = false;
         }
+    }
+
+    /// Forget the dialogs read when `raise` names another prompt than the
+    /// one they were read for, and key the memory to it.
+    fn key_dialog_memory(&mut self, raise: Option<RaiseRead>) {
+        let raise = raise.map(|raise| raise.event_time);
+        if self.prompt_raise != raise {
+            self.prompt_raise = raise;
+            self.subagent_dialog = None;
+            self.prompt_dialog_read = false;
+        }
+    }
+
+    /// The draw deadline of a hook-raised `AwaitingInput` in `read` that no
+    /// reading or hold's look has seen a dialog for, while `now` is before
+    /// it; `None` once a dialog was seen, past the deadline, or for a wait
+    /// no hook raised. Until then no screen reading ends the prompt: its
+    /// dialog draws seconds after the hook.
+    fn undrawn(&mut self, read: StatusRead, now: Instant) -> Option<Instant> {
+        self.key_dialog_memory(read.raise);
+        let raise = read
+            .raise
+            .filter(|_| read.status == SessionStatus::AwaitingInput)?;
+        (!self.prompt_dialog_read && now < raise.deadline).then_some(raise.deadline)
+    }
+
+    /// Hold the screen off leaving `read`'s `AwaitingInput` while its prompt
+    /// is [`Self::undrawn`]: drop any window and candidate and read again at
+    /// the deadline. Answers whether it held.
+    fn hold_undrawn_prompt(&mut self, read: StatusRead, now: Instant) -> bool {
+        let Some(deadline) = self.undrawn(read, now) else {
+            return false;
+        };
+        self.confirm.window = None;
+        self.confirm.candidate = None;
+        self.confirm.read_by(deadline);
+        true
     }
 
     /// Forget the dialogs read once `read` shows nothing waiting: the prompt
@@ -857,6 +915,9 @@ impl ScreenWatch {
         let Some(view) = dialog else {
             return;
         };
+        // The dialog counts for the prompt the record last showed, the raise
+        // whose own hold this look may be in.
+        self.key_dialog_memory(self.wake.seen.and_then(|seen| seen.raise));
         self.prompt_dialog_read = true;
         if view.agent_in_view.is_some() {
             self.subagent_dialog = view.agent_in_view;
@@ -1151,7 +1212,8 @@ impl ScreenWatch {
 
     /// Publish the status the screen shows, at once or after its window;
     /// with no status to publish, follow the background work it shows
-    /// (`background`).
+    /// (`background`). A hook-raised prompt whose dialog has not drawn yet
+    /// is not left until its draw deadline ([`Self::hold_undrawn_prompt`]).
     fn follow_screen(
         &mut self,
         read: StatusRead,
@@ -1165,6 +1227,9 @@ impl ScreenWatch {
             self.follow_background(read, reading, background, now);
             return;
         };
+        if read.status == SessionStatus::AwaitingInput && self.hold_undrawn_prompt(read, now) {
+            return;
+        }
         if publishes_at_once(read.status, target) {
             self.publish_at_once(read, target, quiet);
         } else {
@@ -1348,6 +1413,7 @@ impl ScreenWatch {
                 status: next,
                 pending: from.pending && !left_prompt,
                 held: None,
+                raise: from.raise.filter(|_| !left_prompt),
                 ..from
             });
             self.screen_set_background = next == SessionStatus::Idle
@@ -1606,6 +1672,7 @@ fn hand_shell_back(
             main_hook_time: rec.main_hook_time,
             pending: rec.pending_input.is_some(),
             held: None,
+            raise: status_read(rec).raise,
         });
         let alert = held.and_then(|held| held.alert);
         changed.then(|| alert.map(|alert| alert.event(session_id)))
@@ -2161,6 +2228,18 @@ struct StatusRead {
     pending: bool,
     /// The turn end the record holds.
     held: Option<HeldRead>,
+    /// The hook raise of the pending prompt. Not compared: a raise moves
+    /// with the pending flag or the main hook stamp, which are.
+    raise: Option<RaiseRead>,
+}
+
+/// The hook raise of a pending prompt a [`StatusRead`] saw.
+#[derive(Clone, Copy, Debug)]
+struct RaiseRead {
+    /// The raising event's hook time, which keys the dialogs read.
+    event_time: u128,
+    /// When the raise reaches [`DIALOG_DRAW_DEADLINE`].
+    deadline: Instant,
 }
 
 /// The turn end a [`StatusRead`] saw.
@@ -2202,6 +2281,10 @@ fn status_read(record: &SessionRecord) -> StatusRead {
             event_time: held.event_time,
             ceiling: held.held_at + TURN_END_CEILING,
             background: held.background,
+        }),
+        raise: record.pending_raise.map(|raise| RaiseRead {
+            event_time: raise.event_time,
+            deadline: raise.at + DIALOG_DRAW_DEADLINE,
         }),
     }
 }
@@ -2351,15 +2434,20 @@ fn on_plain_shell_transition(
 
 /// Whether a settled reading in a subagent's view with no dialog ends
 /// `record`'s prompt. After a dialog read in that view (`seen`): any prompt
-/// but one main's hook raised, since the dialog answered was the subagent's.
+/// that is not main's (a subagent's, or one a label-less notification
+/// filled), or none pending, since the dialog answered was the subagent's.
 /// With none read: only an `AwaitingInput` a subagent's hook raised, whose
-/// dialog the view would show.
+/// dialog the view would show, and only past its draw deadline, which the
+/// caller checks.
 fn subagent_edge_ends(record: &SessionRecord, seen: bool) -> bool {
-    let subagents = record.pending_from_subagent && record.pending_input.is_some();
+    if record.pending_input.is_none() {
+        return seen;
+    }
     if seen {
-        subagents || record.pending_input.is_none()
+        record.pending_owner != PromptOwner::Main
     } else {
-        subagents && record.status == SessionStatus::AwaitingInput
+        record.pending_owner == PromptOwner::Subagent
+            && record.status == SessionStatus::AwaitingInput
     }
 }
 
@@ -2410,15 +2498,16 @@ mod tests {
 mod hysteresis_tests {
     use super::{
         AgentReading, AgentStreams, CHECK_DEBOUNCE, CHECK_MAX_WAIT, CONFIRM_SPACING,
-        FOREIGN_WRITE_HOLD, IDLE_WITHOUT_STOP, LAUNCH_HOLD, SHELL_IDLE_AFTER, ScreenWrite,
-        ShellLaunch, ShellStreams, State, TITLE_QUIET_LIMIT, agent_reading, apply_screen_status,
-        hand_shell_back, on_plain_shell_transition, record_status, watch, watch_plain_shell,
+        DIALOG_DRAW_DEADLINE, FOREIGN_WRITE_HOLD, IDLE_WITHOUT_STOP, LAUNCH_HOLD, SHELL_IDLE_AFTER,
+        ScreenWrite, ShellLaunch, ShellStreams, State, TITLE_QUIET_LIMIT, agent_reading,
+        apply_screen_status, hand_shell_back, on_plain_shell_transition, record_status, watch,
+        watch_plain_shell,
     };
     use crate::paths::Dirs;
     use crate::screen::fixture_screen::screen_from;
     use crate::screen::rules::{CompiledRules, rules_for};
     use crate::screen::{Screen, SharedScreen};
-    use crate::session::{SessionRecord, SessionRegistry};
+    use crate::session::{PromptOwner, SessionRecord, SessionRegistry};
     use agent_api::{LineMatcher, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
     use chrono::Utc;
     use protocol::{
@@ -2577,7 +2666,8 @@ mod hysteresis_tests {
             pending_input: None,
             last_hook_time: None,
             main_hook_time: None,
-            pending_from_subagent: false,
+            pending_owner: crate::session::PromptOwner::Main,
+            pending_raise: None,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -6873,7 +6963,7 @@ mod hysteresis_tests {
     /// [`pending_record`] whose prompt a subagent's hook raised.
     fn subagent_pending_record() -> SessionRecord {
         let mut record = pending_record();
-        record.pending_from_subagent = true;
+        record.pending_owner = PromptOwner::Subagent;
         record
     }
 
@@ -6886,7 +6976,7 @@ mod hysteresis_tests {
     /// Whether the record marks its prompt as a subagent's.
     fn pending_from_subagent(h: &Harness) -> bool {
         let rec = h.registry.get(SESSION).expect("session registered");
-        rec.lock().expect("record lock").pending_from_subagent
+        rec.lock().expect("record lock").pending_owner == PromptOwner::Subagent
     }
 
     /// A subagent's prompt answered before any settled reading saw its
@@ -6950,7 +7040,8 @@ mod hysteresis_tests {
 
     /// A subagent's `PermissionRequest` raises the prompt and its dialog is
     /// drawn and replaced inside the debounce, so no settled reading sees it:
-    /// a settled reading in the subagent's view still ends the prompt.
+    /// a settled reading in the subagent's view still ends the prompt, once
+    /// its draw deadline has passed.
     #[tokio::test(start_paused = true)]
     async fn a_subagent_dialog_replaced_inside_the_debounce_still_ends_its_prompt() {
         let h = start_record(
@@ -6981,7 +7072,13 @@ mod hysteresis_tests {
         h.chunk(subagent_view_with_a_question());
         advance(CHECK_DEBOUNCE / 2).await;
         h.chunk(capture_frame(SUBAGENT_IN_VIEW));
-        advance(Duration::from_secs(2)).await;
+        advance(DIALOG_DRAW_DEADLINE.saturating_sub(CHECK_DEBOUNCE / 2 + ms(50))).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the prompt ended before its draw deadline"
+        );
+        advance(ms(500)).await;
         assert_eq!(
             h.status(),
             SessionStatus::Idle,
@@ -7058,7 +7155,8 @@ mod hysteresis_tests {
     }
 
     /// The watcher's own end of a prompt forgets its dialog was read, so a
-    /// subagent's next prompt answered unseen still ends.
+    /// subagent's next prompt answered unseen still ends, at its draw
+    /// deadline.
     #[tokio::test(start_paused = true)]
     async fn a_new_subagent_prompt_after_an_answered_one_ends_unseen() {
         let h =
@@ -7075,6 +7173,12 @@ mod hysteresis_tests {
         pass_hold().await;
         h.chunk(capture_frame(SUBAGENT_IN_VIEW));
         advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the next prompt ended before its draw deadline"
+        );
+        advance(DIALOG_DRAW_DEADLINE).await;
         assert_eq!(h.status(), SessionStatus::Idle, "the next prompt stayed up");
         assert!(!has_pending(&h), "the next prompt stayed pending");
     }
@@ -7498,6 +7602,407 @@ mod hysteresis_tests {
             "main's idle box did not end the status"
         );
         assert!(!has_pending(&h), "main's idle box kept the prompt pending");
+    }
+
+    /// Main's own permission request, for `permission_frame`'s command.
+    fn main_permission_request() -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "tool_input": {"command": "python -c \"print(6*7)\""},
+        })
+    }
+
+    /// The `permission_prompt` notification, with no `agent_id`.
+    fn label_less_notification() -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+            "message": "Claude needs your permission",
+        })
+    }
+
+    /// Whose the record's pending prompt is.
+    fn pending_owner(h: &Harness) -> PromptOwner {
+        let rec = h.registry.get(SESSION).expect("session registered");
+        rec.lock().expect("record lock").pending_owner
+    }
+
+    /// [`subagent_view_with_a_question`] in another subagent's view.
+    fn another_subagent_view_with_a_question() -> Vec<u8> {
+        String::from_utf8(subagent_view_with_a_question())
+            .expect("the frame is text")
+            .replace("Agent C sleep", "Agent D sleep")
+            .into_bytes()
+    }
+
+    /// The order measured with a background subagent: main's `Stop`, the
+    /// subagent's `PermissionRequest` 2.5 s later over the idle box, its
+    /// dialog drawn 3 s after that, the label-less notification 6 s after the
+    /// draw, then the answer. The prompt stays up until it is answered, its
+    /// owner stays the subagent, and the watcher raises no Attention of its
+    /// own (the hook's is the hook route's).
+    #[tokio::test(start_paused = true)]
+    async fn the_measured_background_subagent_order_raises_one_attention_and_keeps_its_prompt() {
+        let mut h = start_record("measured-order", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.hook(2, &main_stop(false));
+        h.chunk(idle_frame(&[]));
+        advance(ms(2500)).await;
+        assert_eq!(h.status(), SessionStatus::Idle, "main's turn did not end");
+        h.hook(3, &subagent_permission_request());
+        advance(ms(1600)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the idle box before the draw ended the prompt"
+        );
+        assert!(has_pending(&h), "the prompt was dropped before its draw");
+        advance(ms(1400)).await;
+        h.chunk(permission_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(h.status(), SessionStatus::AwaitingInput);
+        advance(Duration::from_secs(5)).await;
+        h.hook(4, &label_less_notification());
+        settle().await;
+        assert_eq!(
+            pending_owner(&h),
+            PromptOwner::Subagent,
+            "the notification relabelled the prompt"
+        );
+        assert!(
+            matches!(
+                pending_input(&h),
+                Some(protocol::PendingInput::Permission { .. })
+            ),
+            "the notification replaced the prompt: {:?}",
+            pending_input(&h)
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle, "the answer ended nothing");
+        assert!(!has_pending(&h), "the answered prompt stayed pending");
+        h.hook(
+            5,
+            &serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"}),
+        );
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert_eq!(h.attentions(), 0, "the watcher raised a second Attention");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subagent_prompt_holds_on_the_idle_box_until_its_dialog_draws() {
+        let mut h = start_record("undrawn-idle-box", false, hook_record(SessionStatus::Idle));
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        h.hook(2, &subagent_permission_request());
+        advance(ms(2500)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the idle box before the draw ended the prompt"
+        );
+        assert!(has_pending(&h), "the prompt was dropped before its draw");
+        h.chunk(permission_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(h.status(), SessionStatus::AwaitingInput);
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box after the draw did not end the prompt"
+        );
+        assert!(!has_pending(&h), "the answered prompt stayed pending");
+        assert_eq!(h.attentions(), 0, "the drawn dialog raised an Attention");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subagent_prompt_holds_in_its_view_until_its_dialog_draws() {
+        let mut h = start_record(
+            "undrawn-own-view",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(1)).await;
+        h.hook(2, &subagent_permission_request());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the view before the draw ended the prompt"
+        );
+        h.chunk(subagent_view_with_a_question());
+        advance(Duration::from_secs(1)).await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the answered dialog did not end the prompt"
+        );
+        assert!(!has_pending(&h), "the answered prompt stayed pending");
+        assert_eq!(h.attentions(), 0, "the drawn dialog raised an Attention");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_undrawn_prompt_ends_at_the_draw_deadline() {
+        let h = start_record("undrawn-deadline", false, hook_record(SessionStatus::Idle));
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        h.hook(2, &main_permission_request());
+        advance(DIALOG_DRAW_DEADLINE.saturating_sub(ms(50))).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the prompt ended before its draw deadline"
+        );
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box past the deadline did not end the prompt"
+        );
+        assert!(!has_pending(&h), "the ended prompt stayed pending");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_undrawn_subagent_prompt_ends_in_a_subagents_view_at_the_draw_deadline() {
+        let h = start_record(
+            "undrawn-view-deadline",
+            false,
+            hook_record(SessionStatus::Idle),
+        );
+        pass_hold().await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(1)).await;
+        h.hook(2, &subagent_permission_request());
+        advance(DIALOG_DRAW_DEADLINE.saturating_sub(ms(50))).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the prompt ended before its draw deadline"
+        );
+        advance(ms(500)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the view past the deadline did not end the prompt"
+        );
+        assert!(!has_pending(&h), "the ended prompt stayed pending");
+    }
+
+    /// A subagent's prompt whose dialog was read in its view, answered from
+    /// the chat; the agent repaints the view without it, and a second
+    /// subagent's prompt lands inside that hold, so no reading came between.
+    /// Returns once the second prompt's own hold has passed.
+    async fn answer_then_raise_another_inside_the_hold(tag: &str) -> Harness {
+        let h = start_on_a_subagents_dialog_from(tag, subagent_pending_record()).await;
+        h.registry.clear_answered_prompt_if(SESSION, |_| true);
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the chat answer ended nothing"
+        );
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(ms(300)).await;
+        h.hook(3, &subagent_permission_request());
+        pass_hold().await;
+        h
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_prompt_raised_inside_the_hold_forgets_the_last_dialog_read() {
+        let h = answer_then_raise_another_inside_the_hold("new-prompt-forgets").await;
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the last prompt's dialog read ended the new one"
+        );
+        h.chunk(another_subagent_view_with_a_question());
+        advance(Duration::from_secs(1)).await;
+        h.chunk(another_subagent_in_view());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the new prompt's answered dialog did not end it"
+        );
+        assert!(!has_pending(&h), "the answered prompt stayed pending");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_subagent_prompt_answered_unread_ends_at_its_deadline() {
+        let h = answer_then_raise_another_inside_the_hold("new-prompt-unread").await;
+        advance(DIALOG_DRAW_DEADLINE.saturating_sub(FOREIGN_WRITE_HOLD + ms(50))).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the new prompt ended before its draw deadline"
+        );
+        advance(ms(500)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the new prompt outlived its draw deadline"
+        );
+        assert!(!has_pending(&h), "the ended prompt stayed pending");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dialog_noted_during_the_hooks_hold_counts_for_the_new_prompt() {
+        let h = start_record("noted-in-hold", false, hook_record(SessionStatus::Idle));
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        h.hook(2, &subagent_permission_request());
+        advance(ms(100)).await;
+        h.chunk(permission_frame());
+        advance(ms(150)).await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a dialog seen in the hook's hold did not count as drawn"
+        );
+        assert!(!has_pending(&h), "the answered prompt stayed pending");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_permission_request_over_its_questions_pre_tool_use_keeps_the_dialog_read() {
+        let h = start_record(
+            "question-then-permission",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(
+            2,
+            &serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "AskUserQuestion",
+                "tool_input": {"questions": [{
+                    "question": "Which function should be added to calc.py next?",
+                    "header": "Next fn",
+                    "multiSelect": false,
+                    "options": [{"label": "sub"}, {"label": "div"}, {"label": "pow"}],
+                }]},
+            }),
+        );
+        h.chunk(question_frame());
+        pass_hold().await;
+        h.chunk(transcript_overlay_frame());
+        advance(ms(200)).await;
+        h.hook(
+            3,
+            &serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "AskUserQuestion",
+                "tool_input": {"questions": []},
+            }),
+        );
+        advance(ms(100)).await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the question's PermissionRequest forgot its dialog was read"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_main_prompt_with_a_late_dialog_holds_through_the_spinner() {
+        let mut h = start_record(
+            "late-dialog-spinner",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(1)).await;
+        h.hook(2, &main_permission_request());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the spinner before the draw ended the prompt"
+        );
+        assert!(has_pending(&h), "the prompt was dropped before its draw");
+        h.chunk(permission_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(h.status(), SessionStatus::AwaitingInput);
+        assert_eq!(h.attentions(), 0, "the late dialog raised an Attention");
+        h.hook(
+            3,
+            &serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"}),
+        );
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert!(
+            !has_pending(&h),
+            "the tool's own PostToolUse kept the prompt"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_notification_filled_prompt_ends_in_the_view_its_dialog_was_read() {
+        let mut h = start_record(
+            "notification-filled-read",
+            false,
+            hook_record(SessionStatus::Idle),
+        );
+        pass_hold().await;
+        h.chunk(subagent_view_with_a_question());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the screen raised no wait"
+        );
+        assert_eq!(h.attentions(), 1, "the screen's wait raised no Attention");
+        h.hook(2, &label_less_notification());
+        assert_eq!(pending_owner(&h), PromptOwner::Unknown);
+        advance(Duration::from_secs(1)).await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the answered dialog did not end the filled prompt"
+        );
+        assert!(!has_pending(&h), "the answered prompt stayed pending");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_notification_filled_prompt_is_kept_in_a_subagents_view_with_no_dialog_read() {
+        let h = start_record(
+            "notification-filled-unread",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        pass_hold().await;
+        h.hook(2, &label_less_notification());
+        pass_hold().await;
+        for _ in 0..2 {
+            h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+            advance(Duration::from_secs(2)).await;
+        }
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a subagent's view ended a prompt no dialog was read for"
+        );
+        assert!(has_pending(&h), "a subagent's view dropped the prompt");
+        assert_eq!(pending_owner(&h), PromptOwner::Unknown);
     }
 
     /// A held `Stop` lands on its first settled frame even with another

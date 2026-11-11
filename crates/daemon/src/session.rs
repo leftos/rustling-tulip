@@ -327,12 +327,20 @@ pub struct SessionRecord {
     /// status, so a session reattached `AwaitingInput` keeps what it was
     /// asking; any other restored status starts with none.
     pub pending_input: Option<PendingInput>,
-    /// True when a subagent's hook raised [`Self::pending_input`], false when
-    /// main's hook did or nothing is pending. A subagent's view ends only a
-    /// prompt a subagent raised. Runtime-only: neither mirrored into the
-    /// sidecar nor sent on the wire, so a prompt restored on reattach reads
-    /// as main's. Cleared with the prompt by [`Self::clear_pending`].
-    pub pending_from_subagent: bool,
+    /// Whose hook raised [`Self::pending_input`]: main's, a subagent's, or
+    /// unknown for a label-less `Notification` that filled an empty slot;
+    /// [`PromptOwner::Main`] while nothing is pending. A subagent's view ends
+    /// only a prompt that is not main's, and a main turn end leaves one that
+    /// is not main's waiting. Runtime-only: neither mirrored into the sidecar
+    /// nor sent on the wire, so a prompt restored on reattach reads as
+    /// main's. Reset with the prompt by [`Self::clear_pending`].
+    pub pending_owner: PromptOwner,
+    /// The hook event that raised [`Self::pending_input`] and when it was
+    /// applied, which the screen watcher's draw guard counts its deadline
+    /// from; `None` for a prompt a `Notification` filled, one the screen
+    /// raised and one restored on reattach. Runtime-only, and cleared with
+    /// the prompt by [`Self::clear_pending`].
+    pub pending_raise: Option<PromptRaise>,
     /// Time of the last hook event applied to this session, in nanoseconds
     /// since the Unix epoch, from the shim's `X-RT-Hook-Time` header. Async
     /// hooks finish out of order, so an event at or before this time is
@@ -433,6 +441,33 @@ pub struct SessionRecord {
     pub size_client: Option<String>,
 }
 
+/// Whose hook raised a session's pending prompt, which decides what may end
+/// it (see [`SessionRecord::pending_owner`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PromptOwner {
+    /// The main agent's hook raised it; also the value while nothing is
+    /// pending, and for a prompt restored on reattach.
+    #[default]
+    Main,
+    /// A subagent's hook raised it, or a subagent's `Notification` filled an
+    /// empty slot.
+    Subagent,
+    /// A `Notification` with no `agent_id` filled an empty slot: the prompt
+    /// on screen may be either agent's.
+    Unknown,
+}
+
+/// The hook event that raised a pending prompt (see
+/// [`SessionRecord::pending_raise`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PromptRaise {
+    /// The raising event's hook time, which names the prompt to the screen
+    /// watcher's memory of the dialogs it read.
+    pub event_time: u128,
+    /// When the raise was applied, on the tokio clock.
+    pub at: tokio::time::Instant,
+}
+
 /// What the screen's sighting of an agent in a shell did to its record (see
 /// [`SessionRecord::agent_shown_in_plain_shell`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -460,10 +495,11 @@ pub fn default_agent() -> AgentId {
 }
 
 impl SessionRecord {
-    /// Drop the pending prompt and whose it was, together.
+    /// Drop the pending prompt, whose it was and its raise, together.
     pub fn clear_pending(&mut self) {
         self.pending_input = None;
-        self.pending_from_subagent = false;
+        self.pending_owner = PromptOwner::Main;
+        self.pending_raise = None;
     }
 
     /// The agent whose plugin maps this session's hook events: its own agent,
@@ -1951,7 +1987,8 @@ impl SessionRegistry {
             pending_input: None,
             last_hook_time: None,
             main_hook_time: None,
-            pending_from_subagent: false,
+            pending_owner: crate::session::PromptOwner::Main,
+            pending_raise: None,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -2041,7 +2078,8 @@ impl SessionRegistry {
             pending_input,
             last_hook_time: None,
             main_hook_time: None,
-            pending_from_subagent: false,
+            pending_owner: crate::session::PromptOwner::Main,
+            pending_raise: None,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -2108,7 +2146,8 @@ impl SessionRegistry {
             pending_input: None,
             last_hook_time: None,
             main_hook_time: None,
-            pending_from_subagent: false,
+            pending_owner: crate::session::PromptOwner::Main,
+            pending_raise: None,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -2203,7 +2242,8 @@ mod tests {
             pending_input: None,
             last_hook_time: None,
             main_hook_time: None,
-            pending_from_subagent: false,
+            pending_owner: crate::session::PromptOwner::Main,
+            pending_raise: None,
             hook_driven: false,
             background: false,
             turn_end: None,
