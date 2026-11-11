@@ -4,6 +4,15 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.12.0-alpha
+
+### Highlights
+
+- Update another computer on an older release from the Connections dialog, over the tailnet or SSH, and tell your connected clients to update.
+- Start sessions from the phone's Home: launch a repo's last launch again, a preset, or `/nextup` in any repo or workspace.
+- Choose Claude's effort level when starting a session, with Fable among Claude's models.
+- Questions, toasts, the Dashboard and Accounts show their whole text, wrapping it, instead of cutting it to one line.
+
 ### Added
 
 - A session's screen on the phone shows its running subagents, background shells and next wake-up, as the desktop's strip does.
