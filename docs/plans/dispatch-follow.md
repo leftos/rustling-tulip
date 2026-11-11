@@ -90,7 +90,7 @@ New types in `crates/protocol/src/lib.rs`:
 `DaemonMessage` variants:
 
 - `DispatchRuns { runs: Vec<DispatchRunSnapshot> }`: the full list, sent after `Welcome` beside `Sessions`, and again to a connection whose broadcast stream lagged.
-- `DispatchRunUpdated { run: DispatchRunSnapshot }`: a run appeared or changed, throttled to one per run per 500 ms.
+- `DispatchRunUpdated { run: DispatchRunSnapshot }`: a run appeared or changed; at most one per run per tailer poll (250 ms), every line of a poll folded into it. Updates and removals are sent under the runs lock, so a client sees them in the order the runs changed.
 - `DispatchRunRemoved { run_id }`: the file went, or the pid died.
 
 `ClientMessage` variant:
@@ -102,14 +102,14 @@ The phone app's types are regenerated (`cargo run -p protocol-ts`, committing `a
 ### 6. Daemon: watcher, tailer, liveness (`crates/daemon/src/dispatch_runs.rs`, new)
 
 - **Watcher.** One `notify_debouncer_full` debouncer on the live-run folder, `RecursiveMode::NonRecursive`, 100 ms, as `git_watch.rs` sets one up. A change to a `.json` file re-reads that file through one idempotent `upsert(run_id)`; the removal of a `.json` file removes the run. A full folder scan runs at startup and every 30 s and calls the same `upsert`, covering missed events. A file that fails to parse is retried on the next event or scan, never dropped on one failure.
-- **Main checkout.** On first sight the daemon resolves `main_checkout`: a worktree whose `.git` is a gitfile pointing under `<repo>/.git/worktrees/<name>` resolves to `<repo>` through `repo_path_for_worktree` (moved from `worktrees_admin.rs` into `git.rs` as `pub(crate)`). A plain checkout, a gitdir elsewhere (a submodule layout), or a missing or unreadable worktree leaves it `None`, and the client places the run by its worktree path, as an unregistered folder's sessions are placed.
+- **Main checkout.** On first sight the daemon resolves `main_checkout`: a worktree whose `.git` is a gitfile pointing under `<repo>/.git/worktrees/<name>` resolves to `<repo>` through `repo_path_for_worktree` (moved from `worktrees_admin.rs` into `git.rs` as `pub(crate)`). A plain checkout or a missing or unreadable worktree leaves it `None`, and the client places the run by its worktree path, as an unregistered folder's sessions are placed. The function moves unchanged, so a submodule-layout gitdir resolves to its super repo, which places the run under a real repo.
 - **Tailer.** One task per run, polling the file's `stream` path every 250 ms from its last byte offset. It keeps a trailing partial line until its newline arrives, resets to 0 if the file shrinks, waits for a stream file that does not exist yet, and stops on the run's removal (a cancel token). The first read replays the whole file, which rebuilds a run's state after a daemon restart or a late discovery (a stream is a few MB at most).
 - **Parsing.** Each line goes through `agent_registry::plugin(&agent).parse_headless_line(line)`, the same seam a headless session uses (`crates/daemon/src/headless.rs`), so the daemon never names the parser.
 
   The events feed a pure accumulator, `StreamState { status, metrics, recent_actions, agent_session_id }` with `apply(&mut self, HeadlessEvent)`, which the headless session path shares. `HeadlessEvent` gains an additive `SessionId(String)` that the Claude plugin emits from the `system`/`init` line. The 200-entry recent-actions cap (`RECENT_ACTIONS_CAP`) stays in one place.
-- **Liveness.** Every 2 s the daemon checks each run's process guard. On Windows the guard opens the `child_pid` process and compares its creation FILETIME (`GetProcessTimes`) exactly with `child_start`, the tool's own rule. When `child_start` is null (a tool off Windows), it compares the process's start time from `sysinfo` in whole seconds with `started_at`, accepting 60 s before to 5 s after.
+- **Liveness.** Every 2 s the daemon checks each run's process guard, which answers alive, dead or unknown, dead only on evidence, as the tool's `runner_alive` does. On Windows it opens the `child_pid` process: no such pid is dead; any other open failure (another account's process, a transient error) is unknown; an exit code read that is not still-active is dead; a creation FILETIME (`GetProcessTimes`) read that differs from `child_start` is dead; an unreadable one is unknown. When `child_start` is null (a tool off Windows), it compares the process's start time from `sysinfo` in whole seconds with `started_at`, accepting 60 s before to 5 s after; a start it cannot read is unknown. Unknown counts as alive: the run stays listed and its file is kept.
 
-  A run whose process is gone or fails the guard is removed and its live-run file deleted: the tool crashed or was killed before its `finally`. An orphan `.stop` with no `.json` beside it is deleted too. The tool never deletes other runs' files.
+  A run whose guard says dead is removed and its live-run file deleted: the tool crashed or was killed before its `finally`. An orphan `.stop` with no `.json` beside it is deleted too. The tool never deletes other runs' files.
 - **Idle exit.** A live run does not keep the daemon or the machine awake (`idle_exit.rs` and `keep_awake.rs` are unchanged). A daemon that exits loses nothing, because the next one rescans and replays.
 
 ### 7. A linked run counts as background work
@@ -258,7 +258,7 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: `crates/daemon-client/src/isolation.rs`, `crates/daemon/src/paths.rs`, `crates/dev-daemon/src/env.rs`, `apps/native/src/driver_gate.rs`.
   - Proof: `gate … -- cargo nextest run -p daemon-client -p dev-daemon --cargo-profile test-release -E 'test(/isolat|dispatch_dir/)'`, then `gate … -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --features driver -E 'test(/driver_gate/)'`.
   - Waits on: DF.3. Hotspot: none.
-- [ ] **DF.5 Watcher, tailer, liveness.** Debouncer plus 30 s rescan, the 250 ms tailer (partial line, shrink, missing file), the exact creation-time guard with stale-file deletion, and main-checkout resolution with `repo_path_for_worktree` moved to `git.rs`.
+- [x] **DF.5 Watcher, tailer, liveness.** Debouncer plus 30 s rescan, the 250 ms tailer (partial line, shrink, missing file), the exact creation-time guard with stale-file deletion, and main-checkout resolution with `repo_path_for_worktree` moved to `git.rs`.
   - Files: `crates/daemon/src/dispatch_runs.rs`, `crates/daemon/src/git.rs`, `crates/daemon/src/worktrees_admin.rs`.
   - Proof: `gate … -- cargo nextest run -p daemon --cargo-profile test-release -E 'test(/dispatch_runs::|repo_path_for_worktree/)'`. The tests use a scratch folder and a live-run file for the test's own child process: appended stream lines show as actions, killing the child removes the run and deletes its file, a dead-pid file is dropped at startup, and a file whose start time does not match is rejected.
   - Waits on: DF.2, DF.3. Hotspot: none.

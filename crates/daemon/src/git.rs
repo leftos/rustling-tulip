@@ -1200,10 +1200,68 @@ fn resolved_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Read the `.git` gitfile inside `worktree` and derive the originating
+/// repo's working-tree path. Returns `None` if the file is missing,
+/// malformed, or points to a path that no longer exists.
+pub(crate) fn repo_path_for_worktree(worktree: &Path) -> Option<PathBuf> {
+    let gitfile = worktree.join(".git");
+    let contents = std::fs::read_to_string(&gitfile).ok()?;
+    let line = contents.lines().find(|l| l.starts_with("gitdir:"))?;
+    let raw = line.strip_prefix("gitdir:")?.trim();
+    let gitdir = PathBuf::from(raw);
+    // <repo>/.git/worktrees/<wt-name>  →  pop wt-name, pop worktrees, pop .git
+    let repo_dot_git = gitdir.parent()?.parent()?;
+    let repo = repo_dot_git.parent()?.to_path_buf();
+    repo.exists().then_some(repo)
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
 mod tests {
     use super::*;
+
+    /// A scratch folder under the temp dir, private to this process and case,
+    /// removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(case: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("rt-git-{case}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("the scratch folder is created");
+            Self(root)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn repo_path_for_worktree_resolves_a_gitfile_worktree() {
+        let scratch = Scratch::new("gitfile");
+        let repo = scratch.0.join("repo");
+        let gitdir = repo.join(".git").join("worktrees").join("wt");
+        std::fs::create_dir_all(&gitdir).expect("the worktree's gitdir is created");
+        let worktree = scratch.0.join("wt");
+        std::fs::create_dir_all(&worktree).expect("the worktree is created");
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .expect("the gitfile is written");
+        assert_eq!(repo_path_for_worktree(&worktree), Some(repo));
+    }
+
+    #[test]
+    fn repo_path_for_worktree_is_none_for_a_plain_checkout() {
+        let scratch = Scratch::new("plain");
+        let checkout = scratch.0.join("plain");
+        std::fs::create_dir_all(checkout.join(".git")).expect("the .git folder is created");
+        assert_eq!(repo_path_for_worktree(&checkout), None);
+    }
 
     fn paths(strs: &[&str]) -> Vec<PathBuf> {
         strs.iter().map(PathBuf::from).collect()

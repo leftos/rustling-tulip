@@ -1,10 +1,5 @@
-//! The dispatch tool's live runs: the live-run file format the daemon reads. The watcher, tailer and
-//! liveness check arrive with DF.5 (`docs/plans/dispatch-follow.md`).
-
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the dispatch-run watcher (DF.5)")
-)]
+//! The live-run file format the daemon reads (`docs/plans/dispatch-follow.md`
+//! section 3).
 
 use chrono::{DateTime, Utc};
 use protocol::AgentId;

@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
+use crate::git::repo_path_for_worktree;
 use crate::paths::{normalize_path_key, simplify_path};
 use crate::session::SessionRegistry;
 use crate::state::AppState;
@@ -909,21 +910,6 @@ pub fn is_session_live(snap: &SessionSnapshot) -> bool {
         | SessionStatus::Working
         | SessionStatus::AwaitingInput => true,
     }
-}
-
-/// Read the `.git` gitfile inside `worktree` and derive the originating
-/// repo's working-tree path. Returns `None` if the file is missing,
-/// malformed, or points to a path that no longer exists.
-fn repo_path_for_worktree(worktree: &Path) -> Option<PathBuf> {
-    let gitfile = worktree.join(".git");
-    let contents = std::fs::read_to_string(&gitfile).ok()?;
-    let line = contents.lines().find(|l| l.starts_with("gitdir:"))?;
-    let raw = line.strip_prefix("gitdir:")?.trim();
-    let gitdir = PathBuf::from(raw);
-    // <repo>/.git/worktrees/<wt-name>  →  pop wt-name, pop worktrees, pop .git
-    let repo_dot_git = gitdir.parent()?.parent()?;
-    let repo = repo_dot_git.parent()?.to_path_buf();
-    repo.exists().then_some(repo)
 }
 
 fn is_dir(ent: &std::fs::DirEntry) -> bool {
