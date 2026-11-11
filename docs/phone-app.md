@@ -56,6 +56,16 @@ A launch tapped while the phone is offline is kept and sent again each time the 
 
 A launch that waits a minute with no answer, or comes back after nine minutes, is dropped with `This launch may have started a session. Check the list before launching again.`, since the PC no longer remembers its request by then. A PC too old to launch from the phone drops it with `This host can't launch from the phone.` Closing or reloading the app forgets a launch that was still waiting.
 
+## New session
+
+Home shows a `New session` button below the bar and the Needs you cards and above the groups, once the session list has loaded and when the PC's daemon is new enough to offer it. It is disabled while the bar says `Reconnecting…`. Tap it to open or close a list with one row per workspace and per repo that is not in a workspace, in Home's order, whether or not it was launched before.
+
+A row's `Start` begins a session there with `/nextup` as its first prompt. The row reads `Starting…` and is disabled until the PC answers, and that repo or workspace's `Launch last` is disabled meanwhile (it keeps its label); while a `Launch last` waits, the row's `Start` is disabled, so a repo or workspace has one launch waiting at a time. The list stays open after a start and across reconnects.
+
+A refusal shows the PC's own text in red under its row, and so do the two dropped-start texts below; none shows under a group header.
+
+A start tapped while the phone is offline is kept and sent again each time the connection comes back, with the same request and the same nine-minute and one-minute rules as `Launch last`. A PC too old to start from the phone drops it with `This host can't launch from the phone.`, shown under that repo or workspace's name where the `New session` button would be, with no button. Closing or reloading the app forgets a start that was still waiting.
+
 ## Presets
 
 Each repo or workspace group header on Home has a `Presets` button that opens and closes the group's list of presets. The first open asks the PC for them, and an open list is asked again when the connection comes back. A refused list shows the PC's own error inside the open list.

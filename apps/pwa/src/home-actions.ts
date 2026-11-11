@@ -26,8 +26,21 @@ export interface PendingRequest {
   readonly discardsOriginal?: boolean;
 }
 
-/** A Launch last on its way: one per container, kept until the daemon answers it. */
+/** The two launches a container's tap sends: its stored last launch, or a new `/nextup` session. */
+export type LaunchKind = "launch_last" | "new_session";
+
+/** Whether the host takes a launch of this kind: it lists the kind's feature. */
+export type LaunchSupport = (kind: LaunchKind) => boolean;
+
+/** The first prompt a New session from the phone starts with. */
+export const NEW_SESSION_PROMPT = "/nextup";
+
+/**
+ * A Launch last or a New session on its way: one per container, whatever its
+ * kind, kept until the daemon answers it.
+ */
 export interface PendingLaunch {
+  readonly kind: LaunchKind;
   readonly requestId: string;
   readonly target: ContainerRef;
   /** When the request's first send went out, ms since the epoch: the daemon's journal clock. */
@@ -85,8 +98,10 @@ export interface HomeActions {
   readonly errors: ReadonlyMap<string, string>;
   /** The launches waiting for the daemon, one per container. */
   readonly launches: readonly PendingLaunch[];
-  /** The daemon's refusal text per container, keyed by `containerKey`. */
+  /** The daemon's refusal of a Launch last per container, keyed by `containerKey`. */
   readonly launchErrors: ReadonlyMap<string, string>;
+  /** The daemon's refusal of a New session per container, keyed by `containerKey`. */
+  readonly newSessionErrors: ReadonlyMap<string, string>;
   /** The preset launches waiting for their job's first update, one per preset per container. */
   readonly presetLaunches: readonly PendingPresetLaunch[];
   /** Why a preset's launch was dropped, keyed by `presetKey`. */
@@ -100,11 +115,12 @@ export const NO_ACTIONS: HomeActions = {
   errors: new Map(),
   launches: [],
   launchErrors: new Map(),
+  newSessionErrors: new Map(),
   presetLaunches: [],
   presetErrors: new Map(),
 };
 
-/** What the phone says when the host no longer lists `launch_last`. */
+/** What the phone says when the host no longer lists `launch_last`, or `new_session` for a New session. */
 export const UNSUPPORTED_LAUNCH = "This host can't launch from the phone.";
 
 /** What a preset says when its unanswered launch cannot be resent: the host lacks `preset_job_repeat`. */
@@ -114,6 +130,12 @@ export const UNSUPPORTED_PRESET_RESEND =
 /** The key a preset's pending launch and its dropped-launch text are filed under. */
 export function presetKey(target: ContainerRef, presetId: string): string {
   return `${containerKey(target)}/${presetId}`;
+}
+
+/** The kind of launch waiting on a container; null when none waits. */
+export function pendingLaunchKind(state: HomeActions, target: ContainerRef): LaunchKind | null {
+  const key = containerKey(target);
+  return state.launches.find((launch) => containerKey(launch.target) === key)?.kind ?? null;
 }
 
 /** The key a launch's pending record and its refusal text are filed under. */
@@ -278,19 +300,75 @@ export function launchLast(
   newRequestId: NewRequestId,
   now: number,
 ): ActionResult {
+  return startLaunch(state, "launch_last", target, newRequestId, now);
+}
+
+/**
+ * Start a new session in the container with `/nextup` as its first prompt,
+ * or nothing while a launch of either kind on it still waits for the
+ * daemon. Recorded before the send, as a Launch last is, and resent the same way.
+ */
+export function newSession(
+  state: HomeActions,
+  target: ContainerRef,
+  newRequestId: NewRequestId,
+  now: number,
+): ActionResult {
+  return startLaunch(state, "new_session", target, newRequestId, now);
+}
+
+/** A launch of `kind` on `target`, refused while any launch on that container waits. */
+function startLaunch(
+  state: HomeActions,
+  kind: LaunchKind,
+  target: ContainerRef,
+  newRequestId: NewRequestId,
+  now: number,
+): ActionResult {
   const key = containerKey(target);
   if (state.launches.some((launch) => containerKey(launch.target) === key)) {
     return { message: null, state };
   }
-  const requestId = newRequestId();
-  return {
-    message: { type: "launch_last", target, request_id: requestId },
-    state: {
-      ...state,
-      launches: [...state.launches, { requestId, target, sentAt: now, lastSentAt: now }],
-      launchErrors: withoutLaunchError(state.launchErrors, key),
-    },
+  const launch: PendingLaunch = {
+    kind,
+    requestId: newRequestId(),
+    target,
+    sentAt: now,
+    lastSentAt: now,
   };
+  const errors = launchErrorMaps(state);
+  errors[kind].delete(key);
+  return {
+    message: launchMessage(launch),
+    state: { ...withLaunchErrorMaps(state, errors), launches: [...state.launches, launch] },
+  };
+}
+
+/** The message a pending launch sends, first and on every resend, under its request id. */
+export function launchMessage(launch: PendingLaunch): ClientMessage {
+  if (launch.kind === "new_session") {
+    return {
+      type: "new_session",
+      target: launch.target,
+      initial_prompt: NEW_SESSION_PROMPT,
+      request_id: launch.requestId,
+    };
+  }
+  return { type: "launch_last", target: launch.target, request_id: launch.requestId };
+}
+
+/** Writable copies of the two refusal maps, by the launch kind each one's text is for. */
+type LaunchErrorMaps = Record<LaunchKind, Map<string, string>>;
+
+function launchErrorMaps(state: HomeActions): LaunchErrorMaps {
+  return {
+    launch_last: new Map(state.launchErrors),
+    new_session: new Map(state.newSessionErrors),
+  };
+}
+
+function withLaunchErrorMaps(state: HomeActions, errors: LaunchErrorMaps): HomeActions {
+  return { ...state, launchErrors: errors.launch_last, newSessionErrors: errors.new_session };
 }
 
 /**
@@ -426,32 +504,34 @@ export interface LaunchResend {
  * The messages a reconnect sends for the launches still waiting. A host that
  * launches gets each one again with its earlier id, so the daemon's journal
  * makes one session: a launch older than the journal is dropped instead,
- * since a resend would make a second session. An older host gets nothing,
- * its launches are dropped, and each container shows why.
+ * since a resend would make a second session. A host that does not list a
+ * launch's kind gets nothing for it, the launch is dropped, and its
+ * container shows why.
  */
 export function resendLaunches(
   state: HomeActions,
-  supportsLaunchLast: boolean,
+  supports: LaunchSupport,
   now: number,
 ): LaunchResend {
   if (state.launches.length === 0) {
     return { messages: [], state };
   }
-  const launchErrors = new Map(state.launchErrors);
+  const errors = launchErrorMaps(state);
   const messages: ClientMessage[] = [];
   const launches: PendingLaunch[] = [];
   for (const launch of state.launches) {
     const key = containerKey(launch.target);
-    if (!supportsLaunchLast) {
-      launchErrors.set(key, UNSUPPORTED_LAUNCH);
+    if (!supports(launch.kind)) {
+      errors[launch.kind].set(key, UNSUPPORTED_LAUNCH);
     } else if (now - launch.sentAt >= LAUNCH_RESEND_LIMIT_MS) {
-      launchErrors.set(key, LAUNCH_MAYBE_STARTED);
+      errors[launch.kind].set(key, LAUNCH_MAYBE_STARTED);
     } else {
-      launches.push({ ...launch, lastSentAt: now });
-      messages.push({ type: "launch_last", target: launch.target, request_id: launch.requestId });
+      const resent = { ...launch, lastSentAt: now };
+      launches.push(resent);
+      messages.push(launchMessage(resent));
     }
   }
-  return { messages, state: { ...state, launches, launchErrors } };
+  return { messages, state: { ...withLaunchErrorMaps(state, errors), launches } };
 }
 
 /**
@@ -463,16 +543,18 @@ export function expireLaunches(state: HomeActions, now: number): HomeActions {
   if (state.launches.length === 0) {
     return state;
   }
-  const launchErrors = new Map(state.launchErrors);
+  const errors = launchErrorMaps(state);
   const launches: PendingLaunch[] = [];
   for (const launch of state.launches) {
     if (now - launch.lastSentAt >= LAUNCH_ANSWER_LIMIT_MS) {
-      launchErrors.set(containerKey(launch.target), LAUNCH_MAYBE_STARTED);
+      errors[launch.kind].set(containerKey(launch.target), LAUNCH_MAYBE_STARTED);
     } else {
       launches.push(launch);
     }
   }
-  return launches.length === state.launches.length ? state : { ...state, launches, launchErrors };
+  return launches.length === state.launches.length
+    ? state
+    : { ...withLaunchErrorMaps(state, errors), launches };
 }
 
 /**
@@ -521,10 +603,11 @@ function refuse(state: HomeActions, requestId: string | null, text: string): Fol
   if (launch === undefined) {
     return { state, effects: [] };
   }
-  const launchErrors = new Map(state.launchErrors);
-  launchErrors.set(containerKey(launch.target), text);
+  // A Launch last's refusal shows under its group header, a New session's under its picker row.
+  const errors = launchErrorMaps(state);
+  errors[launch.kind].set(containerKey(launch.target), text);
   return {
-    state: { ...state, launches: withoutLaunch(state, requestId), launchErrors },
+    state: { ...withLaunchErrorMaps(state, errors), launches: withoutLaunch(state, requestId) },
     effects: [],
   };
 }

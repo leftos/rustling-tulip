@@ -5,6 +5,7 @@ import {
   NO_ACTIONS,
   launchLast,
   launchPreset,
+  newSession,
   presetKey,
   stop,
   UNSUPPORTED_PRESET_RESEND,
@@ -125,6 +126,8 @@ function view(overrides: Partial<HomeState> = {}): HomeState {
     index: 0,
     offline: false,
     supportsLaunchLast: true,
+    supportsNewSession: true,
+    newSessionOpen: false,
     ...overrides,
   };
 }
@@ -778,4 +781,109 @@ test("home_screen_says_no_sessions_when_only_hidden_launches_would_show", () => 
   );
   // With the feature the group is content, so the line stays away.
   expect(homeScreen(idle, NO_ACTIONS, view()).empty).toBeNull();
+});
+
+/** A repo that has never launched: it makes no group, so a loaded model of it alone is empty. */
+const BETA: RepoEntry = { id: "b", name: "beta", path: "C:\\dev\\beta", default_branch: null };
+
+test("home_screen_shows_new_session_with_no_sessions_and_with_groups", () => {
+  const empty: HomeModel = { ...model([]), repos: [BETA], loaded: true };
+  const screen = homeScreen(empty, NO_ACTIONS, view());
+  expect(screen.empty).toBe("No sessions");
+  expect(screen.newSession).toEqual({ label: "New session", open: false, enabled: true, rows: [] });
+
+  expect(homeScreen(empty, NO_ACTIONS, view({ newSessionOpen: true })).newSession?.rows).toEqual([
+    { target: { kind: "repo", id: "b" }, name: "beta", label: "Start", enabled: true, error: null },
+  ]);
+
+  const running: HomeModel = { ...repoModel([session("s1", { status: "working" })]), loaded: true };
+  const withGroups = homeScreen(running, NO_ACTIONS, view());
+  expect(withGroups.groups).toHaveLength(1);
+  expect(withGroups.newSession?.label).toBe("New session");
+});
+
+test("home_screen_hides_new_session_on_a_host_without_it_and_before_the_model_loads", () => {
+  const empty: HomeModel = { ...model([]), repos: [BETA], loaded: true };
+  expect(homeScreen(empty, NO_ACTIONS, view({ supportsNewSession: false })).newSession).toBeNull();
+
+  const unloaded: HomeModel = { ...model([]), repos: [BETA] };
+  expect(homeScreen(unloaded, NO_ACTIONS, view()).newSession).toBeNull();
+});
+
+test("home_screen_shows_a_dropped_new_session_error_on_a_host_without_it", () => {
+  const running: HomeModel = {
+    ...repoModel([session("s1", { status: "working" })]),
+    repos: [REPO, BETA],
+    loaded: true,
+  };
+  const dropped: HomeActions = {
+    ...NO_ACTIONS,
+    newSessionErrors: new Map([["repo:a", "This host can't launch from the phone."]]),
+  };
+
+  const screen = homeScreen(running, dropped, view({ supportsNewSession: false }));
+  expect(screen.newSession).toEqual({
+    label: null,
+    open: true,
+    enabled: false,
+    rows: [
+      {
+        target: { kind: "repo", id: "a" },
+        name: "alpha",
+        label: null,
+        enabled: false,
+        error: "This host can't launch from the phone.",
+      },
+    ],
+  });
+  // Never under the group header.
+  expect(screen.groups[0]?.launchError).toBeNull();
+});
+
+test("home_screen_disables_new_session_while_reconnecting", () => {
+  const empty: HomeModel = { ...model([]), repos: [BETA], loaded: true };
+
+  const picker = homeScreen(
+    empty,
+    NO_ACTIONS,
+    view({ status: "backoff", newSessionOpen: true }),
+  ).newSession;
+  expect(picker?.enabled).toBe(false);
+  expect(picker?.rows.map((row) => row.enabled)).toEqual([false]);
+});
+
+test("home_screen_shows_one_pending_launch_per_container_by_its_own_kind", () => {
+  const running: HomeModel = {
+    ...repoModel([session("s1", { status: "working" })]),
+    repos: [REPO, BETA],
+    loaded: true,
+  };
+  const alpha = { kind: "repo" as const, id: "a" };
+
+  // A New session waits: its row says so, and Launch last is off but keeps its own label.
+  const starting = newSession(NO_ACTIONS, alpha, () => "req-1", 0).state;
+  const one = homeScreen(running, starting, view({ newSessionOpen: true }));
+  expect(one.newSession?.rows.map((row) => [row.name, row.label, row.enabled])).toEqual([
+    ["alpha", "Starting…", false],
+    ["beta", "Start", true],
+  ]);
+  expect(one.groups[0]?.launch).toEqual({ target: alpha, label: "Launch last", enabled: false });
+
+  // A Launch last waits: its button says so, and the row's Start is off.
+  const launching = launchLast(NO_ACTIONS, alpha, () => "req-1", 0).state;
+  const two = homeScreen(running, launching, view({ newSessionOpen: true }));
+  expect(two.newSession?.rows[0]).toMatchObject({ label: "Start", enabled: false });
+  expect(two.groups[0]?.launch).toEqual({ target: alpha, label: "Launching…", enabled: false });
+});
+
+test("home_screen_shows_a_new_session_refusal_under_its_picker_row_not_the_header", () => {
+  const running: HomeModel = { ...repoModel([session("s1", { status: "working" })]), loaded: true };
+  const refused: HomeActions = {
+    ...NO_ACTIONS,
+    newSessionErrors: new Map([["repo:a", "No such repo or workspace."]]),
+  };
+
+  const screen = homeScreen(running, refused, view({ newSessionOpen: true }));
+  expect(screen.newSession?.rows[0]?.error).toBe("No such repo or workspace.");
+  expect(screen.groups[0]?.launchError).toBeNull();
 });

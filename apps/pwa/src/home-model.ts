@@ -178,7 +178,14 @@ export function homeGroups(model: HomeModel): readonly HomeGroup[] {
     groups: [],
     trailing: [],
   };
-  pushRemaining(build, pushManualOrder(build));
+  const walk: ContainerWalk = {
+    model,
+    workspaces: build.workspaces,
+    repos: build.repos,
+    workspace: (workspace) => pushWorkspaceGroup(build, workspace),
+    repo: (repo) => pushRepoGroup(build, repo),
+  };
+  pushRemaining(walk, pushManualOrder(walk));
   pushGroup(build.groups, "shell", "shell", "Shells", build.bucketed.shells);
   pushGroup(build.groups, "folder", "folder", "Folders", build.bucketed.folders);
   pushGroup(build.groups, "detached", "detached", "Detached", build.bucketed.detached);
@@ -197,6 +204,44 @@ interface GroupBuild {
   readonly repos: ReadonlyMap<string, RepoEntry>;
   readonly groups: HomeGroup[];
   readonly trailing: LaunchContainer[];
+}
+
+/** One container the New session picker offers: its name and where the session starts. */
+export interface NewSessionChoice {
+  readonly name: string;
+  readonly target: ContainerRef;
+}
+
+/**
+ * The containers a New session can start in, in Home's container order:
+ * every workspace and every repo that is no workspace's member, git or not,
+ * whether or not it has launched or holds a session. A member repo's
+ * sessions belong to its workspace.
+ */
+export function newSessionChoices(model: HomeModel): readonly NewSessionChoice[] {
+  const members = memberRepoIds(model);
+  const choices: NewSessionChoice[] = [];
+  const walk: ContainerWalk = {
+    model,
+    workspaces: new Map(model.workspaces.map((workspace) => [workspace.id, workspace])),
+    repos: new Map(
+      model.repos.filter((repo) => !members.has(repo.id)).map((repo) => [repo.id, repo]),
+    ),
+    workspace: (workspace) =>
+      choices.push({ name: workspace.name, target: { kind: "workspace", id: workspace.id } }),
+    repo: (repo) => choices.push({ name: repo.name, target: { kind: "repo", id: repo.id } }),
+  };
+  pushRemaining(walk, pushManualOrder(walk));
+  return choices;
+}
+
+/** The containers to walk in Home's order, and what each visit does with one. */
+interface ContainerWalk {
+  readonly model: HomeModel;
+  readonly workspaces: ReadonlyMap<string, WorkspaceEntry>;
+  readonly repos: ReadonlyMap<string, RepoEntry>;
+  readonly workspace: (workspace: WorkspaceEntry) => void;
+  readonly repo: (repo: RepoEntry) => void;
 }
 
 /** Every repo a workspace holds, so its sessions stay in the workspace's group. */
@@ -229,24 +274,24 @@ function bucketSessions(model: HomeModel, members: ReadonlySet<string>): Buckets
  * The user's manual order first, workspaces and repos mixed, the desktop's
  * first pass in `apply_container_order`; returns every container it placed.
  */
-function pushManualOrder(build: GroupBuild): Set<string> {
+function pushManualOrder(walk: ContainerWalk): Set<string> {
   const placed = new Set<string>();
-  for (const ref of build.model.containerOrder) {
+  for (const ref of walk.model.containerOrder) {
     const key = `${ref.kind}:${ref.id}`;
     if (placed.has(key)) {
       continue;
     }
     if (ref.kind === "workspace") {
-      const workspace = build.workspaces.get(ref.id);
+      const workspace = walk.workspaces.get(ref.id);
       if (workspace !== undefined) {
         placed.add(key);
-        pushWorkspaceGroup(build, workspace);
+        walk.workspace(workspace);
       }
     } else {
-      const repo = build.repos.get(ref.id);
+      const repo = walk.repos.get(ref.id);
       if (repo !== undefined) {
         placed.add(key);
-        pushRepoGroup(build, repo);
+        walk.repo(repo);
       }
     }
   }
@@ -254,17 +299,17 @@ function pushManualOrder(build: GroupBuild): Set<string> {
 }
 
 /** The containers the manual order did not name, alphabetically, the desktop's second pass. */
-function pushRemaining(build: GroupBuild, placed: ReadonlySet<string>): void {
-  const workspaces = [...build.workspaces.values()].sort((a, b) => compareNames(a.name, b.name));
+function pushRemaining(walk: ContainerWalk, placed: ReadonlySet<string>): void {
+  const workspaces = [...walk.workspaces.values()].sort((a, b) => compareNames(a.name, b.name));
   for (const workspace of workspaces) {
     if (!placed.has(`workspace:${workspace.id}`)) {
-      pushWorkspaceGroup(build, workspace);
+      walk.workspace(workspace);
     }
   }
-  const repos = [...build.repos.values()].sort((a, b) => compareNames(a.name, b.name));
+  const repos = [...walk.repos.values()].sort((a, b) => compareNames(a.name, b.name));
   for (const repo of repos) {
     if (!placed.has(`repo:${repo.id}`)) {
-      pushRepoGroup(build, repo);
+      walk.repo(repo);
     }
   }
 }

@@ -12,6 +12,7 @@ import {
   keepLaunches,
   launchLast,
   launchPreset,
+  newSession,
   presetKey,
   reset,
   resendLaunches,
@@ -410,7 +411,7 @@ test("home_launch_last_sends_the_container_with_a_fresh_id", () => {
   expect(sent.message).toEqual({ type: "launch_last", target: REPO, request_id: "req-1" });
   // Recorded before the send, so a tap that reaches no daemon still waits.
   expect(sent.state.launches).toEqual([
-    { requestId: "req-1", target: REPO, sentAt: NOW, lastSentAt: NOW },
+    { kind: "launch_last", requestId: "req-1", target: REPO, sentAt: NOW, lastSentAt: NOW },
   ]);
 });
 
@@ -518,7 +519,7 @@ test("home_resend_keeps_the_same_id_on_a_host_that_launches", () => {
   const one = launchLast(NO_ACTIONS, REPO, ids, NOW);
   const two = launchLast(one.state, WORKSPACE, ids, NOW);
 
-  const resent = resendLaunches(two.state, true, NOW + 5_000);
+  const resent = resendLaunches(two.state, () => true, NOW + 5_000);
   expect(resent.messages).toEqual([
     { type: "launch_last", target: REPO, request_id: "req-1" },
     { type: "launch_last", target: WORKSPACE, request_id: "req-2" },
@@ -534,20 +535,20 @@ test("home_resend_keeps_the_same_id_on_a_host_that_launches", () => {
 test("home_resend_on_an_older_host_drops_the_launch_and_says_so", () => {
   const sent = launchLast(NO_ACTIONS, REPO, counter(), NOW);
 
-  const resent = resendLaunches(sent.state, false, NOW);
+  const resent = resendLaunches(sent.state, () => false, NOW);
   expect(resent.messages).toEqual([]);
   expect(resent.state.launches).toEqual([]);
   expect(resent.state.launchErrors.get(containerKey(REPO))).toBe(
     "This host can't launch from the phone.",
   );
 
-  expect(resendLaunches(NO_ACTIONS, false, NOW).state).toBe(NO_ACTIONS);
+  expect(resendLaunches(NO_ACTIONS, () => false, NOW).state).toBe(NO_ACTIONS);
 });
 
 test("home_a_resend_under_the_journal_window_keeps_the_id", () => {
   const sent = launchLast(NO_ACTIONS, REPO, counter(), NOW);
 
-  const resent = resendLaunches(sent.state, true, NOW + 9 * MINUTE - 1000);
+  const resent = resendLaunches(sent.state, () => true, NOW + 9 * MINUTE - 1000);
   expect(resent.messages).toEqual([{ type: "launch_last", target: REPO, request_id: "req-1" }]);
   expect(resent.state.launches).toHaveLength(1);
   expect(resent.state.launchErrors.size).toBe(0);
@@ -556,7 +557,7 @@ test("home_a_resend_under_the_journal_window_keeps_the_id", () => {
 test("home_a_resend_past_the_journal_window_drops_the_launch", () => {
   const sent = launchLast(NO_ACTIONS, REPO, counter(), NOW);
 
-  const resent = resendLaunches(sent.state, true, NOW + 9 * MINUTE);
+  const resent = resendLaunches(sent.state, () => true, NOW + 9 * MINUTE);
   expect(resent.messages).toEqual([]);
   expect(resent.state.launches).toEqual([]);
   expect(resent.state.launchErrors.get(containerKey(REPO))).toBe(
@@ -569,7 +570,7 @@ test("home_a_resend_judges_each_launch_by_its_own_age", () => {
   const old = launchLast(NO_ACTIONS, REPO, ids, NOW - 10 * MINUTE);
   const young = launchLast(old.state, WORKSPACE, ids, NOW);
 
-  const resent = resendLaunches(young.state, true, NOW);
+  const resent = resendLaunches(young.state, () => true, NOW);
   expect(resent.messages).toEqual([
     { type: "launch_last", target: WORKSPACE, request_id: "req-2" },
   ]);
@@ -594,7 +595,7 @@ test("home_a_launch_unanswered_for_a_minute_expires_without_sending", () => {
 
 test("home_a_resend_restarts_the_answer_wait", () => {
   const sent = launchLast(NO_ACTIONS, REPO, counter(), NOW);
-  const resent = resendLaunches(sent.state, true, NOW + 5 * MINUTE);
+  const resent = resendLaunches(sent.state, () => true, NOW + 5 * MINUTE);
 
   const kept = expireLaunches(resent.state, NOW + 5 * MINUTE + 30_000);
   expect(kept.launches).toHaveLength(1);
@@ -708,4 +709,130 @@ test("home_the_first_job_update_clears_the_pending_preset", () => {
 
   expect(update("phone-req-1").state.presetLaunches).toEqual([]);
   expect(update("someone-else").state).toBe(sent.state);
+});
+
+/** The `new_session` the phone sends for `target` under `requestId`. */
+function nextupMessage(target: ContainerRef, requestId: string): ClientMessage {
+  return { type: "new_session", target, initial_prompt: "/nextup", request_id: requestId };
+}
+
+test("home_new_session_sends_nextup_to_the_container_with_a_fresh_id", () => {
+  const sent = newSession(NO_ACTIONS, REPO, counter(), NOW);
+
+  expect(sent.message).toEqual(nextupMessage(REPO, "req-1"));
+  expect(sent.state.launches).toEqual([
+    { kind: "new_session", requestId: "req-1", target: REPO, sentAt: NOW, lastSentAt: NOW },
+  ]);
+});
+
+test("home_a_second_new_session_tap_on_the_same_container_sends_nothing", () => {
+  const sent = newSession(NO_ACTIONS, REPO, counter(), NOW);
+
+  const again = newSession(sent.state, REPO, unused(), NOW + 1);
+  expect(again.message).toBeNull();
+  expect(again.state).toBe(sent.state);
+});
+
+test("home_new_session_and_launch_last_never_wait_at_once_on_one_container", () => {
+  const launched = launchLast(NO_ACTIONS, REPO, counter(), NOW);
+  const blocked = newSession(launched.state, REPO, unused(), NOW);
+  expect(blocked.message).toBeNull();
+  expect(blocked.state).toBe(launched.state);
+
+  const started = newSession(NO_ACTIONS, REPO, counter(), NOW);
+  const blockedLaunch = launchLast(started.state, REPO, unused(), NOW);
+  expect(blockedLaunch.message).toBeNull();
+  expect(blockedLaunch.state).toBe(started.state);
+
+  // Another container is free.
+  expect(newSession(launched.state, WORKSPACE, counter(), NOW).message).toEqual(
+    nextupMessage(WORKSPACE, "req-1"),
+  );
+});
+
+test("home_a_new_session_echo_clears_it", () => {
+  const sent = newSession(NO_ACTIONS, REPO, counter(), NOW);
+
+  const landed = foldReply(sent.state, {
+    type: "session_updated",
+    request_id: "req-1",
+    session: session("fresh", { status: "spawning" }),
+  });
+
+  expect(landed.state.launches).toEqual([]);
+  expect(landed.effects).toEqual([]);
+});
+
+test("home_a_new_session_refusal_shows_under_the_picker_row_and_frees_it", () => {
+  const ids = counter();
+  const sent = newSession(NO_ACTIONS, REPO, ids, NOW);
+
+  const refused = foldReply(sent.state, {
+    type: "error",
+    request_id: "req-1",
+    code: "not_found",
+    message: "No such repo or workspace.",
+  });
+
+  expect(refused.state.launches).toEqual([]);
+  expect(refused.state.newSessionErrors.get(containerKey(REPO))).toBe("No such repo or workspace.");
+  // Never under the group header.
+  expect(refused.state.launchErrors.size).toBe(0);
+
+  const again = newSession(refused.state, REPO, ids, NOW + 1);
+  expect(again.message).toEqual(nextupMessage(REPO, "req-2"));
+  expect(again.state.newSessionErrors.size).toBe(0);
+});
+
+test("home_resend_sends_each_launch_as_its_own_kind_with_the_same_id", () => {
+  const ids = counter();
+  const one = launchLast(NO_ACTIONS, REPO, ids, NOW);
+  const two = newSession(one.state, WORKSPACE, ids, NOW);
+
+  const resent = resendLaunches(two.state, () => true, NOW + 5_000);
+  expect(resent.messages).toEqual([
+    { type: "launch_last", target: REPO, request_id: "req-1" },
+    nextupMessage(WORKSPACE, "req-2"),
+  ]);
+  expect(resent.state.launches.map((launch) => launch.lastSentAt)).toEqual([
+    NOW + 5_000,
+    NOW + 5_000,
+  ]);
+});
+
+test("home_resend_on_a_host_without_new_session_drops_it_and_says_so", () => {
+  const ids = counter();
+  const one = launchLast(NO_ACTIONS, REPO, ids, NOW);
+  const two = newSession(one.state, WORKSPACE, ids, NOW);
+
+  const resent = resendLaunches(two.state, (kind) => kind === "launch_last", NOW);
+  expect(resent.messages).toEqual([{ type: "launch_last", target: REPO, request_id: "req-1" }]);
+  expect(resent.state.launches.map((launch) => launch.target)).toEqual([REPO]);
+  expect(resent.state.newSessionErrors.get(containerKey(WORKSPACE))).toBe(
+    "This host can't launch from the phone.",
+  );
+  expect(resent.state.launchErrors.size).toBe(0);
+});
+
+test("home_a_new_session_past_the_journal_window_is_dropped", () => {
+  const sent = newSession(NO_ACTIONS, REPO, counter(), NOW);
+
+  const kept = resendLaunches(sent.state, () => true, NOW + 9 * MINUTE - 1000);
+  expect(kept.messages).toEqual([nextupMessage(REPO, "req-1")]);
+
+  const resent = resendLaunches(sent.state, () => true, NOW + 9 * MINUTE);
+  expect(resent.messages).toEqual([]);
+  expect(resent.state.launches).toEqual([]);
+  expect(resent.state.newSessionErrors.get(containerKey(REPO))).toBe(MAYBE_STARTED);
+});
+
+test("home_a_new_session_unanswered_for_a_minute_expires", () => {
+  const sent = newSession(NO_ACTIONS, REPO, counter(), NOW);
+
+  expect(expireLaunches(sent.state, NOW + MINUTE - 1000)).toBe(sent.state);
+
+  const expired = expireLaunches(sent.state, NOW + MINUTE);
+  expect(expired.launches).toEqual([]);
+  expect(expired.newSessionErrors.get(containerKey(REPO))).toBe(MAYBE_STARTED);
+  expect(expired.launchErrors.size).toBe(0);
 });

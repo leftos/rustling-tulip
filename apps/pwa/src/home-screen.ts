@@ -1,7 +1,22 @@
 import { RECONNECTING_BAR, connectionBar } from "./connection-bar";
 import type { ConnectionStateName } from "./connection-machine";
-import { containerKey, disarm, errorFor, presetKey, type HomeActions } from "./home-actions";
-import { homeGroups, needsYou, type HomeGroup, type HomeModel, type TrayCard } from "./home-model";
+import {
+  containerKey,
+  disarm,
+  errorFor,
+  pendingLaunchKind,
+  presetKey,
+  type HomeActions,
+} from "./home-actions";
+import {
+  homeGroups,
+  needsYou,
+  newSessionChoices,
+  type HomeGroup,
+  type HomeModel,
+  type NewSessionChoice,
+  type TrayCard,
+} from "./home-model";
 import {
   LOST_JOB,
   LOST_STATUS,
@@ -53,6 +68,35 @@ export const PRESETS = "Presets";
 export const LAUNCH_PRESET = "Launch";
 export const CANCEL = "Cancel";
 export const CANCELLED = "Cancelled";
+
+/** Home's New session button, and a picker row's button before and while its session starts. */
+export const NEW_SESSION = "New session";
+export const START = "Start";
+export const STARTING = "Starting…";
+
+/** One container of the New session picker. */
+export interface NewSessionRowView {
+  readonly target: ContainerRef;
+  readonly name: string;
+  /** The row's button; null on a host without `new_session`, where the row only says why. */
+  readonly label: "Start" | "Starting…" | null;
+  readonly enabled: boolean;
+  /** The daemon's refusal of this container's New session, verbatim; null when none. */
+  readonly error: string | null;
+}
+
+/** Home's New session button and, while it is open, the containers it offers. */
+export interface NewSessionView {
+  /**
+   * The button; null on a host without `new_session`, where the view only
+   * lists the containers whose New session it dropped, each with its error.
+   */
+  readonly label: "New session" | null;
+  readonly open: boolean;
+  readonly enabled: boolean;
+  /** The containers, while the picker is open; empty otherwise. */
+  readonly rows: readonly NewSessionRowView[];
+}
 
 /** One Launch last button, as a group header or a Launch again row shows it. */
 export interface LaunchView {
@@ -181,6 +225,10 @@ export interface HomeState {
   readonly offline: boolean;
   /** The host's `Welcome.features` lists `launch_last`. */
   readonly supportsLaunchLast: boolean;
+  /** The host's `Welcome.features` lists `new_session`. */
+  readonly supportsNewSession: boolean;
+  /** The New session picker is open. */
+  readonly newSessionOpen: boolean;
 }
 
 /** Everything Home draws. */
@@ -197,6 +245,8 @@ export interface HomeScreen {
   readonly groups: readonly GroupView[];
   /** `No sessions` once the list has loaded empty; null before it loads, and with any session. */
   readonly empty: string | null;
+  /** The New session button, above the groups; null before the list loads or on a host without it. */
+  readonly newSession: NewSessionView | null;
 }
 
 /**
@@ -295,6 +345,64 @@ export function homeScreen(
     // Before the first list the model is empty too, so only a loaded one says
     // so; a Launch again group the host cannot show is no content either.
     empty: model.loaded && groups.length === 0 && shown === undefined ? NO_SESSIONS : null,
+    newSession: newSessionView(model, actions, state, actionsEnabled),
+  };
+}
+
+/** The New session button and its open list; null before the list loads or on a host without it. */
+function newSessionView(
+  model: HomeModel,
+  actions: HomeActions,
+  state: HomeState,
+  actionsEnabled: boolean,
+): NewSessionView | null {
+  if (!model.loaded) {
+    return null;
+  }
+  if (!state.supportsNewSession) {
+    return droppedNewSessions(model, actions);
+  }
+  const open = state.newSessionOpen;
+  return {
+    label: NEW_SESSION,
+    open,
+    enabled: actionsEnabled,
+    rows: open
+      ? newSessionChoices(model).map((choice) => newSessionRow(choice, actions, actionsEnabled))
+      : [],
+  };
+}
+
+/**
+ * On a host without `new_session`: no button, only the containers whose New
+ * session was dropped, each with why; null when there are none.
+ */
+function droppedNewSessions(model: HomeModel, actions: HomeActions): NewSessionView | null {
+  if (actions.newSessionErrors.size === 0) {
+    return null;
+  }
+  const rows = newSessionChoices(model).flatMap((choice) => {
+    const error = actions.newSessionErrors.get(containerKey(choice.target));
+    return error === undefined
+      ? []
+      : [{ target: choice.target, name: choice.name, label: null, enabled: false, error }];
+  });
+  return rows.length === 0 ? null : { label: null, open: true, enabled: false, rows };
+}
+
+/** One picker row: `Starting…` while its own New session waits, off while any launch on it waits. */
+function newSessionRow(
+  choice: NewSessionChoice,
+  actions: HomeActions,
+  actionsEnabled: boolean,
+): NewSessionRowView {
+  const pending = pendingLaunchKind(actions, choice.target);
+  return {
+    target: choice.target,
+    name: choice.name,
+    label: pending === "new_session" ? STARTING : START,
+    enabled: actionsEnabled && pending === null,
+    error: actions.newSessionErrors.get(containerKey(choice.target)) ?? null,
   };
 }
 
@@ -474,17 +582,13 @@ function launchView(
   if (target === null || !supportsLaunchLast) {
     return null;
   }
-  const pending = isLaunchPending(actions, target);
+  // Either kind of launch waiting on the container disables it; only its own says so.
+  const pending = pendingLaunchKind(actions, target);
   return {
     target,
-    label: pending ? LAUNCHING : LAUNCH_LAST,
-    enabled: actionsEnabled && !pending,
+    label: pending === "launch_last" ? LAUNCHING : LAUNCH_LAST,
+    enabled: actionsEnabled && pending === null,
   };
-}
-
-function isLaunchPending(actions: HomeActions, target: ContainerRef): boolean {
-  const key = containerKey(target);
-  return actions.launches.some((launch) => containerKey(launch.target) === key);
 }
 
 function launchErrorFor(actions: HomeActions, target: ContainerRef): string | null {
