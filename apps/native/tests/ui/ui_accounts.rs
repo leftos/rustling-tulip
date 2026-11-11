@@ -388,6 +388,25 @@ fn a_long_email_wraps_in_the_popover(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_short_email_stays_on_one_line_in_the_popover(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    popover(
+        &mut h,
+        vec![
+            account(1, "main").active().build(),
+            account(2, "spare").build(),
+        ],
+    );
+    let name = h.bounds("accounts-name-2=spare");
+    let detail = h.bounds("accounts-detail-2=spare@example.com");
+    assert!(
+        detail.size.height <= name.size.height * 1.2,
+        "the detail {detail:?} stays on the name's line {name:?}"
+    );
+}
+
+#[gpui::test]
 fn the_popover_stays_closed_after_a_reconnect(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::open(cx, &dir);

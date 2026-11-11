@@ -569,6 +569,7 @@ impl RootView {
             )
             .children(row.detail.map(|detail| {
                 div()
+                    .flex_1()
                     .min_w_0()
                     .text_color(gpui::rgb(t.subtle))
                     .child(tagged_text(format!("accounts-detail-{n}"), detail))
@@ -732,6 +733,7 @@ fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>
         )
         .child(
             div()
+                .flex_1()
                 .min_w_0()
                 .text_color(gpui::rgb(if line.used_up {
                     t.danger_text

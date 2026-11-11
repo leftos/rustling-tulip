@@ -309,6 +309,26 @@ fn a_long_email_wraps_on_the_page(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_short_email_stays_on_one_line_on_the_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(
+        &mut h,
+        vec![
+            account(1, "main").active().build(),
+            account(2, "spare").build(),
+        ],
+        None,
+    );
+    let name = h.bounds("settings-accounts-name-2=spare");
+    let detail = h.bounds("settings-accounts-detail-2=spare@example.com");
+    assert!(
+        detail.size.height <= name.size.height * 1.2,
+        "the detail {detail:?} stays on the name's line {name:?}"
+    );
+}
+
+#[gpui::test]
 fn the_page_shows_a_model_limit_in_use(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
