@@ -1016,7 +1016,7 @@ pub struct RootView {
     menu: Option<SessionMenu>,
     /// The gutter-dot command menu, while open.
     shell_menu: Option<ShellMenu>,
-    /// The menu a Ctrl+click on a path link opened, while open.
+    /// The menu a Ctrl+Shift+click on a path link opened, while open.
     link_menu: Option<LinkMenu>,
     /// The open menu's keyboard focus, so Esc reaches it.
     menu_focus: FocusHandle,

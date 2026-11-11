@@ -1,4 +1,4 @@
-//! The link menu in the window: a Ctrl+click on a path opens it at the
+//! The link menu in the window: a Ctrl+Shift+click on a path opens it at the
 //! click, its rows open the path in the default app, in the viewer or in its
 //! folder, and Up, Down, Enter, Esc and a click outside drive it.
 

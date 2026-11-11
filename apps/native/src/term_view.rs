@@ -508,15 +508,15 @@ pub enum PaneEvent {
     Copied { text: String },
     /// Ctrl+click picked `link`; a path in it resolves against
     /// `base_dirs`, the folders of `session`, the pane's session.
-    /// `action`: what the click asked a path to do; Ctrl+Shift+click asks
-    /// for the viewer.
+    /// `action`: what to do with a path: its app on a Ctrl+click, or the
+    /// link menu's pick.
     OpenLink {
         link: TerminalLink,
         base_dirs: Vec<String>,
         session: Option<String>,
         action: LinkAction,
     },
-    /// Ctrl+click picked the path `link`: the root opens the link menu at
+    /// Ctrl+Shift+click picked the path `link`: the root opens the link menu at
     /// `at`, in window coordinates, whose pick opens it as
     /// [`PaneEvent::OpenLink`] would.
     LinkMenu {
@@ -1654,8 +1654,8 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        // Ctrl+click on a URL opens it and on a path opens the link menu
-        // (Ctrl+Shift+click views a path), ahead of a selection or a mouse
+        // Ctrl+click on a URL or a path opens it, and Ctrl+Shift+click on a path
+        // opens the link menu, ahead of a selection or a mouse
         // report; its release then finds no gesture to end. Only the first
         // press of a multi-click acts; the later ones do nothing.
         if event.button == MouseButton::Left
@@ -2345,23 +2345,23 @@ impl Render for TerminalPane {
     }
 }
 
-/// What the tip over a hovered link of `kind` says: a path offers its menu
-/// or views, a URL only opens.
+/// What the tip over a hovered link of `kind` says: a path opens or offers
+/// its menu, a URL only opens.
 fn link_tip_text(kind: LinkKind) -> &'static str {
     match kind {
-        LinkKind::Path => "Ctrl+click for options · Ctrl+Shift+click to view",
+        LinkKind::Path => "Ctrl+click to open · Ctrl+Shift+click for options",
         LinkKind::Url => "Ctrl+click to open",
     }
 }
 
 impl TerminalPane {
-    /// What a Ctrl+click `event` on `link` asks the root for: the link menu
-    /// for a path, at the click; else the open itself, in the viewer for a
-    /// Ctrl+Shift+click.
+    /// What a Ctrl+click `event` on `link` asks the root for: the link menu at
+    /// the click for a Ctrl+Shift+click on a path; else the open itself, a
+    /// path in its default app (VS Code at a `:line`), a URL in the browser.
     fn link_click(&self, link: TerminalLink, event: &MouseDownEvent) -> PaneEvent {
         let base_dirs = self.base_dirs.clone();
         let session = self.session_id().map(str::to_owned);
-        if matches!(link.kind, LinkKind::Path) && !event.modifiers.shift {
+        if matches!(link.kind, LinkKind::Path) && event.modifiers.shift {
             return PaneEvent::LinkMenu {
                 link,
                 base_dirs,
@@ -2373,11 +2373,7 @@ impl TerminalPane {
             link,
             base_dirs,
             session,
-            action: if event.modifiers.shift {
-                LinkAction::Viewer
-            } else {
-                LinkAction::DefaultApp
-            },
+            action: LinkAction::DefaultApp,
         }
     }
 

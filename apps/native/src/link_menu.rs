@@ -1,4 +1,4 @@
-//! The menu a Ctrl+click on a path link opens: what it was opened on, where
+//! The menu a Ctrl+Shift+click on a path link opens: what it was opened on, where
 //! it sits, which row is highlighted, and the rows it offers.
 
 use gpui::{Pixels, Point};

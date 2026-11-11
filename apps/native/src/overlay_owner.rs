@@ -12,7 +12,7 @@ use gpui::WindowId;
 pub(crate) enum Overlay {
     SessionMenu,
     ShellMenu,
-    /// The menu a Ctrl+click on a path link opens.
+    /// The menu a Ctrl+Shift+click on a path link opens.
     LinkMenu,
     EmptyPaneMenu,
     /// A narrow pane header's ⋯ menu.

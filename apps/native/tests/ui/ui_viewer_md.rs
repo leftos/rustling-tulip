@@ -257,6 +257,7 @@ fn a_markdown_link_with_a_line_opens_source_at_the_line(cx: &mut TestAppContext)
         ..Modifiers::secondary_key()
     };
     h.click(link, ctrl_shift);
+    h.click_on("link-menu-viewer");
 
     let opens: Vec<(String, String)> = h
         .sent()

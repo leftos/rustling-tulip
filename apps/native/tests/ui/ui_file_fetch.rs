@@ -516,8 +516,7 @@ fn click_link(h: &mut Harness<'_>, text: &str, col: usize) {
     click_again(h, col);
 }
 
-/// Ctrl+clicks column `col` of `p2`'s first row and picks the link menu's
-/// first entry.
+/// Ctrl+clicks column `col` of `p2`'s first row.
 fn click_again(h: &mut Harness<'_>, col: usize) {
     let on = h.cell_center("p2", col, 0);
     h.pick_link(on);
@@ -642,7 +641,13 @@ fn the_folder_entry_on_a_remote_path_reveals_the_fetched_copy(cx: &mut TestAppCo
     h.host(&saved_remote())
         .pty("s1", b"see C:/wt/x/docs/notes.txt");
     let on = h.cell_center("p2", 6, 0);
-    h.click(on, Modifiers::secondary_key());
+    h.click(
+        on,
+        Modifiers {
+            shift: true,
+            ..Modifiers::secondary_key()
+        },
+    );
     h.click_on("link-menu-folder");
     let id = one_fetch(&mut h, "docs/notes.txt");
     stream_on(&mut h, &saved_remote(), &id, b"first, ", b"second");

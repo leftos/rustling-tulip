@@ -3741,11 +3741,10 @@ impl<'a> Harness<'a> {
         self.cx.run_until_parked();
     }
 
-    /// Ctrl+clicks a path link at `at` and picks the menu's first entry, as
-    /// a Ctrl+click alone did before the link menu.
+    /// Ctrl+clicks a path link at `at`, which opens it in its app (VS Code
+    /// at a `:line`).
     pub fn pick_link(&mut self, at: Point<Pixels>) {
         self.click(at, Modifiers::secondary_key());
-        self.keys("enter");
     }
 
     /// Runs `change` on the root view, then lets the view settle.

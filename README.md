@@ -30,7 +30,7 @@ It is alpha software.
 - Right-click a repo or workspace for a Spawn submenu: Last, each agent, Shell and your presets. The New session dialog picks its target from a list that narrows as you type, Claude's model (Fable included) and its effort level from Low to Max, and in Advanced takes your own command-line arguments, which Duplicate and Launch last repeat.
 - Pick each host's default shell for new sessions and shells, from the shells installed there (PowerShell, cmd, Git Bash, WSL, Nushell, fish, zsh or bash) or your own command. Claude sessions start inside it.
 - Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges, and on a remote host the wizard takes typed paths on that host.
-- In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, Ctrl+click on a file path offers its default app, the viewer or its folder, Ctrl+Shift+click opens it straight in the viewer, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
+- In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, Ctrl+click on a file path opens it in its default app, Ctrl+Shift+click offers the viewer or its folder too, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
 - Terminal programs that ask for urxvt or pixel-precise mouse reporting get clicks, drags and the wheel in the format they asked for.
 - When Claude exits, its pane stays a working shell, and its Chat and Summary views turn off until Claude starts again.
 - Start Claude yourself in a plain shell, by name, an alias or a wrapper, and the pane gets Chat and Summary while it runs. Settings › Claude can install the app's hooks in Claude Code's own settings, so such a Claude reports its conversation and status too.
@@ -106,7 +106,7 @@ It is alpha software.
 
 ### Text and Markdown viewer
 
-- Ctrl+Shift+click a file path in the terminal and it opens in a read-only viewer tab with line numbers and syntax colours, scrolled to the line the path names. A bare file name after a full path on the same line opens from that path's folder.
+- Ctrl+Shift+click a file path in the terminal and pick Open in viewer, and it opens in a read-only viewer tab with line numbers and syntax colours, scrolled to the line the path names. A bare file name after a full path on the same line opens from that path's folder.
 - Markdown files open rendered (headings, lists, task boxes, tables, code blocks), with a Rendered / Source toggle. Links open, and `#heading` links scroll to the heading.
 - Ctrl+F finds text, a click or drag selects whole lines to copy, and a tab re-reads its file when you come back to it and the file has changed.
 
