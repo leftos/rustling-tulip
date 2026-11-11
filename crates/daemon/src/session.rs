@@ -333,6 +333,12 @@ pub struct SessionRecord {
     /// dropped. Runtime-only: a daemon restart resets it along with the
     /// hook-driven state.
     pub last_hook_time: Option<u128>,
+    /// [`Self::last_hook_time`] of the last main-agent hook event: a
+    /// subagent's event moves only the ordering stamp. The screen watcher
+    /// compares this one to tell whether another writer moved the record, so
+    /// a subagent's tool calls never hold off the screen ending a prompt or a
+    /// turn. Runtime-only, like the ordering stamp.
+    pub main_hook_time: Option<u128>,
     /// True once a mapped hook event has been applied to this session. While
     /// true, a plain shell runs the screen check in place of its classifier.
     /// Set by the first accepted signal from
@@ -1932,6 +1938,7 @@ impl SessionRegistry {
             conversation_id: meta.conversation_id.clone(),
             pending_input: None,
             last_hook_time: None,
+            main_hook_time: None,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -2020,6 +2027,7 @@ impl SessionRegistry {
             conversation_id: meta.conversation_id.clone(),
             pending_input,
             last_hook_time: None,
+            main_hook_time: None,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -2085,6 +2093,7 @@ impl SessionRegistry {
             conversation_id: meta.conversation_id.clone(),
             pending_input: None,
             last_hook_time: None,
+            main_hook_time: None,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -2178,6 +2187,7 @@ mod tests {
             conversation_id: None,
             pending_input: None,
             last_hook_time: None,
+            main_hook_time: None,
             hook_driven: false,
             background: false,
             turn_end: None,

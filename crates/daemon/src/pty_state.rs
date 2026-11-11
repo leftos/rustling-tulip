@@ -1262,8 +1262,13 @@ impl ScreenWatch {
                 how,
                 "status changed by a screen read"
             );
+            // Leaving `AwaitingInput` cleared the prompt with the write
+            // (`apply_watcher_status`), which is this watcher's own too.
+            let left_prompt =
+                from.status == SessionStatus::AwaitingInput && next != SessionStatus::AwaitingInput;
             self.wake.seen = Some(StatusRead {
                 status: next,
+                pending: from.pending && !left_prompt,
                 held: None,
                 ..from
             });
@@ -1514,7 +1519,8 @@ fn hand_shell_back(
         after = Some(StatusRead {
             status: rec.status,
             hook_driven: false,
-            last_hook_time: rec.last_hook_time,
+            main_hook_time: rec.main_hook_time,
+            pending: rec.pending_input.is_some(),
             held: None,
         });
         let alert = held.and_then(|held| held.alert);
@@ -2063,7 +2069,12 @@ impl From<State> for SessionStatus {
 struct StatusRead {
     status: SessionStatus,
     hook_driven: bool,
-    last_hook_time: Option<u128>,
+    /// The main agent's hook stamp: a subagent's event moves only the
+    /// ordering stamp, and never counts as the record moving.
+    main_hook_time: Option<u128>,
+    /// Whether a prompt is pending: a subagent's prompt raised over a wait the
+    /// screen raised moves only this.
+    pending: bool,
     /// The turn end the record holds.
     held: Option<HeldRead>,
 }
@@ -2080,15 +2091,17 @@ struct HeldRead {
 }
 
 /// Two reads match when the record has not moved between them. While a turn
-/// end is held its `Stop` stands in for the hook stamp, which every subagent
-/// event moves: a window takes about a second, and those events would
-/// otherwise restart it for as long as the subagents work.
+/// end is held its `Stop` stands in for the main hook stamp. A subagent's
+/// event moves only the ordering stamp, which is not compared: a window takes
+/// about a second, and those events would otherwise restart it for as long as
+/// the subagents work.
 impl PartialEq for StatusRead {
     fn eq(&self, other: &Self) -> bool {
         self.status == other.status
             && self.hook_driven == other.hook_driven
             && self.held == other.held
-            && (self.held.is_some() || self.last_hook_time == other.last_hook_time)
+            && self.pending == other.pending
+            && (self.held.is_some() || self.main_hook_time == other.main_hook_time)
     }
 }
 
@@ -2099,7 +2112,8 @@ fn status_read(record: &SessionRecord) -> StatusRead {
     StatusRead {
         status: record.status,
         hook_driven: record.hook_driven,
-        last_hook_time: record.last_hook_time,
+        main_hook_time: record.main_hook_time,
+        pending: record.pending_input.is_some(),
         held: record.turn_end.as_ref().map(|held| HeldRead {
             event_time: held.event_time,
             ceiling: held.held_at + TURN_END_CEILING,
@@ -2108,9 +2122,9 @@ fn status_read(record: &SessionRecord) -> StatusRead {
     }
 }
 
-/// The record's current status, whether hooks drive its promotions, the hook
-/// ordering stamp and any held turn end, as one snapshot the caller carries
-/// into its write.
+/// The record's current status, whether hooks drive its promotions, the main
+/// agent's hook stamp (not the ordering stamp), whether a prompt is pending
+/// and any held turn end, as one snapshot the caller carries into its write.
 fn record_status(registry: &Arc<SessionRegistry>, session_id: &str) -> Option<StatusRead> {
     let arc = registry.get(session_id)?;
     let guard = crate::sync::lock(&arc);
@@ -2244,7 +2258,7 @@ fn on_plain_shell_transition(
     }
     *current = next;
     registry.update(session_id, |rec| {
-        if rec.hook_driven != read.hook_driven || rec.last_hook_time != read.last_hook_time {
+        if rec.hook_driven != read.hook_driven || rec.main_hook_time != read.main_hook_time {
             return;
         }
         apply_watcher_status(rec, SessionStatus::from(next));
@@ -2464,6 +2478,7 @@ mod hysteresis_tests {
             conversation_id: None,
             pending_input: None,
             last_hook_time: None,
+            main_hook_time: None,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -2828,6 +2843,12 @@ mod hysteresis_tests {
                 "  ◯ general-purpose  Write 150 animals list B                    1s · ↑ 50 tokens",
             ],
         )
+    }
+
+    /// Move both hook stamps to 2, the way a main agent's hook event does.
+    fn main_stamp(record: &mut SessionRecord) {
+        record.last_hook_time = Some(2);
+        record.main_hook_time = Some(2);
     }
 
     /// A record whose hooks report `status` at hook stamp 1.
@@ -3302,10 +3323,10 @@ mod hysteresis_tests {
     async fn assert_unbroadcast_hook_write_refuses_the_publish(h: &Harness) {
         pass_hold().await;
         h.chunk(idle_frame(&[]));
-        advance(ms(100)).await;
-        h.set_record_unbroadcast(|record| record.last_hook_time = Some(2));
-        // The window's next check, at 190 ms, reads the moved record and holds
-        // until 890 ms.
+        advance(ms(2500)).await;
+        h.set_record_unbroadcast(main_stamp);
+        // The window's next check reads the moved record and holds; unrefused,
+        // the window opened 2.5 s ago would publish at 3 s.
         advance(ms(780)).await;
         assert_eq!(
             h.status(),
@@ -3838,7 +3859,7 @@ mod hysteresis_tests {
         pass_hold().await;
         h.chunk(shell_prompt_frame());
         advance(ms(100)).await;
-        h.set_record(|record| record.last_hook_time = Some(2));
+        h.set_record(main_stamp);
         advance(ms(690)).await;
         assert!(
             h.hook_driven(),
@@ -4036,7 +4057,7 @@ mod hysteresis_tests {
         let read = record_status(&registry, SESSION).expect("the session is registered");
         {
             let record = registry.get(SESSION).expect("session registered");
-            record.lock().expect("record lock").last_hook_time = Some(2);
+            main_stamp(&mut record.lock().expect("record lock"));
         }
         assert_eq!(
             hand_shell_back(&registry, SESSION, read),
@@ -4316,8 +4337,7 @@ mod hysteresis_tests {
             assert_eq!(tui.typed(), [DOWN], "Down to the panel");
             // Another writer moves the record: the watcher holds, then checks
             // the unchanged frame before KEY_WAIT has passed.
-            tui.registry
-                .update(SESSION, |record| record.last_hook_time = Some(1));
+            tui.registry.update(SESSION, super::main_stamp);
             pass_hold().await;
             assert!(
                 tui.typed().is_empty(),
@@ -5651,8 +5671,8 @@ mod hysteresis_tests {
         );
         pass_hold().await;
         h.chunk(idle_frame(&[]));
-        advance(ms(100)).await;
-        h.set_record(|record| record.last_hook_time = Some(2));
+        advance(ms(2500)).await;
+        h.set_record(main_stamp);
         advance(ms(690)).await;
         assert_eq!(
             h.status(),
@@ -5680,7 +5700,8 @@ mod hysteresis_tests {
         h.chunk(idle_frame(&[SPINNER_ROW]));
         advance(ms(100)).await;
         h.chunk(idle_frame(&[]));
-        h.set_record(|record| record.last_hook_time = Some(2));
+        advance(ms(2500)).await;
+        h.set_record(main_stamp);
         advance(ms(690)).await;
         assert_eq!(h.status(), SessionStatus::Working, "read inside the hold");
         advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
@@ -6390,6 +6411,133 @@ mod hysteresis_tests {
         );
     }
 
+    /// A main agent's tool call.
+    fn main_tool() -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+        })
+    }
+
+    /// A prompt answered by key, with subagents firing hooks all along: the
+    /// idle box ends it as if they were quiet.
+    #[tokio::test(start_paused = true)]
+    async fn subagent_stamps_do_not_delay_an_answered_prompt_ending() {
+        let mut h = start_record("subagent-stamps-prompt", false, pending_record());
+        pass_hold().await;
+        h.chunk(question_frame());
+        advance(ms(100)).await;
+        h.chunk(idle_frame(&[]));
+        settle().await;
+        for time in 2..32 {
+            h.hook(time, &subagent_tool());
+            advance(ms(100)).await;
+        }
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "subagent stamps held the answered prompt"
+        );
+        assert!(!has_pending(&h), "the answered prompt stayed pending");
+        assert_eq!(h.attentions(), 0, "no new Attention");
+    }
+
+    /// An Esc with no `Stop`, with subagents firing hooks all along: the idle
+    /// box still ends the turn.
+    #[tokio::test(start_paused = true)]
+    async fn subagent_stamps_do_not_starve_working_to_idle_after_esc() {
+        let h = start_record(
+            "subagent-stamps-esc",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        settle().await;
+        for time in 2..52 {
+            h.hook(time, &subagent_tool());
+            advance(ms(100)).await;
+        }
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "subagent stamps starved the turn's end"
+        );
+    }
+
+    /// A subagent's permission request.
+    fn subagent_permission_hook() -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "agent_id": "a0123456789abcdef",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "notes.txt"},
+        })
+    }
+
+    /// A wait the screen raised with no prompt pending, answered by key; a
+    /// subagent's prompt lands inside the leave window, before its dialog
+    /// paints. The window's read predates that prompt, so it must not clear
+    /// it.
+    #[tokio::test(start_paused = true)]
+    async fn a_subagent_prompt_on_a_screen_raised_wait_is_not_dropped_by_a_stale_read() {
+        let mut h = start_record(
+            "subagent-prompt-stale-read",
+            false,
+            hook_record(SessionStatus::Idle),
+        );
+        pass_hold().await;
+        h.chunk(permission_frame());
+        advance(ms(100)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the screen raised it"
+        );
+        assert!(!has_pending(&h), "no hook named the prompt");
+        h.chunk(idle_frame(&[]));
+        advance(ms(100)).await;
+        h.hook(2, &subagent_permission_hook());
+        advance(ms(400)).await;
+        h.chunk(permission_frame());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::AwaitingInput);
+        let rec = h.registry.get(SESSION).expect("session registered");
+        let pending = rec.lock().expect("record lock").pending_input.clone();
+        assert!(
+            matches!(pending, Some(protocol::PendingInput::Permission { .. })),
+            "the subagent's prompt was dropped: {pending:?}"
+        );
+        assert_eq!(h.attentions(), 1, "one Attention for the wait");
+    }
+
+    /// A main agent's hook inside a window still refuses its publish; the
+    /// idle box still on screen after the hold opens a fresh window.
+    #[tokio::test(start_paused = true)]
+    async fn a_main_hook_mid_window_still_cancels_the_publish() {
+        let h = start_record(
+            "main-hook-mid-window",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(2500)).await;
+        h.hook(2, &main_tool());
+        advance(ms(690)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a window opened before a main hook event still published"
+        );
+        advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box after the hold did not demote"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn stop_hooks_running_keep_idle_and_background() {
         let mut record = hook_record(SessionStatus::Idle);
@@ -6470,11 +6618,14 @@ mod hysteresis_tests {
         assert!(h.background(), "the footer's shell set no background");
         let read = record_status(&h.registry, SESSION).expect("session registered");
         assert!(read.hook_driven, "the screen write cleared hook_driven");
-        assert_eq!(
-            read.last_hook_time,
-            Some(1),
-            "the screen write moved the stamp"
-        );
+        let stamp = h
+            .registry
+            .get(SESSION)
+            .expect("session registered")
+            .lock()
+            .expect("record lock")
+            .last_hook_time;
+        assert_eq!(stamp, Some(1), "the screen write moved the stamp");
     }
 
     const SUBAGENT_IN_VIEW: &str =
@@ -6718,7 +6869,7 @@ mod hysteresis_tests {
         }
     }
 
-    /// A subagent's `PermissionRequest` starts a hold, which no screen write
+    /// A main hook event starts a hold, which no screen write
     /// passes: a dialog painted around it and answered inside it was still
     /// up, so the first reading after the hold ends the status.
     #[tokio::test(start_paused = true)]
@@ -6726,7 +6877,7 @@ mod hysteresis_tests {
         // Painted once the hold has begun.
         let h = start_record("agent-view-in-hold", false, pending_record());
         pass_hold().await;
-        h.set_record(|record| record.last_hook_time = Some(2));
+        h.set_record(main_stamp);
         settle().await;
         h.chunk(subagent_view_with_a_question());
         advance(CHECK_DEBOUNCE + ms(10)).await;
@@ -6742,7 +6893,7 @@ mod hysteresis_tests {
         pass_hold().await;
         h.chunk(subagent_view_with_a_question());
         settle().await;
-        h.set_record(|record| record.last_hook_time = Some(2));
+        h.set_record(main_stamp);
         settle().await;
         h.chunk(capture_frame(SUBAGENT_IN_VIEW));
         advance(Duration::from_secs(2)).await;
@@ -6775,7 +6926,7 @@ mod hysteresis_tests {
         assert!(watch.subagent_dialog.is_some(), "the view names its agent");
 
         let stale = record_status(&registry, SESSION).expect("session registered");
-        registry.update(SESSION, |record| record.last_hook_time = Some(2));
+        registry.update(SESSION, main_stamp);
         watch.follow_subagent_dialog(stale, &reading, view.as_ref(), true);
         assert_eq!(
             status_in(&registry),

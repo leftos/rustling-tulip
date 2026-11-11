@@ -349,6 +349,9 @@ pub(crate) fn apply_to_record(
         return Applied::default();
     }
     record.last_hook_time = Some(event_time);
+    if !report.subagent {
+        record.main_hook_time = Some(event_time);
+    }
     record.hook_driven = true;
     if matches!(record.status, SessionStatus::Stopped | SessionStatus::Error) {
         return Applied::default();
@@ -1718,6 +1721,39 @@ mod tests {
             assert!(record.background, "{event}");
             assert_eq!(record.last_hook_time, Some(2), "{event} still stamps");
         }
+    }
+
+    #[test]
+    fn a_subagent_event_moves_only_the_ordering_stamp() {
+        let mut record = turn_record();
+        record.status = SessionStatus::Working;
+        record.main_hook_time = Some(1);
+        apply_body(
+            &mut record,
+            2,
+            &json!({
+                "hook_event_name": "PostToolUse",
+                "agent_id": "a1",
+                "agent_type": "Explore",
+                "tool_name": "Read",
+            }),
+        );
+        assert_eq!(record.last_hook_time, Some(2), "the ordering stamp moves");
+        assert_eq!(record.main_hook_time, Some(1), "the main stamp stays");
+    }
+
+    #[test]
+    fn a_main_event_moves_both_stamps() {
+        let mut record = turn_record();
+        record.status = SessionStatus::Working;
+        record.main_hook_time = Some(1);
+        apply_body(
+            &mut record,
+            2,
+            &json!({"hook_event_name": "PostToolUse", "tool_name": "Read"}),
+        );
+        assert_eq!(record.last_hook_time, Some(2), "the ordering stamp moves");
+        assert_eq!(record.main_hook_time, Some(2), "the main stamp moves");
     }
 
     /// The one plugin the early-event tests map every agent's events with.

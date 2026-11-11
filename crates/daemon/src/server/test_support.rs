@@ -418,6 +418,7 @@ pub(crate) fn idle_record(id: &str) -> SessionRecord {
         conversation_id: None,
         pending_input: None,
         last_hook_time: None,
+        main_hook_time: None,
         hook_driven: false,
         background: false,
         turn_end: None,
