@@ -18,18 +18,19 @@ It is alpha software.
 - The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A notification fires when a session needs you or finishes (skipped when you are already looking at it), after a wait you choose for Finished.
 - Notifications can be the app's own toasts, which answer a prompt or go to its pane without taking focus; on macOS they always are. Each kind plays its own sound, silent during Do Not Disturb: a chime from the bundled list, your own .wav or .ogg, or none.
 - Turn on session summaries in Settings › Dashboard and each finished turn of a Claude session gets a one-line summary, kept across restarts, with a daily cap on what they spend.
-- The Dashboard tab, opened from the activity rail, opens on a Compact view of every running agent by repo, with its state, work and subagents and no scrolling. Its By status view adds context, recent work, cost, a two-hour activity bar and the Linear issue named in each session's branch, with a drawer per session.
+- The Dashboard tab, opened from the activity rail, opens on a Compact view of every running agent by repo, with its state, work and subagents (each with its model and effort level) and no scrolling. Its By status view adds context, recent work, cost, a two-hour activity bar and the Linear issue named in each session's branch, with a drawer per session.
 - Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane; the header counts today's cost, tokens and commits across every session.
 - `rustling-tulipd` drives sessions from a shell or a script: `sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch`, each with `--json`.
 - Ctrl+Shift+P opens a jump palette: type to find any open pane, tab, session, repo or workspace, and Enter goes straight there. It also opens a shell on any connected computer.
 - Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
 - Tabs and split panes: drag a pane or a sidebar session onto a pane to split, swap or move it, rearrange a tab into a grid, and undo a closed tab or a moved pane.
+- A tab you haven't named is named after the repos and workspaces of its sessions.
 - The sidebar groups sessions by repo or by tab, in Comfortable or Compact rows, with session names smaller than the repo name that holds them, and can show every session under a repo, only the busy ones, or just a count.
 - Repos sort with the ones that need you on top, by latest activity, or in your own order, and an All / Active switch hides the repos and workspaces with nothing running.
-- Right-click a repo or workspace for a Spawn submenu: Last, each agent, Shell and your presets. The New session dialog picks its target from a list that narrows as you type, and remembers your Trusted choice.
+- Right-click a repo or workspace for a Spawn submenu: Last, each agent, Shell and your presets. The New session dialog picks its target from a list that narrows as you type, Claude's model (Fable included) and its effort level from Low to Max, and in Advanced takes your own command-line arguments, which Duplicate and Launch last repeat.
 - Pick each host's default shell for new sessions and shells, from the shells installed there (PowerShell, cmd, Git Bash, WSL, Nushell, fish, zsh or bash) or your own command. Claude sessions start inside it.
 - Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges, and on a remote host the wizard takes typed paths on that host.
-- In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, a file path opens in its default app with Ctrl+click and in the viewer with Ctrl+Shift+click, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
+- In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, Ctrl+click on a file path offers its default app, the viewer or its folder, Ctrl+Shift+click opens it straight in the viewer, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
 - Terminal programs that ask for urxvt or pixel-precise mouse reporting get clicks, drags and the wheel in the format they asked for.
 - When Claude exits, its pane stays a working shell, and its Chat and Summary views turn off until Claude starts again.
 - Start Claude yourself in a plain shell, by name, an alias or a wrapper, and the pane gets Chat and Summary while it runs. Settings › Claude can install the app's hooks in Claude Code's own settings, so such a Claude reports its conversation and status too.
@@ -52,7 +53,7 @@ It is alpha software.
 
 ### Claude accounts
 
-- Save several Claude logins and switch between them. The footer shows the account in use with its five-hour and weekly usage; click it to switch, turn auto-switch on and see when your accounts run dry.
+- Save several Claude logins and switch between them. The footer shows the account in use with its five-hour and weekly usage, and the account list adds its Fable weekly limit while Fable is in use; click it to switch, turn auto-switch on and see when your accounts run dry.
 - Settings › Accounts lists your saved accounts to switch, rename, reorder, remove or add, logs in a new account in a terminal session, and sets auto-switch's threshold, cooldown, strategy and forecast window.
 - A toast tells you when auto-switch changes accounts, finds every account used up, or stops.
 
@@ -70,6 +71,8 @@ It is alpha software.
 - The app connects to this PC and every saved host you switch on, over Tailscale or SSH, and keeps each host's sessions, alerts and panels.
 - The sidebar groups sessions by host, each with its own + Shell; remote panes and tabs carry their host's name, one tab can mix panes from several hosts, and an offline host dims until it reconnects.
 - Spawning, shells, Add repo, presets and Settings work on any connected host: the spawn picker groups repos by host, and Settings has a host selector.
+- Connections and Settings show the release each host runs and mark an older one Behind. Update it from Connections, over Tailscale or SSH, and a notice follows it until it is back; a release that ends sessions or breaks the connection is named before you confirm.
+- From This PC's row in Connections, tell every connected client to update: each counts down 10 seconds with Cancel, and phones reload. When another device updates this PC, the app counts down the same way and reopens after the update.
 
 ![This PC's group in the sidebar with its + Repo and + Shell, a remote session's pane marked with its host "box" beside a local one, and the footer counting 2/3 hosts online](docs/images/multi-host.png)
 
@@ -82,7 +85,7 @@ It is alpha software.
 - Ctrl+click a folder path to fetch the whole folder, with progress and Cancel, leaving out `.git`, `node_modules` and caches. A fetched file's notice offers Fetch whole folder, and a fetched folder's offers Reveal.
 - When a host's session count changed since your last visit, the app offers to keep your layout, open all its sessions or start empty.
 - Paste an image with Ctrl+V, or drop files onto a terminal, in a session on another computer: they are copied there and their paths pasted.
-- An iPhone on the tailnet can open the same sessions as a Home Screen web app: each session as a chat or a live terminal, a Needs you tray, and push notifications that wait while you are at your computer; see [the phone app guide](docs/phone-app.md).
+- An iPhone on the tailnet can open the same sessions as a Home Screen web app: each session as a chat or a live terminal, a Needs you tray, push notifications that wait while you are at your computer, and Launch last, presets and a `/nextup` New session from Home; see [the phone app guide](docs/phone-app.md).
 
 ### Remote access over SSH
 
@@ -124,7 +127,7 @@ It is alpha software.
 ### Settings
 
 - A page per agent: Claude's permission mode, its provider (Anthropic, or DeepSeek with your own `DEEPSEEK_API_KEY`), its default effort level, and its launch command, so you can run another program, an alias or extra arguments.
-- Trusted launch by default, which notifications to show and when to skip them, and whether to keep the PC awake (off, while a session is busy, or always).
+- Which notifications to show and when to skip them, and whether to keep the PC awake (off, while a session is busy, or always).
 - Start the daemon at login, the folder worktrees go in, and Manage worktrees to clean up old ones.
 - Appearance: themes for the whole window and its terminals (built-in ones, Nord by default, or your own), session accent colours, terminal and interface fonts (Inter, Geist, Schibsted Grotesk or any installed font), the interface's text size and weight, the terminal's weight and frame width per app, repo, workspace or session, font sizes per session or per tab, and the window title.
 - The Themes window previews every theme with its contrast check, edits any colour of your own copy, and exports or imports theme files.
@@ -152,6 +155,15 @@ On a Mac with Apple silicon (there is no build for Intel Macs):
 4. Secret environment rows need Windows Credential Manager, so on a Mac a session with a secret row will not start; give it the secret through an `${env:NAME}` row instead.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.12.0-alpha
+
+- Update another computer on an older release from the Connections dialog, over the tailnet or SSH, and tell your connected clients to update.
+- Start sessions from the phone's Home: launch a repo's last launch again, a preset, or `/nextup` in any repo or workspace.
+- Choose Claude's effort level when starting a session, with Fable among Claude's models.
+- Questions, toasts, the Dashboard and Accounts show their whole text, wrapping it, instead of cutting it to one line.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.12.0-alpha).
 
 ## What's new in v0.11.0-alpha
 
