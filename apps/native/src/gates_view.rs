@@ -65,7 +65,7 @@ const LINE_TWO_INDENT: f32 = GLYPH_COLUMN + COLUMN_GAP + NAME_WIDTH + COLUMN_GAP
 /// px.
 const HEADER_GAP: f32 = 7.0;
 /// The row menu's width, in px: fixed, in a dense table whose rows keep one line.
-const MENU_WIDTH: f32 = 200.0;
+const MENU_WIDTH: f32 = 240.0;
 /// The tip of a menu row whose value the gate did not report.
 const NOT_REPORTED: &str = "The gate did not report it";
 

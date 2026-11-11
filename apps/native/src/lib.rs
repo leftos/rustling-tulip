@@ -6192,7 +6192,7 @@ impl Render for RootView {
             .children(self.start_notice_layer(cx))
             .children(overlay)
             .children(self.device_pairing_layer(cx))
-            .children(self.connection_picker_layer(cx))
+            .children(self.connection_picker_layer(window, cx))
     }
 }
 
@@ -6357,7 +6357,7 @@ impl RootView {
             .left(px(PADDING))
             .bottom(ui_px(cx, FOOTER_HEIGHT) + px(4.0))
             // Capped at a window-edge width; its rows wrap.
-            .w(px(320.0))
+            .w(px(400.0))
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -6551,7 +6551,7 @@ fn connecting_overlay(
         .px(px(40.0))
         .py(px(32.0))
         // A window-edge width; the overlay's text wraps.
-        .min_w(px(280.0))
+        .min_w(px(360.0))
         .bg(gpui::rgb(t.modal))
         .border_1()
         .border_color(gpui::rgb(t.modal_edge))
@@ -6721,7 +6721,7 @@ fn tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> A
 /// The widest a description tooltip draws, in logical px. Only the
 /// Dashboard's ask buttons show one; a toast draws its descriptions inline,
 /// as its window would cut a tooltip.
-const DESCRIPTION_TIP_WIDTH: f32 = 320.0;
+const DESCRIPTION_TIP_WIDTH: f32 = 420.0;
 
 /// A tooltip of a sentence or more, wrapping within
 /// [`DESCRIPTION_TIP_WIDTH`]: an answer's description.

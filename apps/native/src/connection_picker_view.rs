@@ -50,6 +50,11 @@ const SSH_HOST_PLACEHOLDER: &str = "devbox or user@host";
 /// The room the panel leaves above and below it, so it never reaches the
 /// window's edge.
 const PANEL_MARGIN: f32 = 24.0;
+/// The room the panel leaves at each side of the window, so a narrower
+/// window narrows it rather than pushing it past the edge.
+const PANEL_SIDE_MARGIN: f32 = 16.0;
+/// The Connections panel's width: wide enough for a host's SSH command on one line; a narrower window narrows it.
+const CONNECTIONS_WIDTH: f32 = 640.0;
 /// The width of the add form's field labels, fixed so the fields line up in their column.
 const FIELD_LABEL_WIDTH: f32 = 104.0;
 /// A row's corner radius.
@@ -1168,7 +1173,11 @@ impl RootView {
     /// above the first-connect overlay: the header, the sections' rows in a
     /// list that scrolls once the panel reaches the window's height less
     /// its margins, the add form while it shows, and the footer.
-    pub(crate) fn connection_picker_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn connection_picker_layer(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let t = theme(cx);
         let dialog = self.connection_picker.as_ref()?;
         let rows = dialog.picker.rows();
@@ -1210,11 +1219,14 @@ impl RootView {
             .as_ref()
             .map(|form| add_form(form, dialog.error.as_deref(), &draw, cx));
         let footer = footer(dialog.add.is_some(), &draw, cx);
+        let width = (window.viewport_size().width / px(1.0) - 2.0 * PANEL_SIDE_MARGIN)
+            .min(CONNECTIONS_WIDTH);
         let panel = modal_panel(
             crate::fonts::ui_text_size(cx),
             "connections-panel",
             &theme(cx),
         )
+        .w(px(width))
         .p_0()
         .gap_0()
         .max_h(relative(1.0))

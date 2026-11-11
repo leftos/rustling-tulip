@@ -2135,8 +2135,10 @@ fn a_saved_rows_detail_line_ends_before_its_on_switch(cx: &mut TestAppContext) {
         "the detail line {line:?} ends before the switch {on:?}"
     );
     assert!(
-        line.size.height > one_line,
-        "the detail line {line:?} wraps past one {one_line:?} line rather than being cut"
+        // Half a line of room for subpixel rounding: a second line would
+        // double the height.
+        line.size.height < one_line * 1.5,
+        "the detail line {line:?} keeps to one {one_line:?} line now that the panel is wider"
     );
 }
 
@@ -2152,6 +2154,9 @@ fn a_squeezed_detail_wraps_between_whole_pieces(cx: &mut TestAppContext) {
     );
     let mut h = Harness::with(cx, &dir, &Fixture::default());
     open_picker(&mut h, tailnet_with(&[]));
+    // The panel clamps to the window, so this narrows it enough for the
+    // largest text size to squeeze the row's line.
+    h.cx.simulate_resize(gpui::size(px(500.0), px(601.0)));
 
     h.root_update(|root, _, cx| root.set_ui_text_size(4, cx));
     h.cx.run_until_parked();
@@ -2226,6 +2231,44 @@ fn a_detail_piece_wider_than_the_column_wraps_inside_it(cx: &mut TestAppContext)
         pieces += 1;
     }
     assert!(pieces >= 2, "the line draws its pieces, {pieces} found");
+}
+
+#[gpui::test]
+fn a_long_ssh_command_fits_the_wider_connections_panel(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let command = "wsl -d Ubuntu -- /home/ana/.local/bin/rustling-tulipd bridge";
+    assert_eq!(command.len(), 60, "the command is the spec's 60 characters");
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{
+            "kind": "ssh",
+            "name": SSH_HOST,
+            "remote_command": command,
+            "enabled": false,
+        }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+
+    open_picker(&mut h, tailnet_with(&[]));
+
+    let key = format!("ssh:{SSH_HOST}");
+    assert!(
+        detail(&mut h, &key).is_some_and(|detail| detail.line.contains(command)),
+        "the row's line names its remote command"
+    );
+    let line = h.bounds(&format!("connections-detail-{key}"));
+    let one_line = h.bounds("connections-detail-This PC").size.height;
+    assert!(
+        // Half a line of room for subpixel rounding: a second line would
+        // double the height.
+        line.size.height < one_line * 1.5,
+        "the 60-character command's detail line {line:?} keeps to one {one_line:?} line"
+    );
+    let on = h.bounds(&switch(&key));
+    assert!(
+        line.right() <= on.left(),
+        "the detail line {line:?} ends before the switch {on:?}"
+    );
 }
 
 #[gpui::test]

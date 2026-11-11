@@ -19,7 +19,7 @@ use crate::undo::{self, TabSnapshot, UndoEntry};
 use crate::{FOOTER_HEIGHT, RootView, tooltip};
 
 /// The widest the shelf gets; a narrower window narrows it.
-const SHELF_WIDTH: f32 = 460.0;
+const SHELF_WIDTH: f32 = 560.0;
 /// What the shelf leaves free at each side of the window.
 const SHELF_MARGIN: f32 = 16.0;
 

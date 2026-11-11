@@ -62,13 +62,13 @@ pub(crate) const POP_OUT_TIP: &str = "Open this pane in a window of its own";
 const CLOSE_WINDOW_TIP: &str = "Close this window; the session is left as it is";
 
 /// The menu's width: capped; its rows keep one line and their tooltips carry the whole summary.
-pub(crate) const MENU_WIDTH: f32 = 240.0;
+pub(crate) const MENU_WIDTH: f32 = 280.0;
 /// The share of the window's height a menu may take before its rows scroll,
 /// as the data lists take before theirs do.
 pub(crate) const MENU_MAX_SHARE: f32 = 0.6;
 const NEW_SESSION_TIP: &str = "Open the spawn dialog; the new session takes over this pane";
 /// A dialog's width: a window-like cap; its text wraps inside it.
-const DIALOG_WIDTH: f32 = 440.0;
+const DIALOG_WIDTH: f32 = 520.0;
 
 /// `panel` centred over a tinted layer that takes every click beneath it, and
 /// tags it `selector`; a click on the layer itself does nothing.
