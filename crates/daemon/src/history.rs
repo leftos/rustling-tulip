@@ -1986,6 +1986,7 @@ pub(crate) mod test_support {
             pending_input: None,
             last_hook_time: None,
             main_hook_time: None,
+            pending_from_subagent: false,
             hook_driven: false,
             background: false,
             turn_end: None,

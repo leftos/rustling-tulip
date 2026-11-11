@@ -327,6 +327,12 @@ pub struct SessionRecord {
     /// status, so a session reattached `AwaitingInput` keeps what it was
     /// asking; any other restored status starts with none.
     pub pending_input: Option<PendingInput>,
+    /// True when a subagent's hook raised [`Self::pending_input`], false when
+    /// main's hook did or nothing is pending. A subagent's view ends only a
+    /// prompt a subagent raised. Runtime-only: neither mirrored into the
+    /// sidecar nor sent on the wire, so a prompt restored on reattach reads
+    /// as main's. Cleared with the prompt by [`Self::clear_pending`].
+    pub pending_from_subagent: bool,
     /// Time of the last hook event applied to this session, in nanoseconds
     /// since the Unix epoch, from the shim's `X-RT-Hook-Time` header. Async
     /// hooks finish out of order, so an event at or before this time is
@@ -454,6 +460,12 @@ pub fn default_agent() -> AgentId {
 }
 
 impl SessionRecord {
+    /// Drop the pending prompt and whose it was, together.
+    pub fn clear_pending(&mut self) {
+        self.pending_input = None;
+        self.pending_from_subagent = false;
+    }
+
     /// The agent whose plugin maps this session's hook events: its own agent,
     /// or a plain shell's [`Self::hook_agent`], so `None` for a plain shell
     /// without one.
@@ -1268,7 +1280,7 @@ impl SessionRegistry {
             if rec.status == SessionStatus::AwaitingInput {
                 rec.status = SessionStatus::Idle;
             }
-            rec.pending_input = None;
+            rec.clear_pending();
             true
         });
     }
@@ -1785,7 +1797,7 @@ pub(crate) fn handle_exit_with(
         user_stopped = rec.pty.is_none() && rec.status == SessionStatus::Stopped;
         rec.status = SessionStatus::Stopped;
         // A stopped session has nothing left waiting on it.
-        rec.pending_input = None;
+        rec.clear_pending();
         rec.background = false;
         rec.pty = None;
         rec.input_notifier = None;
@@ -1939,6 +1951,7 @@ impl SessionRegistry {
             pending_input: None,
             last_hook_time: None,
             main_hook_time: None,
+            pending_from_subagent: false,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -2028,6 +2041,7 @@ impl SessionRegistry {
             pending_input,
             last_hook_time: None,
             main_hook_time: None,
+            pending_from_subagent: false,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -2094,6 +2108,7 @@ impl SessionRegistry {
             pending_input: None,
             last_hook_time: None,
             main_hook_time: None,
+            pending_from_subagent: false,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -2188,6 +2203,7 @@ mod tests {
             pending_input: None,
             last_hook_time: None,
             main_hook_time: None,
+            pending_from_subagent: false,
             hook_driven: false,
             background: false,
             turn_end: None,

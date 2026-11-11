@@ -386,7 +386,7 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
         record.hook_driven = false;
         if record.status == SessionStatus::AwaitingInput {
             crate::pty_state::apply_status(record, SessionStatus::Idle);
-            record.pending_input = None;
+            record.clear_pending();
         }
         turn_alert = land_turn_end(record, false, "agent_end");
         agent_exited = record.end_agent_in_shell();
@@ -421,12 +421,18 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
             })
             .is_some_and(|status| crate::pty_state::apply_status(record, status))
     };
+    // Whose prompt it is goes with it: a subagent's view ends only a prompt
+    // a subagent's hook raised.
     match &report.pending {
-        PendingUpdate::Clear => record.pending_input = None,
-        PendingUpdate::Set(pending) => record.pending_input = Some(pending.clone()),
+        PendingUpdate::Clear => record.clear_pending(),
+        PendingUpdate::Set(pending) => {
+            record.pending_input = Some(pending.clone());
+            record.pending_from_subagent = report.subagent;
+        }
         PendingUpdate::KeepOr(pending) => {
             if record.pending_input.is_none() {
                 record.pending_input = Some(pending.clone());
+                record.pending_from_subagent = report.subagent;
             }
         }
     }
@@ -1122,6 +1128,140 @@ mod tests {
             "the subagent's prompt is pending: {:?}",
             record.pending_input
         );
+    }
+
+    fn subagent_permission_request() -> Value {
+        json!({
+            "hook_event_name": "PermissionRequest",
+            "agent_id": "a0123456789abcdef",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "notes.txt"},
+        })
+    }
+
+    fn main_permission_request() -> Value {
+        json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "notes.txt"},
+        })
+    }
+
+    /// A record whose prompt a subagent's `PermissionRequest` raised, at 2.
+    fn record_with_a_subagents_prompt() -> SessionRecord {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::Working;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        apply_body(&mut record, 2, &subagent_permission_request());
+        record
+    }
+
+    #[test]
+    fn a_subagent_raised_prompt_is_marked_as_the_subagents() {
+        let record = record_with_a_subagents_prompt();
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert!(
+            record.pending_input.is_some(),
+            "the subagent's prompt is pending"
+        );
+        assert!(
+            record.pending_from_subagent,
+            "none pending: marked as the subagent's"
+        );
+
+        // Over a stale value beside another status, the subagent's replaces it.
+        let mut stale = record_with_open_prompt();
+        stale.status = SessionStatus::Working;
+        apply_body(&mut stale, 2, &subagent_permission_request());
+        assert_eq!(stale.status, SessionStatus::AwaitingInput);
+        assert!(
+            stale.pending_from_subagent,
+            "stale value: marked as the subagent's"
+        );
+    }
+
+    #[test]
+    fn a_main_prompt_is_not_marked_as_a_subagents() {
+        let mut working = crate::history::test_support::record("s1", SessionMode::Interactive);
+        working.status = SessionStatus::Working;
+        working.last_hook_time = Some(1);
+        working.hook_driven = true;
+        apply_body(&mut working, 2, &main_permission_request());
+        assert_eq!(working.status, SessionStatus::AwaitingInput);
+        assert!(working.pending_input.is_some(), "main's prompt is pending");
+        assert!(
+            !working.pending_from_subagent,
+            "main's prompt marked as a subagent's"
+        );
+
+        // Main's prompt replacing a stale subagent's value takes the mark off.
+        let mut stale = record_with_a_subagents_prompt();
+        stale.status = SessionStatus::Working;
+        apply_body(&mut stale, 3, &main_permission_request());
+        assert_eq!(stale.status, SessionStatus::AwaitingInput);
+        assert!(
+            !stale.pending_from_subagent,
+            "main's prompt kept the subagent's mark"
+        );
+
+        // A subagent's event over main's open prompt leaves it main's.
+        let mut open = record_with_open_prompt();
+        apply_body(&mut open, 2, &subagent_permission_request());
+        assert_eq!(open.pending_input, Some(main_prompt()));
+        assert!(
+            !open.pending_from_subagent,
+            "a subagent's event marked main's prompt"
+        );
+    }
+
+    #[test]
+    fn a_subagents_keep_or_fills_an_empty_prompt_with_its_mark() {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::Working;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        let notification = json!({
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+            "message": "Claude needs your permission to use Write",
+            "agent_id": "a0123456789abcdef",
+        });
+        assert!(
+            matches!(report(&notification).pending, PendingUpdate::KeepOr(_)),
+            "a permission notification keeps or fills the prompt"
+        );
+        apply_body(&mut record, 2, &notification);
+        assert!(
+            record.pending_input.is_some(),
+            "the empty slot was not filled"
+        );
+        assert!(
+            record.pending_from_subagent,
+            "the subagent's prompt is not marked"
+        );
+    }
+
+    #[test]
+    fn clearing_a_prompt_clears_its_subagent_mark() {
+        // A main hook that ends the prompt.
+        let mut record = record_with_a_subagents_prompt();
+        apply_body(
+            &mut record,
+            3,
+            &json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"}),
+        );
+        assert_eq!(record.pending_input, None);
+        assert!(
+            !record.pending_from_subagent,
+            "a main hook's clear kept the mark"
+        );
+
+        // The helper every other clearing path calls.
+        let mut direct = record_with_a_subagents_prompt();
+        direct.clear_pending();
+        assert_eq!(direct.pending_input, None);
+        assert!(!direct.pending_from_subagent, "clear_pending kept the mark");
     }
 
     #[test]

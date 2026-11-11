@@ -419,6 +419,7 @@ pub(crate) fn idle_record(id: &str) -> SessionRecord {
         pending_input: None,
         last_hook_time: None,
         main_hook_time: None,
+        pending_from_subagent: false,
         hook_driven: false,
         background: false,
         turn_end: None,

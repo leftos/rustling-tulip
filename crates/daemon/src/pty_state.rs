@@ -301,8 +301,17 @@ struct ScreenWatch {
     /// painted after a chat answer cleared it raises nothing.
     dialog_edge_armed: bool,
     /// The subagent in view at the last reading of a dialog; `None` for a
-    /// dialog in main's view, and once a settled reading shows no dialog.
+    /// dialog in main's view, once a settled reading in that view shows no
+    /// dialog, and once nothing waits. Kept across a view change, so another
+    /// subagent's view does not end its prompt.
     subagent_dialog: Option<String>,
+    /// True once a settled reading, or a hold's look at the grid, saw a
+    /// dialog in any view since the record last had nothing waiting. While
+    /// true, a subagent's view with no dialog of its own recorded ends no
+    /// prompt: the dialog read may still be up out of sight. Cleared by a
+    /// reading that finds nothing waiting and by this watcher's own end of
+    /// the prompt.
+    prompt_dialog_read: bool,
     /// Whether the record's background flag is this watcher's own write: the
     /// screen clears only a flag it set. Any other writer's change to the
     /// record, and any status change, drops it.
@@ -562,6 +571,7 @@ impl ScreenWatch {
             title_working: false,
             dialog_edge_armed: true,
             subagent_dialog: None,
+            prompt_dialog_read: false,
             screen_set_background: false,
             turn_end: TurnEndWatch::default(),
             view_return: ViewReturn::default(),
@@ -740,14 +750,19 @@ impl ScreenWatch {
 
     /// End the prompt of a dialog a subagent's view has stopped showing. A
     /// subagent's hooks leave a pending prompt alone and its view writes no
-    /// status, so this edge is what ends it: the last reading in this same
-    /// view was a dialog, and this settled one is not. A half-drawn frame
-    /// counts for nothing, and any other non-dialog reading ends nothing: the
-    /// view moved, and a dialog out of sight may still be up. Only the rules
-    /// start the edge, since the plugin's view also reads an overlay as a
-    /// dialog, and a reading the plugin still calls a dialog keeps it: a
-    /// footer no rule knows, its dialog still up. A clear refused because the
-    /// record moved since `read` keeps the edge for the next reading.
+    /// status, so this edge is what ends it: the last dialog was read in this
+    /// same view, and this settled reading shows none. A prompt a subagent's
+    /// hook raised whose dialog no reading saw (answered inside a hold or the
+    /// debounce) ends on the first settled reading in any subagent's view;
+    /// once a dialog was read in any view, only the same-view edge ends it.
+    /// A half-drawn frame counts for nothing, and a dialog read in another
+    /// subagent's view keeps its prompt: it may still be up, out of sight. An
+    /// answered subagent dialog never ends a prompt main's hook raised. Only
+    /// the rules start the edge, since the plugin's view also reads an
+    /// overlay as a dialog, and a reading the plugin still calls a dialog
+    /// keeps it: a footer no rule knows, its dialog still up. A clear refused
+    /// because the record moved since `read` keeps the edge for the next
+    /// reading. The dialog read is forgotten once nothing waits.
     fn follow_subagent_dialog(
         &mut self,
         read: StatusRead,
@@ -756,34 +771,60 @@ impl ScreenWatch {
         quiet: bool,
     ) {
         let in_view = agent_view.and_then(|view| view.agent_in_view.as_deref());
+        self.forget_spent_prompt(read);
         if reads_dialog(reading) {
             self.subagent_dialog = in_view.map(str::to_owned);
+            self.prompt_dialog_read |= quiet;
             return;
         }
-        if !quiet {
+        let Some(seen) = self.subagent_edge(in_view, quiet) else {
             return;
-        }
-        if in_view.is_none() || self.subagent_dialog.as_deref() != in_view {
-            self.subagent_dialog = None;
-            return;
-        }
+        };
         if agent_view.is_some_and(|view| view.dialog) {
             return;
         }
         let mut refused = false;
+        let mut ended = false;
         self.registry
             .clear_answered_prompt_if(&self.session_id, |record| {
                 refused = moved_since(record, read);
-                !refused
+                ended = !refused && subagent_edge_ends(record, seen);
+                ended
             });
         if !refused {
             self.subagent_dialog = None;
         }
+        if ended {
+            self.prompt_dialog_read = false;
+        }
     }
 
-    /// Note a dialog on the grid in a subagent's view while a hold keeps the
-    /// screen from being read, so one answered inside the hold still has its
-    /// edge. Anything else on the grid changes nothing until a reading.
+    /// Forget the dialogs read once `read` shows nothing waiting: the prompt
+    /// they belonged to has ended.
+    fn forget_spent_prompt(&mut self, read: StatusRead) {
+        if read.status != SessionStatus::AwaitingInput && !read.pending {
+            self.subagent_dialog = None;
+            self.prompt_dialog_read = false;
+        }
+    }
+
+    /// Whether a reading in `in_view` may end a prompt, and if so whether the
+    /// last dialog was read in this same view: `None` for a half-drawn frame,
+    /// main's view, another subagent's view than the dialog's, or no dialog
+    /// recorded in a subagent's view while one was read elsewhere (main's
+    /// view), since that dialog may still be up.
+    fn subagent_edge(&self, in_view: Option<&str>, quiet: bool) -> Option<bool> {
+        let in_view = in_view.filter(|_| quiet)?;
+        match self.subagent_dialog.as_deref() {
+            None => (!self.prompt_dialog_read).then_some(false),
+            Some(dialog) => (dialog == in_view).then_some(true),
+        }
+    }
+
+    /// Note a dialog on the grid while a hold keeps the screen from being
+    /// read: it counts as read, and one in a subagent's view answered inside
+    /// the hold still has its edge. Anything else on the grid changes nothing
+    /// until a reading.
     fn note_held_off_dialog(&mut self) {
         let Some(agent) = self.session_agent() else {
             return;
@@ -792,7 +833,11 @@ impl ScreenWatch {
         let Some(view) = crate::screen::dialogs::read_view(&agent, &screen) else {
             return;
         };
-        if view.agent_in_view.is_some() && reads_dialog(&self.rules.read(&screen)) {
+        if !reads_dialog(&self.rules.read(&screen)) {
+            return;
+        }
+        self.prompt_dialog_read = true;
+        if view.agent_in_view.is_some() {
             self.subagent_dialog = view.agent_in_view;
         }
     }
@@ -2265,6 +2310,20 @@ fn on_plain_shell_transition(
     });
 }
 
+/// Whether a settled reading in a subagent's view with no dialog ends
+/// `record`'s prompt. After a dialog read in that view (`seen`): any prompt
+/// but one main's hook raised, since the dialog answered was the subagent's.
+/// With none read: only an `AwaitingInput` a subagent's hook raised, whose
+/// dialog the view would show.
+fn subagent_edge_ends(record: &SessionRecord, seen: bool) -> bool {
+    let subagents = record.pending_from_subagent && record.pending_input.is_some();
+    if seen {
+        subagents || record.pending_input.is_none()
+    } else {
+        subagents && record.status == SessionStatus::AwaitingInput
+    }
+}
+
 /// [`apply_status`] for a status watcher's own write: leaving `AwaitingInput`
 /// also drops the prompt it was waiting on, since no hook will (a prompt
 /// restored on reattach, or one dismissed while hooks are not driving).
@@ -2272,7 +2331,7 @@ fn apply_watcher_status(record: &mut SessionRecord, next: SessionStatus) -> bool
     let was_awaiting = record.status == SessionStatus::AwaitingInput;
     let entered_awaiting = apply_status(record, next);
     if was_awaiting && record.status != SessionStatus::AwaitingInput {
-        record.pending_input = None;
+        record.clear_pending();
     }
     entered_awaiting
 }
@@ -2479,6 +2538,7 @@ mod hysteresis_tests {
             pending_input: None,
             last_hook_time: None,
             main_hook_time: None,
+            pending_from_subagent: false,
             hook_driven: false,
             background: false,
             turn_end: None,
@@ -6726,7 +6786,12 @@ mod hysteresis_tests {
     /// A session asking for the owner, with `SUBAGENT_IN_VIEW`'s dialog read
     /// once the watcher's first hold has passed.
     async fn start_on_a_subagents_dialog(tag: &str) -> Harness {
-        let h = start_record(tag, false, pending_record());
+        start_on_a_subagents_dialog_from(tag, pending_record()).await
+    }
+
+    /// [`start_on_a_subagents_dialog`] from `record`.
+    async fn start_on_a_subagents_dialog_from(tag: &str, record: SessionRecord) -> Harness {
+        let h = start_record(tag, false, record);
         pass_hold().await;
         h.chunk(subagent_view_with_a_question());
         advance(Duration::from_secs(2)).await;
@@ -6742,17 +6807,221 @@ mod hysteresis_tests {
         record
     }
 
+    /// [`pending_record`] whose prompt a subagent's hook raised.
+    fn subagent_pending_record() -> SessionRecord {
+        let mut record = pending_record();
+        record.pending_from_subagent = true;
+        record
+    }
+
     /// Whether the record still holds a pending prompt.
     fn has_pending(h: &Harness) -> bool {
         let rec = h.registry.get(SESSION).expect("session registered");
         rec.lock().expect("record lock").pending_input.is_some()
     }
 
+    /// Whether the record marks its prompt as a subagent's.
+    fn pending_from_subagent(h: &Harness) -> bool {
+        let rec = h.registry.get(SESSION).expect("session registered");
+        rec.lock().expect("record lock").pending_from_subagent
+    }
+
+    /// A subagent's prompt answered before any settled reading saw its
+    /// dialog: the first settled reading in a subagent's view ends it.
+    #[tokio::test(start_paused = true)]
+    async fn a_subagent_raised_prompt_with_no_dialog_read_ends_on_the_first_settled_reading() {
+        let h = start_record("agent-view-unseen", false, subagent_pending_record());
+        pass_hold().await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the answered prompt stayed up"
+        );
+        assert!(!has_pending(&h), "the answered prompt stayed pending");
+        assert!(!pending_from_subagent(&h), "the ended prompt kept its mark");
+    }
+
+    /// Main's prompt behind a subagent's view is out of sight, not answered.
+    #[tokio::test(start_paused = true)]
+    async fn a_main_prompt_hidden_by_a_subagent_view_is_kept() {
+        let h = start_record("agent-view-main-hidden", false, pending_record());
+        pass_hold().await;
+        for _ in 0..3 {
+            h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+            advance(Duration::from_secs(2)).await;
+        }
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a subagent's view ended main's prompt"
+        );
+        assert!(has_pending(&h), "a subagent's view dropped main's prompt");
+    }
+
+    /// A subagent's dialog drawn in front of main's question and answered
+    /// ends nothing: the question is still main's, and it raises no second
+    /// Attention when it is read again.
+    #[tokio::test(start_paused = true)]
+    async fn an_answered_subagent_dialog_keeps_a_pending_main_question() {
+        let mut h = start_on_a_subagents_dialog("agent-view-main-kept").await;
+        let asked = pending_input(&h);
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the subagent's answer ended main's question"
+        );
+        assert_eq!(pending_input(&h), asked, "main's question was dropped");
+        h.chunk(question_frame());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::AwaitingInput);
+        assert_eq!(
+            h.attentions(),
+            0,
+            "main's question raised a second Attention"
+        );
+    }
+
+    /// A subagent's `PermissionRequest` raises the prompt and its dialog is
+    /// drawn and replaced inside the debounce, so no settled reading sees it:
+    /// a settled reading in the subagent's view still ends the prompt.
+    #[tokio::test(start_paused = true)]
+    async fn a_subagent_dialog_replaced_inside_the_debounce_still_ends_its_prompt() {
+        let h = start_record(
+            "agent-view-debounced",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(
+            2,
+            &serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "agent_id": "a0123456789abcdef",
+                "tool_name": "Write",
+                "tool_input": {"file_path": "notes.txt"},
+            }),
+        );
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the hook raised no prompt"
+        );
+        assert!(
+            pending_from_subagent(&h),
+            "the prompt is not marked as the subagent's"
+        );
+        settle().await;
+        h.chunk(subagent_view_with_a_question());
+        advance(CHECK_DEBOUNCE / 2).await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the answered prompt stayed up"
+        );
+        assert!(!has_pending(&h), "the answered prompt stayed pending");
+    }
+
+    /// Back in a subagent's view after another's, a settled reading with its
+    /// dialog gone ends its prompt, with no Attention beyond the prompt's own.
+    #[tokio::test(start_paused = true)]
+    async fn returning_to_a_subagents_view_with_its_dialog_gone_ends_its_prompt() {
+        let mut h =
+            start_on_a_subagents_dialog_from("agent-view-return", subagent_pending_record()).await;
+        h.chunk(another_subagent_in_view());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "another subagent's view ended the prompt"
+        );
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the answered prompt stayed up"
+        );
+        assert!(!has_pending(&h), "the answered prompt stayed pending");
+        assert_eq!(h.attentions(), 0, "the watcher raised an Attention");
+    }
+
+    /// A subagent's `PermissionRequest` hook payload.
+    fn subagent_permission_request() -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "agent_id": "a0123456789abcdef",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "notes.txt"},
+        })
+    }
+
+    /// A subagent's prompt whose dialog a settled reading saw in main's view
+    /// is still up when a subagent's view hides it.
+    #[tokio::test(start_paused = true)]
+    async fn a_subagent_prompt_whose_dialog_was_read_in_mains_view_is_kept_in_a_subagents_view() {
+        let mut h = start_record(
+            "agent-view-main-read",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &subagent_permission_request());
+        assert!(
+            pending_from_subagent(&h),
+            "the prompt is not the subagent's"
+        );
+        pass_hold().await;
+        h.chunk(permission_frame());
+        advance(Duration::from_secs(2)).await;
+        for _ in 0..2 {
+            h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+            advance(Duration::from_secs(2)).await;
+        }
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a subagent's view ended a prompt whose dialog is up"
+        );
+        assert!(has_pending(&h), "a subagent's view dropped the prompt");
+        h.chunk(permission_frame());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.attentions(), 0, "the dialog raised a second Attention");
+    }
+
+    /// The watcher's own end of a prompt forgets its dialog was read, so a
+    /// subagent's next prompt answered unseen still ends.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_subagent_prompt_after_an_answered_one_ends_unseen() {
+        let h =
+            start_on_a_subagents_dialog_from("agent-view-next", subagent_pending_record()).await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the answered prompt stayed up"
+        );
+        h.hook(3, &subagent_permission_request());
+        assert_eq!(h.status(), SessionStatus::AwaitingInput, "no new prompt");
+        pass_hold().await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle, "the next prompt stayed up");
+        assert!(!has_pending(&h), "the next prompt stayed pending");
+    }
+
     /// No subagent hook ends a subagent's prompt, so the screen does: the
     /// reading after its dialog, in the same view, shows it answered.
     #[tokio::test(start_paused = true)]
     async fn an_answered_subagent_dialog_ends_the_status() {
-        let h = start_on_a_subagents_dialog("agent-view-answered").await;
+        let h = start_on_a_subagents_dialog_from("agent-view-answered", subagent_pending_record())
+            .await;
         h.chunk(capture_frame(SUBAGENT_IN_VIEW));
         advance(Duration::from_secs(2)).await;
         assert_eq!(h.status(), SessionStatus::Idle, "the answer ended nothing");
@@ -6781,9 +7050,12 @@ mod hysteresis_tests {
     /// the dialog up, out of sight.
     #[tokio::test(start_paused = true)]
     async fn leaving_a_subagents_dialog_for_another_view_does_not_end_it() {
-        let h = start_on_a_subagents_dialog("agent-view-left").await;
-        h.chunk(another_subagent_in_view());
-        advance(Duration::from_secs(2)).await;
+        let h =
+            start_on_a_subagents_dialog_from("agent-view-left", subagent_pending_record()).await;
+        for _ in 0..2 {
+            h.chunk(another_subagent_in_view());
+            advance(Duration::from_secs(2)).await;
+        }
         assert_eq!(
             h.status(),
             SessionStatus::AwaitingInput,
@@ -6875,7 +7147,11 @@ mod hysteresis_tests {
     #[tokio::test(start_paused = true)]
     async fn a_dialog_seen_during_the_hold_still_releases() {
         // Painted once the hold has begun.
-        let h = start_record("agent-view-in-hold", false, pending_record());
+        let h = start_record(
+            "agent-view-in-hold",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
         pass_hold().await;
         h.set_record(main_stamp);
         settle().await;
@@ -6889,7 +7165,11 @@ mod hysteresis_tests {
             "painted in the hold: prompt still pending"
         );
         // Painted just before the hold, whose start drops the debounced check.
-        let h = start_record("agent-view-before-hold", false, pending_record());
+        let h = start_record(
+            "agent-view-before-hold",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
         pass_hold().await;
         h.chunk(subagent_view_with_a_question());
         settle().await;
@@ -6906,7 +7186,7 @@ mod hysteresis_tests {
     #[tokio::test]
     async fn a_refused_clear_is_tried_again_on_the_next_reading() {
         let registry = SessionRegistry::new(scratch_dirs("agent-view-refused"));
-        registry.insert(pending_record());
+        registry.insert(hook_record(SessionStatus::AwaitingInput));
         let (reading, view) = read_frame(&capture_frame(SUBAGENT_IN_VIEW));
         let agent = agent_registry::default_agent();
         let chat = crate::chat_mirror::ChatMirror::new(

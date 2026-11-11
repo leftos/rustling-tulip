@@ -26,6 +26,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Answering a subagent's question in front of Claude's own no longer drops Claude's question for a moment, and a subagent's question answered before it showed stops showing as needing you.
 - With Claude's vim mode on, a question whose cursor sits on "Type something" keeps showing as needing you, and its Chat card stays up.
 - A prompt you answer or dismiss from the keyboard while subagents are busy now stops showing as needing you at once, and so does a turn you end with Esc.
 - A session whose reply quotes a question's footer no longer shows as needing you, and pressing Esc on a question with such a quote above it now ends the wait.

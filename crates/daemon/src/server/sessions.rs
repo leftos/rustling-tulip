@@ -1019,7 +1019,7 @@ async fn park_session(hub: &Hub, session_id: &str) {
     hub.sessions.update(session_id, |r| {
         r.is_inactive = true;
         // A parked session has nothing left waiting on it.
-        r.pending_input = None;
+        r.clear_pending();
         r.background = false;
         pty = r.pty.take();
         headless_handle = r.headless.take();
@@ -1412,7 +1412,7 @@ pub(crate) async fn stop_session_if_live(hub: &Hub, session_id: &str) -> bool {
             return false;
         }
         r.status = protocol::SessionStatus::Stopped;
-        r.pending_input = None;
+        r.clear_pending();
         r.background = false;
         pty = r.pty.take();
         headless_handle = r.headless.take();
@@ -1464,7 +1464,7 @@ pub(crate) async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<
     hub.sessions.update(session_id, |r| {
         r.status = protocol::SessionStatus::Stopped;
         // A stopped session has nothing left waiting on it.
-        r.pending_input = None;
+        r.clear_pending();
         r.background = false;
         pty = r.pty.take();
         headless_handle = r.headless.take();
