@@ -35,6 +35,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Ctrl+clicking a file path that runs onto a second line inside one of Claude's boxed dialogs opens the whole path, instead of only its first line.
 - A plan, permission or question card shows in Chat as soon as Claude asks, instead of most of a second after the session turns to waiting.
 - Answering a subagent's question in front of Claude's own no longer drops Claude's question for a moment, and a subagent's question answered before it showed stops showing as needing you.
 - With Claude's vim mode on, a question whose cursor sits on "Type something" keeps showing as needing you, and its Chat card stays up.

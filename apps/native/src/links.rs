@@ -6,10 +6,12 @@
 //! map of the grid column each character starts in, so that a wide glyph
 //! leaves character indices and columns as two different things. Rows are
 //! grouped into the logical lines a link can span: a soft wrap joins the row
-//! below as it is, and a hard line break a TUI emitted mid-path is stitched
-//! back together when both sides of the break look like one path. Every stitch
-//! is a boundary a reading of the path can stop at, so an over-eager stitch
-//! degrades into the fragment that was on screen.
+//! below as it is, except a row that opens with a box frame, which `ConPTY`
+//! can flag as wrapped when it repaints a program's rows as one run; that row
+//! is stitched like a hard break. A hard line break a TUI emitted mid-path is
+//! stitched back together when both sides of the break look like one path.
+//! Every stitch is a boundary a reading of the path can stop at, so an
+//! over-eager stitch degrades into the fragment that was on screen.
 
 use std::sync::LazyLock;
 
@@ -590,6 +592,13 @@ pub enum Stitch {
     Candidate,
 }
 
+/// Whether the grid's soft wrap into `row` is the terminal's own: a row
+/// that opens with a box frame was drawn by the program, which `ConPTY` can
+/// still flag as wrapped when it repaints the program's rows as one run.
+fn soft_wrapped(row: &TerminalRow) -> bool {
+    row.is_wrapped && strip_frame(&row.text).start == 0
+}
+
 /// How `below` continues `above` across a hard line break — a real newline
 /// a TUI emitted rather than a soft wrap the grid flagged — if it does.
 /// `edge` gives the text edge of the box `above` sits in; it is asked only
@@ -600,7 +609,7 @@ pub fn stitch(
     cols: usize,
     edge: impl FnOnce() -> Option<usize>,
 ) -> Option<Stitch> {
-    if below.is_wrapped {
+    if soft_wrapped(below) {
         return None;
     }
     let a = strip_frame(&above.text);
@@ -757,7 +766,7 @@ fn group_rows_with(
             stitches = 0;
             continue;
         }
-        if row.is_wrapped {
+        if soft_wrapped(row) {
             current.push(whole_row(index, row, cols));
             continue;
         }
@@ -1634,6 +1643,64 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "./output.txt");
         assert_eq!(links[0].candidates.len(), 1);
+    }
+
+    #[test]
+    #[expect(clippy::expect_used, reason = "a missing link fails the test")]
+    fn a_framed_row_conpty_painted_as_a_soft_wrap_stitches_like_a_hard_break() {
+        // ConPTY repaints a dialog's rows as one autowrapped run, so
+        // the grid flags each row soft-wrapped even though the program drew its
+        // left frame again at the start of each one. The frame on the lower row
+        // must not land between the halves of the path.
+        let cols = 101;
+        let rows = [
+            row(
+                "  │ DRIVE-376, re-shot with props: a parked car on each side at about 62°, poles and balls at the",
+                cols,
+                false,
+            ),
+            row(
+                r"  │ edges, one pole and one ball in the centre for comparison. The page in the repo: X:\dev\career-dr",
+                cols,
+                true,
+            ),
+            row(
+                r"  │ iver.wt\drive-376\career-driver\docs\plans\canvases\drive-376-projection\index.html (the balls",
+                cols,
+                true,
+            ),
+            row(
+                "  │ read as wide ovals at today's edges and round in the cylindrical lane; the matched lane is too",
+                cols,
+                true,
+            ),
+        ];
+
+        let links = detect_row_links(&rows, cols);
+
+        let path = r"X:\dev\career-driver.wt\drive-376\career-driver\docs\plans\canvases\drive-376-projection\index.html";
+        let link = links
+            .iter()
+            .find(|link| link.covers(1, 90))
+            .expect("a link under the path's first half");
+        assert_eq!(link.target, path);
+        assert_eq!(link.candidates[0].path, path);
+        assert_eq!(
+            link.segments,
+            vec![
+                LinkSegment {
+                    row: 1,
+                    start_column: 85,
+                    end_column: 101
+                },
+                LinkSegment {
+                    row: 2,
+                    start_column: 4,
+                    end_column: 87
+                },
+            ],
+            "the lower row's frame is not part of the link"
+        );
     }
 
     #[test]
