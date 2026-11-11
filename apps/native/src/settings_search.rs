@@ -206,7 +206,10 @@ pub(crate) const RING_EXEMPT: &[(&str, &str)] = &[
         "settings-dashboard-key-source-env",
         "another choice of the Key source row",
     ),
-    ("settings-dashboard-key-clear", "the Key row's Clear button"),
+    (
+        "settings-dashboard-key-clear",
+        "the Key row's Delete stored key button",
+    ),
     (
         "settings-worktrees-root-browse",
         "the Path row's Browse button",

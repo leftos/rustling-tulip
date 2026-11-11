@@ -18,6 +18,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Changed
 
 - Settings › Claude's Install hooks switch waits for OK or Apply, and Cancel leaves the hooks as they were.
+- Settings › Dashboard's Clear is now Delete stored key and waits for OK or Apply, and Test waits until your changes are applied.
 - The Connections panel, context menus, confirm dialogs, the undo shelf and tooltips are wider, so their text fits on fewer lines.
 
 ## v0.12.0-alpha

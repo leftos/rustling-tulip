@@ -4506,6 +4506,16 @@ fn test_result(h: &mut Harness<'_>) -> Option<String> {
     h.root(|root, _| root.dashboard_test_result())
 }
 
+/// The words the Dashboard's Key row button shows.
+fn key_action(h: &mut Harness<'_>) -> &'static str {
+    h.root(|root, _| root.dashboard_key_action_label())
+}
+
+/// The Test button's tooltip on the shown host.
+fn test_tip(h: &mut Harness<'_>) -> Option<&'static str> {
+    h.root(|root, _| root.dashboard_test_tip())
+}
+
 #[gpui::test]
 fn dashboard_tab_follows_the_notifications_tab(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -4675,11 +4685,136 @@ fn masked_key_field_never_draws_the_typed_text(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn clear_sends_set_summarizer_key_none(cx: &mut TestAppContext) {
+fn delete_stored_key_pends_until_apply(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    assert_eq!(key_action(&mut h), "Delete stored key");
+    h.click_on("settings-dashboard-key-clear");
+    assert_eq!(key_sets(&h.sent()), [], "Delete sends nothing before Apply");
+    assert_eq!(key_action(&mut h), "Undo delete", "the button offers Undo");
+    assert_eq!(
+        key_state_line(&mut h),
+        Some("No key"),
+        "the row reads as with no key stored"
+    );
+    assert_eq!(apply_gate(&mut h), (true, true), "the deletion pends");
+    h.click_on("settings-apply");
+    assert_eq!(
+        key_sets(&h.sent()),
+        [("keyed".to_owned(), None)],
+        "Apply deletes the stored key"
+    );
+    assert_eq!(apply_gate(&mut h), (false, false), "Apply took it");
+}
+
+#[gpui::test]
+fn undo_delete_drops_the_held_deletion(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
     h.click_on("settings-dashboard-key-clear");
-    assert_eq!(key_sets(&h.sent()), [("keyed".to_owned(), None)]);
+    h.sent();
+    assert_eq!(apply_gate(&mut h), (true, true), "the deletion pends");
+    h.click_on("settings-dashboard-key-clear");
+    assert_eq!(
+        key_action(&mut h),
+        "Delete stored key",
+        "Undo puts the row back"
+    );
+    assert_eq!(key_state_line(&mut h), Some("Key stored"), "the key stands");
+    assert_eq!(
+        apply_gate(&mut h),
+        (false, false),
+        "the deletion is dropped"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(key_sets(&h.sent()), [], "nothing is sent");
+}
+
+#[gpui::test]
+fn cancel_drops_a_held_key_deletion(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    h.click_on("settings-dashboard-key-clear");
+    h.sent();
+    h.click_on("settings-cancel");
+    assert_eq!(key_sets(&h.sent()), [], "Cancel deletes nothing");
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-dashboard");
+    assert_eq!(key_state_line(&mut h), Some("Key stored"), "the key stands");
+    assert_eq!(
+        apply_gate(&mut h),
+        (false, false),
+        "the deletion is dropped"
+    );
+}
+
+#[gpui::test]
+fn typing_a_key_after_delete_sends_the_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    h.click_on("settings-dashboard-key-clear");
+    h.sent();
+    h.click_on("settings-dashboard-key-field");
+    type_text(&mut h, "sk-9");
+    h.click_on("settings-apply");
+    assert_eq!(
+        key_sets(&h.sent()),
+        [("keyed".to_owned(), Some("sk-9".to_owned()))],
+        "the typed key wins over the held deletion"
+    );
+}
+
+#[gpui::test]
+fn a_key_typed_for_another_provider_keeps_the_held_deletion(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(
+        cx,
+        &dir,
+        support::summarizer_status()
+            .offers("p1", "First model", true, CLI_PRIVACY)
+            .offers("p2", "Second model", true, KEYED_PRIVACY)
+            .chosen("p1"),
+    );
+    h.click_on("settings-dashboard-key-clear");
+    h.sent();
+    h.click_on("settings-dashboard-provider-p2");
+    h.click_on("settings-dashboard-key-field");
+    type_text(&mut h, "sk-9");
+    h.click_on("settings-apply");
+    assert_eq!(
+        key_sets(&h.sent()),
+        [
+            ("p1".to_owned(), None),
+            ("p2".to_owned(), Some("sk-9".to_owned()))
+        ],
+        "the old provider's key is deleted and the new one's saved"
+    );
+}
+
+#[gpui::test]
+fn test_is_disabled_while_the_dashboard_page_has_pending_changes(cx: &mut TestAppContext) {
+    const TIP: &str = "Apply your changes first to test them.";
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    h.scroll_into_view("settings-content", "settings-dashboard-test");
+    h.click_on("settings-dashboard-key-clear");
+    h.click_on("settings-dashboard-test");
+    assert_eq!(test_ids(&h.sent()), [], "a held deletion disables Test");
+    assert_eq!(test_tip(&mut h), Some(TIP), "and says why");
+    h.click_on("settings-dashboard-key-clear");
+    assert_eq!(test_tip(&mut h), None, "Undo lets Test run again");
+    h.scroll_into_view("settings-content", "settings-dashboard-provider-cli");
+    h.click_on("settings-dashboard-provider-cli");
+    h.scroll_into_view("settings-content", "settings-dashboard-test");
+    h.click_on("settings-dashboard-test");
+    assert_eq!(test_ids(&h.sent()), [], "a staged provider disables Test");
+    assert_eq!(test_tip(&mut h), Some(TIP));
+    h.click_on("settings-apply");
+    h.sent();
+    assert_eq!(test_tip(&mut h), None, "Apply lets Test run again");
+    h.scroll_into_view("settings-content", "settings-dashboard-test");
+    h.click_on("settings-dashboard-test");
+    assert_eq!(test_ids(&h.sent()).len(), 1, "Apply enables Test");
 }
 
 #[gpui::test]

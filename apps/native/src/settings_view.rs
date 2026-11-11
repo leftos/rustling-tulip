@@ -3642,7 +3642,7 @@ impl RootView {
                 self.choose_summarizer_provider(index);
             }
             SettingsControl::DashboardKeySource(choice) => self.choose_key_source(choice),
-            SettingsControl::DashboardKeyClear => self.clear_summarizer_key(),
+            SettingsControl::DashboardKeyClear => self.clear_summarizer_key(cx),
             SettingsControl::DashboardTest => self.run_summary_test(),
             SettingsControl::WorktreesBrowse => self.browse_worktrees_root(cx),
             SettingsControl::WorktreesReset => self.reset_worktrees_root(cx),
@@ -7466,6 +7466,8 @@ const SUMMARIES_INTRO: &str = "Short summaries of what each session is doing, fo
 const VARIABLE_HINT: &str = "The daemon reads this variable from its own environment.";
 const CAP_HINT: &str = "Summaries stop for the day once today's spend reaches the cap.";
 const TEST_HINT: &str = "Summarizes a fixed sample with the settings above.";
+/// The Test button's tooltip while the Dashboard page holds a change.
+const TEST_PENDING_TIP: &str = "Apply your changes first to test them.";
 const NEWER_DAEMON: &str =
     "This host's daemon is newer than this app; update the app to change these settings.";
 /// The widths of the Dashboard tab's key and variable fields: input widths.
@@ -7563,6 +7565,44 @@ impl RootView {
             )
     }
 
+    /// Whether the Key row's button takes a press: Clear while the daemon
+    /// holds a key to delete, Undo while a deletion is held.
+    fn key_delete_enabled(&self) -> bool {
+        self.held_key_delete().is_some() || self.key_clear_enabled()
+    }
+
+    /// The words the Key row's button shows.
+    #[must_use]
+    pub fn dashboard_key_action_label(&self) -> &'static str {
+        if self.held_key_delete().is_some() {
+            "Undo delete"
+        } else {
+            "Delete stored key"
+        }
+    }
+
+    /// The shown key's state: no key while its deletion is held, else the
+    /// daemon's.
+    fn shown_key_state(&self) -> Option<KeyState> {
+        if self.held_key_delete().is_some() {
+            return Some(KeyState::Missing);
+        }
+        self.shown_summarizer()?.key_state()
+    }
+
+    /// Whether the shown host's Dashboard page holds a change Apply would
+    /// send, so Test waits for Apply.
+    fn dashboard_test_locked(&self) -> bool {
+        !self.dashboard_pending_rows(&self.settings_host).is_empty()
+    }
+
+    /// The Test button's tooltip: why it waits while the Dashboard page
+    /// holds a change.
+    #[must_use]
+    pub fn dashboard_test_tip(&self) -> Option<&'static str> {
+        self.dashboard_test_locked().then_some(TEST_PENDING_TIP)
+    }
+
     fn provider_controls(&self) -> Vec<SettingsControl> {
         let Some(status) = self.shown_summarizer() else {
             return Vec::new();
@@ -7603,7 +7643,7 @@ impl RootView {
     /// The Dashboard tab's stops [`Self::dashboard_tab_content`] draws now,
     /// a locked or disabled one included: none before the daemon reports
     /// its summarizer, the key rows only for a provider that takes a key,
-    /// and Key and Clear or Variable by the key source.
+    /// and Key and its delete button or Variable by the key source.
     fn dashboard_drawn(&self) -> Vec<SettingsControl> {
         if self.shown_summarizer().is_none() {
             return Vec::new();
@@ -7639,7 +7679,7 @@ impl RootView {
             return vec![SettingsControl::DashboardEnvVariable];
         }
         let mut controls = vec![SettingsControl::DashboardKey];
-        if self.key_clear_enabled() {
+        if self.key_delete_enabled() {
             controls.push(SettingsControl::DashboardKeyClear);
         }
         controls
@@ -7728,7 +7768,16 @@ impl RootView {
             move |this, input, _: &TextChanged, _, cx| {
                 let text = input.read(cx).text().to_owned();
                 if let Some(tab) = this.dashboard_settings_tabs.get_mut(&host) {
-                    *tab.draft_mut(field) = text;
+                    tab.draft_mut(field).clone_from(&text);
+                }
+                // A typed key replaces a held deletion of the key it would
+                // overwrite; a deletion held for another provider stays.
+                if field == DashboardField::Key
+                    && !text.trim().is_empty()
+                    && let Some(provider) = this.shown_key_provider()
+                {
+                    this.settings_pending
+                        .drop_key_delete(&this.settings_host, &provider);
                 }
                 cx.notify();
             },
@@ -7755,6 +7804,23 @@ impl RootView {
             .find_map(pick)
     }
 
+    /// The provider whose stored key a held deletion deletes on the shown
+    /// host, if one is held.
+    fn held_key_delete(&self) -> Option<String> {
+        self.dashboard_pending(|value| match value {
+            HostPending::SummaryKeyDelete { provider } => Some(provider.clone()),
+            _ => None,
+        })
+    }
+
+    /// Whether `host` holds a deletion of its stored summarizer key.
+    fn holds_key_delete(&self, host: &HostKey) -> bool {
+        self.settings_pending
+            .host(host)
+            .iter()
+            .any(|value| matches!(value, HostPending::SummaryKeyDelete { .. }))
+    }
+
     /// Whether summaries show as on: pending, else the daemon's.
     fn shown_summaries_on(&self, status: &SummarizerStatus) -> bool {
         self.dashboard_pending(|value| match value {
@@ -7771,6 +7837,12 @@ impl RootView {
             _ => None,
         })
         .unwrap_or_else(|| status.settings.provider.clone())
+    }
+
+    /// The provider the shown host's typed key would be saved under.
+    fn shown_key_provider(&self) -> Option<String> {
+        let status = self.shown_summarizer()?;
+        Some(self.shown_provider_id(status))
     }
 
     fn toggle_summaries(&mut self) {
@@ -7829,6 +7901,12 @@ impl RootView {
         let tab = self.dashboard_settings_tabs.get(host);
         let variable = tab.map_or("", |tab| tab.variable_draft.trim());
         let mut rows = self.dashboard_toggle_rows(host, variable);
+        if self.holds_key_delete(host) {
+            rows.push(PendingEdit {
+                row: PendingRow::Toggle,
+                valid: true,
+            });
+        }
         if let Some(tab) = tab {
             let source = self.pending_key_source(host);
             rows.extend(dashboard_draft_rows(&status.settings, source, tab));
@@ -7885,9 +7963,16 @@ impl RootView {
             return;
         };
         let has = |row: PendingRow| rows.iter().any(|edit| edit.row == row);
-        let mut changed = !held.is_empty();
+        let mut changed = false;
+        let mut delete = None;
         for value in held {
-            take_dashboard_value(&mut settings, value);
+            match value {
+                HostPending::SummaryKeyDelete { provider } => delete = Some(provider),
+                other => {
+                    take_dashboard_value(&mut settings, other);
+                    changed = true;
+                }
+            }
         }
         let tab = self.dashboard_settings_tabs.get(host);
         let variable = tab
@@ -7907,6 +7992,9 @@ impl RootView {
         let provider = settings.provider.clone();
         if changed {
             self.send_summarizer_settings(host, settings, cap.is_some());
+        }
+        if let Some(deleted) = delete {
+            self.send_summarizer_delete(host, deleted);
         }
         if has(PendingRow::DashboardKey) {
             self.send_summarizer_key(host, provider, cx);
@@ -7946,36 +8034,64 @@ impl RootView {
         tab.key_draft.clear();
         tab.key.update(cx, |input, cx| input.set_text("", cx));
         tracing::info!(%provider, "settings: saving the summarizer key");
+        self.send_summarizer_key_value(host, provider, Some(Secret(key)));
+    }
+
+    /// `provider`'s stored key deleted on `host`.
+    fn send_summarizer_delete(&mut self, host: &HostKey, provider: String) {
+        tracing::info!(%provider, "settings: deleting the summarizer key");
+        self.send_summarizer_key_value(host, provider, None);
+    }
+
+    /// `key` to `host` for `provider` as Apply's key send, whose echo OK
+    /// waits for; `None` deletes the stored one.
+    fn send_summarizer_key_value(&mut self, host: &HostKey, provider: String, key: Option<Secret>) {
         self.send_setting(
             host,
             ClientMessage::SetSummarizerKey {
                 provider,
-                key: Some(Secret(key)),
+                key,
                 request_id: Some(crate::new_request_id()),
             },
         );
     }
 
-    fn clear_summarizer_key(&self) {
-        let Some(provider) = self.shown_summarizer().map(|s| s.settings.provider.clone()) else {
-            return;
-        };
-        if self.summarizer_locked() {
+    /// The Key row's button on the shown host: holds a deletion of the
+    /// stored key until Apply, or drops the held one.
+    fn clear_summarizer_key(&mut self, cx: &mut Context<Self>) {
+        if let Some(provider) = self.held_key_delete() {
+            self.settings_pending
+                .drop_key_delete(&self.settings_host, &provider);
             return;
         }
-        tracing::info!(%provider, "settings: deleting the summarizer key");
-        self.send_to(
-            &self.settings_host,
-            ClientMessage::SetSummarizerKey {
-                provider,
-                key: None,
-                request_id: Some(crate::new_request_id()),
-            },
-        );
+        let Some(provider) = self
+            .shown_summarizer()
+            .map(|status| status.settings.provider.clone())
+        else {
+            return;
+        };
+        if self.summarizer_locked() || !self.key_clear_enabled() {
+            return;
+        }
+        self.clear_key_draft(cx);
+        tracing::info!(%provider, "settings: holding the summarizer key's deletion");
+        let host = self.settings_host.clone();
+        self.settings_pending
+            .set_host(&host, HostPending::SummaryKeyDelete { provider }, None);
+    }
+
+    /// The Dashboard tab's key field emptied: a held deletion deletes the
+    /// stored key, not a typed one.
+    fn clear_key_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.dashboard_settings_tabs.get_mut(&self.settings_host) else {
+            return;
+        };
+        tab.key_draft.clear();
+        tab.key.update(cx, |input, cx| input.set_text("", cx));
     }
 
     fn run_summary_test(&mut self) {
-        if self.shown_summarizer().is_none() {
+        if self.shown_summarizer().is_none() || self.dashboard_test_locked() {
             return;
         }
         let request_id = crate::new_request_id();
@@ -8001,7 +8117,7 @@ impl RootView {
     /// The words the Dashboard tab shows for the chosen provider's key.
     #[must_use]
     pub fn dashboard_key_state(&self) -> Option<&'static str> {
-        self.shown_summarizer()?.key_state().map(key_state_words)
+        self.shown_key_state().map(key_state_words)
     }
 
     /// The key field's text, once the tab was shown.
@@ -8102,7 +8218,7 @@ impl RootView {
             .child(enabled)
             .child(self.provider_row(status, focused, cx))
             .children(privacy)
-            .children(self.key_rows(status, tab, focused, cx));
+            .children(self.key_rows(tab, focused, cx));
         let cap_error = self.dashboard_cap_error().map(|error| {
             hint(size, error, &t).driver_id(|| "settings-dashboard-cap-error".to_owned())
         });
@@ -8128,8 +8244,18 @@ impl RootView {
                 .text_color(gpui::rgb(t.text_2))
                 .children(text.lines().map(|line| div().child(line.to_owned())))
         });
-        let test_button =
-            settings_button(SettingsControl::DashboardTest, "Test", true, focused, cx);
+        let test_tip = self.dashboard_test_tip();
+        let test_button = settings_button(
+            SettingsControl::DashboardTest,
+            "Test",
+            test_tip.is_none(),
+            focused,
+            cx,
+        );
+        let test_button = match test_tip {
+            Some(tip) => test_button.tooltip(tooltip(tip)),
+            None => test_button,
+        };
         let test = section(size, shift, "Test")
             .child(hint(size, TEST_HINT, &t))
             .child(div().flex().child(test_button))
@@ -8175,10 +8301,10 @@ impl RootView {
     }
 
     /// For a provider that takes a key: the key source, the masked key
-    /// field with Save and Clear or the variable field, and the key state.
+    /// field with its delete button or the variable field, and the key
+    /// state.
     fn key_rows(
         &self,
-        status: &SummarizerStatus,
         tab: &DashboardSettingsTab,
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
@@ -8217,8 +8343,8 @@ impl RootView {
                 );
                 let clear = settings_button(
                     SettingsControl::DashboardKeyClear,
-                    "Clear",
-                    self.key_clear_enabled(),
+                    self.dashboard_key_action_label(),
+                    self.key_delete_enabled(),
                     focused,
                     cx,
                 );
@@ -8238,7 +8364,7 @@ impl RootView {
                 );
             }
         }
-        rows.extend(status.key_state().map(|state| {
+        rows.extend(self.shown_key_state().map(|state| {
             div()
                 .driver_id(|| "settings-dashboard-key-state".to_owned())
                 .text_color(gpui::rgb(t.text_2))
@@ -8598,6 +8724,10 @@ pub(crate) enum HostPending {
     Summaries(bool),
     SummaryProvider(String),
     SummaryKeySource(KeySourceChoice),
+    /// The stored key of `provider` deleted on Apply.
+    SummaryKeyDelete {
+        provider: String,
+    },
 }
 
 impl HostPending {
@@ -8979,6 +9109,23 @@ impl PendingSettings {
     /// `host`'s held values, no longer held.
     fn take_host(&mut self, host: &HostKey) -> Vec<HostPending> {
         self.hosts.remove(host).unwrap_or_default()
+    }
+
+    /// Drops `host`'s held deletion of `provider`'s key, if any: Undo, or a
+    /// typed key that wins over it.
+    fn drop_key_delete(&mut self, host: &HostKey, provider: &str) {
+        let Some(held) = self.hosts.get_mut(host) else {
+            return;
+        };
+        held.retain(|value| match value {
+            HostPending::SummaryKeyDelete {
+                provider: held_provider,
+            } => held_provider != provider,
+            _ => true,
+        });
+        if held.is_empty() {
+            self.hosts.remove(host);
+        }
     }
 }
 
