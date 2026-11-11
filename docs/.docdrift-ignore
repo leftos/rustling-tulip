@@ -15,6 +15,10 @@ start-guard.json
 # The updater's result file under the updates dir
 last-result.json
 updates/last-result.json
+# A remote host update's request and result files, and the e2e sandbox's launch record, under the config dir
+host-update-request.json
+host-update-result.json
+e2e-host-update-launch.json
 # Upstream gpui source the docs cite
 elements/text.rs
 src/window.rs
