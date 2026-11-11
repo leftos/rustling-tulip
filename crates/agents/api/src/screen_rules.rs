@@ -190,6 +190,17 @@ pub enum ScreenRegion {
     /// Every row below the last horizontal rule row (the footer under the
     /// prompt box), trailing empty rows dropped.
     AfterLastRule,
+    /// The last `rows` non-empty rows from the last row that starts with
+    /// `marker` (leading blanks skipped) down, that row included; the last
+    /// `rows` non-empty rows of the screen when no row starts with it. A
+    /// dialog's footer sits below its own cursor row, while a footer quoted
+    /// in the transcript sits above the input box's cursor row.
+    FromLastMarkedRow {
+        /// The character the anchoring row starts with.
+        marker: char,
+        /// How many rows to read.
+        rows: usize,
+    },
     /// A region this build does not know, carried from a newer plugin.
     #[serde(other)]
     Unknown,

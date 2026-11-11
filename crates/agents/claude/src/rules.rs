@@ -73,6 +73,15 @@ pub(crate) const READY_SIGNAL: ReadySignal = ReadySignal {
     quiet_for: Duration::from_millis(1500),
 };
 
+/// Where the dialog rules read: the bottom rows from the last `❯` row down.
+/// A dialog draws its footer under its own cursor row, while a footer a reply
+/// quoted sits in the transcript above the idle box's `❯` row, so it is cut
+/// off (the chat's dialog reader anchors its footer the same way).
+const DIALOG_REGION: ScreenRegion = ScreenRegion::FromLastMarkedRow {
+    marker: '❯',
+    rows: 24,
+};
+
 /// Claude's screen rules, in descending priority order.
 static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
     rules: vec![
@@ -111,7 +120,7 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
         ScreenRule {
             name: "dialog_permission".to_string(),
             priority: 980,
-            region: ScreenRegion::BottomNonEmpty { rows: 24 },
+            region: DIALOG_REGION,
             // Tab and Down take the hint off the footer while the dialog stays up.
             matcher: LineMatcher::Regex(
                 r"^\s*Esc to cancel(?:\s*·\s*Tab to amend.*)?\s*$".to_string(),
@@ -122,7 +131,7 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
         ScreenRule {
             name: "dialog_question".to_string(),
             priority: 980,
-            region: ScreenRegion::BottomNonEmpty { rows: 24 },
+            region: DIALOG_REGION,
             // A narrow pane wraps the footer, cutting off its `Esc to cancel`.
             matcher: LineMatcher::Regex(r"^\s*Enter to select ·".to_string()),
             // An Esc that does anything but cancel: a list, not a question.
@@ -134,6 +143,7 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
         ScreenRule {
             name: "dialog_question_review".to_string(),
             priority: 980,
+            // No footer, and its matched row sits above the cursor on `2. Cancel`.
             region: ScreenRegion::BottomNonEmpty { rows: 24 },
             matcher: LineMatcher::Regex(r"^\s*(?:❯\s*)?\d+\.\s+Submit answers\s*$".to_string()),
             not: Vec::new(),
@@ -142,7 +152,7 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
         ScreenRule {
             name: "dialog_plan".to_string(),
             priority: 980,
-            region: ScreenRegion::BottomNonEmpty { rows: 24 },
+            region: DIALOG_REGION,
             matcher: LineMatcher::Contains("Tell Claude what to change".to_string()),
             not: Vec::new(),
             verdict: ScreenVerdict::AwaitingInput,
@@ -150,7 +160,7 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
         ScreenRule {
             name: "dialog_trust".to_string(),
             priority: 980,
-            region: ScreenRegion::BottomNonEmpty { rows: 24 },
+            region: DIALOG_REGION,
             matcher: LineMatcher::Contains("Enter to confirm · Esc to cancel".to_string()),
             not: Vec::new(),
             verdict: ScreenVerdict::AwaitingInput,

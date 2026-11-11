@@ -494,8 +494,29 @@ fn region_lines(screen: &Screen, region: ScreenRegion) -> Vec<String> {
         ScreenRegion::AbovePromptBox { rows } => screen.above_prompt_box(rows),
         ScreenRegion::Title => screen.title().into_iter().collect(),
         ScreenRegion::AfterLastRule => screen.after_last_horizontal_rule(),
+        ScreenRegion::FromLastMarkedRow { marker, rows } => {
+            from_last_marked_row(&screen.rows(), marker, rows)
+        }
         ScreenRegion::Unknown => Vec::new(),
     }
+}
+
+/// The last `n` non-empty rows of `rows` from the last one that starts with
+/// `marker` (leading blanks skipped) down, that row included; the last `n`
+/// non-empty rows of all of them when none does.
+fn from_last_marked_row(rows: &[String], marker: char, n: usize) -> Vec<String> {
+    let start = rows
+        .iter()
+        .rposition(|row| row.trim_start().starts_with(marker))
+        .unwrap_or(0);
+    let mut lines: Vec<String> = rows[start..]
+        .iter()
+        .filter(|row| !row.is_empty())
+        .cloned()
+        .collect();
+    let excess = lines.len().saturating_sub(n);
+    lines.drain(..excess);
+    lines
 }
 
 #[cfg(test)]
@@ -1044,10 +1065,15 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 39] = [
+        let cases: [(&str, &str, Verdict); 41] = [
             (
                 "v03-ready",
                 include_str!("fixtures/v03-ready.txt"),
+                State(Idle),
+            ),
+            (
+                "v03-ready-quoting-question-footer--synthesized",
+                include_str!("fixtures/v03-ready-quoting-question-footer--synthesized.txt"),
                 State(Idle),
             ),
             (
@@ -1179,6 +1205,11 @@ mod tests {
             (
                 "v42-ask-review",
                 include_str!("fixtures/v42-ask-review.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v42-ask-review-cursor-on-cancel--synthesized",
+                include_str!("fixtures/v42-ask-review-cursor-on-cancel--synthesized.txt"),
                 State(AwaitingInput),
             ),
             (
@@ -1362,6 +1393,50 @@ mod tests {
         let reading = read_claude(&screen_from(&frame));
         assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
         assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
+    }
+
+    /// A question's footer quoted in a reply above the idle box is
+    /// transcript, not a dialog: the box under it is what the screen shows.
+    #[test]
+    fn a_quoted_question_footer_above_the_idle_box_reads_idle() {
+        let capture = include_str!("fixtures/v03-ready-quoting-question-footer--synthesized.txt");
+        assert!(
+            capture.contains("  Enter to select · ↑/↓ to navigate · Esc to cancel"),
+            "the reply quotes the footer"
+        );
+        let reading = read_claude(&screen_from(capture));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
+        assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
+    }
+
+    /// A real question drawn under a reply that quoted the footer is still
+    /// a dialog: the quote above it changes nothing.
+    #[test]
+    fn a_real_question_under_a_quoted_footer_reads_as_a_dialog() {
+        let capture = include_str!("fixtures/c31-ask-q1.txt");
+        assert!(
+            capture.contains("\n• …"),
+            "the capture's dialog follows its bullet"
+        );
+        let quoted = capture.replacen(
+            "\n• …",
+            "\n  Enter to select · ↑/↓ to navigate · Esc to cancel\n\n• …",
+            1,
+        );
+        let reading = read_claude(&screen_from(&quoted));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::AwaitingInput));
+        assert_eq!(reading.rule.as_deref(), Some("dialog_question"));
+    }
+
+    /// The answers review draws no footer, and with its cursor on `2. Cancel`
+    /// the `1. Submit answers` row sits above the cursor: still a dialog.
+    #[test]
+    fn a_question_review_with_its_cursor_on_cancel_reads_as_a_dialog() {
+        let capture = include_str!("fixtures/v42-ask-review-cursor-on-cancel--synthesized.txt");
+        assert!(capture.contains("❯ 2. Cancel"), "the cursor sits on Cancel");
+        let reading = read_claude(&screen_from(capture));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::AwaitingInput));
+        assert_eq!(reading.rule.as_deref(), Some("dialog_question_review"));
     }
 
     #[test]

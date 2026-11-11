@@ -26,6 +26,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A session whose reply quotes a question's footer no longer shows as needing you, and pressing Esc on a question with such a quote above it now ends the wait.
 - In a narrow pane, the branch name keeps a few characters before the session's name starts to shorten, instead of shrinking to a sliver.
 - On the phone, a chat scrolled to the bottom stays there when the keyboard, the key bar or the Keys and Quick docks open.
 - The phone's Home lists a group's sessions in the same order as the desktop each time it connects, instead of a new order after a relaunch.

@@ -5329,6 +5329,36 @@ mod hysteresis_tests {
         assert_eq!(pending_input(&h), None, "the prompt left with the wait");
     }
 
+    /// A question (`question_frame`, no quote on screen) holds the wait; Esc
+    /// cancels it and the idle box draws under a reply that quotes the
+    /// question's footer. No hook fires for Esc, so that idle frame must end
+    /// the wait, the quoted footer above the box notwithstanding.
+    #[tokio::test(start_paused = true)]
+    async fn esc_over_a_dialog_with_a_quoted_footer_ends_awaiting_input() {
+        let h = start_record("esc-quoted-footer", false, restored_prompt_record());
+        pass_hold().await;
+        h.chunk(question_frame());
+        advance(ms(800)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the question holds the wait"
+        );
+        h.chunk(idle_frame(&[
+            "● The footer under a question reads:",
+            "",
+            "  Enter to select · ↑/↓ to navigate · Esc to cancel",
+            "",
+        ]));
+        advance(ms(800)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box under a quoted footer ends the wait"
+        );
+        assert_eq!(pending_input(&h), None, "the prompt left with the wait");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_restored_prompt_is_cleared_when_the_plain_shell_classifier_leaves_awaiting_input() {
         let h = start_record(

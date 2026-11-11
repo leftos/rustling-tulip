@@ -14,6 +14,12 @@ The spike captures (`v03-ready.txt`, `c11-turn1-end.txt`, `p98-compacted.txt` an
 
 `v152-heads-up-collapsed.txt` is the one capture made by hand: `v152-learn-more.txt` with the expanded title and bullet rows taken out and the key row replaced by the collapsed notice's `1: Learn more   2: Knew this already   0: Dismiss`, since no capture of the collapsed notice exists.
 
+`v03-ready-quoting-question-footer--synthesized.txt` is `v03-ready.txt` with a user prompt and a reply quoting a question's footer (`Enter to select · ↑/↓ to navigate · Esc to cancel`) written into the blank rows above the idle box: a quoted footer is transcript, not a dialog.
+
+`v42-ask-review-cursor-on-cancel--synthesized.txt` is `v42-ask-review.txt` with the cursor moved from `1. Submit answers` to `2. Cancel`, so the review's matched row sits above the cursor.
+
+`v03-ready-quoting-question-footer--synthesized.txt` is made by hand from `v03-ready.txt`: a reply above the idle box quotes a question dialog's footer (`Enter to select · ↑/↓ to navigate · Esc to cancel`), which must still read idle.
+
 The `claude--*` files are the `web/src/fixtures/panes/` panes from collie, https://github.com/leftos/collie at commit 82c6bba7, SGR-coloured text under the MIT licence (see `LICENSE-collie` beside them). The exception is `claude--mcp-server-prompt.txt`, a plain-text capture of Claude Code's new-MCP-server dialog taken in this repo.
 
 `screen/rules.rs` and `screen/dialogs.rs` load each file with `include_str!` as one screen (`screen/fixture_screen.rs`): its lines are the rows, fed to a grid wide enough for the widest of them.
