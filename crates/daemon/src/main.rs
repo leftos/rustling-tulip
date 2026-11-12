@@ -337,6 +337,10 @@ async fn run_daemon(
     // a Resume swaps the abandoned session out for the freshly-spawned one
     // without the user losing their layout.
     //
+    // A local pane following a subagent of a session that is not live is
+    // cleared too; an abandoned session keeps its record, so its subagents'
+    // follows stay as its pane bindings do.
+    //
     // With a live-run folder watched, a local pane following a run that did
     // not survive is cleared too; with none, no run is judged and every
     // follow stays.
@@ -981,8 +985,9 @@ fn prune_stale_tabs(
         .map(|m| m.session_id.clone())
         .chain(abandoned.iter().map(|m| m.session_id.clone()))
         .collect();
-    // Prune one tab vec in place: clear panes whose session is dead, and,
-    // with a live-run list, panes following a run that is not live; then drop
+    // Prune one tab vec in place: clear panes whose session is dead, panes
+    // following a subagent of a session that is not live, and, with a
+    // live-run list, panes following a run that is not live; then drop
     // grid tabs left with no bound pane. Non-grid tabs (e.g. diff tabs)
     // always survive. Returns (panes_cleared, tabs_dropped).
     let prune_vec = |tabs: &mut Vec<protocol::TabEntry>| {
@@ -994,7 +999,8 @@ fn prune_stale_tabs(
             };
             let sessions = tabs::prune_sessions_not_in(grid, &live_ids);
             let follows = live_runs.is_some_and(|runs| tabs::prune_follows_not_in(grid, runs));
-            if sessions || follows {
+            let subagents = tabs::prune_subagent_follows_not_in(grid, &live_ids);
+            if sessions || follows || subagents {
                 panes_cleared += 1;
             }
         }

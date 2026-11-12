@@ -699,6 +699,32 @@ pub fn prune_follows_not_in(grid: &mut GridNode, live: &HashSet<String>) -> bool
     }
 }
 
+/// Clear the follow of every local pane (no `host`) whose subagent's host
+/// session is not in `keep`. Used on daemon startup beside
+/// `prune_sessions_not_in`; a pane of another daemon, and any other follow
+/// kind, are not this function's to judge and stay as they are. Returns true
+/// if at least one pane was modified.
+pub fn prune_subagent_follows_not_in(grid: &mut GridNode, keep: &HashSet<String>) -> bool {
+    match grid {
+        GridNode::Pane { host, follow, .. } => {
+            if host.is_none()
+                && let Some(PaneFollow::Subagent { session_id, .. }) = follow.as_ref()
+                && !keep.contains(session_id)
+            {
+                *follow = None;
+                true
+            } else {
+                false
+            }
+        }
+        GridNode::Split { first, second, .. } => {
+            let a = prune_subagent_follows_not_in(first, keep);
+            let b = prune_subagent_follows_not_in(second, keep);
+            a || b
+        }
+    }
+}
+
 /// True iff at least one pane in the grid is still bound: to a session id or
 /// to a follow. A tab where every pane is empty carries no recoverable state
 /// across a daemon restart, so the supervisor drops it on startup.
@@ -1630,6 +1656,24 @@ mod tests {
         }
     }
 
+    fn subagent(session_id: &str, agent_id: &str) -> PaneFollow {
+        PaneFollow::Subagent {
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+        }
+    }
+
+    /// A pane following subagent `agent_id` of session `session_id` on `host`
+    /// (`None` is this daemon).
+    fn subagent_pane(id: &str, session_id: &str, agent_id: &str, host: Option<&str>) -> GridNode {
+        GridNode::Pane {
+            pane_id: id.to_string(),
+            session_id: None,
+            host: host.map(str::to_string),
+            follow: Some(subagent(session_id, agent_id)),
+        }
+    }
+
     /// The pane `id` of `tab`, as the layout builders read it.
     fn pane_in(tab: &TabEntry, id: &str) -> PaneRef {
         collect_panes(tab.grid().expect("a grid tab"))
@@ -1818,6 +1862,62 @@ mod tests {
             !prune_follows_not_in(&mut grid, &live),
             "nothing left to clear"
         );
+    }
+
+    #[test]
+    fn prune_subagent_follows_keeps_a_surviving_sessions_follow() {
+        let mut grid = subagent_pane("p1", "s1", "a1", None);
+        let keep: HashSet<String> = ["s1".to_string()].into();
+
+        assert!(
+            !prune_subagent_follows_not_in(&mut grid, &keep),
+            "a surviving session's subagent follow stays"
+        );
+        let follow = collect_panes(&grid)
+            .into_iter()
+            .next()
+            .expect("a single pane")
+            .follow;
+        assert_eq!(follow, Some(subagent("s1", "a1")));
+    }
+
+    #[test]
+    fn prune_subagent_follows_clears_a_lost_sessions_follow() {
+        let mut grid = split(
+            Horizontal,
+            0.5,
+            subagent_pane("p1", "s2", "a2", None),
+            subagent_pane("p2", "s1", "a1", None),
+        );
+        let keep: HashSet<String> = ["s1".to_string()].into();
+
+        assert!(prune_subagent_follows_not_in(&mut grid, &keep));
+        let follows: Vec<Option<PaneFollow>> = collect_panes(&grid)
+            .into_iter()
+            .map(|pane| pane.follow)
+            .collect();
+        assert_eq!(follows, vec![None, Some(subagent("s1", "a1"))]);
+    }
+
+    #[test]
+    fn prune_subagent_follows_leaves_other_hosts_and_kinds() {
+        let mut grid = split(
+            Horizontal,
+            0.5,
+            subagent_pane("p1", "gone", "a1", Some("ssh:devbox")),
+            follow_pane("p2", "r1", None),
+        );
+        let keep: HashSet<String> = HashSet::new();
+
+        assert!(
+            !prune_subagent_follows_not_in(&mut grid, &keep),
+            "a foreign pane's and a run follow are not the new prune's to judge"
+        );
+        let follows: Vec<Option<PaneFollow>> = collect_panes(&grid)
+            .into_iter()
+            .map(|pane| pane.follow)
+            .collect();
+        assert_eq!(follows, vec![Some(subagent("gone", "a1")), Some(run("r1"))]);
     }
 
     fn split(dir: SplitDirection, ratio: f32, a: GridNode, b: GridNode) -> GridNode {

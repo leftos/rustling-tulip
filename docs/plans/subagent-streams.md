@@ -59,7 +59,7 @@ Each is a symbol to read before building on it.
 
   `apply` upserts by id and caps at `CHAT_REPLY_CAP`; `fold` parses lines with `plugin.chat_entries(line, known)`; `follow` sends the backfill and registers under the caller's lock; `restarted` and `end` tell the followers. `DispatchRuns::follow_transcript` refuses any source but `DispatchRun` with `UNSUPPORTED_MESSAGE`, and `server.rs` routes both follow messages to `server/dispatch_runs.rs`.
 - **File tail**: `transcript_tail::spawn(path, start_offset, client_count, on_event)` in `crates/daemon/src/transcript_tail.rs` (`TailEvent::{Line, Restarted, CaughtUp}`), which waits for a file that does not exist yet and parks at `client_count` 0. The chat mirror uses it.
-- **Pane follow** (DF.8): `GridNode::Pane.follow: Option<PaneFollow>`, `PaneFollow::{DispatchRun { run_id }, Unknown}`; `CreateTab`, `SplitPane` and `ReplacePaneSession` carry it; `tabs::prune_follows_not_in` clears dead run follows at daemon start.
+- **Pane follow** (DF.8): `GridNode::Pane.follow: Option<PaneFollow>`, `PaneFollow::{DispatchRun { run_id }, Subagent { session_id, agent_id }, Unknown}`; `CreateTab`, `SplitPane` and `ReplacePaneSession` carry it; `tabs::prune_follows_not_in` clears dead run follows at daemon start, and `tabs::prune_subagent_follows_not_in` clears a subagent follow whose host session is neither live nor abandoned.
 - **Sidebar nesting** (RT-1580), in `apps/native/src/sidebar.rs` and `sidebar_view.rs`, described in `docs/native-client.md` "Sessions under repos":
   - the model: `Leaf.depth`, `Leaf.host_session`, `Leaf.nested`, `Leaf.collapsed`, `LeafKind::{Session, Dispatch}`, `nest_runs` and `nest_after` (repos view), `nest_tab_runs` and `linked_on` (tabs view), `session_fold_key`, `SidebarModel::toggle_session_fold`;
   - the drawing: `shown_leaves`, `NEST_INDENT` (14 px), `session_fold` (the chevron, tooltip "Hide its dispatch runs" / "Show its dispatch runs") and `RootView::toggle_session_fold`.
@@ -155,6 +155,7 @@ Every decision here is an orchestrator decision (not an owner ruling), settled f
 
 - **SS.7, the path boundary:** only the agent id comes from the client. The session folder, conversation id and env rows for `subagent_transcript_path` come from the host session's record, never from the message.
 - **SS.5, no typed prompt seen:** `ActivitySnapshot.last_typed_prompt_at` is `None` when the last typed prompt lies further back than the activity reader's first-read tail. Orchestrator decision (not an owner ruling): `None` means "no prompt since the process start", so finished subagents stay listed (capped at five) until a typed prompt is seen.
+- **SS.12, a Resume of the host:** a Resume rebinds panes through `tabs::rebind_session` (`rebind_grid`), which appears to rewrite only a pane's `session_id`, so a `Subagent` follow would keep naming the old session id (unverified). Check it when the pane lands, and rebind a subagent follow's `session_id` beside the pane's if it holds.
 - **SS.5, a resumed subagent:** the sidecar's `finished: true` may stay set when a subagent is resumed, which nobody has checked on a live resume. Orchestrator decision (not an owner ruling): transcript lines newer than the sidecar's last write make the subagent running again, whatever the flag says.
 
 ## Actors and invariants
@@ -222,7 +223,7 @@ Each step lands on `main` on its own and keeps the suite green. Hotspot files ar
   Files: `crates/daemon/src/subagents/tail.rs` (new), `crates/daemon/src/server/transcripts.rs` (new), `crates/daemon/src/server.rs` (hotspot: the `Hub` field, and the or-pattern moving to `transcripts::handle`), `crates/daemon/src/server/dispatch_runs.rs` (its follow arms go), `crates/daemon/src/server/connection.rs` (the guard).
 
   Tests on a temp `CLAUDE_CONFIG_DIR`: a follow answers the backfill with its `request_id`; appended lines reach only followers, each once; a follow before the file exists gets an empty backfill and then the lines; an unknown session or a refused id answers `NOT_FOUND`; the last unfollow and a closed connection stop the tail; removing the session sends `ended: true`; a dispatch-run follow still works. Depends on: SS.1, SS.2, SS.6.
-- [ ] **SS.8 Daemon: startup prune.** Clear a local pane's `Subagent` follow whose session did not survive, beside `prune_sessions_not_in`.
+- [x] **SS.8 Daemon: startup prune.** Clear a local pane's `Subagent` follow whose session did not survive, beside `prune_sessions_not_in`.
 
   Files: `crates/daemon/src/tabs.rs`, `crates/daemon/src/main.rs`. Tests in `tabs.rs`: a follow of a restored session stays, one of a lost session clears, another host's pane is untouched. Depends on: SS.1.
 - [x] **SS.9 Client: sidebar model.** `LeafKind::Subagent`, `Leaf.nested_subagents`, a `subagent_leaf(host, host id, &SubagentSnapshot)` builder, and nesting in `nest_after` (subagents, then runs) for the repos view and in `nest_tab_runs` for the tabs view. `sidebar_view.rs`'s exhaustive `LeafKind` matches get an arm (no drag payload yet, dimmed with the host).
