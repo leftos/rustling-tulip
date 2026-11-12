@@ -615,6 +615,31 @@ fn following_an_unknown_source_answers_unsupported() {
 }
 
 #[test]
+fn dropping_a_connections_follow_guard_unfollows_it_from_every_run() {
+    let runs = DispatchRuns::new();
+    runs.list_linked_for_test("r1", None);
+    runs.list_linked_for_test("r2", None);
+    let guard = runs.follow_guard(1);
+    let _first = follow(&runs, "r1", 1, None);
+    let _second = follow(&runs, "r2", 1, None);
+    let _other = follow(&runs, "r1", 2, None);
+
+    drop(guard);
+    assert_eq!(runs.followers_of("r1"), [2]);
+    assert_eq!(runs.followers_of("r2"), Vec::<ConnectionId>::new());
+}
+
+#[test]
+fn a_follow_guard_for_a_connection_that_followed_nothing_drops_quietly() {
+    let runs = DispatchRuns::new();
+    runs.list_linked_for_test("r1", None);
+    let _other = follow(&runs, "r1", 2, None);
+
+    drop(runs.follow_guard(1));
+    assert_eq!(runs.followers_of("r1"), [2]);
+}
+
+#[test]
 fn runs_listed_before_the_log_is_attached_log_at_attach() {
     let runs = DispatchRuns::new();
     runs.list_linked_for_test("r1", Some("c1"));

@@ -268,9 +268,9 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
     client_session_until(hub, socket, auth, None).await;
 }
 
-/// The guards that end `connection`'s Dashboard watch, unload its chats, stop
-/// it counting as at the desk and drop its client record when dropped, on
-/// every way out, panic included.
+/// The guards that end `connection`'s Dashboard watch, unload its chats,
+/// unfollow its transcripts, stop it counting as at the desk and drop its
+/// client record when dropped, on every way out, panic included.
 fn connection_watches(
     hub: &Hub,
     connection: u64,
@@ -280,12 +280,16 @@ fn connection_watches(
 ) -> (
     crate::dashboard::WatchGuard,
     crate::chat_mirror::ChatLoadGuard,
+    Option<crate::dispatch_runs::TranscriptFollowGuard>,
     crate::presence::PresenceGuard,
     ClientGuard,
 ) {
     (
         hub.dashboard.watch_guard(connection),
         hub.chat_mirror.guard(connection),
+        hub.dispatch_runs
+            .as_ref()
+            .map(|dispatch| dispatch.runs.follow_guard(connection)),
         crate::presence::PresenceGuard::new(Arc::clone(&hub.presence), connection),
         register_client(hub, connection, handshake, out_tx, auth),
     )
@@ -433,9 +437,10 @@ pub(super) async fn client_session_until<S: Socket>(
     // Subscribe to global session events. After splitting PtyOutput out, this
     // channel only carries low-volume control events.
     let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
-    // End any Dashboard watch and chat load of this connection, stop it
-    // counting as at the desk and drop its client record, on every way out,
-    // panic included; dropped before `out_tx`, since they hold clones.
+    // End any Dashboard watch, chat load and transcript follow of this
+    // connection, stop it counting as at the desk and drop its client record,
+    // on every way out, panic included; dropped before `out_tx`, since they
+    // hold clones.
     let watches = connection_watches(&hub, connection, &handshake, &out_tx, &auth);
     let event_task = spawn_session_forwarder(Arc::clone(&hub.sessions), out_tx.clone(), connection);
 
@@ -2362,6 +2367,44 @@ mod tests {
         );
         assert!(client.pings >= 4, "it was pinged: {}", client.pings);
         assert!(!session.is_finished());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_closed_local_connection_that_followed_a_quiet_run_ends() {
+        let (mut hub, scratch) = test_hub("closed-follower");
+        let folder = scratch.path().join("live");
+        let runs = crate::server::test_support::enable_dispatch_runs(&mut hub, folder);
+        runs.list_for_test("run-q", 4242, Some(7), chrono::Utc::now());
+        let (mut client, session) = mem_session(&hub, AuthKind::Local);
+        client.send(&hello(&hub.auth_token, None));
+        client.send(&protocol::ClientMessage::FollowTranscript {
+            source: protocol::TranscriptSource::DispatchRun {
+                run_id: "run-q".to_owned(),
+            },
+            request_id: Some("f1".to_owned()),
+        });
+        let backfill = async {
+            while let Some(message) = client.next(true).await {
+                if matches!(message, DaemonMessage::Transcript { .. }) {
+                    return;
+                }
+            }
+            unreachable!("the connection closed before the backfill");
+        };
+        tokio::time::timeout(GUARD, backfill)
+            .await
+            .expect("the follow is answered");
+
+        drop(client);
+        tokio::time::timeout(GUARD, session)
+            .await
+            .expect("the session ends with its connection")
+            .expect("the session did not panic");
+        assert_eq!(
+            *hub.client_count.borrow(),
+            0,
+            "the client count is released"
+        );
     }
 
     #[tokio::test(start_paused = true)]

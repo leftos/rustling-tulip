@@ -612,6 +612,26 @@ impl DispatchRuns {
         }
     }
 
+    /// Stop sending every listed run's transcript to `connection`.
+    pub(crate) fn unfollow_all(&self, connection: ConnectionId) {
+        for entry in self.lock().entries.values_mut() {
+            entry.transcript.unfollow(connection);
+        }
+    }
+
+    /// A guard that unfollows every transcript `connection` follows when it
+    /// drops, releasing the connection's queue the followers hold.
+    #[must_use]
+    pub(crate) fn follow_guard(
+        self: &Arc<Self>,
+        connection: ConnectionId,
+    ) -> TranscriptFollowGuard {
+        TranscriptFollowGuard {
+            runs: Arc::clone(self),
+            connection,
+        }
+    }
+
     /// The connections following `run_id`'s transcript, oldest follow first.
     #[cfg(test)]
     fn followers_of(&self, run_id: &str) -> Vec<ConnectionId> {
@@ -688,6 +708,19 @@ impl DispatchRuns {
         let mut file = test_file(run_id, 4242, Some(7), Utc::now());
         file.session_id = session_id.map(str::to_owned);
         self.insert(run_id, file, None, CancellationToken::new())
+    }
+}
+
+/// Unfollows every transcript its connection follows when dropped, on every
+/// way out of the connection.
+pub(crate) struct TranscriptFollowGuard {
+    runs: Arc<DispatchRuns>,
+    connection: ConnectionId,
+}
+
+impl Drop for TranscriptFollowGuard {
+    fn drop(&mut self) {
+        self.runs.unfollow_all(self.connection);
     }
 }
 
