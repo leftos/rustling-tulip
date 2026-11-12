@@ -290,7 +290,7 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: an inbox request to `~/.claude` naming `dispatch/live.py`, `executor.py`, `run.py`, `mailbox.py`, `SKILL.md` and the tests.
   - Proof: the tool's gate green there, then one real tier-1 run watched and stopped from the native client.
   - Waits on: DF.3 (schema fixed) for the request; DF.10 for the real-run proof. Hotspot: none.
-- [ ] **DF.13 Docs.** The durable docs describe the feature, and this design goes once nothing open links it (RT-499 links it).
+- [x] **DF.13 Docs.** The durable docs describe the feature, and this design goes once nothing open links it (RT-499 links it).
   - Files: `CLAUDE.md` (env row), `docs/on-disk.md` (live-run folder and file), `docs/wire-protocol.md` (messages and feature flag), `docs/README.md` glossary (live-run file, live-run folder, stop marker, pane follow), `docs/architecture.md` (the decisions, the "no headless view" line, Task Index rows), `docs/native-client.md` (the `DS` leaf and view).
   - Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/df13.log --timeout 600 --slot light -- prek run --all-files`.
   - Waits on: DF.1 to DF.11. Hotspot: none.

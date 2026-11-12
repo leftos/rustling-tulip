@@ -180,9 +180,21 @@ A fetched `.html` or `.htm` page that opens when done brings the relative media 
 
 ## The dispatch live-run folder
 
-The daemon follows the dispatch tool's runs from one folder, resolved by `resolve_dispatch_live_dir` in `crates/daemon/src/paths.rs`: `RUSTLING_TULIP_DISPATCH_DIR` when set and not empty (made absolute; one that cannot be made absolute means none), else the first folder a registered agent names (the Claude plugin's `live_runs_dir`: `live` under `DISPATCH_LOG_DIR_VAR`, else `~/.claude/dispatch/live`), else none. The daemon creates nothing there. It starts the watcher before the tab prune and logs `following dispatch runs in the live-run folder` (info, `folder`), or `the live-run folder could not be watched; following no dispatch runs` (warn) when it cannot watch it.
+The daemon follows the dispatch tool's runs from one folder, resolved by `resolve_dispatch_live_dir` in `crates/daemon/src/paths.rs`: `RUSTLING_TULIP_DISPATCH_DIR` when set and not empty (made absolute; one that cannot be made absolute means none), else the first folder a registered agent names (the Claude plugin's `live_runs_dir`: `live` under `DISPATCH_LOG_DIR_VAR`, else `~/.claude/dispatch/live`), else none.
 
-Each run is one `<run_id>.json` live-run file the tool writes; the daemon only reads it, and deletes one whose process is gone. A Stop (`StopDispatchRun`, `docs/wire-protocol.md`) writes an empty `<run_id>.stop` marker beside it before it kills the run's process tree, so the tool never sees its child exit without the marker; a marker that cannot be written kills nothing. Stop logs `dispatch_runs: stopped the run`, `dispatch_runs: the stop marker could not be written; nothing is killed`, `dispatch_runs: taskkill failed but the run's child has exited` or `dispatch_runs: the run could not be stopped`, and a lagging connection logs `client dispatch-run stream lagged; resending the run list`.
+With a folder, the daemon creates it (`create_dir_all`) before it watches it, since a watch on a missing folder fails; with none it runs no watcher and lists no `dispatch_runs` feature. It starts the watcher before the tab prune and logs `following dispatch runs in the live-run folder` (info, `folder`), or `the live-run folder could not be watched; following no dispatch runs` (warn) when it cannot watch it.
+
+Each run is one `<run_id>.json` live-run file, one per `claude` process (`<run_id>` is the run folder's name and the child's pid, so a resume has its own). The tool writes it as UTF-8 JSON to `<run_id>.json.tmp` and renames it over the name (`os.replace`), so a reader never sees half a file; the watcher reads only `.json` names and ignores `.tmp` and `.stop`.
+
+Its fields: `schema` (1; the daemon skips a file of another schema and logs it once, and ignores unknown extra fields), `run_id`, `title`, `backend` (opaque), `tier`, `session_id` (the dispatching session's conversation id, null from a plain shell), `agent` (optional agent id naming the stream's format, absent is the default agent), `worktree`, `run_dir`, `stream` (the file the daemon tails), `child_pid` and `child_start` (the `claude` child, whose tree Stop kills; `child_start` is a Windows FILETIME integer, null elsewhere), `runner_pid` and `runner_start` (the dispatch process; the daemon never kills it and the snapshot does not carry it).
+
+Also `started_at` (UTC, the liveness fallback when `child_start` is null), `resumed_from` and `auto_resume`. The parse is `crates/daemon/src/dispatch_runs/parse.rs`.
+
+The tool removes the file and any `.stop` beside it when the run ends. The daemon never writes a live-run file: it reads it, tails the `stream` file it names from byte 0, and deletes a file whose process is gone (at first sight or at its liveness tick) and a `.stop` left with no `.json`. The tool and the daemon both tolerate the file already being missing, and a file that does not parse is retried on the next event or scan, never dropped on one failure.
+
+A Stop (`StopDispatchRun`, `docs/wire-protocol.md`) writes an empty `<run_id>.stop` stop marker beside the file before it kills the run's process tree, so the tool never sees its child exit without the marker (it then records the run as stopped and skips its automatic resume); a marker that cannot be written kills nothing. The tool, not the daemon, removes the marker with the file.
+
+Stop logs `dispatch_runs: stopped the run`, `dispatch_runs: the stop marker could not be written; nothing is killed`, `dispatch_runs: taskkill failed but the run's child has exited` or `dispatch_runs: the run could not be stopped`, and a lagging connection logs `client dispatch-run stream lagged; resending the run list`.
 
 ## Uploaded files
 
