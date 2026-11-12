@@ -441,7 +441,6 @@ pub fn resolve_push_dir() -> anyhow::Result<PathBuf> {
 /// runs. An override that cannot be made absolute answers none rather than
 /// another folder, so an isolated run never reads the owner's real runs.
 /// Nothing is created here.
-#[expect(dead_code, reason = "read by the dispatch-run watcher (DF.5)")]
 #[must_use]
 pub fn resolve_dispatch_live_dir() -> Option<PathBuf> {
     dispatch_live_dir_from(

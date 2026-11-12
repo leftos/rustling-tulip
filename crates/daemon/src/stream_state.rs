@@ -74,10 +74,6 @@ fn apply_metrics(
 }
 
 /// What a run's stream has reported so far.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the dispatch-run watcher (DF.5)")
-)]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct StreamState {
     /// The last status the stream reported; `None` until the first one, which
@@ -93,10 +89,6 @@ pub(crate) struct StreamState {
 
 impl StreamState {
     /// Apply `event`, in the order the plugin yielded it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the dispatch-run watcher (DF.5)")
-    )]
     pub(crate) fn apply(&mut self, event: HeadlessEvent) {
         let id = apply_event(
             event,

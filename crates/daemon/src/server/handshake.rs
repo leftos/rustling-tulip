@@ -178,6 +178,7 @@ async fn read_hello<R: Inbound>(
         origin_of(auth),
         hub.accounts.is_some(),
         hub.gate_state.is_some(),
+        hub.dispatch_runs.is_some(),
     ));
     Ok(Handshake {
         negotiated_version: negotiated,
@@ -266,10 +267,11 @@ const FEATURE_SCREEN_DUMP: &str = "screen_dump";
 /// A feature joins only once the daemon fully honours it, since a client that
 /// sees it listed offers the capability to the user.
 ///
-/// These are the features every daemon lists, whatever its state. The account
-/// and gate state features are not here: they join in [`welcome_message`]
-/// only when the hub holds an accounts service or a gate state, since a
-/// daemon without one cannot honour them.
+/// These are the features every daemon lists, whatever its state. The account,
+/// gate state and dispatch-run features are not here: they join in
+/// [`welcome_message`] only when the hub holds an accounts service, a gate
+/// state or a live-run folder's runs, since a daemon without one cannot
+/// honour them.
 const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_AGENT_COMMANDS,
     protocol::FEATURE_DEVICE_PAIRING,
@@ -303,13 +305,16 @@ const DAEMON_FEATURES: &[&str] = &[
 /// the hub holds an accounts service only where the agent's account store
 /// works, and a daemon without one lists neither. `gate_state` then appends
 /// `protocol::FEATURE_GATE_STATE`: the hub holds a gate state only where the
-/// gate's live inputs are read (64-bit Windows).
+/// gate's live inputs are read (64-bit Windows). `dispatch_runs` then appends
+/// `protocol::FEATURE_DISPATCH_RUNS`: the hub holds dispatch runs only where
+/// the daemon watches a live-run folder.
 fn welcome_message(
     negotiated: u32,
     daemon_id: &str,
     origin: ConnectionOrigin,
     accounts: bool,
     gate_state: bool,
+    dispatch_runs: bool,
 ) -> DaemonMessage {
     let mut features: Vec<String> = DAEMON_FEATURES
         .iter()
@@ -321,6 +326,9 @@ fn welcome_message(
     }
     if gate_state {
         features.push(protocol::FEATURE_GATE_STATE.to_owned());
+    }
+    if dispatch_runs {
+        features.push(protocol::FEATURE_DISPATCH_RUNS.to_owned());
     }
     DaemonMessage::Welcome {
         protocol_version: negotiated,
@@ -344,6 +352,14 @@ fn negotiate_protocol_version(scalar: u32, range: &[u32]) -> Option<u32> {
         }
     }
     best
+}
+
+/// Send the full dispatch-run list, under the runs lock, when the daemon
+/// follows a live-run folder; nothing otherwise.
+fn send_dispatch_runs(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    if let Some(dispatch) = &hub.dispatch_runs {
+        dispatch.runs.send_list(out_tx);
+    }
 }
 
 pub(super) fn push_initial_state(
@@ -388,6 +404,7 @@ pub(super) fn push_initial_state(
     let sessions = hub.sessions.snapshots();
     let session_count = u32::try_from(sessions.len()).unwrap_or(u32::MAX);
     let _ = out_tx.send(DaemonMessage::Sessions { sessions });
+    send_dispatch_runs(hub, out_tx);
     if needs_layout_chooser {
         let clonable = hub
             .state
@@ -672,7 +689,14 @@ mod tests {
     #[test]
     fn welcome_lists_detailed_logging_and_the_initial_state_carries_the_switch() {
         let (hub, _scratch) = test_hub("detailed-logging-initial");
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -708,7 +732,14 @@ mod tests {
     }
     #[test]
     fn welcome_carries_the_daemon_features_and_the_negotiated_version() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            false,
+            false,
+        );
         let mut expected: Vec<String> = DAEMON_FEATURES
             .iter()
             .map(|feature| (*feature).to_owned())
@@ -736,7 +767,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_client_update() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -749,7 +787,14 @@ mod tests {
 
     #[test]
     fn welcome_carries_the_daemon_build_version() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -762,7 +807,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_web_push() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -775,7 +827,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_resume_session() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -788,7 +847,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_launch_last() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -801,7 +867,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_new_session() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -814,7 +887,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_spawn_extra_args() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -827,7 +907,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_preset_job_repeat() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -840,7 +927,14 @@ mod tests {
 
     #[test]
     fn the_welcome_lists_client_presence() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -853,7 +947,14 @@ mod tests {
 
     #[test]
     fn the_welcome_lists_upload_file() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -998,7 +1099,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_default_shell() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -1011,7 +1119,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_agent_commands() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -1240,7 +1355,14 @@ mod tests {
 
     #[test]
     fn welcome_advertises_device_pairing() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -1253,7 +1375,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_device_block() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -1268,7 +1397,14 @@ mod tests {
 
     #[test]
     fn welcome_carries_the_daemon_id() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -1280,7 +1416,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_daemon_id_feature() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -1293,7 +1436,14 @@ mod tests {
 
     #[test]
     fn welcome_lists_accounts_feature() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, true, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -1307,7 +1457,14 @@ mod tests {
 
     #[test]
     fn welcome_without_an_accounts_service_lists_no_account_features() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local, false, false);
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            false,
+            false,
+            false,
+        );
         assert!(
             matches!(
                 &welcome,
@@ -1336,6 +1493,7 @@ mod tests {
             ConnectionOrigin::Local,
             true,
             true,
+            false,
         ));
         assert_eq!(
             enabled.last().map(String::as_str),
@@ -1349,6 +1507,7 @@ mod tests {
             ConnectionOrigin::Local,
             true,
             false,
+            false,
         ));
         assert!(
             !disabled.iter().any(|f| f == protocol::FEATURE_GATE_STATE),
@@ -1357,6 +1516,87 @@ mod tests {
         assert!(
             !DAEMON_FEATURES.contains(&protocol::FEATURE_GATE_STATE),
             "the gate feature joins only where the gate state is read"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_dispatch_runs_only_with_a_folder() {
+        let with = features_of(&welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            true,
+            true,
+        ));
+        assert_eq!(
+            with.last().map(String::as_str),
+            Some(protocol::FEATURE_DISPATCH_RUNS),
+            "the dispatch-run feature follows the gate feature: {with:?}"
+        );
+        let gate_at = with.iter().position(|f| f == protocol::FEATURE_GATE_STATE);
+        assert_eq!(gate_at, Some(with.len() - 2), "{with:?}");
+
+        let without = features_of(&welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            true,
+            true,
+            false,
+        ));
+        assert!(
+            !without.iter().any(|f| f == protocol::FEATURE_DISPATCH_RUNS),
+            "{without:?}"
+        );
+        assert!(
+            !DAEMON_FEATURES.contains(&protocol::FEATURE_DISPATCH_RUNS),
+            "the dispatch-run feature joins only where a live-run folder is watched"
+        );
+    }
+
+    #[test]
+    fn dispatch_runs_follow_sessions_in_the_initial_state() {
+        let (mut hub, scratch) = test_hub("dispatch-runs-initial-state");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        push_initial_state(&hub, &out_tx, "c1", false, true);
+        let mut none = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            none.push(message);
+        }
+        assert!(
+            !none
+                .iter()
+                .any(|m| matches!(m, DaemonMessage::DispatchRuns { .. })),
+            "a daemon that watches no live-run folder sends no list"
+        );
+
+        let runs = crate::server::test_support::enable_dispatch_runs(
+            &mut hub,
+            scratch.path().join("live"),
+        );
+        runs.list_for_test("run-i", 4242, Some(7), chrono::Utc::now());
+        push_initial_state(&hub, &out_tx, "c1", false, true);
+        let mut sent = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            sent.push(message);
+        }
+        let sessions_at = sent
+            .iter()
+            .position(|m| matches!(m, DaemonMessage::Sessions { .. }))
+            .expect("the sessions list is sent");
+        let listed = match sent.get(sessions_at + 1) {
+            Some(DaemonMessage::DispatchRuns { runs }) => Some(
+                runs.iter()
+                    .map(|run| run.run_id.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
+        assert_eq!(
+            listed,
+            Some(vec!["run-i".to_owned()]),
+            "the run list follows the sessions list: {sent:?}"
         );
     }
 

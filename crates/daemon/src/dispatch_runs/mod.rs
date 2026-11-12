@@ -12,13 +12,6 @@
 //! `Updated` lands after its run's `Removed`, and no older fold overtakes a
 //! newer one.
 
-// The runtime tests are Windows-only, so a test build elsewhere leaves the
-// runtime unused too, until DF.6 starts it from the server.
-#![cfg_attr(
-    any(not(test), not(windows)),
-    expect(dead_code, reason = "started by the server in DF.6")
-)]
-
 pub(crate) mod guard;
 mod parse;
 mod tail;
@@ -30,17 +23,53 @@ use crate::stream_state::StreamState;
 use agent_api::HeadlessEvent;
 use chrono::{DateTime, Utc};
 use parse::LiveRunFile;
-use protocol::{DispatchRunSnapshot, DispatchRunStatus, SessionStatus};
+use protocol::{DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, SessionStatus};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// The broadcast channel's capacity; a receiver further behind lags.
-const EVENT_CAPACITY: usize = 256;
+pub(crate) const EVENT_CAPACITY: usize = 256;
+
+/// What the server holds of the live runs it follows: the list and its
+/// change feed, and the live-run folder a Stop writes its marker into.
+#[derive(Clone)]
+pub(crate) struct DispatchRunsHub {
+    /// The listed runs.
+    pub runs: Arc<DispatchRuns>,
+    /// The live-run folder the watcher follows.
+    pub folder: PathBuf,
+}
+
+/// What [`DispatchRuns::mark_stopping`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MarkStopping {
+    /// The run is now stopping, and its `Updated` was sent.
+    Marked,
+    /// The run was already stopping; nothing changed.
+    AlreadyStopping,
+    /// The run is not listed, or is listed again under another generation.
+    Gone,
+}
+
+/// What a Stop reads of one listed run, under the lock.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StopTarget {
+    /// The listing the Stop acts on.
+    pub generation: u64,
+    /// The run's child, whose tree a Stop kills.
+    pub child_pid: u32,
+    /// The child's recorded creation time, when the tool recorded one.
+    pub child_start: Option<u64>,
+    /// When the file says the child started.
+    pub started_at: DateTime<Utc>,
+    /// Whether a Stop already marked the run.
+    pub stopping: bool,
+}
 
 /// A change to the live-run list.
 #[expect(
@@ -71,13 +100,6 @@ pub(crate) struct Timing {
 
 impl Timing {
     /// The design's intervals (`docs/plans/dispatch-follow.md` section 6).
-    #[cfg_attr(
-        test,
-        expect(
-            dead_code,
-            reason = "used by the server wiring (DF.6); tests use short intervals"
-        )
-    )]
     pub(crate) const DEFAULT: Self = Self {
         scan: Duration::from_secs(30),
         liveness: Duration::from_secs(2),
@@ -96,6 +118,8 @@ struct RunEntry {
     /// Which listing of this run id this is, so a stale tailer's fold or a
     /// stale liveness verdict never touches a later listing.
     generation: u64,
+    /// A Stop marked the run; its status shows `Stopping` until it goes.
+    stopping: bool,
 }
 
 impl RunEntry {
@@ -113,7 +137,11 @@ impl RunEntry {
                 .map(|path| path.to_string_lossy().into_owned()),
             run_dir: file.run_dir.to_string_lossy().into_owned(),
             started_at: file.started_at,
-            status: status_of(self.stream.status),
+            status: if self.stopping {
+                DispatchRunStatus::Stopping
+            } else {
+                status_of(self.stream.status)
+            },
             metrics: self.stream.metrics.clone(),
             recent_actions: self.stream.recent_actions.clone(),
             agent_session_id: self.stream.agent_session_id.clone(),
@@ -132,6 +160,17 @@ fn status_of(stream: Option<SessionStatus>) -> DispatchRunStatus {
         Some(SessionStatus::Stopped | SessionStatus::Error) => DispatchRunStatus::Ended,
         Some(_) => DispatchRunStatus::Working,
     }
+}
+
+/// Every run in `map`, oldest first.
+fn sorted_snapshots(map: &RunMap) -> Vec<DispatchRunSnapshot> {
+    let mut snapshots: Vec<DispatchRunSnapshot> = map
+        .entries
+        .iter()
+        .map(|(run_id, entry)| entry.snapshot(run_id))
+        .collect();
+    snapshots.sort_by_key(|snapshot| snapshot.started_at);
+    snapshots
 }
 
 /// What the liveness tick checks of one run, read under the lock.
@@ -167,14 +206,19 @@ impl DispatchRuns {
 
     /// Every listed run, oldest first.
     pub(crate) fn snapshots(&self) -> Vec<DispatchRunSnapshot> {
-        let mut snapshots: Vec<DispatchRunSnapshot> = self
-            .lock()
-            .entries
-            .iter()
-            .map(|(run_id, entry)| entry.snapshot(run_id))
-            .collect();
-        snapshots.sort_by_key(|snapshot| snapshot.started_at);
-        snapshots
+        sorted_snapshots(&self.lock())
+    }
+
+    /// Send the whole run list on `out_tx` while holding the runs lock, so no
+    /// change is broadcast between the list's read and its send: a connection
+    /// whose forwarder subscribed first never sees a change land before the
+    /// list it already applies to.
+    pub(crate) fn send_list(&self, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+        let map = self.lock();
+        let _ = out_tx.send(DaemonMessage::DispatchRuns {
+            runs: sorted_snapshots(&map),
+        });
+        drop(map);
     }
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<DispatchRunEvent> {
@@ -233,6 +277,7 @@ impl DispatchRuns {
             main_checkout,
             cancel,
             generation,
+            stopping: false,
         };
         let snapshot = entry.snapshot(run_id);
         if let Some(old) = map.entries.insert(run_id.to_owned(), entry) {
@@ -318,6 +363,83 @@ impl DispatchRuns {
         }
         let snapshot = entry.snapshot(run_id);
         self.send(DispatchRunEvent::Updated(snapshot));
+    }
+
+    /// What a Stop needs of the listed run `run_id`; `None` when it is not
+    /// listed.
+    pub(crate) fn stop_target(&self, run_id: &str) -> Option<StopTarget> {
+        self.lock().entries.get(run_id).map(|entry| StopTarget {
+            generation: entry.generation,
+            child_pid: entry.file.child_pid,
+            child_start: entry.file.child_start,
+            started_at: entry.file.started_at,
+            stopping: entry.stopping,
+        })
+    }
+
+    /// Mark the run listed at `generation` as stopping and send its
+    /// `Updated`, unless it is already stopping or no longer that listing.
+    /// Two Stops racing here see one `Marked`.
+    pub(crate) fn mark_stopping(&self, run_id: &str, generation: u64) -> MarkStopping {
+        self.set_stopping(run_id, generation, true)
+    }
+
+    /// Clear the stopping mark of the run listed at `generation` (its kill
+    /// failed) and send its `Updated`; nothing when it is not marked.
+    pub(crate) fn clear_stopping(&self, run_id: &str, generation: u64) {
+        let _ = self.set_stopping(run_id, generation, false);
+    }
+
+    /// Set the run's stopping mark to `stopping` under the lock, sending its
+    /// `Updated` when the mark changed.
+    fn set_stopping(&self, run_id: &str, generation: u64, stopping: bool) -> MarkStopping {
+        let mut map = self.lock();
+        let Some(entry) = map
+            .entries
+            .get_mut(run_id)
+            .filter(|entry| entry.generation == generation)
+        else {
+            return MarkStopping::Gone;
+        };
+        if entry.stopping == stopping {
+            return MarkStopping::AlreadyStopping;
+        }
+        entry.stopping = stopping;
+        let snapshot = entry.snapshot(run_id);
+        self.send(DispatchRunEvent::Updated(snapshot));
+        MarkStopping::Marked
+    }
+
+    /// List `run_id` as a run of `child_pid` without a watcher, for the
+    /// server's tests; returns its generation.
+    #[cfg(test)]
+    pub(crate) fn list_for_test(
+        &self,
+        run_id: &str,
+        child_pid: u32,
+        child_start: Option<u64>,
+        started_at: DateTime<Utc>,
+    ) -> u64 {
+        let file = LiveRunFile {
+            schema: parse::SCHEMA,
+            run_id: run_id.to_owned(),
+            title: "a run".to_owned(),
+            backend: "a backend".to_owned(),
+            tier: None,
+            session_id: None,
+            agent: None,
+            worktree: PathBuf::from("worktree"),
+            run_dir: PathBuf::from("run"),
+            stream: PathBuf::from("stream.jsonl"),
+            child_pid,
+            child_start,
+            runner_pid: None,
+            runner_start: None,
+            started_at,
+            resumed_from: None,
+            auto_resume: false,
+        };
+        self.insert(run_id, file, None, CancellationToken::new())
     }
 }
 

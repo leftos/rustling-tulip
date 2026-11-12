@@ -449,6 +449,7 @@ pub(super) async fn client_session_until<S: Socket>(
         client_id.clone(),
     );
     let preset_event_task = spawn_preset_forwarder(&hub, out_tx.clone());
+    let dispatch_run_task = spawn_dispatch_run_events(&hub, &out_tx);
     let (state_event_task, attached) = spawn_state_events(&hub, &out_tx, &client_id, &auth);
 
     // Send initial state snapshots: this client's layout, or the first-connect
@@ -481,8 +482,16 @@ pub(super) async fn client_session_until<S: Socket>(
     tab_event_task.abort();
     preset_event_task.abort();
     state_event_task.abort();
+    abort_forwarders(dispatch_run_task);
     end_served(send_task, &mut receiver, life).await;
     info!("client_session: returning");
+}
+
+/// Stop a closing connection's forwarder tasks.
+fn abort_forwarders(tasks: impl IntoIterator<Item = tokio::task::JoinHandle<()>>) {
+    for task in tasks {
+        task.abort();
+    }
 }
 
 /// What the send pump hands back when it ends: the sink and the queue.
@@ -748,6 +757,57 @@ fn spawn_tab_forwarder(
                     rx = sender.subscribe();
                     let tabs = state.client_layout(&client_id);
                     let _ = out_tx.send(DaemonMessage::Tabs { tabs });
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// This connection's dispatch-run forwarder; none when the daemon follows no
+/// live-run folder.
+fn spawn_dispatch_run_events(
+    hub: &Hub,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let dispatch = hub.dispatch_runs.as_ref()?;
+    Some(spawn_dispatch_run_forwarder(
+        Arc::clone(&dispatch.runs),
+        out_tx.clone(),
+    ))
+}
+
+/// Forwards the live dispatch runs' changes to the connection's `out_tx`, in
+/// the order the run list sent them. A connection that falls behind gets the
+/// whole run list in place of the changes it missed, and the changes after it.
+pub(super) fn spawn_dispatch_run_forwarder(
+    runs: Arc<crate::dispatch_runs::DispatchRuns>,
+    out_tx: mpsc::UnboundedSender<DaemonMessage>,
+) -> tokio::task::JoinHandle<()> {
+    use crate::dispatch_runs::DispatchRunEvent;
+    // Subscribed before the task starts, so no change sent after this call
+    // is missed.
+    let mut rx = runs.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(DispatchRunEvent::Updated(run)) => {
+                    let _ = out_tx.send(DaemonMessage::DispatchRunUpdated { run });
+                }
+                Ok(DispatchRunEvent::Removed(run_id)) => {
+                    let _ = out_tx.send(DaemonMessage::DispatchRunRemoved { run_id });
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(
+                        lagged = n,
+                        "client dispatch-run stream lagged; resending the run list"
+                    );
+                    // Subscribe before taking the list: every change after
+                    // the list applies on top of it.
+                    rx = runs.subscribe();
+                    let _ = out_tx.send(DaemonMessage::DispatchRuns {
+                        runs: runs.snapshots(),
+                    });
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -2380,6 +2440,48 @@ mod tests {
         assert_eq!(
             removed.expect("events after the list still arrive"),
             "after".to_string(),
+            "the forwarder keeps draining its new subscription"
+        );
+        forwarder.abort();
+    }
+
+    #[tokio::test]
+    async fn lagged_dispatch_run_forwarder_resends_the_list() {
+        let runs = crate::dispatch_runs::DispatchRuns::new();
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_dispatch_run_forwarder(Arc::clone(&runs), out_tx);
+
+        // The current-thread runtime first polls the forwarder at the await
+        // below, by which time these listings have overflowed the channel.
+        let started_at = chrono::Utc::now();
+        let mut generation = 0;
+        for _ in 0..=crate::dispatch_runs::EVENT_CAPACITY {
+            generation = runs.list_for_test("run-l", 4242, Some(7), started_at);
+        }
+        let listed = match next_message(&mut rx).await {
+            DaemonMessage::DispatchRuns { runs } => {
+                Some(runs.into_iter().map(|run| run.run_id).collect::<Vec<_>>())
+            }
+            _ => None,
+        };
+        assert_eq!(
+            listed.expect("the lagged connection gets the run list"),
+            ["run-l"],
+            "the list is the runs as they stand"
+        );
+
+        // The changes after the list arrive on the fresh subscription.
+        assert_eq!(
+            runs.mark_stopping("run-l", generation),
+            crate::dispatch_runs::MarkStopping::Marked
+        );
+        let status = match next_message(&mut rx).await {
+            DaemonMessage::DispatchRunUpdated { run } => Some(run.status),
+            _ => None,
+        };
+        assert_eq!(
+            status,
+            Some(protocol::DispatchRunStatus::Stopping),
             "the forwarder keeps draining its new subscription"
         );
         forwarder.abort();

@@ -3266,6 +3266,7 @@ mod tests {
             peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
             accounts: None,
             gate_state: None,
+            dispatch_runs: None,
             host_update: Arc::new(crate::server::HostUpdate::nothing_installed()),
         };
         (hub, preset_rx, scratch)

@@ -3557,6 +3557,15 @@ export type ClientMessage =
    */
   | { type: "stop_session"; session_id: string; cleanup: CleanupAction[] }
   /**
+   * Stop a live dispatch run: the daemon marks it `Stopping`, writes the
+   * run's stop marker and kills its child's process tree. Success shows as
+   * [`DaemonMessage::DispatchRunUpdated`] (`Stopping`) and then
+   * [`DaemonMessage::DispatchRunRemoved`]; a failure is
+   * [`DaemonMessage::ActionFailed`] with `request_id` echoed to the
+   * requester only. A Stop for a run already stopping does nothing.
+   */
+  | { type: "stop_dispatch_run"; run_id: string; request_id?: string | null }
+  /**
    * Replay an abandoned session: read its stored [`SpawnConfig`] and
    * `last_prompt` from the sidecar, spawn a fresh session, and delete
    * the abandoned sidecar atomically. Surfaces an error if the

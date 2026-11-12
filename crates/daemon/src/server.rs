@@ -25,6 +25,7 @@ mod clients;
 pub(crate) use self::clients::Clients;
 mod connection;
 mod dashboard;
+mod dispatch_runs;
 mod folder;
 mod gate;
 mod handshake;
@@ -249,6 +250,9 @@ pub struct Hub {
     /// from the user's gates, so it may report no gate state or another
     /// account's.
     pub(crate) gate_state: Option<crate::gate_state::GateHub>,
+    /// The dispatch tool's live runs and their folder; `Some` exactly when
+    /// the daemon watches a live-run folder.
+    pub(crate) dispatch_runs: Option<crate::dispatch_runs::DispatchRunsHub>,
     /// What a [`ClientMessage::RemoteUpdate`] checks the host against: where
     /// the install is, what runs from it, and whether an update is already
     /// running in this daemon.
@@ -525,6 +529,7 @@ pub async fn run(
     abandoned: Vec<OrphanMeta>,
     resume_ids: Vec<String>,
     published: &AtomicBool,
+    dispatch_runs: Option<crate::dispatch_runs::DispatchRunsHub>,
 ) -> anyhow::Result<()> {
     let run_start = std::time::Instant::now();
     // A fresh loopback token every start. Remote access is off unless
@@ -641,6 +646,7 @@ pub async fn run(
                 crate::gate_state::live_history_source(),
             )
         }),
+        dispatch_runs,
         host_update: Arc::new(HostUpdate::for_this_daemon()?),
     };
     start_hub_tasks(&hub, client_count_rx);
@@ -1202,6 +1208,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::SetGateSlotCount { .. } | ClientMessage::GateHistory { .. }) => {
             gate::handle(hub, m, ctx);
         }
+        m @ ClientMessage::StopDispatchRun { .. } => dispatch_runs::handle(hub, m, ctx),
     }
     Ok(())
 }

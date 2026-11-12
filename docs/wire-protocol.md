@@ -87,6 +87,10 @@ The rules of the daemon/client protocol that the types in `crates/protocol/src/l
 
   The native client asks This PC only: once when the Gates view opens, then every 15 s while it shows, and every 60 s while a gate state is known and the view is hidden, one request at a time; a refusal echoing that id is logged at info, with no toast.
 
+  A daemon that lists `dispatch_runs` (`FEATURE_DISPATCH_RUNS`) in `Welcome.features`, which it does only when a live-run folder is watched, sends `DispatchRuns { runs }` (`dispatch_runs`) after `Sessions` on connect, then `DispatchRunUpdated { run }` and `DispatchRunRemoved { run_id }` to every connection as the runs change; a connection that lags is sent the full `DispatchRuns` list again.
+
+  `StopDispatchRun { run_id, request_id? }` (`stop_dispatch_run`, served on tailnet connections too, as a session stop is) stops a live run: the daemon broadcasts the run as `Stopping`, writes its stop marker, kills its process tree, and the run's removal follows as `DispatchRunRemoved`. It sends no reply on success. A run that is gone or is no longer its process is answered `ActionFailed` titled "The run already ended", and a failed kill "Could not stop the run", each to the requester alone, echoing `request_id`; a Stop for a run already `Stopping` does nothing. A daemon that watches no folder answers `Error { code: "unsupported_message" }`.
+
   The gate types (`GateState`, `GateSlot`, `GateClaim`, `GateHistoryRun` and the rest) are the daemon's own, converted from gate-state's, so a change to the gate's files never reaches the protocol: every field past the ids is defaulted.
 
   `GateClaim`, `GateWaiting` and `GateQueueTicket` carry `command_key` (gate-state's normalized command, the same key as `GateCommandSummary.command`) and `repo` (the entry's folder's repository, by the rule `GateHistory` uses), both defaulted, so a client finds an entry's usual time in the summary.

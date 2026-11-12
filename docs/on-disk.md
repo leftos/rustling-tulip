@@ -176,6 +176,12 @@ A fetch writes a hidden `.fetch-<launch stamp>-<n>.part` beside the target and r
 
 A fetched `.html` or `.htm` page that opens when done brings the relative media it names with it, saved at the same `<host>/<repo-name>/<rel-path>` place (never outside the repo root) and each fetched again if already on disk (`apps/native/src/html_media.rs`, `docs/native-client.md` "Fetched files").
 
+## The dispatch live-run folder
+
+The daemon follows the dispatch tool's runs from one folder, resolved by `resolve_dispatch_live_dir` in `crates/daemon/src/paths.rs`: `RUSTLING_TULIP_DISPATCH_DIR` when set and not empty (made absolute; one that cannot be made absolute means none), else the first folder a registered agent names (the Claude plugin's `live_runs_dir`: `live` under `DISPATCH_LOG_DIR_VAR`, else `~/.claude/dispatch/live`), else none. The daemon creates nothing there. It starts the watcher before the tab prune and logs `following dispatch runs in the live-run folder` (info, `folder`), or `the live-run folder could not be watched; following no dispatch runs` (warn) when it cannot watch it.
+
+Each run is one `<run_id>.json` live-run file the tool writes; the daemon only reads it, and deletes one whose process is gone. A Stop (`StopDispatchRun`, `docs/wire-protocol.md`) writes an empty `<run_id>.stop` marker beside it before it kills the run's process tree, so the tool never sees its child exit without the marker; a marker that cannot be written kills nothing. Stop logs `dispatch_runs: stopped the run`, `dispatch_runs: the stop marker could not be written; nothing is killed`, `dispatch_runs: taskkill failed but the run's child has exited` or `dispatch_runs: the run could not be stopped`, and a lagging connection logs `client dispatch-run stream lagged; resending the run list`.
+
 ## Uploaded files
 
 An `UploadFile` (`docs/wire-protocol.md`) saves into `<session folder>/.tmp/rt-uploads/`, the session folder being the session's first member's worktree path, else its current folder (`crates/daemon/src/server/upload.rs`). The folder holds a `.gitignore` of `*`, so the files never show in git. A file is named `YYYYMMDD-HHMMSS-<n>-<safe name>`: the client's name keeps only its last path component, every character outside `A-Z a-z 0-9 . _ -` becomes `_`, it is cut to 80 characters, and `upload` stands in when nothing usable is left. After each write, files in the folder older than 7 days are deleted.

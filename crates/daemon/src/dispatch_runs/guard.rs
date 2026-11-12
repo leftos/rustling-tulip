@@ -31,6 +31,10 @@ pub(crate) enum Liveness {
 }
 
 /// What `OpenProcess` and the reads through its handle gave (Windows).
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(dead_code, reason = "only the Windows guard opens a process")
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessRead {
     /// `OpenProcess` failed with `ERROR_INVALID_PARAMETER`: no process has
@@ -54,15 +58,30 @@ enum StartRead {
     /// Not listed, and nothing else says a process has that pid.
     Absent,
     /// Not listed, but the pid exists (a signal 0 reached it or was refused).
+    #[cfg_attr(
+        all(not(unix), not(test)),
+        expect(
+            dead_code,
+            reason = "only the Unix signal check finds a pid it cannot read"
+        )
+    )]
     Unreadable,
 }
 
 /// The exit code `GetExitCodeProcess` reports for a process still running.
-const STILL_ACTIVE: u32 = 259;
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(dead_code, reason = "only the Windows guard reads an exit code")
+)]
+pub(crate) const STILL_ACTIVE: u32 = 259;
 
 /// The verdict on a Windows read, as the tool's `runner_alive` decides it:
 /// dead only on evidence. Without a recorded start, the `sysinfo` start time
 /// decides once the process is known to be running.
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(dead_code, reason = "only the Windows guard opens a process")
+)]
 fn classify_process(
     read: ProcessRead,
     child_start: Option<u64>,
@@ -255,6 +274,12 @@ impl GuardedProcess {
         unsafe { GetExitCodeProcess(self.handle, &raw mut code) }.ok()?;
         Some(code)
     }
+
+    /// The held process's exit code now, [`STILL_ACTIVE`] while it runs;
+    /// `None` when it cannot be read.
+    pub(crate) fn current_exit_code(&self) -> Option<u32> {
+        self.exit_code()
+    }
 }
 
 #[cfg(windows)]
@@ -269,10 +294,6 @@ impl Drop for GuardedProcess {
 /// recorded, holding its handle so the pid cannot be reused meanwhile.
 /// Strict, unlike [`liveness`]: anything unreadable opens nothing.
 #[cfg(windows)]
-#[cfg_attr(
-    test,
-    expect(dead_code, reason = "DF.6's Stop holds this handle across its kill")
-)]
 pub(crate) fn open(
     child_pid: u32,
     child_start: Option<u64>,
@@ -290,8 +311,8 @@ pub(crate) fn open(
 }
 
 /// `pid`'s creation time as a FILETIME read as one `u64`, the value a
-/// live-run file's `child_start` records.
-#[cfg(windows)]
+/// live-run file's `child_start` records; tests record a child's start with it.
+#[cfg(all(windows, test))]
 pub(crate) fn creation_filetime(pid: u32) -> Option<u64> {
     GuardedProcess::open_pid(pid)?.creation_filetime()
 }

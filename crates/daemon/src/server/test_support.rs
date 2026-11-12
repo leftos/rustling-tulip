@@ -211,9 +211,26 @@ pub(super) fn build_test_hub(
         peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
         accounts: None,
         gate_state: None,
+        dispatch_runs: None,
         host_update: Arc::new(super::HostUpdate::nothing_installed()),
     };
     (hub, scratch, attention_rx)
+}
+
+/// Give `hub` an empty dispatch-run list over the live-run folder `folder`,
+/// with no watcher, as a daemon that follows a live-run folder holds one;
+/// returns the list, which the test fills with
+/// [`crate::dispatch_runs::DispatchRuns::list_for_test`].
+pub(crate) fn enable_dispatch_runs(
+    hub: &mut Hub,
+    folder: PathBuf,
+) -> Arc<crate::dispatch_runs::DispatchRuns> {
+    let runs = crate::dispatch_runs::DispatchRuns::new();
+    hub.dispatch_runs = Some(crate::dispatch_runs::DispatchRunsHub {
+        runs: Arc::clone(&runs),
+        folder,
+    });
+    runs
 }
 
 /// Give `hub` a gate state holding `state`, as a 64-bit Windows daemon's hub

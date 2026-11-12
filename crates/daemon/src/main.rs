@@ -321,6 +321,11 @@ async fn run_daemon(
     // last_prompt against a fresh process) or Discard from the sidebar. The
     // sidecar stays on disk until one of those handlers consumes it.
 
+    // The live-run folder's startup scan lists the dispatch runs that survived
+    // a restart before the tab prune below, so a pane following one keeps it.
+    let dispatch_shutdown = tokio_util::sync::CancellationToken::new();
+    let dispatch_runs = start_dispatch_runs(&dispatch_shutdown);
+
     // Persisted tabs reference session ids that may no longer be valid. After
     // orphan recovery, clear panes that point at dead sessions and drop tabs
     // with no surviving session bindings — otherwise a killed-daemon restart
@@ -361,10 +366,45 @@ async fn run_daemon(
         dirs.sessions_dir.clone(),
     ));
 
-    let result = server::run(state, dirs, live, dead, resume_ids, published).await;
+    let result = server::run(
+        state,
+        dirs,
+        live,
+        dead,
+        resume_ids,
+        published,
+        dispatch_runs,
+    )
+    .await;
+    dispatch_shutdown.cancel();
     info!(?result, "rustling-tulipd main returning");
     result?;
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Start following the dispatch tool's live-run folder until `shutdown`:
+/// `None` when no folder is configured or the watcher could not start, and
+/// the daemon then follows no dispatch runs.
+fn start_dispatch_runs(
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Option<dispatch_runs::DispatchRunsHub> {
+    let folder = paths::resolve_dispatch_live_dir()?;
+    let runs = dispatch_runs::DispatchRuns::new();
+    match dispatch_runs::spawn(
+        folder.clone(),
+        Arc::clone(&runs),
+        dispatch_runs::Timing::DEFAULT,
+        shutdown.clone(),
+    ) {
+        Ok(_watcher) => {
+            info!(folder = %folder.display(), "following dispatch runs in the live-run folder");
+            Some(dispatch_runs::DispatchRunsHub { runs, folder })
+        }
+        Err(err) => {
+            tracing::warn!(?err, folder = %folder.display(), "the live-run folder could not be watched; following no dispatch runs");
+            None
+        }
+    }
 }
 
 /// Run `--version` or `apply-update` when the arguments ask for one and return

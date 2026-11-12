@@ -4644,6 +4644,17 @@ pub enum ClientMessage {
         /// delete worktrees.
         cleanup: Vec<CleanupAction>,
     },
+    /// Stop a live dispatch run: the daemon marks it `Stopping`, writes the
+    /// run's stop marker and kills its child's process tree. Success shows as
+    /// [`DaemonMessage::DispatchRunUpdated`] (`Stopping`) and then
+    /// [`DaemonMessage::DispatchRunRemoved`]; a failure is
+    /// [`DaemonMessage::ActionFailed`] with `request_id` echoed to the
+    /// requester only. A Stop for a run already stopping does nothing.
+    StopDispatchRun {
+        run_id: String,
+        #[serde(default)]
+        request_id: Option<String>,
+    },
     /// Replay an abandoned session: read its stored [`SpawnConfig`] and
     /// `last_prompt` from the sidecar, spawn a fresh session, and delete
     /// the abandoned sidecar atomically. Surfaces an error if the
@@ -12139,6 +12150,36 @@ mod tests {
         assert!(!run.auto_resume);
         assert_eq!(run.status, DispatchRunStatus::Working);
         assert_eq!(run.started_at, gate_time("2026-11-11T09:00:00Z"));
+    }
+
+    #[test]
+    fn stop_dispatch_run_round_trips() {
+        let stop = ClientMessage::StopDispatchRun {
+            run_id: "9f2c1e".to_owned(),
+            request_id: Some("req-7".to_owned()),
+        };
+        let json = serde_json::to_string(&stop).expect("serializes");
+        assert!(json.starts_with(r#"{"type":"stop_dispatch_run""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("decodes");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::StopDispatchRun { run_id, request_id: Some(id) }
+                    if run_id == "9f2c1e" && id == "req-7"
+            ),
+            "{back:?}"
+        );
+
+        let bare: ClientMessage =
+            serde_json::from_str(r#"{"type":"stop_dispatch_run","run_id":"9f2c1e"}"#)
+                .expect("decodes without a request id");
+        assert!(
+            matches!(
+                &bare,
+                ClientMessage::StopDispatchRun { run_id, request_id: None } if run_id == "9f2c1e"
+            ),
+            "{bare:?}"
+        );
     }
 
     #[test]

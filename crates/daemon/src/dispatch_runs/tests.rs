@@ -24,6 +24,99 @@ fn snapshot_status_maps_the_stream_status() {
     );
 }
 
+/// One test connection: its forwarder copies the run list's changes to the
+/// client's queue as the server's does, and on a lag resubscribes and sends
+/// the list. It ends once `done` is set and nothing is left to forward.
+fn forward_until_done(
+    runs: &DispatchRuns,
+    mut rx: broadcast::Receiver<DispatchRunEvent>,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    done: &std::sync::atomic::AtomicBool,
+) {
+    use std::sync::atomic::Ordering;
+    use tokio::sync::broadcast::error::TryRecvError;
+    loop {
+        let message = match rx.try_recv() {
+            Ok(DispatchRunEvent::Updated(run)) => DaemonMessage::DispatchRunUpdated { run },
+            Ok(DispatchRunEvent::Removed(run_id)) => DaemonMessage::DispatchRunRemoved { run_id },
+            Err(TryRecvError::Lagged(_)) => {
+                rx = runs.subscribe();
+                runs.send_list(out_tx);
+                continue;
+            }
+            Err(TryRecvError::Empty) if done.load(Ordering::Acquire) => return,
+            Err(TryRecvError::Empty) => {
+                std::thread::yield_now();
+                continue;
+            }
+            Err(TryRecvError::Closed) => return,
+        };
+        let _ = out_tx.send(message);
+    }
+}
+
+/// The run ids a client holds after applying `messages` in order: a list
+/// replaces them, an update adds its run, a removal drops it.
+fn client_view(messages: &mut mpsc::UnboundedReceiver<DaemonMessage>) -> Vec<String> {
+    let mut held = std::collections::BTreeSet::new();
+    while let Ok(message) = messages.try_recv() {
+        match message {
+            DaemonMessage::DispatchRuns { runs } => {
+                held = runs.into_iter().map(|run| run.run_id).collect();
+            }
+            DaemonMessage::DispatchRunUpdated { run } => {
+                held.insert(run.run_id);
+            }
+            DaemonMessage::DispatchRunRemoved { run_id } => {
+                held.remove(&run_id);
+            }
+            _ => {}
+        }
+    }
+    held.into_iter().collect()
+}
+
+/// Connections that subscribe and take the initial list while a run is
+/// listed and removed over and over all end holding exactly the runs that
+/// remain: no removal is forwarded ahead of a list that still holds its run.
+#[test]
+#[expect(clippy::expect_used, reason = "a test joins its threads with expect")]
+fn initial_dispatch_runs_list_is_sent_under_the_runs_lock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const CONNECTIONS: usize = 32;
+    const TOGGLES: usize = 2_000;
+    let runs = DispatchRuns::new();
+    let done = Arc::new(AtomicBool::new(false));
+    let toggler = std::thread::spawn({
+        let runs = Arc::clone(&runs);
+        move || {
+            for _ in 0..TOGGLES {
+                runs.list_for_test("run-t", 4242, Some(7), Utc::now());
+                runs.remove("run-t");
+            }
+        }
+    });
+    let mut clients = Vec::new();
+    for _ in 0..CONNECTIONS {
+        let (out_tx, out_rx) = mpsc::unbounded_channel();
+        let rx = runs.subscribe();
+        let forwarder = std::thread::spawn({
+            let (runs, done, out_tx) = (Arc::clone(&runs), Arc::clone(&done), out_tx.clone());
+            move || forward_until_done(&runs, rx, &out_tx, &done)
+        });
+        runs.send_list(&out_tx);
+        clients.push((forwarder, out_rx));
+        std::thread::yield_now();
+    }
+    toggler.join().expect("the toggler ends");
+    runs.list_for_test("run-last", 4242, Some(7), Utc::now());
+    done.store(true, Ordering::Release);
+    for (forwarder, mut out_rx) in clients {
+        forwarder.join().expect("the forwarder ends");
+        assert_eq!(client_view(&mut out_rx), ["run-last"]);
+    }
+}
+
 #[cfg(windows)]
 #[expect(
     clippy::expect_used,
