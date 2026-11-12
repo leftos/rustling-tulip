@@ -282,7 +282,7 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: `apps/native/src/dispatch_view.rs` (new), `apps/native/src/grid_view.rs`, `apps/native/src/lib.rs`, `apps/native/tests/ui/ui_dispatch.rs` (new), `apps/native/tests/ui/main.rs`, `tools/test-map.json`.
   - Proof: `gate … -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_dispatch`, `.\rt.ps1 test -Validate`, and a native-shot of the view shown before and after.
   - Waits on: DF.8, DF.9. Hotspot: `lib.rs`.
-- [ ] **DF.11 Live e2e.** A real daemon shows a fake run's leaf with streamed actions, Stop kills the child, and the leaf goes.
+- [x] **DF.11 Live e2e.** A real daemon shows a fake run's leaf with streamed actions, Stop kills the child, and the leaf goes.
   - Files: `apps/native/tests/e2e_dispatch.rs` (new), `crates/agents/claude/fake/index.mjs` (a slow stream-json mode), `apps/native/tests/support/live.rs`, `rt.ps1`, `tools/test-map.json`.
   - Proof: `.\rt.ps1 native-e2e -Test e2e_dispatch -Filter 'test(/dispatch/)'`.
   - Waits on: DF.4, DF.6, DF.10. Hotspot: none.

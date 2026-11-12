@@ -52,6 +52,15 @@ The email is `FAKE_CLAUDE_LOGIN_EMAIL`, else `login@example.com`; `<tag>` is the
 
 `.claude.json` keeps every key a file already there holds and sets `oauthAccount`. A file that exists but is not a JSON object fails the login with `fake-claude: <path> is not a JSON object` on stderr and exit 2, writing nothing.
 
+## Headless stream-json run
+
+With `FAKE_CLAUDE_STREAM_JSON` set to a positive whole number of milliseconds, the shim stands in for a headless `claude -p --output-format stream-json` run that never finishes, as a dispatch run's child: it looks at no argument, prints no banner and runs no hook. It writes to stdout, each line ended by `\n`:
+
+- at once, `{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-00000000f00d"}`;
+- then one line every interval, cycling through `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}`, the same with `"name":"Edit"`, and `{"type":"assistant","message":{"content":[{"type":"text","text":"step <n>"}]}}` with `n` counting up from 1.
+
+It never writes a `result` line and never exits on its own: it waits to be killed. Any other non-empty value prints `fake-claude: FAKE_CLAUDE_STREAM_JSON must be a positive whole number of milliseconds: <value>` on stderr and exits 2. The live tier's dispatch spec (`apps/native/tests/e2e_dispatch.rs`) runs it as `node index.mjs` with its stdout in a run's stream file.
+
 A crash is appended to `fake-claude-crash.log` in the OS temp dir.
 
 `fake-claude.cmd` (Windows) and `fake-claude.sh` (POSIX) are shims that run `index.mjs` under `node`, forwarding every argument.

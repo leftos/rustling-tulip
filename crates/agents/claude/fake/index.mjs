@@ -59,6 +59,14 @@
  *     knob says, writes a subscription login into `CLAUDE_CONFIG_DIR` for the
  *     account store's capture, fails, or hangs; every case exits before the
  *     banner, the settings load or the prompt.
+ *   - With `FAKE_CLAUDE_STREAM_JSON=<ms>` set it stands in for a headless
+ *     stream-json run instead of a session, before the arguments, banner or
+ *     hooks: it writes `{"type":"system","subtype":"init",…}` at once, then
+ *     every <ms> milliseconds the next assistant line, cycling through a
+ *     `Read` tool use, an `Edit` tool use and a `step <n>` text with `n`
+ *     counting up, each ended by `\n`. It never writes a `result` line and
+ *     never exits on its own (a value that is not a positive whole number
+ *     exits 2).
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
  *   - Takes the prompt as Claude does: the argument after `--`, or a bare
  *     argument that is no known flag's value, is the session's first message
@@ -183,6 +191,13 @@ process.on("unhandledRejection", (err) => {
   process.exit(1);
 });
 
+// A dispatched headless run is not a session either: with
+// `FAKE_CLAUDE_STREAM_JSON` set it only streams stream-json lines on stdout,
+// before the arguments, the banner or the hooks are looked at.
+const streamInterval = process.env.FAKE_CLAUDE_STREAM_JSON ?? "";
+if (streamInterval !== "") {
+  await streamJson(streamInterval);
+}
 const args = process.argv.slice(2);
 // `claude auth login` is not a session: the daemon runs the CLI that way to
 // capture a subscription login, so this mode answers on the process's own
@@ -968,6 +983,48 @@ function findLineBreak(value) {
  */
 function lineBreakLength(value, index) {
   return value[index] === "\r" && value[index + 1] === "\n" ? 2 : 1;
+}
+
+/**
+ * Stands in for a headless `claude -p --output-format stream-json` run that
+ * never finishes, as the `FAKE_CLAUDE_STREAM_JSON` knob asks: the `init` line
+ * at once, then every `interval` ms the next of a `Read` tool use, an `Edit`
+ * tool use and a `step <n>` text, `n` counting up. It never writes a
+ * `result` line and never exits on its own; it waits to be killed. A value
+ * that is not a positive whole number of milliseconds exits 2.
+ */
+async function streamJson(interval) {
+  const ms = Number(interval);
+  if (!Number.isInteger(ms) || ms <= 0) {
+    return endAfterWrite(
+      process.stderr,
+      `fake-claude: FAKE_CLAUDE_STREAM_JSON must be a positive whole number of milliseconds: ${interval}\r\n`,
+      2,
+    );
+  }
+  const line = (record) => process.stdout.write(`${JSON.stringify(record)}\n`);
+  const assistant = (block) =>
+    line({ type: "assistant", message: { content: [block] } });
+  line({
+    type: "system",
+    subtype: "init",
+    session_id: "00000000-0000-4000-8000-00000000f00d",
+  });
+  let tick = 0;
+  let step = 0;
+  setInterval(() => {
+    const kind = tick % 3;
+    tick += 1;
+    if (kind === 0) {
+      assistant({ type: "tool_use", name: "Read" });
+    } else if (kind === 1) {
+      assistant({ type: "tool_use", name: "Edit" });
+    } else {
+      step += 1;
+      assistant({ type: "text", text: `step ${step}` });
+    }
+  }, ms);
+  return new Promise(() => {});
 }
 
 /**

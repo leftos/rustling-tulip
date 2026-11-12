@@ -59,6 +59,16 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// The fake Claude CLI's script, which a spec runs under `node` itself.
+pub fn fake_claude_script() -> PathBuf {
+    repo_root()
+        .join("crates")
+        .join("agents")
+        .join("claude")
+        .join("fake")
+        .join("index.mjs")
+}
+
 /// `<target>/<profile>/`: the test binary runs from its `deps/` subdir, and
 /// cargo puts the daemon and tracer binaries beside that.
 pub fn target_bin_dir() -> PathBuf {
@@ -240,6 +250,17 @@ impl LiveDaemon {
             .find(|(key, _)| *key == "RUSTLING_TULIP_UPDATES_DIR")
             .map(|(_, value)| PathBuf::from(value))
             .expect("an isolated daemon has an updates dir")
+    }
+
+    /// The daemon's live-run folder, `RUSTLING_TULIP_DISPATCH_DIR`, from
+    /// [`Self::envs`]: a dispatch run's file written here is listed.
+    pub fn dispatch_dir(&self) -> PathBuf {
+        self.envs()
+            .iter()
+            .rev()
+            .find(|(key, _)| *key == "RUSTLING_TULIP_DISPATCH_DIR")
+            .map(|(_, value)| PathBuf::from(value))
+            .expect("an isolated daemon has a live-run folder")
     }
 
     /// Makes the fake tailscale's `whois` answer that every peer belongs to
