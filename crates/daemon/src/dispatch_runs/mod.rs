@@ -19,6 +19,7 @@
 //! still reads the run's stop marker, which the scan deletes only once no
 //! live-run file is beside it.
 
+pub(crate) mod activity;
 pub(crate) mod guard;
 mod links;
 mod parse;
@@ -130,6 +131,9 @@ struct RunEntry {
     generation: u64,
     /// A Stop marked the run; its status shows `Stopping` until it goes.
     stopping: bool,
+    /// The last status line queued for the run's log; `None` until the log is
+    /// attached.
+    logged: Option<SessionStatus>,
 }
 
 impl RunEntry {
@@ -210,6 +214,8 @@ pub(crate) struct DispatchRuns {
     /// The sessions whose conversations the runs link, set once by
     /// [`Self::attach_sessions`] under the runs lock.
     sessions: OnceLock<Arc<SessionRegistry>>,
+    /// Where the runs' status lines go, set once by [`Self::attach_activity`].
+    activity: OnceLock<std::sync::mpsc::Sender<activity::RunLogLine>>,
 }
 
 impl DispatchRuns {
@@ -219,6 +225,7 @@ impl DispatchRuns {
             runs: Mutex::new(RunMap::default()),
             events,
             sessions: OnceLock::new(),
+            activity: OnceLock::new(),
         })
     }
 
@@ -236,6 +243,18 @@ impl DispatchRuns {
         }
         drop(map);
         self.notify(&flipped);
+    }
+
+    /// Send every run's status line from now on to `log`, and queue a line
+    /// for each run already listed. A second call does nothing.
+    pub(crate) fn attach_activity(&self, log: std::sync::mpsc::Sender<activity::RunLogLine>) {
+        let mut map = self.lock();
+        if self.activity.set(log).is_err() {
+            return;
+        }
+        for (run_id, entry) in &mut map.entries {
+            self.log_change(run_id, entry);
+        }
     }
 
     /// Link the conversation `added` names and unlink the one `removed`
@@ -278,6 +297,24 @@ impl DispatchRuns {
     /// Every listed run, oldest first.
     pub(crate) fn snapshots(&self) -> Vec<DispatchRunSnapshot> {
         sorted_snapshots(&self.lock())
+    }
+
+    /// The listed runs whose file names conversation `conversation_id`,
+    /// oldest first.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the Dashboard's nested dispatch runs read it")
+    )]
+    pub(crate) fn runs_of(&self, conversation_id: &str) -> Vec<DispatchRunSnapshot> {
+        sorted_snapshots(&self.lock())
+            .into_iter()
+            .filter(|snapshot| snapshot.session_id.as_deref() == Some(conversation_id))
+            .collect()
+    }
+
+    /// Whether `run_id` is listed.
+    pub(crate) fn is_listed(&self, run_id: &str) -> bool {
+        self.lock().entries.contains_key(run_id)
     }
 
     /// Send the whole run list on `out_tx` while holding the runs lock, so no
@@ -333,6 +370,27 @@ impl DispatchRuns {
             .collect()
     }
 
+    /// Queue `entry`'s status line when it differs from the last one queued.
+    /// Called under the runs lock: the send never blocks, so the lines keep
+    /// the list's own order. Nothing before the log is attached.
+    fn log_change(&self, run_id: &str, entry: &mut RunEntry) {
+        let status = activity::logged_status(status_of(entry.stream.status));
+        let Some(log) = self.activity.get() else {
+            return;
+        };
+        if entry.logged == Some(status) {
+            return;
+        }
+        // An appender gone (the daemon is stopping) is fine: nothing is left
+        // to write the line.
+        let _ = log.send(activity::RunLogLine {
+            key: crate::activity_log::dispatch_key(run_id),
+            at: Utc::now(),
+            status,
+        });
+        entry.logged = Some(status);
+    }
+
     /// List a new run and send its first `Updated`, returning its generation.
     fn insert(
         &self,
@@ -344,14 +402,16 @@ impl DispatchRuns {
         let mut map = self.lock();
         let generation = map.next_generation;
         map.next_generation += 1;
-        let entry = RunEntry {
+        let mut entry = RunEntry {
             file,
             stream: StreamState::default(),
             main_checkout,
             cancel,
             generation,
             stopping: false,
+            logged: None,
         };
+        self.log_change(run_id, &mut entry);
         let snapshot = entry.snapshot(run_id);
         let added = entry.file.session_id.clone();
         let old = map.entries.insert(run_id.to_owned(), entry);
@@ -386,6 +446,7 @@ impl DispatchRuns {
             entry.stream = StreamState::default();
             entry.generation = next_generation;
         }
+        self.log_change(run_id, entry);
         let snapshot = entry.snapshot(run_id);
         if restart {
             map.next_generation += 1;
@@ -413,6 +474,19 @@ impl DispatchRuns {
     fn removed(&self, map: MutexGuard<'_, RunMap>, run_id: &str, entry: &RunEntry) {
         entry.cancel.cancel();
         let flipped = self.relink(None, entry.file.session_id.as_deref());
+        if entry
+            .logged
+            .is_some_and(|status| status != SessionStatus::Stopped)
+            && let Some(log) = self.activity.get()
+        {
+            // An appender gone (the daemon is stopping) is fine: nothing is
+            // left to write the line.
+            let _ = log.send(activity::RunLogLine {
+                key: crate::activity_log::dispatch_key(run_id),
+                at: Utc::now(),
+                status: SessionStatus::Stopped,
+            });
+        }
         self.send(DispatchRunEvent::Removed(run_id.to_owned()));
         drop(map);
         self.notify(&flipped);
@@ -452,6 +526,7 @@ impl DispatchRuns {
         for event in events {
             entry.stream.apply(event);
         }
+        self.log_change(run_id, entry);
         let snapshot = entry.snapshot(run_id);
         self.send(DispatchRunEvent::Updated(snapshot));
     }

@@ -62,6 +62,12 @@ pub fn session_key(id: &str) -> String {
     format!("session-{id}")
 }
 
+/// The log key of dispatch run `run_id`.
+#[must_use]
+pub fn dispatch_key(run_id: &str) -> String {
+    format!("dispatch-{run_id}")
+}
+
 /// Append one status change to `key`'s log, creating the folder if missing.
 pub fn append(dir: &Path, key: &str, at: DateTime<Utc>, status: SessionStatus) {
     let mut line = match serde_json::to_vec(&Line { at, status }) {
@@ -134,8 +140,8 @@ pub fn read_lines(dir: &Path, key: &str) -> Vec<(DateTime<Utc>, SessionStatus)> 
 
 /// Drop every line older than [`WINDOW`], except the newest of them, whose
 /// status the window's start is read from. A key no longer live (see
-/// [`sidecar_is_live`]) whose newest line passed the window has its file
-/// deleted.
+/// [`sidecar_or_listed_run_is_live`]) whose newest line passed the window has
+/// its file deleted.
 pub fn prune(dir: &Path, now: DateTime<Utc>, is_live: impl Fn(&str) -> bool) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -281,13 +287,24 @@ pub fn gaps_for(
 
 /// A liveness test for [`prune`]: a `session-<id>` key is live while its
 /// session's sidecar exists (live and abandoned sessions both have one; a
-/// graceful stop deletes it). No other key is ever live.
+/// graceful stop deletes it). No other key is live;
+/// [`sidecar_or_listed_run_is_live`] adds dispatch runs.
 pub fn sidecar_is_live(sessions_dir: &Path) -> impl Fn(&str) -> bool {
     let sessions_dir = sessions_dir.to_path_buf();
     move |key: &str| {
         key.strip_prefix("session-")
             .is_some_and(|id| sessions_dir.join(id).join("meta.json").exists())
     }
+}
+
+/// A liveness test for [`prune`]: [`sidecar_is_live`] for `session-<id>`
+/// keys, and a `dispatch-<run id>` key is live while `is_listed(run id)`.
+pub fn sidecar_or_listed_run_is_live(
+    sessions_dir: &Path,
+    is_listed: impl Fn(&str) -> bool,
+) -> impl Fn(&str) -> bool {
+    let sidecar = sidecar_is_live(sessions_dir);
+    move |key: &str| sidecar(key) || key.strip_prefix("dispatch-").is_some_and(&is_listed)
 }
 
 fn line_path(dir: &Path, key: &str) -> PathBuf {
@@ -462,6 +479,47 @@ mod tests {
         assert!(
             line_path(&dir, &live).exists(),
             "a live session's log stays"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_key_prefixes_the_run_id() {
+        assert_eq!(dispatch_key("r1"), "dispatch-r1");
+    }
+
+    #[test]
+    fn prune_keeps_a_listed_runs_log_past_two_hours() {
+        let dir = scratch_dir("prune-listed-run");
+        let now = at(0);
+        let listed = dispatch_key("listed");
+        let gone = dispatch_key("gone");
+        append(
+            &dir,
+            &listed,
+            now - chrono::Duration::hours(3),
+            SessionStatus::Working,
+        );
+        append(
+            &dir,
+            &gone,
+            now - chrono::Duration::hours(3),
+            SessionStatus::Stopped,
+        );
+
+        prune(
+            &dir,
+            now,
+            sidecar_or_listed_run_is_live(&dir.join("sessions"), |id| id == "listed"),
+        );
+
+        assert!(
+            line_path(&dir, &listed).exists(),
+            "a listed run's log stays while it is listed"
+        );
+        assert!(
+            !line_path(&dir, &gone).exists(),
+            "a run that left the list goes two hours after its last line"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

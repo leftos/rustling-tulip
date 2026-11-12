@@ -360,22 +360,7 @@ async fn run_daemon(
     // is a value nothing can open again, so sweep it from the store and index.
     sweep_unreferenced_secrets(&dirs, &state, chrono::Utc::now());
 
-    // The status-change log survives the sessions it records, so the
-    // Dashboard's two-hour activity track is whole when one opens. Prune it
-    // and record this start (the stretch since the previous daemon's last
-    // alive stamp becomes a gap) before any session is inserted, then keep the
-    // alive stamp fresh for as long as this daemon runs.
-    let now = chrono::Utc::now();
-    activity_log::prune(
-        &dirs.activity_dir(),
-        now,
-        activity_log::sidecar_is_live(&dirs.sessions_dir),
-    );
-    let _ = activity_log::record_start(&dirs.activity_dir(), now);
-    tokio::spawn(stamp_alive_periodically(
-        dirs.activity_dir(),
-        dirs.sessions_dir.clone(),
-    ));
+    start_activity_log(&dirs, dispatch_runs.as_ref());
 
     let result = server::run(
         state,
@@ -441,10 +426,48 @@ async fn run_update_subcommand() -> anyhow::Result<Option<std::process::ExitCode
     Ok(None)
 }
 
+/// The status-change log survives the sessions and runs it records, so the
+/// Dashboard's two-hour activity track is whole when one opens. Prune it and
+/// record this start (the stretch since the previous daemon's last alive stamp
+/// becomes a gap) before any session is inserted, attach the dispatch runs'
+/// status lines, then keep the alive stamp fresh for as long as this daemon
+/// runs.
+fn start_activity_log(dirs: &paths::Dirs, dispatch_runs: Option<&dispatch_runs::DispatchRunsHub>) {
+    let now = chrono::Utc::now();
+    let listed_runs: Option<Arc<dispatch_runs::DispatchRuns>> =
+        dispatch_runs.map(|hub| Arc::clone(&hub.runs));
+    activity_log::prune(
+        &dirs.activity_dir(),
+        now,
+        activity_log::sidecar_or_listed_run_is_live(&dirs.sessions_dir, |id| {
+            listed_runs.as_ref().is_some_and(|runs| runs.is_listed(id))
+        }),
+    );
+    let _ = activity_log::record_start(&dirs.activity_dir(), now);
+    if let Some(hub) = dispatch_runs {
+        match dispatch_runs::activity::spawn_appender(dirs.activity_dir()) {
+            Ok((log, _appender)) => hub.runs.attach_activity(log),
+            Err(err) => tracing::warn!(
+                ?err,
+                "the dispatch runs' status log could not start; their tracks stay empty"
+            ),
+        }
+    }
+    tokio::spawn(stamp_alive_periodically(
+        dirs.activity_dir(),
+        dirs.sessions_dir.clone(),
+        listed_runs,
+    ));
+}
+
 /// Refresh the activity log's alive stamp and prune it every
 /// [`activity_log::ALIVE_EVERY`], for the daemon's life: the gap after an
 /// unrecorded death is measured from the last stamp.
-async fn stamp_alive_periodically(activity_dir: PathBuf, sessions_dir: PathBuf) {
+async fn stamp_alive_periodically(
+    activity_dir: PathBuf,
+    sessions_dir: PathBuf,
+    runs: Option<Arc<dispatch_runs::DispatchRuns>>,
+) {
     let mut tick = tokio::time::interval(activity_log::ALIVE_EVERY);
     // The first tick is due at once; `record_start` already stamped.
     tick.tick().await;
@@ -452,10 +475,17 @@ async fn stamp_alive_periodically(activity_dir: PathBuf, sessions_dir: PathBuf) 
         tick.tick().await;
         let dir = activity_dir.clone();
         let sessions = sessions_dir.clone();
+        let runs = runs.clone();
         let _ = tokio::task::spawn_blocking(move || {
             let now = chrono::Utc::now();
             activity_log::stamp_alive(&dir, now);
-            activity_log::prune(&dir, now, activity_log::sidecar_is_live(&sessions));
+            activity_log::prune(
+                &dir,
+                now,
+                activity_log::sidecar_or_listed_run_is_live(&sessions, |id| {
+                    runs.as_ref().is_some_and(|runs| runs.is_listed(id))
+                }),
+            );
         })
         .await;
     }

@@ -154,6 +154,167 @@ fn attach_links_runs_listed_before_the_registry() {
     let _ = std::fs::remove_dir_all(&dirs.config);
 }
 
+/// The status lines already sent on `rx`, as `(key, status)` pairs in order.
+fn logged_lines(
+    rx: &std::sync::mpsc::Receiver<activity::RunLogLine>,
+) -> Vec<(String, SessionStatus)> {
+    rx.try_iter().map(|line| (line.key, line.status)).collect()
+}
+
+/// `runs` with its status lines sent to a fresh channel.
+fn attach_log(runs: &DispatchRuns) -> std::sync::mpsc::Receiver<activity::RunLogLine> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    runs.attach_activity(tx);
+    rx
+}
+
+#[test]
+fn a_listed_run_logs_working_and_its_removal_logs_stopped() {
+    let runs = DispatchRuns::new();
+    let rx = attach_log(&runs);
+    runs.list_linked_for_test("r1", Some("c1"));
+
+    assert!(runs.remove("r1"));
+    assert_eq!(
+        logged_lines(&rx),
+        [
+            ("dispatch-r1".to_owned(), SessionStatus::Working),
+            ("dispatch-r1".to_owned(), SessionStatus::Stopped),
+        ]
+    );
+}
+
+#[test]
+fn a_run_whose_stream_ends_logs_stopped_once() {
+    let runs = DispatchRuns::new();
+    let rx = attach_log(&runs);
+    let generation = runs.list_linked_for_test("r1", Some("c1"));
+    runs.fold(
+        "r1",
+        generation,
+        false,
+        vec![HeadlessEvent::Status(SessionStatus::Working)],
+    );
+    runs.fold(
+        "r1",
+        generation,
+        false,
+        vec![HeadlessEvent::Status(SessionStatus::Stopped)],
+    );
+
+    assert!(runs.remove("r1"));
+    assert_eq!(
+        logged_lines(&rx),
+        [
+            ("dispatch-r1".to_owned(), SessionStatus::Working),
+            ("dispatch-r1".to_owned(), SessionStatus::Stopped),
+        ]
+    );
+}
+
+#[test]
+fn a_fold_that_keeps_the_status_logs_nothing() {
+    let runs = DispatchRuns::new();
+    let rx = attach_log(&runs);
+    let generation = runs.list_linked_for_test("r1", Some("c1"));
+    for _ in 0..2 {
+        runs.fold(
+            "r1",
+            generation,
+            false,
+            vec![HeadlessEvent::RecentAction("x".to_owned())],
+        );
+    }
+    assert_eq!(
+        logged_lines(&rx),
+        [("dispatch-r1".to_owned(), SessionStatus::Working)]
+    );
+}
+
+#[test]
+fn a_restarted_stream_logs_working_again() {
+    let runs = DispatchRuns::new();
+    let rx = attach_log(&runs);
+    let generation = runs.list_linked_for_test("r1", Some("c1"));
+    runs.fold(
+        "r1",
+        generation,
+        false,
+        vec![HeadlessEvent::Status(SessionStatus::Stopped)],
+    );
+    runs.fold(
+        "r1",
+        generation,
+        true,
+        vec![HeadlessEvent::Status(SessionStatus::Working)],
+    );
+    assert_eq!(
+        logged_lines(&rx),
+        [
+            ("dispatch-r1".to_owned(), SessionStatus::Working),
+            ("dispatch-r1".to_owned(), SessionStatus::Stopped),
+            ("dispatch-r1".to_owned(), SessionStatus::Working),
+        ]
+    );
+}
+
+#[test]
+fn runs_listed_before_the_log_is_attached_log_at_attach() {
+    let runs = DispatchRuns::new();
+    runs.list_linked_for_test("r1", Some("c1"));
+    runs.list_linked_for_test("r2", Some("c2"));
+
+    let rx = attach_log(&runs);
+    let mut lines = logged_lines(&rx);
+    lines.sort_by_key(|(key, _)| key.clone());
+    assert_eq!(
+        lines,
+        [
+            ("dispatch-r1".to_owned(), SessionStatus::Working),
+            ("dispatch-r2".to_owned(), SessionStatus::Working),
+        ]
+    );
+
+    let (tx, second) = std::sync::mpsc::channel();
+    runs.attach_activity(tx);
+    assert!(
+        logged_lines(&second).is_empty(),
+        "a second attach does nothing"
+    );
+}
+
+#[test]
+fn runs_of_lists_the_runs_naming_the_conversation_oldest_first() {
+    let runs = DispatchRuns::new();
+    let now = Utc::now();
+    let list = |run_id: &str, conversation_id: &str, started_at: DateTime<Utc>| {
+        let mut file = test_file(run_id, 4242, Some(7), started_at);
+        file.session_id = Some(conversation_id.to_owned());
+        runs.insert(run_id, file, None, CancellationToken::new());
+    };
+    list("a", "c1", now);
+    list("b", "c1", now - chrono::Duration::minutes(1));
+    list("c", "c2", now);
+
+    let ids: Vec<String> = runs
+        .runs_of("c1")
+        .into_iter()
+        .map(|run| run.run_id)
+        .collect();
+    assert_eq!(ids, ["b", "a"]);
+    assert_eq!(runs.runs_of("none"), Vec::new());
+}
+
+#[test]
+fn is_listed_follows_the_list() {
+    let runs = DispatchRuns::new();
+    assert!(!runs.is_listed("r1"), "nothing is listed yet");
+    runs.list_linked_for_test("r1", None);
+    assert!(runs.is_listed("r1"));
+    assert!(runs.remove("r1"));
+    assert!(!runs.is_listed("r1"));
+}
+
 /// Connections that subscribe and take the initial list while a run is
 /// listed and removed over and over all end holding exactly the runs that
 /// remain: no removal is forwarded ahead of a list that still holds its run.

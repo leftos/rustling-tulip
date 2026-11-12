@@ -285,9 +285,9 @@ A machine without the gate shows no gate rows, no gate ticks and no gate rule in
 
 ### Dispatch runs
 
-A **dispatch run** (a `claude -p` implementer run started by the user's `dispatch` skill) is followed by the daemon's dispatch watcher, designed in [dispatch-follow.md](./dispatch-follow.md) for RT-31: its live-run file names its `worktree`, `run_dir`, `pid` and `tool_pid`, and `<run_dir>/stream.jsonl` its progress.
+A **dispatch run** (a `claude -p` implementer run started by the user's `dispatch` skill) is followed by the daemon's dispatch watcher, designed in [dispatch-follow.md](./dispatch-follow.md) for RT-31: its live-run file names its `worktree`, `run_dir`, `session_id`, `child_pid` and `runner_pid`, and `<run_dir>/stream.jsonl` its progress.
 
-**Orchestrator decision (not an owner ruling):** the Dashboard nests a run under the listed session whose process is an ancestor of its `tool_pid` (the same ancestry rule as gates), else under the session whose worktree holds its `worktree`; its row shows its title, a `dispatch` tag, what it runs now from its stream, and its own activity track. A run no session claims is left out.
+**Orchestrator decision (not an owner ruling):** the Dashboard nests a run under the listed sessions on the conversation its live-run file's `session_id` names; its row shows its title, a `dispatch` tag, what it runs now from its stream, and its own activity track. A run with no `session_id`, or one naming a conversation no listed session holds, is left out.
 
 ### Day ledger
 
@@ -299,8 +299,8 @@ The **status-change log** is the daemon's record of each session's and dispatch 
 
 **Orchestrator decision (not an owner ruling):**
 
-- **Where**: `activity/<key>.jsonl` in the config dir, one file per session (`session-<id>`) and per dispatch run (`dispatch-<run id>`), one line `{at, status}` appended on every status change. `SessionRegistry::update_from` already sees every change (it stamps `status_since`, `session.rs:781`), so the append sits beside that stamp; a dispatch run's lines come from RT-31's watcher as its run goes from running to ended.
-- **Pruning**: lines older than 2 hours are dropped when the daemon starts and whenever a file is rewritten; a file whose session or run has been gone for 2 hours is deleted.
+- **Where**: `activity/<key>.jsonl` in the config dir, one file per session (`session-<id>`) and per dispatch run (`dispatch-<run id>`), one line `{at, status}` appended on every status change. `SessionRegistry::update_from` already sees every change (it stamps `status_since`, `session.rs:781`), so the append sits beside that stamp; a dispatch run's lines are queued by the runs list as the run is listed (`Working`) and as its stream ends or it leaves the list (`Stopped`), only changes, and written by one appender thread, `dispatch-activity`.
+- **Pruning**: lines older than 2 hours are dropped when the daemon starts and whenever a file is rewritten; a session's file whose session has been gone for 2 hours is deleted, and a run's file is kept while the run is listed and deleted 2 hours after its closing line once it leaves.
 - **Restarts**: `activity/daemon.json` holds this daemon's start time and an alive stamp refreshed every 60 s. On start, the stretch from the previous daemon's last alive stamp to this start is a gap for every key, and a key with no line before this start (a session first seen now) has a gap from the window's start. A gap draws hatched with `no record before HH:MM · the daemon restarted`, and the caption starts `since HH:MM`.
 - **Stretches**: `Working` draws working, `AwaitingInput` asking, `Idle` idle, an end (`Stopped`, `Error`, a run ended) closes the track. The client draws the `Idle` stretch after a turn as finished while that turn is unseen on this client (`Leaf.unseen`), since only the client knows what it has shown.
 - **Gate ticks**: the gate journal's holds (through the daemon's gate reader, RT-55) whose working folder is inside one of the session's worktrees, as ops-tower's activity route joins them by `cwd`; a hold still running at `now` is drawn brighter.
@@ -503,7 +503,7 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
   Session segments and restart gaps are built (`crates/daemon/src/dashboard/tracks.rs`); gate holds are RT-732.
 
   Proof: server tests that a watcher gets every segment on `WatchDashboard`, then one message per stretch change, a gap segment after a restart, and a hold inside a session's worktree joined to it. Waits on DB.2, DB.5, DB.19; gate holds on the daemon's gate reader (RT-55, as RT-64 re-cuts it), with none drawn until it lands.
-- [ ] DB.21 Nest dispatch runs under their session and track them. `crates/daemon/src/dispatch_runs.rs` (RT-31's watcher appends each run's status changes to the log), `crates/daemon/src/dashboard/mod.rs` (a run's node under the session that started it, by `tool_pid` ancestry, else by worktree), `crates/daemon/src/dashboard/now.rs` (rule 3 for a run), `crates/daemon/src/dashboard/tracks.rs` (dispatch keys).
+- [ ] DB.21 Nest dispatch runs under their session and track them. `crates/daemon/src/dispatch_runs/` (RT-31's watcher appends each run's status changes to the log), `crates/daemon/src/dashboard/mod.rs` (a run's node under the sessions on the conversation its `session_id` names), `crates/daemon/src/dashboard/now.rs` (rule 3 for a run), `crates/daemon/src/dashboard/tracks.rs` (dispatch keys).
 
   Proof: tests with a fake process table and live-run files: a run nests under its launcher, a run no session claims is left out, its stretches reach `ActivityTracks`. Waits on RT-31 (DF.1 to DF.5), DB.19, DB.20.
 - [ ] DB.22 Draw the two-hour activity track. `apps/native/src/activity_track.rs` (new: bars, gate ticks, the hatched gap and its note, the legend, the long and short captions), `apps/native/src/dashboard.rs` (the client's tracks from `ActivityTracks`, an open stretch extended to now, finished while unseen), `apps/native/src/dashboard_view.rs` (By status's `Last 2 h` column, a dispatch row's track), `apps/native/src/palette.rs`, `apps/native/tests/ui/ui_dashboard.rs`.
