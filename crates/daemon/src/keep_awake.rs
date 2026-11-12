@@ -326,6 +326,7 @@ mod tests {
 
     fn test_record(id: &str, status: SessionStatus, is_abandoned: bool) -> SessionRecord {
         SessionRecord {
+            dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: id.to_string(),
             label: id.to_string(),
             default_label: id.to_string(),
@@ -508,6 +509,7 @@ mod tests {
     async fn when_busy_counts_a_printing_shell_and_awaiting_input() {
         let mut h = start("busy-shell", KeepAwakeMode::WhenBusy);
         h.sessions.insert(SessionRecord {
+            dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             mode: SessionMode::PlainShell,
             ..test_record("sh", SessionStatus::Idle, false)
         });
@@ -548,6 +550,7 @@ mod tests {
     async fn when_busy_ignores_busy_excluded_sessions() {
         let mut h = start("busy-excluded", KeepAwakeMode::WhenBusy);
         h.sessions.insert(SessionRecord {
+            dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             busy_excluded: true,
             ..test_record("dev-server", SessionStatus::Working, false)
         });

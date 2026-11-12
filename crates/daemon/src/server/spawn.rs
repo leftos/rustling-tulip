@@ -1325,6 +1325,7 @@ fn interactive_record(
     pty: Option<Arc<crate::pty::PtyHandle>>,
 ) -> SessionRecord {
     let mut record = SessionRecord {
+        dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
         id: new.session_id,
         label: new.label.clone(),
         default_label: new.label,
@@ -1410,6 +1411,7 @@ fn plain_shell_record(
     pty: Option<Arc<crate::pty::PtyHandle>>,
 ) -> SessionRecord {
     let mut record = SessionRecord {
+        dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
         id: new.session_id,
         label: new.label.clone(),
         default_label: new.label,
@@ -2660,6 +2662,7 @@ impl HeadlessRecord<'_> {
     fn into_record(self) -> SessionRecord {
         let worktree_paths = worktree_paths_for_config(&self.stored_config, &self.members);
         SessionRecord {
+            dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: self.session_id,
             label: self.label.clone(),
             default_label: self.label,

@@ -1950,6 +1950,7 @@ pub(crate) mod test_support {
     /// A standalone record `id` in `mode` with no process behind it.
     pub fn record(id: &str, mode: SessionMode) -> SessionRecord {
         SessionRecord {
+            dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: id.to_string(),
             label: id.to_string(),
             default_label: id.to_string(),

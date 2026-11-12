@@ -400,6 +400,7 @@ pub(super) fn appearance_registry(tag: &str) -> (Arc<SessionRegistry>, Dirs) {
 /// An idle standalone session `id` with no process behind it.
 pub(crate) fn idle_record(id: &str) -> SessionRecord {
     SessionRecord {
+        dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
         id: id.to_string(),
         label: id.to_string(),
         default_label: id.to_string(),

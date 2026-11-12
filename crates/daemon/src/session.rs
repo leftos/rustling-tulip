@@ -380,6 +380,11 @@ pub struct SessionRecord {
     /// terminal status directly. Runtime-only: a reattached or rebuilt record
     /// starts with it false.
     pub background: bool,
+    /// The conversations live dispatch runs name, shared with the registry
+    /// that holds this record; [`Self::snapshot`] reports background work
+    /// while [`Self::conversation_id`] is among them. Empty, so never linked,
+    /// for a record outside a registry.
+    pub(crate) dispatch_links: crate::dispatch_runs::DispatchLinks,
     /// The main `Stop` whose `Idle` is held while the status stays `Working`;
     /// `None` otherwise. Every status change settles it in the registry
     /// update: a move to `Idle` keeps its flag and alert, unless the writer
@@ -694,7 +699,11 @@ impl SessionRecord {
             conversation_id: self.conversation_id.clone(),
             busy_excluded: self.busy_excluded,
             pending_input: self.pending_input.clone(),
-            background: self.background,
+            background: self.background
+                || self
+                    .conversation_id
+                    .as_deref()
+                    .is_some_and(|id| self.dispatch_links.is_linked(id)),
             resumed_from: self.resumed_from.clone(),
             role: self.role,
             status_label: protocol::StatusLabel::Unknown,
@@ -837,6 +846,9 @@ pub struct SessionRegistry {
     /// leaves `Working` or `AwaitingInput` for `Idle`, so it takes no
     /// registry lock.
     stop_line_due: RwLock<Option<StopLineDue>>,
+    /// The conversations live dispatch runs name; every record inserted gets
+    /// a clone, so its snapshot sees the links.
+    dispatch_links: crate::dispatch_runs::DispatchLinks,
 }
 
 /// Answers whether a session's stop line is on its way.
@@ -946,7 +958,27 @@ impl SessionRegistry {
             scrollback_gates: Mutex::new(HashMap::new()),
             discovery: Discovery::default(),
             stop_line_due: RwLock::new(None),
+            dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
         })
+    }
+
+    /// The conversations live dispatch runs name, shared with every record
+    /// in the registry.
+    pub(crate) fn dispatch_links(&self) -> &crate::dispatch_runs::DispatchLinks {
+        &self.dispatch_links
+    }
+
+    /// Send an update of every session on `conversation_id`, whose link to a
+    /// live dispatch run came or went, through the usual update path.
+    pub(crate) fn notify_conversation(&self, conversation_id: &str) {
+        let ids: Vec<String> = read(&self.by_id)
+            .iter()
+            .filter(|(_, record)| lock(record).conversation_id.as_deref() == Some(conversation_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.update(&id, |_| {});
+        }
     }
 
     /// Ask `due` from now on whether a session's stop line is on its way.
@@ -1093,7 +1125,8 @@ impl SessionRegistry {
     /// `input_notifier`, which depend on infrastructure spawned after the
     /// record is in the map) before publishing. Calling `publish()` fires the
     /// snapshot exactly once, so clients see the record fully wired up.
-    pub fn insert_pending(&self, record: SessionRecord) -> PendingInsert<'_> {
+    pub fn insert_pending(&self, mut record: SessionRecord) -> PendingInsert<'_> {
+        record.dispatch_links = self.dispatch_links.clone();
         let id = record.id.clone();
         let arc = Arc::new(Mutex::new(record));
         lock(&self.scrollback_gates).entry(id.clone()).or_default();
@@ -1944,6 +1977,7 @@ impl SessionRegistry {
     pub fn insert_orphan(&self, meta: &OrphanMeta) {
         let (default_label, user_label, label) = resolve_labels_from_meta(meta);
         let mut record = SessionRecord {
+            dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: meta.session_id.clone(),
             label,
             default_label,
@@ -2035,6 +2069,7 @@ impl SessionRegistry {
             None
         };
         let mut record = SessionRecord {
+            dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: meta.session_id.clone(),
             label,
             default_label,
@@ -2103,6 +2138,7 @@ impl SessionRegistry {
     pub fn insert_abandoned(&self, meta: &OrphanMeta) {
         let (default_label, user_label, label) = resolve_labels_from_meta(meta);
         let mut record = SessionRecord {
+            dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: meta.session_id.clone(),
             label,
             default_label,
@@ -2200,6 +2236,7 @@ mod tests {
     /// A headless record with an empty history.
     fn record(id: &str) -> SessionRecord {
         SessionRecord {
+            dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: id.to_string(),
             label: id.to_string(),
             default_label: id.to_string(),
@@ -2430,6 +2467,28 @@ mod tests {
             }
         }
         reasons
+    }
+
+    #[test]
+    fn dispatch_link_sets_background_in_the_snapshot_only() {
+        use crate::history::test_support::{record, scratch_dirs};
+        let dirs = scratch_dirs("dispatch-link");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut linked = record("s1", protocol::SessionMode::Interactive);
+        linked.conversation_id = Some("c1".to_owned());
+        registry.insert(linked);
+        let arc = registry.get("s1").expect("s1 is registered");
+        assert!(!lock(&arc).snapshot().background, "no run links c1 yet");
+
+        registry.dispatch_links().link("c1");
+        let guard = lock(&arc);
+        assert!(guard.snapshot().background, "a live run links c1");
+        assert!(!guard.background, "the record's own flag is never written");
+        drop(guard);
+
+        registry.dispatch_links().unlink("c1");
+        assert!(!lock(&arc).snapshot().background, "the run went");
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]

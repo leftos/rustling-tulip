@@ -76,6 +76,84 @@ fn client_view(messages: &mut mpsc::UnboundedReceiver<DaemonMessage>) -> Vec<Str
     held.into_iter().collect()
 }
 
+/// A registry holding session `s1` on conversation `c1`, and an empty run
+/// list.
+fn linked_sessions(tag: &str) -> (Arc<SessionRegistry>, Arc<DispatchRuns>, crate::paths::Dirs) {
+    use crate::history::test_support::{record, scratch_dirs};
+    let dirs = scratch_dirs(&format!("dispatch-link-{tag}"));
+    let sessions = SessionRegistry::new(dirs.clone());
+    let mut linked = record("s1", protocol::SessionMode::Interactive);
+    linked.conversation_id = Some("c1".to_owned());
+    sessions.insert(linked);
+    (sessions, DispatchRuns::new(), dirs)
+}
+
+/// The `background` of each `SessionUpdated` already sent on `events`, in
+/// order. Every update is sent before the call that caused it returns, so
+/// nothing is waited for.
+fn updated_backgrounds(
+    events: &mut broadcast::Receiver<crate::session::SessionEvent>,
+) -> Vec<(String, bool)> {
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let crate::session::SessionEvent::Updated(snapshot, _) = event {
+            seen.push((snapshot.id.clone(), snapshot.background));
+        }
+    }
+    seen
+}
+
+/// Session `s1`'s snapshot `background`.
+#[expect(clippy::expect_used, reason = "a test reads its session with expect")]
+fn s1_background(sessions: &SessionRegistry) -> bool {
+    let record = sessions.get("s1").expect("s1 is registered");
+    crate::sync::lock(&record).snapshot().background
+}
+
+#[test]
+fn a_linked_run_marks_its_session_background_and_its_removal_clears_it() {
+    let (sessions, runs, dirs) = linked_sessions("linked");
+    runs.attach_sessions(Arc::clone(&sessions));
+    let mut events = sessions.subscribe();
+
+    runs.list_linked_for_test("run-1", Some("c1"));
+    assert_eq!(updated_backgrounds(&mut events), [("s1".to_owned(), true)]);
+
+    assert!(runs.remove("run-1"));
+    assert_eq!(updated_backgrounds(&mut events), [("s1".to_owned(), false)]);
+    let _ = std::fs::remove_dir_all(&dirs.config);
+}
+
+#[test]
+fn an_unmatched_run_changes_no_session() {
+    let (sessions, runs, dirs) = linked_sessions("unmatched");
+    runs.attach_sessions(Arc::clone(&sessions));
+    let mut events = sessions.subscribe();
+
+    runs.list_linked_for_test("run-other", Some("other"));
+    runs.list_linked_for_test("run-none", None);
+    assert_eq!(updated_backgrounds(&mut events), []);
+    assert!(!s1_background(&sessions));
+
+    runs.remove("run-other");
+    runs.remove("run-none");
+    assert_eq!(updated_backgrounds(&mut events), []);
+    let _ = std::fs::remove_dir_all(&dirs.config);
+}
+
+#[test]
+fn attach_links_runs_listed_before_the_registry() {
+    let (sessions, runs, dirs) = linked_sessions("attach");
+    runs.list_linked_for_test("run-1", Some("c1"));
+    let mut events = sessions.subscribe();
+    assert!(!s1_background(&sessions), "the runs are not attached yet");
+
+    runs.attach_sessions(Arc::clone(&sessions));
+    assert_eq!(updated_backgrounds(&mut events), [("s1".to_owned(), true)]);
+    assert!(s1_background(&sessions));
+    let _ = std::fs::remove_dir_all(&dirs.config);
+}
+
 /// Connections that subscribe and take the initial list while a run is
 /// listed and removed over and over all end holding exactly the runs that
 /// remain: no removal is forwarded ahead of a list that still holds its run.

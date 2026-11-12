@@ -1970,6 +1970,27 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_session_with_a_linked_run_is_not_finished() {
+        let setup = setup("linked-run");
+        let sessions = registry(&setup);
+        let mut linked = idle_record("s1");
+        linked.conversation_id = Some("c1".to_owned());
+        sessions.insert(linked);
+        let read = || {
+            let record = sessions.get("s1").expect("s1 is registered");
+            lock(&record).snapshot()
+        };
+
+        sessions.dispatch_links().link("c1");
+        let holding = read();
+        assert!(holding.background, "the link reads as background work");
+        assert_eq!(raised(&status("working"), &holding), None);
+
+        sessions.dispatch_links().unlink("c1");
+        assert_eq!(raised(&holding, &read()), Some(PushKind::Finished));
+    }
+
+    #[test]
     fn event_step_raises_needs_you_on_entering_awaiting_input() {
         let setup = setup("step-needs-you");
         let sessions = registry(&setup);

@@ -13,20 +13,23 @@
 //! newer one.
 
 pub(crate) mod guard;
+mod links;
 mod parse;
 mod tail;
 #[cfg(test)]
 mod tests;
 mod watch;
 
+use crate::session::SessionRegistry;
 use crate::stream_state::StreamState;
 use agent_api::HeadlessEvent;
 use chrono::{DateTime, Utc};
+pub(crate) use links::DispatchLinks;
 use parse::LiveRunFile;
 use protocol::{DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, SessionStatus};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -193,6 +196,9 @@ struct RunMap {
 pub(crate) struct DispatchRuns {
     runs: Mutex<RunMap>,
     events: broadcast::Sender<DispatchRunEvent>,
+    /// The sessions whose conversations the runs link, set once by
+    /// [`Self::attach_sessions`] under the runs lock.
+    sessions: OnceLock<Arc<SessionRegistry>>,
 }
 
 impl DispatchRuns {
@@ -201,7 +207,61 @@ impl DispatchRuns {
         Arc::new(Self {
             runs: Mutex::new(RunMap::default()),
             events,
+            sessions: OnceLock::new(),
         })
+    }
+
+    /// Count every listed run, and every run listed from now on, as
+    /// background work of the sessions on the conversation its `session_id`
+    /// names, and send those sessions' updates. A second call does nothing.
+    pub(crate) fn attach_sessions(&self, sessions: Arc<SessionRegistry>) {
+        let map = self.lock();
+        if self.sessions.set(sessions).is_err() {
+            return;
+        }
+        let mut flipped = Vec::new();
+        for entry in map.entries.values() {
+            flipped.extend(self.relink(entry.file.session_id.as_deref(), None));
+        }
+        drop(map);
+        self.notify(&flipped);
+    }
+
+    /// Link the conversation `added` names and unlink the one `removed`
+    /// names, returning the ids whose link came or went. Nothing before the
+    /// sessions are attached. Called under the runs lock; the links lock is
+    /// a leaf, so this takes no other lock.
+    fn relink(&self, added: Option<&str>, removed: Option<&str>) -> Vec<String> {
+        let Some(sessions) = self.sessions.get() else {
+            return Vec::new();
+        };
+        if added == removed {
+            return Vec::new();
+        }
+        let links = sessions.dispatch_links();
+        let mut flipped = Vec::new();
+        if let Some(id) = added
+            && links.link(id)
+        {
+            flipped.push(id.to_owned());
+        }
+        if let Some(id) = removed
+            && links.unlink(id)
+        {
+            flipped.push(id.to_owned());
+        }
+        flipped
+    }
+
+    /// Send an update of every session on each of `flipped`'s conversations.
+    /// Called with neither the runs lock nor the links lock held.
+    fn notify(&self, flipped: &[String]) {
+        let Some(sessions) = self.sessions.get() else {
+            return;
+        };
+        for conversation_id in flipped {
+            sessions.notify_conversation(conversation_id);
+        }
     }
 
     /// Every listed run, oldest first.
@@ -280,10 +340,16 @@ impl DispatchRuns {
             stopping: false,
         };
         let snapshot = entry.snapshot(run_id);
-        if let Some(old) = map.entries.insert(run_id.to_owned(), entry) {
+        let added = entry.file.session_id.clone();
+        let old = map.entries.insert(run_id.to_owned(), entry);
+        if let Some(old) = &old {
             old.cancel.cancel();
         }
+        let removed = old.and_then(|old| old.file.session_id);
+        let flipped = self.relink(added.as_deref(), removed.as_deref());
         self.send(DispatchRunEvent::Updated(snapshot));
+        drop(map);
+        self.notify(&flipped);
         generation
     }
 
@@ -299,6 +365,7 @@ impl DispatchRuns {
             return None;
         }
         let restart = entry.file.stream != file.stream || entry.file.agent != file.agent;
+        let flipped = self.relink(file.session_id.as_deref(), entry.file.session_id.as_deref());
         entry.file = file;
         if restart {
             entry.cancel.cancel();
@@ -311,6 +378,8 @@ impl DispatchRuns {
             map.next_generation += 1;
         }
         self.send(DispatchRunEvent::Updated(snapshot));
+        drop(map);
+        self.notify(&flipped);
         restart.then_some(next_generation)
     }
 
@@ -321,9 +390,19 @@ impl DispatchRuns {
         let Some(entry) = map.entries.remove(run_id) else {
             return false;
         };
-        entry.cancel.cancel();
-        self.send(DispatchRunEvent::Removed(run_id.to_owned()));
+        self.removed(map, run_id, &entry);
         true
+    }
+
+    /// Finish removing `entry`, already taken out of `map`: stop its tailer,
+    /// unlink its conversation and send `Removed`, then release the lock and
+    /// send the sessions' updates.
+    fn removed(&self, map: MutexGuard<'_, RunMap>, run_id: &str, entry: &RunEntry) {
+        entry.cancel.cancel();
+        let flipped = self.relink(None, entry.file.session_id.as_deref());
+        self.send(DispatchRunEvent::Removed(run_id.to_owned()));
+        drop(map);
+        self.notify(&flipped);
     }
 
     /// [`Self::remove`], only while the run is still the listing at
@@ -337,8 +416,7 @@ impl DispatchRuns {
         let Some(entry) = removed else {
             return false;
         };
-        entry.cancel.cancel();
-        self.send(DispatchRunEvent::Removed(run_id.to_owned()));
+        self.removed(map, run_id, &entry);
         true
     }
 
@@ -420,26 +498,46 @@ impl DispatchRuns {
         child_start: Option<u64>,
         started_at: DateTime<Utc>,
     ) -> u64 {
-        let file = LiveRunFile {
-            schema: parse::SCHEMA,
-            run_id: run_id.to_owned(),
-            title: "a run".to_owned(),
-            backend: "a backend".to_owned(),
-            tier: None,
-            session_id: None,
-            agent: None,
-            worktree: PathBuf::from("worktree"),
-            run_dir: PathBuf::from("run"),
-            stream: PathBuf::from("stream.jsonl"),
-            child_pid,
-            child_start,
-            runner_pid: None,
-            runner_start: None,
-            started_at,
-            resumed_from: None,
-            auto_resume: false,
-        };
+        let file = test_file(run_id, child_pid, child_start, started_at);
         self.insert(run_id, file, None, CancellationToken::new())
+    }
+
+    /// [`Self::list_for_test`] for a run whose file names the conversation
+    /// `session_id`.
+    #[cfg(test)]
+    pub(crate) fn list_linked_for_test(&self, run_id: &str, session_id: Option<&str>) -> u64 {
+        let mut file = test_file(run_id, 4242, Some(7), Utc::now());
+        file.session_id = session_id.map(str::to_owned);
+        self.insert(run_id, file, None, CancellationToken::new())
+    }
+}
+
+/// The live-run file of a run of `child_pid` that names no conversation.
+#[cfg(test)]
+fn test_file(
+    run_id: &str,
+    child_pid: u32,
+    child_start: Option<u64>,
+    started_at: DateTime<Utc>,
+) -> LiveRunFile {
+    LiveRunFile {
+        schema: parse::SCHEMA,
+        run_id: run_id.to_owned(),
+        title: "a run".to_owned(),
+        backend: "a backend".to_owned(),
+        tier: None,
+        session_id: None,
+        agent: None,
+        worktree: PathBuf::from("worktree"),
+        run_dir: PathBuf::from("run"),
+        stream: PathBuf::from("stream.jsonl"),
+        child_pid,
+        child_start,
+        runner_pid: None,
+        runner_start: None,
+        started_at,
+        resumed_from: None,
+        auto_resume: false,
     }
 }
 

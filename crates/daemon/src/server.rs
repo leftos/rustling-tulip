@@ -545,6 +545,11 @@ pub async fn run(
 
     let (attention_tx, attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());
+    // A live run counts as its dispatching session's background work, from
+    // the runs the startup scan already listed on.
+    if let Some(hub) = dispatch_runs.as_ref() {
+        hub.runs.attach_sessions(Arc::clone(&sessions));
+    }
 
     // Reattach orphans BEFORE binding the WS server. Doing the reattach
     // off-thread caused a regression where bytes from the tracer's ring

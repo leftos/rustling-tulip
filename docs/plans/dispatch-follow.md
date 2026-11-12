@@ -110,7 +110,7 @@ The phone app's types are regenerated (`cargo run -p protocol-ts`, committing `a
 - **Liveness.** Every 2 s the daemon checks each run's process guard, which answers alive, dead or unknown, dead only on evidence, as the tool's `runner_alive` does. On Windows it opens the `child_pid` process: no such pid is dead; any other open failure (another account's process, a transient error) is unknown; an exit code read that is not still-active is dead; a creation FILETIME (`GetProcessTimes`) read that differs from `child_start` is dead; an unreadable one is unknown. When `child_start` is null (a tool off Windows), it compares the process's start time from `sysinfo` in whole seconds with `started_at`, accepting 60 s before to 5 s after; a start it cannot read is unknown. Unknown counts as alive: the run stays listed and its file is kept.
 
   A run whose guard says dead is removed and its live-run file deleted: the tool crashed or was killed before its `finally`. An orphan `.stop` with no `.json` beside it is deleted too. The tool never deletes other runs' files.
-- **Idle exit.** A live run does not keep the daemon or the machine awake (`idle_exit.rs` and `keep_awake.rs` are unchanged). A daemon that exits loses nothing, because the next one rescans and replays.
+- **Idle exit and keep-awake.** A live run does not keep the daemon running (`idle_exit.rs` is unchanged); a daemon that exits loses nothing, because the next one rescans and replays. A run linked to a session (section 7) makes that session read as busy to keep-awake, which builds its busy set from session snapshots as the native client does, so the "When busy" mode keeps the machine awake while the dispatching session's run works; a run linked to no session does not.
 
 ### 7. A linked run counts as background work
 
@@ -120,7 +120,7 @@ Mechanism: the session registry owns one shared `DispatchLinks` set (conversatio
 
 When a run linked to a conversation appears or goes, the watcher updates the set and then pushes a `SessionUpdated` for each session with that conversation id through the registry's usual update path. A record whose conversation id changes picks the link up on its next snapshot.
 
-Why one home: every reader of `SessionSnapshot.background` (the sidebar and footer, the Dashboard's "waiting on background", push's Finished-versus-Needs-you decision in `push/trigger.rs`, the CLI's `bg` column, RT-91's clear-and-continue refusal) learns about live runs with no change. Daemon-internal readers of `record.background` (the turn-end hold in `hook_status.rs`, `idle_exit.rs`, `keep_awake.rs`) keep reading the record's own flag on purpose.
+Why one home: every reader of `SessionSnapshot.background` (the sidebar and footer, the Dashboard's "waiting on background", push's Finished-versus-Needs-you decision in `push/trigger.rs`, the CLI's `bg` column, RT-91's clear-and-continue refusal) learns about live runs with no change. The daemon's own readers of `record.background` (the turn-end hold in `hook_status.rs`, the Dashboard's now line in `dashboard/mod.rs`) keep reading the record's flag on purpose; `idle_exit.rs` reads neither, and `keep_awake.rs` reads the snapshots, so it counts a linked run (section 6).
 
 A run with no `session_id`, or one matching no session, affects no session. A `/clear` in the dispatching session starts a new conversation id, after which the run no longer links to it; that is accepted.
 
@@ -172,7 +172,7 @@ Invariants (each gets a test):
 - The `DispatchLinks` lock is never held while taking a record lock: the watcher updates the set, releases it, then pushes the session updates.
 - A stopped run is never auto-resumed (tool side); a resume's own run dir gets its own file and leaf.
 
-Sites: `crates/daemon/src/dispatch_runs.rs` (watch, scan, tailer, liveness, guard, links), `crates/daemon/src/server/dispatch_runs.rs` (Stop), `crates/daemon/src/server/connection.rs` (broadcast forward and lag resend), `crates/daemon/src/server/handshake.rs` (initial list), `crates/daemon/src/session.rs` (snapshot), `crates/daemon/src/main.rs` (startup order).
+Sites: `crates/daemon/src/dispatch_runs/` (watch, scan, tailer, liveness, guard, `links.rs`), `crates/daemon/src/server/dispatch_runs.rs` (Stop), `crates/daemon/src/server/connection.rs` (broadcast forward and lag resend), `crates/daemon/src/server/handshake.rs` (initial list), `crates/daemon/src/session.rs` (snapshot), `crates/daemon/src/main.rs` (startup order).
 
 Tool-side sites: the tool's `executor.py` (register, unregister, marker check) and `run.py` (skip resume). The tool's `dispatch watch` liveness check is independent and deletes nothing of the daemon's. Tests wait on events or observations with a hang guard, never on wall time (`docs/testing.md`, `load-proof-tests`).
 
@@ -266,7 +266,7 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: `crates/protocol/src/lib.rs` and the regenerated `apps/pwa/src/protocol.ts` (the client message), `crates/daemon/src/server.rs`, `crates/daemon/src/server/handshake.rs`, `crates/daemon/src/server/connection.rs`, `crates/daemon/src/server/dispatch_runs.rs` (new), `crates/daemon/src/main.rs`.
   - Proof: `gate … -- cargo nextest run -p daemon --cargo-profile test-release -E 'test(/dispatch_run|handshake/)'`, including `stop_dispatch_run_kills_the_tree_and_writes_the_marker` with a parent and a grandchild process.
   - Waits on: DF.1, DF.5. Hotspot: `server.rs`.
-- [ ] **DF.7 Background flag from a linked run.** `SessionRecord::snapshot()` reports `background` while a live run's `session_id` matches the record's `conversation_id`, through the registry's `DispatchLinks`, and the watcher pushes session updates when a link changes.
+- [x] **DF.7 Background flag from a linked run.** `SessionRecord::snapshot()` reports `background` while a live run's `session_id` matches the record's `conversation_id`, through the registry's `DispatchLinks`, and the watcher pushes session updates when a link changes.
   - Files: `crates/daemon/src/session.rs`, `crates/daemon/src/dispatch_runs.rs`, `crates/daemon/src/push/trigger.rs` (a test only).
   - Proof: `gate … -- cargo nextest run -p daemon --cargo-profile test-release -E 'test(/dispatch_link|trigger::/)'` (a linked run sets the flag, its removal clears it, an unmatched run changes nothing, an idle session with a linked run is not Finished).
   - Waits on: DF.5. Hotspot: none.
