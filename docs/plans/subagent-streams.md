@@ -187,22 +187,22 @@ Invariants (each gets a test):
 
 Each step lands on `main` on its own and keeps the suite green. Hotspot files are marked.
 
-- [ ] **SS.1 Protocol.** `SubagentSnapshot`, `SessionSnapshot.subagents`, `PaneFollow::Subagent { session_id, agent_id }`, `TranscriptSource::Subagent { session_id, agent_id }`. The daemon's `SessionRecord::snapshot()` sends an empty list; `grid_view.rs`'s two exhaustive `PaneFollow` matches get an arm (the muted placeholder, title "Subagent").
+- [x] **SS.1 Protocol.** `SubagentSnapshot`, `SessionSnapshot.subagents`, `PaneFollow::Subagent { session_id, agent_id }`, `TranscriptSource::Subagent { session_id, agent_id }`. The daemon's `SessionRecord::snapshot()` sends an empty list; `grid_view.rs`'s two exhaustive `PaneFollow` matches get an arm (the muted placeholder, title "Subagent").
 
   Files: `crates/protocol/src/lib.rs` (hotspot), `apps/pwa/src/protocol.ts` (regenerated), `crates/daemon/src/session.rs`, `apps/native/src/grid_view.rs`.
 
   Tests: round trips of both variants and of a full `SubagentSnapshot`; a snapshot without `subagents` decodes with it empty, and an empty list is left out; `unknown_pane_follow_kind_decodes_as_unknown` and `an_unknown_transcript_source_decodes_as_unknown` use `"subagent"` as their unknown kind today and move to a kind no build knows; `generated_protocol_ts_is_current`. Depends on: TV.1 (landed).
-- [ ] **SS.2 Plugin: the subagent transcript path.** `subagent_transcript_path(folder, conversation_id, agent_id, rows)` on the typed `Agent` trait (default `None`), `AgentPlugin` and the blanket adapter; the Claude plugin's implementation over `transcripts::transcript_path` and `subagents_dir`, refusing ids that are not plain.
+- [x] **SS.2 Plugin: the subagent transcript path.** `subagent_transcript_path(folder, conversation_id, agent_id, rows)` on the typed `Agent` trait (default `None`), `AgentPlugin` and the blanket adapter; the Claude plugin's implementation over `transcripts::transcript_path` and `subagents_dir`, refusing ids that are not plain.
 
   Files: `crates/agents/api/src/lib.rs`, `crates/agents/claude/src/lib.rs`, `crates/agents/claude/src/transcripts.rs`, `crates/agents/claude/tests/fixtures/transcripts/subagent-run.jsonl` (new: a redacted real subagent transcript with a prompt, a reply, a tool call and its result).
 
   Tests: the path honours the `CLAUDE_CONFIG_DIR` row; a non-plain conversation or agent id gives `None`; `chat_entries` over the fixture yields the user prompt, the answer and one tool card with its result (in `chat_entries.rs`'s tests). Depends on: nothing.
-- [ ] **SS.3 Plugin: typed-prompt time and the sidecar's `finished`.** `ActivitySnapshot.last_typed_prompt_at`, set by the Claude activity reader; `SubagentReader` reads the sidecar's `finished: true` as finished.
+- [x] **SS.3 Plugin: typed-prompt time and the sidecar's `finished`.** `ActivitySnapshot.last_typed_prompt_at`, set by the Claude activity reader; `SubagentReader` reads the sidecar's `finished: true` as finished.
 
   Files: `crates/agents/api/src/activity.rs`, `crates/agents/claude/src/activity.rs`, `crates/agents/claude/src/subagents.rs`.
 
   Tests: a typed prompt moves the time and a task-notification record does not; a sidecar with `finished: true` finishes a subagent whose last reply holds a tool call; one without the field keeps rule 4. Depends on: nothing.
-- [ ] **SS.4 Daemon: the record's list.** `SessionRecord.subagents`, runtime-only, copied by `snapshot()`.
+- [x] **SS.4 Daemon: the record's list.** `SessionRecord.subagents`, runtime-only, copied by `snapshot()`.
 
   Mechanical: every `SessionRecord` literal gains `subagents: Vec::new()` (the compiler names them: `session.rs`, `server/spawn.rs`, `server/test_support.rs`, `keep_awake.rs`, `idle_exit.rs`, `history.rs`, `pty_state.rs`), a one-line change each, which is why this step exceeds five files.
 
@@ -212,7 +212,7 @@ Each step lands on `main` on its own and keeps the suite green. Hotspot files ar
   Files: `crates/daemon/src/subagents/mod.rs` (new), `crates/daemon/src/subagents/tests.rs` (new), `crates/daemon/src/server.rs` (hotspot: construct and spawn), `crates/daemon/src/main.rs` (the `mod` line).
 
   Tests, with a scripted reader factory as the Dashboard's tests use: a running subagent reaches the snapshot with one `SessionUpdated`; an unchanged pass sends none; a finished one stays until a newer typed prompt; one finished before the process start is never listed; a sixth finish drops the oldest; a nested running child keeps its finished parent listed; a stopped session's list empties once; at `client_count` 0 no reader is called. Depends on: SS.3, SS.4.
-- [ ] **SS.6 Daemon: share the transcript log.** Move `dispatch_runs/transcript.rs` to `crates/daemon/src/transcript_log.rs` as `pub(crate)` with its tests; `DispatchRuns` uses it unchanged.
+- [x] **SS.6 Daemon: share the transcript log.** Move `dispatch_runs/transcript.rs` to `crates/daemon/src/transcript_log.rs` as `pub(crate)` with its tests; `DispatchRuns` uses it unchanged.
 
   Files: `crates/daemon/src/dispatch_runs/transcript.rs` (moved), `crates/daemon/src/transcript_log.rs`, `crates/daemon/src/dispatch_runs/mod.rs`, `crates/daemon/src/main.rs` (the `mod` line).
 
@@ -225,7 +225,7 @@ Each step lands on `main` on its own and keeps the suite green. Hotspot files ar
 - [ ] **SS.8 Daemon: startup prune.** Clear a local pane's `Subagent` follow whose session did not survive, beside `prune_sessions_not_in`.
 
   Files: `crates/daemon/src/tabs.rs`, `crates/daemon/src/main.rs`. Tests in `tabs.rs`: a follow of a restored session stays, one of a lost session clears, another host's pane is untouched. Depends on: SS.1.
-- [ ] **SS.9 Client: sidebar model.** `LeafKind::Subagent`, `Leaf.nested_subagents`, a `subagent_leaf(host, host id, &SubagentSnapshot)` builder, and nesting in `nest_after` (subagents, then runs) for the repos view and in `nest_tab_runs` for the tabs view. `sidebar_view.rs`'s exhaustive `LeafKind` matches get an arm (no drag payload yet, dimmed with the host).
+- [x] **SS.9 Client: sidebar model.** `LeafKind::Subagent`, `Leaf.nested_subagents`, a `subagent_leaf(host, host id, &SubagentSnapshot)` builder, and nesting in `nest_after` (subagents, then runs) for the repos view and in `nest_tab_runs` for the tabs view. `sidebar_view.rs`'s exhaustive `LeafKind` matches get an arm (no drag payload yet, dimmed with the host).
 
   Files: `apps/native/src/sidebar.rs`, `apps/native/src/subagents.rs` (new, the twin of `dispatch_runs.rs`), `apps/native/src/sidebar_view.rs`, `apps/native/src/lib.rs` (hotspot: the `mod` line).
 
