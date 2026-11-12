@@ -151,6 +151,12 @@ Every decision here is an orchestrator decision (not an owner ruling), settled f
 - **A dispatch run's own subagents are not listed.** A run is not a session the daemon's registry holds, and its transcript view already shows each `Agent` call and its result. Listing them would need a reader keyed by the run's conversation and worktree, which is a separate item if wanted.
 - **Agent seam.** Protocol, daemon and client name no agent: `SubagentSnapshot`, `SA`, `subagents` and `subagent_transcript_path` name none, and every path, field and file name stays in `crates/agents/claude/`.
 
+## Notes for the later steps
+
+- **SS.7, the path boundary:** only the agent id comes from the client. The session folder, conversation id and env rows for `subagent_transcript_path` come from the host session's record, never from the message.
+- **SS.5, no typed prompt seen:** `ActivitySnapshot.last_typed_prompt_at` is `None` when the last typed prompt lies further back than the activity reader's first-read tail. Orchestrator decision (not an owner ruling): `None` means "no prompt since the process start", so finished subagents stay listed (capped at five) until a typed prompt is seen.
+- **SS.5, a resumed subagent:** the sidecar's `finished: true` may stay set when a subagent is resumed, which nobody has checked on a live resume. Orchestrator decision (not an owner ruling): transcript lines newer than the sidecar's last write make the subagent running again, whatever the flag says.
+
 ## Actors and invariants
 
 Actors:
