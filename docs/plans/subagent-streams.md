@@ -2,9 +2,9 @@
 
 The design for RT-30 ("View a session's running subagents as read-only sessions") and RT-406 ("Show a session's subagents under it in the sidebar"). A Claude session's subagents show as rows nested under its sidebar leaf, exactly as its dispatch runs do.
 
-A click on one opens a pane that follows the subagent's real transcript read-only, through the same transcript messages and view a dispatch run's pane uses ([transcript-view.md](./transcript-view.md)). Viewing is read-only: no interception, messaging or stopping, which stay non-goals (`docs/architecture.md` "Non-goals").
+A click on one opens a pane that follows the subagent's real transcript read-only, through the same transcript messages and view a dispatch run's pane uses (`docs/native-client.md`, the dispatch-run follow; `docs/wire-protocol.md`, `FollowTranscript`). Viewing is read-only: no interception, messaging or stopping, which stay non-goals (`docs/architecture.md` "Non-goals").
 
-This design replaces step TV.6 ("Subagent source") of [transcript-view.md](./transcript-view.md): the subagent source, its pane follow and its tail are the steps below.
+The subagent source, its pane follow and its tail are the steps below; TV.1 to TV.4, cited below, are the landed steps of the dispatch-run transcript view (RT-1581).
 
 ## Owner rulings
 
@@ -250,7 +250,6 @@ Each step lands on `main` on its own and keeps the suite green. Hotspot files ar
   Spec: the row appears under its host; a click opens a pane that streams the appended lines; the row reads finished; a typed prompt removes it while the open pane keeps its transcript. Depends on: SS.5, SS.7, SS.12.
 - [ ] **SS.14 Docs.** Promote the lasting decisions, then delete this file:
   - the list service and the tails to `docs/session-runtime.md`, the wire to `docs/wire-protocol.md`, the rows and the pane to `docs/native-client.md` ("Sessions under repos"), a task-index row to `docs/architecture.md`;
-  - `SA` and "typed prompt" to the glossary in `docs/README.md`, the `subagents` shot view to `docs/testing.md` and CLAUDE.md's view list;
-  - TV.6 removed from [transcript-view.md](./transcript-view.md).
+  - `SA` and "typed prompt" to the glossary in `docs/README.md`, the `subagents` shot view to `docs/testing.md` and CLAUDE.md's view list.
 
   Depends on: every step above.
