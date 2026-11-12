@@ -681,6 +681,21 @@ pub trait Agent: Send + Sync + 'static {
         None
     }
 
+    /// The transcript of subagent `agent_id`, which conversation
+    /// `conversation_id` launched for a session that ran in `folder` with
+    /// resolved rows `rows`; `None` for an agent that keeps no subagent
+    /// transcript, and for an id that could name a path rather than a file
+    /// name.
+    fn subagent_transcript_path(
+        &self,
+        _folder: &Path,
+        _conversation_id: &str,
+        _agent_id: &str,
+        _rows: &ResolvedRows,
+    ) -> Option<PathBuf> {
+        None
+    }
+
     /// What one complete transcript line adds to the chat, in order. `known`
     /// returns the entry already held under an id, so a record that completes
     /// an earlier entry (a tool result) answers with the whole updated entry.
@@ -998,6 +1013,15 @@ pub trait AgentPlugin: Send + Sync {
         rows: &ResolvedRows,
     ) -> Option<PathBuf>;
 
+    /// See [`Agent::subagent_transcript_path`].
+    fn subagent_transcript_path(
+        &self,
+        folder: &Path,
+        conversation_id: &str,
+        agent_id: &str,
+        rows: &ResolvedRows,
+    ) -> Option<PathBuf>;
+
     /// See [`Agent::chat_entries`].
     fn chat_entries(&self, line: &str, known: &dyn Fn(&str) -> Option<ChatEntry>)
     -> Vec<ChatEntry>;
@@ -1234,6 +1258,16 @@ impl<A: Agent> AgentPlugin for A {
         rows: &ResolvedRows,
     ) -> Option<PathBuf> {
         Agent::transcript_path(self, folder, conversation_id, rows)
+    }
+
+    fn subagent_transcript_path(
+        &self,
+        folder: &Path,
+        conversation_id: &str,
+        agent_id: &str,
+        rows: &ResolvedRows,
+    ) -> Option<PathBuf> {
+        Agent::subagent_transcript_path(self, folder, conversation_id, agent_id, rows)
     }
 
     fn chat_entries(

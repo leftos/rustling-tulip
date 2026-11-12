@@ -25,6 +25,7 @@ use protocol::AgentState;
 use serde_json::Value;
 use tracing::debug;
 
+use crate::chat_entries;
 use crate::pricing::{self, Usage};
 use crate::records::{self, LaunchedTask, NOTIFICATION_TAG, TaskNotification};
 use crate::subagents::SubagentReader;
@@ -221,6 +222,8 @@ pub(crate) struct State {
     pub(crate) effort: Option<String>,
     pub(crate) failure_run: u32,
     pub(crate) first_prompt: Option<String>,
+    /// The newest main-thread prompt the user typed.
+    pub(crate) last_typed_prompt_at: Option<DateTime<Utc>>,
     pub(crate) first_record_at: Option<DateTime<Utc>>,
     pub(crate) last_record_at: Option<DateTime<Utc>>,
     pub(crate) last_assistant_text: Option<String>,
@@ -447,6 +450,12 @@ impl State {
         if notifies && let Some(text) = content.as_str() {
             self.finish_tasks(text, at);
         }
+        if let Some(at) = at
+            && is_typed_prompt(record)
+        {
+            self.last_typed_prompt_at =
+                Some(self.last_typed_prompt_at.map_or(at, |held| held.max(at)));
+        }
     }
 
     /// Adds a background task the result recorded at `at` launched, with the
@@ -603,6 +612,7 @@ impl State {
             minute_counts,
             failure_run: self.failure_run,
             first_prompt: self.first_prompt.clone(),
+            last_typed_prompt_at: self.last_typed_prompt_at,
             last_record_at: self.last_record_at,
             last_assistant_text: self.last_assistant_text.clone(),
         }
@@ -710,6 +720,14 @@ fn last_text_block(content: &Value) -> Option<&str> {
         .filter(|block| block["type"] == "text")
         .filter_map(|block| block["text"].as_str())
         .find(|text| !text.trim().is_empty())
+}
+
+/// Whether `record` is a prompt the user typed: the chat's line facts call it
+/// a prompt, and it did not arrive as a task notification.
+fn is_typed_prompt(record: &Value) -> bool {
+    let woke_the_agent = record.pointer("/origin/kind").and_then(Value::as_str)
+        == Some(chat_entries::TASK_NOTIFICATION_KIND);
+    chat_entries::record_facts(record).is_user_prompt && !woke_the_agent
 }
 
 /// The prompt a `user` record gives: the slash command it runs as its
@@ -929,6 +947,50 @@ pub(crate) mod tests {
         assert_eq!(current.agent_call_ids, ["toolu_03"]);
         assert_eq!(current.last_record_at, Some(at("2026-09-27T10:03:00Z")));
         assert_eq!(current.minute_counts.iter().sum::<u16>(), 4, "{current:?}");
+    }
+
+    #[test]
+    fn only_a_typed_prompt_moves_the_typed_prompt_time() {
+        const NOTICE: &str = concat!(
+            r#"{"type":"user","uuid":"00000000-0000-4000-8000-0000000000c9","isSidechain":false,"#,
+            r#""timestamp":"2026-09-27T10:00:09.000Z","origin":{"kind":"task-notification"},"#,
+            r#""message":{"role":"user","content":"<task-notification><task-id>a1</task-id>"#,
+            r#"<status>completed</status><summary>Agent x completed</summary></task-notification>"}}"#
+        );
+        let typed = |uuid: &str, time: &str, text: &str| {
+            format!(
+                r#"{{"type":"user","uuid":"{uuid}","isSidechain":false,"timestamp":"{time}","message":{{"role":"user","content":"{text}"}}}}"#
+            ) + "\n"
+        };
+        let notice = format!("{NOTICE}\n");
+        let body = [
+            typed(
+                "00000000-0000-4000-8000-0000000000c1",
+                "2026-09-27T10:00:01.000Z",
+                "Fix the build",
+            ),
+            typed(
+                "00000000-0000-4000-8000-0000000000c2",
+                "2026-09-27T10:00:06.000Z",
+                "Now run the tests",
+            ),
+            notice.clone(),
+        ]
+        .concat();
+
+        let snapshot = read_whole("typed-prompt", &body, "2026-09-27T10:01:00Z");
+
+        assert_eq!(
+            snapshot.last_typed_prompt_at,
+            Some(at("2026-09-27T10:00:06Z")),
+            "the newest typed prompt, not the notification after it"
+        );
+        assert_eq!(snapshot.last_record_at, Some(at("2026-09-27T10:00:09Z")));
+        assert_eq!(
+            read_whole("typed-prompt-none", &notice, "2026-09-27T10:01:00Z").last_typed_prompt_at,
+            None,
+            "a task notification is no typed prompt"
+        );
     }
 
     #[test]

@@ -184,6 +184,23 @@ pub(crate) fn subagents_dir(transcript: &Path) -> PathBuf {
     transcript.with_file_name(stem).join("subagents")
 }
 
+/// The transcript of subagent `agent_id`, which conversation `id` launched
+/// for a session started in `folder` under the Claude home its rows `rows`
+/// give it. An id that is not a plain file-name stem (a path separator, `..`)
+/// has none, and so does a session with no Claude home.
+pub(crate) fn subagent_transcript_path(
+    folder: &Path,
+    id: &str,
+    agent_id: &str,
+    rows: &ResolvedRows,
+) -> Option<PathBuf> {
+    if !is_plain_id(agent_id) {
+        return None;
+    }
+    let transcript = transcript_path(folder, id, rows)?;
+    Some(subagents_dir(&transcript).join(format!("agent-{agent_id}.jsonl")))
+}
+
 fn candidate_from_entry(
     entry: &DirEntry,
     cwd: &str,
@@ -347,7 +364,7 @@ fn tidy_title(raw: &str) -> Option<String> {
 mod tests {
     use super::{
         candidates, claude_home_from, encode_project_dir, find_in, known_conversation, project_dir,
-        transcript_exists, transcript_path,
+        subagent_transcript_path, subagents_dir, transcript_exists, transcript_path,
     };
     use agent_api::{ConversationQuery, FoundConversation, ResolvedRows};
     use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -741,6 +758,35 @@ mod tests {
 
         for id in [r"..\x", "../x", "a/b", ""] {
             assert_eq!(transcript_path(Path::new(CWD), id, &rows), None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn subagent_transcript_path_honours_the_config_dir_row() {
+        let rows = ResolvedRows::new(vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())]);
+        let main = project_dir(Path::new("/cfg"), CWD).join("abc-1.jsonl");
+
+        assert_eq!(
+            subagent_transcript_path(Path::new(CWD), "abc-1", "a1b2", &rows),
+            Some(subagents_dir(&main).join("agent-a1b2.jsonl"))
+        );
+    }
+
+    #[test]
+    fn subagent_transcript_path_rejects_ids_that_are_not_plain() {
+        let rows = ResolvedRows::new(vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())]);
+
+        for id in [r"..\x", "../x", "a/b", ""] {
+            assert_eq!(
+                subagent_transcript_path(Path::new(CWD), id, "a1b2", &rows),
+                None,
+                "conversation id {id:?}"
+            );
+            assert_eq!(
+                subagent_transcript_path(Path::new(CWD), "abc-1", id, &rows),
+                None,
+                "agent id {id:?}"
+            );
         }
     }
 

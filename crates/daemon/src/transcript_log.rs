@@ -1,7 +1,7 @@
-//! A listed run's transcript: the chat entries its stream's records parse
-//! into, the newest [`CHAT_REPLY_CAP`] of them kept, and the connections that
-//! follow it. Every method runs under the runs lock, so a follow's backfill
-//! and the appends after it reach a follower in the log's own order.
+//! A followed transcript's chat entries: the ones its records parse into, the
+//! newest [`CHAT_REPLY_CAP`] of them kept, and the connections that follow it.
+//! Every method runs under its owner's lock, so a follow's backfill and the
+//! appends after it reach a follower in the log's own order.
 
 use crate::chat_mirror::{CHAT_REPLY_CAP, entry_id};
 use agent_api::AgentPlugin;
@@ -14,9 +14,9 @@ pub(crate) type ConnectionId = u64;
 /// A connection's outbound queue.
 pub(crate) type Outbox = mpsc::UnboundedSender<DaemonMessage>;
 
-/// One run's entries and followers.
+/// One followed transcript's entries and followers.
 #[derive(Debug, Default)]
-pub(super) struct TranscriptLog {
+pub(crate) struct TranscriptLog {
     entries: Vec<ChatEntry>,
     /// How many entries the cap dropped in front of `entries`.
     hidden: u32,
@@ -28,7 +28,7 @@ impl TranscriptLog {
     /// Upsert `new` by id in order: a held id is replaced in place, any other
     /// entry appended. Then the oldest entries past the cap are dropped and
     /// counted in `hidden`. Returns the entries applied, in order.
-    pub(super) fn apply(&mut self, new: Vec<ChatEntry>) -> Vec<ChatEntry> {
+    pub(crate) fn apply(&mut self, new: Vec<ChatEntry>) -> Vec<ChatEntry> {
         for entry in &new {
             let id = entry_id(entry);
             let held = self
@@ -50,7 +50,7 @@ impl TranscriptLog {
     }
 
     /// The held entry under `id`, for the parser's `known`.
-    pub(super) fn get(&self, id: &str) -> Option<ChatEntry> {
+    pub(crate) fn get(&self, id: &str) -> Option<ChatEntry> {
         self.entries
             .iter()
             .find(|held| entry_id(held) == Some(id))
@@ -58,7 +58,7 @@ impl TranscriptLog {
     }
 
     /// Clear the entries and `hidden`; the followers stay.
-    pub(super) fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.entries.clear();
         self.hidden = 0;
     }
@@ -66,7 +66,7 @@ impl TranscriptLog {
     /// Parse `lines` with `plugin` and apply each line's entries in line
     /// order, then tell the followers: after a `restart` (cleared first) the
     /// whole log, else the entries applied, when there are any.
-    pub(super) fn fold(
+    pub(crate) fn fold(
         &mut self,
         source: &TranscriptSource,
         restart: bool,
@@ -94,7 +94,7 @@ impl TranscriptLog {
     }
 
     /// Clear the log and send the followers the empty log in place of theirs.
-    pub(super) fn restarted(&mut self, source: &TranscriptSource) {
+    pub(crate) fn restarted(&mut self, source: &TranscriptSource) {
         self.reset();
         let empty = self.backfill(source, None);
         self.publish(&empty);
@@ -119,7 +119,7 @@ impl TranscriptLog {
 
     /// Make `connection` a follower, in place of any earlier follow of its,
     /// and send it the whole log answering `request_id`.
-    pub(super) fn follow(
+    pub(crate) fn follow(
         &mut self,
         connection: ConnectionId,
         outbox: Outbox,
@@ -133,13 +133,13 @@ impl TranscriptLog {
     }
 
     /// Stop sending to `connection`; nothing when it does not follow.
-    pub(super) fn unfollow(&mut self, connection: ConnectionId) {
+    pub(crate) fn unfollow(&mut self, connection: ConnectionId) {
         self.followers
             .retain(|(follower, _)| *follower != connection);
     }
 
     /// Tell the followers the run ended.
-    pub(super) fn end(&self, source: &TranscriptSource) {
+    pub(crate) fn end(&self, source: &TranscriptSource) {
         for (_, outbox) in &self.followers {
             // A closed connection is fine: the log goes with the run.
             let _ = outbox.send(DaemonMessage::TranscriptAppend {
@@ -152,7 +152,7 @@ impl TranscriptLog {
 
     /// The following connections, oldest follow first.
     #[cfg(test)]
-    pub(super) fn followers(&self) -> Vec<ConnectionId> {
+    pub(crate) fn followers(&self) -> Vec<ConnectionId> {
         self.followers
             .iter()
             .map(|(connection, _)| *connection)

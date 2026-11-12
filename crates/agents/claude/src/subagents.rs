@@ -22,9 +22,11 @@
 //!    launcher's transcript that ended the task and is newer than the
 //!    transcript's last line, ends it: `completed` as finished, any other
 //!    end as failed.
-//! 3. A last reply with `end_turn` and no tool call, followed only by
+//! 3. A sidecar marked `finished` finishes it, whether or not its last reply
+//!    was read.
+//! 4. A last reply with `end_turn` and no tool call, followed only by
 //!    attachments, finishes it.
-//! 4. Otherwise it runs; lines after a finished state make it run again.
+//! 5. Otherwise it runs; lines after a finished state make it run again.
 
 use std::collections::HashMap;
 use std::fs;
@@ -96,6 +98,7 @@ struct SidecarFields {
     tool_use_id: Option<String>,
     parent_agent_id: Option<String>,
     stopped_by_user: bool,
+    finished: bool,
 }
 
 /// A subagent joined to its launch.
@@ -408,6 +411,9 @@ fn ending(
     {
         return ended(end, notice.status.as_deref(), notice.at);
     }
+    if sidecar.is_some_and(|fields| fields.finished) {
+        return ended(AgentState::Finished, None, last);
+    }
     if state.run_ended {
         return ended(AgentState::Finished, None, last);
     }
@@ -477,6 +483,7 @@ fn parse_sidecar(bytes: &[u8]) -> Option<SidecarFields> {
         tool_use_id: text("toolUseId"),
         parent_agent_id: text("parentAgentId"),
         stopped_by_user: value["stoppedByUser"] == true,
+        finished: value["finished"] == true,
     })
 }
 
@@ -681,6 +688,29 @@ mod tests {
             ..running_node()
         };
         assert_eq!(tree(&scratch, None, NOW), [expected]);
+    }
+
+    #[test]
+    fn a_finished_sidecar_finishes_a_subagent_whose_last_reply_holds_a_tool_call() {
+        let sidecar = RUNNING_META.replace("\"spawnDepth\"", "\"finished\":true,\"spawnDepth\"");
+        let scratch = conversation("sidecar-finished", &[("a20", RUNNING, Some(&sidecar))]);
+
+        let expected = SubagentNode {
+            state: AgentState::Finished,
+            finished_at: Some(at("2026-09-27T10:00:10Z")),
+            ..running_node()
+        };
+        assert_eq!(tree(&scratch, None, NOW), [expected]);
+    }
+
+    #[test]
+    fn a_sidecar_without_the_finished_field_keeps_a_running_subagent() {
+        let says_false =
+            RUNNING_META.replace("\"spawnDepth\"", "\"finished\":false,\"spawnDepth\"");
+        for sidecar in [RUNNING_META, &says_false] {
+            let scratch = conversation("sidecar-unfinished", &[("a20", RUNNING, Some(sidecar))]);
+            assert_eq!(tree(&scratch, None, NOW), [running_node()]);
+        }
     }
 
     #[test]

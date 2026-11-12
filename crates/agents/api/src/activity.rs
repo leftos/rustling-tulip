@@ -83,6 +83,9 @@ pub struct ActivitySnapshot {
     /// The first prompt the user gave the conversation, a slash command as its
     /// command line.
     pub first_prompt: Option<String>,
+    /// The newest main-thread prompt the user typed, leaving out the records
+    /// that woke the agent as task notifications.
+    pub last_typed_prompt_at: Option<DateTime<Utc>>,
     /// The newest time any record carries.
     pub last_record_at: Option<DateTime<Utc>>,
     /// The last text the agent wrote in its newest reply that has any.

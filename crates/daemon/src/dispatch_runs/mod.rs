@@ -26,11 +26,12 @@ mod parse;
 mod tail;
 #[cfg(test)]
 mod tests;
-mod transcript;
 mod watch;
 
 use crate::session::SessionRegistry;
 use crate::stream_state::StreamState;
+use crate::transcript_log::TranscriptLog;
+pub(crate) use crate::transcript_log::{ConnectionId, Outbox};
 use agent_api::{AgentPlugin, HeadlessEvent};
 use chrono::{DateTime, Utc};
 pub(crate) use links::DispatchLinks;
@@ -46,8 +47,6 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use transcript::TranscriptLog;
-pub(crate) use transcript::{ConnectionId, Outbox};
 
 /// The broadcast channel's capacity; a receiver further behind lags.
 pub(crate) const EVENT_CAPACITY: usize = 256;

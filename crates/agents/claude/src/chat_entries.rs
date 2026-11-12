@@ -28,6 +28,9 @@ const SENTENCE_PREFIXES: [&str; 2] = ["Agent \"", "Background command \""];
 /// The question a plan approval's receipt answers: the dialog's title.
 const PLAN_QUESTION: &str = "Ready to code?";
 const PLAN_ANSWER: &str = "Approved the plan";
+/// The `origin.kind` a record carries when a task notification woke the agent,
+/// rather than a prompt the user typed.
+pub(crate) const TASK_NOTIFICATION_KIND: &str = "task-notification";
 
 type Known<'a> = &'a dyn Fn(&str) -> Option<ChatEntry>;
 
@@ -63,16 +66,21 @@ pub(crate) fn line_facts(line: &str) -> TranscriptLineFacts {
     let Ok(record) = serde_json::from_str::<Value>(line) else {
         return TranscriptLineFacts::default();
     };
-    let prompt = prompt_text(&record);
+    record_facts(&record)
+}
+
+/// [`line_facts`] for a record already parsed.
+pub(crate) fn record_facts(record: &Value) -> TranscriptLineFacts {
+    let prompt = prompt_text(record);
     let is_interrupt = prompt.as_deref().is_some_and(is_interrupt_text);
     TranscriptLineFacts {
-        prompt_id: str_at(&record, "promptId").map(str::to_owned),
+        prompt_id: str_at(record, "promptId").map(str::to_owned),
         is_user_prompt: prompt.is_some() && !is_interrupt,
         is_interrupt,
-        timestamp: str_at(&record, "timestamp")
+        timestamp: str_at(record, "timestamp")
             .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
             .map(|stamp| stamp.with_timezone(&Utc)),
-        ended_tasks: ended_tasks(&record),
+        ended_tasks: ended_tasks(record),
     }
 }
 
@@ -81,7 +89,7 @@ pub(crate) fn line_facts(line: &str) -> TranscriptLineFacts {
 /// `<event>`, and leaves its monitor running, so that notification is not
 /// listed; the others in the same record are.
 fn ended_tasks(record: &Value) -> Vec<String> {
-    if record.pointer("/origin/kind").and_then(Value::as_str) != Some("task-notification") {
+    if record.pointer("/origin/kind").and_then(Value::as_str) != Some(TASK_NOTIFICATION_KIND) {
         return Vec::new();
     }
     let Some(text) = record.pointer("/message/content").and_then(content_text) else {
@@ -143,7 +151,7 @@ fn user_entries(record: &Value, uuid: &str, known: Known<'_>) -> Vec<ChatEntry> 
     let Some(content) = record.pointer("/message/content") else {
         return Vec::new();
     };
-    if record.pointer("/origin/kind").and_then(Value::as_str) == Some("task-notification") {
+    if record.pointer("/origin/kind").and_then(Value::as_str) == Some(TASK_NOTIFICATION_KIND) {
         return content_text(content)
             .and_then(|text| task_notification_row(&text))
             .map(|text| system_row(uuid, text))
@@ -1030,6 +1038,7 @@ mod tests {
             "stream-json-run" => {
                 include_str!("../tests/fixtures/transcripts/stream-json-run.jsonl")
             }
+            "subagent-run" => include_str!("../tests/fixtures/transcripts/subagent-run.jsonl"),
             other => unreachable!("no fixture {other}"),
         }
     }
@@ -1151,6 +1160,44 @@ mod tests {
             [ChatEntry::Answer {
                 id: "5f0c8a43-2d6e-4b7a-9c1e-3a8d7e6f1b20".to_owned(),
                 text: "All gates passed.".to_owned(),
+                live: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn subagent_transcript_fixture_parses_into_chat_entries() {
+        const CALL: &str = "toolu_00a81c9e93fc4c039810";
+        let (outputs, _) = replay(fixture("subagent-run"));
+
+        assert_eq!(
+            outputs[0],
+            [ChatEntry::User {
+                id: "ba94b131-98f4-4528-bf46-a24155bee58e".to_owned(),
+                text: "List the files in src.".to_owned(),
+                pending: false,
+            }]
+        );
+        assert!(
+            matches!(&outputs[1][..], [ChatEntry::Tool { id, name, result: None, .. }]
+                if id == CALL && name == "Bash"),
+            "{:?}",
+            outputs[1]
+        );
+        assert!(
+            matches!(
+                &outputs[2][..],
+                [ChatEntry::Tool { id, result: Some(ToolOutcome { text, is_error: false }), .. }]
+                    if id == CALL && text == "main.rs\nlib.rs"
+            ),
+            "{:?}",
+            outputs[2]
+        );
+        assert_eq!(
+            outputs[3],
+            [ChatEntry::Answer {
+                id: "a57ebdbd-14b2-418b-98fa-6bec4c5d89f0".to_owned(),
+                text: "There are two files.".to_owned(),
                 live: false,
             }]
         );

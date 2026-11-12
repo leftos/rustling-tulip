@@ -445,6 +445,16 @@ impl Agent for ClaudePlugin {
         transcripts::transcript_path(folder, conversation_id, rows)
     }
 
+    fn subagent_transcript_path(
+        &self,
+        folder: &Path,
+        conversation_id: &str,
+        agent_id: &str,
+        rows: &ResolvedRows,
+    ) -> Option<PathBuf> {
+        transcripts::subagent_transcript_path(folder, conversation_id, agent_id, rows)
+    }
+
     fn chat_entries(
         &self,
         line: &str,
