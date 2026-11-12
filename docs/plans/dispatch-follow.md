@@ -278,7 +278,7 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: `apps/native/src/sidebar.rs`, `apps/native/src/sidebar_view.rs`, `apps/native/src/session_menu.rs`, `apps/native/src/lib.rs`, `apps/native/tests/ui/ui_sidebar.rs`.
   - Proof: `gate … -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release -E 'test(/sidebar::.*dispatch|ui_sidebar::.*dispatch/)'`, covering placement (repo, workspace member, unregistered path, no `main_checkout`), the leaf appearing, updating and going, a click sending `CreateTab` with the follow, and Stop arming then sending. Then `.\rt.ps1 native-shot main`.
   - Waits on: DF.1, DF.8. Hotspot: `lib.rs`.
-- [ ] **DF.10 Dispatch view and Stop.** A pane with a `DispatchRun` follow draws the header, stats and recent actions; Stop arms, then confirms; a removed run's pane keeps its last snapshot.
+- [x] **DF.10 Dispatch view and Stop.** A pane with a `DispatchRun` follow draws the header, stats and recent actions; Stop arms, then confirms; a removed run's pane keeps its last snapshot.
   - Files: `apps/native/src/dispatch_view.rs` (new), `apps/native/src/grid_view.rs`, `apps/native/src/lib.rs`, `apps/native/tests/ui/ui_dispatch.rs` (new), `apps/native/tests/ui/main.rs`, `tools/test-map.json`.
   - Proof: `gate … -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_dispatch`, `.\rt.ps1 test -Validate`, and a native-shot of the view shown before and after.
   - Waits on: DF.8, DF.9. Hotspot: `lib.rs`.

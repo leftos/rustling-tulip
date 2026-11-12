@@ -71,7 +71,7 @@ use gpui::{
 };
 use protocol::{
     AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab,
-    ChatScreen, ClientMessage, ComposerState, DaemonMessage, GridNode, SessionSnapshot,
+    ChatScreen, ClientMessage, ComposerState, DaemonMessage, GridNode, PaneFollow, SessionSnapshot,
     SplitDirection, StretchLine, SummarySource, ToolKind, ToolOutcome, WorkShell, WorkSubagent,
 };
 use rustling_tulip_native::builtin_themes::DRACULA;
@@ -140,6 +140,9 @@ const TULIP: &str = "rustling-tulip";
 const YAAT: &str = "yaat";
 const WORKSPACE: &str = "flight-deck";
 const TULIP_PATH: &str = r"D:\src\rustling-tulip";
+/// The dispatch run the `dispatch` shot shows, and the pane following it.
+const SHOT_RUN: &str = "r-shot";
+const SHOT_RUN_PANE: &str = "p-run";
 const YAAT_PATH: &str = r"D:\src\yaat";
 const DECK_SERVER: &str = "deck-server";
 const DECK_CLIENT: &str = "deck-client";
@@ -239,10 +242,11 @@ enum View {
     PanesAccentChosen,
     UpdateHost,
     UpdateHostBreaks,
+    Dispatch,
 }
 
 impl View {
-    const ALL: [Self; 40] = [
+    const ALL: [Self; 41] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -283,6 +287,7 @@ impl View {
         Self::PanesAccentChosen,
         Self::UpdateHost,
         Self::UpdateHostBreaks,
+        Self::Dispatch,
     ];
 
     fn name(self) -> &'static str {
@@ -327,6 +332,7 @@ impl View {
             Self::UpdateHost => "update-host",
             Self::UpdateHostBreaks => "update-host-breaks",
             Self::Toast => "toast",
+            Self::Dispatch => "dispatch",
         }
     }
 
@@ -412,6 +418,16 @@ impl View {
             Self::Gates => root.shown_activity() == Activity::Gates,
             Self::OpenShell => root.shell_dialog_open(),
             Self::SafeStart => root.start_prompt_open(),
+            // The tulip tab's session pane beside the pane following a
+            // working dispatch run, the run listed under its repo.
+            Self::Dispatch => {
+                root.dispatch_view_header(SHOT_RUN_PANE).is_some()
+                    && root
+                        .sidebar_containers()
+                        .iter()
+                        .flat_map(|container| &container.leaves)
+                        .any(|leaf| leaf.id == SHOT_RUN)
+            }
             // The Update host confirm over "box", listing its two sessions.
             Self::UpdateHost => root
                 .host_update_dialog()
@@ -617,6 +633,7 @@ impl Shot {
             | View::PanesAccentChosen
             | View::UpdateHost
             | View::UpdateHostBreaks
+            | View::Dispatch
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -1341,6 +1358,7 @@ fn drive(
         | View::SafeStart
         | View::PanesAccent
         | View::UpdateCountdown
+        | View::Dispatch
         | View::Toast => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
@@ -1953,6 +1971,21 @@ fn tulip_grid(view: View) -> GridNode {
             }),
         };
     }
+    if view == View::Dispatch {
+        return GridNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(pane("p1", "s-petal")),
+            second: Box::new(GridNode::Pane {
+                pane_id: SHOT_RUN_PANE.to_owned(),
+                session_id: None,
+                host: None,
+                follow: Some(PaneFollow::DispatchRun {
+                    run_id: SHOT_RUN.to_owned(),
+                }),
+            }),
+        };
+    }
     if view == View::MainNarrow {
         return GridNode::Split {
             direction: SplitDirection::Horizontal,
@@ -1987,6 +2020,41 @@ fn tulip_grid(view: View) -> GridNode {
         first: Box::new(pane("p1", "s-petal")),
         second: Box::new(second),
     }
+}
+
+/// The `dispatch` shot's run: working, metered, with a tier and a dozen
+/// recent actions, in a worktree of the tulip repo.
+fn shot_dispatch_runs() -> Result<DaemonMessage> {
+    parse_message(json!({
+        "type": "dispatch_runs",
+        "runs": [{
+            "run_id": SHOT_RUN,
+            "title": "Wire dispatch runs into the sidebar",
+            "backend": "backend-flash",
+            "tier": 2,
+            "worktree": format!("{TULIP_PATH}.wt\\df9"),
+            "main_checkout": TULIP_PATH,
+            "run_dir": r"C:\runs\r-shot",
+            "started_at": "2026-01-01T00:00:00Z",
+            "status": "working",
+            "metrics": { "input_tokens": 842_000, "output_tokens": 31_000, "cost_usd": 0.46 },
+            "recent_actions": [
+                "Read apps/native/src/sidebar.rs",
+                "Read apps/native/src/drag.rs",
+                "Grep \"DragPayload::\"",
+                "Edit apps/native/src/drag.rs",
+                "Edit apps/native/src/grid_view.rs",
+                "Edit apps/native/src/tab_bar.rs",
+                "Bash cargo fmt --all --check",
+                "Bash cargo clippy -p rustling-tulip-native",
+                "Edit apps/native/tests/ui/ui_sidebar_drag.rs",
+                "Bash cargo nextest run -E 'test(/^drag::tests::/)'",
+                "Bash cargo nextest run --test ui -E 'test(/^ui_sidebar_drag::/)'",
+                "Bash prek run --files apps/native/src/drag.rs",
+            ],
+        }],
+    }))
+    .context("the fixture's dispatch runs")
 }
 
 /// The version the shot fixtures' remote host reports: older than this
@@ -2299,6 +2367,11 @@ impl FakeDaemon {
         if self.view == View::Gates {
             features.push(protocol::FEATURE_GATE_STATE.to_owned());
         }
+        // Only the dispatch shot follows a run, so the other views list
+        // none and no run leaf appears under their repos.
+        if self.view == View::Dispatch {
+            features.push(protocol::FEATURE_DISPATCH_RUNS.to_owned());
+        }
         conn.on_welcome(version, features.clone(), None);
         conn.set_build_version(Some(env!("CARGO_PKG_VERSION").to_owned()));
         self.event(NetEvent::State(conn))?;
@@ -2328,6 +2401,9 @@ impl FakeDaemon {
             sessions: fixture.sessions.clone(),
         })?;
         self.send(fixture.tabs.clone())?;
+        if self.view == View::Dispatch {
+            self.send(shot_dispatch_runs()?)?;
+        }
         self.send(fixture.keep_awake.clone())?;
         self.send(DaemonMessage::DefaultShell {
             id: "pwsh".to_owned(),
