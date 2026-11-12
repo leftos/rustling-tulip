@@ -303,6 +303,7 @@ fn walk_panes<'a>(node: &'a GridNode, out: &mut Vec<Pane<'a>>) {
             pane_id,
             session_id,
             host,
+            ..
         } => out.push(Pane {
             id: pane_id,
             session: session_id.as_deref(),
@@ -1078,6 +1079,7 @@ impl Placement {
                 initial_session_id: session_id,
                 host,
                 request_id,
+                follow: None,
             },
             Self::Pane {
                 tab_id,
@@ -1087,6 +1089,7 @@ impl Placement {
                 pane_id: pane_id.clone(),
                 session_id,
                 host,
+                follow: None,
             },
             Self::Pane {
                 tab_id,
@@ -1100,6 +1103,7 @@ impl Placement {
                 new_session_id: session_id,
                 host,
                 request_id: Some(crate::new_request_id()),
+                follow: None,
             },
         }
     }
@@ -1884,6 +1888,7 @@ pub(crate) mod tests {
             pane_id: id.to_owned(),
             session_id: session.map(str::to_owned),
             host: None,
+            follow: None,
         }
     }
 
@@ -1893,6 +1898,7 @@ pub(crate) mod tests {
             pane_id: id.to_owned(),
             session_id: session.map(str::to_owned),
             host: Some(host.to_owned()),
+            follow: None,
         }
     }
 
@@ -2585,6 +2591,7 @@ pub(crate) mod tests {
                 initial_session_id: Some("new".to_owned()),
                 host: None,
                 request_id: Some("r1".to_owned()),
+                follow: None,
             })
         );
 
@@ -2604,6 +2611,7 @@ pub(crate) mod tests {
                 pane_id: "e".to_owned(),
                 session_id: Some("new".to_owned()),
                 host: None,
+                follow: None,
             })
         );
         let split = Placement::Pane {
@@ -2628,6 +2636,7 @@ pub(crate) mod tests {
                 new_session_id: Some("new".to_owned()),
                 host: None,
                 request_id: None,
+                follow: None,
             })
         );
 
@@ -2835,6 +2844,7 @@ pub(crate) mod tests {
             new_session_id: None,
             host: None,
             request_id: request_id.map(str::to_owned),
+            follow: None,
         }
     }
 

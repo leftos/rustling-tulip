@@ -335,7 +335,18 @@ async fn run_daemon(
     // (as `is_abandoned = true`) and need their tab/pane bindings intact so
     // a Resume swaps the abandoned session out for the freshly-spawned one
     // without the user losing their layout.
-    prune_stale_tabs(&state, &live, &dead);
+    //
+    // With a live-run folder watched, a local pane following a run that did
+    // not survive is cleared too; with none, no run is judged and every
+    // follow stays.
+    let live_runs: Option<HashSet<String>> = dispatch_runs.as_ref().map(|hub| {
+        hub.runs
+            .snapshots()
+            .into_iter()
+            .map(|run| run.run_id)
+            .collect()
+    });
+    prune_stale_tabs(&state, &live, &dead, live_runs.as_ref());
     let resume_ids = history::record_lost_at_start(&dirs, &dead, chrono::Utc::now());
     info!(
         count = resume_ids.len(),
@@ -932,14 +943,16 @@ fn prune_stale_tabs(
     state: &Arc<state::AppState>,
     live_orphans: &[orphan::OrphanMeta],
     abandoned: &[orphan::OrphanMeta],
+    live_runs: Option<&HashSet<String>>,
 ) {
     let live_ids: HashSet<String> = live_orphans
         .iter()
         .map(|m| m.session_id.clone())
         .chain(abandoned.iter().map(|m| m.session_id.clone()))
         .collect();
-    // Prune one tab vec in place: clear panes whose session is dead, then drop
-    // grid tabs left with no live session. Non-grid tabs (e.g. diff tabs)
+    // Prune one tab vec in place: clear panes whose session is dead, and,
+    // with a live-run list, panes following a run that is not live; then drop
+    // grid tabs left with no bound pane. Non-grid tabs (e.g. diff tabs)
     // always survive. Returns (panes_cleared, tabs_dropped).
     let prune_vec = |tabs: &mut Vec<protocol::TabEntry>| {
         let prev = tabs.len();
@@ -948,7 +961,9 @@ fn prune_stale_tabs(
             let Some(grid) = tab.grid_mut() else {
                 continue;
             };
-            if tabs::prune_sessions_not_in(grid, &live_ids) {
+            let sessions = tabs::prune_sessions_not_in(grid, &live_ids);
+            let follows = live_runs.is_some_and(|runs| tabs::prune_follows_not_in(grid, runs));
+            if sessions || follows {
                 panes_cleared += 1;
             }
         }

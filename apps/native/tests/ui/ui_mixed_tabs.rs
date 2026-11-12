@@ -248,7 +248,7 @@ fn a_remote_spawn_aimed_at_an_empty_pane_fills_it_with_its_host(cx: &mut TestApp
 
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(new), host: Some(host) }]
+        matches!(sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(new), host: Some(host), .. }]
             if tab_id == "t1" && pane_id == "p2" && new == "b2" && host == REMOTE),
         "the aimed pane takes the remote session with its host: sent {sent:?}"
     );
@@ -328,7 +328,7 @@ fn restarting_a_remote_session_in_its_pane_discards_on_the_remote(cx: &mut TestA
 
     let local_sent = h.sent();
     assert!(
-        matches!(local_sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(new), host: Some(host) }]
+        matches!(local_sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(new), host: Some(host), .. }]
             if tab_id == "t1" && pane_id == "p2" && new == "b4" && host == REMOTE),
         "the restart takes its original's pane, naming its host: sent {local_sent:?}"
     );
@@ -360,7 +360,7 @@ fn clicking_a_remote_leaf_in_no_tab_places_it_with_its_host(cx: &mut TestAppCont
 
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id), host: Some(host) }]
+        matches!(sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id), host: Some(host), .. }]
             if tab_id == "t1" && pane_id == "p2" && id == "b1" && host == REMOTE),
         "the empty pane takes the remote session with its host: sent {sent:?}"
     );

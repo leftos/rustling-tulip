@@ -1926,6 +1926,7 @@ fn pane(id: &str, session: &str) -> GridNode {
         pane_id: id.to_owned(),
         session_id: Some(session.to_owned()),
         host: None,
+        follow: None,
     }
 }
 
@@ -1965,6 +1966,7 @@ fn tulip_grid(view: View) -> GridNode {
                     pane_id: "p5".to_owned(),
                     session_id: None,
                     host: None,
+                    follow: None,
                 }),
             }),
         };
@@ -1974,6 +1976,7 @@ fn tulip_grid(view: View) -> GridNode {
             pane_id: "p2".to_owned(),
             session_id: Some(BOX_SESSION.to_owned()),
             host: Some(SHOT_TAILNET_HOST.to_owned()),
+            follow: None,
         }
     } else {
         pane("p2", "s-shell")

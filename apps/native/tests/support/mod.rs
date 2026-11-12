@@ -1432,6 +1432,7 @@ pub fn pane(id: &str, session: Option<&str>) -> GridNode {
         pane_id: id.to_owned(),
         session_id: session.map(str::to_owned),
         host: None,
+        follow: None,
     }
 }
 
@@ -1463,6 +1464,7 @@ pub fn remote_pane(id: &str, session: &str) -> GridNode {
         pane_id: id.to_owned(),
         session_id: Some(session.to_owned()),
         host: Some(REMOTE.to_owned()),
+        follow: None,
     }
 }
 

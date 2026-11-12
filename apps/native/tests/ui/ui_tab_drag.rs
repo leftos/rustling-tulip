@@ -868,6 +868,7 @@ fn a_remote_leaf_dropped_on_a_pill_lands_in_that_tab_with_its_host(cx: &mut Test
                 pane_id,
                 session_id: Some(session),
                 host: Some(host),
+                ..
             }] if tab_id == "t2" && pane_id == "p2" && session == "b1" && host == REMOTE
         ),
         "t2's empty pane takes the remote session with its host: sent {sent:?}"

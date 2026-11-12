@@ -2375,6 +2375,10 @@ pub enum GridNode {
         /// The host key of a session on another daemon; `None` is this daemon.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        /// What the pane shows instead of a session. A pane holds a session
+        /// or a follow, never both; `None` when it follows nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow: Option<PaneFollow>,
     },
     Split {
         direction: SplitDirection,
@@ -2383,6 +2387,18 @@ pub enum GridNode {
         first: Box<GridNode>,
         second: Box<GridNode>,
     },
+}
+
+/// Something other than a session that a [`GridNode::Pane`] shows. The pane's
+/// `host` names the daemon that owns what it follows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaneFollow {
+    /// The live view of a dispatch run, by its run id.
+    DispatchRun { run_id: String },
+    /// A follow kind this build does not know (a newer client's); kept as is.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Which side of a [`SplitPane`](ClientMessage::SplitPane) the newly created
@@ -5369,6 +5385,10 @@ pub enum ClientMessage {
         /// The host key of a session on another daemon; `None` is this daemon.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        /// What the pane follows instead of a session; refused alongside
+        /// `initial_session_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow: Option<PaneFollow>,
         /// Echoed on the [`DaemonMessage::Error`] that refuses it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
@@ -5446,6 +5466,10 @@ pub enum ClientMessage {
         /// The host key of a session on another daemon; `None` is this daemon.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        /// What the new pane follows instead of a session; refused alongside
+        /// `new_session_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow: Option<PaneFollow>,
         /// Echoed on the [`DaemonMessage::Error`] that refuses it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
@@ -5508,7 +5532,9 @@ pub enum ClientMessage {
         request_id: Option<String>,
     },
     /// Set the session a pane references without changing topology. `None`
-    /// turns the pane into an empty placeholder.
+    /// turns the pane into an empty placeholder. A session clears the pane's
+    /// follow; a follow clears its session; both at once is refused with
+    /// [`DaemonMessage::Error`].
     ReplacePaneSession {
         tab_id: String,
         pane_id: String,
@@ -5516,6 +5542,9 @@ pub enum ClientMessage {
         /// The host key of a session on another daemon; `None` is this daemon.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        /// What the pane follows instead of a session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow: Option<PaneFollow>,
     },
     /// Rebuild a tab's grid using `layout`. Pane identities (and their
     /// `session_id` bindings) are preserved — only the surrounding split
@@ -8185,12 +8214,14 @@ mod tests {
                 touch: false,
                 new_session_id: None,
                 host: None,
+                follow: None,
                 request_id: request_id.clone(),
             },
             ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: Some("s1".to_owned()),
                 host: None,
+                follow: None,
                 request_id: request_id.clone(),
             },
             ClientMessage::ForgetHostSessions {
@@ -8335,11 +8366,75 @@ mod tests {
             pane_id: "p2".to_owned(),
             session_id: Some("s2".to_owned()),
             host: Some("ssh:devbox".to_owned()),
+            follow: None,
         };
         let json = serde_json::to_string(&foreign).expect("serializes");
         assert!(json.contains(r#""host":"ssh:devbox""#), "{json}");
         let back: GridNode = serde_json::from_str(&json).expect("round-trips");
         assert_eq!(back, foreign);
+    }
+
+    #[test]
+    fn pane_follow_round_trips_and_absent_follow_is_omitted() {
+        let following = GridNode::Pane {
+            pane_id: "p1".to_owned(),
+            session_id: None,
+            host: None,
+            follow: Some(PaneFollow::DispatchRun {
+                run_id: "run-1".to_owned(),
+            }),
+        };
+        let json = serde_json::to_string(&following).expect("serializes");
+        assert!(
+            json.contains(r#""follow":{"kind":"dispatch_run","run_id":"run-1"}"#),
+            "{json}"
+        );
+        let back: GridNode = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, following);
+
+        let plain = GridNode::Pane {
+            pane_id: "p2".to_owned(),
+            session_id: Some("s2".to_owned()),
+            host: None,
+            follow: None,
+        };
+        let json = serde_json::to_string(&plain).expect("serializes");
+        assert!(!json.contains("follow"), "None is omitted: {json}");
+    }
+
+    #[test]
+    fn unknown_pane_follow_kind_decodes_as_unknown() {
+        let node: GridNode = serde_json::from_str(
+            r#"{"kind":"pane","pane_id":"p1","follow":{"kind":"subagent","id":"x"}}"#,
+        )
+        .expect("a pane with an unknown follow kind still decodes");
+        let GridNode::Pane {
+            pane_id, follow, ..
+        } = node
+        else {
+            panic!("a pane decodes as a pane");
+        };
+        assert_eq!(pane_id, "p1");
+        assert_eq!(follow, Some(PaneFollow::Unknown));
+    }
+
+    #[test]
+    fn create_tab_split_and_replace_default_follow_to_none() {
+        let messages = [
+            r#"{"type":"create_tab","name":null,"initial_session_id":"s1"}"#,
+            r#"{"type":"split_pane","tab_id":"t","pane_id":"p","direction":"horizontal","place":"second","new_session_id":null}"#,
+            r#"{"type":"replace_pane_session","tab_id":"t","pane_id":"p","session_id":"s1"}"#,
+        ];
+        for json in messages {
+            let msg: ClientMessage = serde_json::from_str(json).expect(json);
+            let follow = match msg {
+                ClientMessage::CreateTab { follow, .. }
+                | ClientMessage::SplitPane { follow, .. }
+                | ClientMessage::ReplacePaneSession { follow, .. } => follow,
+                other => panic!("unexpected message {other:?}"),
+            };
+            assert_eq!(follow, None, "{json}");
+        }
     }
 
     /// `CreateTab`, `SplitPane` and `ReplacePaneSession`, each naming `host`.
@@ -8351,6 +8446,7 @@ mod tests {
                 initial_session_id: Some("s1".to_owned()),
                 host: host.clone(),
                 request_id: None,
+                follow: None,
             },
             ClientMessage::SplitPane {
                 tab_id: "t1".to_owned(),
@@ -8361,12 +8457,14 @@ mod tests {
                 new_session_id: Some("s2".to_owned()),
                 host: host.clone(),
                 request_id: None,
+                follow: None,
             },
             ClientMessage::ReplacePaneSession {
                 tab_id: "t1".to_owned(),
                 pane_id: "p1".to_owned(),
                 session_id: Some("s3".to_owned()),
                 host,
+                follow: None,
             },
         ]
     }
@@ -10593,6 +10691,7 @@ mod tests {
                         pane_id: "p1".to_string(),
                         session_id: Some("s1".to_string()),
                         host: None,
+                        follow: None,
                     }),
                     second: Box::new(GridNode::Split {
                         direction: SplitDirection::Vertical,
@@ -10601,11 +10700,13 @@ mod tests {
                             pane_id: "p2".to_string(),
                             session_id: None,
                             host: None,
+                            follow: None,
                         }),
                         second: Box::new(GridNode::Pane {
                             pane_id: "p3".to_string(),
                             session_id: Some("s3".to_string()),
                             host: None,
+                            follow: None,
                         }),
                     }),
                 },
@@ -10660,6 +10761,7 @@ mod tests {
                 pane_id: "p1".to_string(),
                 session_id: None,
                 host: None,
+                follow: None,
             }
         );
     }
@@ -10674,6 +10776,7 @@ mod tests {
             touch: false,
             new_session_id: None,
             host: None,
+            follow: None,
             request_id: None,
         };
         let json = serde_json::to_string(&msg).expect("serialize");

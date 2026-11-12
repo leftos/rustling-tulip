@@ -260,16 +260,21 @@ fn emptied(
             pane_id,
             session_id,
             host,
+            follow,
         } => {
             let named = host_of_wire(host.as_deref());
             let host_key = rehosted(&named).unwrap_or(named);
             let known = session_id.as_ref().is_some_and(|id| {
                 known_sessions.contains(&SessionRef::new(host_key.clone(), id.clone()))
             });
+            // A follow pane has no session to forget: it keeps its follow and
+            // the host of what it follows.
+            let keeps_host = known || follow.is_some();
             GridNode::Pane {
                 pane_id: pane_id.clone(),
                 session_id: session_id.clone().filter(|_| known),
-                host: host_key.wire().map(str::to_owned).filter(|_| known),
+                host: host_key.wire().map(str::to_owned).filter(|_| keeps_host),
+                follow: follow.clone(),
             }
         }
         GridNode::Split {

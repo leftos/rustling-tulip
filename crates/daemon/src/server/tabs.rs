@@ -103,12 +103,18 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             name,
             initial_session_id,
             host,
+            follow,
             request_id,
         } => {
+            let Some(initial) =
+                one_binding(out_tx, initial_session_id, host, follow, request_id.clone())
+            else {
+                return Ok(());
+            };
             // Resolve the default name against the current tab list so
             // sequential opens produce `Tab`, `Tab 2`, `Tab 3`, ...
             let created = hub.state.mutate_client_layout(client_id, |tabs| {
-                let tab = crate::tabs::make_tab(name, initial_session_id, host, tabs);
+                let tab = crate::tabs::make_tab(name, initial, tabs);
                 tabs.push(tab.clone());
                 tab
             });
@@ -233,11 +239,17 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             touch,
             new_session_id,
             host,
+            follow,
             request_id,
         } => {
+            let Some(binding) =
+                one_binding(out_tx, new_session_id, host, follow, request_id.clone())
+            else {
+                return Ok(());
+            };
             let updated = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 let tab = crate::tabs::find_tab_mut(tabs, &tab_id)?;
-                let new_pane = crate::tabs::new_pane(new_session_id, host);
+                let new_pane = crate::tabs::new_pane(binding);
                 if touch {
                     crate::tabs::split_tab_pane_by_hand(tab, &pane_id, direction, place, new_pane)?;
                 } else {
@@ -285,11 +297,15 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             pane_id,
             session_id,
             host,
+            follow,
         } => {
+            let Some(binding) = one_binding(out_tx, session_id, host, follow, None) else {
+                return Ok(());
+            };
             let updated = hub.state.mutate_client_layout(client_id, |tabs| {
                 let tab = crate::tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = crate::tabs::grid_or_err_mut(tab)?;
-                crate::tabs::replace_pane_session(grid, &pane_id, session_id, host)?;
+                crate::tabs::replace_pane_session(grid, &pane_id, binding)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
             hub.emit_tab(client_id, TabEvent::Updated(updated));
@@ -699,6 +715,28 @@ fn send_tab_failure(
     });
 }
 
+/// The binding a tab request asks a pane to show, or `None` after refusing
+/// the request with `TAB_REFUSED` (echoing `request_id`) when it names both a
+/// session and a follow: a pane holds one or the other.
+fn one_binding(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    session_id: Option<String>,
+    host: Option<String>,
+    follow: Option<protocol::PaneFollow>,
+    request_id: Option<String>,
+) -> Option<crate::tabs::PaneBinding> {
+    if session_id.is_some() && follow.is_some() {
+        let err = anyhow::anyhow!("a pane holds a session or a follow, not both");
+        send_tab_failure(out_tx, &err, request_id);
+        return None;
+    }
+    Some(crate::tabs::PaneBinding {
+        session_id,
+        host,
+        follow,
+    })
+}
+
 /// Build a one-tab layout with a pane per currently-running session — the
 /// "open all active sessions" first-connect choice. Empty when no sessions
 /// exist (the client starts with no tabs).
@@ -711,6 +749,7 @@ fn build_all_sessions_layout(hub: &Hub) -> Vec<TabEntry> {
             pane_id: uuid::Uuid::new_v4().to_string(),
             session_id: Some(s.id),
             host: None,
+            follow: None,
         })
         .collect();
     let Some(grid) = crate::tabs::build_grid(&panes, 0, None) else {
@@ -969,7 +1008,7 @@ mod tests {
     use crate::server::dispatch;
     use crate::server::test_support::{dispatch_one, drain, seed_two_pane_layout, test_hub};
     use crate::state::AppState;
-    use protocol::PaneDropEdge;
+    use protocol::{GridNode, PaneDropEdge};
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::{Mutex as AsyncMutex, broadcast};
@@ -1061,6 +1100,7 @@ mod tests {
                 new_session_id: None,
                 host: None,
                 request_id: Some("s1".to_string()),
+                follow: None,
             },
         )
         .await;
@@ -1071,6 +1111,107 @@ mod tests {
                     if id == "s1" && message.contains("ghost-tab")
             ),
             "{msg:?}"
+        );
+    }
+
+    fn run_follow() -> protocol::PaneFollow {
+        protocol::PaneFollow::DispatchRun {
+            run_id: "run-1".to_string(),
+        }
+    }
+
+    /// Whether `msg` is the `TAB_REFUSED` answer to a pane given both a
+    /// session and a follow, echoing `expected_id`.
+    fn is_both_refusal(msg: &DaemonMessage, expected_id: Option<&str>) -> bool {
+        matches!(
+            msg,
+            DaemonMessage::Error { message, request_id, code: Some(code) }
+                if request_id.as_deref() == expected_id
+                    && code == protocol::error_codes::TAB_REFUSED
+                    && message == "a pane holds a session or a follow, not both"
+        )
+    }
+
+    #[tokio::test]
+    async fn a_pane_with_both_a_session_and_a_follow_is_refused_with_its_request_id() {
+        let (hub, _scratch) = test_hub("both-refused");
+        seed_two_pane_layout(&hub, "c1");
+        let before = hub.state.client_layout("c1");
+        let refused = [
+            (
+                ClientMessage::CreateTab {
+                    name: None,
+                    initial_session_id: Some("s1".to_string()),
+                    host: None,
+                    follow: Some(run_follow()),
+                    request_id: Some("r-create".to_string()),
+                },
+                Some("r-create"),
+            ),
+            (
+                ClientMessage::SplitPane {
+                    tab_id: "t1".to_string(),
+                    pane_id: "p1".to_string(),
+                    direction: protocol::SplitDirection::Horizontal,
+                    place: protocol::SplitPlace::Second,
+                    touch: false,
+                    new_session_id: Some("s1".to_string()),
+                    host: None,
+                    follow: Some(run_follow()),
+                    request_id: Some("r-split".to_string()),
+                },
+                Some("r-split"),
+            ),
+            (
+                ClientMessage::ReplacePaneSession {
+                    tab_id: "t1".to_string(),
+                    pane_id: "p1".to_string(),
+                    session_id: Some("s1".to_string()),
+                    host: None,
+                    follow: Some(run_follow()),
+                },
+                None,
+            ),
+        ];
+        for (msg, expected_id) in refused {
+            let reply = dispatch_one(&hub, msg).await;
+            assert!(is_both_refusal(&reply, expected_id), "{reply:?}");
+        }
+        assert_eq!(
+            hub.state.client_layout("c1"),
+            before,
+            "nothing in the layout changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_tab_with_a_follow_opens_a_follow_pane() {
+        let (hub, _scratch) = test_hub("create-follow");
+        let replies = dispatch_all(
+            &hub,
+            ClientMessage::CreateTab {
+                name: Some("Run".to_string()),
+                initial_session_id: None,
+                host: None,
+                follow: Some(run_follow()),
+                request_id: Some("r1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            !replies
+                .iter()
+                .any(|m| matches!(m, DaemonMessage::Error { .. })),
+            "{replies:?}"
+        );
+        let tabs = hub.state.client_layout("c1");
+        assert_eq!(tabs.len(), 1, "{tabs:?}");
+        assert!(
+            matches!(
+                tabs[0].grid(),
+                Some(GridNode::Pane { session_id: None, follow, .. }) if *follow == Some(run_follow())
+            ),
+            "{tabs:?}"
         );
     }
 
@@ -1854,6 +1995,7 @@ mod tests {
                     pane_id: "p2".to_string(),
                     session_id: Some("s2".to_string()),
                     host: None,
+                    follow: None,
                 }),
                 second: Box::new(GridNode::Split {
                     direction: SplitDirection::Horizontal,
@@ -1862,11 +2004,13 @@ mod tests {
                         pane_id: "p3".to_string(),
                         session_id: Some("s3".to_string()),
                         host: None,
+                        follow: None,
                     }),
                     second: Box::new(GridNode::Pane {
                         pane_id: "p4".to_string(),
                         session_id: Some("s4".to_string()),
                         host: None,
+                        follow: None,
                     }),
                 }),
             };
@@ -2018,6 +2162,7 @@ mod tests {
                 pane_id: id.to_string(),
                 session_id: Some(session.to_string()),
                 host: host.map(str::to_string),
+                follow: None,
             };
             vec![
                 pane("p1", "old", Some(REBIND_HOST)),
@@ -2162,6 +2307,7 @@ mod tests {
                     pane_id: "p1".to_string(),
                     session_id: Some("s1".to_string()),
                     host: Some(REHOST_FROM.to_string()),
+                    follow: None,
                 }],
                 protocol::SplitDirection::Horizontal,
             )

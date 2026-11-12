@@ -2535,6 +2535,7 @@ fn three_hosts<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
         pane_id: "p5".to_owned(),
         session_id: Some("c1".to_owned()),
         host: Some(LAB.to_owned()),
+        follow: None,
     };
     let fixture = Fixture {
         sessions: vec![session("a1").build()],
@@ -3112,6 +3113,7 @@ fn ssh_pane(id: &str, session: &str) -> protocol::GridNode {
         pane_id: id.to_owned(),
         session_id: Some(session.to_owned()),
         host: Some(SSH_KEY.to_owned()),
+        follow: None,
     }
 }
 
@@ -3823,6 +3825,7 @@ fn panes_of_a_host_no_longer_saved_are_forgotten_after_this_pcs_tabs(cx: &mut Te
         pane_id: "p5".to_owned(),
         session_id: Some("c1".to_owned()),
         host: Some(OTHER.to_owned()),
+        follow: None,
     };
     let mut fixture = two_tab_fixture();
     fixture.tabs.push(tab("t3", &other_pane));

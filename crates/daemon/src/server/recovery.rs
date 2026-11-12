@@ -2036,7 +2036,11 @@ mod tests {
 
     /// Store a client layout whose one tab shows `session_id` in its pane.
     fn seed_pane_layout(hub: &Hub, session_id: &str) {
-        let tab = crate::tabs::make_tab(None, Some(session_id.to_owned()), None, &[]);
+        let tab = crate::tabs::make_tab(
+            None,
+            crate::tabs::PaneBinding::session(Some(session_id.to_owned()), None),
+            &[],
+        );
         hub.state
             .mutate_all_layouts(|layouts| {
                 layouts.insert(

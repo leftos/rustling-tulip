@@ -1050,6 +1050,7 @@ fn restart_placement(
             pane_id: binding.pane_id.clone(),
             session_id: Some(new_id.to_owned()),
             host: host.clone(),
+            follow: None,
         })
         .collect();
     if panes.is_empty() && !in_popout {
@@ -1058,6 +1059,7 @@ fn restart_placement(
             initial_session_id: Some(new_id.to_owned()),
             host,
             request_id: None,
+            follow: None,
         });
     }
     messages.push(ClientMessage::DiscardSession {
@@ -2136,7 +2138,7 @@ mod tests {
         assert_eq!(placed.focus, PlacedFocus::NewTab);
         assert!(
             matches!(placed.messages.as_slice(), [
-                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), host: None, request_id: None },
+                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), host: None, request_id: None, .. },
             ] if id == "s2"),
             "the copy opens a tab and nothing is discarded: {:?}",
             placed.messages
@@ -2162,7 +2164,7 @@ mod tests {
         assert_eq!(empty.focus, pane_focus("t2", "b"));
         assert!(
             matches!(empty.messages.as_slice(), [
-                ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id), host: None },
+                ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id), host: None, .. },
             ] if tab_id == "t2" && pane_id == "b" && id == "s2"),
             "the tab's empty pane takes the copy: {:?}",
             empty.messages
@@ -2273,7 +2275,7 @@ mod tests {
         assert_eq!(restarted.focus, pane_focus("t1", "p1"));
         assert!(
             matches!(restarted.messages.as_slice(), [
-                ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id), host: None },
+                ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id), host: None, .. },
                 discard,
             ] if tab_id == "t1" && pane_id == "p1" && id == "s3" && is_discard(discard, &[])),
             "{:?}",
@@ -2360,7 +2362,7 @@ mod tests {
         assert_eq!(placed.focus, PlacedFocus::NewTab);
         assert!(
             matches!(placed.messages.as_slice(), [
-                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), host: None, request_id: None },
+                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), host: None, request_id: None, .. },
                 discard,
             ] if id == "s2" && is_discard(discard, &[])),
             "{:?}",

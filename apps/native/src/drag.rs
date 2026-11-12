@@ -541,14 +541,16 @@ fn contains_pane(grid: &GridNode, pane_id: &str) -> bool {
     }
 }
 
-/// Whether the pane `pane_id` of `grid` shows a session.
+/// Whether the pane `pane_id` of `grid` shows something: a session or a
+/// follow.
 fn pane_is_bound(grid: &GridNode, pane_id: &str) -> bool {
     match grid {
         GridNode::Pane {
             pane_id: id,
             session_id,
+            follow,
             ..
-        } => id == pane_id && session_id.is_some(),
+        } => id == pane_id && (session_id.is_some() || follow.is_some()),
         GridNode::Split { first, second, .. } => {
             pane_is_bound(first, pane_id) || pane_is_bound(second, pane_id)
         }
@@ -778,6 +780,7 @@ fn unbound_drop(
             pane_id,
             session_id,
             host,
+            follow: None,
         };
         return Some((
             PaneDropEdge::Replace,
@@ -796,6 +799,7 @@ fn unbound_drop(
         new_session_id: session_id,
         host,
         request_id,
+        follow: None,
     };
     Some((
         edge,
@@ -929,6 +933,21 @@ mod tests {
             tab("t2", &pane("c", Some("s3"))),
             diff_tab("t3"),
         ]
+    }
+
+    #[test]
+    fn a_follow_pane_is_bound_for_drag() {
+        let following = GridNode::Pane {
+            pane_id: "f".to_owned(),
+            session_id: None,
+            host: None,
+            follow: Some(protocol::PaneFollow::DispatchRun {
+                run_id: "run-1".to_owned(),
+            }),
+        };
+        let grid = split(H, 0.5, following, pane("e", None));
+        assert!(pane_is_bound(&grid, "f"), "a follow pane is bound");
+        assert!(!pane_is_bound(&grid, "e"), "an empty pane is not");
     }
 
     /// One tab holding the two panes `a` and `b`, split `direction`.

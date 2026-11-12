@@ -390,6 +390,7 @@ impl ShadowPanes {
                     pane_id: stand_in,
                     session_id: Some(session_id.to_owned()),
                     host: host.wire().map(str::to_owned),
+                    follow: None,
                 };
                 split_pane(grid, &split, new_pane);
                 PaneTarget::Split(split)
@@ -399,17 +400,19 @@ impl ShadowPanes {
 }
 
 /// Shows `session_id` of `host` in pane `pane_id` of `grid`, as the daemon's
-/// own pane will once it takes it.
+/// own pane will once it takes it: the session clears the pane's follow.
 fn fill_pane(grid: &mut GridNode, pane_id: &str, session_id: &str, host: &HostKey) {
     match grid {
         GridNode::Pane {
             pane_id: id,
             session_id: shown,
             host: pane_host,
+            follow,
         } => {
             if id == pane_id {
                 *shown = Some(session_id.to_owned());
                 *pane_host = host.wire().map(str::to_owned);
+                *follow = None;
             }
         }
         GridNode::Split { first, second, .. } => {
@@ -430,6 +433,7 @@ fn split_pane(grid: &mut GridNode, split: &SplitTarget, new_pane: GridNode) -> b
                 pane_id: String::new(),
                 session_id: None,
                 host: None,
+                follow: None,
             },
         );
         let (first, second) = match split.place {
@@ -619,6 +623,7 @@ mod tests {
             pane_id: pane_id.to_owned(),
             session_id: Some(session_id.to_owned()),
             host: None,
+            follow: None,
         })
     }
 
@@ -695,6 +700,7 @@ mod tests {
                         pane_id: "a".to_owned(),
                         session_id: Some("new".to_owned()),
                         host: Some("box".to_owned()),
+                        follow: None,
                     })
                 ),
                 (box_host, discard_msg("old")),
@@ -1013,6 +1019,7 @@ mod tests {
                 pane_id: "b".to_owned(),
                 session_id: Some("new".to_owned()),
                 host: None,
+                follow: None,
             })
         );
         assert!(placed.relayout);
@@ -1073,7 +1080,7 @@ mod tests {
         assert!(
             matches!(
                 only(&placed),
-                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), host: None, request_id: Some(_) }
+                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), host: None, request_id: Some(_), .. }
                     if id == "new"
             ),
             "{:?}",

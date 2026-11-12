@@ -650,6 +650,7 @@ pub(super) fn local_pane(id: &str, sid: Option<&str>) -> crate::tabs::PaneRef {
         pane_id: id.to_string(),
         session_id: sid.map(str::to_string),
         host: None,
+        follow: None,
     }
 }
 
@@ -662,11 +663,13 @@ pub(super) fn seed_two_pane_layout(hub: &Hub, client_id: &str) {
                 pane_id: "p1".to_string(),
                 session_id: None,
                 host: None,
+                follow: None,
             },
             crate::tabs::PaneRef {
                 pane_id: "p2".to_string(),
                 session_id: None,
                 host: None,
+                follow: None,
             },
         ],
         protocol::SplitDirection::Horizontal,

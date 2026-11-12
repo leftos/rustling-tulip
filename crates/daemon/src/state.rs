@@ -849,6 +849,7 @@ mod tests {
                     pane_id: format!("pane-{id}"),
                     session_id: None,
                     host: None,
+                    follow: None,
                 },
             },
             created_at: chrono::Utc::now(),
@@ -1236,7 +1237,7 @@ mod tests {
             matches!(
                 &tab.content,
                 protocol::TabContent::Grid {
-                    grid: protocol::GridNode::Pane { pane_id, session_id, .. }
+                    grid: protocol::GridNode::Pane { pane_id, session_id, follow: None, .. }
                 } if pane_id == "pane-1" && session_id.as_deref() == Some("sess-1")
             ),
             "the tab's pane and session are kept: {:?}",
@@ -1248,6 +1249,34 @@ mod tests {
             "the pre-per-client tabs field keeps its tab"
         );
         assert_eq!(persisted.legacy_tabs[0].id, "tab-legacy");
+    }
+
+    /// A v0.5.1-alpha `state.json` predates pane follows: every pane of its
+    /// layouts loads following nothing, and writing them back adds no
+    /// `follow` key.
+    #[test]
+    fn v0_5_1_layout_loads_with_no_follow() {
+        let dirs = scratch_dirs("v051-follow");
+        std::fs::write(&dirs.state_file, V0_5_1_STATE_JSON).expect("write the v0.5.1 state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("the v0.5.1 state.json loads");
+        let persisted = state.with_persisted(PersistedState::clone);
+        let tabs: Vec<&protocol::TabEntry> = persisted
+            .layouts
+            .values()
+            .flat_map(|layout| layout.tabs.iter())
+            .chain(persisted.legacy_tabs.iter())
+            .collect();
+        let panes: Vec<crate::tabs::PaneRef> = tabs
+            .iter()
+            .filter_map(|tab| tab.grid())
+            .flat_map(crate::tabs::collect_panes)
+            .collect();
+        assert_eq!(panes.len(), 2, "the layout's pane and the legacy pane");
+        assert!(panes.iter().all(|pane| pane.follow.is_none()), "{panes:?}");
+
+        let written = serde_json::to_string(&tabs).expect("the tabs serialize");
+        assert!(!written.contains("follow"), "no follow key: {written}");
     }
 
     /// The host settings a v0.5.1-alpha `state.json` held, field by field.

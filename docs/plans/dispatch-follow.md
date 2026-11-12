@@ -270,7 +270,7 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: `crates/daemon/src/session.rs`, `crates/daemon/src/dispatch_runs.rs`, `crates/daemon/src/push/trigger.rs` (a test only).
   - Proof: `gate … -- cargo nextest run -p daemon --cargo-profile test-release -E 'test(/dispatch_link|trigger::/)'` (a linked run sets the flag, its removal clears it, an unmatched run changes nothing, an idle session with a linked run is not Finished).
   - Waits on: DF.5. Hotspot: none.
-- [ ] **DF.8 Pane follow.** `follow: Option<PaneFollow>` on `GridNode::Pane`, `CreateTab`, `SplitPane` and `ReplacePaneSession`, and the daemon's tab rules: exclusive with a session, never empty, carried by moves and swaps, cleared at startup after the first live-folder scan; plus an old-layout load test.
+- [x] **DF.8 Pane follow.** `follow: Option<PaneFollow>` on `GridNode::Pane`, `CreateTab`, `SplitPane` and `ReplacePaneSession`, and the daemon's tab rules: exclusive with a session, never empty, carried by moves and swaps, cleared at startup after the first live-folder scan; plus an old-layout load test.
   - Files: `crates/protocol/src/lib.rs`, `apps/pwa/src/protocol.ts`, `crates/daemon/src/tabs.rs`, `crates/daemon/src/server/tabs.rs`, `crates/daemon/src/main.rs`, plus any `GridNode::Pane` destructuring the compiler names.
   - Proof: `gate … -- cargo nextest run -p protocol -p daemon --cargo-profile test-release -E 'test(/follow/)'`, then the `generated_protocol_ts_is_current` run.
   - Waits on: DF.1, DF.6. Hotspot: protocol.

@@ -1053,6 +1053,7 @@ fn split_beside(h: &mut Harness<'_>, client: &LiveClient, pane: &str, session_id
         new_session_id: Some(session_id.to_owned()),
         host: None,
         request_id: None,
+        follow: None,
     });
     h.wait_until("a second pane beside the first", |h| {
         h.root(|root, _| root.active_pane_ids().len() == 2)

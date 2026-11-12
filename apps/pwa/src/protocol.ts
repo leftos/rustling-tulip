@@ -1716,10 +1716,21 @@ export type GridNode =
    * Becomes `None` when the referenced session is removed.
    *
    * `host`: The host key of a session on another daemon; `None` is this daemon.
+   *
+   * `follow`: What the pane shows instead of a session. A pane holds a session
+   * or a follow, never both; `None` when it follows nothing.
    */
-  | { kind: "pane"; pane_id: string; session_id?: string | null; host?: string | null }
+  | { kind: "pane"; pane_id: string; session_id?: string | null; host?: string | null; follow?: PaneFollow | null }
   /** `ratio`: Size of `first` as a fraction of the split (clamped 0.05..=0.95). */
   | { kind: "split"; direction: SplitDirection; ratio: number; first: GridNode; second: GridNode };
+
+/**
+ * Something other than a session that a [`GridNode::Pane`] shows. The pane's
+ * `host` names the daemon that owns what it follows.
+ */
+export type PaneFollow =
+  /** The live view of a dispatch run, by its run id. */
+  | { kind: "dispatch_run"; run_id: string };
 
 /**
  * Which side of a [`SplitPane`](ClientMessage::SplitPane) the newly created
@@ -4179,9 +4190,12 @@ export type ClientMessage =
    *
    * `host`: The host key of a session on another daemon; `None` is this daemon.
    *
+   * `follow`: What the pane follows instead of a session; refused alongside
+   * `initial_session_id`.
+   *
    * `request_id`: Echoed on the [`DaemonMessage::Error`] that refuses it.
    */
-  | { type: "create_tab"; name: string | null; initial_session_id: string | null; host?: string | null; request_id?: string | null }
+  | { type: "create_tab"; name: string | null; initial_session_id: string | null; host?: string | null; follow?: PaneFollow | null; request_id?: string | null }
   /**
    * Close a tab. The underlying sessions are NOT stopped — only the tab's
    * layout entry is removed.
@@ -4244,9 +4258,12 @@ export type ClientMessage =
    *
    * `host`: The host key of a session on another daemon; `None` is this daemon.
    *
+   * `follow`: What the new pane follows instead of a session; refused alongside
+   * `new_session_id`.
+   *
    * `request_id`: Echoed on the [`DaemonMessage::Error`] that refuses it.
    */
-  | { type: "split_pane"; tab_id: string; pane_id: string; direction: SplitDirection; place: SplitPlace; touch?: boolean; new_session_id: string | null; host?: string | null; request_id?: string | null }
+  | { type: "split_pane"; tab_id: string; pane_id: string; direction: SplitDirection; place: SplitPlace; touch?: boolean; new_session_id: string | null; host?: string | null; follow?: PaneFollow | null; request_id?: string | null }
   /**
    * Close a pane. If it was the only pane in the tab, the tab is removed.
    * Otherwise the parent split collapses to the remaining sibling. A
@@ -4292,11 +4309,15 @@ export type ClientMessage =
   | { type: "swap_panes"; src_tab_id: string; src_pane_id: string; dst_tab_id: string; dst_pane_id: string; request_id?: string | null }
   /**
    * Set the session a pane references without changing topology. `None`
-   * turns the pane into an empty placeholder.
+   * turns the pane into an empty placeholder. A session clears the pane's
+   * follow; a follow clears its session; both at once is refused with
+   * [`DaemonMessage::Error`].
    *
    * `host`: The host key of a session on another daemon; `None` is this daemon.
+   *
+   * `follow`: What the pane follows instead of a session.
    */
-  | { type: "replace_pane_session"; tab_id: string; pane_id: string; session_id: string | null; host?: string | null }
+  | { type: "replace_pane_session"; tab_id: string; pane_id: string; session_id: string | null; host?: string | null; follow?: PaneFollow | null }
   /**
    * Rebuild a tab's grid using `layout`. Pane identities (and their
    * `session_id` bindings) are preserved — only the surrounding split

@@ -1264,6 +1264,7 @@ impl RootView {
             touch: true,
             new_session_id: None,
             request_id: Some(crate::new_request_id()),
+            follow: None,
         };
         self.tabs.note_layout_request(&msg);
         self.send_to(&HostKey::Local, msg);

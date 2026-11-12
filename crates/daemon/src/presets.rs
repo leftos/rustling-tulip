@@ -1782,6 +1782,7 @@ fn attach_to_tab(
         pane_id,
         session_id: Some(session_id.to_string()),
         host: None,
+        follow: None,
     });
     let new_grid = match build_layout {
         TabBuildLayout::Linear(dir) => tabs::build_balanced(&state.current_panes, dir),
@@ -1841,6 +1842,7 @@ fn open_new_tab(
                 pane_id: Uuid::new_v4().to_string(),
                 session_id: None,
                 host: None,
+                follow: None,
             },
         },
         created_at: Utc::now(),
@@ -2832,6 +2834,7 @@ mod tests {
                             pane_id: "p0".to_string(),
                             session_id: Some("s0".to_string()),
                             host: None,
+                            follow: None,
                         },
                     },
                     created_at: Utc::now(),
@@ -2849,6 +2852,7 @@ mod tests {
                 pane_id: "p0".to_string(),
                 session_id: Some("s0".to_string()),
                 host: None,
+                follow: None,
             }],
             tab_count: 1,
             client_id: "test-client".to_string(),
