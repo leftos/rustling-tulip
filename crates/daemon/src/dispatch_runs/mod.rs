@@ -11,6 +11,13 @@
 //! never blocks or awaits), so receivers see them in the map's own order: no
 //! `Updated` lands after its run's `Removed`, and no older fold overtakes a
 //! newer one.
+//!
+//! The list follows the child alone: a run whose child is dead leaves it at
+//! the next liveness tick or scan, and is not listed again while the daemon runs. The files follow
+//! the runner: the daemon deletes a dead child's live-run file only once the
+//! file's runner is dead or not recorded, since a runner that may be alive
+//! still reads the run's stop marker, which the scan deletes only once no
+//! live-run file is beside it.
 
 pub(crate) mod guard;
 mod links;
@@ -182,6 +189,10 @@ struct GuardTarget {
     generation: u64,
     child_pid: u32,
     child_start: Option<u64>,
+    /// The dispatch tool's process that waits on the child, when recorded.
+    runner_pid: Option<u32>,
+    /// The runner's recorded creation time, when the tool recorded one.
+    runner_start: Option<u64>,
     started_at: DateTime<Utc>,
 }
 
@@ -315,6 +326,8 @@ impl DispatchRuns {
                 generation: entry.generation,
                 child_pid: entry.file.child_pid,
                 child_start: entry.file.child_start,
+                runner_pid: entry.file.runner_pid,
+                runner_start: entry.file.runner_start,
                 started_at: entry.file.started_at,
             })
             .collect()

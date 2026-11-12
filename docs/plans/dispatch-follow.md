@@ -109,7 +109,7 @@ The phone app's types are regenerated (`cargo run -p protocol-ts`, committing `a
   The events feed a pure accumulator, `StreamState { status, metrics, recent_actions, agent_session_id }` with `apply(&mut self, HeadlessEvent)`, which the headless session path shares. `HeadlessEvent` gains an additive `SessionId(String)` that the Claude plugin emits from the `system`/`init` line. The 200-entry recent-actions cap (`RECENT_ACTIONS_CAP`) stays in one place.
 - **Liveness.** Every 2 s the daemon checks each run's process guard, which answers alive, dead or unknown, dead only on evidence, as the tool's `runner_alive` does. On Windows it opens the `child_pid` process: no such pid is dead; any other open failure (another account's process, a transient error) is unknown; an exit code read that is not still-active is dead; a creation FILETIME (`GetProcessTimes`) read that differs from `child_start` is dead; an unreadable one is unknown. When `child_start` is null (a tool off Windows), it compares the process's start time from `sysinfo` in whole seconds with `started_at`, accepting 60 s before to 5 s after; a start it cannot read is unknown. Unknown counts as alive: the run stays listed and its file is kept.
 
-  A run whose guard says dead is removed and its live-run file deleted: the tool crashed or was killed before its `finally`. An orphan `.stop` with no `.json` beside it is deleted too. The tool never deletes other runs' files.
+  The list follows the child alone: a run whose guard says dead is removed at that tick or scan, whatever its runner does, and is not listed again while the daemon runs (a kept path is never listed); after a restart a kept file whose child reads dead stays unlisted, and one whose child reads unknown is listed as any unknown run is (RT-1569). The files follow the runner: the daemon deletes a dead child's live-run file only once its runner is dead or not recorded (`runner_pid` null), since the runner still reads the run's `.stop` after its child exits. The runner's liveness mirrors the tool's `runner_alive`: an exact creation-time compare when `runner_start` is recorded; when it is null, a process start no later than 5 s after `started_at`, with no lower bound, since an auto-resumed run's runner started before its child. A runner whose liveness is unknown keeps the file, never a listing. An orphan `.stop` with no `.json` beside it is deleted by the scan after its upserts, so a kept `.json` protects its marker, and a pass that deletes a run file takes its marker too. The tool never deletes other runs' files.
 - **Idle exit and keep-awake.** A live run does not keep the daemon running (`idle_exit.rs` is unchanged); a daemon that exits loses nothing, because the next one rescans and replays. A run linked to a session (section 7) makes that session read as busy to keep-awake, which builds its busy set from session snapshots as the native client does, so the "When busy" mode keeps the machine awake while the dispatching session's run works; a run linked to no session does not.
 
 ### 7. A linked run counts as background work
@@ -142,7 +142,7 @@ A tailnet client may Stop a run, by the same rule as `StopSession`, which the da
 ### 9. Restart, crash and many clients
 
 - **Daemon restart mid-run.** The run is not the daemon's child, so it keeps going. The new daemon's startup scan finds the file, the guard passes, and the tailer replays the stream from byte 0, so clients get the full state. A Stop issued just before the restart has either killed the tree or not happened.
-- **Tool crash** (Python killed, `claude` orphaned or dead): while `claude` lives, the run stays listed and Stop still works through `child_pid`. Once `claude` is gone, the next liveness tick drops the run and deletes the file. **Machine reboot**: every pid is gone, and the startup scan drops and deletes every stale file.
+- **Tool crash** (Python killed, `claude` orphaned or dead): while `claude` lives, the run stays listed and Stop still works through `child_pid`. Once `claude` is gone, the next liveness tick drops the run; its file is deleted at that tick when the runner is gone too, else by the first scan (or event on the file) after the runner is gone; the tick checks only listed runs. **Machine reboot**: every pid is gone, and the startup scan deletes every stale file and its marker in one pass.
 - **Pid reuse**: the exact creation-time compare rejects a recycled pid, so the daemon never lists, or kills, an unrelated process.
 - **Many clients**: every connection gets the same broadcasts. A Stop from one shows `Stopping` and then removal on all of them.
 
@@ -154,7 +154,7 @@ Actors:
 2. The `claude` child: appends to the stream file under `child_pid`.
 3. The daemon watcher: debounced events plus the 30 s rescan, both calling one idempotent `upsert(run_id)`.
 4. One tailer task per run.
-5. The liveness tick, which drops runs with a dead or reused pid and deletes their file.
+5. The liveness tick, which drops runs with a dead or reused child pid and deletes their file once their runner is dead or not recorded.
 6. The Stop handler on a connection task.
 7. Clients, which receive `DispatchRunUpdated` and `DispatchRunRemoved` and may send a second Stop.
 8. The session registry, whose snapshots read the `DispatchLinks` set.
@@ -168,6 +168,7 @@ Invariants (each gets a test):
 - The guard's process handle stays open from the creation-time compare until `taskkill` returns, so the pid cannot be reused in between (Windows). Off Windows a window between check and kill remains, as it does in `orphan.rs`'s session kill.
 - The tailer replays from byte 0 on first sight, never emits a partial line, waits for a stream file that does not exist yet, and stops when its run is removed.
 - The daemon's deletion of a stale file and the tool's `unregister` may race; both tolerate a missing file.
+- The daemon never deletes a live-run file while its runner may be alive; a kept file protects its stop marker.
 - On a daemon restart, the startup scan runs before the tab prune (section 11), so a pane following a run that survived keeps its follow.
 - The `DispatchLinks` lock is never held while taking a record lock: the watcher updates the set, releases it, then pushes the session updates.
 - A stopped run is never auto-resumed (tool side); a resume's own run dir gets its own file and leaf.

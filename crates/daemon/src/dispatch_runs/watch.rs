@@ -2,9 +2,10 @@
 //! scan and the liveness tick, all on one task that owns every listing and
 //! removal (`docs/plans/dispatch-follow.md` sections 6 and 10).
 
-use super::parse::{Parsed, is_run_file, parse};
+use super::guard::{self, Liveness, Verdict};
+use super::parse::{LiveRunFile, Parsed, is_run_file, parse};
 use super::tail::{self, Tailer};
-use super::{DispatchRuns, Timing, guard};
+use super::{DispatchRuns, Timing};
 use anyhow::Context as _;
 use notify::RecursiveMode;
 use notify_debouncer_full::new_debouncer;
@@ -61,6 +62,7 @@ pub(super) fn start(
         timing,
         shutdown,
         unknown_logged: HashSet::new(),
+        kept_logged: HashSet::new(),
     };
     // The startup scan lists the runs already there before `spawn` returns,
     // so a caller ordering work after it (DF.6's tab prune) sees them.
@@ -80,6 +82,9 @@ struct Watcher {
     shutdown: CancellationToken,
     /// The unknown-schema files already logged, so each is logged once.
     unknown_logged: HashSet<PathBuf>,
+    /// The dead-child files already logged as kept for their runner, so each
+    /// is logged once; a path leaves it when its file is deleted or listed.
+    kept_logged: HashSet<PathBuf>,
 }
 
 impl Watcher {
@@ -110,7 +115,9 @@ impl Watcher {
     }
 
     /// Read every run file, remove the runs whose file is gone, and delete
-    /// the stop markers with no run file beside them.
+    /// the stop markers with no run file beside them. The markers go last, so
+    /// a run file this pass deleted takes its marker in the same pass; a run
+    /// file kept for a runner that may be alive is what protects its marker.
     fn scan(&mut self) {
         let entries = match std::fs::read_dir(&self.folder) {
             Ok(entries) => entries,
@@ -120,6 +127,7 @@ impl Watcher {
             }
         };
         let paths: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+        self.kept_logged.retain(|path| paths.contains(path));
         let mut present = HashSet::new();
         for path in paths.iter().filter(|path| is_run_file(path)) {
             present.extend(run_id_of(path));
@@ -138,9 +146,10 @@ impl Watcher {
     }
 
     /// Read one run file and list, update or skip its run. A run is listed
-    /// only once its guard passes; a file that fails it is deleted. A file
-    /// that does not parse is skipped and tried again on the next event or
-    /// scan, never removing a listed run.
+    /// only once its guard passes; a file that fails it is never listed, and
+    /// is deleted only once its runner is dead or not recorded. A file that
+    /// does not parse is skipped and tried again on the next event or scan,
+    /// never removing a listed run.
     fn upsert(&mut self, path: &Path) {
         let Some(run_id) = run_id_of(path) else {
             return;
@@ -172,15 +181,12 @@ impl Watcher {
             }
             return;
         }
-        if !guard::process_alive(file.child_pid, file.child_start, file.started_at) {
-            info!(
-                run_id,
-                pid = file.child_pid,
-                "dispatch_runs: a run file names a dead process; deleted"
-            );
-            delete_file(path);
+        let child = guard::liveness(file.child_pid, file.child_start, file.started_at);
+        if !should_list(self.kept_logged.contains(path), child) {
+            self.drop_dead_file(&run_id, path, &file);
             return;
         }
+        self.kept_logged.remove(path);
         let main_checkout = crate::git::repo_path_for_worktree(&file.worktree);
         let cancel = self.shutdown.child_token();
         let generation = self
@@ -208,23 +214,72 @@ impl Watcher {
         tokio::spawn(tail::run(tailer, cancel));
     }
 
-    /// Drop every run whose process is gone or is not the one its file
-    /// recorded, deleting its file first.
-    fn check_liveness(&self) {
+    /// An unlisted file whose child is dead: never listed; deleted only when
+    /// its runner is dead or not recorded, else kept for the runner, which
+    /// still reads the stop marker, and logged once.
+    fn drop_dead_file(&mut self, run_id: &str, path: &Path, file: &LiveRunFile) {
+        let runner = guard::runner_liveness(file.runner_pid, file.runner_start, file.started_at);
+        if guard::verdict(Liveness::Dead, runner) == (Verdict::Gone { delete_files: true }) {
+            info!(
+                run_id,
+                pid = file.child_pid,
+                "dispatch_runs: a run file names a dead process; deleted"
+            );
+            self.kept_logged.remove(path);
+            delete_file(path);
+        } else if self.kept_logged.insert(path.to_path_buf()) {
+            info!(
+                run_id,
+                pid = file.child_pid,
+                runner_pid = file.runner_pid,
+                "dispatch_runs: a run file names a dead process; kept for its runner"
+            );
+        }
+    }
+
+    /// Drop every run whose child is gone or is not the one its file
+    /// recorded. Its file is deleted first only when its runner is dead or
+    /// not recorded; the runner is read only for a dead child.
+    fn check_liveness(&mut self) {
         for target in self.runs.guard_targets() {
-            if guard::process_alive(target.child_pid, target.child_start, target.started_at) {
+            let child = guard::liveness(target.child_pid, target.child_start, target.started_at);
+            if child != Liveness::Dead {
                 continue;
             }
-            info!(
-                run_id = target.run_id,
-                pid = target.child_pid,
-                "dispatch_runs: a run's process is gone; dropped"
-            );
-            delete_file(&self.folder.join(format!("{}.json", target.run_id)));
+            let runner =
+                guard::runner_liveness(target.runner_pid, target.runner_start, target.started_at);
+            let Verdict::Gone { delete_files } = guard::verdict(child, runner) else {
+                continue;
+            };
+            let path = self.folder.join(format!("{}.json", target.run_id));
+            if delete_files {
+                info!(
+                    run_id = target.run_id,
+                    pid = target.child_pid,
+                    "dispatch_runs: a run's process is gone; dropped"
+                );
+                delete_file(&path);
+            } else {
+                info!(
+                    run_id = target.run_id,
+                    pid = target.child_pid,
+                    runner_pid = target.runner_pid,
+                    "dispatch_runs: a run's process is gone; dropped, its file kept for its runner"
+                );
+                self.kept_logged.insert(path);
+            }
             self.runs
                 .remove_generation(&target.run_id, target.generation);
         }
     }
+}
+
+/// Whether an unlisted run file's run may be listed: its child is not known
+/// dead, and the watcher has not already dropped it (`kept`, a dead child's
+/// file kept for its runner), so a dropped run is never listed again while
+/// its file remains, even once its child's pid reads unknown or alive.
+pub(super) fn should_list(kept: bool, child: Liveness) -> bool {
+    !kept && child != Liveness::Dead
 }
 
 /// An interval whose first tick is one `period` from now.

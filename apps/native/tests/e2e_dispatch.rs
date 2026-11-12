@@ -199,8 +199,7 @@ fn follow_dispatch_run(h: &mut Harness<'_>, client: &LiveClient) -> String {
 }
 
 /// Waits until the daemon's log says it stopped the run, which it logs only
-/// after the stop marker was written and the kill returned. The log outlives
-/// the marker, which the daemon's scan deletes once the run file is gone.
+/// after the stop marker was written and the kill returned.
 fn wait_dispatch_stopped_logged(h: &mut Harness<'_>, daemon: &LiveDaemon) {
     h.wait_until("the daemon to log the run stopped", |_| {
         daemon
@@ -219,17 +218,33 @@ fn stop_dispatch_from_header(h: &mut Harness<'_>, pane: &str) {
 }
 
 /// Waits until the daemon has removed the run: the client was sent
-/// `DispatchRunRemoved` and the run file is gone from the folder.
-fn wait_dispatch_removed(h: &mut Harness<'_>, client: &LiveClient, run_file: &Path) {
-    h.wait_until("the daemon to remove the run and delete its file", |_| {
-        let removed = client
+/// `DispatchRunRemoved`.
+fn wait_dispatch_removed(h: &mut Harness<'_>, client: &LiveClient) {
+    h.wait_until("the daemon to remove the run", |_| {
+        client
             .find_message(|msg| match msg {
                 DaemonMessage::DispatchRunRemoved { run_id } if run_id == RUN_ID => Some(()),
                 _ => None,
             })
-            .is_some();
-        removed && !run_file.exists()
+            .is_some()
     });
+}
+
+/// The run's runner (this test process) is alive, so the daemon kept the
+/// run file and the stop marker beside it for the runner to read; deletes
+/// both, as the dispatch tool does once it has read the marker.
+fn finish_as_the_runner(run_file: &Path) {
+    let marker = run_file.with_extension("stop");
+    assert!(
+        run_file.exists(),
+        "the daemon keeps the run file while its runner lives"
+    );
+    assert!(
+        marker.exists(),
+        "the daemon keeps the stop marker while its runner lives"
+    );
+    std::fs::remove_file(run_file).expect("delete the run file as the runner");
+    std::fs::remove_file(&marker).expect("delete the stop marker as the runner");
 }
 
 #[gpui::test]
@@ -259,7 +274,8 @@ fn live_dispatch_run_streams_follows_and_stops(cx: &mut TestAppContext) {
     });
     wait_dispatch_stopped_logged(&mut h, &daemon);
 
-    wait_dispatch_removed(&mut h, &client, &run_file);
+    wait_dispatch_removed(&mut h, &client);
+    finish_as_the_runner(&run_file);
     h.wait_until("the pane to show the run ended", |h| {
         h.root(|root, _| root.dispatch_view_note(&pane))
             .is_some_and(|note| note.starts_with("Ended. Run folder:"))

@@ -195,6 +195,64 @@ fn initial_dispatch_runs_list_is_sent_under_the_runs_lock() {
     }
 }
 
+/// The list follows the child alone; the files go only once the runner is
+/// dead or not recorded.
+#[test]
+fn verdict_drops_on_a_dead_child_and_deletes_only_with_a_dead_or_absent_runner() {
+    use guard::Liveness::{Alive, Dead, Unknown};
+    use guard::Verdict::{Gone, Live};
+    let keep = Gone {
+        delete_files: false,
+    };
+    let delete = Gone { delete_files: true };
+    let rows = [
+        (Alive, None, Live),
+        (Alive, Some(Alive), Live),
+        (Alive, Some(Unknown), Live),
+        (Alive, Some(Dead), Live),
+        (Unknown, None, Live),
+        (Unknown, Some(Alive), Live),
+        (Unknown, Some(Unknown), Live),
+        (Unknown, Some(Dead), Live),
+        (Dead, None, delete),
+        (Dead, Some(Alive), keep),
+        (Dead, Some(Unknown), keep),
+        (Dead, Some(Dead), delete),
+    ];
+    for (child, runner, expected) in rows {
+        assert_eq!(
+            guard::verdict(child, runner),
+            expected,
+            "child {child:?}, runner {runner:?}"
+        );
+    }
+}
+
+/// A file the watcher already dropped and kept for its runner is never
+/// listed again, whatever its child's pid reads later (such as unknown, once
+/// the pid is reused by a process the daemon may not open); an unkept file
+/// is listed unless its child is dead. Pure, since an unknown child cannot be
+/// produced at runtime.
+#[test]
+fn a_kept_file_is_not_listed_again_when_its_child_reads_unknown() {
+    use guard::Liveness::{Alive, Dead, Unknown};
+    let rows = [
+        (false, Alive, true),
+        (false, Unknown, true),
+        (false, Dead, false),
+        (true, Alive, false),
+        (true, Unknown, false),
+        (true, Dead, false),
+    ];
+    for (kept, child, expected) in rows {
+        assert_eq!(
+            watch::should_list(kept, child),
+            expected,
+            "kept {kept}, child {child:?}"
+        );
+    }
+}
+
 #[cfg(windows)]
 #[expect(
     clippy::expect_used,
@@ -280,6 +338,30 @@ mod runtime {
             .to_string()
         }
 
+        /// [`Self::run_text`] whose file records `runner` as its runner's
+        /// pid and start.
+        fn runner_text(
+            &self,
+            run_id: &str,
+            child: (u32, Option<u64>),
+            runner: (u32, Option<u64>),
+        ) -> String {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&self.run_text(run_id, child.0, child.1))
+                    .expect("the run text is JSON");
+            value["runner_pid"] = runner.0.into();
+            value["runner_start"] = runner.1.into();
+            value.to_string()
+        }
+
+        /// Write `<run_id>.stop`, the marker a Stop leaves for the runner.
+        fn write_stop(&self, run_id: &str) -> PathBuf {
+            std::fs::create_dir_all(self.live()).expect("the live folder is created");
+            let marker = self.live().join(format!("{run_id}.stop"));
+            std::fs::write(&marker, b"").expect("the stop marker is written");
+            marker
+        }
+
         fn append_stream(&self, text: &str) {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -342,6 +424,18 @@ mod runtime {
         let ids = (child.pid(), child.start());
         drop(child);
         ids
+    }
+
+    /// The test process as a live runner: its pid and its start.
+    fn live_runner() -> (u32, Option<u64>) {
+        let pid = std::process::id();
+        (pid, guard::creation_filetime(pid))
+    }
+
+    /// An exited process as a dead runner: its pid and its start.
+    fn dead_runner() -> (u32, Option<u64>) {
+        let (pid, start) = exited_child();
+        (pid, Some(start))
     }
 
     /// The runtime under test, stopped when dropped.
@@ -737,5 +831,184 @@ mod runtime {
             .await;
         assert_eq!(run.recent_actions, ["system: init", TOOL_ACTION]);
         assert_eq!(run.agent_session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn runner_liveness_classifies_like_runner_alive() {
+        use chrono::TimeDelta;
+        use guard::Liveness::{Alive, Dead};
+        let now = Utc::now();
+        let (me, me_start) = live_runner();
+        let me_start = me_start.expect("the test process's start is read");
+        assert_eq!(guard::runner_liveness(None, None, now), None, "no runner");
+        assert_eq!(
+            guard::runner_liveness(Some(me), Some(me_start), now),
+            Some(Alive),
+            "the exact start"
+        );
+        assert_eq!(
+            guard::runner_liveness(Some(me), Some(me_start + 1), now),
+            Some(Dead),
+            "another start"
+        );
+        assert_eq!(
+            guard::runner_liveness(Some(me), None, now + TimeDelta::hours(1)),
+            Some(Alive),
+            "no start, started long before started_at"
+        );
+        assert_eq!(
+            guard::runner_liveness(Some(me), None, now - TimeDelta::days(1)),
+            Some(Dead),
+            "no start, started more than 5 s after started_at"
+        );
+        let (gone, gone_start) = dead_runner();
+        assert_eq!(
+            guard::runner_liveness(Some(gone), gone_start, now),
+            Some(Dead),
+            "no such process"
+        );
+    }
+
+    /// Start a watcher and list `run_id` for `child`, its file recording
+    /// `runner`; returns the runtime and the run file.
+    async fn listed_run(
+        scratch: &Scratch,
+        run_id: &str,
+        child: &Pinger,
+        runner: (u32, Option<u64>),
+    ) -> (Runtime, PathBuf) {
+        let mut runtime = Runtime::start(&scratch.live());
+        let text = scratch.runner_text(run_id, (child.pid(), Some(child.start())), runner);
+        let path = scratch.write_run(run_id, &text);
+        runtime
+            .wait_updated(run_id, "the run's listing", |_| true)
+            .await;
+        (runtime, path)
+    }
+
+    /// What a Stop leaves: the marker written, then the child killed; waits
+    /// for the run's removal and returns the marker.
+    async fn stop_run(
+        runtime: &mut Runtime,
+        scratch: &Scratch,
+        run_id: &str,
+        child: Pinger,
+    ) -> PathBuf {
+        let marker = scratch.write_stop(run_id);
+        drop(child);
+        runtime
+            .wait_for("the run's removal", |event| is_removed(event, run_id))
+            .await;
+        marker
+    }
+
+    /// No `Updated` of `run_id` among the events not yet received.
+    fn assert_not_listed_again(runtime: &mut Runtime, run_id: &str) {
+        let later = runtime.drain();
+        assert!(
+            !later.iter().any(|event| is_update_of(event, run_id)),
+            "a dead child's run is never listed again: {later:?}"
+        );
+        assert_eq!(runtime.runs.snapshots().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_keeps_its_file_and_marker_while_its_runner_lives() {
+        let scratch = Scratch::new("stop-kept");
+        let child = Pinger::spawn();
+        let (mut runtime, path) = listed_run(&scratch, "run-sk", &child, live_runner()).await;
+
+        let marker = stop_run(&mut runtime, &scratch, "run-sk", child).await;
+        wait_a_scan(&scratch.live()).await;
+        assert!(path.exists(), "the run file is kept for its live runner");
+        assert!(marker.exists(), "the kept run file protects the marker");
+        assert_not_listed_again(&mut runtime, "run-sk");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_whose_runner_is_dead_loses_its_file_and_marker() {
+        let scratch = Scratch::new("stop-dead");
+        let child = Pinger::spawn();
+        let (mut runtime, path) = listed_run(&scratch, "run-sd", &child, dead_runner()).await;
+
+        let marker = stop_run(&mut runtime, &scratch, "run-sd", child).await;
+        wait_until("the run file and its marker are deleted", || {
+            !path.exists() && !marker.exists()
+        })
+        .await;
+        assert_not_listed_again(&mut runtime, "run-sd");
+    }
+
+    #[tokio::test]
+    async fn a_kept_file_and_marker_go_once_the_runner_dies() {
+        let scratch = Scratch::new("stop-later");
+        let child = Pinger::spawn();
+        let runner = Pinger::spawn();
+        let recorded = (runner.pid(), Some(runner.start()));
+        let (mut runtime, path) = listed_run(&scratch, "run-sl", &child, recorded).await;
+
+        let marker = stop_run(&mut runtime, &scratch, "run-sl", child).await;
+        wait_a_scan(&scratch.live()).await;
+        assert!(
+            path.exists() && marker.exists(),
+            "both kept while the runner lives"
+        );
+
+        drop(runner);
+        wait_a_scan(&scratch.live()).await;
+        assert!(
+            !path.exists(),
+            "a scan after the runner died deletes the file"
+        );
+        assert!(!marker.exists(), "the same scan deletes its marker");
+        assert_not_listed_again(&mut runtime, "run-sl");
+    }
+
+    #[tokio::test]
+    async fn a_dead_child_with_a_live_runner_is_removed_and_its_file_left_to_the_runner() {
+        let scratch = Scratch::new("child-exits");
+        let child = Pinger::spawn();
+        let (mut runtime, path) = listed_run(&scratch, "run-ce", &child, live_runner()).await;
+
+        drop(child);
+        runtime
+            .wait_for("the run's removal", |event| is_removed(event, "run-ce"))
+            .await;
+        wait_a_scan(&scratch.live()).await;
+        assert!(path.exists(), "the run file is left to its live runner");
+        assert_not_listed_again(&mut runtime, "run-ce");
+    }
+
+    #[tokio::test]
+    async fn a_restart_keeps_a_stopped_runs_file_and_marker_for_its_live_runner() {
+        let scratch = Scratch::new("restart-kept");
+        let (pid, start) = exited_child();
+        let text = scratch.runner_text("run-rk", (pid, Some(start)), live_runner());
+        let path = scratch.write_run("run-rk", &text);
+        let marker = scratch.write_stop("run-rk");
+        let mut runtime = Runtime::start(&scratch.live());
+
+        assert!(
+            path.exists() && marker.exists(),
+            "the startup scan keeps both"
+        );
+        wait_a_scan(&scratch.live()).await;
+        assert!(path.exists(), "a later scan keeps the run file");
+        assert!(marker.exists(), "a later scan keeps the marker");
+        assert_not_listed_again(&mut runtime, "run-rk");
+    }
+
+    #[tokio::test]
+    async fn a_dead_run_and_its_marker_are_deleted_at_startup() {
+        let scratch = Scratch::new("restart-dead");
+        let (pid, start) = exited_child();
+        let text = scratch.runner_text("run-rd", (pid, Some(start)), dead_runner());
+        let path = scratch.write_run("run-rd", &text);
+        let marker = scratch.write_stop("run-rd");
+        let mut runtime = Runtime::start(&scratch.live());
+
+        assert!(!path.exists(), "the startup scan deletes the run file");
+        assert!(!marker.exists(), "the same scan deletes its marker");
+        assert_not_listed_again(&mut runtime, "run-rd");
     }
 }

@@ -5,6 +5,13 @@
 //! it exactly, the dispatch tool's own rule, so a recycled pid never passes.
 //! Without one (a tool off Windows), the process's start time from `sysinfo`
 //! must fall within 60 s before to 5 s after the file's `started_at`.
+//!
+//! The run's runner, the dispatch tool's own process that reads the stop
+//! marker once its child is gone, is checked only for a dead child, to decide
+//! whether the run's files may go ([`verdict`]). Its rule mirrors the tool's
+//! `runner_alive`: the exact creation time when `runner_start` is recorded,
+//! else a process start no later than 5 s after `started_at`, with no lower
+//! bound, since an auto-resumed run's runner started before its child.
 
 use chrono::{DateTime, Utc};
 #[cfg(windows)]
@@ -68,6 +75,40 @@ enum StartRead {
     Unreadable,
 }
 
+/// Which start-time rule decides a process recorded without its creation
+/// time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartRule {
+    /// The child's: 60 s before to 5 s after `started_at`.
+    Window,
+    /// The runner's: no later than 5 s after `started_at`.
+    NoLaterThan,
+}
+
+/// What the watcher does with a run, from its child's and its runner's
+/// liveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// The child may be running: the run stays listed, or is listed.
+    Live,
+    /// The child is gone: the run leaves the list; its file is deleted only
+    /// when `delete_files`, since a runner that may be alive still reads the
+    /// stop marker the file protects.
+    Gone { delete_files: bool },
+}
+
+/// The run's verdict: the list follows the child alone, the files follow the
+/// runner. A runner that is not recorded (`None`) or dead lets the files go;
+/// one alive or unknown keeps them.
+pub(crate) fn verdict(child: Liveness, runner: Option<Liveness>) -> Verdict {
+    match child {
+        Liveness::Alive | Liveness::Unknown => Verdict::Live,
+        Liveness::Dead => Verdict::Gone {
+            delete_files: matches!(runner, None | Some(Liveness::Dead)),
+        },
+    }
+}
+
 /// The exit code `GetExitCodeProcess` reports for a process still running.
 #[cfg_attr(
     all(not(windows), not(test)),
@@ -88,6 +129,22 @@ fn classify_process(
     start_read: Option<StartRead>,
     started_at: DateTime<Utc>,
 ) -> Liveness {
+    classify_process_by(read, child_start, start_read, started_at, StartRule::Window)
+}
+
+/// [`classify_process`] with `rule` deciding a process recorded without its
+/// start.
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(dead_code, reason = "only the Windows guard opens a process")
+)]
+fn classify_process_by(
+    read: ProcessRead,
+    child_start: Option<u64>,
+    start_read: Option<StartRead>,
+    started_at: DateTime<Utc>,
+    rule: StartRule,
+) -> Liveness {
     let (exit_code, created) = match read {
         ProcessRead::NoSuchPid => return Liveness::Dead,
         ProcessRead::OpenFailed => return Liveness::Unknown,
@@ -102,7 +159,9 @@ fn classify_process(
             Some(created) if created == start => Liveness::Alive,
             Some(_) => return Liveness::Dead,
         },
-        None => start_read.map_or(Liveness::Unknown, |read| classify_start(read, started_at)),
+        None => start_read.map_or(Liveness::Unknown, |read| {
+            classify_start_by(read, started_at, rule)
+        }),
     };
     if exit_code.is_none() && identity == Liveness::Alive {
         Liveness::Unknown
@@ -114,10 +173,54 @@ fn classify_process(
 /// The verdict on a `sysinfo` read: the start time must fall in the window
 /// around `started_at`; a start of 0 or an unreadable pid is unknown.
 fn classify_start(read: StartRead, started_at: DateTime<Utc>) -> Liveness {
+    classify_start_by(read, started_at, StartRule::Window)
+}
+
+/// The verdict on a `sysinfo` read under `rule`; a start of 0 or an
+/// unreadable pid is unknown.
+fn classify_start_by(read: StartRead, started_at: DateTime<Utc>, rule: StartRule) -> Liveness {
+    let fits = |start| match rule {
+        StartRule::Window => start_within_window(start, started_at),
+        StartRule::NoLaterThan => start_no_later_than(start, started_at),
+    };
     match read {
         StartRead::Started(0) | StartRead::Unreadable => Liveness::Unknown,
-        StartRead::Started(start) if start_within_window(start, started_at) => Liveness::Alive,
+        StartRead::Started(start) if fits(start) => Liveness::Alive,
         StartRead::Started(_) | StartRead::Absent => Liveness::Dead,
+    }
+}
+
+/// What the guard can tell of the run's runner, the dispatch tool's process
+/// that waits on the child; `None` when the file records none. The exact
+/// creation time decides when `runner_start` is recorded, else a start no
+/// later than 5 s after `started_at`.
+pub(crate) fn runner_liveness(
+    pid: Option<u32>,
+    start: Option<u64>,
+    started_at: DateTime<Utc>,
+) -> Option<Liveness> {
+    let pid = pid?;
+    #[cfg(windows)]
+    {
+        let (read, _held) = read_process(pid);
+        let start_read = (start.is_none() && matches!(read, ProcessRead::Opened { .. }))
+            .then(|| read_start(pid));
+        Some(classify_process_by(
+            read,
+            start,
+            start_read,
+            started_at,
+            StartRule::NoLaterThan,
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = start;
+        Some(classify_start_by(
+            read_start(pid),
+            started_at,
+            StartRule::NoLaterThan,
+        ))
     }
 }
 
@@ -143,6 +246,7 @@ pub(crate) fn liveness(
 
 /// Whether the run may still be alive: false only when the guard knows its
 /// child is gone or is another process.
+#[cfg(all(windows, test))]
 pub(crate) fn process_alive(
     child_pid: u32,
     child_start: Option<u64>,
@@ -225,6 +329,13 @@ pub(crate) fn start_within_window(start_unix: u64, started_at: DateTime<Utc>) ->
     };
     let at = started_at.timestamp();
     (at - START_BEFORE_SECS..=at + START_AFTER_SECS).contains(&start)
+}
+
+/// Whether a process that started at `start_unix` (Unix seconds) can be the
+/// runner of a run that the file says started at `started_at`: no later than
+/// 5 s after it.
+fn start_no_later_than(start_unix: u64, started_at: DateTime<Utc>) -> bool {
+    i64::try_from(start_unix).is_ok_and(|start| start <= started_at.timestamp() + START_AFTER_SECS)
 }
 
 /// An open handle to a run's child, which keeps its pid from being reused
