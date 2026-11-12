@@ -1223,7 +1223,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::SetGateSlotCount { .. } | ClientMessage::GateHistory { .. }) => {
             gate::handle(hub, m, ctx);
         }
-        m @ ClientMessage::StopDispatchRun { .. } => dispatch_runs::handle(hub, m, ctx),
+        m @ (ClientMessage::StopDispatchRun { .. }
+        | ClientMessage::FollowTranscript { .. }
+        | ClientMessage::UnfollowTranscript { .. }) => dispatch_runs::handle(hub, m, ctx),
     }
     Ok(())
 }

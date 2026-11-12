@@ -1733,6 +1733,14 @@ export type PaneFollow =
   | { kind: "dispatch_run"; run_id: string };
 
 /**
+ * What a transcript follow reads: the source whose [`ChatEntry`] log a
+ * [`ClientMessage::FollowTranscript`] loads.
+ */
+export type TranscriptSource =
+  /** The transcript of a dispatch run, by its run id. */
+  | { kind: "dispatch_run"; run_id: string };
+
+/**
  * Which side of a [`SplitPane`](ClientMessage::SplitPane) the newly created
  * pane occupies.
  */
@@ -4478,6 +4486,15 @@ export type ClientMessage =
    */
   | { type: "unload_chat"; session_id: string }
   /**
+   * Follow a source's transcript for this connection: the log as it
+   * stands, answered with [`DaemonMessage::Transcript`] carrying this
+   * `request_id`, then the later entries as
+   * [`DaemonMessage::TranscriptAppend`].
+   */
+  | { type: "follow_transcript"; source: TranscriptSource; request_id?: string | null }
+  /** Stop following a source's transcript for this connection. */
+  | { type: "unfollow_transcript"; source: TranscriptSource }
+  /**
    * Send text to the session's agent from the chat composer, during a turn
    * too. A refusal is answered with [`DaemonMessage::Error`] carrying this
    * `request_id`.
@@ -5651,6 +5668,20 @@ export type DaemonMessage =
    * the same message, takes the place of.
    */
   | { type: "chat_append"; session_id: string; entries?: ChatEntry[]; removed?: string[] }
+  /**
+   * The answer to [`ClientMessage::FollowTranscript`], sent to the
+   * requester with its `request_id`: the source's transcript as it stands.
+   * `hidden` counts the entries the cap dropped in front of `entries`.
+   * Sent unsolicited (`request_id` `None`) to followers when the source's
+   * log restarts, which replaces what they hold.
+   */
+  | { type: "transcript"; source: TranscriptSource; entries?: ChatEntry[]; hidden?: number; request_id?: string | null }
+  /**
+   * Transcript entries that arrived after the follow, sent to followers
+   * only. An entry whose id is already known replaces it. `ended` is true
+   * on the last append of a source that has ended.
+   */
+  | { type: "transcript_append"; source: TranscriptSource; entries?: ChatEntry[]; ended?: boolean }
   /** The dialog or composer state changed, sent to loaders only. */
   | { type: "chat_screen_changed"; session_id: string; screen: ChatScreen }
   /**

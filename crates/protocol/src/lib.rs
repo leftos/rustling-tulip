@@ -2401,6 +2401,18 @@ pub enum PaneFollow {
     Unknown,
 }
 
+/// What a transcript follow reads: the source whose [`ChatEntry`] log a
+/// [`ClientMessage::FollowTranscript`] loads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TranscriptSource {
+    /// The transcript of a dispatch run, by its run id.
+    DispatchRun { run_id: String },
+    /// A source this build does not know (a newer peer's).
+    #[serde(other)]
+    Unknown,
+}
+
 /// Which side of a [`SplitPane`](ClientMessage::SplitPane) the newly created
 /// pane occupies.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -5744,6 +5756,19 @@ pub enum ClientMessage {
     UnloadChat {
         session_id: String,
     },
+    /// Follow a source's transcript for this connection: the log as it
+    /// stands, answered with [`DaemonMessage::Transcript`] carrying this
+    /// `request_id`, then the later entries as
+    /// [`DaemonMessage::TranscriptAppend`].
+    FollowTranscript {
+        source: TranscriptSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Stop following a source's transcript for this connection.
+    UnfollowTranscript {
+        source: TranscriptSource,
+    },
     /// Send text to the session's agent from the chat composer, during a turn
     /// too. A refusal is answered with [`DaemonMessage::Error`] carrying this
     /// `request_id`.
@@ -7239,6 +7264,30 @@ pub enum DaemonMessage {
         entries: Vec<ChatEntry>,
         #[serde(default)]
         removed: Vec<String>,
+    },
+    /// The answer to [`ClientMessage::FollowTranscript`], sent to the
+    /// requester with its `request_id`: the source's transcript as it stands.
+    /// `hidden` counts the entries the cap dropped in front of `entries`.
+    /// Sent unsolicited (`request_id` `None`) to followers when the source's
+    /// log restarts, which replaces what they hold.
+    Transcript {
+        source: TranscriptSource,
+        #[serde(default)]
+        entries: Vec<ChatEntry>,
+        #[serde(default)]
+        hidden: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Transcript entries that arrived after the follow, sent to followers
+    /// only. An entry whose id is already known replaces it. `ended` is true
+    /// on the last append of a source that has ended.
+    TranscriptAppend {
+        source: TranscriptSource,
+        #[serde(default)]
+        entries: Vec<ChatEntry>,
+        #[serde(default)]
+        ended: bool,
     },
     /// The dialog or composer state changed, sent to loaders only.
     ChatScreenChanged {
@@ -16221,6 +16270,137 @@ mod tests {
             ClientMessage::UnloadChat { session_id } => assert_eq!(session_id, "s1"),
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn follow_transcript_message_round_trips() {
+        let msg = ClientMessage::FollowTranscript {
+            source: TranscriptSource::DispatchRun {
+                run_id: "r1".to_string(),
+            },
+            request_id: Some("q1".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"follow_transcript""#), "{json}");
+        assert!(json.contains(r#""kind":"dispatch_run""#), "{json}");
+        assert!(json.contains(r#""run_id":"r1""#), "{json}");
+        assert!(json.contains(r#""request_id":"q1""#), "{json}");
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::FollowTranscript { source, request_id } => {
+                assert_eq!(
+                    source,
+                    TranscriptSource::DispatchRun {
+                        run_id: "r1".to_string()
+                    }
+                );
+                assert_eq!(request_id.as_deref(), Some("q1"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unfollow_transcript_message_round_trips() {
+        let msg = ClientMessage::UnfollowTranscript {
+            source: TranscriptSource::DispatchRun {
+                run_id: "r1".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"unfollow_transcript","source":{"kind":"dispatch_run","run_id":"r1"}}"#
+        );
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::UnfollowTranscript { source } => {
+                assert_eq!(
+                    source,
+                    TranscriptSource::DispatchRun {
+                        run_id: "r1".to_string()
+                    }
+                );
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transcript_messages_round_trip() {
+        let entries = vec![ChatEntry::Answer {
+            id: "a1".to_string(),
+            text: "Running them now.".to_string(),
+            live: true,
+        }];
+        let backfill = DaemonMessage::Transcript {
+            source: TranscriptSource::DispatchRun {
+                run_id: "r1".to_string(),
+            },
+            entries: entries.clone(),
+            hidden: 3,
+            request_id: None,
+        };
+        let json = serde_json::to_string(&backfill).expect("serialize");
+        assert!(json.contains(r#""type":"transcript""#), "{json}");
+        assert!(!json.contains("request_id"), "{json}");
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::Transcript {
+                source,
+                entries: decoded,
+                hidden,
+                request_id,
+            } => {
+                assert_eq!(
+                    source,
+                    TranscriptSource::DispatchRun {
+                        run_id: "r1".to_string()
+                    }
+                );
+                assert_eq!(decoded, entries);
+                assert_eq!(hidden, 3);
+                assert_eq!(request_id, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let append = DaemonMessage::TranscriptAppend {
+            source: TranscriptSource::DispatchRun {
+                run_id: "r1".to_string(),
+            },
+            entries: entries.clone(),
+            ended: true,
+        };
+        let json = serde_json::to_string(&append).expect("serialize");
+        assert!(json.contains(r#""type":"transcript_append""#), "{json}");
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::TranscriptAppend {
+                source,
+                entries: decoded,
+                ended,
+            } => {
+                assert_eq!(
+                    source,
+                    TranscriptSource::DispatchRun {
+                        run_id: "r1".to_string()
+                    }
+                );
+                assert_eq!(decoded, entries);
+                assert!(ended);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_transcript_source_decodes_as_unknown() {
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"unfollow_transcript","source":{"kind":"subagent","agent_id":"a"}}"#,
+        )
+        .expect("an unknown source decodes in place");
+        assert!(matches!(
+            msg,
+            ClientMessage::UnfollowTranscript {
+                source: TranscriptSource::Unknown
+            }
+        ));
     }
 
     #[test]

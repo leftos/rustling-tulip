@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use protocol::{ClientMessage, DaemonMessage, error_codes};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::Hub;
 use super::connection::ConnCtx;
@@ -38,13 +38,25 @@ enum Outcome {
 /// a task of its own, since it opens a process, writes a file and waits on a
 /// kill.
 pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
-    let ClientMessage::StopDispatchRun { run_id, request_id } = msg else {
-        warn!(
-            ?msg,
+    match msg {
+        ClientMessage::FollowTranscript { source, .. } => {
+            debug!(?source, "transcript follow received");
+        }
+        ClientMessage::UnfollowTranscript { source } => {
+            debug!(?source, "transcript unfollow received");
+        }
+        ClientMessage::StopDispatchRun { run_id, request_id } => {
+            stop_run(hub, ctx, run_id, request_id);
+        }
+        other => warn!(
+            ?other,
             "dispatch_runs::handle: routed a message it does not own"
-        );
-        return;
-    };
+        ),
+    }
+}
+
+/// Stop the run, answering the requester's reply when nothing was stopped.
+fn stop_run(hub: &Hub, ctx: &ConnCtx<'_>, run_id: String, request_id: Option<String>) {
     let Some(dispatch) = hub.dispatch_runs.clone() else {
         let _ = ctx.out_tx.send(DaemonMessage::Error {
             message: "dispatch runs are not followed by this daemon".to_owned(),
