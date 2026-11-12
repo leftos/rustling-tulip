@@ -196,6 +196,7 @@ pub mod toast_activation;
 mod toast_stack;
 mod toast_view;
 mod toast_window;
+mod transcript_view;
 pub mod ui_theme;
 mod undo;
 mod undo_view;
@@ -1126,6 +1127,11 @@ pub struct RootView {
     run_stop_armed: Option<(HostKey, String)>,
     /// The log scroll of each pane that follows a dispatch run, by pane id.
     run_scrolls: HashMap<String, dispatch_view::RunScroll>,
+    /// The transcript held of each followed dispatch run, by host and run id.
+    transcripts: HashMap<(HostKey, String), transcript_view::Transcript>,
+    /// Each dispatch run, by host and run id, whose transcript its host was
+    /// asked to follow, with the request id of a follow not yet answered.
+    transcript_follows: HashMap<(HostKey, String), Option<String>>,
     /// The Detached banner's Stop all waiting for its second click.
     detached_stop_all: sidebar_view::DetachedStopAll,
     /// Restarts and resumes waiting for their duplicate.
@@ -1725,6 +1731,8 @@ impl RootView {
             kept_runs: dispatch_view::KeptRuns::default(),
             run_stop_armed: None,
             run_scrolls: HashMap::new(),
+            transcripts: HashMap::new(),
+            transcript_follows: HashMap::new(),
             detached_stop_all: sidebar_view::DetachedStopAll::default(),
             duplicates: Duplicates::default(),
             prefills: Prefills::default(),
@@ -4257,6 +4265,7 @@ impl RootView {
         self.reconcile_diff_tabs(window, cx);
         self.prune_tab_font_sizes();
         self.prune_kept_runs();
+        self.follow_transcripts();
         self.apply_pane_fonts(false, cx);
         self.refresh_spawn_tabs();
         let keyboard_free = !self.overlay_open();
@@ -4852,6 +4861,14 @@ impl RootView {
         let focused = self.shown_session().filter(|_| main_active);
         self.sidebar.set_focused_session(focused.as_deref());
         self.keep_followed_runs(host, msg);
+        if matches!(
+            msg,
+            DaemonMessage::DispatchRuns { .. }
+                | DaemonMessage::DispatchRunUpdated { .. }
+                | DaemonMessage::DispatchRunRemoved { .. }
+        ) {
+            self.follow_transcripts();
+        }
         self.sidebar.apply(host, msg);
         // A session focused in a pop-out is shown too: a turn ending there
         // is seen. `popout_focused` holds a terminal only while its pop-out
@@ -5016,6 +5033,7 @@ impl RootView {
         self.on_client_update_message(host, &msg, cx);
         self.on_remote_update_message(host, &msg, cx);
         self.on_shell_message(host, &msg, window, cx);
+        self.on_transcript_message(host, &msg, cx);
         if self.on_panel_message(host, &msg, window, cx) {
             return;
         }
@@ -5243,6 +5261,11 @@ impl RootView {
         {
             return;
         }
+        if let Some(id) = failure.request_id
+            && self.transcript_refused(host, id)
+        {
+            return;
+        }
         if let Some(id) = failure.request_id {
             let _ = self.launch_last.take_request(id);
         }
@@ -5358,6 +5381,10 @@ impl RootView {
     fn on_welcome(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         // The new connection lists its dispatch runs afresh, if it lists any.
         self.keep_runs_before_welcome(host);
+        // The new connection follows no transcript yet; each held one draws
+        // until its reply replaces it.
+        self.transcript_follows.retain(|(on, _), _| on != host);
+        self.follow_transcripts();
         self.sidebar.forget_runs(host);
         self.lists_since_welcome.remove(host);
         self.forget_uploads_of(host);
@@ -5376,6 +5403,106 @@ impl RootView {
         self.reset_devices(window, cx);
         self.ask_pending_devices();
         self.ask_devices();
+    }
+
+    /// Follows the transcript of each dispatch run a pane follows, on a host
+    /// that lists dispatch runs, with a fresh request id, and unfollows each
+    /// one no pane follows any more, dropping what was held of it.
+    fn follow_transcripts(&mut self) {
+        let wanted = self.followed_run_keys();
+        let gone: Vec<(HostKey, String)> = self
+            .transcript_follows
+            .keys()
+            .filter(|key| !wanted.contains(*key))
+            .cloned()
+            .collect();
+        for (host, run_id) in gone {
+            self.transcript_follows
+                .remove(&(host.clone(), run_id.clone()));
+            let source = protocol::TranscriptSource::DispatchRun { run_id };
+            self.send_to(&host, ClientMessage::UnfollowTranscript { source });
+        }
+        self.transcripts.retain(|key, _| wanted.contains(key));
+        for (host, run_id) in wanted {
+            let lists_runs = self
+                .conn_of(&host)
+                .is_some_and(|conn| conn.supports(protocol::FEATURE_DISPATCH_RUNS));
+            let key = (host, run_id);
+            if !lists_runs || self.transcript_follows.contains_key(&key) {
+                continue;
+            }
+            let request_id = new_request_id();
+            let source = protocol::TranscriptSource::DispatchRun {
+                run_id: key.1.clone(),
+            };
+            self.send_to(
+                &key.0,
+                ClientMessage::FollowTranscript {
+                    source,
+                    request_id: Some(request_id.clone()),
+                },
+            );
+            self.transcript_follows.insert(key, Some(request_id));
+        }
+    }
+
+    /// Folds a followed run's transcript or append from `host`. A reply to
+    /// another follow than the one waiting is stale and dropped; a transcript
+    /// sent unasked replaces the one held.
+    fn on_transcript_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
+        match msg {
+            DaemonMessage::Transcript {
+                source: protocol::TranscriptSource::DispatchRun { run_id },
+                entries,
+                hidden,
+                request_id,
+            } => {
+                let key = (host.clone(), run_id.clone());
+                let Some(pending) = self.transcript_follows.get_mut(&key) else {
+                    return;
+                };
+                if let Some(id) = request_id {
+                    if pending.as_deref() != Some(id.as_str()) {
+                        return;
+                    }
+                    *pending = None;
+                }
+                let transcript = self.transcripts.entry(key).or_default();
+                transcript.replace(entries.clone(), *hidden);
+                cx.notify();
+            }
+            DaemonMessage::TranscriptAppend {
+                source: protocol::TranscriptSource::DispatchRun { run_id },
+                entries,
+                ended,
+            } => {
+                if let Some(transcript) = self.transcripts.get_mut(&(host.clone(), run_id.clone()))
+                {
+                    transcript.append(entries.clone(), *ended);
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A refusal of `host`'s follow `request_id`: the follow waits no more and
+    /// its pane keeps the run's recent actions. Returns whether it was one.
+    fn transcript_refused(&mut self, host: &HostKey, request_id: &str) -> bool {
+        let pending = self
+            .transcript_follows
+            .iter_mut()
+            .find(|((on, _), pending)| on == host && pending.as_deref() == Some(request_id));
+        let Some((_, pending)) = pending else {
+            return false;
+        };
+        *pending = None;
+        true
     }
 
     /// Whether the owner is at the desk now: the window active and, where the

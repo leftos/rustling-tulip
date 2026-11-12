@@ -3,7 +3,7 @@
 //! state of a run that has gone. The model is plain Rust, so every rule is
 //! unit-tested; `RootView` keeps the state and draws it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{
     AnyElement, Context, Div, ElementId, Pixels, ScrollHandle, ScrollWheelEvent, SharedString,
@@ -20,6 +20,7 @@ use crate::grid_view::{TipAt, header_tipped};
 use crate::session_menu::{header_text_button, on_press};
 use crate::spawn_view::DISABLED_OPACITY;
 use crate::target::HostKey;
+use crate::transcript_view::{LineKind, Transcript, transcript_lines};
 use crate::ui_theme::theme;
 use crate::{RootView, UI_TEXT_SIZE, tabs};
 
@@ -281,6 +282,14 @@ impl RootView {
                 }),
                 _ => None,
             })
+            .collect()
+    }
+
+    /// The host and run id of every dispatch run some pane follows.
+    pub(crate) fn followed_run_keys(&self) -> HashSet<(HostKey, String)> {
+        self.followed_runs()
+            .into_iter()
+            .map(|followed| (followed.host, followed.run_id))
             .collect()
     }
 
@@ -554,8 +563,8 @@ impl RootView {
     ) -> Div {
         let t = theme(cx);
         let inner = match self.run_shown(host, run_id) {
-            RunShown::Live(run) => self.run_column(pane_id, run, false, cx),
-            RunShown::Ended(run) => self.run_column(pane_id, run, true, cx),
+            RunShown::Live(run) => self.run_column(pane_id, host, run, false, cx),
+            RunShown::Ended(run) => self.run_column(pane_id, host, run, true, cx),
             RunShown::Gone => crate::grid_view::muted_note(
                 ui_text_size(cx),
                 format!("This run has ended: {run_id}"),
@@ -573,10 +582,12 @@ impl RootView {
             .child(inner)
     }
 
-    /// A run's stats line, its log and, once it has gone, its run folder.
+    /// A run of `host`: its stats line, its log and, once it has gone, its
+    /// run folder.
     fn run_column(
         &self,
         pane_id: &str,
+        host: &HostKey,
         run: &DispatchRunSnapshot,
         ended: bool,
         cx: &mut Context<Self>,
@@ -605,18 +616,29 @@ impl RootView {
             .flex_1()
             .min_h(px(0.0))
             .child(stats)
-            .child(self.run_log(pane_id, run, cx))
+            .child(self.run_log(pane_id, host, run, cx))
             .children(note)
     }
 
-    /// The run's recent actions, oldest first, in the terminal's font,
-    /// scrolled to the end while the user has not scrolled up.
+    /// The run's transcript once one is held, else its recent actions,
+    /// oldest first, in the terminal's font, scrolled to the end while the
+    /// user has not scrolled up.
     fn run_log(
         &self,
         pane_id: &str,
+        host: &HostKey,
         run: &DispatchRunSnapshot,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let key = (host.clone(), run.run_id.clone());
+        let rows: Vec<AnyElement> = match self.transcripts.get(&key) {
+            Some(transcript) => Self::transcript_rows(pane_id, &key, transcript, cx),
+            None => run
+                .recent_actions
+                .iter()
+                .map(|action| div().child(action.clone()).into_any_element())
+                .collect(),
+        };
         let t = theme(cx);
         let family = self.sidebar.ui_state().terminal_font.family.as_deref();
         let family = SharedString::from(family.unwrap_or(DEFAULT_FAMILY).to_owned());
@@ -634,11 +656,7 @@ impl RootView {
             .font_weight(crate::fonts::mono_weight())
             .text_size(ui_px_at(ui_text_size(cx), UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text_2))
-            .children(
-                run.recent_actions
-                    .iter()
-                    .map(|action| div().child(action.clone())),
-            );
+            .children(rows);
         let Some(scroll) = self.run_scrolls.get(pane_id) else {
             return column;
         };
@@ -664,6 +682,49 @@ impl RootView {
             }))
     }
 
+    /// The rows of `transcript`, held for run `run` of pane `pane_id`; a row
+    /// of a tool call expands or collapses the call's output on a press.
+    fn transcript_rows(
+        pane_id: &str,
+        run: &(HostKey, String),
+        transcript: &Transcript,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let t = theme(cx);
+        let mut rows = Vec::new();
+        for (at, line) in transcript_lines(transcript).into_iter().enumerate() {
+            let colour = match line.kind {
+                LineKind::Answer | LineKind::Tool => t.text,
+                LineKind::Output | LineKind::Muted => t.muted,
+                LineKind::Error => t.danger,
+            };
+            let name = format!("dispatch-line-{pane_id}-{at}");
+            let row = div()
+                .id(ElementId::Name(SharedString::from(name.clone())))
+                .driver_id(|| name)
+                .text_color(gpui::rgb(colour))
+                .child(line.text);
+            let Some(entry) = line.entry else {
+                rows.push(row.into_any_element());
+                continue;
+            };
+            let run = run.clone();
+            let row = on_press(row.cursor_pointer(), cx, move |this, _, _| {
+                this.toggle_transcript_entry(&run, &entry);
+            });
+            rows.push(row.into_any_element());
+        }
+        rows
+    }
+
+    /// Expands the output of tool call `id` in run `run`'s transcript, or
+    /// collapses it again.
+    fn toggle_transcript_entry(&mut self, run: &(HostKey, String), id: &str) {
+        if let Some(transcript) = self.transcripts.get_mut(run) {
+            transcript.toggle(id);
+        }
+    }
+
     /// The stats line pane `pane_id` draws for the run it follows.
     #[must_use]
     pub fn dispatch_view_stats(&self, pane_id: &str) -> Option<String> {
@@ -676,15 +737,20 @@ impl RootView {
     }
 
     /// The log lines pane `pane_id` draws for the run it follows, oldest
-    /// first.
+    /// first: the transcript's once one is held, else the recent actions.
     #[must_use]
     pub fn dispatch_view_lines(&self, pane_id: &str) -> Vec<String> {
         let Some((host, run_id)) = self.pane_run(pane_id) else {
             return Vec::new();
         };
-        match self.run_shown(&host, &run_id) {
-            RunShown::Live(run) | RunShown::Ended(run) => run.recent_actions.clone(),
-            RunShown::Gone => Vec::new(),
+        let held = self.transcripts.get(&(host.clone(), run_id.clone()));
+        match (self.run_shown(&host, &run_id), held) {
+            (RunShown::Gone, _) => Vec::new(),
+            (_, Some(transcript)) => transcript_lines(transcript)
+                .into_iter()
+                .map(|line| line.text)
+                .collect(),
+            (RunShown::Live(run) | RunShown::Ended(run), None) => run.recent_actions.clone(),
         }
     }
 

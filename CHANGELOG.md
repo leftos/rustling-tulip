@@ -8,6 +8,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - A dispatch run sits indented under the session that started it in the sidebar, and a chevron on that session's row folds its runs away.
 - A setting in Settings › General decides whether the first click on a pane that isn't focused also acts in it (on by default) or only focuses it.
+- A pane following a dispatch run shows its transcript the way Claude Code's terminal does: its replies, each tool call and the tool's output, which a click expands.
 
 ### Fixed
 

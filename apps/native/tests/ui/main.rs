@@ -96,6 +96,7 @@ mod ui_theme;
 mod ui_themes;
 mod ui_themes_edit;
 mod ui_toasts;
+mod ui_transcript;
 mod ui_update;
 mod ui_viewer;
 mod ui_viewer_md;
