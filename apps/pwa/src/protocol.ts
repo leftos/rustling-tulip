@@ -713,6 +713,47 @@ export interface HostRebind {
   new_id: string;
 }
 
+/**
+ * One subagent a session's agent started, as its host session's
+ * [`SessionSnapshot::subagents`] lists it.
+ */
+export interface SubagentSnapshot {
+  /** The id the agent's own transcript file is named by: `a` and hex digits. */
+  agent_id: string;
+  /**
+   * The id of the agent that started it; `None` for one the session's main
+   * conversation started. A daemon that predates the field sends none.
+   */
+  parent_agent_id?: string | null;
+  /**
+   * How deep it sits under its host: 1 for one the main conversation
+   * started. A daemon that predates the field sends 0.
+   */
+  depth?: number;
+  /** The subagent type it was started as. `None` until known. */
+  agent_type?: string | null;
+  /** The description its launcher gave it. `None` until known. */
+  description?: string | null;
+  /** The model it runs on. `None` until known. */
+  model?: string | null;
+  /** The effort level it runs at. `None` until known. */
+  effort?: string | null;
+  /**
+   * Where it is in its run. A state this build does not know reads as
+   * [`AgentState::Unknown`].
+   */
+  state?: AgentState;
+  /**
+   * How it ended, as its agent's plugin words it. `None` while it runs and
+   * for a run whose end is not known.
+   */
+  end_status?: string | null;
+  /** When it was started. `None` when not known. */
+  started_at?: string | null;
+  /** When it finished or failed. `None` while it runs and when not known. */
+  finished_at?: string | null;
+}
+
 export interface SessionSnapshot {
   id: string;
   label: string;
@@ -843,6 +884,12 @@ export interface SessionSnapshot {
    * conversation is not known.
    */
   conversation_id?: string | null;
+  /**
+   * The session's subagents, in tree order: each first-layer subagent,
+   * oldest first, followed by its subtree. Empty for a session with none,
+   * and from a daemon that predates the field.
+   */
+  subagents?: SubagentSnapshot[];
   /**
    * True when the user asked that this session not count as busy (a dev
    * server, a watcher): clients leave it out of their busy counts and
@@ -1730,7 +1777,12 @@ export type GridNode =
  */
 export type PaneFollow =
   /** The live view of a dispatch run, by its run id. */
-  | { kind: "dispatch_run"; run_id: string };
+  | { kind: "dispatch_run"; run_id: string }
+  /**
+   * The read-only view of one subagent of the session `session_id`: the
+   * agent `agent_id` it started.
+   */
+  | { kind: "subagent"; session_id: string; agent_id: string };
 
 /**
  * What a transcript follow reads: the source whose [`ChatEntry`] log a
@@ -1738,7 +1790,12 @@ export type PaneFollow =
  */
 export type TranscriptSource =
   /** The transcript of a dispatch run, by its run id. */
-  | { kind: "dispatch_run"; run_id: string };
+  | { kind: "dispatch_run"; run_id: string }
+  /**
+   * The transcript of one subagent of the session `session_id`, by the
+   * agent `agent_id` it started.
+   */
+  | { kind: "subagent"; session_id: string; agent_id: string };
 
 /**
  * Which side of a [`SplitPane`](ClientMessage::SplitPane) the newly created

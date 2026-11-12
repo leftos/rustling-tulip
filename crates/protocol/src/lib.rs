@@ -960,6 +960,48 @@ pub struct HostRebind {
     pub new_id: String,
 }
 
+/// One subagent a session's agent started, as its host session's
+/// [`SessionSnapshot::subagents`] lists it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentSnapshot {
+    /// The id the agent's own transcript file is named by: `a` and hex digits.
+    pub agent_id: String,
+    /// The id of the agent that started it; `None` for one the session's main
+    /// conversation started. A daemon that predates the field sends none.
+    #[serde(default)]
+    pub parent_agent_id: Option<String>,
+    /// How deep it sits under its host: 1 for one the main conversation
+    /// started. A daemon that predates the field sends 0.
+    #[serde(default)]
+    pub depth: u8,
+    /// The subagent type it was started as. `None` until known.
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    /// The description its launcher gave it. `None` until known.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The model it runs on. `None` until known.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The effort level it runs at. `None` until known.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Where it is in its run. A state this build does not know reads as
+    /// [`AgentState::Unknown`].
+    #[serde(default)]
+    pub state: AgentState,
+    /// How it ended, as its agent's plugin words it. `None` while it runs and
+    /// for a run whose end is not known.
+    #[serde(default)]
+    pub end_status: Option<String>,
+    /// When it was started. `None` when not known.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// When it finished or failed. `None` while it runs and when not known.
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -1082,6 +1124,11 @@ pub struct SessionSnapshot {
     /// conversation is not known.
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// The session's subagents, in tree order: each first-layer subagent,
+    /// oldest first, followed by its subtree. Empty for a session with none,
+    /// and from a daemon that predates the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagents: Vec<SubagentSnapshot>,
     /// True when the user asked that this session not count as busy (a dev
     /// server, a watcher): clients leave it out of their busy counts and
     /// attention highlight. It still raises notifications. Set via
@@ -1510,7 +1557,7 @@ pub enum AgentKind {
 }
 
 /// Where an [`AgentNode`] is in its run.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     Running,
@@ -1518,6 +1565,7 @@ pub enum AgentState {
     Finished,
     Failed,
     /// Forward-compat fallback: a state the current build does not know.
+    #[default]
     #[serde(other)]
     Unknown,
 }
@@ -2396,6 +2444,12 @@ pub enum GridNode {
 pub enum PaneFollow {
     /// The live view of a dispatch run, by its run id.
     DispatchRun { run_id: String },
+    /// The read-only view of one subagent of the session `session_id`: the
+    /// agent `agent_id` it started.
+    Subagent {
+        session_id: String,
+        agent_id: String,
+    },
     /// A follow kind this build does not know (a newer client's). It is written back as `{"kind":"unknown"}`, so the newer follow's fields are lost.
     #[serde(other)]
     Unknown,
@@ -2408,6 +2462,12 @@ pub enum PaneFollow {
 pub enum TranscriptSource {
     /// The transcript of a dispatch run, by its run id.
     DispatchRun { run_id: String },
+    /// The transcript of one subagent of the session `session_id`, by the
+    /// agent `agent_id` it started.
+    Subagent {
+        session_id: String,
+        agent_id: String,
+    },
     /// A source this build does not know (a newer peer's).
     #[serde(other)]
     Unknown,
@@ -8454,7 +8514,7 @@ mod tests {
     #[test]
     fn unknown_pane_follow_kind_decodes_as_unknown() {
         let node: GridNode = serde_json::from_str(
-            r#"{"kind":"pane","pane_id":"p1","follow":{"kind":"subagent","id":"x"}}"#,
+            r#"{"kind":"pane","pane_id":"p1","follow":{"kind":"hologram","id":"x"}}"#,
         )
         .expect("a pane with an unknown follow kind still decodes");
         let GridNode::Pane {
@@ -8470,6 +8530,21 @@ mod tests {
             r#"{"kind":"unknown"}"#,
             "an unknown follow is written back by its kind alone, losing a newer follow's fields"
         );
+    }
+
+    #[test]
+    fn pane_follow_subagent_round_trips() {
+        let follow = PaneFollow::Subagent {
+            session_id: "s1".to_owned(),
+            agent_id: "a1b2".to_owned(),
+        };
+        let json = serde_json::to_string(&follow).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"kind":"subagent","session_id":"s1","agent_id":"a1b2"}"#
+        );
+        let back: PaneFollow = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, follow);
     }
 
     #[test]
@@ -15113,6 +15188,96 @@ mod tests {
         assert!(back.background, "the flag round-trips");
     }
 
+    /// A subagent snapshot with its id, depth and state set and nothing else.
+    fn listed_subagent(agent_id: &str, depth: u8) -> SubagentSnapshot {
+        SubagentSnapshot {
+            agent_id: agent_id.to_owned(),
+            parent_agent_id: None,
+            depth,
+            agent_type: None,
+            description: None,
+            model: None,
+            effort: None,
+            state: AgentState::Running,
+            end_status: None,
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn a_full_subagent_snapshot_round_trips() {
+        let subagent = SubagentSnapshot {
+            agent_id: "a1b2".to_owned(),
+            parent_agent_id: Some("a0".to_owned()),
+            depth: 2,
+            agent_type: Some("Explore".to_owned()),
+            description: Some("Map the gate".to_owned()),
+            model: Some("opus".to_owned()),
+            effort: Some("high".to_owned()),
+            state: AgentState::Running,
+            end_status: Some("completed".to_owned()),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+        };
+        let json = serde_json::to_value(&subagent).expect("encode");
+        for field in [
+            "agent_id",
+            "parent_agent_id",
+            "depth",
+            "agent_type",
+            "description",
+            "model",
+            "effort",
+            "state",
+            "end_status",
+            "started_at",
+            "finished_at",
+        ] {
+            assert!(json.get(field).is_some(), "{field} is on the wire: {json}");
+        }
+        assert_eq!(json.get("state"), Some(&serde_json::json!("running")));
+        let back: SubagentSnapshot = serde_json::from_value(json).expect("decode");
+        assert_eq!(back, subagent, "every field round-trips");
+    }
+
+    #[test]
+    fn a_session_snapshot_without_subagents_decodes_with_an_empty_list() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        assert!(
+            snapshot.subagents.is_empty(),
+            "a snapshot from before the field lists no subagents"
+        );
+    }
+
+    #[test]
+    fn an_empty_subagent_list_is_left_out_of_a_session_snapshot() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        let json = serde_json::to_value(SessionSnapshot {
+            subagents: Vec::new(),
+            ..snapshot
+        })
+        .expect("encode");
+        assert!(json.get("subagents").is_none(), "{json}");
+
+        let listed = vec![listed_subagent("a1", 1), listed_subagent("a2", 2)];
+        let json = serde_json::to_value(SessionSnapshot {
+            subagents: listed.clone(),
+            ..labelled(SessionStatus::Working)
+        })
+        .expect("encode");
+        assert_eq!(
+            json.get("subagents")
+                .and_then(|list| list.as_array().map(Vec::len)),
+            Some(2),
+            "{json}"
+        );
+        let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
+        assert_eq!(back.subagents, listed, "tree order round-trips");
+    }
+
     #[test]
     fn an_empty_resumed_from_stays_off_the_wire_and_a_list_round_trips() {
         let snapshot: SessionSnapshot =
@@ -16390,9 +16555,24 @@ mod tests {
     }
 
     #[test]
+    fn transcript_source_subagent_round_trips() {
+        let source = TranscriptSource::Subagent {
+            session_id: "s1".to_string(),
+            agent_id: "a1b2".to_string(),
+        };
+        let json = serde_json::to_string(&source).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"kind":"subagent","session_id":"s1","agent_id":"a1b2"}"#
+        );
+        let back: TranscriptSource = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, source);
+    }
+
+    #[test]
     fn an_unknown_transcript_source_decodes_as_unknown() {
         let msg: ClientMessage = serde_json::from_str(
-            r#"{"type":"unfollow_transcript","source":{"kind":"subagent","agent_id":"a"}}"#,
+            r#"{"type":"unfollow_transcript","source":{"kind":"hologram","agent_id":"a"}}"#,
         )
         .expect("an unknown source decodes in place");
         assert!(matches!(

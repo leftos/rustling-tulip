@@ -17,7 +17,7 @@ use crate::termstate::{self, BracketedPasteTracker};
 use chrono::{DateTime, Utc};
 use protocol::{
     AgentId, AppearanceOverrides, PendingInput, SessionKind, SessionMember, SessionMetrics,
-    SessionMode, SessionRole, SessionSnapshot, SessionStatus, SpawnConfig,
+    SessionMode, SessionRole, SessionSnapshot, SessionStatus, SpawnConfig, SubagentSnapshot,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -313,6 +313,11 @@ pub struct SessionRecord {
     /// headless runs and sessions whose conversation is not known yet; a
     /// hook-reported id can fill it in.
     pub conversation_id: Option<String>,
+    /// The session's subagents, in tree order, as its snapshot lists them;
+    /// rebuilt from the agent's own files by the list service. Runtime-only:
+    /// the sidecar and the history entry carry none, so a daemon restart
+    /// starts with an empty list.
+    pub subagents: Vec<SubagentSnapshot>,
     /// True when the user asked that this session not count as busy. Set by
     /// `SetSessionBusyExcluded`, mirrored into the sidecar and copied into the
     /// session's history entry, so reattach, Resume and recovery keep it.
@@ -697,6 +702,7 @@ impl SessionRecord {
             is_inactive: self.is_inactive,
             worktree_paths: self.worktree_paths.clone(),
             conversation_id: self.conversation_id.clone(),
+            subagents: self.subagents.clone(),
             busy_excluded: self.busy_excluded,
             pending_input: self.pending_input.clone(),
             background: self.background
@@ -1977,6 +1983,7 @@ impl SessionRegistry {
     pub fn insert_orphan(&self, meta: &OrphanMeta) {
         let (default_label, user_label, label) = resolve_labels_from_meta(meta);
         let mut record = SessionRecord {
+            subagents: Vec::new(),
             dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: meta.session_id.clone(),
             label,
@@ -2069,6 +2076,7 @@ impl SessionRegistry {
             None
         };
         let mut record = SessionRecord {
+            subagents: Vec::new(),
             dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: meta.session_id.clone(),
             label,
@@ -2138,6 +2146,7 @@ impl SessionRegistry {
     pub fn insert_abandoned(&self, meta: &OrphanMeta) {
         let (default_label, user_label, label) = resolve_labels_from_meta(meta);
         let mut record = SessionRecord {
+            subagents: Vec::new(),
             dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: meta.session_id.clone(),
             label,
@@ -2237,6 +2246,7 @@ mod tests {
     fn record(id: &str) -> SessionRecord {
         SessionRecord {
             dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
+            subagents: Vec::new(),
             id: id.to_string(),
             label: id.to_string(),
             default_label: id.to_string(),
@@ -3422,6 +3432,46 @@ mod tests {
             rec.snapshot().status_label,
             protocol::StatusLabel::Background
         );
+    }
+
+    #[test]
+    fn a_record_with_subagents_snapshots_them_and_its_sidecar_carries_none() {
+        use crate::history::test_support::{record, scratch_dirs, write_meta_for};
+        let dirs = scratch_dirs("sidecar-subagents");
+        write_meta_for(&dirs, "s1");
+        let list = vec![
+            SubagentSnapshot {
+                agent_id: "a1".to_owned(),
+                depth: 1,
+                state: protocol::AgentState::Running,
+                ..SubagentSnapshot::default()
+            },
+            SubagentSnapshot {
+                agent_id: "a2".to_owned(),
+                parent_agent_id: Some("a1".to_owned()),
+                depth: 2,
+                ..SubagentSnapshot::default()
+            },
+        ];
+        let mut rec = record("s1", SessionMode::Interactive);
+        rec.subagents.clone_from(&list);
+        assert_eq!(
+            rec.snapshot().subagents,
+            list,
+            "the snapshot carries the list"
+        );
+
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(rec);
+        registry.sync_sidecar("s1");
+        let path = dirs.sessions_dir.join("s1").join("meta.json");
+        let bytes = std::fs::read(&path).expect("read the sidecar");
+        let sidecar: serde_json::Value = serde_json::from_slice(&bytes).expect("a JSON sidecar");
+        assert!(
+            sidecar.get("subagents").is_none(),
+            "the sidecar carries no list: {sidecar}"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]

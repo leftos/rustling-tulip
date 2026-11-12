@@ -326,6 +326,7 @@ mod tests {
 
     fn test_record(id: &str, status: SessionStatus, is_abandoned: bool) -> SessionRecord {
         SessionRecord {
+            subagents: Vec::new(),
             dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
             id: id.to_string(),
             label: id.to_string(),
