@@ -27,6 +27,10 @@ pub(crate) struct HeaderFit {
     /// Each button of the cluster that moves (Pop out to the last prompt
     /// arrow), in header order; a segmented control counts as one item.
     pub(crate) cluster: Vec<f32>,
+    /// Each item that stays drawn beside the cluster or the ⋯ button
+    /// however narrow the header (a followed dispatch run's Stop), in
+    /// header order.
+    pub(crate) fixed: Vec<f32>,
     /// Close's width.
     pub(crate) close: f32,
 }
@@ -48,16 +52,17 @@ fn row_width(items: &[f32]) -> f32 {
 const SPACER: f32 = 0.0;
 
 /// The width a header needs to show everything inline with the title at
-/// [`TITLE_MIN`]: padding, glyph, title, chips, the spacer, the cluster and
-/// Close, a [`GAP`] between each two items.
+/// [`TITLE_MIN`]: padding, glyph, title, chips, the spacer, the fixed items,
+/// the cluster and Close, a [`GAP`] between each two items.
 pub(crate) fn inline_width(fit: &HeaderFit) -> f32 {
-    let mut items = Vec::with_capacity(fit.chips.len() + fit.cluster.len() + 4);
+    let mut items = Vec::with_capacity(fit.chips.len() + fit.cluster.len() + fit.fixed.len() + 4);
     if fit.glyph > 0.0 {
         items.push(fit.glyph);
     }
     items.push(TITLE_MIN);
     items.extend(&fit.chips);
     items.push(SPACER);
+    items.extend(&fit.fixed);
     items.extend(&fit.cluster);
     items.push(fit.close);
     PAD_LEFT + row_width(&items) + PAD_RIGHT
@@ -72,18 +77,19 @@ pub(crate) fn collapses(fit: &HeaderFit) -> bool {
 
 /// Whether the header's row holds every chip at its floor, `floor` or the
 /// chip's own width when that is less, beside the parts that never shrink:
-/// padding, glyph, the title shrunk to nothing, the spacer, the cluster or,
-/// when the header [`collapses`], the ⋯ button `overflow`, and Close, a
-/// [`GAP`] between each two items. When it does not, the chips shrink past
-/// their floor, as far as nothing.
+/// padding, glyph, the title shrunk to nothing, the spacer, the fixed
+/// items, the cluster or, when the header [`collapses`], the ⋯ button
+/// `overflow`, and Close, a [`GAP`] between each two items. When it does
+/// not, the chips shrink past their floor, as far as nothing.
 pub(crate) fn floors_fit(fit: &HeaderFit, floor: f32, overflow: f32) -> bool {
-    let mut items = Vec::with_capacity(fit.chips.len() + fit.cluster.len() + 4);
+    let mut items = Vec::with_capacity(fit.chips.len() + fit.cluster.len() + fit.fixed.len() + 4);
     if fit.glyph > 0.0 {
         items.push(fit.glyph);
     }
     items.push(0.0);
     items.extend(fit.chips.iter().map(|chip| chip.min(floor)));
     items.push(SPACER);
+    items.extend(&fit.fixed);
     if collapses(fit) {
         items.push(overflow);
     } else {
@@ -105,8 +111,38 @@ mod tests {
             glyph: 14.0,
             chips: vec![20.0, 90.0],
             cluster: vec![54.0, 36.0, 190.0, 26.0, 26.0, 26.0, 26.0, 26.0],
+            fixed: Vec::new(),
             close: 26.0,
         }
+    }
+
+    #[test]
+    fn a_run_header_counts_its_chip_status_and_stop() {
+        // A pane that follows a dispatch run: no glyph, its chip and status
+        // as chips, split right and down, its Stop fixed, Close.
+        let bare = HeaderFit {
+            width: 0.0,
+            glyph: 0.0,
+            chips: Vec::new(),
+            cluster: vec![26.0, 26.0],
+            fixed: Vec::new(),
+            close: 26.0,
+        };
+        let mut run = HeaderFit {
+            chips: vec![110.0, 50.0],
+            fixed: vec![34.0],
+            ..bare.clone()
+        };
+        let need = inline_width(&run);
+        let added = 110.0 + 50.0 + 34.0 + 3.0 * GAP;
+        assert!(
+            (need - inline_width(&bare) - added).abs() < 0.01,
+            "the chip, the status and Stop each take their width and a gap"
+        );
+        run.width = need;
+        assert!(!collapses(&run));
+        run.width = need - 1.0;
+        assert!(collapses(&run), "a pixel short of them collapses");
     }
 
     #[test]

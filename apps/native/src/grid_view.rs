@@ -24,6 +24,7 @@ use crate::assets::SIDEBAR_MORE_ICON;
 use crate::chat::PaneView;
 use crate::chat_view::{AGENT_DOWN_TIP, COMPACT_TIP, compact_toggle, offers_chat, view_segment};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
+use crate::dispatch_view::{RunHeader, RunShown, run_header};
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
@@ -1768,7 +1769,7 @@ impl RootView {
                     let host = self.tabs.pane_host(tab_id, pane_id);
                     self.dispatch_body(pane_id, &host, run_id, cx)
                 }
-                PaneFollow::Unknown => follow_placeholder(follow, pane_id, cx),
+                PaneFollow::Unknown => follow_placeholder(pane_id, cx),
             };
             return match self.panes.get(pane_id) {
                 Some(slot) => {
@@ -2097,7 +2098,7 @@ impl RootView {
         let parts = self.popout_header_parts(pane_id);
         let mut title = header_title(
             pane_id,
-            pane_title(parts.as_ref(), None),
+            pane_title(parts.as_ref(), None, None),
             TipAt::Mouse,
             true,
             cx,
@@ -2148,10 +2149,8 @@ impl RootView {
         let menu_ids = (tab_id.to_owned(), pane_id.to_owned());
         let menu_session = session_id.map(str::to_owned);
         let name = format!("pane-header-{pane_id}");
-        let ghost = parts
-            .map(|parts| parts.title.as_str())
-            .or_else(|| follow.map(follow_label));
-        let label: SharedString = drag::ghost_label(ghost).into();
+        let named = pane_title(parts, follow, target.run);
+        let label: SharedString = drag::ghost_label(named.label()).into();
         let payload = DragPayload::Pane {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
@@ -2215,13 +2214,7 @@ impl RootView {
             .when(at == TipAt::BelowRow, |row| {
                 row.child(header_row_probe(pane_id))
             })
-            .children(header_title(
-                pane_id,
-                pane_title(parts, follow),
-                at,
-                floors,
-                cx,
-            ))
+            .children(header_title(pane_id, named, at, floors, cx))
             .child(div().flex_1())
             .children(controls)
             .children(buttons)
@@ -2596,15 +2589,18 @@ impl RootView {
             ..
         } = *target;
         let cluster = self.header_cluster(tab_id, pane_id, session_id, cx);
+        // A followed dispatch run's Stop is always in sight.
+        let run_stop = self.header_run_stop(tab_id, pane_id, at, cx);
         if let Some(menu_at) = self.header_overflow_anchor(target, &cluster, cx) {
             // How the session stands stays in sight beside ⋯: an armed
             // Stop's Confirm stop and Cancel, a stopped session's exit code.
-            let controls = if matches!(cluster.stop, Some(StopSlot::Armed | StopSlot::ExitCode(_)))
-            {
-                self.header_stop(pane_id, session_id, StopPlace::Grid, cx)
-            } else {
-                Vec::new()
-            };
+            let mut controls =
+                if matches!(cluster.stop, Some(StopSlot::Armed | StopSlot::ExitCode(_))) {
+                    self.header_stop(pane_id, session_id, StopPlace::Grid, cx)
+                } else {
+                    Vec::new()
+                };
+            controls.extend(run_stop);
             let buttons = vec![
                 overflow_button(tab_id, pane_id, menu_at, at, cx),
                 Self::close_button(tab_id, pane_id, session_id, at, cx),
@@ -2616,6 +2612,7 @@ impl RootView {
             .into_iter()
             .collect();
         controls.extend(self.header_stop(pane_id, session_id, StopPlace::Grid, cx));
+        controls.extend(run_stop);
         let buttons = self.pane_buttons(tab_id, pane_id, session_id, at, cx);
         (controls, buttons)
     }
@@ -2747,6 +2744,8 @@ impl RootView {
             session_id,
             parts,
             follow: self.tabs.pane_follow(tab_id, pane_id),
+            run: self.pane_run_shown(tab_id, pane_id),
+            run_stop: self.run_stop_labels(tab_id, pane_id),
             at,
             here,
         }
@@ -3227,17 +3226,30 @@ fn header_title(
         .min_w(px(0.0))
         .overflow_hidden()
         .whitespace_nowrap();
-    let PaneTitle::Session(parts) = named else {
-        let label = match named {
-            PaneTitle::Follow(follow) => follow_label(follow),
-            _ => drag::EMPTY_PANE_LABEL,
-        };
-        return vec![title.child(label).into_any_element()];
+    let strong = |title: Stateful<Div>, cx: &mut Context<RootView>| {
+        title
+            .text_size(ui_px(cx, TITLE_TEXT_SIZE))
+            .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+            .text_color(gpui::rgb(t.text))
     };
-    let title = title
-        .text_size(ui_px(cx, TITLE_TEXT_SIZE))
-        .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
-        .text_color(gpui::rgb(t.text));
+    let parts = match named {
+        PaneTitle::Session(parts) => parts,
+        PaneTitle::Follow(_, Some(run)) => {
+            let title = strong(title, cx);
+            let [chip, _] = run_chip_widths(&run, cx);
+            let floor = if floors {
+                (chip > CHIP_MIN_WIDTH).then_some(px(CHIP_MIN_WIDTH))
+            } else {
+                Some(px(0.0))
+            };
+            return crate::dispatch_view::run_title(pane_id, &run, title, floor, cx);
+        }
+        PaneTitle::Follow(follow, None) => {
+            return vec![title.child(follow_label(follow)).into_any_element()];
+        }
+        PaneTitle::Empty => return vec![title.child(drag::EMPTY_PANE_LABEL).into_any_element()],
+    };
+    let title = strong(title, cx);
     let status_id = format!("pane-status-{pane_id}");
     let status = div()
         .id(SharedString::from(status_id.clone()))
@@ -3350,7 +3362,7 @@ fn chip_text(
 
 /// `chip` shrinking before the title, down to `floor`; with no floor (a
 /// chip no wider than [`CHIP_MIN_WIDTH`]) it keeps its own width.
-fn give_way(chip: Stateful<Div>, floor: Option<Pixels>) -> Stateful<Div> {
+pub(crate) fn give_way(chip: Stateful<Div>, floor: Option<Pixels>) -> Stateful<Div> {
     let Some(floor) = floor else {
         return chip;
     };
@@ -3457,14 +3469,11 @@ pub(crate) fn muted_note(offset: i8, text: impl Into<SharedString>, t: &UiTheme)
         .child(text.into())
 }
 
-/// What a pane that follows something instead of a session draws: a muted
-/// note naming what it follows.
-fn follow_placeholder(follow: &PaneFollow, pane_id: &str, cx: &mut Context<RootView>) -> Div {
+/// What a pane that follows something this app does not know draws: a
+/// muted note saying it needs a newer app.
+fn follow_placeholder(pane_id: &str, cx: &mut Context<RootView>) -> Div {
     let t = theme(cx);
-    let text = match follow {
-        PaneFollow::DispatchRun { run_id } => format!("Following dispatch run {run_id}."),
-        PaneFollow::Unknown => "This pane needs a newer app.".to_owned(),
-    };
+    let text = "This pane needs a newer app.";
     muted_note(crate::fonts::ui_text_size(cx), text, &t)
         .driver_id(|| format!("pane-follow-{pane_id}"))
 }
@@ -3922,31 +3931,51 @@ struct HeaderTarget<'a> {
     parts: Option<&'a PaneHeaderParts>,
     /// What the pane follows instead of a session, for its title.
     follow: Option<&'a PaneFollow>,
+    /// What the pane shows of the dispatch run it follows.
+    run: Option<RunShown<'a>>,
+    /// The labels of the followed run's Stop, which stays in the row
+    /// however narrow the header.
+    run_stop: &'static [&'static str],
     at: TipAt,
     here: WindowId,
 }
 
 /// What a pane's header names: the session it shows with the parts it
 /// draws, what it follows instead, or nothing for an empty pane.
-#[derive(Clone, Copy)]
 enum PaneTitle<'a> {
     /// The session's parts.
     Session(&'a PaneHeaderParts),
-    /// What the pane follows instead of a session.
-    Follow(&'a PaneFollow),
+    /// What the pane follows instead of a session, with the header of the
+    /// dispatch run it follows when anything is known of the run.
+    Follow(&'a PaneFollow, Option<RunHeader>),
     /// An empty pane.
     Empty,
 }
 
-/// What a pane's header names, from the parts of the session it shows and
-/// what it follows instead.
+impl PaneTitle<'_> {
+    /// The text a drag of the pane carries: the session's or the run's
+    /// title, else what the pane follows; nothing for an empty pane.
+    fn label(&self) -> Option<&str> {
+        match self {
+            PaneTitle::Session(parts) => Some(parts.title.as_str()),
+            PaneTitle::Follow(_, Some(run)) => Some(run.title.as_str()),
+            PaneTitle::Follow(follow, None) => Some(follow_label(follow)),
+            PaneTitle::Empty => None,
+        }
+    }
+}
+
+/// What a pane's header names, from the parts of the session it shows,
+/// what it follows instead and what it shows of the dispatch run it
+/// follows.
 fn pane_title<'a>(
     parts: Option<&'a PaneHeaderParts>,
     follow: Option<&'a PaneFollow>,
+    run: Option<RunShown<'_>>,
 ) -> PaneTitle<'a> {
     match (parts, follow) {
         (Some(parts), _) => PaneTitle::Session(parts),
-        (None, Some(follow)) => PaneTitle::Follow(follow),
+        (None, Some(follow)) => PaneTitle::Follow(follow, run.and_then(|run| run_header(&run))),
         (None, None) => PaneTitle::Empty,
     }
 }
@@ -4151,16 +4180,37 @@ fn header_fit(
         // The card's border takes a pixel on each side.
         width: card.width - 2.0 * CARD_BORDER,
         glyph: target.parts.map_or(0.0, |_| GlyphSize::Leaf.px()),
-        chips: target.parts.map_or_else(Vec::new, |parts| {
-            parts
+        chips: match (target.parts, target.run.and_then(|run| run_header(&run))) {
+            (Some(parts), _) => parts
                 .chips
                 .iter()
                 .map(|chip| chip_width(chip, cx))
-                .collect()
-        }),
+                .collect(),
+            (None, Some(run)) => run_chip_widths(&run, cx).to_vec(),
+            (None, None) => Vec::new(),
+        },
         cluster: cluster_item_widths(cluster, cx),
+        fixed: target
+            .run_stop
+            .iter()
+            .map(|label| HeaderText { cx }.button(label))
+            .collect(),
         close: HEADER_BUTTON_SIZE,
     }
+}
+
+/// The widths a followed dispatch run's header gives its chips: the
+/// `DS · backend · tier n` chip and the status word, as `run_title` draws
+/// them.
+fn run_chip_widths(run: &RunHeader, cx: &App) -> [f32; 2] {
+    let chip = text_width(
+        cx,
+        &run.chip,
+        DEFAULT_FAMILY,
+        crate::fonts::mono_weight(),
+        ui_px(cx, crate::dispatch_view::CHIP_TEXT_SIZE),
+    );
+    [chip, HeaderText { cx }.ui(run.status)]
 }
 
 fn chip_width(chip: &HeaderChip, cx: &App) -> f32 {

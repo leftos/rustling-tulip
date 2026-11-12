@@ -536,6 +536,7 @@ impl RootView {
                     .and_then(|(_, session)| session);
                 if let Some(session_id) = session {
                     let host = self.slot_host(&pane_id);
+                    self.disarm_run_stop();
                     self.confirm.click(StopPlace::Grid, &host, &session_id);
                 }
             }

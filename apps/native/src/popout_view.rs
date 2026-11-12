@@ -401,6 +401,7 @@ impl RootView {
             match overlay {
                 Overlay::SessionMenu => {
                     self.confirm.disarm();
+                    self.disarm_run_stop();
                     self.menu = None;
                 }
                 Overlay::ShellMenu => self.shell_menu = None,

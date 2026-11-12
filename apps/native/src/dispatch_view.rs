@@ -6,14 +6,19 @@
 use std::collections::HashMap;
 
 use gpui::{
-    Context, Div, ElementId, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, div,
-    prelude::*, px,
+    AnyElement, Context, Div, ElementId, Pixels, ScrollHandle, ScrollWheelEvent, SharedString,
+    Stateful, StyledText, div, prelude::*, px,
 };
-use protocol::{DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, PaneFollow};
+use protocol::{ClientMessage, DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, PaneFollow};
 
 use crate::dashboard_rows::{format_cost, format_tokens};
+use crate::dispatch_menu::stop_tip;
 use crate::driver_id::DriverId as _;
+use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, ui_px_at, ui_text_size};
+use crate::grid_view::{TipAt, header_tipped};
+use crate::session_menu::{header_text_button, on_press};
+use crate::spawn_view::DISABLED_OPACITY;
 use crate::target::HostKey;
 use crate::ui_theme::theme;
 use crate::{RootView, UI_TEXT_SIZE, tabs};
@@ -44,6 +49,106 @@ pub(crate) fn stats_line(run: &DispatchRunSnapshot, ended: bool) -> String {
         out = format_tokens(run.metrics.output_tokens),
     )
 }
+
+/// What a pane header draws for the dispatch run its pane follows: the
+/// run's title, its `DS · backend · tier n` chip and its status word.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RunHeader {
+    pub title: String,
+    pub chip: String,
+    pub status: &'static str,
+}
+
+/// The header of a followed run as `shown` draws it; `None` when nothing is
+/// known of the run.
+pub(crate) fn run_header(shown: &RunShown<'_>) -> Option<RunHeader> {
+    let (run, ended) = match *shown {
+        RunShown::Live(run) => (run, false),
+        RunShown::Ended(run) => (run, true),
+        RunShown::Gone => return None,
+    };
+    let tier = run
+        .tier
+        .map(|tier| format!(" · tier {tier}"))
+        .unwrap_or_default();
+    let status = if ended {
+        "ended"
+    } else {
+        status_word(run.status)
+    };
+    Some(RunHeader {
+        title: run.title.clone(),
+        chip: format!("DS · {}{tier}", run.backend),
+        status,
+    })
+}
+
+/// The status a followed run's Stop goes by: the run's own, `Ended` once it
+/// has gone; `None` when nothing is known of the run.
+fn run_status(shown: &RunShown<'_>) -> Option<DispatchRunStatus> {
+    match *shown {
+        RunShown::Live(run) => Some(run.status),
+        RunShown::Ended(_) => Some(DispatchRunStatus::Ended),
+        RunShown::Gone => None,
+    }
+}
+
+/// The left of the header of pane `pane_id`, which follows a dispatch run:
+/// `title`, the header's styled title box, holding the run's title cut to
+/// fit, then the run's chip, which gives way with `…` down to `chip_floor`
+/// as a session's chips do, and its status word, kept whole.
+pub(crate) fn run_title(
+    pane_id: &str,
+    header: &RunHeader,
+    title: Stateful<Div>,
+    chip_floor: Option<Pixels>,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
+    let t = theme(cx);
+    let title_id = format!("dispatch-title-{pane_id}");
+    let text = SharedString::from(header.title.clone());
+    let name = div()
+        .driver_id(|| title_id.clone())
+        .relative()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .children(ellipsized(
+            &title_id,
+            text.clone(),
+            StyledText::new(text.clone()),
+        ));
+    let chip_id = format!("dispatch-chip-{pane_id}");
+    let chip = div()
+        .id(ElementId::Name(SharedString::from(chip_id.clone())))
+        .driver_id(|| chip_id.clone())
+        .flex()
+        .flex_none()
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .font_family(DEFAULT_FAMILY)
+        .font_weight(crate::fonts::mono_weight())
+        .text_size(ui_px_at(ui_text_size(cx), CHIP_TEXT_SIZE))
+        .text_color(gpui::rgb(t.subtle))
+        .child(truncating(&chip_id, StyledText::new(header.chip.clone())));
+    let chip = crate::grid_view::give_way(chip, chip_floor);
+    let status = div()
+        .driver_id(|| format!("dispatch-status-{pane_id}"))
+        .flex_none()
+        .whitespace_nowrap()
+        .text_color(gpui::rgb(t.muted))
+        .child(header.status);
+    vec![
+        title.child(name).into_any_element(),
+        chip.into_any_element(),
+        status.into_any_element(),
+    ]
+}
+
+/// The size of a followed run's chip in its pane header, as the sidebar's
+/// dispatch tag.
+pub(crate) const CHIP_TEXT_SIZE: f32 = 10.0;
 
 /// The last snapshot a client saw of a followed dispatch run, and whether
 /// the run has gone since.
@@ -108,7 +213,7 @@ impl KeptRuns {
 }
 
 /// What a pane that follows a dispatch run draws.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum RunShown<'a> {
     /// The run, still working or not yet re-listed.
     Live(&'a DispatchRunSnapshot),
@@ -287,6 +392,137 @@ impl RootView {
             if scroll.run != run {
                 *scroll = RunScroll::of(run);
             }
+        }
+    }
+
+    /// What pane `pane_id` of tab `tab_id` shows of the dispatch run it
+    /// follows; `None` when it follows no dispatch run.
+    pub(crate) fn pane_run_shown(&self, tab_id: &str, pane_id: &str) -> Option<RunShown<'_>> {
+        let Some(PaneFollow::DispatchRun { run_id }) = self.tabs.pane_follow(tab_id, pane_id)
+        else {
+            return None;
+        };
+        let host = self.tabs.pane_host(tab_id, pane_id);
+        Some(self.run_shown(&host, run_id))
+    }
+
+    /// The Stop of pane `pane_id` of tab `tab_id` when it follows a
+    /// dispatch run, its tip shown `at`; nothing otherwise.
+    pub(crate) fn header_run_stop(
+        &self,
+        tab_id: &str,
+        pane_id: &str,
+        at: TipAt,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(PaneFollow::DispatchRun { run_id }) = self.tabs.pane_follow(tab_id, pane_id)
+        else {
+            return Vec::new();
+        };
+        let host = self.tabs.pane_host(tab_id, pane_id);
+        self.run_stop_controls(pane_id, host, run_id, at, cx)
+    }
+
+    /// Pane `pane_id`'s Stop for run `run_id` of `host`, then, once
+    /// pressed, its Confirm stop and Cancel. Stop is drawn disabled, saying
+    /// why, while the run is stopping or has ended, and not at all when
+    /// nothing is known of the run. The buttons act on the press.
+    pub(crate) fn run_stop_controls(
+        &self,
+        pane_id: &str,
+        host: HostKey,
+        run_id: &str,
+        at: TipAt,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(status) = run_status(&self.run_shown(&host, run_id)) else {
+            return Vec::new();
+        };
+        let t = theme(cx);
+        let stop_id = format!("dispatch-stop-{pane_id}");
+        if let Some(tip) = stop_tip(status) {
+            let button = header_text_button(&stop_id, "Stop", t.muted, &t)
+                .opacity(DISABLED_OPACITY)
+                .cursor_default()
+                .hover(|style| style);
+            return vec![header_tipped(button, &stop_id, pane_id, tip, at, cx).into_any_element()];
+        }
+        let key = (host, run_id.to_owned());
+        if self.run_stop_armed.as_ref() != Some(&key) {
+            let button = header_text_button(&stop_id, "Stop", t.muted, &t);
+            return vec![
+                on_press(button, cx, move |this, _, _| this.arm_run_stop(key.clone()))
+                    .into_any_element(),
+            ];
+        }
+        let confirm = format!("dispatch-stop-confirm-{pane_id}");
+        let confirm = header_text_button(&confirm, "Confirm stop", t.danger, &t);
+        let cancel = format!("dispatch-stop-cancel-{pane_id}");
+        let cancel = header_text_button(&cancel, "Cancel", t.text, &t);
+        vec![
+            on_press(confirm, cx, move |this, _, _| this.confirm_run_stop(&key)).into_any_element(),
+            on_press(cancel, cx, |this, _, _| {
+                this.disarm_run_stop();
+            })
+            .into_any_element(),
+        ]
+    }
+
+    /// Arms the Stop of `run`, dropping a session's armed Stop.
+    fn arm_run_stop(&mut self, run: (HostKey, String)) {
+        self.confirm.disarm();
+        self.run_stop_armed = Some(run);
+    }
+
+    /// The confirm of `run`'s Stop: disarms, and asks the run's host to
+    /// stop it unless the run is now stopping or has ended.
+    fn confirm_run_stop(&mut self, run: &(HostKey, String)) {
+        self.disarm_run_stop();
+        let (host, run_id) = run;
+        let stoppable = run_status(&self.run_shown(host, run_id))
+            .is_some_and(|status| stop_tip(status).is_none());
+        if stoppable {
+            self.send_to(
+                host,
+                ClientMessage::StopDispatchRun {
+                    run_id: run_id.clone(),
+                    request_id: Some(crate::new_request_id()),
+                },
+            );
+        }
+    }
+
+    /// Drops an armed dispatch run Stop; returns whether one was armed for
+    /// a run that can still be stopped. An arm whose run has since begun
+    /// stopping, ended or gone draws no Confirm stop, so it goes silently.
+    pub(crate) fn disarm_run_stop(&mut self) -> bool {
+        let Some((host, run_id)) = self.run_stop_armed.take() else {
+            return false;
+        };
+        run_status(&self.run_shown(&host, &run_id)).is_some_and(|status| stop_tip(status).is_none())
+    }
+
+    /// The labels of the Stop pane `pane_id` of tab `tab_id` draws for the
+    /// dispatch run it follows, as [`Self::run_stop_controls`] draws them:
+    /// none when it follows no known run, Confirm stop and Cancel while
+    /// armed, else Stop.
+    pub(crate) fn run_stop_labels(&self, tab_id: &str, pane_id: &str) -> &'static [&'static str] {
+        let Some(PaneFollow::DispatchRun { run_id }) = self.tabs.pane_follow(tab_id, pane_id)
+        else {
+            return &[];
+        };
+        let host = self.tabs.pane_host(tab_id, pane_id);
+        let Some(status) = run_status(&self.run_shown(&host, run_id)) else {
+            return &[];
+        };
+        let armed = self
+            .run_stop_armed
+            .as_ref()
+            .is_some_and(|(on, id)| *on == host && id == run_id);
+        if armed && stop_tip(status).is_none() {
+            &["Confirm stop", "Cancel"]
+        } else {
+            &["Stop"]
         }
     }
 
@@ -470,6 +706,22 @@ impl RootView {
         self.run_scrolls.get(pane_id).map(|scroll| scroll.following)
     }
 
+    /// The title, chip and status pane `pane_id`'s header draws for the run
+    /// it follows; `None` when nothing is known of the run.
+    #[must_use]
+    pub fn dispatch_view_header(&self, pane_id: &str) -> Option<(String, String, String)> {
+        let (host, run_id) = self.pane_run(pane_id)?;
+        let header = run_header(&self.run_shown(&host, &run_id))?;
+        Some((header.title, header.chip, header.status.to_owned()))
+    }
+
+    /// Whether pane `pane_id`'s Stop waits for its confirm.
+    #[must_use]
+    pub fn dispatch_stop_armed(&self, pane_id: &str) -> bool {
+        self.pane_run(pane_id)
+            .is_some_and(|run| self.run_stop_armed.as_ref() == Some(&run))
+    }
+
     /// Whether a snapshot of run `run_id` of `host` is kept.
     #[must_use]
     pub fn kept_run(&self, host: &HostKey, run_id: &str) -> bool {
@@ -591,6 +843,31 @@ mod tests {
             ended: true,
         };
         assert_eq!(shown(None, Some(&keep)), RunShown::Ended(&keep.last));
+    }
+
+    #[test]
+    fn run_header_reads_title_chip_and_status() {
+        let mut tiered = working("r1");
+        tiered.tier = Some(2);
+        assert_eq!(
+            run_header(&RunShown::Live(&tiered)),
+            Some(RunHeader {
+                title: "title r1".to_owned(),
+                chip: "DS · backend-x · tier 2".to_owned(),
+                status: "working",
+            })
+        );
+        let plain = working("r1");
+        assert_eq!(
+            run_header(&RunShown::Live(&plain)).map(|header| header.chip),
+            Some("DS · backend-x".to_owned()),
+            "no tier, no tier part"
+        );
+        assert_eq!(
+            run_header(&RunShown::Ended(&plain)).map(|header| header.status),
+            Some("ended")
+        );
+        assert_eq!(run_header(&RunShown::Gone), None);
     }
 
     #[test]

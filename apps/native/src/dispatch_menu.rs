@@ -73,7 +73,7 @@ pub(crate) fn rows(status: DispatchRunStatus, stop_armed: bool) -> Vec<DispatchR
 
 /// Why Stop cannot be pressed for a run with `status`; `None` while the
 /// run can still be stopped.
-fn stop_tip(status: DispatchRunStatus) -> Option<&'static str> {
+pub(crate) fn stop_tip(status: DispatchRunStatus) -> Option<&'static str> {
     match status {
         DispatchRunStatus::Stopping => Some(STOPPING_TIP),
         DispatchRunStatus::Ended => Some(ENDED_TIP),
@@ -88,8 +88,8 @@ const STOP_SELECTOR: &str = "dispatch-menu-stop";
 const COPY_FOLDER_SELECTOR: &str = "dispatch-menu-copy-folder";
 const STOP_LABEL: &str = "Stop run";
 const STOP_CONFIRM_LABEL: &str = "Confirm: stop run…";
-const STOPPING_TIP: &str = "The run is already stopping";
-const ENDED_TIP: &str = "The run has ended";
+pub(crate) const STOPPING_TIP: &str = "The run is already stopping";
+pub(crate) const ENDED_TIP: &str = "The run has ended";
 
 impl RootView {
     /// Opens the menu of `host`'s dispatch run `run_id` at `at`, taking the

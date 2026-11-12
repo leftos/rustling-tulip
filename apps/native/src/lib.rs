@@ -1121,6 +1121,9 @@ pub struct RootView {
     confirm: HeaderStopConfirm,
     /// The last snapshot of each dispatch run a pane follows.
     kept_runs: dispatch_view::KeptRuns,
+    /// The dispatch run, by host and run id, whose pane header Stop waits
+    /// for its second click.
+    run_stop_armed: Option<(HostKey, String)>,
     /// The log scroll of each pane that follows a dispatch run, by pane id.
     run_scrolls: HashMap<String, dispatch_view::RunScroll>,
     /// The Detached banner's Stop all waiting for its second click.
@@ -1719,6 +1722,7 @@ impl RootView {
             presence_timer: None,
             confirm: HeaderStopConfirm::default(),
             kept_runs: dispatch_view::KeptRuns::default(),
+            run_stop_armed: None,
             run_scrolls: HashMap::new(),
             detached_stop_all: sidebar_view::DetachedStopAll::default(),
             duplicates: Duplicates::default(),
@@ -4502,6 +4506,7 @@ impl RootView {
         }
         self.drop_stale_divider_drag(drag_tree);
         self.confirm.disarm();
+        self.disarm_run_stop();
         self.follow_popout_moves(cx);
         self.after_tabs_change(window, cx);
         self.focus_moved_popped_panes(popped_focus, window, cx);
@@ -5829,7 +5834,8 @@ impl RootView {
         let tab_close = self.tabs.close_confirm.disarm();
         let remove_armed = self.repo_remove.disarm();
         let detached_stop_all = self.detached_stop_all.disarm();
-        self.confirm.disarm() || tab_close || remove_armed || detached_stop_all
+        let run_stop = self.disarm_run_stop();
+        self.confirm.disarm() || tab_close || remove_armed || detached_stop_all || run_stop
     }
 
     /// The keys a focused container row takes: Up and Down move the row
@@ -6140,7 +6146,8 @@ impl RootView {
     fn on_any_mouse_down(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let tab_close = self.tabs.close_confirm.disarm();
         let remove_armed = self.repo_remove.disarm();
-        if self.confirm.disarm() || tab_close || remove_armed {
+        let run_stop = self.disarm_run_stop();
+        if self.confirm.disarm() || tab_close || remove_armed || run_stop {
             cx.notify();
         }
     }

@@ -1180,6 +1180,7 @@ impl RootView {
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
         self.confirm.disarm();
+        self.disarm_run_stop();
         self.menu_focus.focus(window);
         cx.notify();
     }
@@ -1196,6 +1197,7 @@ impl RootView {
     /// window it was open in.
     pub(crate) fn close_session_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm.disarm();
+        self.disarm_run_stop();
         if self.menu.take().is_some() {
             let owner = self.overlays.owner(Overlay::SessionMenu);
             self.hand_back_focus(owner, window, cx);
@@ -2259,6 +2261,7 @@ impl RootView {
         menu.rename = None;
         menu.submenu = Submenu::None;
         self.confirm.disarm();
+        self.disarm_run_stop();
         self.menu_focus.focus(window);
         cx.notify();
     }
@@ -2271,6 +2274,7 @@ impl RootView {
         };
         menu.submenu = submenu;
         self.confirm.disarm();
+        self.disarm_run_stop();
         self.menu_focus.focus(window);
         cx.notify();
     }
@@ -2508,6 +2512,7 @@ impl RootView {
         }
         cx.notify();
         self.confirm.disarm();
+        self.disarm_run_stop();
         let resume_session = self.supports_resume_session(host);
         let shown = self.is_shown(host, session_id);
         match plan(action, &session, shown, resume_session) {
@@ -2608,6 +2613,7 @@ impl RootView {
             return;
         };
         self.confirm.disarm();
+        self.disarm_run_stop();
         match &placed.focus {
             PlacedFocus::NewTab => {
                 let create_request = crate::new_request_id();
@@ -3241,6 +3247,7 @@ impl RootView {
             );
             return vec![
                 on_press(button, cx, move |this, _, _| {
+                    this.disarm_run_stop();
                     this.confirm.click(place, &host, &id);
                 })
                 .into_any_element(),
@@ -3267,6 +3274,7 @@ impl RootView {
             .into_any_element(),
             on_press(cancel, cx, |this, _, _| {
                 this.confirm.disarm();
+                this.disarm_run_stop();
             })
             .into_any_element(),
         ]
@@ -3988,7 +3996,7 @@ fn on_action_press(
 }
 
 /// Runs `act` on a left press and keeps the press from the root.
-fn on_press(
+pub(crate) fn on_press(
     button: Stateful<Div>,
     cx: &mut Context<RootView>,
     act: impl Fn(&mut RootView, &mut Window, &mut Context<RootView>) + 'static,
@@ -4177,7 +4185,7 @@ pub(crate) fn menu_separator(t: &UiTheme) -> Div {
 }
 
 /// A small text button in a pane header.
-fn header_text_button(
+pub(crate) fn header_text_button(
     selector: &str,
     label: &'static str,
     color: u32,

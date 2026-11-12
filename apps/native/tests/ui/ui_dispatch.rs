@@ -5,11 +5,14 @@
 use crate::support;
 
 use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point, px};
-use protocol::{DaemonMessage, SplitDirection};
-use rustling_tulip_native::target::HostKey;
+use protocol::{
+    ChatScreen, ClientMessage, ComposerState, DaemonMessage, DispatchRunStatus, GridNode,
+    PaneFollow, SplitDirection,
+};
+use rustling_tulip_native::target::{HostKey, Target};
 use support::{
-    DispatchRunBuilder, Fixture, Harness, TestDir, dispatch_run, follow_pane, pane, repo, session,
-    split, tab,
+    DispatchRunBuilder, Fixture, Harness, REMOTE, TestDir, dispatch_run, follow_pane, pane, repo,
+    session, split, tab,
 };
 
 const STATS: &str = "working · $0.46 · 842k in · 3k out";
@@ -254,5 +257,245 @@ fn closing_the_follow_pane_forgets_the_run(cx: &mut TestAppContext) {
     assert!(
         !h.root(|root, _| root.kept_run(&HostKey::Local, "r1")),
         "a run no pane follows is forgotten"
+    );
+}
+
+/// The title, chip and status pane `f2`'s header draws for its run.
+fn header(h: &mut Harness<'_>) -> Option<(String, String, String)> {
+    h.root(|root, _| root.dispatch_view_header("f2"))
+}
+
+/// Whether pane `f2`'s Stop waits for its confirm.
+fn stop_armed(h: &mut Harness<'_>) -> bool {
+    h.root(|root, _| root.dispatch_stop_armed("f2"))
+}
+
+/// The run id and request id of each `StopDispatchRun` in `sent`.
+fn stops(sent: &[ClientMessage]) -> Vec<(String, Option<String>)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::StopDispatchRun { run_id, request_id } => {
+                Some((run_id.clone(), request_id.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn the_header_shows_the_runs_title_chip_and_status(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(cx, &dir);
+
+    assert_eq!(
+        header(&mut h),
+        Some((
+            "title r1".to_owned(),
+            "DS · backend-x · tier 2".to_owned(),
+            "working".to_owned()
+        ))
+    );
+    let title = h.bounds("dispatch-title-f2");
+    let chip = h.bounds("dispatch-chip-f2");
+    let status = h.bounds("dispatch-status-f2");
+    assert!(title.size.width > px(0.0), "the title is drawn");
+    assert!(chip.origin.x > title.origin.x, "the chip follows the title");
+    assert!(
+        status.origin.x > chip.origin.x,
+        "the status follows the chip"
+    );
+}
+
+#[gpui::test]
+fn stop_arms_then_sends_stop_dispatch_run(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(cx, &dir);
+    h.sent();
+
+    h.click_on("dispatch-stop-f2");
+    assert!(stops(&h.sent()).is_empty(), "the first press only arms");
+    assert!(stop_armed(&mut h), "Confirm stop is drawn");
+
+    h.click_on("dispatch-stop-confirm-f2");
+    let sent = stops(&h.sent());
+    assert!(
+        matches!(sent.as_slice(), [(run_id, Some(_))] if run_id == "r1"),
+        "the confirm sends one stop with a request id: {sent:?}"
+    );
+    assert!(!stop_armed(&mut h), "the confirm disarms");
+}
+
+#[gpui::test]
+fn cancel_disarms_the_run_stop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(cx, &dir);
+    h.sent();
+    h.click_on("dispatch-stop-f2");
+    assert!(stop_armed(&mut h), "precondition: armed");
+
+    h.click_on("dispatch-stop-cancel-f2");
+
+    assert!(!stop_armed(&mut h), "Cancel disarms");
+    assert!(stops(&h.sent()).is_empty(), "Cancel sends nothing");
+}
+
+#[gpui::test]
+fn stop_goes_to_a_remote_runs_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = fixture("r1");
+    fixture.tabs = vec![tab(
+        "t1",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            GridNode::Pane {
+                pane_id: "f2".to_owned(),
+                session_id: None,
+                host: Some(REMOTE.to_owned()),
+                follow: Some(PaneFollow::DispatchRun {
+                    run_id: "r1".to_owned(),
+                }),
+            },
+        ),
+    )];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let target = Target::tailnet(REMOTE, None);
+    h.host(&target)
+        .connect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.host(&target).send(DaemonMessage::DispatchRuns {
+        runs: vec![r1().build()],
+    });
+    h.sent();
+    h.host(&target).sent();
+
+    h.click_on("dispatch-stop-f2");
+    h.click_on("dispatch-stop-confirm-f2");
+
+    let remote = stops(&h.host(&target).sent());
+    assert!(
+        matches!(remote.as_slice(), [(run_id, Some(_))] if run_id == "r1"),
+        "the run's host gets the stop: {remote:?}"
+    );
+    assert!(stops(&h.sent()).is_empty(), "This PC gets no stop");
+}
+
+#[gpui::test]
+fn stop_is_disabled_while_the_run_is_stopping(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = connected(cx, &dir, "r1");
+    h.send(DaemonMessage::DispatchRuns {
+        runs: vec![r1().status(DispatchRunStatus::Stopping).build()],
+    });
+    h.sent();
+
+    h.click_on("dispatch-stop-f2");
+    h.click_on("dispatch-stop-f2");
+
+    assert!(!stop_armed(&mut h), "a stopping run's Stop never arms");
+    assert!(stops(&h.sent()).is_empty(), "nothing is sent");
+}
+
+#[gpui::test]
+fn a_failed_stop_shows_the_action_failed_notice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(cx, &dir);
+    h.sent();
+    h.click_on("dispatch-stop-f2");
+    h.click_on("dispatch-stop-confirm-f2");
+    let request_id = stops(&h.sent())
+        .into_iter()
+        .find_map(|(_, request_id)| request_id)
+        .expect("the confirm sends a stop with a request id");
+    assert!(
+        h.root(|root, _| root.action_failed().is_none()),
+        "precondition: no notice"
+    );
+
+    h.send(DaemonMessage::ActionFailed {
+        title: "Could not stop the run".to_owned(),
+        detail: "The run folder is gone.".to_owned(),
+        hint: None,
+        request_id: Some(request_id),
+    });
+
+    assert!(
+        h.root(|root, _| root.action_failed().is_some()),
+        "the failure shows as other action failures do"
+    );
+}
+
+#[gpui::test]
+fn escape_disarms_the_run_stop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(cx, &dir);
+    // The run's pane holds the keyboard.
+    h.click_on("pane-follow-f2");
+    h.click_on("dispatch-stop-f2");
+    assert!(stop_armed(&mut h), "precondition: armed");
+
+    h.keys("escape");
+
+    assert!(!stop_armed(&mut h), "Escape disarms");
+}
+
+#[gpui::test]
+fn escape_after_the_armed_run_ended_is_not_swallowed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(cx, &dir);
+    // Stacked, so each header is wide enough to keep its buttons.
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Vertical,
+                pane("p1", Some("s1")),
+                follow_pane("f2", "r1"),
+            ),
+        )],
+    });
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    // Pane `p1` shows `s1`'s chat, a turn running.
+    h.click_on("pane-view-chat-p1");
+    let load = h.sent().into_iter().find_map(|msg| match msg {
+        ClientMessage::LoadChat {
+            session_id,
+            request_id,
+        } if session_id == "s1" => request_id,
+        _ => None,
+    });
+    h.send(DaemonMessage::Chat {
+        session_id: "s1".to_owned(),
+        entries: Vec::new(),
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id: load,
+    });
+    h.send(DaemonMessage::ChatScreenChanged {
+        session_id: "s1".to_owned(),
+        screen: ChatScreen {
+            composer: ComposerState::Working,
+            prompt: None,
+        },
+    });
+    // The chat's composer holds the keyboard.
+    h.click_on("chat-composer");
+    h.click_on("dispatch-stop-f2");
+    assert!(stop_armed(&mut h), "precondition: armed");
+    h.send(DaemonMessage::DispatchRunRemoved {
+        run_id: "r1".to_owned(),
+    });
+    h.sent();
+
+    h.keys("escape");
+
+    assert!(!stop_armed(&mut h), "the stale arm is cleared");
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\x1b".to_vec(),
+        "the Escape goes on to interrupt the chat's turn"
     );
 }

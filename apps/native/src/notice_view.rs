@@ -534,6 +534,7 @@ impl RootView {
         };
         self.remember_quick_shell(request_id);
         self.confirm.disarm();
+        self.disarm_run_stop();
         for msg in placed.messages {
             self.tabs.note_layout_request(&msg);
             self.send_to(&destination(&msg, &placed.session_host), msg);
