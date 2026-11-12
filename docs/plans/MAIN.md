@@ -612,6 +612,9 @@
 - [ ] RT-1567 Show the ⋯ overflow and keep the title readable in a narrow run pane's header
 - [ ] RT-1569 Drop a dispatch run whose child reads unknown once its runner is dead
 - [ ] RT-1570 Read a dispatch run's last stream lines before dropping it
+- [ ] RT-1577 Polish found by the v0.13.0-alpha dispatch smoke run
+  - [ ] RT-1578 Name a tab that follows a dispatch run after its repo or run, not Tab N
+  - [ ] RT-1579 Show a nested dispatch run's cost in its Dashboard row
 
 ## macOS and Unix
 
