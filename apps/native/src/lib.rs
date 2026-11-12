@@ -4762,11 +4762,17 @@ impl RootView {
         self.set_conn(host, conn);
         // A sidebar leaf's drag outlives its host's connection, but the
         // marks it puts up follow it: an overlay over a pane goes once the
-        // leaf's host stops being online.
+        // leaf's host stops being online, and a run's leaf with it.
         if self.is_remote_offline(host)
             && matches!(
                 self.active_sidebar_drag(cx),
-                Some(DragPayload::Leaf { host: leaf_host, .. }) if leaf_host == host
+                Some(
+                    DragPayload::Leaf {
+                        host: leaf_host, ..
+                    } | DragPayload::Run {
+                        host: leaf_host, ..
+                    }
+                ) if leaf_host == host
             )
         {
             self.pane_drop = None;

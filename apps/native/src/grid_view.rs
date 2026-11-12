@@ -2412,7 +2412,9 @@ impl RootView {
         match drop {
             LeafDrop::Move(drop) => self.send_pane_move(&drop, cx),
             LeafDrop::Send { message, session } => {
-                if let Some(target) = tabs::bind_target(&message) {
+                // A followed run has no terminal, so there is no size for a
+                // bind to claim: only a placed session arms one.
+                if let (Some(session), Some(target)) = (session, tabs::bind_target(&message)) {
                     self.tabs.arm_bind(&session, target);
                 }
                 self.tabs.note_layout_request(&message);
@@ -2434,7 +2436,10 @@ impl RootView {
     ) -> Option<(String, PaneDropEdge, LeafDrop)> {
         let here = window.window_handle().window_id();
         let tab = self.window_tab(here)?;
-        if !matches!(payload, DragPayload::Pane { .. } | DragPayload::Leaf { .. }) {
+        if !matches!(
+            payload,
+            DragPayload::Pane { .. } | DragPayload::Leaf { .. } | DragPayload::Run { .. }
+        ) {
             return None;
         }
         let rect = grid_rect(self.layouts.grid(here)?);
@@ -2464,6 +2469,18 @@ impl RootView {
                 request_id,
                 source_online,
             )?;
+            return Some((pane_id, edge, drop));
+        }
+        if let DragPayload::Run { run_id, host } = payload {
+            if self.is_remote_offline(host) {
+                return None;
+            }
+            let target = drag::LeafTarget {
+                tab_id: &tab.id,
+                pane_id: &pane_id,
+                edge,
+            };
+            let (edge, drop) = drag::run_drop(self.tabs.tabs(), host, run_id, &target, request_id)?;
             return Some((pane_id, edge, drop));
         }
         let drop = drag::pane_drop(
@@ -2954,11 +2971,14 @@ impl RootView {
     }
 
     /// The pane the drop overlay is drawn on and the edge it shows, while a
-    /// pane or a sidebar leaf drag is under way.
+    /// pane drag, or a sidebar leaf or run drag, is under way.
     #[must_use]
     pub fn pane_drop_overlay(&self, cx: &App) -> Option<(String, PaneDropEdge)> {
         let dragging = self.active_pane_drag(cx).is_some()
-            || matches!(self.active_sidebar_drag(cx), Some(DragPayload::Leaf { .. }));
+            || matches!(
+                self.active_sidebar_drag(cx),
+                Some(DragPayload::Leaf { .. } | DragPayload::Run { .. })
+            );
         self.pane_drop.clone().filter(|_| dragging)
     }
 }

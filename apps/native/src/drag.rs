@@ -6,8 +6,8 @@
 //! sidebar leaf dropped on a pane or a pill does.
 
 use protocol::{
-    ClientMessage, ContainerRef, GridNode, PaneDropEdge, SessionSnapshot, SplitDirection,
-    SplitPlace, TabEntry,
+    ClientMessage, ContainerRef, GridNode, PaneDropEdge, PaneFollow, SessionSnapshot,
+    SplitDirection, SplitPlace, TabEntry,
 };
 
 use crate::sidebar::{Container, ContainerKind, LeafKind, can_attach};
@@ -51,6 +51,8 @@ pub enum DragPayload {
         container_id: String,
         host: HostKey,
     },
+    /// A dispatch run's sidebar leaf: its run id and the host that lists it.
+    Run { run_id: String, host: HostKey },
 }
 
 /// Which half of a row or pill a pointer points at.
@@ -528,6 +530,8 @@ pub fn sidebar_reorder(
                 .collect();
             reorder_sessions(&ids, container_id, session_id, target, side)
         }
+        // Anything else sends nothing: a dispatch run's leaf has no place in
+        // a session order, whatever row it is over.
         _ => None,
     }
 }
@@ -658,11 +662,12 @@ pub enum LeafDrop {
     /// would, with that move's undo entry.
     Move(PaneDrop),
     /// An unbound leaf: this message places its session, with no undo, as
-    /// a click on the leaf places it. `session` is the one it places, which
-    /// claims the pane's size when its bind arrives.
+    /// a click on the leaf places it. `session` is the session it places,
+    /// which claims the pane's size when its bind arrives; `None` for a
+    /// followed run, which has no terminal to size.
     Send {
         message: Box<ClientMessage>,
-        session: SessionRef,
+        session: Option<SessionRef>,
     },
 }
 
@@ -787,7 +792,7 @@ fn unbound_drop(
             PaneDropEdge::Replace,
             LeafDrop::Send {
                 message: Box::new(message),
-                session: session.clone(),
+                session: Some(session.clone()),
             },
         ));
     };
@@ -806,7 +811,71 @@ fn unbound_drop(
         edge,
         LeafDrop::Send {
             message: Box::new(message),
-            session: session.clone(),
+            session: Some(session.clone()),
+        },
+    ))
+}
+
+/// Where the dispatch run `run_id` of `host` dropped at `target` goes: an
+/// empty pane or the centre makes that pane follow the run in place of what
+/// it showed, and a half (or the outer edge on that side) of a pane that
+/// shows something splits it with a new pane following the run. Every drop
+/// starts a follow of its own, so two panes may follow one run. Either
+/// request names the run's host and goes to This PC, the layout home; none
+/// while the tab is gone or holds no such pane. The caller refuses a drop
+/// from a host that is not connected.
+#[must_use]
+pub fn run_drop(
+    tabs: &[TabEntry],
+    host: &HostKey,
+    run_id: &str,
+    target: &LeafTarget<'_>,
+    request_id: Option<String>,
+) -> Option<(PaneDropEdge, LeafDrop)> {
+    let grid = tabs.iter().find(|tab| tab.id == target.tab_id)?.grid()?;
+    if !contains_pane(grid, target.pane_id) {
+        return None;
+    }
+    let tab_id = target.tab_id.to_owned();
+    let pane_id = target.pane_id.to_owned();
+    let host = host.wire().map(str::to_owned);
+    let follow = Some(PaneFollow::DispatchRun {
+        run_id: run_id.to_owned(),
+    });
+    let edge = half_of(target.edge);
+    let split = split_of(edge).filter(|_| pane_is_bound(grid, target.pane_id));
+    let Some((direction, place)) = split else {
+        let message = ClientMessage::ReplacePaneSession {
+            tab_id,
+            pane_id,
+            session_id: None,
+            host,
+            follow,
+        };
+        return Some((
+            PaneDropEdge::Replace,
+            LeafDrop::Send {
+                message: Box::new(message),
+                session: None,
+            },
+        ));
+    };
+    let message = ClientMessage::SplitPane {
+        tab_id,
+        pane_id,
+        direction,
+        place,
+        touch: true,
+        new_session_id: None,
+        host,
+        request_id,
+        follow,
+    };
+    Some((
+        edge,
+        LeafDrop::Send {
+            message: Box::new(message),
+            session: None,
         },
     ))
 }
@@ -886,7 +955,7 @@ pub fn leaf_pill_drop(
             Placement::NewTab => None,
             placement @ Placement::Pane { .. } => Some(LeafDrop::Send {
                 message: Box::new(placement.message(hosted.host, &session.id, request_id)),
-                session: session.clone(),
+                session: Some(session.clone()),
             }),
         };
     };
@@ -1982,6 +2051,200 @@ mod tests {
             .is_none(),
             "a leaf dropped on its own pane does nothing"
         );
+    }
+
+    /// The empty pane `id` following dispatch run `run_id`.
+    fn following(id: &str, run_id: &str) -> GridNode {
+        GridNode::Pane {
+            pane_id: id.to_owned(),
+            session_id: None,
+            host: None,
+            follow: Some(PaneFollow::DispatchRun {
+                run_id: run_id.to_owned(),
+            }),
+        }
+    }
+
+    /// `t1` is the bound `a | b`, `t2` holds the empty pane `e`, `t3` holds
+    /// the follow pane `g` beside the empty `f`.
+    fn run_tabs() -> Vec<TabEntry> {
+        vec![
+            tab(
+                "t1",
+                &split(H, 0.5, pane("a", Some("s1")), pane("b", Some("s2"))),
+            ),
+            tab("t2", &pane("e", None)),
+            tab(
+                "t3",
+                &split(H, 0.5, following("g", "run-9"), pane("f", None)),
+            ),
+        ]
+    }
+
+    /// The dispatch run `run_id` of `host` dropped on `pane_id` of `tab_id`
+    /// at `edge`, with request `r`.
+    fn run_onto(
+        host: &HostKey,
+        run_id: &str,
+        tab_id: &str,
+        pane_id: &str,
+        edge: PaneDropEdge,
+    ) -> Option<(PaneDropEdge, LeafDrop)> {
+        run_drop(
+            &run_tabs(),
+            host,
+            run_id,
+            &onto(tab_id, pane_id, edge),
+            Some("r".to_owned()),
+        )
+    }
+
+    #[test]
+    fn run_dropped_on_a_bound_panes_half_edge_splits_it_with_the_follow() {
+        let (edge, message) = landed(run_onto(
+            &HostKey::Local,
+            "run-1",
+            "t1",
+            "b",
+            PaneDropEdge::Left,
+        ));
+        assert_eq!(edge, PaneDropEdge::Left);
+        assert_eq!(
+            message,
+            json!({
+                "type": "split_pane",
+                "tab_id": "t1",
+                "pane_id": "b",
+                "direction": "horizontal",
+                "place": "first",
+                "touch": true,
+                "new_session_id": null,
+                "request_id": "r",
+                "follow": {"kind": "dispatch_run", "run_id": "run-1"},
+            })
+        );
+    }
+
+    #[test]
+    fn run_dropped_on_a_panes_centre_follows_the_run_there() {
+        let (edge, message) = landed(run_onto(
+            &HostKey::Local,
+            "run-1",
+            "t1",
+            "a",
+            PaneDropEdge::Replace,
+        ));
+        assert_eq!(edge, PaneDropEdge::Replace);
+        assert_eq!(
+            message,
+            json!({
+                "type": "replace_pane_session",
+                "tab_id": "t1",
+                "pane_id": "a",
+                "session_id": null,
+                "follow": {"kind": "dispatch_run", "run_id": "run-1"},
+            })
+        );
+    }
+
+    #[test]
+    fn run_dropped_on_an_empty_pane_follows_the_run_there() {
+        for edge in [
+            PaneDropEdge::Left,
+            PaneDropEdge::Right,
+            PaneDropEdge::Top,
+            PaneDropEdge::Bottom,
+            PaneDropEdge::Replace,
+            PaneDropEdge::OuterRight,
+        ] {
+            let (landed_edge, message) =
+                landed(run_onto(&HostKey::Local, "run-1", "t2", "e", edge));
+            assert_eq!(
+                landed_edge,
+                PaneDropEdge::Replace,
+                "an empty pane takes the follow in place: {edge:?}"
+            );
+            assert_eq!(
+                message,
+                json!({
+                    "type": "replace_pane_session",
+                    "tab_id": "t2",
+                    "pane_id": "e",
+                    "session_id": null,
+                    "follow": {"kind": "dispatch_run", "run_id": "run-1"},
+                }),
+                "{edge:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_dropped_on_a_follow_pane_edge_splits_it() {
+        let (edge, message) = landed(run_onto(
+            &HostKey::Local,
+            "run-1",
+            "t3",
+            "g",
+            PaneDropEdge::Right,
+        ));
+        assert_eq!(edge, PaneDropEdge::Right, "a follow pane is bound");
+        assert_eq!(
+            message,
+            json!({
+                "type": "split_pane",
+                "tab_id": "t3",
+                "pane_id": "g",
+                "direction": "horizontal",
+                "place": "second",
+                "touch": true,
+                "new_session_id": null,
+                "request_id": "r",
+                "follow": {"kind": "dispatch_run", "run_id": "run-1"},
+            })
+        );
+    }
+
+    #[test]
+    fn run_dropped_on_a_missing_pane_does_nothing() {
+        assert!(
+            run_onto(&HostKey::Local, "run-1", "t1", "gone", PaneDropEdge::Left).is_none(),
+            "no such pane"
+        );
+        assert!(
+            run_onto(&HostKey::Local, "run-1", "gone", "a", PaneDropEdge::Left).is_none(),
+            "no such tab"
+        );
+    }
+
+    #[test]
+    fn run_drop_names_the_runs_host() {
+        let (_, message) = landed(run_onto(
+            &HostKey::Remote(BOX.to_owned()),
+            "run-1",
+            "t1",
+            "b",
+            PaneDropEdge::Left,
+        ));
+        assert_eq!(
+            message["host"].as_str(),
+            Some(BOX),
+            "the request names the run's host: {message}"
+        );
+    }
+
+    #[test]
+    fn a_run_payload_reorders_nothing() {
+        let repos = repos_view();
+        let payload = DragPayload::Run {
+            run_id: "d1".to_owned(),
+            host: HostKey::Local,
+        };
+        for row in [leaf_row("repo:r1", "a"), header("repo:r1")] {
+            assert!(
+                sidebar_reorder(&payload, &repos, &row, Side::After).is_none(),
+                "a run reorders nothing: {row:?}"
+            );
+        }
     }
 
     #[test]

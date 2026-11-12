@@ -10,11 +10,14 @@ use crate::support;
 
 use gpui::{Pixels, Point, TestAppContext, point, px};
 use protocol::{
-    ClientMessage, ContainerRef, DaemonMessage, GridNode, PaneDropEdge, SplitDirection, SplitPlace,
+    ClientMessage, ContainerRef, DaemonMessage, GridNode, PaneDropEdge, PaneFollow, SplitDirection,
+    SplitPlace,
 };
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{RootView, Side, SidebarRow};
-use support::{Fixture, Harness, REMOTE, TestDir, pane, repo, session, split, tab, workspace};
+use support::{
+    Fixture, Harness, REMOTE, TestDir, dispatch_run, pane, repo, session, split, tab, workspace,
+};
 
 /// Workspace `w1` (session `u`, shown in no pane); repos `r1` (sessions
 /// `a`, `b`) and `r2` (session `c`); the standalone shell `sh`, the folder
@@ -761,6 +764,137 @@ fn a_remote_leaf_dropped_on_an_empty_pane_fills_it_with_its_host(cx: &mut TestAp
         "the empty pane takes the remote session with its host: sent {sent:?}"
     );
     assert!(remote_placements(&mut h).is_empty());
+}
+
+/// Repo `r1` at `C:\r1` (sessions `a` and `b`), which the dispatch run `d1`
+/// works in a worktree of.
+fn runs_fixture() -> Fixture {
+    Fixture {
+        repos: vec![repo("r1", "C:\\r1")],
+        sessions: vec![
+            session("a").in_repo("r1").build(),
+            session("b").in_repo("r1").build(),
+        ],
+        ..Fixture::default()
+    }
+}
+
+/// The daemon's run list: run `d1` in a worktree of `r1`.
+fn runs_msg() -> DaemonMessage {
+    DaemonMessage::DispatchRuns {
+        runs: vec![
+            dispatch_run("d1")
+                .worktree("C:\\r1.wt\\a")
+                .main_checkout("C:\\r1")
+                .build(),
+        ],
+    }
+}
+
+/// A harness over [`runs_fixture`] whose daemon lists the run `d1` in `r1`
+/// and lays tab `t1` out as `grid`, with nothing sent left unread.
+fn run_beside<'a>(cx: &'a mut TestAppContext, dir: &TestDir, grid: &GridNode) -> Harness<'a> {
+    let mut fixture = runs_fixture();
+    fixture.tabs = vec![tab("t1", grid)];
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(runs_msg());
+    h.sent();
+    h
+}
+
+#[gpui::test]
+fn a_run_leaf_dropped_on_a_pane_edge_splits_it_following_the_run(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("a")),
+        pane("p2", Some("b")),
+    );
+    let mut h = run_beside(cx, &dir, &grid);
+
+    let to = at(&mut h, "p2", 0.1, 0.5);
+    drop_leaf(&mut h, "d1", to, ("p2", PaneDropEdge::Left));
+
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::SplitPane {
+                tab_id,
+                pane_id,
+                direction: SplitDirection::Horizontal,
+                place: SplitPlace::First,
+                touch: true,
+                new_session_id: None,
+                host: None,
+                request_id: Some(_),
+                follow: Some(PaneFollow::DispatchRun { run_id }),
+            }] if tab_id == "t1" && pane_id == "p2" && run_id == "d1"
+        ),
+        "the split makes a new pane follow the run: sent {sent:?}"
+    );
+    assert!(undo_messages(&mut h).is_empty(), "a follow records no undo");
+}
+
+#[gpui::test]
+fn a_run_leaf_dropped_on_an_empty_pane_follows_the_run_there(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("a")),
+        pane("p2", None),
+    );
+    let mut h = run_beside(cx, &dir, &grid);
+
+    let to = at(&mut h, "p2", 0.1, 0.5);
+    drop_leaf(&mut h, "d1", to, ("p2", PaneDropEdge::Replace));
+
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::ReplacePaneSession {
+                tab_id,
+                pane_id,
+                session_id: None,
+                host: None,
+                follow: Some(PaneFollow::DispatchRun { run_id }),
+            }] if tab_id == "t1" && pane_id == "p2" && run_id == "d1"
+        ),
+        "an empty pane takes the follow in place, whatever edge the pointer is on: sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_run_leaf_dropped_on_a_tab_pill_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = runs_fixture();
+    fixture.tabs = vec![
+        tab("t1", &pane("p1", Some("a"))),
+        tab("t2", &pane("p2", None)),
+    ];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(runs_msg());
+    h.sent();
+
+    let from = on_row(&mut h, "leaf-d1", 0.5);
+    let to = on_pill(&mut h, "t2", 0.5);
+    h.start_drag(from);
+    assert!(h.dragging(), "the run's leaf drags");
+    h.drag_to(to);
+    assert!(
+        h.root(|root, cx| root.pill_no_drop("t2", cx)),
+        "the pill shows its no-drop state for a run"
+    );
+    h.release(to);
+    assert!(!h.dragging(), "the release ends the drag");
+
+    assert!(
+        placements(&mut h).is_empty(),
+        "a tab pill takes no dispatch run"
+    );
 }
 
 #[gpui::test]

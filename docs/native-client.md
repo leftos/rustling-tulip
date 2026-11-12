@@ -411,7 +411,7 @@ The client sends no `SetPaneRatio` for a divider press that stays within 3 logic
 
 ## Drag model
 
-`apps/native/src/drag.rs` is the plain-Rust half of every drag. `DragPayload` is a `Pane`, a `Tab`, a `Container` or a `Leaf`. `drop_edge` maps the pointer's fraction of a pane to a `PaneDropEdge`: the outer band (`OUTER_BAND`, 0.12) on a side that touches the grid boundary (`tabs::outer_edges`, within 0.5 px), the nearer outer edge at a corner; the centre box (`CENTRE_LOW` 0.35 to `CENTRE_HIGH` 0.65) is `Replace`; otherwise the half on the nearer axis.
+`apps/native/src/drag.rs` is the plain-Rust half of every drag. `DragPayload` is a `Pane`, a `Tab`, a `Container`, a session `Leaf` or a dispatch run's `Run`. `drop_edge` maps the pointer's fraction of a pane to a `PaneDropEdge`: the outer band (`OUTER_BAND`, 0.12) on a side that touches the grid boundary (`tabs::outer_edges`, within 0.5 px), the nearer outer edge at a corner; the centre box (`CENTRE_LOW` 0.35 to `CENTRE_HIGH` 0.65) is `Replace`; otherwise the half on the nearer axis.
 
 `pane_drop` builds a `PaneDrop` with its undo label: `undo::SWAPPED_PANES` for a centre drop onto a pane that shows a session, in the same tab or another, `undo::MOVED_PANE` otherwise. Every edge or centre drop on a pane sets `MovePane.touch`, so the daemon counts the destination as arranged by hand; a pill drop and the pane menu's Move to ▸ tab do not (the daemon rebuilds both tabs).
 
@@ -741,7 +741,9 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
 
   A dispatch run's leaf (runtime tag `DS`, `LeafKind::Dispatch`) follows the same modes: under Busy only, a Starting or Working run shows and a Stopping or Ended run hides. A Starting, Working or Stopping run also marks its repo or workspace active. Runs sit after a container's sessions, newest first; a run in an unregistered folder gets a `Dir` container of its own. The tabs view lists a run in every tab with a pane following it (by the pane's host), and puts every host's other runs in Unbound, a remote one with its host chip.
 
-  A run leaf draws the `DS` tag and no tab pill or session chips, and dims with its own host. A click (`RootView::open_dispatch_run`) focuses the pane already following the run, else asks This PC's daemon for a new tab whose pane follows it (`CreateTab` with a `DispatchRun` follow naming the run's host). Drag and the right-click menu are still to land (`docs/plans/dispatch-follow.md`).
+  A run leaf draws the `DS` tag and no tab pill or session chips, and dims with its own host. A click (`RootView::open_dispatch_run`) focuses the pane already following the run, else asks This PC's daemon for a new tab whose pane follows it (`CreateTab` with a `DispatchRun` follow naming the run's host).
+
+  A run leaf drags as `DragPayload::Run` (not while its host is dimmed); `drag::run_drop`, the twin of `unbound_drop`, makes the same split-or-replace choice: a half edge of a pane that shows a session or follows a run splits it with a new pane following the run (`SplitPane` with the follow), and the centre, or any edge of an empty pane, makes that pane follow the run (`ReplacePaneSession` with the follow). A tab pill refuses a run, and a run is never in a reorder. The right-click menu is still to land (`docs/plans/dispatch-follow.md`).
 - **Sort repos**: the row after Sessions under repos (`settings-repo-sort-manual|active|needs-you`), saved as `general.repo_sort` (`"manual"`, `"active"`, `"needs_you"`; a missing key or an unknown value loads as `"needs_you"`, the default). The repos view sorts repos and workspaces together.
 
   Needs you on top puts those with a session in the Needs You list first (`needs_you::is_listed`: never a parked or abandoned session), then those with a live session, then the rest. Active first puts active ones, then the rest. Each group keeps the manual order, and shell, folder and Detached rows stay last. Manual keeps the manual order.

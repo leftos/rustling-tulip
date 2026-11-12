@@ -1505,12 +1505,19 @@ fn leaf_drag_row(
     // An offline host's leaf is as inert as its other dimmed rows: like an
     // SH or DIR header it neither drags nor takes a drop, so no drag starts
     // and no drop mark shows while the host is away.
-    // A dispatch run's leaf neither drags nor takes a drop.
     let is_session = leaf.kind == LeafKind::Session;
-    let payload = if ctx.dimmed.containers.contains(&container.key) || !is_session {
+    let dim_host = ctx.dimmed.hosts.contains(&leaf.host);
+    let payload = if ctx.dimmed.containers.contains(&container.key) || dim_host {
         None
     } else {
-        drag::leaf_payload(container, &session)
+        match leaf.kind {
+            LeafKind::Session => drag::leaf_payload(container, &session),
+            // A dispatch run's leaf drags its run, to a pane that follows it.
+            LeafKind::Dispatch => Some(DragPayload::Run {
+                run_id: leaf.id.clone(),
+                host: leaf.host.clone(),
+            }),
+        }
     };
     let dragged = payload.is_some() && ctx.dragged == payload;
     let line = ctx.mark_at(&target).map(|side| {
