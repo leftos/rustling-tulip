@@ -125,7 +125,7 @@ The views:
 - `spawn-hosts`: the spawn dialog over those two hosts with its closed Target field.
 - `open-shell`: the Open a shell dialog with a folder path too long for its field, scrolled to the caret at its end.
 - `safe-start`: the prompt a start after a crashed one raises, "The last start crashed" with Open tabs and Start without tabs, over the window with no tab drawn.
-- `dispatch`: the tulip tab split with a pane following a working dispatch run (header with its `DS` chip and Stop, stats line, recent actions), its `DS` leaf under the tulip repo.
+- `dispatch`: the tulip tab split with a pane following a working dispatch run (header with its `DS` chip and Stop, stats line, recent actions), its `DS` leaf under the tulip repo, one run nested under the "Petal footer polish" session and one unnested run, "Trim the dispatch log".
 - `panes-accent`: four panes in a 2x2 grid, the Theme pane focused, beside the Rose, Periwinkle and Lilac panes a chosen colour stores an accent and a frame for.
 - `panes-accent-chosen`: the same grid with the Periwinkle pane focused.
 - `settings-hosts`: Settings on the Claude page with the host selector showing This PC and a remote host on 0.9.0 wearing the Behind tag.
