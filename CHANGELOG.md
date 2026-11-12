@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking; looking at one clears it.
+
 ### Fixed
 
 - A phone alert no longer goes out, or counts in the badge, for a session closed a moment before.

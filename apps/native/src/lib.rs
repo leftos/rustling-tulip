@@ -1482,6 +1482,10 @@ impl RootView {
         cx.observe_window_activation(window, |root, window, cx| {
             if !window.is_window_active() {
                 root.set_link_mode(false, cx);
+            } else if let Some(id) = root.shown_session() {
+                // Coming back to the window shows its focused session: a
+                // turn that finished there while it was inactive is seen.
+                root.mark_session_seen(None, &id, cx);
             }
             root.dismiss_skipped_toasts(window.is_window_active(), cx);
             root.report_presence(window, cx);
@@ -2080,7 +2084,7 @@ impl RootView {
         if shown {
             self.popout_focused = Some(pane_id.to_owned());
             if let Some(session) = self.popout_focused_session() {
-                self.sidebar.mark_seen_on(&session.host, &session.id);
+                self.mark_session_seen(Some(&session.host), &session.id, cx);
             }
         } else if self.popout_focused.as_deref() == Some(pane_id) {
             self.popout_focused = None;
@@ -3791,7 +3795,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.sidebar.clear_attention_on(host, id);
-        self.sidebar.mark_seen_on(host, id);
+        self.mark_session_seen(Some(host), id, cx);
         let shown = SessionRef::new(host.clone(), id);
         if let Some(key) = self
             .popouts
@@ -4756,15 +4760,25 @@ impl RootView {
     /// You list re-arms the panel's repaint, so its cycle follows the
     /// youngest wait rather than the list as it stood when the timer was
     /// armed.
-    fn fold_sidebar(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
+    fn fold_sidebar(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        main_active: bool,
+        cx: &mut Context<Self>,
+    ) {
         let before = moves_needs_you(msg).then(|| self.needs_you_list());
-        let focused = self.shown_session();
+        // The main window's focused session is watched only while that
+        // window is active: a turn ending there while the owner is in
+        // another app, or the window is minimized, ends unseen.
+        let focused = self.shown_session().filter(|_| main_active);
         self.sidebar.set_focused_session(focused.as_deref());
         self.sidebar.apply(host, msg);
         // A session focused in a pop-out is shown too: a turn ending there
-        // is seen.
+        // is seen. `popout_focused` holds a terminal only while its pop-out
+        // window is active (`PopoutView::report_shown`).
         if let Some(session) = self.popout_focused_session() {
-            self.sidebar.mark_seen_on(&session.host, &session.id);
+            self.mark_session_seen(Some(&session.host), &session.id, cx);
         }
         self.prune_container_row_focus();
         self.prune_preselected_target();
@@ -4892,7 +4906,9 @@ impl RootView {
         // The sidebar takes the message before the panes do, so what a
         // snapshot changed is read from the old one.
         let (moved, exit_discard, finished) = self.before_fold(host, &msg);
-        self.fold_sidebar(host, &msg, cx);
+        // Windows deactivates a window it minimizes, so a minimized window
+        // watches no session.
+        self.fold_sidebar(host, &msg, window.is_window_active(), cx);
         self.record_host_session_count(host, &msg);
         if let Some(discard) = exit_discard {
             self.send_to(host, discard);

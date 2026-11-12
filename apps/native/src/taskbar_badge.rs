@@ -1,7 +1,8 @@
 //! The main window's taskbar badge: the App title count over every tab,
 //! drawn on Windows as a disc in the palette's danger colour with white
-//! digits on the window's taskbar button. Pop-out windows carry none, and
-//! other platforms draw none yet.
+//! digits on the window's taskbar button, or in its working blue for the
+//! sessions that finished unseen while nothing needs the owner. Pop-out
+//! windows carry none, and other platforms draw none yet.
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
@@ -9,8 +10,10 @@ use gpui::{App, Context, Window};
 use protocol::DaemonMessage;
 
 use crate::settings_view::TITLE_DEBOUNCE;
-use crate::tabs::{TabBadge, window_session_counts};
-use crate::ui_theme::theme;
+use crate::sidebar::CountMode;
+use crate::tabs::{TabBadge, TabCounts, window_session_counts};
+use crate::target::HostKey;
+use crate::ui_theme::{UiTheme, theme};
 use crate::{NetEvent, RootView};
 
 /// What the badge shows: its text, what a screen reader reads for it, and
@@ -119,6 +122,26 @@ pub(crate) fn moves_badge(event: &NetEvent) -> bool {
     }
 }
 
+/// The overlay `mode` shows for `counts`. In the Needs you mode, a session
+/// that needs the owner gets the danger disc; otherwise one that finished
+/// unseen gets the working blue one, as Windows shows one overlay per
+/// button. The Busy and Idle modes ignore finished sessions.
+pub(crate) fn overlay_for(counts: TabCounts, mode: CountMode, t: &UiTheme) -> Option<BadgeOverlay> {
+    let badge = counts.badge(mode).or_else(|| counts.finished_badge(mode))?;
+    let (n, what, colour) = match badge {
+        TabBadge::NeedsYou(1) => (1, "needs you", t.danger),
+        TabBadge::NeedsYou(n) => (n, "need you", t.danger),
+        TabBadge::Finished(n) => (n, "finished", t.working),
+        TabBadge::Busy { busy, .. } => (busy, "busy", t.danger),
+        TabBadge::Idle { idle, .. } => (idle, "idle", t.danger),
+    };
+    Some(BadgeOverlay {
+        text: overlay_text(n)?,
+        description: format!("{n} {what}"),
+        colour,
+    })
+}
+
 impl RootView {
     /// The badge the main window wants now: the App title count over every
     /// tab, each session once, none while the count is off or counts
@@ -128,18 +151,29 @@ impl RootView {
         if !title.show_count {
             return None;
         }
-        let counts = window_session_counts(self.tabs.tabs(), &self.sidebar.sessions_by_host());
-        let (n, what) = match counts.badge(title.count)? {
-            TabBadge::NeedsYou(1) => (1, "needs you"),
-            TabBadge::NeedsYou(n) => (n, "need you"),
-            TabBadge::Busy { busy, .. } => (busy, "busy"),
-            TabBadge::Idle { idle, .. } => (idle, "idle"),
-        };
-        Some(BadgeOverlay {
-            text: overlay_text(n)?,
-            description: format!("{n} {what}"),
-            colour: theme(cx).danger,
-        })
+        let unseen = |host: &HostKey, id: &str| self.sidebar.is_unseen_on(host, id);
+        let counts =
+            window_session_counts(self.tabs.tabs(), &self.sidebar.sessions_by_host(), &unseen);
+        overlay_for(counts, title.count, &theme(cx))
+    }
+
+    /// The user looked at a session: `host`'s session `id`, or `id` on
+    /// every host with `None`. Its finished turn is seen, and the main
+    /// window's taskbar badge follows the count that leaves, whichever
+    /// window the look came from.
+    pub(crate) fn mark_session_seen(
+        &mut self,
+        host: Option<&HostKey>,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match host {
+            Some(host) => self.sidebar.mark_seen_on(host, id),
+            None => self.sidebar.mark_seen(id),
+        }
+        Self::in_window(self.layouts.main(), cx, |root, window, cx| {
+            root.schedule_taskbar_badge(window, cx);
+        });
     }
 
     /// Whether `wanted` is what the taskbar button already shows.
@@ -582,7 +616,72 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::overlay_text;
+    use super::{BadgeOverlay, overlay_for, overlay_text};
+    use crate::sidebar::CountMode;
+    use crate::tabs::TabCounts;
+    use crate::ui_theme::UiTheme;
+
+    /// Live sessions with `needs_you` asking and `finished` unseen.
+    fn counts(needs_you: usize, finished: usize) -> TabCounts {
+        TabCounts {
+            busy: needs_you,
+            idle: finished,
+            needs_you,
+            finished,
+            total: needs_you + finished,
+        }
+    }
+
+    #[test]
+    fn needs_you_outranks_finished_on_the_taskbar() {
+        let t = UiTheme::CONTRAST;
+        assert_eq!(
+            overlay_for(counts(1, 3), CountMode::NeedsYou, &t),
+            Some(BadgeOverlay {
+                text: "1".to_owned(),
+                description: "1 needs you".to_owned(),
+                colour: t.danger,
+            })
+        );
+    }
+
+    #[test]
+    fn finished_shows_blue_when_nothing_needs_you() {
+        let t = UiTheme::CONTRAST;
+        assert_eq!(
+            overlay_for(counts(0, 2), CountMode::NeedsYou, &t),
+            Some(BadgeOverlay {
+                text: "2".to_owned(),
+                description: "2 finished".to_owned(),
+                colour: t.working,
+            })
+        );
+        assert_eq!(overlay_for(counts(0, 0), CountMode::NeedsYou, &t), None);
+    }
+
+    #[test]
+    fn busy_mode_ignores_finished() {
+        let t = UiTheme::CONTRAST;
+        let busy = TabCounts {
+            busy: 1,
+            idle: 2,
+            needs_you: 0,
+            finished: 2,
+            total: 3,
+        };
+        assert_eq!(
+            overlay_for(busy, CountMode::Busy, &t),
+            Some(BadgeOverlay {
+                text: "1".to_owned(),
+                description: "1 busy".to_owned(),
+                colour: t.danger,
+            })
+        );
+        assert_eq!(
+            overlay_for(busy, CountMode::Idle, &t).map(|overlay| overlay.description),
+            Some("2 idle".to_owned())
+        );
+    }
 
     #[test]
     fn the_badge_text_is_none_at_zero_digits_to_nine_and_nine_plus_above() {

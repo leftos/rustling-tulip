@@ -1102,6 +1102,7 @@ fn background_turn_ending_waits_until_its_leaf_is_clicked(cx: &mut TestAppContex
         .sessions
         .push(session("s2").status("working").build());
     let mut h = Harness::with(cx, &dir, &fixture);
+    h.cx.update(|window, _| window.activate_window());
     h.answer_scrollback("s1", b"");
     for id in ["s1", "s2"] {
         h.send(DaemonMessage::SessionUpdated {
@@ -1162,6 +1163,7 @@ fn unseen_session_rebound_into_the_focused_pane_is_seen(cx: &mut TestAppContext)
         .sessions
         .push(session("s2").status("working").build());
     let mut h = Harness::with(cx, &dir, &fixture);
+    h.cx.update(|window, _| window.activate_window());
     h.answer_scrollback("s1", b"");
     h.send(DaemonMessage::SessionUpdated {
         session: session("s2").build(),

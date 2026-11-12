@@ -250,7 +250,8 @@ impl RootView {
     /// attached to the pane's session and sizing the PTY only in the active
     /// tab. `Detach` goes out once no pane shows a session; the panes still
     /// showing a session that lost one re-attach. The session the focused
-    /// pane now shows has its finished turn seen, as a focus would.
+    /// pane now shows has its finished turn seen, as a focus would, while
+    /// the main window is active.
     pub(crate) fn reconcile_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let before = tabs::view_counts(self.panes.values().filter_map(PaneSlot::session_ref));
         let bindings = self.tabs.bindings();
@@ -274,8 +275,11 @@ impl RootView {
         for session in to_sync {
             self.sync_session(&session, cx);
         }
-        if let Some(id) = self.shown_session() {
-            self.sidebar.mark_seen(&id);
+        // Shown only while the main window is active: a session counts as
+        // watched only while its window is.
+        let watched = self.is_main_window(window) && window.is_window_active();
+        if let Some(id) = self.shown_session().filter(|_| watched) {
+            self.mark_session_seen(None, &id, cx);
         }
         self.sync_chat_loads(cx);
         self.update_pane_roles(cx);
@@ -503,7 +507,7 @@ impl RootView {
         if let Some(slot) = self.panes.get(pane_id) {
             let (tab_id, session) = (slot.tab_id.clone(), slot.session_ref());
             if let Some(session) = session {
-                self.sidebar.mark_seen_on(&session.host, &session.id);
+                self.mark_session_seen(Some(&session.host), &session.id, cx);
             }
             self.set_focused_pane(&tab_id, pane_id, cx);
             self.focus_history.record(&tab_id, Some(pane_id));

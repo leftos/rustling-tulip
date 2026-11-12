@@ -824,6 +824,11 @@ fn is_busy(session: &SessionSnapshot) -> bool {
     }
 }
 
+/// Whether `host`'s session `id` holds a finished turn the user has not
+/// looked at: the sidebar's unseen set, asked by host so two hosts'
+/// sessions of the same id do not mix.
+pub type IsUnseen<'a> = dyn Fn(&HostKey, &str) -> bool + 'a;
+
 /// A grid tab's live terminals, counted per pane.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TabCounts {
@@ -834,6 +839,9 @@ pub struct TabCounts {
     /// Sessions waiting on the owner's answer, each once however many panes
     /// show it, leaving out abandoned ones.
     pub needs_you: usize,
+    /// Sessions whose turn finished unseen, each once however many panes
+    /// show it, leaving out abandoned ones.
+    pub finished: usize,
     /// Every live one.
     pub total: usize,
 }
@@ -843,6 +851,9 @@ pub struct TabCounts {
 pub enum TabBadge {
     /// How many terminals need the owner; never 0.
     NeedsYou(usize),
+    /// How many sessions finished a turn the user has not looked at; never
+    /// 0. Only [`TabCounts::finished_badge`] gives it.
+    Finished(usize),
     /// Busy terminals over all live ones.
     Busy { busy: usize, total: usize },
     /// Idle terminals over all live ones.
@@ -872,19 +883,44 @@ impl TabCounts {
             }),
         }
     }
+
+    /// The finished badge beside the needs-you one: only in
+    /// [`CountMode::NeedsYou`], and only while a session finished unseen.
+    #[must_use]
+    pub fn finished_badge(self, mode: CountMode) -> Option<TabBadge> {
+        (mode == CountMode::NeedsYou && self.total > 0 && self.finished > 0)
+            .then_some(TabBadge::Finished(self.finished))
+    }
+
+    /// Counts one live pane showing `session` in total, busy and idle.
+    fn add_pane(&mut self, session: &SessionSnapshot) {
+        self.total += 1;
+        if is_busy(session) && !session.busy_excluded {
+            self.busy += 1;
+        }
+        if session.status == SessionStatus::Idle && !session.background {
+            self.idle += 1;
+        }
+    }
 }
 
 /// The live terminals of `tab`: every pane holding a session the daemon
 /// lists and has not parked counts, so a session shown in two panes counts
-/// twice in busy, idle and total. Needs you counts each session once, as
-/// the footer does. A session marked "Don't count as busy" counts in total,
-/// idle and needs you but never in busy. `None` for a tab that is not a
-/// pane grid (a diff tab).
+/// twice in busy, idle and total. Needs you and finished count each session
+/// once, as the footer does; finished counts those `unseen` answers for. A
+/// session marked "Don't count as busy" counts in total, idle, needs you
+/// and finished but never in busy. `None` for a tab that is not a pane grid
+/// (a diff tab).
 #[must_use]
-pub fn tab_session_counts(tab: &TabEntry, sessions: &HostSessions<'_>) -> Option<TabCounts> {
+pub fn tab_session_counts(
+    tab: &TabEntry,
+    sessions: &HostSessions<'_>,
+    unseen: &IsUnseen<'_>,
+) -> Option<TabCounts> {
     let grid = tab.grid()?;
     let mut counts = TabCounts::default();
     let mut asking = HashSet::new();
+    let mut finished = HashSet::new();
     for pane in collect_panes(grid) {
         let Some(id) = pane.session else {
             continue;
@@ -895,27 +931,33 @@ pub fn tab_session_counts(tab: &TabEntry, sessions: &HostSessions<'_>) -> Option
         if session.is_inactive {
             continue;
         }
-        counts.total += 1;
-        if is_busy(session) && !session.busy_excluded {
-            counts.busy += 1;
+        counts.add_pane(session);
+        if session.is_abandoned {
+            continue;
         }
-        if session.status == SessionStatus::Idle && !session.background {
-            counts.idle += 1;
-        }
-        if session.status == SessionStatus::AwaitingInput && !session.is_abandoned {
+        if session.status == SessionStatus::AwaitingInput {
             asking.insert(session.id.as_str());
+        }
+        if unseen(&pane.host, &session.id) {
+            finished.insert((pane.host.clone(), session.id.as_str()));
         }
     }
     counts.needs_you = asking.len();
+    counts.finished = finished.len();
     Some(counts)
 }
 
 /// The live terminals of every tab in `tabs` together, each session counted
-/// once however many panes and tabs show it, as the footer counts. A
-/// session marked "Don't count as busy" counts in total, idle and needs you
-/// but never in busy; a diff tab adds nothing.
+/// once however many panes and tabs show it, as the footer counts; finished
+/// counts those `unseen` answers for. A session marked "Don't count as
+/// busy" counts in total, idle, needs you and finished but never in busy; a
+/// diff tab adds nothing.
 #[must_use]
-pub fn window_session_counts(tabs: &[TabEntry], sessions: &HostSessions<'_>) -> TabCounts {
+pub fn window_session_counts(
+    tabs: &[TabEntry],
+    sessions: &HostSessions<'_>,
+    unseen: &IsUnseen<'_>,
+) -> TabCounts {
     let mut counts = TabCounts::default();
     let mut seen = HashSet::new();
     for pane in tabs
@@ -932,15 +974,15 @@ pub fn window_session_counts(tabs: &[TabEntry], sessions: &HostSessions<'_>) -> 
         if session.is_inactive || !seen.insert((pane.host.clone(), session.id.as_str())) {
             continue;
         }
-        counts.total += 1;
-        if is_busy(session) && !session.busy_excluded {
-            counts.busy += 1;
+        counts.add_pane(session);
+        if session.is_abandoned {
+            continue;
         }
-        if session.status == SessionStatus::Idle && !session.background {
-            counts.idle += 1;
-        }
-        if session.status == SessionStatus::AwaitingInput && !session.is_abandoned {
+        if session.status == SessionStatus::AwaitingInput {
             counts.needs_you += 1;
+        }
+        if unseen(&pane.host, &session.id) {
+            counts.finished += 1;
         }
     }
     counts
@@ -3349,7 +3391,8 @@ pub(crate) mod tests {
 
     /// `tab`'s busy and total counts.
     fn busy_total(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Option<(usize, usize)> {
-        tab_session_counts(tab, &on_local(sessions)).map(|counts| (counts.busy, counts.total))
+        tab_session_counts(tab, &on_local(sessions), &none_unseen)
+            .map(|counts| (counts.busy, counts.total))
     }
 
     #[test]
@@ -3443,7 +3486,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_diff_tab_has_no_counts() {
-        assert_eq!(tab_session_counts(&diff_tab("d"), &[]), None);
+        assert_eq!(tab_session_counts(&diff_tab("d"), &[], &none_unseen), None);
     }
 
     #[test]
@@ -3464,8 +3507,8 @@ pub(crate) mod tests {
             left,
             with_status("work", SessionStatus::Working),
         ];
-        let counts =
-            tab_session_counts(&tab("t", &grid), &on_local(&sessions)).expect("a grid tab");
+        let counts = tab_session_counts(&tab("t", &grid), &on_local(&sessions), &none_unseen)
+            .expect("a grid tab");
         assert_eq!(
             counts.needs_you, 2,
             "an excluded asking session still needs you; an abandoned one does not"
@@ -3475,7 +3518,11 @@ pub(crate) mod tests {
             Some(TabBadge::NeedsYou(2))
         );
         let none = [with_status("work", SessionStatus::Working)];
-        let calm = tab_session_counts(&tab("t", &pane("a", Some("work"))), &on_local(&none));
+        let calm = tab_session_counts(
+            &tab("t", &pane("a", Some("work"))),
+            &on_local(&none),
+            &none_unseen,
+        );
         assert_eq!(
             calm.and_then(|counts| counts.badge(CountMode::NeedsYou)),
             None,
@@ -3501,8 +3548,8 @@ pub(crate) mod tests {
             server,
             with_status("ask", SessionStatus::AwaitingInput),
         ];
-        let counts =
-            tab_session_counts(&tab("t", &grid), &on_local(&sessions)).expect("a grid tab");
+        let counts = tab_session_counts(&tab("t", &grid), &on_local(&sessions), &none_unseen)
+            .expect("a grid tab");
         assert_eq!(counts.idle, 2, "background work is not idle");
         assert_eq!(
             counts.badge(CountMode::Idle),
@@ -3513,7 +3560,11 @@ pub(crate) mod tests {
             Some(TabBadge::Busy { busy: 2, total: 4 })
         );
         let working = [with_status("w", SessionStatus::Working)];
-        let none_idle = tab_session_counts(&tab("t", &pane("a", Some("w"))), &on_local(&working));
+        let none_idle = tab_session_counts(
+            &tab("t", &pane("a", Some("w"))),
+            &on_local(&working),
+            &none_unseen,
+        );
         assert_eq!(
             none_idle.and_then(|counts| counts.badge(CountMode::Idle)),
             Some(TabBadge::Idle { idle: 0, total: 1 }),
@@ -3528,8 +3579,8 @@ pub(crate) mod tests {
         ask.is_inactive = true;
         let mut idle = with_status("idle", SessionStatus::Idle);
         idle.is_inactive = true;
-        let counts =
-            tab_session_counts(&tab("t", &grid), &on_local(&[ask, idle])).expect("a grid tab");
+        let counts = tab_session_counts(&tab("t", &grid), &on_local(&[ask, idle]), &none_unseen)
+            .expect("a grid tab");
         assert_eq!(counts, TabCounts::default());
         for mode in [CountMode::NeedsYou, CountMode::Busy, CountMode::Idle] {
             assert_eq!(counts.badge(mode), None, "{mode:?}");
@@ -3548,18 +3599,64 @@ pub(crate) mod tests {
             with_status("ask", SessionStatus::AwaitingInput),
             with_status("idle", SessionStatus::Idle),
         ];
-        let counts =
-            tab_session_counts(&tab("t", &grid), &on_local(&sessions)).expect("a grid tab");
+        let counts = tab_session_counts(&tab("t", &grid), &on_local(&sessions), &none_unseen)
+            .expect("a grid tab");
         assert_eq!(
             counts,
             TabCounts {
                 busy: 2,
                 idle: 1,
                 needs_you: 1,
+                finished: 0,
                 total: 3,
             },
             "needs you counts the session once; busy, idle and total count panes"
         );
+    }
+
+    /// Nothing is unseen.
+    fn none_unseen(_: &HostKey, _: &str) -> bool {
+        false
+    }
+
+    #[test]
+    fn finished_counts_unseen_sessions_once() {
+        let grid = split(
+            H,
+            0.5,
+            split(V, 0.5, pane("a", Some("done")), pane("b", Some("done"))),
+            pane("c", Some("idle")),
+        );
+        let sessions = [
+            with_status("done", SessionStatus::Idle),
+            with_status("idle", SessionStatus::Idle),
+        ];
+        let unseen = |host: &HostKey, id: &str| *host == HostKey::Local && id == "done";
+        let counts = tab_session_counts(&tab("t", &grid), &on_local(&sessions), &unseen)
+            .expect("a grid tab");
+        assert_eq!(
+            counts.finished, 1,
+            "the unseen session counts once however many panes show it; the seen one not at all"
+        );
+        assert_eq!(
+            counts.finished_badge(CountMode::NeedsYou),
+            Some(TabBadge::Finished(1))
+        );
+        assert_eq!(counts.finished_badge(CountMode::Busy), None);
+        let tabs = [tab("t", &grid)];
+        assert_eq!(
+            window_session_counts(&tabs, &on_local(&sessions), &unseen).finished,
+            1
+        );
+        let mut gone = with_status("done", SessionStatus::Idle);
+        gone.is_abandoned = true;
+        let abandoned = [gone, with_status("idle", SessionStatus::Idle)];
+        let counts = tab_session_counts(&tab("t", &grid), &on_local(&abandoned), &unseen)
+            .expect("a grid tab");
+        assert_eq!(counts.finished, 0, "an abandoned session is not finished");
+        let counts = tab_session_counts(&tab("t", &grid), &on_local(&sessions), &none_unseen)
+            .expect("a grid tab");
+        assert_eq!(counts.finished_badge(CountMode::NeedsYou), None);
     }
 
     const STRIP: [&str; 4] = ["a", "b", "c", "d"];
@@ -4034,7 +4131,7 @@ pub(crate) mod tests {
             ),
         );
         assert_eq!(
-            tab_session_counts(&tab("t", &grid), &sessions)
+            tab_session_counts(&tab("t", &grid), &sessions, &none_unseen)
                 .map(|counts| (counts.busy, counts.total)),
             Some((2, 3)),
             "the remote panes count with their own host's status"

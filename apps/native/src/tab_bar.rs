@@ -26,7 +26,8 @@ use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator,
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tab_menu::{MenuLine, TabAction, head_lines, merge_lines, rearrange_lines};
 use crate::tabs::{
-    PillClick, TabBadge, bound_pane_count, collect_panes, sole_remote_host, tab_session_counts,
+    PillClick, TabBadge, TabCounts, bound_pane_count, collect_panes, sole_remote_host,
+    tab_session_counts,
 };
 use crate::target::HostKey;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -163,9 +164,25 @@ impl RootView {
     /// or nothing needing the owner in the Needs you mode.
     #[must_use]
     pub fn tab_badge(&self, tab_id: &str) -> Option<TabBadge> {
-        let tab = self.tabs.tab(tab_id)?;
-        tab_session_counts(tab, &self.sidebar.sessions_by_host())?
+        self.tab_counts(tab_id)?
             .badge(self.sidebar.ui_state().title.count)
+    }
+
+    /// The finished pill `tab_id`'s pill shows after its needs-you one, a
+    /// [`TabBadge::Finished`]; `None` outside the Needs you count mode, and
+    /// while no live session in its panes finished a turn unseen.
+    #[must_use]
+    pub fn tab_finished_badge(&self, tab_id: &str) -> Option<TabBadge> {
+        self.tab_counts(tab_id)?
+            .finished_badge(self.sidebar.ui_state().title.count)
+    }
+
+    /// The live sessions in `tab_id`'s panes, counted; `None` for a tab
+    /// that is gone or is no pane grid.
+    fn tab_counts(&self, tab_id: &str) -> Option<TabCounts> {
+        let tab = self.tabs.tab(tab_id)?;
+        let unseen = |host: &HostKey, id: &str| self.sidebar.is_unseen_on(host, id);
+        tab_session_counts(tab, &self.sidebar.sessions_by_host(), &unseen)
     }
 
     /// Every line of `menu`: the Grid submenu alone while it is open, else
@@ -623,18 +640,20 @@ impl RootView {
             .child(new_tab_button(cx))
     }
 
-    /// What `tab`'s pill shows around its name: its count badge, and a
-    /// Dashboard tab's icon and needs-you badge.
+    /// What `tab`'s pill shows around its name: its count badge and its
+    /// finished badge, and a Dashboard tab's icon and needs-you badge.
     fn pill_marks(
         &self,
         tab: &TabEntry,
         t: &UiTheme,
         cx: &mut Context<Self>,
-    ) -> [Option<AnyElement>; 3] {
+    ) -> [Option<AnyElement>; 4] {
         let offset = crate::fonts::ui_text_size(cx);
         let dashboard = matches!(tab.content, TabContent::Dashboard);
         [
             self.tab_badge(&tab.id)
+                .map(|badge| count_badge(offset, &tab.id, badge, t).into_any_element()),
+            self.tab_finished_badge(&tab.id)
                 .map(|badge| count_badge(offset, &tab.id, badge, t).into_any_element()),
             dashboard.then(|| dashboard_icon(&tab.id, t).into_any_element()),
             dashboard
@@ -651,7 +670,7 @@ impl RootView {
         let look = PillLook::of(active, self.tabs.selection.contains(&tab.id));
         let armed = self.tabs.close_confirm.armed() == Some(tab.id.as_str());
         let marks = mark_theme(active, &t);
-        let [badge, icon, need_badge] = self.pill_marks(tab, &marks, cx);
+        let [badge, finished, icon, need_badge] = self.pill_marks(tab, &marks, cx);
         let rename = self.renaming.as_ref().filter(|r| r.tab_id == tab.id);
         let label = match rename {
             Some(rename) => div()
@@ -733,6 +752,7 @@ impl RootView {
                     .on_drag(DragPayload::Tab(tab.id.clone()), ghost)
             })
             .children(badge)
+            .children(finished)
             .children(icon)
             .child(label)
             .children(host)
@@ -1343,9 +1363,9 @@ struct CountPill {
 }
 
 impl CountPill {
-    /// Needs you: the count on the asking amber. Busy: the working colour
-    /// with its glyph while a pane is busy, else a grey `0/N`. Idle: a grey
-    /// `idle/total`.
+    /// Needs you: the count on the asking amber. Finished: the count on the
+    /// working blue. Busy: the working colour with its glyph while a pane
+    /// is busy, else a grey `0/N`. Idle: a grey `idle/total`.
     fn of(badge: TabBadge, t: &UiTheme) -> Self {
         match badge {
             TabBadge::NeedsYou(n) => Self {
@@ -1354,6 +1374,13 @@ impl CountPill {
                 color: t.on_asking,
                 background: t.asking,
                 tooltip: format!("{n} need you"),
+            },
+            TabBadge::Finished(n) => Self {
+                text: badge_text(n).unwrap_or_default(),
+                glyph: false,
+                color: t.on_asking,
+                background: t.working,
+                tooltip: format!("{n} finished"),
             },
             TabBadge::Busy { busy, total } => Self {
                 text: format!("{busy}/{total}"),
@@ -1373,11 +1400,15 @@ impl CountPill {
     }
 }
 
-/// The count pill after a grid tab's name, tagged `tab-badge-<id>`; its
-/// working glyph is tagged `tab-badge-glyph-<id>-working`.
+/// The count pill after a grid tab's name, tagged `tab-badge-<id>`, or
+/// `tab-finished-badge-<id>` for the finished one; its working glyph is
+/// tagged `tab-badge-glyph-<id>-working`.
 fn count_badge(offset: i8, tab_id: &str, badge: TabBadge, t: &UiTheme) -> Stateful<Div> {
     let pill = CountPill::of(badge, t);
-    let name = format!("tab-badge-{tab_id}");
+    let name = match badge {
+        TabBadge::Finished(_) => format!("tab-finished-badge-{tab_id}"),
+        _ => format!("tab-badge-{tab_id}"),
+    };
     let glyph_id = format!("tab-badge-glyph-{tab_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -1805,6 +1836,20 @@ mod tests {
                 color: ON_ASKING,
                 background: ASKING,
                 tooltip: "2 need you".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn finished_pill_is_blue_with_its_count() {
+        assert_eq!(
+            CountPill::of(TabBadge::Finished(2), &UiTheme::CONTRAST),
+            CountPill {
+                text: "2".to_owned(),
+                glyph: false,
+                color: ON_ASKING,
+                background: WORKING,
+                tooltip: "2 finished".to_owned(),
             }
         );
     }

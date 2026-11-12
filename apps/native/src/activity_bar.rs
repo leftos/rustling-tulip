@@ -1,7 +1,8 @@
 //! The activity rail at the window's left edge: Sessions, Needs You, Source
 //! control and, while This PC's daemon pushes a gate state, Gates, which
 //! pick the panel beside it and fold it, the badges counting the sessions
-//! waiting on the user, the uncommitted changes and the busy gate slots,
+//! that finished a turn unseen, the sessions waiting on the user, the
+//! uncommitted changes and the busy gate slots,
 //! the Dashboard button, which opens or shows the Dashboard tab, and at the
 //! bottom the Recover sessions button with its badge and the Settings
 //! button.
@@ -160,6 +161,13 @@ impl RootView {
         badge_text(self.sc_badge())
     }
 
+    /// The Sessions item's badge as drawn, when it shows: the sessions on
+    /// every host that finished a turn the user has not looked at.
+    #[must_use]
+    pub fn sessions_badge(&self) -> Option<String> {
+        badge_text(self.sidebar.unseen_count())
+    }
+
     /// The Gates item's badge count, the busy and held slots of This PC's
     /// local pools; `None` while the item is left out.
     fn gates_count(&self) -> Option<usize> {
@@ -183,9 +191,9 @@ impl RootView {
                 selector: "activity-sessions",
                 label: "Sessions",
                 icon: SESSIONS_ICON,
-                badge: 0,
+                badge: self.sidebar.unseen_count(),
                 badge_selector: "activity-sessions-badge",
-                noun: "",
+                noun: "finished",
             },
             Item {
                 activity: Activity::NeedsYou,
@@ -240,12 +248,13 @@ impl RootView {
         let active = self.shown_activity() == item.activity;
         let collapsed = self.sidebar.is_collapsed();
         let activity = item.activity;
-        // The Gates badge counts taken slots in the accent; the others keep
-        // the neutral pill.
-        let badge_colors = if activity == Activity::Gates {
-            (t.accent, t.on_accent)
-        } else {
-            (t.hover, t.text)
+        // The Gates badge counts taken slots in the accent and the Sessions
+        // badge finished turns in the working blue; the others keep the
+        // neutral pill.
+        let badge_colors = match activity {
+            Activity::Gates => (t.accent, t.on_accent),
+            Activity::Sessions => (t.working, t.on_asking),
+            _ => (t.hover, t.text),
         };
         let button = rail_button(item.selector, item.icon, active, &t)
             .when_some(badge_text(item.badge), |row, text| {

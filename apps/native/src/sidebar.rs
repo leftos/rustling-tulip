@@ -1818,6 +1818,20 @@ impl SidebarModel {
         self.slices().any(|(_, slice)| slice.unseen.contains(id))
     }
 
+    /// Whether `host`'s session `id` ended its last turn unseen; another
+    /// host's session of the same id does not count.
+    #[must_use]
+    pub fn is_unseen_on(&self, host: &HostKey, id: &str) -> bool {
+        self.slice(host)
+            .is_some_and(|slice| slice.unseen.contains(id))
+    }
+
+    /// How many sessions, over every host, ended a turn unseen.
+    #[must_use]
+    pub fn unseen_count(&self) -> usize {
+        self.slices().map(|(_, slice)| slice.unseen.len()).sum()
+    }
+
     /// This PC's sessions, the layout home's.
     pub fn local_sessions(&self) -> &[SessionSnapshot] {
         &self.local.sessions
