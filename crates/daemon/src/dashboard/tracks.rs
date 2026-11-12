@@ -18,9 +18,13 @@ use crate::activity_log;
 /// track covers: the span of [`activity_log::WINDOW`].
 pub(crate) const TRACK_HOURS: u32 = 2;
 
-/// One session the Dashboard lists, as its track needs it.
-pub(crate) struct TrackedSession {
-    pub(crate) id: String,
+/// One track the Dashboard sends: a listed session's or a linked dispatch
+/// run's.
+pub(crate) struct Tracked {
+    /// The status log it reads, which is also its segments' key.
+    pub(crate) key: String,
+    /// What its stretches are.
+    pub(crate) kind: SegmentKind,
     /// The lane it draws in: its workspace's name, else its repo's name.
     pub(crate) repo: String,
     /// Its display label.
@@ -34,24 +38,19 @@ pub(crate) fn window_start(now: DateTime<Utc>) -> DateTime<Utc> {
     now - activity_log::WINDOW
 }
 
-/// Every listed session's stretches and gaps over the last
-/// [`activity_log::WINDOW`], sorted by lane, session key and start.
+/// Every track's stretches and gaps over the last [`activity_log::WINDOW`],
+/// sorted by lane, key and start.
 #[must_use]
-pub(crate) fn build(
-    dir: &Path,
-    sessions: &[TrackedSession],
-    now: DateTime<Utc>,
-) -> Vec<ActivitySegment> {
-    // Read once for the whole pass: every session's gaps come from it.
+pub(crate) fn build(dir: &Path, tracked: &[Tracked], now: DateTime<Utc>) -> Vec<ActivitySegment> {
+    // Read once for the whole pass: every track's gaps come from it.
     let record = activity_log::read_daemon_record(dir);
     let window_start = window_start(now);
     let mut segments = Vec::new();
-    for session in sessions {
-        let key = activity_log::session_key(&session.id);
-        let lines = activity_log::read_lines(dir, &key);
+    for track in tracked {
+        let lines = activity_log::read_lines(dir, &track.key);
         let gaps = activity_log::gaps_for(&record, lines.first().map(|(at, _)| *at), now);
-        segments.extend(stretches(session, &key, &lines, &gaps, window_start));
-        segments.extend(gap_segments(session, &key, &gaps, window_start));
+        segments.extend(stretches(track, &lines, &gaps, window_start));
+        segments.extend(gap_segments(track, &gaps, window_start));
     }
     segments.sort_by(|a, b| {
         (a.repo.as_str(), a.key.as_str(), a.from).cmp(&(b.repo.as_str(), b.key.as_str(), b.from))
@@ -87,11 +86,10 @@ fn clipped_start(from: DateTime<Utc>, window_start: DateTime<Utc>) -> Option<Dat
     (from > window_start).then_some(from)
 }
 
-/// The stretches one session's `lines` draw over the window starting at
+/// The stretches one track's `lines` draw over the window starting at
 /// `window_start`, cut where a `gaps` entry means no daemon recorded.
 fn stretches(
-    session: &TrackedSession,
-    key: &str,
+    tracked: &Tracked,
     lines: &[(DateTime<Utc>, SessionStatus)],
     gaps: &[activity_log::Gap],
     window_start: DateTime<Utc>,
@@ -117,10 +115,10 @@ fn stretches(
                     last.to = to;
                 }
                 _ => segments.push(ActivitySegment {
-                    repo: session.repo.clone(),
-                    key: key.to_owned(),
-                    kind: SegmentKind::Session,
-                    label: session.label.clone(),
+                    repo: tracked.repo.clone(),
+                    key: tracked.key.clone(),
+                    kind: tracked.kind,
+                    label: tracked.label.clone(),
                     activity: Some(activity),
                     from,
                     to,
@@ -157,17 +155,16 @@ fn cut(
 
 /// The stretches no daemon recorded, clipped to the window.
 fn gap_segments(
-    session: &TrackedSession,
-    key: &str,
+    tracked: &Tracked,
     gaps: &[activity_log::Gap],
     window_start: DateTime<Utc>,
 ) -> Vec<ActivitySegment> {
     gaps.iter()
         .map(|gap| ActivitySegment {
-            repo: session.repo.clone(),
-            key: key.to_owned(),
+            repo: tracked.repo.clone(),
+            key: tracked.key.clone(),
             kind: SegmentKind::Gap,
-            label: session.label.clone(),
+            label: tracked.label.clone(),
             activity: None,
             from: gap.from.max(window_start),
             to: Some(gap.to),
@@ -218,9 +215,10 @@ mod tests {
     }
 
     /// The one listed session the tests draw.
-    fn session(id: &str) -> TrackedSession {
-        TrackedSession {
-            id: id.to_owned(),
+    fn session(id: &str) -> Tracked {
+        Tracked {
+            key: activity_log::session_key(id),
+            kind: SegmentKind::Session,
             repo: "repo".to_owned(),
             label: "repo: main".to_owned(),
         }
@@ -268,6 +266,33 @@ mod tests {
     fn write_record(dir: &Path, record: &activity_log::DaemonRecord) {
         let bytes = serde_json::to_vec(record).expect("serialize the record");
         std::fs::write(dir.join("daemon.json"), bytes).expect("write the record");
+    }
+
+    #[test]
+    fn a_dispatch_key_draws_dispatch_segments() {
+        let dir = scratch_dir("dispatch");
+        let now = at(0);
+        let key = activity_log::dispatch_key("r1");
+        activity_log::append(&dir, &key, now - minutes(10), SessionStatus::Working);
+
+        let segments = build(
+            &dir,
+            &[Tracked {
+                key: key.clone(),
+                kind: SegmentKind::Dispatch,
+                repo: "repo".to_owned(),
+                label: "Fix the parser".to_owned(),
+            }],
+            now,
+        );
+
+        let dispatch = of_kind(&segments, SegmentKind::Dispatch);
+        assert_eq!(dispatch.len(), 1, "{segments:?}");
+        assert_eq!(dispatch[0].key, "dispatch-r1");
+        assert_eq!(dispatch[0].label, "Fix the parser");
+        assert_eq!(dispatch[0].activity, Some(SegmentActivity::Working));
+        assert_eq!(dispatch[0].to, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

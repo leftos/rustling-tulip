@@ -482,12 +482,18 @@ pub(crate) async fn bind_loopback() -> anyhow::Result<tokio::net::TcpListener> {
         .context("binding loopback listener")
 }
 
-/// The Dashboard over `sessions`, its day ledger in the config dir.
-fn dashboard_service(sessions: &Arc<SessionRegistry>, dirs: &Dirs) -> crate::dashboard::Dashboard {
+/// The Dashboard over `sessions`, its day ledger in the config dir, nesting
+/// the runs of `runs`.
+fn dashboard_service(
+    sessions: &Arc<SessionRegistry>,
+    dirs: &Dirs,
+    runs: Option<Arc<crate::dispatch_runs::DispatchRuns>>,
+) -> crate::dashboard::Dashboard {
     crate::dashboard::Dashboard::new(
         Arc::clone(sessions),
         dirs.activity_dir(),
         crate::paths::day_ledger_file(dirs),
+        runs,
     )
 }
 
@@ -593,7 +599,11 @@ pub async fn run(
     // task. Same liveness predicate as the idle-exit watcher below.
     let (keep_awake_tx, keep_awake_status_rx) = start_keep_awake(&state, &sessions, &state_events);
 
-    let dashboard = dashboard_service(&sessions, &dirs);
+    let dashboard = dashboard_service(
+        &sessions,
+        &dirs,
+        dispatch_runs.as_ref().map(|hub| Arc::clone(&hub.runs)),
+    );
     let summarizer = start_summarizer(&state, &dirs, &client_count, &state_events);
     outlets.chat.set_summarizer(Arc::clone(&summarizer));
     let turns =

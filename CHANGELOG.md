@@ -9,6 +9,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking; looking at one clears it.
 - Dispatch runs show in the sidebar under their repo, workspace or folder, tagged DS; clicking one opens a tab that follows it, dragging one onto a pane follows it there, and its menu stops it.
 - A pane following a dispatch run shows its title, cost, tokens and recent actions with a Stop button, and keeps them with its run folder once the run ends.
+- The Dashboard lists the dispatch runs a session started under that session, and its now line says when the session is waiting on one.
 
 ### Fixed
 

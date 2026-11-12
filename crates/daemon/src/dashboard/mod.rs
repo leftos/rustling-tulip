@@ -27,11 +27,13 @@ use agent_api::{
 use chrono::{DateTime, Utc};
 use protocol::{
     ActivitySegment, AgentId, AgentKind, AgentNode, AgentState, DaemonMessage, DayTotals,
-    RecentWork, SessionFacts, SessionKind, SessionMember, SessionStatus, StuckReason,
+    DispatchRunSnapshot, DispatchRunStatus, RecentWork, SegmentKind, SessionFacts, SessionKind,
+    SessionMember, SessionStatus, StuckReason,
 };
 use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
+use crate::activity_log;
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
 
@@ -74,6 +76,9 @@ struct Inner {
     work: work::WorkCache,
     /// Each branch's pull-request read, reused for [`pr::TTL`].
     pr: pr::PrCache,
+    /// The daemon's live dispatch runs, whose linked runs nest under their
+    /// sessions; `None` when it follows none.
+    runs: Option<Arc<crate::dispatch_runs::DispatchRuns>>,
 }
 
 struct State {
@@ -143,6 +148,8 @@ struct Listed {
     /// Whether it resumed abandoned sessions in place, so its figures already
     /// carry a conversation's earlier spend.
     resumed: bool,
+    /// The listed dispatch runs on its conversation, oldest first.
+    runs: Vec<DispatchRunSnapshot>,
 }
 
 /// One session's read, handed to the blocking pool and back.
@@ -158,21 +165,30 @@ struct Job {
 impl Dashboard {
     /// The service over `sessions`, reading with each agent plugin's reader,
     /// the status-change logs under `activity_dir` and its day ledger in
-    /// `ledger_path`.
+    /// `ledger_path`, and nesting the runs of `runs`.
     pub(crate) fn new(
         sessions: Arc<SessionRegistry>,
         activity_dir: PathBuf,
         ledger_path: PathBuf,
+        runs: Option<Arc<crate::dispatch_runs::DispatchRuns>>,
     ) -> Self {
-        Self::with_reader_factory(sessions, activity_dir, ledger_path, Arc::new(plugin_reader))
+        Self::with_reader_factory(
+            sessions,
+            activity_dir,
+            ledger_path,
+            Arc::new(plugin_reader),
+            runs,
+        )
     }
 
-    /// The service over `sessions`, reading with `factory`'s readers.
+    /// The service over `sessions`, reading with `factory`'s readers, and
+    /// nesting the runs of `runs`.
     pub(crate) fn with_reader_factory(
         sessions: Arc<SessionRegistry>,
         activity_dir: PathBuf,
         ledger_path: PathBuf,
         factory: ReaderFactory,
+        runs: Option<Arc<crate::dispatch_runs::DispatchRuns>>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -188,6 +204,7 @@ impl Dashboard {
                 pass: tokio::sync::Mutex::new(()),
                 work: work::WorkCache::default(),
                 pr: pr::PrCache::default(),
+                runs,
             }),
         }
     }
@@ -360,7 +377,7 @@ impl Dashboard {
     /// session no longer listed leaves the cache. Answers false, having read
     /// nothing, when no connection watches.
     async fn read_pass(&self, now: DateTime<Utc>) -> bool {
-        let listed = listed_sessions(&self.inner.sessions);
+        let listed = listed_sessions(&self.inner.sessions, self.inner.runs.as_deref());
         let jobs = {
             let mut state = lock(&self.inner.state);
             if state.watchers.is_empty() {
@@ -497,21 +514,30 @@ impl Dashboard {
     /// every watcher holding another copy; a watcher whose connection is gone
     /// is dropped. No log is read with no watcher.
     async fn send_tracks(&self, now: DateTime<Utc>) {
-        let sessions: Vec<tracks::TrackedSession> = {
+        let tracked: Vec<tracks::Tracked> = {
             if lock(&self.inner.state).watchers.is_empty() {
                 return;
             }
-            listed_sessions(&self.inner.sessions)
-                .into_iter()
-                .map(|listed| tracks::TrackedSession {
-                    id: listed.id,
-                    repo: listed.repo,
+            let mut tracked = Vec::new();
+            for listed in listed_sessions(&self.inner.sessions, self.inner.runs.as_deref()) {
+                let repo = listed.repo;
+                tracked.push(tracks::Tracked {
+                    key: activity_log::session_key(&listed.id),
+                    kind: SegmentKind::Session,
+                    repo: repo.clone(),
                     label: listed.label,
-                })
-                .collect()
+                });
+                tracked.extend(listed.runs.iter().map(|run| tracks::Tracked {
+                    key: activity_log::dispatch_key(&run.run_id),
+                    kind: SegmentKind::Dispatch,
+                    repo: repo.clone(),
+                    label: run.title.clone(),
+                }));
+            }
+            tracked
         };
         let dir = self.inner.activity_dir.clone();
-        let built = tokio::task::spawn_blocking(move || tracks::build(&dir, &sessions, now)).await;
+        let built = tokio::task::spawn_blocking(move || tracks::build(&dir, &tracked, now)).await;
         let segments = match built {
             Ok(segments) => segments,
             Err(err) => {
@@ -572,8 +598,12 @@ fn plugin_reader(agent: &AgentId, source: &ActivitySource) -> Option<Box<dyn Act
 }
 
 /// The sessions the Dashboard lists: every one with an agent, headless runs
-/// included, but no plain shell and no parked or abandoned session.
-fn listed_sessions(sessions: &SessionRegistry) -> Vec<Listed> {
+/// included, but no plain shell and no parked or abandoned session, each with
+/// the dispatch runs on its conversation.
+fn listed_sessions(
+    sessions: &SessionRegistry,
+    runs: Option<&crate::dispatch_runs::DispatchRuns>,
+) -> Vec<Listed> {
     sessions
         .snapshots()
         .into_iter()
@@ -605,6 +635,11 @@ fn listed_sessions(sessions: &SessionRegistry) -> Vec<Listed> {
                 .iter()
                 .map(|member| PathBuf::from(&member.worktree_path))
                 .collect();
+            let linked = runs
+                .zip(record.conversation_id.as_deref())
+                .map_or_else(Vec::new, |(runs, conversation_id)| {
+                    runs.runs_of(conversation_id)
+                });
             Some(Listed {
                 id: snapshot.id,
                 agent: record.agent.clone(),
@@ -623,6 +658,7 @@ fn listed_sessions(sessions: &SessionRegistry) -> Vec<Listed> {
                 branch,
                 folders,
                 resumed: !record.resumed_from.is_empty(),
+                runs: linked,
             })
         })
         .collect()
@@ -788,11 +824,16 @@ fn build_facts(
         status_since: session.status_since,
         background: session.background,
         snapshot,
+        running_run: session
+            .runs
+            .iter()
+            .find(|run| run.status != DispatchRunStatus::Ended),
     };
     let mut facts = empty_facts(&session.id);
     facts.now = now_line(&input, now);
     facts.issue = issue_from_branch(&session.branch);
     let Some(snapshot) = snapshot else {
+        facts.agents = session.runs.iter().map(run_node).collect();
         return facts;
     };
     let tree = TreeContext {
@@ -801,7 +842,7 @@ fn build_facts(
         fallback_start: snapshot.last_record_at.unwrap_or(session.started_at),
         now,
     };
-    facts.agents = agent_tree(snapshot, &tree);
+    facts.agents = agent_tree(snapshot, &session.runs, &tree);
     facts.context_percent = snapshot
         .context
         .as_ref()
@@ -865,13 +906,19 @@ impl TreeContext {
     }
 }
 
-/// The session's agent tree: its subagents, then its background shells in
-/// launch order, running ones before ended ones.
-fn agent_tree(snapshot: &ActivitySnapshot, tree: &TreeContext) -> Vec<AgentNode> {
+/// The session's agent tree: its subagents, then its linked dispatch runs,
+/// oldest first, then its background shells in launch order, running ones
+/// before ended ones.
+fn agent_tree(
+    snapshot: &ActivitySnapshot,
+    runs: &[DispatchRunSnapshot],
+    tree: &TreeContext,
+) -> Vec<AgentNode> {
     let subagents = snapshot
         .subagents
         .iter()
         .filter_map(|node| subagent_node(node, tree));
+    let dispatch = runs.iter().map(run_node);
     let running = snapshot
         .background
         .iter()
@@ -881,7 +928,42 @@ fn agent_tree(snapshot: &ActivitySnapshot, tree: &TreeContext) -> Vec<AgentNode>
         .iter()
         .filter(|ended| !tree.before_turn(ended.ended_at))
         .map(|ended| ended_shell_node(ended, tree));
-    subagents.chain(running).chain(ended).collect()
+    subagents
+        .chain(dispatch)
+        .chain(running)
+        .chain(ended)
+        .collect()
+}
+
+/// One linked dispatch run as a node under its session. Its node is listed
+/// whether or not the session has a reading, and a stopped session does not
+/// finish it: the run outlives its session's process.
+fn run_node(run: &DispatchRunSnapshot) -> AgentNode {
+    let (state, task) = match run.status {
+        DispatchRunStatus::Ended => (AgentState::Finished, "finished".to_owned()),
+        DispatchRunStatus::Stopping => (AgentState::Running, "stopping".to_owned()),
+        _ => (
+            AgentState::Running,
+            run.recent_actions
+                .last()
+                .map(String::as_str)
+                .map(one_line)
+                .unwrap_or_default(),
+        ),
+    };
+    AgentNode {
+        key: format!("dispatch:{}", run.run_id),
+        kind: AgentKind::Dispatch,
+        name: run.title.clone(),
+        task,
+        activity: Vec::new(),
+        state,
+        started_at: run.started_at,
+        stuck: None,
+        model: None,
+        effort: None,
+        children: Vec::new(),
+    }
 }
 
 /// A subagent and the ones it launched, or `None` for one that ended before
@@ -1088,7 +1170,10 @@ mod tests {
         ActivitySnapshot, BackgroundTask, ContextReading, EndedTask, OpenCall, SubagentNode,
     };
     use chrono::{DateTime, Duration, TimeZone as _, Utc};
-    use protocol::{AgentKind, AgentState, DayTotals, SessionStatus, StuckReason};
+    use protocol::{
+        AgentKind, AgentState, DayTotals, DispatchRunSnapshot, DispatchRunStatus, SessionMetrics,
+        SessionStatus, StuckReason,
+    };
 
     use super::{Job, Listed, State, TreeContext, agent_tree, apply_jobs, build_facts, ledger};
     use crate::server::test_support::ScratchDir;
@@ -1144,6 +1229,28 @@ mod tests {
             branch: "main".to_owned(),
             folders: Vec::new(),
             resumed: false,
+            runs: Vec::new(),
+        }
+    }
+
+    /// A linked dispatch run `run_id` titled `title`, in `status`.
+    fn dispatch_run(run_id: &str, title: &str, status: DispatchRunStatus) -> DispatchRunSnapshot {
+        DispatchRunSnapshot {
+            run_id: run_id.to_owned(),
+            title: title.to_owned(),
+            backend: "native".to_owned(),
+            tier: None,
+            worktree: "X:/dev/repo".to_owned(),
+            main_checkout: None,
+            run_dir: "X:/dev/repo/.tmp/dispatch/r1".to_owned(),
+            started_at: at(2),
+            status,
+            metrics: SessionMetrics::default(),
+            recent_actions: Vec::new(),
+            agent_session_id: None,
+            session_id: Some("conv1".to_owned()),
+            resumed_from: None,
+            auto_resume: false,
         }
     }
 
@@ -1215,7 +1322,7 @@ mod tests {
             subagents: vec![launcher],
             ..ActivitySnapshot::default()
         };
-        let nodes = agent_tree(&snapshot, &tree(true, None));
+        let nodes = agent_tree(&snapshot, &[], &tree(true, None));
         assert_eq!(nodes.len(), 1);
         let top = &nodes[0];
         assert_eq!(top.key, "subagent:a1");
@@ -1239,7 +1346,7 @@ mod tests {
             subagents: vec![launcher],
             ..ActivitySnapshot::default()
         };
-        let nodes = agent_tree(&snapshot, &tree(true, None));
+        let nodes = agent_tree(&snapshot, &[], &tree(true, None));
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].model.as_deref(), Some("Opus 5.5"));
         assert_eq!(nodes[0].effort.as_deref(), Some("high"));
@@ -1248,7 +1355,7 @@ mod tests {
             subagents: vec![node("a2", AgentState::Running)],
             ..ActivitySnapshot::default()
         };
-        let nodes = agent_tree(&unknown, &tree(true, None));
+        let nodes = agent_tree(&unknown, &[], &tree(true, None));
         assert_eq!(nodes[0].model, None, "a subagent with none sends none");
         assert_eq!(nodes[0].effort, None);
     }
@@ -1262,7 +1369,7 @@ mod tests {
             subagents: vec![killed],
             ..ActivitySnapshot::default()
         };
-        let nodes = agent_tree(&snapshot, &tree(true, None));
+        let nodes = agent_tree(&snapshot, &[], &tree(true, None));
         assert_eq!(nodes[0].task, "killed · 12m");
         assert_eq!(nodes[0].state, AgentState::Failed);
     }
@@ -1277,7 +1384,7 @@ mod tests {
             subagents: vec![two, three],
             ..ActivitySnapshot::default()
         };
-        let nodes = agent_tree(&snapshot, &tree(true, None));
+        let nodes = agent_tree(&snapshot, &[], &tree(true, None));
         assert_eq!(nodes[0].stuck, None);
         assert_eq!(nodes[1].stuck, Some(StuckReason::ToolFailures { count: 3 }));
     }
@@ -1356,6 +1463,97 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_run_nests_after_the_subagents_and_before_the_shells() {
+        let mut run = dispatch_run("r1", "Fix the parser", DispatchRunStatus::Working);
+        run.recent_actions = vec!["tool: Read".to_owned(), "tool: Bash".to_owned()];
+        let mut session = listed(SessionStatus::Working);
+        session.runs = vec![run.clone()];
+        let snapshot = ActivitySnapshot {
+            subagents: vec![node("a1", AgentState::Running)],
+            background: vec![BackgroundTask {
+                id: "b1".to_owned(),
+                tool_use_id: None,
+                started: Some(at(2)),
+                command: Some("npm run dev".to_owned()),
+            }],
+            ..ActivitySnapshot::default()
+        };
+
+        let facts = build_facts(&session, Some(&snapshot), None, at(10));
+
+        let kinds: Vec<AgentKind> = facts.agents.iter().map(|node| node.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![AgentKind::Subagent, AgentKind::Dispatch, AgentKind::Shell]
+        );
+        let dispatch = &facts.agents[1];
+        assert_eq!(dispatch.key, "dispatch:r1");
+        assert_eq!(dispatch.name, "Fix the parser");
+        assert_eq!(dispatch.task, "tool: Bash");
+        assert_eq!(dispatch.state, AgentState::Running);
+        assert_eq!(dispatch.started_at, run.started_at);
+    }
+
+    #[test]
+    fn a_run_node_is_listed_with_no_reading() {
+        let mut session = listed(SessionStatus::Working);
+        session.runs = vec![dispatch_run(
+            "r1",
+            "Fix the parser",
+            DispatchRunStatus::Working,
+        )];
+
+        let facts = build_facts(&session, None, None, at(10));
+
+        assert_eq!(facts.agents.len(), 1, "{:?}", facts.agents);
+        assert_eq!(facts.agents[0].key, "dispatch:r1");
+        assert_eq!(facts.agents[0].kind, AgentKind::Dispatch);
+    }
+
+    #[test]
+    fn a_stopped_sessions_run_keeps_running() {
+        let mut session = listed(SessionStatus::Stopped);
+        session.runs = vec![dispatch_run(
+            "r1",
+            "Fix the parser",
+            DispatchRunStatus::Working,
+        )];
+        let snapshot = ActivitySnapshot {
+            subagents: vec![node("a1", AgentState::Running)],
+            ..ActivitySnapshot::default()
+        };
+
+        let facts = build_facts(&session, Some(&snapshot), None, at(10));
+
+        assert_eq!(facts.agents[0].state, AgentState::Finished, "rule 1");
+        assert_eq!(facts.agents[1].kind, AgentKind::Dispatch);
+        assert_eq!(facts.agents[1].state, AgentState::Running);
+    }
+
+    #[test]
+    fn a_run_nodes_task_follows_its_status() {
+        let mut stopping = listed(SessionStatus::Working);
+        stopping.runs = vec![dispatch_run(
+            "r1",
+            "Fix the parser",
+            DispatchRunStatus::Stopping,
+        )];
+        let facts = build_facts(&stopping, None, None, at(10));
+        assert_eq!(facts.agents[0].task, "stopping");
+        assert_eq!(facts.agents[0].state, AgentState::Running);
+
+        let mut ended = listed(SessionStatus::Working);
+        ended.runs = vec![dispatch_run(
+            "r2",
+            "Fix the parser",
+            DispatchRunStatus::Ended,
+        )];
+        let ended_facts = build_facts(&ended, None, None, at(10));
+        assert_eq!(ended_facts.agents[0].task, "finished");
+        assert_eq!(ended_facts.agents[0].state, AgentState::Finished);
+    }
+
+    #[test]
     fn finished_nodes_from_before_the_turn_are_dropped() {
         let mut old = node("old", AgentState::Finished);
         old.finished_at = Some(at(2));
@@ -1381,12 +1579,12 @@ mod tests {
             }],
             ..ActivitySnapshot::default()
         };
-        let keys: Vec<String> = agent_tree(&snapshot, &tree(true, Some(at(5))))
+        let keys: Vec<String> = agent_tree(&snapshot, &[], &tree(true, Some(at(5))))
             .into_iter()
             .map(|node| node.key)
             .collect();
         assert_eq!(keys, vec!["subagent:launcher", "subagent:recent"]);
-        let every = agent_tree(&snapshot, &tree(true, None));
+        let every = agent_tree(&snapshot, &[], &tree(true, None));
         assert_eq!(every.len(), 4);
         assert_eq!(every[3].task, "completed · 2m");
     }

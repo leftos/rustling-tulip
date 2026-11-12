@@ -456,8 +456,8 @@ mod tests {
     use agent_api::ActivitySnapshot;
     use chrono::Utc;
     use protocol::{
-        ActivitySegment, ClientMessage, DaemonMessage, DayTotals, RecentWork, SegmentActivity,
-        SegmentKind, SessionFacts, SessionMember, SessionStatus, WorkTotals,
+        ActivitySegment, AgentKind, ClientMessage, DaemonMessage, DayTotals, RecentWork,
+        SegmentActivity, SegmentKind, SessionFacts, SessionMember, SessionStatus, WorkTotals,
     };
     use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
@@ -558,9 +558,34 @@ mod tests {
             hub.dirs.activity_dir(),
             crate::paths::day_ledger_file(&hub.dirs),
             script.factory(),
+            None,
         )
         .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
         (hub, scratch, script)
+    }
+
+    /// [`scripted_hub`] whose Dashboard follows a fresh `DispatchRuns`, which
+    /// it returns too.
+    fn scripted_hub_with_runs(
+        tag: &str,
+    ) -> (
+        Hub,
+        ScratchDir,
+        Script,
+        Arc<crate::dispatch_runs::DispatchRuns>,
+    ) {
+        let (mut hub, scratch) = test_hub(tag);
+        let script = Script::default();
+        let runs = crate::dispatch_runs::DispatchRuns::new();
+        hub.dashboard = Dashboard::with_reader_factory(
+            Arc::clone(&hub.sessions),
+            hub.dirs.activity_dir(),
+            crate::paths::day_ledger_file(&hub.dirs),
+            script.factory(),
+            Some(Arc::clone(&runs)),
+        )
+        .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
+        (hub, scratch, script, runs)
     }
 
     /// A path that is not a repository: the session's detail carries no
@@ -766,6 +791,64 @@ mod tests {
         assert_eq!(open.repo, "repo");
         assert_eq!(open.activity, Some(SegmentActivity::Working));
         assert_eq!(open.to, None);
+    }
+
+    #[tokio::test]
+    async fn a_linked_run_nests_under_its_session() {
+        let (hub, _scratch, script, runs) = scripted_hub_with_runs("dash-run-nests");
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
+        runs.list_linked_for_test("r1", Some("conv1"));
+        runs.list_linked_for_test("r2", Some("other"));
+        runs.list_linked_for_test("r3", None);
+        let mut c1 = conn(1);
+
+        send(&hub, &c1, ON).await;
+
+        let messages = facts_messages(&mut c1);
+        let facts = messages[0]
+            .iter()
+            .find(|facts| facts.session_id == "s1")
+            .expect("s1's facts");
+        let dispatch: Vec<&protocol::AgentNode> = facts
+            .agents
+            .iter()
+            .filter(|node| node.kind == AgentKind::Dispatch)
+            .collect();
+        assert_eq!(dispatch.len(), 1, "{:?}", facts.agents);
+        assert_eq!(dispatch[0].key, "dispatch:r1", "a run no session claims");
+    }
+
+    #[tokio::test]
+    async fn a_linked_runs_stretches_reach_activity_tracks() {
+        let (hub, _scratch, script, runs) = scripted_hub_with_runs("dash-run-tracks");
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
+        runs.list_linked_for_test("r1", Some("conv1"));
+        activity_log::append(
+            &hub.dirs.activity_dir(),
+            &activity_log::dispatch_key("r1"),
+            Utc::now(),
+            SessionStatus::Working,
+        );
+        let mut c1 = conn(1);
+
+        send(&hub, &c1, ON).await;
+
+        let messages = tracks_messages(&mut c1);
+        let segments = &messages[0].1;
+        let open = segments
+            .iter()
+            .rfind(|segment| segment.key == "dispatch-r1")
+            .expect("the run's open stretch");
+        assert_eq!(open.kind, SegmentKind::Dispatch);
+        assert_eq!(open.repo, "repo");
+        assert_eq!(open.activity, Some(SegmentActivity::Working));
+        assert_eq!(open.to, None);
+        assert!(
+            !segments
+                .iter()
+                .any(|segment| segment.key.starts_with("dispatch-r2")),
+            "{segments:?}"
+        );
     }
 
     #[tokio::test]

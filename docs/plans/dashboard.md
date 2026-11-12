@@ -133,7 +133,7 @@ The **now line** says what a session is doing this second, highest rule first (O
 
 1. Waiting on the user: the pending prompt on one line, as the Needs You panel words it (`detail_of`, `apps/native/src/needs_you.rs:101`).
 2. Working, held by a gate: `In gate · <kind> <index>: <command>`, or `Queued for gate · #n`.
-3. Working on a running subagent's or dispatch run's result: `Waiting on subagent "<description>"`.
+3. Working on a running subagent's result: `Waiting on subagent "<description>"`; with no running subagent, on a linked dispatch run's: `Waiting on dispatch run "<title>"` (kind `waiting_on_subagent`). An `Idle` session whose linked run still runs reads the same, dated from the oldest running run's start. A running subagent comes first.
 4. Working with an open tool call: `Running <tool> · <age>: <command>`, the oldest open call, whitespace collapsed and cut at 80 characters.
 5. Working with only background work running, or idle with the snapshot's `background` flag: `Waiting on a background task`.
 6. Working otherwise: `Thinking`.
@@ -149,7 +149,7 @@ The daemon words rules 2 to 6 (ages `<1m`, `5m`, `1h05m`) in `crates/daemon/src/
 
 Under a Working row (and, planned in RT-789, in By status under any row whose drawer is open), one row per node of its agent tree below the main agent, indented by depth with a `└` branch: the node's glyph and name (a subagent's description, a dispatch run's title with a `dispatch` tag, `bg shell <id>`, `Monitor <id>`, `In gate · heavy 1`), a subagent's model and effort after its name when known (`Opus 5.5 · high`), what it runs now or its task (`Running Bash · 1m: <command>`, `finished · 2 findings, both fixed`, `exited 1 · 12m`), its own stuck flag, and its age.
 
-In By status a dispatch run's row also carries its own activity track. Finished nodes stay listed, dimmed, while their session's turn lasts.
+In By status a dispatch run's row also carries its own activity track. Finished subagent and shell nodes stay listed, dimmed, while their session's turn lasts. A dispatch run's node (key `dispatch:<run id>`, kind `dispatch`) is listed after the subagents and before the shells, even when the session has no transcript reading; it reads `running` until the run's stream ends, then `finished`, and leaves when the run leaves the daemon's run list (keeping it for the turn is RT-1574).
 
 **Orchestrator decision (not an owner ruling):** subagents get no activity tracks; sessions and dispatch runs do.
 
@@ -249,7 +249,7 @@ It follows ops-tower's reader (`docs/agents-transcripts.md`, "The transcript rec
 
 - While at least one connection has sent `WatchDashboard { on: true }`, a task ticks every 2 s: for each listed session it asks the plugin's reader for what changed, builds the now line (rules above), the agent tree, context, tokens, cost, activity counts and stuck reasons, and sends `DashboardFacts` with the changed entries to the watchers. `WatchDashboard { on: true }` is answered at once with every entry (an empty list when no session is listed), and afterwards a watcher gets only the changed entries, at most every 2 s. `on: false` or closing the connection ends the watch (`server/connection.rs`).
 - With no watcher the task parks and reads nothing, as the git watcher parks at `Hub.client_count` 0 (`crates/daemon/src/git_watch.rs`). The facts cache is emptied when the last watcher leaves, so the next first watch reads every transcript afresh.
-- `GetSessionDetail` answers one session's drawer: its summary ring, prompt, recent work (DB.6), Linear detail (DB.7) and token figures. It answers from the facts cache with `SessionDetail { lines, prompt, work, request_id }`, or `Error "unknown session: <id>"` echoing the `request_id`; `lines` is the session's whole summary ring (SA.6), `work` is read from git (DB.6, "Recent work" below), and the fields DB.7 to DB.9 and DB.21 fill stay empty until those steps land.
+- `GetSessionDetail` answers one session's drawer: its summary ring, prompt, recent work (DB.6), Linear detail (DB.7) and token figures. It answers from the facts cache with `SessionDetail { lines, prompt, work, request_id }`, or `Error "unknown session: <id>"` echoing the `request_id`; `lines` is the session's whole summary ring (SA.6), `work` is read from git (DB.6, "Recent work" below), and the fields DB.7 to DB.9 fill stay empty until those steps land.
 - Facts are runtime-only; a restarted daemon rebuilds them from the transcripts on its first tick.
 
 ### Linear context
@@ -503,7 +503,7 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
   Session segments and restart gaps are built (`crates/daemon/src/dashboard/tracks.rs`); gate holds are RT-732.
 
   Proof: server tests that a watcher gets every segment on `WatchDashboard`, then one message per stretch change, a gap segment after a restart, and a hold inside a session's worktree joined to it. Waits on DB.2, DB.5, DB.19; gate holds on the daemon's gate reader (RT-55, as RT-64 re-cuts it), with none drawn until it lands.
-- [ ] DB.21 Nest dispatch runs under their session and track them. `crates/daemon/src/dispatch_runs/` (RT-31's watcher appends each run's status changes to the log), `crates/daemon/src/dashboard/mod.rs` (a run's node under the sessions on the conversation its `session_id` names), `crates/daemon/src/dashboard/now.rs` (rule 3 for a run), `crates/daemon/src/dashboard/tracks.rs` (dispatch keys).
+- [x] DB.21 Nest dispatch runs under their session and track them. `crates/daemon/src/dispatch_runs/` (RT-31's watcher appends each run's status changes to the log), `crates/daemon/src/dashboard/mod.rs` (an `agent` node of kind `dispatch` for each run under the sessions on the conversation its `session_id` names: its title, its newest recent action as the task, `stopping` while a Stop is in flight, `finished` once its stream ends), `crates/daemon/src/dashboard/now.rs` (rule 3 for a run: `Waiting on dispatch run "<title>"`), `crates/daemon/src/dashboard/tracks.rs` (`dispatch-<run id>` keys: a `dispatch` segment per linked run in its session's lane, labelled with the run's title).
 
   Proof: tests with a fake process table and live-run files: a run nests under its launcher, a run no session claims is left out, its stretches reach `ActivityTracks`. Waits on RT-31 (DF.1 to DF.5), DB.19, DB.20.
 - [ ] DB.22 Draw the two-hour activity track. `apps/native/src/activity_track.rs` (new: bars, gate ticks, the hatched gap and its note, the legend, the long and short captions), `apps/native/src/dashboard.rs` (the client's tracks from `ActivityTracks`, an open stretch extended to now, finished while unseen), `apps/native/src/dashboard_view.rs` (By status's `Last 2 h` column, a dispatch row's track), `apps/native/src/palette.rs`, `apps/native/tests/ui/ui_dashboard.rs`.

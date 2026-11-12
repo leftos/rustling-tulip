@@ -145,6 +145,7 @@ pub(super) fn build_test_hub(
         Arc::clone(&sessions),
         dirs.activity_dir(),
         crate::paths::day_ledger_file(&dirs),
+        None,
     )
     .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
     let summarizer = test_summarizer(

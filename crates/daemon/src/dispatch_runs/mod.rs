@@ -301,10 +301,6 @@ impl DispatchRuns {
 
     /// The listed runs whose file names conversation `conversation_id`,
     /// oldest first.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Dashboard's nested dispatch runs read it")
-    )]
     pub(crate) fn runs_of(&self, conversation_id: &str) -> Vec<DispatchRunSnapshot> {
         sorted_snapshots(&self.lock())
             .into_iter()

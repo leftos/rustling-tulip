@@ -1,6 +1,7 @@
 //! The daemon's part of a Dashboard card's now line: what a session is doing
 //! this second, highest rule first. The daemon words the rules its own data
-//! decides (a running subagent, an open tool call, background work, thinking);
+//! decides (a running subagent, a running dispatch run, an open tool call,
+//! background work, thinking);
 //! the cases only the client knows (a pending prompt, an unseen turn, the
 //! summary, an ended session) go out as [`NowKind::Unknown`] with no text.
 //!
@@ -23,36 +24,56 @@ pub(crate) struct NowInput<'a> {
     /// stop left background work running.
     pub(crate) background: bool,
     pub(crate) snapshot: Option<&'a ActivitySnapshot>,
+    /// The session's oldest running linked dispatch run, for rule 3.
+    pub(crate) running_run: Option<&'a protocol::DispatchRunSnapshot>,
 }
 
 /// The now line for `input` as of `now`.
 pub(crate) fn now_line(input: &NowInput<'_>, now: DateTime<Utc>) -> NowLine {
     match input.status {
         SessionStatus::Working => working_line(input, now),
-        SessionStatus::Idle if input.background => waiting_on_background(
+        SessionStatus::Idle => idle_line(input),
+        _ => client_worded(input.status_since),
+    }
+}
+
+/// An idle session: waiting on a running linked dispatch run, else on the
+/// background work its last stop left running.
+fn idle_line(input: &NowInput<'_>) -> NowLine {
+    if let Some(run) = input.running_run {
+        return waiting_on_run(run);
+    }
+    if input.background {
+        return waiting_on_background(
             input
                 .snapshot
                 .and_then(|snapshot| snapshot.background.first())
                 .and_then(|task| task.started)
                 .or(input.status_since),
-        ),
-        _ => client_worded(input.status_since),
+        );
     }
+    client_worded(input.status_since)
 }
 
-/// A working session: a running subagent, else its oldest open call, else
-/// background work, else thinking.
+/// A working session: a running subagent, then a running linked dispatch
+/// run, else its oldest open call, else background work, else thinking.
 fn working_line(input: &NowInput<'_>, now: DateTime<Utc>) -> NowLine {
-    let Some(snapshot) = input.snapshot else {
-        return thinking(input.status_since);
-    };
-    if let Some(node) = first_running(&snapshot.subagents) {
+    if let Some(node) = input
+        .snapshot
+        .and_then(|snapshot| first_running(&snapshot.subagents))
+    {
         return NowLine {
             kind: NowKind::WaitingOnSubagent,
             text: format!("Waiting on subagent \"{}\"", subagent_name(node)),
             since: node.started_at.or(input.status_since),
         };
     }
+    if let Some(run) = input.running_run {
+        return waiting_on_run(run);
+    }
+    let Some(snapshot) = input.snapshot else {
+        return thinking(input.status_since);
+    };
     if let Some(call) = snapshot.open_calls.first() {
         return NowLine {
             kind: NowKind::RunningTool,
@@ -64,6 +85,15 @@ fn working_line(input: &NowInput<'_>, now: DateTime<Utc>) -> NowLine {
         return waiting_on_background(task.started.or(input.status_since));
     }
     thinking(input.status_since)
+}
+
+/// Rule 3 for a session waiting on its linked dispatch run's result.
+fn waiting_on_run(run: &protocol::DispatchRunSnapshot) -> NowLine {
+    NowLine {
+        kind: NowKind::WaitingOnSubagent,
+        text: format!("Waiting on dispatch run \"{}\"", run.title),
+        since: Some(run.started_at),
+    }
 }
 
 fn waiting_on_background(since: Option<DateTime<Utc>>) -> NowLine {
@@ -147,7 +177,9 @@ pub(crate) fn one_line(text: &str) -> String {
 mod tests {
     use agent_api::{ActivitySnapshot, BackgroundTask, OpenCall, SubagentNode};
     use chrono::{DateTime, Duration, TimeZone as _, Utc};
-    use protocol::{AgentState, NowKind, SessionStatus};
+    use protocol::{
+        AgentState, DispatchRunSnapshot, DispatchRunStatus, NowKind, SessionMetrics, SessionStatus,
+    };
 
     use super::{NowInput, age, now_line, one_line};
 
@@ -206,6 +238,45 @@ mod tests {
             status_since: Some(at(0)),
             background,
             snapshot: Some(snapshot),
+            running_run: None,
+        };
+        now_line(&input, at(10))
+    }
+
+    /// A linked dispatch run titled `title`, started at `started_at`.
+    fn dispatch_run(title: &str, started_at: DateTime<Utc>) -> DispatchRunSnapshot {
+        DispatchRunSnapshot {
+            run_id: "r1".to_owned(),
+            title: title.to_owned(),
+            backend: "native".to_owned(),
+            tier: None,
+            worktree: "X:/dev/repo".to_owned(),
+            main_checkout: None,
+            run_dir: "X:/dev/repo/.tmp/dispatch/r1".to_owned(),
+            started_at,
+            status: DispatchRunStatus::Working,
+            metrics: SessionMetrics::default(),
+            recent_actions: Vec::new(),
+            agent_session_id: None,
+            session_id: None,
+            resumed_from: None,
+            auto_resume: false,
+        }
+    }
+
+    /// The now line of a session waiting on `run`.
+    fn line_with_run(
+        status: SessionStatus,
+        background: bool,
+        snapshot: Option<&ActivitySnapshot>,
+        run: &DispatchRunSnapshot,
+    ) -> protocol::NowLine {
+        let input = NowInput {
+            status,
+            status_since: Some(at(0)),
+            background,
+            snapshot,
+            running_run: Some(run),
         };
         now_line(&input, at(10))
     }
@@ -361,6 +432,57 @@ mod tests {
     }
 
     #[test]
+    fn a_running_dispatch_run_is_waited_on_by_title() {
+        let snapshot = ActivitySnapshot {
+            open_calls: vec![call("Bash", Some("ls"), at(1))],
+            ..ActivitySnapshot::default()
+        };
+        let run = dispatch_run("Fix the parser", at(6));
+
+        let line = line_with_run(SessionStatus::Working, false, Some(&snapshot), &run);
+
+        assert_eq!(line.kind, NowKind::WaitingOnSubagent);
+        assert_eq!(line.text, "Waiting on dispatch run \"Fix the parser\"");
+        assert_eq!(line.since, Some(at(6)));
+    }
+
+    #[test]
+    fn a_running_subagent_comes_before_a_dispatch_run() {
+        let snapshot = ActivitySnapshot {
+            subagents: vec![subagent("a1", AgentState::Running)],
+            ..ActivitySnapshot::default()
+        };
+        let run = dispatch_run("Fix the parser", at(6));
+
+        let line = line_with_run(SessionStatus::Working, false, Some(&snapshot), &run);
+
+        assert_eq!(line.kind, NowKind::WaitingOnSubagent);
+        assert_eq!(line.text, "Waiting on subagent \"look at a1\"");
+    }
+
+    #[test]
+    fn a_working_session_with_no_reading_waits_on_its_run() {
+        let run = dispatch_run("Fix the parser", at(6));
+
+        let line = line_with_run(SessionStatus::Working, false, None, &run);
+
+        assert_eq!(line.kind, NowKind::WaitingOnSubagent);
+        assert_eq!(line.text, "Waiting on dispatch run \"Fix the parser\"");
+        assert_eq!(line.since, Some(at(6)));
+    }
+
+    #[test]
+    fn an_idle_session_with_a_running_run_waits_on_it() {
+        let run = dispatch_run("Fix the parser", at(6));
+
+        let line = line_with_run(SessionStatus::Idle, true, None, &run);
+
+        assert_eq!(line.kind, NowKind::WaitingOnSubagent);
+        assert_eq!(line.text, "Waiting on dispatch run \"Fix the parser\"");
+        assert_eq!(line.since, Some(at(6)));
+    }
+
+    #[test]
     fn an_ended_background_shell_does_not_count() {
         let snapshot = ActivitySnapshot {
             ended_background: vec![agent_api::EndedTask {
@@ -387,6 +509,7 @@ mod tests {
             status_since: Some(at(0)),
             background: false,
             snapshot: None,
+            running_run: None,
         };
         assert_eq!(now_line(&unread, at(10)).kind, NowKind::Thinking);
     }
@@ -429,6 +552,7 @@ mod tests {
             status_since: Some(at(0)),
             background: false,
             snapshot: Some(&snapshot),
+            running_run: None,
         };
         let first = now_line(&input, at(4));
         let later = now_line(&input, at(4) + Duration::seconds(30));

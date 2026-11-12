@@ -279,6 +279,7 @@ mod tests {
             hub.dirs.activity_dir(),
             crate::paths::day_ledger_file(&hub.dirs),
             script.factory(),
+            None,
         )
         .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
         (hub, scratch, script)
