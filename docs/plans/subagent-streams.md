@@ -155,7 +155,7 @@ Every decision here is an orchestrator decision (not an owner ruling), settled f
 
 - **SS.7, the path boundary:** only the agent id comes from the client. The session folder, conversation id and env rows for `subagent_transcript_path` come from the host session's record, never from the message.
 - **SS.5, no typed prompt seen:** `ActivitySnapshot.last_typed_prompt_at` is `None` when the last typed prompt lies further back than the activity reader's first-read tail. Orchestrator decision (not an owner ruling): `None` means "no prompt since the process start", so finished subagents stay listed (capped at five) until a typed prompt is seen.
-- **SS.12, a Resume of the host:** a Resume rebinds panes through `tabs::rebind_session` (`rebind_grid`), which appears to rewrite only a pane's `session_id`, so a `Subagent` follow would keep naming the old session id (unverified). Check it when the pane lands, and rebind a subagent follow's `session_id` beside the pane's if it holds.
+- **A Resume of the host:** `tabs::rebind_session` (a Resume, rerun or recovery) moves a pane following one of the old session's subagents to the new session id, and `tabs::rehost_panes` moves it with its session's panes.
 - **SS.5, a resumed subagent:** the sidecar's `finished: true` may stay set when a subagent is resumed, which nobody has checked on a live resume. Orchestrator decision (not an owner ruling): transcript lines newer than the sidecar's last write make the subagent running again, whatever the flag says.
 
 ## Actors and invariants

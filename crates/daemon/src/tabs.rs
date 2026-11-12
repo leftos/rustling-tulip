@@ -739,8 +739,9 @@ pub fn has_any_session(grid: &GridNode) -> bool {
 }
 
 /// Rebind every pane of `host` (`None` for this daemon's own) bound to `old`
-/// across `tabs` to `new`, in place. A pane of any other host with the same
-/// id stays. Used wherever one session replaces another: a resume, an
+/// across `tabs` to `new`, in place, whether it shows the session itself or
+/// follows one of its subagents. A pane of any other host with the same id
+/// stays. Used wherever one session replaces another: a resume, an
 /// auto-resume or a recovery here, and another daemon's through
 /// `RebindHostSessions`. The new session takes over the slot(s) the old one
 /// occupied instead of orphaning into the sidebar. Topology is untouched.
@@ -774,17 +775,28 @@ pub fn shows_session(tabs: &[TabEntry], host: Option<&str>, session: &str) -> bo
     })
 }
 
+/// Rebind one grid's panes of `target` from `old` to `new`: a pane bound to
+/// the session itself, and a pane following one of its subagents.
 fn rebind_grid(grid: &mut GridNode, target: Option<&str>, old: &str, new: &str) -> bool {
     match grid {
         GridNode::Pane {
-            session_id, host, ..
+            session_id,
+            host,
+            follow,
+            ..
         } => {
-            if host.as_deref() == target && session_id.as_deref() == Some(old) {
-                *session_id = Some(new.to_string());
-                true
-            } else {
-                false
+            if host.as_deref() != target {
+                return false;
             }
+            let mut changed = false;
+            if session_id.as_deref() == Some(old) {
+                *session_id = Some(new.to_string());
+                changed = true;
+            }
+            if rebind_subagent_follow(follow, old, new) {
+                changed = true;
+            }
+            changed
         }
         GridNode::Split { first, second, .. } => {
             let a = rebind_grid(first, target, old, new);
@@ -794,12 +806,26 @@ fn rebind_grid(grid: &mut GridNode, target: Option<&str>, old: &str, new: &str) 
     }
 }
 
-/// Move every pane of `from` in `tabs` whose session is in `session_ids` to
-/// host `to` (`None` for this daemon's own), in place. Used by
-/// `RehostPanes` when two host keys turn out to reach one daemon. A pane of
-/// any other host, or of `from` with a session not listed, stays. Topology,
-/// pane ids, ratios and bindings are untouched. Returns clones of the tabs
-/// whose grids changed so the caller can broadcast scoped tab events.
+/// Rewrite a follow of session `old`'s subagent to session `new`, the agent
+/// unchanged, in place. A dispatch run follow and an unknown kind are never
+/// touched: neither names a session.
+fn rebind_subagent_follow(follow: &mut Option<PaneFollow>, old: &str, new: &str) -> bool {
+    match follow {
+        Some(PaneFollow::Subagent { session_id, .. }) if session_id.as_str() == old => {
+            new.clone_into(session_id);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Move every pane of `from` in `tabs` showing one of `session_ids` — the
+/// session itself or a follow of one of its subagents — to host `to` (`None`
+/// for this daemon's own), in place. Used by `RehostPanes` when two host keys
+/// turn out to reach one daemon. A pane of any other host, or of `from` with
+/// a session not listed, stays. Topology, pane ids, ratios and bindings are
+/// untouched. Returns clones of the tabs whose grids changed so the caller can
+/// broadcast scoped tab events.
 pub fn rehost_panes(
     tabs: &mut [TabEntry],
     from: &str,
@@ -818,14 +844,20 @@ pub fn rehost_panes(
     updated
 }
 
+/// Move one grid's panes of `from` to `to` where they show a session in
+/// `session_ids`, whether the session itself or a follow of its subagent.
 fn rehost_grid(grid: &mut GridNode, from: &str, to: Option<&str>, session_ids: &[String]) -> bool {
     match grid {
         GridNode::Pane {
-            session_id, host, ..
+            session_id,
+            host,
+            follow,
+            ..
         } => {
             let listed = session_id
                 .as_deref()
-                .is_some_and(|sid| session_ids.iter().any(|id| id == sid));
+                .is_some_and(|sid| session_ids.iter().any(|id| id == sid))
+                || follows_listed_subagent(follow.as_ref(), session_ids);
             if host.as_deref() == Some(from) && listed {
                 *host = to.map(str::to_string);
                 true
@@ -838,6 +870,15 @@ fn rehost_grid(grid: &mut GridNode, from: &str, to: Option<&str>, session_ids: &
             let b = rehost_grid(second, from, to, session_ids);
             a || b
         }
+    }
+}
+
+/// Whether `follow` is a follow of a subagent of one of `session_ids`. A
+/// dispatch run follow never is: its id names no session.
+fn follows_listed_subagent(follow: Option<&PaneFollow>, session_ids: &[String]) -> bool {
+    match follow {
+        Some(PaneFollow::Subagent { session_id, .. }) => session_ids.contains(session_id),
+        _ => false,
     }
 }
 
@@ -2318,6 +2359,56 @@ mod tests {
     }
 
     #[test]
+    fn rebind_session_moves_a_subagent_follow_to_the_new_session() {
+        let mut tabs = vec![grid_tab("A", subagent_pane("p1", "old", "a1", None))];
+
+        let updated = rebind_session(&mut tabs, None, "old", "new");
+
+        let updated_ids: Vec<&str> = updated.iter().map(|tab| tab.id.as_str()).collect();
+        assert_eq!(updated_ids, ["A"], "the tab whose follow moved is reported");
+        let follows: Vec<Option<PaneFollow>> = collect_panes(tabs[0].grid().expect("A grid"))
+            .into_iter()
+            .map(|pane| pane.follow)
+            .collect();
+        assert_eq!(follows, vec![Some(subagent("new", "a1"))]);
+    }
+
+    #[test]
+    fn rebind_session_leaves_another_hosts_and_other_sessions_subagent_follows() {
+        let mut tabs = vec![grid_tab(
+            "A",
+            split(
+                Horizontal,
+                0.5,
+                subagent_pane("p1", "old", "a1", Some("ssh:devbox")),
+                subagent_pane("p2", "other", "a2", None),
+            ),
+        )];
+
+        let updated = rebind_session(&mut tabs, None, "old", "new");
+
+        assert!(updated.is_empty(), "nothing moved, so no tab is reported");
+        let follows: Vec<Option<PaneFollow>> = collect_panes(tabs[0].grid().expect("A grid"))
+            .into_iter()
+            .map(|pane| pane.follow)
+            .collect();
+        assert_eq!(
+            follows,
+            vec![Some(subagent("old", "a1")), Some(subagent("other", "a2"))]
+        );
+    }
+
+    #[test]
+    fn rebind_session_leaves_a_run_follow() {
+        let mut tabs = vec![grid_tab("A", follow_pane("p1", "old", None))];
+
+        let updated = rebind_session(&mut tabs, None, "old", "new");
+
+        assert!(updated.is_empty(), "a run id is not a session binding");
+        assert_eq!(tabs[0].grid(), Some(&follow_pane("p1", "old", None)));
+    }
+
+    #[test]
     fn rehost_panes_moves_only_panes_of_that_host_and_session() {
         let mut tabs = vec![grid_tab(
             "A",
@@ -2375,6 +2466,33 @@ mod tests {
             collect_panes(tabs[0].grid().expect("A grid"))[0].host,
             None,
             "This PC's panes carry no host"
+        );
+    }
+
+    #[test]
+    fn rehost_panes_moves_a_pane_following_a_listed_sessions_subagent() {
+        let mut tabs = vec![grid_tab(
+            "A",
+            split(
+                Horizontal,
+                0.5,
+                subagent_pane("p1", "s1", "a1", Some("a")),
+                subagent_pane("p2", "s2", "a2", Some("a")),
+            ),
+        )];
+
+        let updated = rehost_panes(&mut tabs, "a", None, &["s1".to_string()]);
+
+        let updated_ids: Vec<&str> = updated.iter().map(|tab| tab.id.as_str()).collect();
+        assert_eq!(updated_ids, ["A"], "the tab whose pane moved is reported");
+        let hosts: Vec<Option<String>> = collect_panes(tabs[0].grid().expect("A grid"))
+            .into_iter()
+            .map(|pane| pane.host)
+            .collect();
+        assert_eq!(
+            hosts,
+            vec![None, Some("a".to_string())],
+            "only the listed session's subagent follow moved"
         );
     }
 
