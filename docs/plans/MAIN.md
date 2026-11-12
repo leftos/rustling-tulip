@@ -267,6 +267,7 @@
 - [ ] RT-1378 Word the crash box for a panic past the start's stable window
 - [ ] RT-707 Keep a repo's sessions out of Detached once the repo joins a workspace
 - [ ] RT-1484 Keep an offline host's leaf in the Tabs view from dragging, and dim it by its own host
+- [ ] RT-1548 Show the blue finished pill on a dragged tab's ghost
 
 ## Terminal, panes and links
 
@@ -582,9 +583,6 @@
 
 - [ ] RT-30 View a session's running subagents as read-only sessions
 - [/] RT-31 Follow DeepSeek dispatch runs as read-only sessions · release vNext
-  - [ ] RT-1500 DF.6: Wire dispatch runs into the server and handle Stop · release vNext
-  - [ ] RT-1501 DF.7: Count a linked live run as the launching session's background work · release vNext
-  - [ ] RT-1502 DF.8: Let a tab pane follow a dispatch run · release vNext
   - [ ] RT-1503 DF.9: Show dispatch runs as DS leaves in the native sidebar · release vNext
   - [ ] RT-1504 DF.10: Draw a followed dispatch run in its pane, with Stop · release vNext
   - [ ] RT-1505 DF.11: Prove following and stopping a dispatch run end to end · release vNext
@@ -607,6 +605,7 @@
 - [ ] RT-716 Let the agent plugin name a permission prompt's allow, always-allow and deny options
 - [ ] RT-1510 Rewrite the subagent-streams design against the client's real views and the pane follow field
 - [ ] RT-1542 Stop dispatch-run tailers with their watcher, and keep a stop marker until the runner is gone
+- [ ] RT-1552 Keep a follow pane's host on undo and keep follows through a failed startup scan
 
 ## macOS and Unix
 
@@ -621,6 +620,8 @@
 - [ ] RT-1036 macOS toasts: hold app toasts back during Focus and over a full-screen app
 - [ ] RT-1118 Fix the macOS smoke test's capture_live_login call so the Mac workspace clippy passes
 - [ ] RT-1243 Draw the toast's typed-answer box on macOS
+- [ ] RT-1550 Reap the opener and browser processes the client starts on macOS and Linux
+- [ ] RT-1551 Read a leading // as a local path when building a page URL off Windows
 
 ## Dictation
 
@@ -674,6 +675,8 @@
 - [ ] RT-1489 Keep Settings › Accounts alias drafts when Settings shows another host and back
 - [ ] RT-1490 Treat no saved theme as the default when Settings compares the Appearance look
 - [ ] RT-1491 Keep Settings' saved look when open_settings runs again while Settings is open
+- [ ] RT-1547 Carry a link's #fragment and ?query on remote, file:// hyperlink and relative-join links
+- [ ] RT-1549 Keep session update broadcasts in record order and off unpublished records
 
 ## Design files
 
@@ -685,7 +688,7 @@
 - [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789, RT-1509
 - [default-shell.md](default-shell.md) — RT-956
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
-- [dispatch-follow.md](dispatch-follow.md) — RT-31, RT-167, RT-1500, RT-1501, RT-1502, RT-1503, RT-1504, RT-1505, RT-1506, RT-1507, RT-1509, RT-1510, RT-1541, RT-1542
+- [dispatch-follow.md](dispatch-follow.md) — RT-31, RT-167, RT-1503, RT-1504, RT-1505, RT-1506, RT-1507, RT-1509, RT-1510, RT-1541, RT-1542, RT-1552
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-787, RT-867, RT-868, RT-869
 - [finished-toast.md](finished-toast.md) — RT-755, RT-757
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
