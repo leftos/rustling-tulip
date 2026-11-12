@@ -123,6 +123,25 @@ fn write_run_file(
     path
 }
 
+/// Starts the fake CLI streaming into a run folder under `daemon`'s scratch
+/// folder and lists it with a run file; returns the child and the run file.
+fn start_streaming_run(daemon: &LiveDaemon, worktree: &Path) -> (RunChild, PathBuf) {
+    let run_dir = daemon.dir().join("run");
+    std::fs::create_dir_all(&run_dir).expect("create the run folder");
+    let child = spawn_streaming_child(&run_dir.join("stream.jsonl"));
+    let run_file = write_run_file(daemon, worktree, &run_dir, &child);
+    (child, run_file)
+}
+
+/// Fails the spec unless `node`, which runs the fake CLI, is on the PATH.
+fn assert_node() {
+    let node = Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    assert!(node, "node not on PATH; the fake CLI needs it");
+}
+
 /// Waits until the run's leaf is laid out in the sidebar with the `DS` tag.
 fn wait_dispatch_leaf(h: &mut Harness<'_>) {
     h.wait_until("the run's leaf laid out in the sidebar", |h| {
@@ -137,19 +156,19 @@ fn wait_dispatch_leaf(h: &mut Harness<'_>) {
     assert!(tagged, "the run's leaf carries the DS tag");
 }
 
-/// The recent actions pane `pane` draws for the run it follows.
+/// The transcript lines pane `pane` draws for the run it follows.
 fn dispatch_lines(h: &mut Harness<'_>, pane: &str) -> Vec<String> {
     h.root(|root, _| root.dispatch_view_lines(pane))
 }
 
-/// The highest `n` of the `assistant: step <n>` lines in `lines`; 0 before
-/// the first. The daemon caps a run's actions and drops the oldest, so the
+/// The highest `n` of the `● step <n>` lines in `lines`; 0 before the
+/// first. The transcript is capped and drops the oldest entries, so the
 /// step count, unlike the line count, keeps rising for as long as the child
 /// streams.
 fn newest_dispatch_step(lines: &[String]) -> u64 {
     lines
         .iter()
-        .filter_map(|line| line.strip_prefix("assistant: step "))
+        .filter_map(|line| line.strip_prefix("● step "))
         .filter_map(|n| n.parse().ok())
         .max()
         .unwrap_or(0)
@@ -188,7 +207,7 @@ fn follow_dispatch_run(h: &mut Harness<'_>, client: &LiveClient) -> String {
         };
         dispatch_lines(h, id)
             .iter()
-            .any(|line| line == "tool: Read")
+            .any(|line| line.starts_with("● Read"))
     });
     let pane = pane.expect("the wait just found the pane");
     let seen = newest_dispatch_step(&dispatch_lines(h, &pane));
@@ -250,20 +269,13 @@ fn finish_as_the_runner(run_file: &Path) {
 #[gpui::test]
 #[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
 fn live_dispatch_run_streams_follows_and_stops(cx: &mut TestAppContext) {
-    let node = Command::new("node")
-        .arg("--version")
-        .output()
-        .is_ok_and(|out| out.status.success());
-    assert!(node, "node not on PATH; the fake CLI needs it");
+    assert_node();
     let daemon = LiveDaemon::start("dispatch");
     let (mut h, client) = Harness::open_live(cx, &daemon);
     wait_connected(&mut h, &client, &daemon);
     let worktree = register_fixture(&mut h, &client, &daemon);
 
-    let run_dir = daemon.dir().join("run");
-    std::fs::create_dir_all(&run_dir).expect("create the run folder");
-    let mut child = spawn_streaming_child(&run_dir.join("stream.jsonl"));
-    let run_file = write_run_file(&daemon, &worktree, &run_dir, &child);
+    let (mut child, run_file) = start_streaming_run(&daemon, &worktree);
 
     wait_dispatch_leaf(&mut h);
     let pane = follow_dispatch_run(&mut h, &client);
@@ -281,4 +293,54 @@ fn live_dispatch_run_streams_follows_and_stops(cx: &mut TestAppContext) {
             .is_some_and(|note| note.starts_with("Ended. Run folder:"))
     });
     h.wait_until("the run's leaf to leave the sidebar", |h| !h.in_model(LEAF));
+}
+
+/// A tool call's head line in a followed run's transcript.
+fn is_tool_call(line: &str) -> bool {
+    line.starts_with("● Read") || line.starts_with("● Edit")
+}
+
+/// A tool's first output line, not the `Running…` of a call still waiting.
+fn is_tool_output(line: &str) -> bool {
+    line.starts_with("  ⎿  ") && line != "  ⎿  Running…"
+}
+
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn a_followed_run_shows_its_transcript(cx: &mut TestAppContext) {
+    assert_node();
+    let daemon = LiveDaemon::start("dispatch-transcript");
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+    let worktree = register_fixture(&mut h, &client, &daemon);
+    let (_child, _run_file) = start_streaming_run(&daemon, &worktree);
+    wait_dispatch_leaf(&mut h);
+    wait_dispatch_init(&mut h, &client);
+
+    h.click_on(LEAF);
+
+    let mut lines = Vec::new();
+    h.wait_until(
+        "a pane following the run with a tool call and its output",
+        |h| {
+            let Some(pane) = h.first_pane() else {
+                return false;
+            };
+            lines = dispatch_lines(h, &pane);
+            lines.iter().any(|line| is_tool_call(line))
+                && lines.iter().any(|line| is_tool_output(line))
+        },
+    );
+    assert!(
+        lines.iter().any(|line| is_tool_call(line)),
+        "a tool call names its tool: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| is_tool_output(line)),
+        "a tool's output sits under its call: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("system:")),
+        "the transcript draws no recent action: {lines:?}"
+    );
 }

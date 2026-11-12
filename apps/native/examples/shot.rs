@@ -419,9 +419,14 @@ impl View {
             Self::OpenShell => root.shell_dialog_open(),
             Self::SafeStart => root.start_prompt_open(),
             // The tulip tab's session pane beside the pane following a
-            // working dispatch run, the run listed under its repo.
+            // working dispatch run and drawing its transcript, the run listed
+            // under its repo.
             Self::Dispatch => {
                 root.dispatch_view_header(SHOT_RUN_PANE).is_some()
+                    && root
+                        .dispatch_view_lines(SHOT_RUN_PANE)
+                        .iter()
+                        .any(|line| line.starts_with("● "))
                     && root
                         .sidebar_containers()
                         .iter()
@@ -2073,6 +2078,58 @@ fn shot_dispatch_runs() -> Result<DaemonMessage> {
     .context("the fixture's dispatch runs")
 }
 
+/// The followed run's transcript in the `dispatch` shot: an answer, a read,
+/// an edit, a test run whose eight output lines collapse to five and a count,
+/// and a lint still running.
+fn shot_run_transcript() -> Vec<ChatEntry> {
+    let tests = [
+        "    Starting 184 tests across 1 binary",
+        "        PASS [   0.412s] ui_sidebar::rows_grow_with_the_ui_text_size_and_clicks_still_hit_them",
+        "        PASS [   0.412s] ui_sidebar::a_repo_row_with_a_summary_grows_by_two_offsets",
+        "        PASS [   0.412s] ui_sidebar::sidebar_chips_grow_with_the_ui_text_size",
+        "        PASS [   0.412s] ui_sidebar::the_view_switcher_fits_at_text_size_plus_four",
+        "        PASS [   0.412s] ui_sidebar::containers_render_workspace_repo_shell_dir_detached_in_order",
+        "        PASS [   0.412s] ui_sidebar::excluded_leaf_shows_the_marker_and_no_badge",
+        "     Summary [  21.3s] 184 tests run: 184 passed",
+    ]
+    .join("\n");
+    vec![
+        ChatEntry::Answer {
+            id: "t1".to_owned(),
+            text: "I'll wire the runs into the sidebar, starting with the drag payload.".to_owned(),
+            live: false,
+        },
+        chat_tool(
+            "t2",
+            "Read",
+            ToolKind::Read,
+            "apps/native/src/drag.rs",
+            Some("pub enum DragPayload {\n    Session(SessionDrag),\n    Run(RunDrag),\n}"),
+        ),
+        chat_tool(
+            "t3",
+            "Edit",
+            ToolKind::Other,
+            "apps/native/src/sidebar.rs",
+            Some("Updated sidebar.rs with 14 additions and 3 removals"),
+        ),
+        chat_tool(
+            "t4",
+            "Bash",
+            ToolKind::Run,
+            "cargo nextest run -p rustling-tulip-native --test ui ui_sidebar",
+            Some(&tests),
+        ),
+        chat_tool(
+            "t5",
+            "Bash",
+            ToolKind::Run,
+            "cargo clippy -p rustling-tulip-native",
+            None,
+        ),
+    ]
+}
+
 /// The version the shot fixtures' remote host reports: older than this
 /// client's, so its rows show their version and the "Behind" tag.
 const REMOTE_BUILD_VERSION: &str = "0.9.0";
@@ -2611,10 +2668,28 @@ impl FakeDaemon {
                     request_id: request_id.clone(),
                 }
             }
-            _ => return Ok(Vec::new()),
+            _ => return Ok(follow_reply(msg).into_iter().collect()),
         };
         Ok(vec![reply])
     }
+}
+
+/// The `dispatch` shot's reply to a follow of its run's transcript; `None`
+/// for any other message.
+fn follow_reply(msg: &ClientMessage) -> Option<DaemonMessage> {
+    let ClientMessage::FollowTranscript {
+        source: source @ protocol::TranscriptSource::DispatchRun { run_id },
+        request_id,
+    } = msg
+    else {
+        return None;
+    };
+    (run_id == SHOT_RUN).then(|| DaemonMessage::Transcript {
+        source: source.clone(),
+        entries: shot_run_transcript(),
+        hidden: 0,
+        request_id: request_id.clone(),
+    })
 }
 
 /// The fake daemon's accounts at `now`, the mock's five: main in use, ops

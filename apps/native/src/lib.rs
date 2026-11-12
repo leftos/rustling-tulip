@@ -5262,7 +5262,7 @@ impl RootView {
             return;
         }
         if let Some(id) = failure.request_id
-            && self.transcript_refused(host, id)
+            && self.transcript_refused(host, id, failure.code)
         {
             return;
         }
@@ -5491,17 +5491,23 @@ impl RootView {
         }
     }
 
-    /// A refusal of `host`'s follow `request_id`: the follow waits no more and
-    /// its pane keeps the run's recent actions. Returns whether it was one.
-    fn transcript_refused(&mut self, host: &HostKey, request_id: &str) -> bool {
+    /// A refusal of `host`'s follow `request_id`: the follow waits no more.
+    /// A run gone (`not_found`) keeps the transcript held; any other refusal,
+    /// such as an older host's `unsupported_message`, drops it so the pane
+    /// shows the run's recent actions. Returns whether it was one.
+    fn transcript_refused(&mut self, host: &HostKey, request_id: &str, code: Option<&str>) -> bool {
         let pending = self
             .transcript_follows
             .iter_mut()
             .find(|((on, _), pending)| on == host && pending.as_deref() == Some(request_id));
-        let Some((_, pending)) = pending else {
+        let Some((key, pending)) = pending else {
             return false;
         };
         *pending = None;
+        let key = key.clone();
+        if code != Some(protocol::error_codes::NOT_FOUND) {
+            self.transcripts.remove(&key);
+        }
         true
     }
 

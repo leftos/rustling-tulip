@@ -62,8 +62,9 @@
  *   - With `FAKE_CLAUDE_STREAM_JSON=<ms>` set it stands in for a headless
  *     stream-json run instead of a session, before the arguments, banner or
  *     hooks: it writes `{"type":"system","subtype":"init",…}` at once, then
- *     every <ms> milliseconds the next assistant line, cycling through a
- *     `Read` tool use, an `Edit` tool use and a `step <n>` text with `n`
+ *     every <ms> milliseconds the next step, cycling through a `Read` tool
+ *     call, an `Edit` tool call (each a `tool_use` line and the `user`
+ *     `tool_result` line answering it) and a `step <n>` text with `n`
  *     counting up, each ended by `\n`. It never writes a `result` line and
  *     never exits on its own (a value that is not a positive whole number
  *     exits 2).
@@ -988,8 +989,11 @@ function lineBreakLength(value, index) {
 /**
  * Stands in for a headless `claude -p --output-format stream-json` run that
  * never finishes, as the `FAKE_CLAUDE_STREAM_JSON` knob asks: the `init` line
- * at once, then every `interval` ms the next of a `Read` tool use, an `Edit`
- * tool use and a `step <n>` text, `n` counting up. It never writes a
+ * at once, then every `interval` ms the next of a `Read` tool call, an `Edit`
+ * tool call (each an `assistant` `tool_use` record and the `user`
+ * `tool_result` record answering it) and a `step <n>` text, `n` counting up;
+ * every message record carries a fresh `uuid`, the `session_id` and
+ * `parent_tool_use_id: null`, as a real stream-json run's do. It never writes a
  * `result` line and never exits on its own; it waits to be killed. A value
  * that is not a positive whole number of milliseconds exits 2.
  */
@@ -1002,23 +1006,41 @@ async function streamJson(interval) {
       2,
     );
   }
+  const sessionId = "00000000-0000-4000-8000-00000000f00d";
   const line = (record) => process.stdout.write(`${JSON.stringify(record)}\n`);
-  const assistant = (block) =>
-    line({ type: "assistant", message: { content: [block] } });
-  line({
-    type: "system",
-    subtype: "init",
-    session_id: "00000000-0000-4000-8000-00000000f00d",
-  });
+  const message = (role, block) =>
+    line({
+      type: role,
+      message: { role, content: [block] },
+      parent_tool_use_id: null,
+      session_id: sessionId,
+      uuid: randomUUID(),
+    });
+  const assistant = (block) => message("assistant", block);
+  const tool = (name, input, result) => {
+    const id = `toolu_${randomUUID().replaceAll("-", "")}`;
+    assistant({ type: "tool_use", id, name, input });
+    message("user", {
+      tool_use_id: id,
+      type: "tool_result",
+      content: result,
+      is_error: false,
+    });
+  };
+  line({ type: "system", subtype: "init", session_id: sessionId });
   let tick = 0;
   let step = 0;
   setInterval(() => {
     const kind = tick % 3;
     tick += 1;
     if (kind === 0) {
-      assistant({ type: "tool_use", name: "Read" });
+      tool("Read", { file_path: "src/lib.rs" }, "1\tpub fn step() {}");
     } else if (kind === 1) {
-      assistant({ type: "tool_use", name: "Edit" });
+      tool(
+        "Edit",
+        { file_path: "src/lib.rs", old_string: "step", new_string: "next_step" },
+        "The file src/lib.rs has been updated.",
+      );
     } else {
       step += 1;
       assistant({ type: "text", text: `step ${step}` });

@@ -8,6 +8,9 @@ use std::collections::HashSet;
 
 use protocol::ChatEntry;
 
+/// The entries a client holds of one run, as the daemon's log keeps them.
+pub(crate) const TRANSCRIPT_CAP: usize = 500;
+
 /// The transcript a client holds of one followed run.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Transcript {
@@ -24,10 +27,12 @@ impl Transcript {
     pub(crate) fn replace(&mut self, entries: Vec<ChatEntry>, hidden: u32) {
         self.entries = entries;
         self.hidden = hidden;
+        self.cap();
     }
 
     /// Folds in `entries`: one whose id is held replaces it in place, any
-    /// other goes at the end. Marks the run ended when `ended`.
+    /// other goes at the end, and the oldest past [`TRANSCRIPT_CAP`] go
+    /// into `hidden`. Marks the run ended when `ended`.
     pub(crate) fn append(&mut self, entries: Vec<ChatEntry>, ended: bool) {
         for entry in entries {
             let held = entry_id(&entry)
@@ -38,6 +43,18 @@ impl Transcript {
             }
         }
         self.ended |= ended;
+        self.cap();
+    }
+
+    /// Drops the oldest entries past [`TRANSCRIPT_CAP`], counting them in
+    /// `hidden`.
+    fn cap(&mut self) {
+        let excess = self.entries.len().saturating_sub(TRANSCRIPT_CAP);
+        if excess > 0 {
+            self.entries.drain(..excess);
+            let dropped = u32::try_from(excess).unwrap_or(u32::MAX);
+            self.hidden = self.hidden.saturating_add(dropped);
+        }
     }
 
     /// Expands the output of tool call `id`, or collapses it again.
@@ -264,6 +281,21 @@ mod tests {
             ]
         );
         assert!(!transcript.ended);
+    }
+
+    #[test]
+    fn append_drops_the_oldest_past_the_cap_and_counts_them_hidden() {
+        let mut transcript = Transcript::default();
+        transcript.replace(Vec::new(), 4);
+        let entries = (0..TRANSCRIPT_CAP + 3)
+            .map(|at| answer(&format!("a{at}"), "hi"))
+            .collect();
+
+        transcript.append(entries, false);
+
+        assert_eq!(transcript.entries.len(), TRANSCRIPT_CAP);
+        assert_eq!(transcript.entries.first(), Some(&answer("a3", "hi")));
+        assert_eq!(transcript.hidden, 7, "the three dropped add to the four");
     }
 
     #[test]

@@ -113,6 +113,12 @@
     },
     {
       "paths": [
+        "crates/daemon/src/dispatch_runs/transcript.rs"
+      ],
+      "filter": "package(daemon) & test(/^dispatch_runs::/)"
+    },
+    {
+      "paths": [
         "crates/daemon/src/screen/dialogs.rs",
         "crates/daemon/src/screen/fixture_screen.rs"
       ],
@@ -484,6 +490,18 @@
         "apps/native/tests/ui/ui_dispatch.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^dispatch_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_dispatch::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/transcript_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^transcript_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_transcript|ui_dispatch)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_transcript.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^ui_transcript::/)"
     },
     {
       "paths": [

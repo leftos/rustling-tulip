@@ -269,6 +269,51 @@ fn a_reconnect_follows_again_and_the_reply_replaces_the_lines(cx: &mut TestAppCo
     assert_eq!(lines(&mut h), ["● One.", "● Two."], "replaced, not merged");
 }
 
+/// The fixture holding `● One.` from a first follow, reconnected, with the
+/// re-follow's request id.
+fn held_then_reconnected<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, String) {
+    let mut h = listed(cx, dir);
+    let first = follow_id(&mut h);
+    h.send(reply(vec![answer("a1", "One.")], Some(first)));
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(DaemonMessage::DispatchRuns {
+        runs: vec![r1().build()],
+    });
+    let second = follow_id(&mut h);
+    (h, second)
+}
+
+fn refusal(code: &str, request_id: String) -> DaemonMessage {
+    DaemonMessage::Error {
+        code: Some(code.to_owned()),
+        message: "refused".to_owned(),
+        request_id: Some(request_id),
+    }
+}
+
+#[gpui::test]
+fn an_unsupported_follow_refusal_drops_the_transcript_and_shows_recent_actions(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, id) = held_then_reconnected(cx, &dir);
+    assert_eq!(lines(&mut h), ["● One."]);
+
+    h.send(refusal(protocol::error_codes::UNSUPPORTED_MESSAGE, id));
+
+    assert_eq!(lines(&mut h), ["read a.rs", "edit b.rs"]);
+}
+
+#[gpui::test]
+fn a_not_found_refusal_keeps_the_last_transcript(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = held_then_reconnected(cx, &dir);
+
+    h.send(refusal(protocol::error_codes::NOT_FOUND, id));
+
+    assert_eq!(lines(&mut h), ["● One."]);
+}
+
 #[gpui::test]
 fn clicking_a_tool_line_expands_and_collapses_its_output(cx: &mut TestAppContext) {
     let dir = TestDir::new();

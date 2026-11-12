@@ -57,7 +57,11 @@ The email is `FAKE_CLAUDE_LOGIN_EMAIL`, else `login@example.com`; `<tag>` is the
 With `FAKE_CLAUDE_STREAM_JSON` set to a positive whole number of milliseconds, the shim stands in for a headless `claude -p --output-format stream-json` run that never finishes, as a dispatch run's child: it looks at no argument, prints no banner and runs no hook. It writes to stdout, each line ended by `\n`:
 
 - at once, `{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-00000000f00d"}`;
-- then one line every interval, cycling through `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}`, the same with `"name":"Edit"`, and `{"type":"assistant","message":{"content":[{"type":"text","text":"step <n>"}]}}` with `n` counting up from 1.
+- then one step every interval, cycling through a `Read` tool call, an `Edit` tool call and a `step <n>` text with `n` counting up from 1.
+
+  A tool call is two lines: an `assistant` record whose `message.content` is one `{"type":"tool_use","id":"toolu_…","name":"Read","input":{"file_path":"src/lib.rs"}}` block (the `Edit` call's input also has `old_string` and `new_string`), then a `user` record whose content is the matching `{"tool_use_id":"toolu_…","type":"tool_result","content":"…","is_error":false}` block. The text is an `assistant` record with one `{"type":"text","text":"step <n>"}` block.
+
+  Every `assistant` and `user` record also carries `"role"` in its `message`, a fresh `uuid`, `"session_id":"00000000-0000-4000-8000-00000000f00d"` and `"parent_tool_use_id":null`, the shape of a real stream-json run's records, so the daemon builds a followed run's transcript from them.
 
 It never writes a `result` line and never exits on its own: it waits to be killed. Any other non-empty value prints `fake-claude: FAKE_CLAUDE_STREAM_JSON must be a positive whole number of milliseconds: <value>` on stderr and exits 2. The live tier's dispatch spec (`apps/native/tests/e2e_dispatch.rs`) runs it as `node index.mjs` with its stdout in a run's stream file.
 
