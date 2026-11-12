@@ -16,8 +16,7 @@ These are the orchestrator's decisions (not owner rulings), settled from the cod
 - **One fold.** The daemon builds each run's entry log in the tailer's `fold`, always, under the same generation guard, and clears it on `restart` and `replace`. The follow reply is built and the follower registered under the lock `fold` takes, so an append is either in the backfill or sent after it. `recent_actions` stays beside it as the fallback.
 - **Caps.** The log keeps the last 500 entries (`CHAT_REPLY_CAP`), counting the dropped ones in `hidden`. A result for a dropped call is dropped.
 - **Thinking.** `Thinking` entries are not drawn in the transcript view.
-- **Tool output.** A tool card shows its one-line summary and the first 5 lines of its output; a click on the card expands it to the whole capped text and collapses it again, as the chat's tool cards do.
-- **Look.** The view reuses the chat card look (`chat_view.rs`), not a new palette.
+- **Look.** The view reads like Claude Code in a terminal, in the terminal font: an answer is `● {text}`; a tool call is `● {name}({summary})` with its output under it as `  ⎿  {line}`, the first 5 lines and then `     … +{n} lines`; a call still waiting for its result shows `  ⎿  Running…`; a failed result is drawn in the error colour. A click on a tool call's rows expands its output to the whole capped text and collapses it again. System rows are muted.
 - **Result line.** The stream's `result` record shows only in the pane's stats line (status, cost, tokens), as today.
 - **Ended runs.** A run that ended keeps its last transcript in the client while the pane stays open, as the kept snapshot does. A run that ended before the client connected shows the existing gone note; reading an ended run's `stream.jsonl` from its run dir is out of scope.
 - **Reconnect.** After `Welcome` the client re-sends `FollowTranscript` for each followed run and replaces its model with the reply, ignoring a reply whose `request_id` is stale.
@@ -25,10 +24,9 @@ These are the orchestrator's decisions (not owner rulings), settled from the cod
 
 ## Steps
 
-- [ ] TV.1 Protocol: the four messages and `TranscriptSource` in `crates/protocol/src/lib.rs`, round-trip tests, `apps/pwa/src/protocol.ts` regenerated.
-- [ ] TV.2 Parse: a defaulted `stream_entries(line, known)` on the agent-api trait, implemented by the Claude plugin over `chat_entries`, with a real stream-json fixture.
-- [ ] TV.3 Daemon: the entry log in `RunEntry`, folded in `fold`; follow and unfollow handlers in `crates/daemon/src/server/dispatch_runs.rs`, per-connection followers dropped on disconnect and on run removal; the `dispatch` or-pattern in `server.rs`.
-- [ ] TV.4 Client model: `apps/native/src/transcript_view.rs` (backfill, append upsert by id, cap, expanded set), the follow and unfollow sends and the message fold in `RootView`, a `ui_transcript` spec.
-- [ ] TV.5 Client drawing: `dispatch_view.rs` delegates its body to the transcript view, with the chat card look; `ui_dispatch` updated.
-- [ ] TV.6 Shot and e2e: the `dispatch` native-shot fixture gains a transcript; fake-claude's stream mode writes `user`/`tool_result` records; `e2e_dispatch` follows a transcript.
-- [ ] TV.7 Subagent source (RT-30, after RT-1510): `TranscriptSource::Subagent` and `PaneFollow` variant, a subagent-file tail feeding the same log.
+- [x] TV.1 Protocol: the four messages and `TranscriptSource` in `crates/protocol/src/lib.rs`, round-trip tests, `apps/pwa/src/protocol.ts` regenerated.
+- [x] TV.2 Parse: the agent's existing `chat_entries(line, known)` reads stream-json records as they are, proved by a real stream-json fixture.
+- [x] TV.3 Daemon: the entry log in `RunEntry`, folded in `fold`; follow and unfollow handled in `DispatchRuns`, a follower dropped at its first failed send and at run removal.
+- [ ] TV.4 Client: `apps/native/src/transcript_view.rs` (backfill, append upsert by id, the expanded set, the terminal-style lines), the follow and unfollow sends and the message fold in `RootView`, `dispatch_view.rs` drawing the transcript in place of recent actions once one has arrived, a `ui_transcript` spec.
+- [ ] TV.5 Shot and e2e: the `dispatch` native-shot fixture gains a transcript; fake-claude's stream mode writes `user`/`tool_result` records; `e2e_dispatch` follows a transcript.
+- [ ] TV.6 Subagent source (RT-30, after RT-1510): `TranscriptSource::Subagent` and `PaneFollow` variant, a subagent-file tail feeding the same log.
