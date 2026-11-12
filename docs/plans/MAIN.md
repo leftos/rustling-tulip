@@ -115,7 +115,7 @@
 
 - [ ] RT-43 Bump gpui past 0.2.2 to drop the proc-macro-error2 warning
 - [ ] RT-44 Find what holds tracer_protocol's incremental session directory
-- [ ] RT-60 Add the agent-mail-guard prek hook · release vNext
+- [ ] RT-60 Add the agent-mail-guard prek hook · release vNext+1
 - [ ] RT-70 Speed up the daemon's git-fixture tests with shared fixture templates
 - [ ] RT-128 Run fmt, clippy and the full suite in a Windows CI workflow
 - [ ] RT-130 Cut cold builds across worktrees: measure, then sccache or a safe shared target
@@ -126,7 +126,7 @@
 - [ ] RT-260 Autostart test: stop writing to the live HKCU Run key
 - [ ] RT-262 Run the ui_ellipsis specs: test-release builds without debug assertions
 - [ ] RT-324 Drive the native client headless: hidden window, virtual input, captures
-  - [ ] RT-316 Capture the native client in any state: native-shot views for the overlays and empty area, and a drive-and-capture command · release vNext
+  - [ ] RT-316 Capture the native client in any state: native-shot views for the overlays and empty area, and a drive-and-capture command · release vNext+1
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-347 Make the UI test harness's in_model refuse a selector it does not know
 - [ ] RT-554 Make the UI specs' absence checks able to fail
@@ -166,8 +166,8 @@
 - [ ] RT-1396 Map the remote-update and spawn files in tools/test-map.json
 - [ ] RT-1458 Let a driven cloaked client run its updater against a test feed, for release smoke runs
 - [ ] RT-1481 Scrub the owner's paths and status line from the screen fixtures
-- [ ] RT-1541 Check the dispatch dir in the isolated daemon's launch check
-- [ ] RT-1564 Map the native files test-map.json misses so -Validate passes again
+- [ ] RT-1541 Check the dispatch dir in the isolated daemon's launch check · release vNext+1
+- [ ] RT-1564 Map the native files test-map.json misses so -Validate passes again · release vNext+1
 
 ## Elevated daemon and security
 
@@ -268,8 +268,8 @@
 - [ ] RT-1378 Word the crash box for a panic past the start's stable window
 - [ ] RT-707 Keep a repo's sessions out of Detached once the repo joins a workspace
 - [ ] RT-1484 Keep an offline host's leaf in the Tabs view from dragging, and dim it by its own host
-- [ ] RT-1548 Show the blue finished pill on a dragged tab's ghost
-- [ ] RT-1559 Name a closed follow pane in the undo toast instead of "Closed empty pane"
+- [ ] RT-1548 Show the blue finished pill on a dragged tab's ghost · release vNext+1
+- [ ] RT-1559 Name a closed follow pane in the undo toast instead of "Closed empty pane" · release vNext+1
 - [ ] RT-1563 Close sidebar menus with their own window's focus, and on the first Escape
 - [ ] RT-1566 Clear an armed session Stop when its session exits so Escape is not swallowed
 
@@ -510,22 +510,22 @@
 
 ## Dashboard, Gates and Linear
 
-- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries · release vNext
-  - [ ] RT-501 Draw the repo lanes, the default view (DB.24) · release vNext
-  - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25) · release vNext
-  - [ ] RT-453 Document the summarizer and the Dashboard (SA.11) · release vNext
-  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8) · release vNext
-  - [ ] RT-528 Count a session's recent work from where its branch stood at start, not by commit time · release vNext
-  - [ ] RT-529 Polish the Dashboard rows: the cut Agents summary and the first-frame column flicker · release vNext
-  - [ ] RT-732 Send gate holds in the Dashboard's activity tracks · release vNext
-  - [ ] RT-733 Draw a dispatch run's activity track under its Dashboard row · release vNext
-  - [ ] RT-734 Show the Linear column in the Dashboard drawer · release vNext
-  - [ ] RT-735 Show each session's Linear issue state and title from the Linear client · release vNext
-  - [ ] RT-736 Count issues Done and release progress in the Dashboard header · release vNext
-  - [ ] RT-737 Add the accounts card and Questions to the need-you band · release vNext
-  - [ ] RT-738 Add Questions, Next up and the No live agent table to the repo lanes · release vNext
-  - [ ] RT-739 Promote the Dashboard design and delete docs/plans/dashboard.md · release vNext
-  - [ ] RT-789 Draw nested agent rows under an open Dashboard drawer
+- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries · release vNext+1
+  - [ ] RT-501 Draw the repo lanes, the default view (DB.24) · release vNext+1
+  - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25) · release vNext+1
+  - [ ] RT-453 Document the summarizer and the Dashboard (SA.11) · release vNext+1
+  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8) · release vNext+1
+  - [ ] RT-528 Count a session's recent work from where its branch stood at start, not by commit time · release vNext+1
+  - [ ] RT-529 Polish the Dashboard rows: the cut Agents summary and the first-frame column flicker · release vNext+1
+  - [ ] RT-732 Send gate holds in the Dashboard's activity tracks · release vNext+1
+  - [ ] RT-733 Draw a dispatch run's activity track under its Dashboard row · release vNext+1
+  - [ ] RT-734 Show the Linear column in the Dashboard drawer · release vNext+1
+  - [ ] RT-735 Show each session's Linear issue state and title from the Linear client · release vNext+1
+  - [ ] RT-736 Count issues Done and release progress in the Dashboard header · release vNext+1
+  - [ ] RT-737 Add the accounts card and Questions to the need-you band · release vNext+1
+  - [ ] RT-738 Add Questions, Next up and the No live agent table to the repo lanes · release vNext+1
+  - [ ] RT-739 Promote the Dashboard design and delete docs/plans/dashboard.md · release vNext+1
+  - [ ] RT-789 Draw nested agent rows under an open Dashboard drawer · release vNext+1
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-92 Show context %, cost and prompt-cache expiry on each session
 - [ ] RT-133 Linear issue links: detect IDs in terminal text and session titles, hover card, open in the app
@@ -568,7 +568,7 @@
 - [ ] RT-1451 List a backgrounded subagent once on the Dashboard, not again as a bg shell
 - [ ] RT-1479 Keep the Dashboard's subagent name uncut while its row has room
 - [ ] RT-1509 Nest a dispatch run under its session by the live-run file's session id (DB.21)
-- [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts
+- [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts · release vNext+1
 
 ## Repos, workspaces and worktrees
 
@@ -585,7 +585,8 @@
 
 ## Agents and subagents
 
-- [ ] RT-30 View a session's running subagents as read-only sessions · release vNext
+- [/] RT-30 View a session's running subagents as read-only sessions · release vNext
+  - [ ] RT-1586 List a dispatch run's own subagents nested under its DS row · release vNext
 - [ ] RT-49 Offer every popular agent harness in the spawn dialog's runtime dropdown
   - [ ] RT-214 AH.1 Spike: DSH per-invocation patch, hook payload and resume
   - [ ] RT-215 AH.2 Pi runtime: backend, session id and dialog entry
@@ -597,24 +598,24 @@
 - [ ] RT-176 Import a DeepSeek session started with a model alias as DeepSeek
 - [ ] RT-192 Verify the DeepSeek provider's model and env handling
 - [ ] RT-403 Take the prompt-echo marker for prompt navigation from the agent descriptor
-- [ ] RT-406 Show a session's subagents under it in the sidebar, with a depth setting
+- [/] RT-406 Show a session's subagents nested under it in the sidebar · release vNext
 - [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user
 - [ ] RT-687 Remove AgentDescriptor.accent and AccentToken with the next protocol bump
 - [ ] RT-716 Let the agent plugin name a permission prompt's allow, always-allow and deny options
-- [ ] RT-1510 Rewrite the subagent-streams design against the client's real views and the pane follow field · release vNext
-- [ ] RT-1542 Stop dispatch-run tailers with their watcher, and keep a stop marker until the runner is gone
-- [ ] RT-1552 Keep a follow pane's host on undo and keep follows through a failed startup scan
-- [ ] RT-1558 Show a dispatch run's runner pid in its DS leaf's hover
-- [ ] RT-1560 List panes that follow a dispatch run in the jump palette
-- [ ] RT-1561 Teach the any-menu-open checks and close paths about the dispatch run menu
-- [ ] RT-1562 Fade only the dragged row of a run listed in two tabs
-- [ ] RT-1565 Say a followed run's host is not connected instead of that the run ended
-- [ ] RT-1567 Show the ⋯ overflow and keep the title readable in a narrow run pane's header
-- [ ] RT-1569 Drop a dispatch run whose child reads unknown once its runner is dead
-- [ ] RT-1570 Read a dispatch run's last stream lines before dropping it
-- [ ] RT-1577 Polish found by the v0.13.0-alpha dispatch smoke run
-  - [ ] RT-1578 Name a tab that follows a dispatch run after its repo or run, not Tab N
-  - [ ] RT-1579 Show a nested dispatch run's cost in its Dashboard row
+- [ ] RT-1542 Stop dispatch-run tailers with their watcher, and keep a stop marker until the runner is gone · release vNext+1
+- [ ] RT-1552 Keep a follow pane's host on undo and keep follows through a failed startup scan · release vNext+1
+- [ ] RT-1558 Show a dispatch run's runner pid in its DS leaf's hover · release vNext+1
+- [ ] RT-1560 List panes that follow a dispatch run in the jump palette · release vNext+1
+- [ ] RT-1561 Teach the any-menu-open checks and close paths about the dispatch run menu · release vNext+1
+- [ ] RT-1562 Fade only the dragged row of a run listed in two tabs · release vNext+1
+- [ ] RT-1565 Say a followed run's host is not connected instead of that the run ended · release vNext+1
+- [ ] RT-1567 Show the ⋯ overflow and keep the title readable in a narrow run pane's header · release vNext+1
+- [ ] RT-1569 Drop a dispatch run whose child reads unknown once its runner is dead · release vNext+1
+- [ ] RT-1570 Read a dispatch run's last stream lines before dropping it · release vNext+1
+- [ ] RT-1577 Polish found by the v0.13.0-alpha dispatch smoke run · release vNext+1
+  - [ ] RT-1578 Name a tab that follows a dispatch run after its repo or run, not Tab N · release vNext+1
+  - [ ] RT-1579 Show a nested dispatch run's cost in its Dashboard row · release vNext+1
+- [ ] RT-1587 Keep a wrapped transcript line's indent in a followed run's pane
 
 ## macOS and Unix
 
@@ -687,8 +688,9 @@
 - [ ] RT-1491 Keep Settings' saved look when open_settings runs again while Settings is open
 - [ ] RT-1547 Carry a link's #fragment and ?query on remote, file:// hyperlink and relative-join links
 - [ ] RT-1549 Keep session update broadcasts in record order and off unpublished records
-- [ ] RT-1572 Keep hook and thinking-token system events out of a stream's recent actions
-- [ ] RT-1576 Log dispatch runs that change or leave before the status log attaches at startup
+- [ ] RT-1576 Log dispatch runs that change or leave before the status log attaches at startup · release vNext+1
+- [ ] RT-1583 Credit a linked run's activity to the same host session it nests under when sessions share a conversation
+- [ ] RT-1585 Stop two dispatch-run runtime tests leaking a handle
 
 ## Design files
 
@@ -700,7 +702,7 @@
 - [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789, RT-1509, RT-1574
 - [default-shell.md](default-shell.md) — RT-956
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
-- [dispatch-follow.md](dispatch-follow.md) — RT-167, RT-1509, RT-1510, RT-1541, RT-1542, RT-1552, RT-1558
+- [dispatch-follow.md](dispatch-follow.md) — RT-167, RT-1509, RT-1541, RT-1542, RT-1552, RT-1558
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-787, RT-867, RT-868, RT-869
 - [finished-toast.md](finished-toast.md) — RT-755, RT-757
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
@@ -718,5 +720,5 @@
 - [remote-update.md](remote-update.md) — RT-1353, RT-1355, RT-1397, Updates and installer
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792, Remote hosts and connections
-- [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406, RT-1510, Agents and subagents
+- [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406, RT-1586, Agents and subagents
 - [toast-position.md](toast-position.md) — RT-1105
