@@ -14,12 +14,13 @@ It is alpha software.
 - Add any folder as a repo: one that is not a git repo shows as DIR and opens sessions in place, with no worktree or branch choice.
 - Group repos into a workspace: one session works across all of them, with their relative paths kept. A VS Code `.code-workspace` file next to a repo is offered as a workspace.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
-- Tab pills and, on Windows, a badge on the taskbar button count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead.
+- Tab pills and, on Windows, a badge on the taskbar button count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead. A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking; looking at one clears it.
 - The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A notification fires when a session needs you or finishes (skipped when you are already looking at it), after a wait you choose for Finished.
 - Notifications can be the app's own toasts, which answer a prompt or go to its pane without taking focus; on macOS they always are. Each kind plays its own sound, silent during Do Not Disturb: a chime from the bundled list, your own .wav or .ogg, or none.
 - Turn on session summaries in Settings › Dashboard and each finished turn of a Claude session gets a one-line summary, kept across restarts, with a daily cap on what they spend.
 - The Dashboard tab, opened from the activity rail, opens on a Compact view of every running agent by repo, with its state, work and subagents (each with its model and effort level) and no scrolling. Its By status view adds context, recent work, cost, a two-hour activity bar and the Linear issue named in each session's branch, with a drawer per session.
 - Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane; the header counts today's cost, tokens and commits across every session.
+- Dispatch runs show in the sidebar tagged DS. Click one, or drag it onto a pane, to follow it with its cost, tokens, recent actions and a Stop button; the Dashboard lists each under the session that started it.
 - `rustling-tulipd` drives sessions from a shell or a script: `sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch`, each with `--json`.
 - Ctrl+Shift+P opens a jump palette: type to find any open pane, tab, session, repo or workspace, and Enter goes straight there. It also opens a shell on any connected computer.
 - Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
@@ -155,6 +156,15 @@ On a Mac with Apple silicon (there is no build for Intel Macs):
 4. Secret environment rows need Windows Credential Manager, so on a Mac a session with a secret row will not start; give it the secret through an `${env:NAME}` row instead.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.13.0-alpha
+
+- Dispatch runs show in the sidebar tagged DS, and a pane can follow one with its cost, tokens, recent actions and a Stop button.
+- The Dashboard lists the dispatch runs a session started under that session.
+- A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking.
+- Ctrl+clicking a file path in a terminal opens it in its app at once.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.13.0-alpha).
 
 ## What's new in v0.12.1-alpha
 
