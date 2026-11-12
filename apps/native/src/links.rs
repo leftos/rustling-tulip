@@ -44,6 +44,9 @@ pub struct TerminalLinkCandidate {
     pub path: String,
     pub line: Option<u32>,
     pub column: Option<u32>,
+    /// The `?query` and `#fragment` cut off the path's last component, with
+    /// its leading `?` or `#`; `None` on every reading that was not cut.
+    pub suffix: Option<String>,
 }
 
 /// One link, as the rows it was matched in describe it.
@@ -505,6 +508,7 @@ fn build_hyperlink_link(
             path: target,
             line: None,
             column: None,
+            suffix: None,
         }],
         start_index: start,
         end_index: end,
@@ -985,6 +989,7 @@ fn add_absolute_base_readings(links: &mut [TerminalLink]) {
             path: format!("{folder}{separator}{}", primary.path),
             line: primary.line,
             column: primary.column,
+            suffix: primary.suffix,
         };
         links[index].target.clone_from(&joined.path);
         links[index].line = joined.line;
@@ -1047,6 +1052,7 @@ fn build_link(
             path: text.to_owned(),
             line: None,
             column: None,
+            suffix: None,
         }]
     } else {
         build_candidates(text, start_index, end_index, segments)
@@ -1058,6 +1064,7 @@ fn build_link(
             path: text.to_owned(),
             line: None,
             column: None,
+            suffix: None,
         });
     TerminalLink {
         kind,
@@ -1122,17 +1129,58 @@ fn build_candidates(
     }
 
     let mut candidates: Vec<TerminalLinkCandidate> = Vec::new();
-    for reading in &readings {
+    // Every uncut reading comes before any `?query`/`#fragment` cut, so a
+    // file whose name holds the mark wins over the page it might be.
+    let uncut = readings.iter().map(|reading| (reading.as_str(), None));
+    let cuts = readings
+        .iter()
+        .filter_map(|reading| without_suffix(reading))
+        .map(|(path, suffix)| (path, Some(suffix)));
+    for (reading, suffix) in uncut.chain(cuts) {
         if reading.is_empty() {
             continue;
         }
-        let split = split_path_position(reading);
+        let split = TerminalLinkCandidate {
+            suffix: suffix.map(str::to_owned),
+            ..split_path_position(reading)
+        };
         if split.path.is_empty() || candidates.contains(&split) {
             continue;
         }
         candidates.push(split);
     }
     candidates
+}
+
+/// `reading` cut at its first `?` or `#` that no `\` follows, and the text cut off (`/` may follow it, as in `#/route`); `None` when
+/// there is none or the cut would end on a separator.
+fn without_suffix(reading: &str) -> Option<(&str, &str)> {
+    let tail_start = reading.rfind('\\').map_or(0, |slash| slash + 1);
+    let mark = tail_start + reading[tail_start..].find(['?', '#'])?;
+    let (path, suffix) = reading.split_at(mark);
+    (!path.is_empty() && !path.ends_with(['/', '\\'])).then_some((path, suffix))
+}
+
+/// The readings a click on a link with `spaced` readings may open, each with
+/// the index of the spaced reading it came from: every reading's first
+/// candidate in order, then each one's `?query`/`#fragment` cut in the same
+/// order.
+#[must_use]
+pub fn spaced_candidates(spaced: &[TerminalLink]) -> Vec<(usize, TerminalLinkCandidate)> {
+    let first = spaced.iter().enumerate().filter_map(|(index, reading)| {
+        reading
+            .candidates
+            .first()
+            .map(|candidate| (index, candidate.clone()))
+    });
+    let cuts = spaced.iter().enumerate().filter_map(|(index, reading)| {
+        reading
+            .candidates
+            .iter()
+            .find(|candidate| candidate.suffix.is_some())
+            .map(|candidate| (index, candidate.clone()))
+    });
+    first.chain(cuts).collect()
 }
 
 /// Where `index` falls in the assembled line.
@@ -1246,6 +1294,7 @@ pub(crate) fn split_path_position(value: &str) -> TerminalLinkCandidate {
             path: value.to_owned(),
             line: None,
             column: None,
+            suffix: None,
         };
     };
     TerminalLinkCandidate {
@@ -1259,6 +1308,7 @@ pub(crate) fn split_path_position(value: &str) -> TerminalLinkCandidate {
         column: captures
             .get(3)
             .and_then(|group| group.as_str().parse::<u32>().ok()),
+        suffix: None,
     }
 }
 
@@ -1274,7 +1324,8 @@ mod tests {
 
     use super::{
         LinkKind, LinkSegment, TerminalLink, TerminalLinkCandidate, TerminalRow, can_stitch,
-        detect_links, detect_row_links, group_rows, hyperlink_links, trim_link_candidate,
+        detect_links, detect_row_links, group_rows, hyperlink_links, spaced_candidates,
+        trim_link_candidate,
     };
 
     /// A row of `text` padded to `cols`, with each character of `two_column`
@@ -1447,11 +1498,161 @@ mod tests {
             path: path.to_owned(),
             line,
             column,
+            suffix: None,
+        }
+    }
+
+    /// A reading cut off before `suffix`, a `?query` and/or `#fragment`.
+    fn cut(path: &str, suffix: &str) -> TerminalLinkCandidate {
+        TerminalLinkCandidate {
+            suffix: Some(suffix.to_owned()),
+            ..candidate(path, None, None)
         }
     }
 
     fn targets(links: &[TerminalLink]) -> Vec<&str> {
         links.iter().map(|link| link.target.as_str()).collect()
+    }
+
+    #[test]
+    fn a_path_ending_in_a_fragment_also_reads_without_it() {
+        let links = detect_links(r"open X:\dir\index.html#q1 now");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].target, r"X:\dir\index.html#q1");
+        assert_eq!(
+            links[0].candidates,
+            [
+                candidate(r"X:\dir\index.html#q1", None, None),
+                cut(r"X:\dir\index.html", "#q1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_path_with_a_query_and_fragment_reads_both_ways() {
+        let links = detect_links(r"open X:\dir\index.html?a=1&b=2#q1 now");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].target, r"X:\dir\index.html?a=1&b=2#q1");
+        assert_eq!(
+            links[0].candidates,
+            [
+                candidate(r"X:\dir\index.html?a=1&b=2#q1", None, None),
+                cut(r"X:\dir\index.html", "?a=1&b=2#q1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fragment_with_a_slash_is_cut() {
+        let links = detect_links(r"open X:\dir\index.html#/route now");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(
+            links[0].candidates,
+            [
+                candidate(r"X:\dir\index.html#/route", None, None),
+                cut(r"X:\dir\index.html", "#/route"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_query_with_a_slash_is_cut_at_its_start() {
+        let links = detect_links(r"open X:\sb\index.html?path=/story/x#q1 now");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(
+            links[0].candidates,
+            [
+                candidate(r"X:\sb\index.html?path=/story/x#q1", None, None),
+                cut(r"X:\sb\index.html", "?path=/story/x#q1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn uncut_readings_come_before_every_suffix_cut() {
+        let cols = 20;
+        let head = "./dd/aa.html#q1/bbbb";
+        let rows = [row(head, cols, false), row("cc.html#q2", cols, false)];
+        assert!(can_stitch(&rows[0], &rows[1], cols));
+
+        let links = detect_row_links(&rows, cols);
+
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(
+            links[0].candidates,
+            [
+                candidate(&format!("{head}cc.html#q2"), None, None),
+                candidate(head, None, None),
+                cut("./dd/aa.html", "#q1/bbbbcc.html#q2"),
+                cut("./dd/aa.html", "#q1/bbbb"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_spaced_path_with_a_fragment_opens_the_page() {
+        let links = detect_links(r"open X:\my docs\index.html#q1 now");
+        assert_eq!(links[0].target, r"X:\my", "{links:?}");
+        assert_eq!(
+            spaced_candidates(&links[0].spaced),
+            [
+                (0, candidate(r"X:\my docs\index.html#q1", None, None)),
+                (0, cut(r"X:\my docs\index.html", "#q1")),
+            ],
+            "a spaced reading's cut is offered after every uncut reading"
+        );
+
+        let cols = 140;
+        let folder = r"X:\dev\rustling-tulip.wt\rt-929\apps\native\tests\ui\fixtures\links\a-long-folder-name-to-wrap\";
+        let rows = [
+            row(&format!("\u{2502}{:138}\u{2502}", ""), cols, false),
+            row(
+                &format!("\u{2502}  {:<136}\u{2502}", format!("Read {folder}")),
+                cols,
+                false,
+            ),
+            row(
+                &format!(
+                    "\u{2502}  {:<136}\u{2502}",
+                    r"another-folder\page.html#q1 first."
+                ),
+                cols,
+                false,
+            ),
+            row(&format!("\u{2502}{:138}\u{2502}", ""), cols, false),
+        ];
+        let links = detect_row_links(&rows, cols);
+        assert_eq!(
+            spaced_candidates(&links[0].spaced),
+            [
+                (
+                    0,
+                    candidate(&format!(r"{folder}another-folder\page.html#q1"), None, None)
+                ),
+                (0, cut(&format!(r"{folder}another-folder\page.html"), "#q1")),
+            ],
+            "a box-split reading's cut is offered too"
+        );
+    }
+
+    #[test]
+    fn a_question_mark_ending_a_sentence_is_not_a_query() {
+        let links = detect_links(r"see X:\dir\index.html?");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(
+            links[0].candidates,
+            [candidate(r"X:\dir\index.html", None, None)]
+        );
+    }
+
+    #[test]
+    fn a_hash_in_a_folder_name_is_not_cut() {
+        let links = detect_links(r"open X:\a#b\file.txt now");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(
+            links[0].candidates,
+            [candidate(r"X:\a#b\file.txt", None, None)]
+        );
     }
 
     #[test]

@@ -64,14 +64,14 @@ fn viewer_verdict(action: &OpenAction) -> std::io::Result<Verdict> {
 }
 
 /// `link` with the first reading of each of its spaced readings, in their
-/// order, in front of its own candidates: a remote pane cannot check them
-/// before the click, so the host's probe tries them first.
+/// order, then each one's `?query`/`#fragment` cut, in front of its own
+/// candidates: a remote pane cannot check them before the click, so the
+/// host's probe tries them first.
 fn with_spaced_first(link: &TerminalLink) -> TerminalLink {
     let mut link = link.clone();
-    let spaced: Vec<TerminalLinkCandidate> = link
-        .spaced
-        .iter()
-        .filter_map(|reading| reading.candidates.first().cloned())
+    let spaced: Vec<TerminalLinkCandidate> = crate::links::spaced_candidates(&link.spaced)
+        .into_iter()
+        .map(|(_, candidate)| candidate)
         .collect();
     link.candidates.splice(0..0, spaced);
     link
@@ -80,7 +80,9 @@ fn with_spaced_first(link: &TerminalLink) -> TerminalLink {
 /// The file `action` opens.
 fn action_path(action: &OpenAction) -> &Path {
     match action {
-        OpenAction::VsCode { path, .. } | OpenAction::DefaultApp(path) => path,
+        OpenAction::VsCode { path, .. }
+        | OpenAction::DefaultApp(path)
+        | OpenAction::Page { path, .. } => path,
     }
 }
 
@@ -215,10 +217,8 @@ impl RootView {
             spaced,
             base_dirs,
         } = check;
-        let candidates: Vec<TerminalLinkCandidate> = spaced
-            .iter()
-            .filter_map(|reading| reading.candidates.first().cloned())
-            .collect();
+        let (owners, candidates): (Vec<usize>, Vec<TerminalLinkCandidate>) =
+            crate::links::spaced_candidates(&spaced).into_iter().unzip();
         let ui_dir = self.ui_dir.clone();
         let opener = Arc::clone(&self.opener);
         let found = cx.background_executor().spawn(async move {
@@ -230,7 +230,8 @@ impl RootView {
             )
         });
         cx.spawn(async move |_, cx| {
-            let Some(widened) = found.await.and_then(|index| spaced.into_iter().nth(index)) else {
+            let owner = found.await.and_then(|index| owners.get(index).copied());
+            let Some(widened) = owner.and_then(|index| spaced.into_iter().nth(index)) else {
                 return;
             };
             // Fails only when the pane is gone, leaving no link to widen.
@@ -420,12 +421,19 @@ impl RootView {
             (Origin::Link, OpenAction::DefaultApp(path)) => {
                 self.open_in_default_app(path, Route::LINK, window, cx);
             }
+            (Origin::Link, OpenAction::Page { path, suffix }) => {
+                self.open_by(OpenJob::Page { path, suffix }, Route::LINK, window, cx);
+            }
             (Origin::Fetched, OpenAction::VsCode { path, line, column }) => {
                 let job = file_fetch::open_job(path, Some(line), column);
                 self.open_fetched_job(job, Then::Nothing, window, cx);
             }
             (Origin::Fetched, OpenAction::DefaultApp(path)) => {
                 let job = file_fetch::open_job(path, None, None);
+                self.open_fetched_job(job, Then::Nothing, window, cx);
+            }
+            (Origin::Fetched, OpenAction::Page { path, suffix }) => {
+                let job = OpenJob::Page { path, suffix };
                 self.open_fetched_job(job, Then::Nothing, window, cx);
             }
         }

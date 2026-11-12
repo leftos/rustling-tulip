@@ -113,6 +113,14 @@ pub trait Opener: Send + Sync {
     /// When the OS refused to open it.
     fn default_app(&self, path: &Path) -> Result<(), String>;
 
+    /// Opens the web page `path` in the browser with `suffix`, its `?query`
+    /// and/or `#fragment` as the link wrote it, after it; where that cannot
+    /// be done, the page opens at its top.
+    ///
+    /// # Errors
+    /// When the OS refused to open it.
+    fn page(&self, path: &Path, suffix: &str) -> Result<(), String>;
+
     /// Shows `path` selected in its folder in the file manager.
     ///
     /// # Errors
@@ -135,6 +143,10 @@ pub trait Opener: Send + Sync {
     /// folders and workspace file its open rows target, and every folder or
     /// workspace job asks it before it opens one.
     fn path_exists(&self, path: &Path) -> bool;
+
+    /// Whether `path` is a file right now, not a folder: a link opens as a
+    /// page only when it is.
+    fn is_file(&self, path: &Path) -> bool;
 }
 
 /// Why an open did not happen.
@@ -174,6 +186,10 @@ impl Opener for SystemOpener {
         }
     }
 
+    fn page(&self, path: &Path, suffix: &str) -> Result<(), String> {
+        open_page(path, suffix)
+    }
+
     fn reveal(&self, path: &Path) -> Result<(), String> {
         reveal_in_folder(path)
     }
@@ -192,6 +208,10 @@ impl Opener for SystemOpener {
 
     fn path_exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
     }
 }
 
@@ -242,6 +262,14 @@ impl Opener for LoggingOpener {
         Ok(())
     }
 
+    fn page(&self, path: &Path, suffix: &str) -> Result<(), String> {
+        tracing::info!(
+            "a cloaked window would open page: {}{suffix}",
+            path.display()
+        );
+        Ok(())
+    }
+
     fn reveal(&self, path: &Path) -> Result<(), String> {
         tracing::info!("a cloaked window would open reveal: {}", path.display());
         Ok(())
@@ -261,6 +289,10 @@ impl Opener for LoggingOpener {
 
     fn path_exists(&self, path: &Path) -> bool {
         self.0.path_exists(path)
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        self.0.is_file(path)
     }
 }
 
@@ -286,6 +318,9 @@ pub enum OpenAction {
     },
     /// A plain path, for the app the OS picks.
     DefaultApp(PathBuf),
+    /// A web page whose link carried a `?query` and/or `#fragment`, which
+    /// only the browser can honour.
+    Page { path: PathBuf, suffix: String },
 }
 
 /// What a path link's click asked for: the default app (VS Code at a line),
@@ -374,6 +409,11 @@ pub enum OpenJob {
         path: PathBuf,
         confirmed: bool,
     },
+    /// A web page in the browser, at its `?query` and/or `#fragment`.
+    Page {
+        path: PathBuf,
+        suffix: String,
+    },
     Reveal(PathBuf),
 }
 
@@ -393,7 +433,11 @@ impl OpenJob {
         match self {
             Self::Folder(path) | Self::VsCodeWorkspace(path) => std::slice::from_ref(path),
             Self::VsCodeFolder(paths) => paths,
-            Self::Url(_) | Self::VsCode { .. } | Self::DefaultApp { .. } | Self::Reveal(_) => &[],
+            Self::Url(_)
+            | Self::VsCode { .. }
+            | Self::DefaultApp { .. }
+            | Self::Page { .. }
+            | Self::Reveal(_) => &[],
         }
     }
 
@@ -432,6 +476,7 @@ impl OpenJob {
             Self::Folder(path) | Self::DefaultApp { path, .. } => {
                 opener.default_app(path).map_err(OpenFailure::Failed)
             }
+            Self::Page { path, suffix } => opener.page(path, suffix).map_err(OpenFailure::Failed),
             Self::Reveal(path) => opener.reveal(path).map_err(OpenFailure::Failed),
         }
         .map(|()| JobOutcome::Opened)
@@ -523,13 +568,25 @@ pub fn resolve_link(
     ui_dir: Option<&Path>,
     opener: &dyn Opener,
 ) -> Resolution {
-    resolve_with(
+    let resolution = resolve_with(
         candidates,
         base_dirs,
         || ui_dir.map(load_unc_hosts).unwrap_or_default(),
         || opener.mapped_unc_hosts(),
         |reading| opener.existing(reading),
-    )
+    );
+    page_only_for_a_file(resolution, |path| opener.is_file(path))
+}
+
+/// `resolution`, but a page that `is_file` says is no file — a folder named
+/// like a page — opens as a plain path, as it did before pages.
+fn page_only_for_a_file(resolution: Resolution, is_file: impl Fn(&Path) -> bool) -> Resolution {
+    match resolution {
+        Resolution::Open(OpenAction::Page { path, .. }) if !is_file(&path) => {
+            Resolution::Open(OpenAction::DefaultApp(path))
+        }
+        other => other,
+    }
 }
 
 /// Which of a path link's `candidates` exists under `base_dirs`: the index
@@ -643,16 +700,164 @@ fn first_existing(
     readings.iter().find_map(|reading| existing(reading))
 }
 
-/// How to open `path`, the resolved reading of `candidate`.
+/// How to open `path`, the resolved reading of `candidate`: at its line in
+/// VS Code, as a page at its `?query` and/or `#fragment` when it is a web
+/// page, else in its default app, any suffix dropped.
 fn open_action(candidate: &TerminalLinkCandidate, path: PathBuf) -> OpenAction {
-    match candidate.line {
-        Some(line) => OpenAction::VsCode {
+    match (candidate.line, &candidate.suffix) {
+        (Some(line), _) => OpenAction::VsCode {
             path,
             line,
             column: candidate.column,
         },
-        None => OpenAction::DefaultApp(path),
+        (None, Some(suffix)) if is_web_page(&path) => OpenAction::Page {
+            path,
+            suffix: suffix.clone(),
+        },
+        (None, _) => OpenAction::DefaultApp(path),
     }
+}
+
+/// The extensions of a file the browser opens as a web page.
+const WEB_PAGE_EXTENSIONS: &[&str] = &["html", "htm", "xhtml"];
+
+/// Whether `path` names a web page, by its extension in any case.
+fn is_web_page(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            WEB_PAGE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+}
+
+/// The `file:` URL of `path`, `\` turned to `/` and every byte outside
+/// `A-Z a-z 0-9 - . _ ~ / :` percent-encoded, with `suffix` after it as
+/// written but for its spaces, quotes, controls and non-ASCII bytes, which
+/// are percent-encoded: the URL is always one command-line token.
+#[cfg(any(windows, test))]
+fn page_url(path: &Path, suffix: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let text = path.to_string_lossy().replace('\\', "/");
+    // A network path (`//host/share`) names its host after `file:`; any
+    // other path is local, under `file:///`.
+    let (mut url, rest) = match text.strip_prefix("//") {
+        Some(network) => (String::from("file://"), network),
+        None => (String::from("file:///"), text.trim_start_matches('/')),
+    };
+    let mut push = |byte: u8, keep: bool| {
+        if keep {
+            url.push(char::from(byte));
+        } else {
+            url.push('%');
+            url.push(char::from(HEX[usize::from(byte >> 4)]));
+            url.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    };
+    for byte in rest.bytes() {
+        push(
+            byte,
+            byte.is_ascii_alphanumeric() || b"-._~/:".contains(&byte),
+        );
+    }
+    // The suffix stays as written but for what could end the URL's token
+    // on a command line: a space, a quote, a control or a non-ASCII byte.
+    for byte in suffix.bytes() {
+        push(byte, byte.is_ascii_graphic() && byte != b'"');
+    }
+    url
+}
+
+/// The program and the raw argument text of the browser command line
+/// `template`, with the bare `url` in place of its `%1` or `%L`, or after it
+/// when it has neither; `None` when it names no program.
+#[cfg(any(windows, test))]
+fn browser_command(template: &str, url: &str) -> Option<(String, String)> {
+    let template = template.trim();
+    let (program, rest) = match template.strip_prefix('"') {
+        Some(quoted) => quoted.split_once('"')?,
+        None => template
+            .split_once(char::is_whitespace)
+            .unwrap_or((template, "")),
+    };
+    if program.is_empty() {
+        return None;
+    }
+    let rest = rest.trim();
+    // The placeholder takes the bare URL, as the shell substitutes it: a
+    // registered `"%1"` keeps its own quotes, and Chromium's
+    // `--single-argument %1` takes what follows verbatim, quotes included.
+    let placeholder = ["%1", "%L", "%l"]
+        .into_iter()
+        .find(|placeholder| rest.contains(placeholder));
+    let args = match placeholder {
+        Some(placeholder) => rest.replace(placeholder, url),
+        None if rest.is_empty() => url.to_owned(),
+        None => format!("{rest} {url}"),
+    };
+    Some((program.to_owned(), args))
+}
+
+/// Opens the web page `path` at `suffix` in the browser registered for
+/// `.html`, since the shell drops a `file:` URL's fragment when it opens the
+/// file through its type; when that browser cannot be found or started, the
+/// page opens at its top.
+#[cfg(windows)]
+fn open_page(path: &Path, suffix: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt as _;
+
+    let url = page_url(path, suffix);
+    let launched = html_open_command().and_then(|template| {
+        let (program, args) = browser_command(&template, &url)
+            .ok_or_else(|| format!("no program in the browser command {template}"))?;
+        Command::new(&program)
+            .raw_arg(&args)
+            .spawn()
+            .map(drop)
+            .map_err(|err| format!("start {program}: {err}"))
+    });
+    launched.or_else(|err| {
+        tracing::warn!("could not open {url} in the browser, so the page opens at its top: {err}");
+        shell_open(path.as_os_str()).map_err(|err| format!("open {}: {err}", path.display()))
+    })
+}
+
+/// Off Windows the page opens at its top: `suffix` is dropped.
+#[cfg(not(windows))]
+fn open_page(path: &Path, _suffix: &str) -> Result<(), String> {
+    shell_open(path.as_os_str()).map_err(|err| format!("open {}: {err}", path.display()))
+}
+
+/// The command line Windows runs to open a `.html` file.
+#[cfg(windows)]
+fn html_open_command() -> Result<String, String> {
+    use windows::Win32::UI::Shell::{ASSOCF_NONE, ASSOCSTR_COMMAND, AssocQueryStringW};
+    use windows::core::{PWSTR, w};
+
+    let mut buffer = vec![0_u16; 2048];
+    let mut len = u32::try_from(buffer.len()).map_err(|err| err.to_string())?;
+    // SAFETY: both strings are static NUL-terminated literals, and `buffer`
+    // holds the `len` characters the call may write and outlives it.
+    unsafe {
+        AssocQueryStringW(
+            ASSOCF_NONE,
+            ASSOCSTR_COMMAND,
+            w!(".html"),
+            w!("open"),
+            Some(PWSTR(buffer.as_mut_ptr())),
+            &raw mut len,
+        )
+    }
+    .ok()
+    .map_err(|err| format!("look up the .html open command: {err}"))?;
+    let end = buffer
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(buffer.len());
+    Ok(String::from_utf16_lossy(
+        buffer.get(..end).unwrap_or_default(),
+    ))
 }
 
 /// `reading` canonicalized when it exists on disk.
@@ -1037,8 +1242,9 @@ mod tests {
 
     use super::{
         JobOutcome, OpenAction, OpenFailure, OpenJob, Opener, Resolution, VsCodeTarget, base_dirs,
-        copy_path, existing_on_disk, macos_vscode_commands, opener_for, repo_folder, resolve_with,
-        runs_code, simplify_path, unc_host, validate_http_url, workspace_vscode_target,
+        browser_command, copy_path, existing_on_disk, macos_vscode_commands, open_action,
+        opener_for, page_only_for_a_file, page_url, repo_folder, resolve_with, runs_code,
+        simplify_path, unc_host, validate_http_url, workspace_vscode_target,
     };
     use crate::links::TerminalLinkCandidate;
     use crate::temp_dir::TempDir;
@@ -1083,6 +1289,10 @@ mod tests {
             Err("not in these tests".to_owned())
         }
 
+        fn page(&self, _: &Path, _: &str) -> Result<(), String> {
+            Err("not in these tests".to_owned())
+        }
+
         fn reveal(&self, _: &Path) -> Result<(), String> {
             Err("not in these tests".to_owned())
         }
@@ -1104,6 +1314,10 @@ mod tests {
         fn path_exists(&self, _: &Path) -> bool {
             true
         }
+
+        fn is_file(&self, _: &Path) -> bool {
+            true
+        }
     }
 
     fn candidate(path: &str, line: Option<u32>, column: Option<u32>) -> TerminalLinkCandidate {
@@ -1111,6 +1325,15 @@ mod tests {
             path: path.to_owned(),
             line,
             column,
+            suffix: None,
+        }
+    }
+
+    /// A reading cut off before `suffix`, a `?query` and/or `#fragment`.
+    fn cut(path: &str, suffix: &str) -> TerminalLinkCandidate {
+        TerminalLinkCandidate {
+            suffix: Some(suffix.to_owned()),
+            ..candidate(path, None, None)
         }
     }
 
@@ -1579,6 +1802,153 @@ mod tests {
         assert_eq!(*calls.borrow(), [expected]);
     }
 
+    /// The two readings of a link that ends in a `#fragment`, as the detector
+    /// builds them: the whole text, then the text cut at the `#`.
+    #[cfg(windows)]
+    fn fragment_candidates() -> [TerminalLinkCandidate; 2] {
+        [
+            candidate(r"X:\dir\index.html#q1", None, None),
+            cut(r"X:\dir\index.html", "#q1"),
+        ]
+    }
+
+    /// An existence check that finds only `target`.
+    #[cfg(windows)]
+    fn finds_only(target: &str) -> impl FnMut(&Path) -> Option<Result<PathBuf, String>> + '_ {
+        move |reading: &Path| (reading == Path::new(target)).then(|| Ok(reading.to_path_buf()))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_fragment_link_opens_the_file_before_the_hash() {
+        let resolution = resolve_with(
+            &fragment_candidates(),
+            &[],
+            Vec::new,
+            Vec::new,
+            finds_only(r"X:\dir\index.html"),
+        );
+        assert_eq!(
+            resolution,
+            Resolution::Open(OpenAction::Page {
+                path: PathBuf::from(r"X:\dir\index.html"),
+                suffix: "#q1".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_html_link_with_a_fragment_opens_as_a_page() {
+        let path = PathBuf::from("X:/dir/index.HTML");
+        assert_eq!(
+            open_action(&cut(r"X:\dir\index.HTML", "#q1"), path.clone()),
+            OpenAction::Page {
+                path,
+                suffix: "#q1".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_text_file_link_drops_its_fragment() {
+        let path = PathBuf::from("X:/dir/notes.txt");
+        assert_eq!(
+            open_action(&cut(r"X:\dir\notes.txt", "#x"), path.clone()),
+            OpenAction::DefaultApp(path)
+        );
+    }
+
+    #[test]
+    fn page_url_encodes_the_path_and_keeps_the_suffix() {
+        assert_eq!(
+            page_url(Path::new(r"X:\a b\é.html"), "#q1"),
+            "file:///X:/a%20b/%C3%A9.html#q1"
+        );
+        assert_eq!(
+            page_url(Path::new("X:/p.html"), "?q=a b&c=\"é\"\t#/r:1%20"),
+            "file:///X:/p.html?q=a%20b&c=%22%C3%A9%22%09#/r:1%20",
+            "the suffix keeps its marks and loses whatever could end the token"
+        );
+    }
+
+    #[test]
+    fn browser_command_replaces_the_placeholder() {
+        assert_eq!(
+            browser_command(
+                r#""C:\B\b.exe" --single-argument %1"#,
+                "file:///X:/p.html#q1"
+            ),
+            Some((
+                r"C:\B\b.exe".to_owned(),
+                "--single-argument file:///X:/p.html#q1".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn browser_command_keeps_a_quoted_placeholders_own_quotes() {
+        assert_eq!(
+            browser_command(r#""C:\F\f.exe" -osint -url "%1""#, "file:///X:/p.html#q1"),
+            Some((
+                r"C:\F\f.exe".to_owned(),
+                r#"-osint -url "file:///X:/p.html#q1""#.to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_folder_named_like_a_page_is_not_a_page() {
+        let page = || {
+            Resolution::Open(OpenAction::Page {
+                path: PathBuf::from("X:/site.html"),
+                suffix: "#q1".to_owned(),
+            })
+        };
+        assert_eq!(
+            page_only_for_a_file(page(), |_| false),
+            Resolution::Open(OpenAction::DefaultApp(PathBuf::from("X:/site.html")))
+        );
+        assert_eq!(page_only_for_a_file(page(), |_| true), page());
+    }
+
+    #[test]
+    fn browser_command_without_a_placeholder_appends_the_url() {
+        assert_eq!(
+            browser_command(r#""C:\B\b.exe" -new"#, "file:///X:/p.html"),
+            Some((
+                r"C:\B\b.exe".to_owned(),
+                "-new file:///X:/p.html".to_owned()
+            ))
+        );
+        assert_eq!(
+            browser_command(r"C:\B\b.exe", "file:///X:/p.html"),
+            Some((r"C:\B\b.exe".to_owned(), "file:///X:/p.html".to_owned()))
+        );
+        assert_eq!(
+            browser_command(r#""C:\B\b.exe"#, "u"),
+            None,
+            "an unclosed quote"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_named_with_a_hash_opens_as_itself() {
+        let resolution = resolve_with(
+            &fragment_candidates(),
+            &[],
+            Vec::new,
+            Vec::new,
+            finds_only(r"X:\dir\index.html#q1"),
+        );
+        assert_eq!(
+            resolution,
+            Resolution::Open(OpenAction::DefaultApp(PathBuf::from(
+                r"X:\dir\index.html#q1"
+            )))
+        );
+    }
+
     #[test]
     fn a_local_path_needs_no_host_lookup() {
         let calls = RefCell::new(Vec::new());
@@ -1675,6 +2045,11 @@ mod tests {
             Ok(())
         }
 
+        fn page(&self, path: &Path, suffix: &str) -> Result<(), String> {
+            self.ask(format!("page {}{suffix}", path.display()));
+            Ok(())
+        }
+
         fn reveal(&self, path: &Path) -> Result<(), String> {
             self.ask(format!("reveal {}", path.display()));
             Ok(())
@@ -1694,6 +2069,10 @@ mod tests {
 
         fn path_exists(&self, path: &Path) -> bool {
             !self.gone.iter().any(|gone| gone == path)
+        }
+
+        fn is_file(&self, path: &Path) -> bool {
+            self.path_exists(path)
         }
     }
 

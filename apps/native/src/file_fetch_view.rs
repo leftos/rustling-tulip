@@ -1664,6 +1664,7 @@ impl RootView {
         let path = match &job {
             OpenJob::DefaultApp { path, .. }
             | OpenJob::VsCode { path, .. }
+            | OpenJob::Page { path, .. }
             | OpenJob::Reveal(path) => Some(path.as_path()),
             OpenJob::Url(_)
             | OpenJob::Folder(_)

@@ -346,6 +346,7 @@ mod tests {
             path: path.to_owned(),
             line,
             column,
+            suffix: None,
         }
     }
 

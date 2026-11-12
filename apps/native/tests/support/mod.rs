@@ -1776,6 +1776,11 @@ pub enum Opened {
     /// A `.code-workspace` file opened in VS Code.
     VsCodeWorkspace(PathBuf),
     DefaultApp(PathBuf),
+    /// A web page in the browser, at its `?query` and/or `#fragment`.
+    Page {
+        path: PathBuf,
+        suffix: String,
+    },
     /// Shown selected in its folder.
     Reveal(PathBuf),
 }
@@ -1850,6 +1855,14 @@ impl Opener for OpenRecorder {
         Ok(())
     }
 
+    fn page(&self, path: &Path, suffix: &str) -> Result<(), String> {
+        self.record(Opened::Page {
+            path: path.to_path_buf(),
+            suffix: suffix.to_owned(),
+        });
+        Ok(())
+    }
+
     fn reveal(&self, path: &Path) -> Result<(), String> {
         self.record(Opened::Reveal(path.to_path_buf()));
         Ok(())
@@ -1897,6 +1910,11 @@ impl Opener for OpenRecorder {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .any(|gone| gone == path)
+    }
+
+    /// Every path a spec has not marked gone is a file.
+    fn is_file(&self, path: &Path) -> bool {
+        self.path_exists(path)
     }
 }
 

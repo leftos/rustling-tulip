@@ -238,7 +238,7 @@ pub(crate) fn decide(action: &OpenAction, probe: &Probe) -> Verdict {
     }
     let (path, line) = match action {
         OpenAction::VsCode { path, line, .. } => (path.clone(), Some(*line)),
-        OpenAction::DefaultApp(path) => (path.clone(), None),
+        OpenAction::DefaultApp(path) | OpenAction::Page { path, .. } => (path.clone(), None),
     };
     Verdict::Viewer { path, line }
 }

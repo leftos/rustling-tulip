@@ -955,6 +955,7 @@ impl RootView {
                     path: path.to_string_lossy().into_owned(),
                     line: None,
                     column: None,
+                    suffix: None,
                 };
                 let base_dirs = vec![folder.to_string_lossy().into_owned()];
                 let action = if prefer_viewer {

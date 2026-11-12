@@ -1750,6 +1750,10 @@ impl Opener for NoOpener {
         Err("the shot opens nothing".to_owned())
     }
 
+    fn page(&self, _path: &Path, _suffix: &str) -> Result<(), String> {
+        Err("the shot opens nothing".to_owned())
+    }
+
     fn reveal(&self, _path: &Path) -> Result<(), String> {
         Err("the shot opens nothing".to_owned())
     }
@@ -1769,6 +1773,10 @@ impl Opener for NoOpener {
     /// The shot's fake paths count as present, so its menus draw their open
     /// rows enabled.
     fn path_exists(&self, _path: &Path) -> bool {
+        true
+    }
+
+    fn is_file(&self, _path: &Path) -> bool {
         true
     }
 }

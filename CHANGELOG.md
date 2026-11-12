@@ -10,6 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - One slow or unreachable push service no longer delays alerts to your other devices.
 - Connecting or pairing from another device no longer waits while a phone saves its alert settings.
 - The Claude accounts popover and Settings › Accounts line up every usage bar and percentage, whatever the limit's label.
+- Ctrl+clicking a path ending in `#anchor` or `?query`, like `index.html#q1`, opens it; on Windows a web page opens at that anchor.
 
 ### Changed
 
