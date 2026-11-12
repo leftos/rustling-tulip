@@ -171,6 +171,7 @@ mod stash_view;
 mod stashes;
 mod status_glyph;
 mod stretchtext;
+mod subagents;
 mod summarizer_settings;
 mod summary;
 mod summary_view;

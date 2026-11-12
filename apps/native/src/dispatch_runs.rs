@@ -78,6 +78,7 @@ pub fn dispatch_leaf(run: &DispatchRunSnapshot, host: &HostKey) -> Leaf {
         depth: 0,
         host_session: None,
         nested: 0,
+        nested_subagents: 0,
         collapsed: false,
     }
 }

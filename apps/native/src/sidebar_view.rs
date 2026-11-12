@@ -1535,6 +1535,7 @@ fn leaf_drag_row(
                 run_id: leaf.id.clone(),
                 host: leaf.host.clone(),
             }),
+            LeafKind::Subagent => None,
         }
     };
     let dragged = payload.is_some() && ctx.dragged == payload;
@@ -1559,7 +1560,7 @@ fn leaf_drag_row(
     );
     let dim = match leaf.kind {
         LeafKind::Session => ctx.dimmed.sessions.contains(leaf.id.as_str()),
-        LeafKind::Dispatch => ctx.dimmed.hosts.contains(&leaf.host),
+        LeafKind::Dispatch | LeafKind::Subagent => ctx.dimmed.hosts.contains(&leaf.host),
     };
     dimmed(draggable_row(row, payload, &target, &leaf.label, cx), dim)
         .when(dragged, |row| row.opacity(DRAGGED_ROW_OPACITY))
@@ -3399,6 +3400,7 @@ mod tests {
             depth: 0,
             host_session: None,
             nested: 0,
+            nested_subagents: 0,
             collapsed: false,
         }
     }

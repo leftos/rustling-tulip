@@ -167,11 +167,13 @@ pub enum RepoSort {
     NeedsYou,
 }
 
-/// What a leaf stands for: a session, or a dispatch run the daemon lists.
+/// What a leaf stands for: a session, a dispatch run the daemon lists, or a
+/// subagent one of its sessions started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeafKind {
     Session,
     Dispatch,
+    Subagent,
 }
 
 /// One session row.
@@ -218,13 +220,17 @@ pub struct Leaf {
     pub state: LeafState,
     /// The label's hover text.
     pub tooltip: String,
-    /// How far the row nests: 1 for a dispatch run under the session that
-    /// dispatched it, 0 for every other row.
+    /// How far the row nests: a subagent's depth under its host session (1 to
+    /// 3), 1 for a dispatch run under the session that dispatched it, 0 for
+    /// every other row.
     pub depth: u8,
     /// The id of the session a nested row sits under; `None` at depth 0.
     pub host_session: Option<String>,
-    /// How many nested rows follow this session's row.
+    /// How many nested rows follow this session's row: its subagents, then
+    /// its dispatch runs.
     pub nested: usize,
+    /// How many of [`Leaf::nested`] are its subagents.
+    pub nested_subagents: usize,
     /// The session's nested rows are folded away ([`session_fold_key`]).
     pub collapsed: bool,
 }
@@ -3329,8 +3335,9 @@ fn host_conversation<'a>(
         .filter(|id| conversations.contains(id))
 }
 
-/// Nests each run a listed session dispatched under the first session leaf
-/// of `containers`, in their order, that runs its conversation.
+/// Nests each subagent a listed session started, then each run it
+/// dispatched, under the first session leaf of `containers`, in their order,
+/// that runs its conversation.
 fn nest_runs<'a>(
     containers: &mut [Container],
     inputs: &TreeInputs<'a>,
@@ -3342,36 +3349,39 @@ fn nest_runs<'a>(
             runs.entry(conversation).or_default().push(run);
         }
     }
-    if runs.is_empty() {
-        return;
-    }
-    let conversation_of: HashMap<&str, &str> = inputs
-        .sessions
-        .iter()
-        .filter_map(|s| Some((s.id.as_str(), s.conversation_id.as_deref()?)))
-        .collect();
+    let sessions: HashMap<&str, &'a SessionSnapshot> =
+        inputs.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
     for container in containers {
         let mut at = 0;
         while at < container.leaves.len() {
-            let leaf = &container.leaves[at];
-            let host_runs = (leaf.kind == LeafKind::Session)
-                .then(|| conversation_of.get(leaf.id.as_str()))
-                .flatten()
-                .and_then(|conversation| runs.remove(*conversation));
-            if let Some(host_runs) = host_runs {
-                at += nest_after(&mut container.leaves, at, host_runs, inputs.collapsed);
+            let host = if container.leaves[at].kind == LeafKind::Session {
+                sessions.get(container.leaves[at].id.as_str()).copied()
+            } else {
+                None
+            };
+            if let Some(host) = host {
+                let host_runs = host
+                    .conversation_id
+                    .as_deref()
+                    .and_then(|conversation| runs.remove(conversation))
+                    .unwrap_or_default();
+                if !host.subagents.is_empty() || !host_runs.is_empty() {
+                    at += nest_after(&mut container.leaves, at, host, host_runs, inputs.collapsed);
+                }
             }
             at += 1;
         }
     }
 }
 
-/// Puts a leaf per run of `runs`, oldest first, right after the session
-/// leaf at `at`, at depth 1 under it, and sets that leaf's nested count and
-/// fold from `collapsed`; returns how many went in.
+/// Puts a leaf per subagent of `host_session` in its list's order, then a
+/// leaf per run of `runs`, oldest first, right after the session leaf at
+/// `at`, and sets that leaf's nested counts and fold from `collapsed`;
+/// returns how many went in.
 fn nest_after(
     leaves: &mut Vec<Leaf>,
     at: usize,
+    host_session: &SessionSnapshot,
     mut runs: Vec<&DispatchRunSnapshot>,
     collapsed: &BTreeSet<String>,
 ) -> usize {
@@ -3383,17 +3393,20 @@ fn nest_after(
             .cmp(&b.started_at)
             .then_with(|| a.run_id.cmp(&b.run_id))
     });
-    host.nested = runs.len();
+    host.nested_subagents = host_session.subagents.len();
+    host.nested = host.nested_subagents + runs.len();
     host.collapsed = collapsed.contains(&session_fold_key(&host.host, &host.id));
     let (host_key, host_id) = (host.host.clone(), host.id.clone());
-    let nested: Vec<Leaf> = runs
-        .into_iter()
-        .map(|run| Leaf {
-            depth: 1,
-            host_session: Some(host_id.clone()),
-            ..crate::dispatch_runs::dispatch_leaf(run, &host_key)
-        })
+    let mut nested: Vec<Leaf> = host_session
+        .subagents
+        .iter()
+        .map(|snapshot| crate::subagents::subagent_leaf(&host_key, &host_id, snapshot))
         .collect();
+    nested.extend(runs.into_iter().map(|run| Leaf {
+        depth: 1,
+        host_session: Some(host_id.clone()),
+        ..crate::dispatch_runs::dispatch_leaf(run, &host_key)
+    }));
     let count = nested.len();
     let after = at + 1;
     leaves.splice(after..after, nested);
@@ -3562,6 +3575,7 @@ fn leaf(
         depth: 0,
         host_session: None,
         nested: 0,
+        nested_subagents: 0,
         collapsed: false,
     }
 }
@@ -3873,49 +3887,44 @@ fn linked_on(run: &DispatchRunSnapshot, host: &TabHost<'_>) -> bool {
     })
 }
 
-/// Nests the runs each session leaf of a tab's `leaves` dispatched right
-/// after it, as [`nest_after`] does; the first leaf of a host and
-/// conversation takes its runs.
+/// Nests the subagents and runs each session leaf of a tab's `leaves`
+/// started right after it, as [`nest_after`] does; the first leaf of a host
+/// and conversation takes its runs.
 fn nest_tab_runs(leaves: &mut Vec<Leaf>, hosts: &[TabHost<'_>], collapsed: &BTreeSet<String>) {
     let mut taken: HashSet<(HostKey, String)> = HashSet::new();
     let mut at = 0;
     while at < leaves.len() {
-        let runs = tab_host_runs(&leaves[at], hosts, &mut taken);
-        if !runs.is_empty() {
-            at += nest_after(leaves, at, runs, collapsed);
+        if let Some((session, runs)) = tab_host_rows(&leaves[at], hosts, &mut taken)
+            && (!session.subagents.is_empty() || !runs.is_empty())
+        {
+            at += nest_after(leaves, at, session, runs, collapsed);
         }
         at += 1;
     }
 }
 
-/// The runs session `leaf` dispatched on its own host; none for a run
-/// leaf, or when an earlier leaf in `taken` runs the same conversation.
-fn tab_host_runs<'a>(
+/// The session `leaf` stands for on its own host, and the runs that session
+/// dispatched there; none for a subagent or run leaf, or a session no host
+/// lists, and no runs for a conversation an earlier leaf in `taken` took.
+fn tab_host_rows<'a>(
     leaf: &Leaf,
     hosts: &[TabHost<'a>],
     taken: &mut HashSet<(HostKey, String)>,
-) -> Vec<&'a DispatchRunSnapshot> {
+) -> Option<(&'a SessionSnapshot, Vec<&'a DispatchRunSnapshot>)> {
     if leaf.kind != LeafKind::Session {
-        return Vec::new();
+        return None;
     }
-    let Some(host) = hosts.iter().find(|h| *h.host == leaf.host) else {
-        return Vec::new();
+    let host = hosts.iter().find(|h| *h.host == leaf.host)?;
+    let session = host.sessions.iter().find(|s| s.id == leaf.id)?;
+    let runs = match session.conversation_id.as_deref() {
+        Some(conversation) if taken.insert((leaf.host.clone(), conversation.to_owned())) => host
+            .runs
+            .iter()
+            .filter(|run| run.session_id.as_deref() == Some(conversation))
+            .collect(),
+        _ => Vec::new(),
     };
-    let sessions: &'a [SessionSnapshot] = host.sessions;
-    let Some(conversation) = sessions
-        .iter()
-        .find(|s| s.id == leaf.id)
-        .and_then(|s| s.conversation_id.as_deref())
-    else {
-        return Vec::new();
-    };
-    if !taken.insert((leaf.host.clone(), conversation.to_owned())) {
-        return Vec::new();
-    }
-    host.runs
-        .iter()
-        .filter(|run| run.session_id.as_deref() == Some(conversation))
-        .collect()
+    Some((session, runs))
 }
 
 /// The run `follow` names, when it follows a dispatch run.
@@ -4636,7 +4645,7 @@ pub(crate) mod tests {
     use crate::tabs::tests::{follow_pane, pane, tab};
     use protocol::{
         AgentSelection, AttentionReason, GridNode, OptionValue, PaneFollow, SessionMember,
-        SplitDirection,
+        SplitDirection, SubagentSnapshot,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -5038,6 +5047,7 @@ pub(crate) mod tests {
         container_order: Vec<ContainerRef>,
         session_order: HashMap<String, Vec<String>>,
         runs: Vec<DispatchRunSnapshot>,
+        collapsed: BTreeSet<String>,
     }
 
     impl Fixture {
@@ -5053,6 +5063,7 @@ pub(crate) mod tests {
                 container_order: Vec::new(),
                 session_order: HashMap::new(),
                 runs: Vec::new(),
+                collapsed: BTreeSet::new(),
             }
         }
 
@@ -5067,7 +5078,7 @@ pub(crate) mod tests {
                 session_order: &self.session_order,
                 attention: &HashSet::new(),
                 unseen: &HashSet::new(),
-                collapsed: &BTreeSet::new(),
+                collapsed: &self.collapsed,
                 runs: &self.runs,
             })
         }
@@ -10443,6 +10454,36 @@ pub(crate) mod tests {
         s
     }
 
+    /// Subagent `id` at `depth`, described as `task {id}`.
+    fn subagent(id: &str, depth: u8) -> SubagentSnapshot {
+        SubagentSnapshot {
+            agent_id: id.to_owned(),
+            depth,
+            description: Some(format!("task {id}")),
+            ..SubagentSnapshot::default()
+        }
+    }
+
+    /// `s` listing `subagents`.
+    fn with_subagents(mut s: SessionSnapshot, subagents: Vec<SubagentSnapshot>) -> SessionSnapshot {
+        s.subagents = subagents;
+        s
+    }
+
+    /// A pane following subagent `agent_id` of session `session_id`, showing
+    /// no session.
+    fn follow_subagent_pane(id: &str, session_id: &str, agent_id: &str) -> GridNode {
+        GridNode::Pane {
+            pane_id: id.to_owned(),
+            session_id: None,
+            host: None,
+            follow: Some(PaneFollow::Subagent {
+                session_id: session_id.to_owned(),
+                agent_id: agent_id.to_owned(),
+            }),
+        }
+    }
+
     /// Each leaf of container `key` as its id, depth and host session.
     fn nesting(containers: &[Container], key: &str) -> Vec<(String, u8, Option<String>)> {
         containers
@@ -10581,6 +10622,162 @@ pub(crate) mod tests {
         assert_eq!((leaf.depth, leaf.host_session.as_deref()), (0, None));
         assert_eq!(leaf.host, remote);
         assert_eq!(find_leaf(&tree, "a").nested, 0);
+    }
+
+    /// This PC listing `s1` (conversation `c1`, subagents `a1` and `a2`) and
+    /// `s2` in `r1`, and run `d1` that `s1` dispatched.
+    fn subagent_fixture() -> Fixture {
+        let mut fixture = Fixture::new(
+            vec![repo("r1", "X:\\r1")],
+            Vec::new(),
+            vec![
+                with_subagents(
+                    talking(in_repo("s1", "r1"), "c1"),
+                    vec![subagent("a1", 1), subagent("a2", 2)],
+                ),
+                in_repo("s2", "r1"),
+            ],
+        );
+        fixture.runs = vec![run_of("d1", "c1", 10)];
+        fixture
+    }
+
+    #[test]
+    fn a_sessions_subagents_nest_under_it_before_its_runs() {
+        let tree = subagent_fixture().build();
+        assert_eq!(
+            nesting(&tree, "repo:r1"),
+            [
+                row("s1", 0, None),
+                row("a1", 1, Some("s1")),
+                row("a2", 2, Some("s1")),
+                row("d1", 1, Some("s1")),
+                row("s2", 0, None),
+            ]
+        );
+        let host = find_leaf(&tree, "s1");
+        assert_eq!((host.nested, host.nested_subagents), (3, 2));
+        assert_eq!(find_leaf(&tree, "a1").kind, LeafKind::Subagent);
+        assert_eq!(find_leaf(&tree, "s2").nested_subagents, 0);
+    }
+
+    #[test]
+    fn a_nested_subagent_keeps_its_depth_up_to_three() {
+        let mut fixture = subagent_fixture();
+        fixture.sessions[0].subagents =
+            vec![subagent("a1", 1), subagent("a2", 2), subagent("a3", 3)];
+        assert_eq!(
+            nesting(&fixture.build(), "repo:r1"),
+            [
+                row("s1", 0, None),
+                row("a1", 1, Some("s1")),
+                row("a2", 2, Some("s1")),
+                row("a3", 3, Some("s1")),
+                row("d1", 1, Some("s1")),
+                row("s2", 0, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_deeper_subagent_draws_at_depth_three() {
+        let mut fixture = subagent_fixture();
+        fixture.sessions[0].subagents = vec![subagent("a1", 1), subagent("deep", 5)];
+        assert_eq!(
+            nesting(&fixture.build(), "repo:r1"),
+            [
+                row("s1", 0, None),
+                row("a1", 1, Some("s1")),
+                row("deep", 3, Some("s1")),
+                row("d1", 1, Some("s1")),
+                row("s2", 0, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_hosts_fold_counts_and_hides_its_subagents_and_runs() {
+        let mut fixture = subagent_fixture();
+        fixture
+            .collapsed
+            .insert(session_fold_key(&HostKey::Local, "s1"));
+        let tree = fixture.build();
+        let host = find_leaf(&tree, "s1");
+        assert_eq!((host.nested, host.nested_subagents), (3, 2));
+        assert!(
+            host.collapsed,
+            "a folded host draws none of the rows nested under it"
+        );
+        assert!(
+            !find_leaf(&tree, "s2").collapsed,
+            "the other session stays open"
+        );
+        assert_eq!(
+            nesting(&tree, "repo:r1").len(),
+            5,
+            "its subagents and its run both sit in its container"
+        );
+    }
+
+    /// This PC listing `s1` (conversation `c1`, subagents `a1` and `a2`) and
+    /// `s2`, and run `d1` that `s1` dispatched.
+    fn subagent_tabs_model() -> SidebarModel {
+        let mut model = SidebarModel::default();
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![
+                    with_subagents(
+                        talking(session("s1"), "c1"),
+                        vec![subagent("a1", 1), subagent("a2", 1)],
+                    ),
+                    session("s2"),
+                ],
+            },
+        );
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run_of("d1", "c1", 10)],
+            },
+        );
+        model
+    }
+
+    #[test]
+    fn in_the_tabs_view_a_subagent_nests_under_its_bound_host() {
+        let model = subagent_tabs_model();
+        let tree = model.tab_containers(&[
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s1"))),
+        ]);
+        let want = [
+            row("s1", 0, None),
+            row("a1", 1, Some("s1")),
+            row("a2", 1, Some("s1")),
+            row("d1", 1, Some("s1")),
+        ];
+        assert_eq!(nesting(&tree, "tab:t1"), want, "each tab that shows it");
+        assert_eq!(nesting(&tree, "tab:t2"), want);
+        assert_eq!(nesting(&tree, "unbound"), [row("s2", 0, None)]);
+        let host = find_leaf(&tree, "s1");
+        assert_eq!((host.nested, host.nested_subagents), (3, 2));
+    }
+
+    #[test]
+    fn in_the_tabs_view_a_subagent_of_an_unbound_host_is_not_listed() {
+        let model = subagent_tabs_model();
+        let grid = split2(
+            pane("p1", Some("s2")),
+            follow_subagent_pane("p2", "s1", "a1"),
+        );
+        let tree = model.tab_containers(&[tab("t1", &grid)]);
+        assert!(
+            tree.iter().flat_map(|c| &c.leaves).all(|l| l.id != "a1"),
+            "the subagent is in no container, even while a pane follows it"
+        );
+        assert_eq!(nesting(&tree, "tab:t1"), [row("s2", 0, None)]);
+        assert_eq!(nesting(&tree, "unbound"), [row("s1", 0, None)]);
     }
 
     /// This PC listing `s1` (conversation `c1`) and `s2` in `r1`, and two
