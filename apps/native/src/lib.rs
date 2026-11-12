@@ -232,8 +232,9 @@ use gpui::{
     px, size,
 };
 use protocol::{
-    AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RepoEntry,
-    SessionMode, SessionSnapshot, SuggestTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
+    AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, PaneFollow,
+    RepoEntry, SessionMode, SessionSnapshot, SuggestTarget, TabContent, TabEntry,
+    VscodeWorkspaceSuggestion,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -288,7 +289,7 @@ use crate::status_glyph::{GlyphSize, glyph_view};
 use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{
     BindTarget, HostedSession, PaneTarget, Placement, SessionRef, TabsModel, auto_grid_resends,
-    find_tab_containing_session, is_auto_grid, tab_pills,
+    find_tab_containing_session, find_tab_following, is_auto_grid, tab_pills,
 };
 use crate::target::HostKey;
 use crate::term::ShellCommand;
@@ -3828,6 +3829,46 @@ impl RootView {
             self.place_session(host, &session, window, cx);
         }
         self.dismiss_skipped_toasts(window.is_window_active(), cx);
+        cx.notify();
+    }
+
+    /// A click on `host`'s dispatch run `run_id`: focuses the pane that
+    /// already follows it, else asks This PC's daemon for a tab that does.
+    /// The layout lives on This PC, so the request goes there while the tab
+    /// names the run's host.
+    pub(crate) fn open_dispatch_run(
+        &mut self,
+        host: &HostKey,
+        run_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.launched_highlight.clear();
+        self.preselected_target = None;
+        if let Some((tab_id, pane_id)) = find_tab_following(self.tabs.tabs(), host, run_id) {
+            if self.is_tab_popped(&tab_id) {
+                self.tabs.set_focused(&tab_id, &pane_id);
+                self.update_pane_roles(cx);
+                self.activate_popout(&PopoutKey::Tab { tab_id }, cx);
+            } else {
+                self.tabs.focus_pane(&tab_id, &pane_id);
+                self.after_tabs_change(window, cx);
+            }
+        } else {
+            let request_id = new_request_id();
+            self.tabs.arm_create(&request_id);
+            let msg = ClientMessage::CreateTab {
+                name: None,
+                initial_session_id: None,
+                host: host.wire().map(str::to_owned),
+                request_id: Some(request_id),
+                follow: Some(PaneFollow::DispatchRun {
+                    run_id: run_id.to_owned(),
+                }),
+            };
+            self.tabs.note_layout_request(&msg);
+            self.send_to(&HostKey::Local, msg);
+        }
         cx.notify();
     }
 

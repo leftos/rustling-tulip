@@ -4,7 +4,7 @@
 
 use protocol::{
     AgentDescriptor, AgentId, AppearanceOverrides, CharRange, ContainerRef, DaemonMessage,
-    DispatchRunSnapshot, RepoEntry, SessionChip, SessionKind, SessionMode, SessionRole,
+    DispatchRunSnapshot, PaneFollow, RepoEntry, SessionChip, SessionKind, SessionMode, SessionRole,
     SessionSnapshot, SessionStatus, SpawnConfig, SpawnTarget, TabEntry, WorkspaceEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -64,7 +64,7 @@ impl ContainerKind {
 }
 
 /// The Unbound container's hover text.
-pub const UNBOUND_HOVER: &str = "Sessions alive but not referenced by any tab. \
+pub const UNBOUND_HOVER: &str = "Sessions and dispatch runs alive but not shown in any tab. \
      Click the unbound pill on a session to open it in a new tab.";
 
 /// What an expanded Detached container says above its sessions.
@@ -1705,6 +1705,12 @@ impl SidebarModel {
     fn slices(&self) -> impl Iterator<Item = (&HostKey, &HostSlice)> {
         std::iter::once((&LOCAL_HOST, &self.local))
             .chain(self.remote.iter().map(|(host, slice)| (host, slice)))
+    }
+
+    /// Every host the sidebar lists, This PC's first, then the remote hosts
+    /// in order.
+    pub(crate) fn hosts(&self) -> impl Iterator<Item = &HostKey> {
+        self.slices().map(|(host, _)| host)
     }
 
     /// `host`'s slice; `None` for a remote host that never sent one.
@@ -3534,11 +3540,12 @@ impl TabHost<'_> {
 /// The tabs view: one container per tab in the daemon's order, holding the
 /// listed sessions its panes show, each once per host, This PC's in the
 /// tab's manual order from This PC's `session_order` and then pane order,
-/// then the other hosts' in pane order (a diff tab's is empty); then
-/// Unbound when it holds anything: This PC's sessions no pane shows sorted
-/// by label, then every host's dispatch runs in `hosts` order, each host's
-/// newest first and each leaf carrying its own host. `hosts` holds every
-/// host's part, each pane's session looked up in its own host's.
+/// then the other hosts' in pane order, then the dispatch runs its panes
+/// follow in pane order (a diff tab's is empty); then Unbound when it
+/// holds anything: This PC's sessions no pane shows sorted by label, then
+/// every host's dispatch runs no tab follows, in `hosts` order, each
+/// host's newest first and each leaf carrying its own host. `hosts` holds
+/// every host's part, each pane's session looked up in its own host's.
 pub fn build_tab_containers(
     tabs: &[TabEntry],
     hosts: &[TabHost<'_>],
@@ -3546,9 +3553,10 @@ pub fn build_tab_containers(
 ) -> Vec<Container> {
     let local = hosts.iter().find(|h| *h.host == HostKey::Local);
     let mut shown: HashSet<&str> = HashSet::new();
+    let mut runs_shown: HashSet<(HostKey, String)> = HashSet::new();
     let mut out = Vec::new();
     for tab in tabs {
-        let leaves = tab_leaves(tab, hosts, &mut shown);
+        let leaves = tab_leaves(tab, hosts, &mut shown, &mut runs_shown);
         out.push(tab_view_container(
             ContainerKind::Tab,
             &tab.id,
@@ -3568,7 +3576,11 @@ pub fn build_tab_containers(
         leaves.extend(unbound.into_iter().map(|s| local.leaf(s)));
     }
     for host in hosts {
-        let mut runs: Vec<&DispatchRunSnapshot> = host.runs.iter().collect();
+        let mut runs: Vec<&DispatchRunSnapshot> = host
+            .runs
+            .iter()
+            .filter(|run| !runs_shown.contains(&(host.host.clone(), run.run_id.clone())))
+            .collect();
         crate::dispatch_runs::sort_newest_first(&mut runs);
         leaves.extend(
             runs.into_iter()
@@ -3588,48 +3600,73 @@ pub fn build_tab_containers(
 }
 
 /// `tab`'s leaves: each session its panes show, once per host and id, This
-/// PC's in its manual order then the other hosts' in pane order. This PC's
-/// ids join `shown`.
+/// PC's in its manual order then the other hosts' in pane order, then the
+/// dispatch runs its panes follow, once per run per tab, in pane order.
+/// This PC's session ids join `shown`, and every followed run's host and
+/// id join `runs_shown` however many tabs follow it.
 fn tab_leaves<'a>(
     tab: &TabEntry,
     hosts: &[TabHost<'a>],
     shown: &mut HashSet<&'a str>,
+    runs_shown: &mut HashSet<(HostKey, String)>,
 ) -> Vec<Leaf> {
     let mut seen: HashSet<SessionRef> = HashSet::new();
+    let mut followed: HashSet<(HostKey, String)> = HashSet::new();
     let mut local: Vec<&'a SessionSnapshot> = Vec::new();
     let mut remote: Vec<Leaf> = Vec::new();
+    let mut runs: Vec<Leaf> = Vec::new();
     for pane in tab.grid().map(collect_panes).unwrap_or_default() {
-        let Some(id) = pane.session else {
-            continue;
-        };
         let Some(host) = hosts.iter().find(|h| *h.host == pane.host) else {
             continue;
         };
-        let Some(s) = host.sessions.iter().find(|s| s.id == id) else {
-            continue;
-        };
-        if !seen.insert(SessionRef::new(pane.host.clone(), id)) {
-            continue;
-        }
-        if pane.host == HostKey::Local {
-            local.push(s);
-        } else {
-            remote.push(host.leaf(s));
+        if let Some(id) = pane.session {
+            let Some(s) = host.sessions.iter().find(|s| s.id == id) else {
+                continue;
+            };
+            if !seen.insert(SessionRef::new(pane.host.clone(), id)) {
+                continue;
+            }
+            if pane.host == HostKey::Local {
+                local.push(s);
+            } else {
+                remote.push(host.leaf(s));
+            }
+        } else if let Some(run_id) = followed_run(pane.follow) {
+            let Some(run) = host.runs.iter().find(|run| run.run_id == run_id) else {
+                continue;
+            };
+            let followed_run = (pane.host.clone(), run_id.to_owned());
+            runs_shown.insert(followed_run.clone());
+            if followed.insert(followed_run) {
+                runs.push(crate::dispatch_runs::dispatch_leaf(run, &pane.host));
+            }
         }
     }
-    let Some(this_pc) = hosts.iter().find(|h| *h.host == HostKey::Local) else {
-        return remote;
+    let this_pc = hosts.iter().find(|h| *h.host == HostKey::Local);
+    let mut leaves: Vec<Leaf> = match this_pc {
+        Some(this_pc) => {
+            let order = this_pc.rollups.session_order.get(&tab.id);
+            apply_session_order(local, order)
+                .into_iter()
+                .map(|s| {
+                    shown.insert(s.id.as_str());
+                    this_pc.leaf(s)
+                })
+                .collect()
+        }
+        None => Vec::new(),
     };
-    let order = this_pc.rollups.session_order.get(&tab.id);
-    let mut leaves: Vec<Leaf> = apply_session_order(local, order)
-        .into_iter()
-        .map(|s| {
-            shown.insert(s.id.as_str());
-            this_pc.leaf(s)
-        })
-        .collect();
     leaves.extend(remote);
+    leaves.extend(runs);
     leaves
+}
+
+/// The run `follow` names, when it follows a dispatch run.
+fn followed_run(follow: Option<&PaneFollow>) -> Option<&str> {
+    match follow {
+        Some(PaneFollow::DispatchRun { run_id }) => Some(run_id.as_str()),
+        _ => None,
+    }
 }
 
 fn tab_view_container(
@@ -4320,9 +4357,10 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 pub(crate) mod tests {
     use super::*;
     use crate::agent_options::test_selection as agent_selection;
-    use crate::tabs::tests::{pane, tab};
+    use crate::tabs::tests::{follow_pane, pane, tab};
     use protocol::{
-        AgentSelection, AttentionReason, GridNode, OptionValue, SessionMember, SplitDirection,
+        AgentSelection, AttentionReason, GridNode, OptionValue, PaneFollow, SessionMember,
+        SplitDirection,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -8728,12 +8766,21 @@ pub(crate) mod tests {
     }
 
     fn tab_view(tabs: &[TabEntry], sessions: &[SessionSnapshot]) -> Vec<Container> {
+        tab_view_with_runs(tabs, sessions, &[])
+    }
+
+    /// [`tab_view`], This PC also listing `runs`.
+    fn tab_view_with_runs(
+        tabs: &[TabEntry],
+        sessions: &[SessionSnapshot],
+        runs: &[DispatchRunSnapshot],
+    ) -> Vec<Container> {
         build_tab_containers(
             tabs,
             &[TabHost {
                 host: &HostKey::Local,
                 sessions,
-                runs: &[],
+                runs,
                 label_agents: &[],
                 rollups: TabRollups {
                     session_order: &HashMap::new(),
@@ -8770,6 +8817,103 @@ pub(crate) mod tests {
         );
         let tree = tab_view(&[tab("t1", &grid)], &[session("s1"), session("s2")]);
         assert_eq!(leaf_ids(&tree, "tab:t1"), ["s2", "s1"]);
+    }
+
+    #[test]
+    fn tabs_view_lists_a_followed_run_in_its_tab_not_unbound() {
+        let grid = split2(pane("p1", Some("s1")), follow_pane("p2", "r1"));
+        let runs = [
+            run("r1", "X:\\w", None, 10, Run::Working),
+            run("r2", "X:\\w", None, 20, Run::Working),
+        ];
+        let tree = tab_view_with_runs(&[tab("t1", &grid)], &[session("s1")], &runs);
+        assert_eq!(
+            leaf_kinds(&tree, "tab:t1"),
+            kinds(&[("s1", LeafKind::Session), ("r1", LeafKind::Dispatch),]),
+            "the followed run sits after the tab's sessions"
+        );
+        assert_eq!(
+            leaf_ids(&tree, "unbound"),
+            ["r2"],
+            "only the run no pane follows is unbound"
+        );
+    }
+
+    #[test]
+    fn tabs_view_lists_a_run_in_every_tab_that_follows_it() {
+        let runs = [run("r1", "X:\\w", None, 10, Run::Working)];
+        let first = split2(follow_pane("p1", "r1"), follow_pane("p2", "r1"));
+        let second = follow_pane("p3", "r1");
+        let tree = tab_view_with_runs(&[tab("t1", &first), tab("t2", &second)], &[], &runs);
+        assert_eq!(leaf_ids(&tree, "tab:t1"), ["r1"], "t1 lists it once");
+        assert_eq!(
+            leaf_ids(&tree, "tab:t2"),
+            ["r1"],
+            "the second tab that follows it lists it too"
+        );
+        assert!(
+            leaf_ids(&tree, "unbound").is_empty(),
+            "a followed run is never unbound"
+        );
+    }
+
+    #[test]
+    fn tabs_view_lists_a_remote_followed_run_by_its_pane_host() {
+        let remote = remote_host(BOX);
+        let wire = remote.wire().expect("a remote key").to_owned();
+        let grid = GridNode::Pane {
+            pane_id: "p1".to_owned(),
+            session_id: None,
+            host: Some(wire),
+            follow: Some(PaneFollow::DispatchRun {
+                run_id: "r1".to_owned(),
+            }),
+        };
+        let local_runs = [run("r1", "X:\\w", None, 10, Run::Working)];
+        let remote_runs = [run("r1", "X:\\w", None, 20, Run::Working)];
+        let containers = build_tab_containers(
+            &[tab("t1", &grid)],
+            &[
+                TabHost {
+                    host: &HostKey::Local,
+                    sessions: &[],
+                    runs: &local_runs,
+                    label_agents: &[],
+                    rollups: TabRollups {
+                        session_order: &HashMap::new(),
+                        attention: &HashSet::new(),
+                        unseen: &HashSet::new(),
+                    },
+                },
+                TabHost {
+                    host: &remote,
+                    sessions: &[],
+                    runs: &remote_runs,
+                    label_agents: &[],
+                    rollups: TabRollups {
+                        session_order: &HashMap::new(),
+                        attention: &HashSet::new(),
+                        unseen: &HashSet::new(),
+                    },
+                },
+            ],
+            &BTreeSet::new(),
+        );
+        let in_tab = containers
+            .iter()
+            .find(|c| c.key == "tab:t1")
+            .expect("the tab");
+        assert_eq!(in_tab.leaves.len(), 1, "one run follows in the tab");
+        assert_eq!(in_tab.leaves[0].id, "r1");
+        assert_eq!(in_tab.leaves[0].kind, LeafKind::Dispatch);
+        assert_eq!(in_tab.leaves[0].host, remote, "the pane's host lists it");
+        let unbound = containers
+            .iter()
+            .find(|c| c.kind == ContainerKind::Unbound)
+            .expect("Unbound holds This PC's run of the same id");
+        assert_eq!(unbound.leaves.len(), 1);
+        assert_eq!(unbound.leaves[0].id, "r1");
+        assert_eq!(unbound.leaves[0].host, HostKey::Local);
     }
 
     #[test]

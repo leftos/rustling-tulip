@@ -139,6 +139,12 @@ impl RootView {
                 .filter(|session| self.session_dimmed(&session.id))
                 .map(|session| session.id.as_str())
                 .collect(),
+            hosts: self
+                .sidebar
+                .hosts()
+                .filter(|host| self.host_dimmed(host))
+                .cloned()
+                .collect(),
         }
     }
 
@@ -311,7 +317,9 @@ impl RootView {
             detached_stop_all: self.detached_stop_all.armed(),
             host_chips: containers
                 .iter()
-                .filter(|container| container.kind == ContainerKind::Tab)
+                .filter(|container| {
+                    matches!(container.kind, ContainerKind::Tab | ContainerKind::Unbound)
+                })
                 .flat_map(|container| &container.leaves)
                 .filter_map(|leaf| {
                     let label = self.host_chip_label(&leaf.host)?;
@@ -1522,7 +1530,10 @@ fn leaf_drag_row(
             cx.stop_propagation();
         }),
     );
-    let dim = ctx.dimmed.sessions.contains(leaf.id.as_str());
+    let dim = match leaf.kind {
+        LeafKind::Session => ctx.dimmed.sessions.contains(leaf.id.as_str()),
+        LeafKind::Dispatch => ctx.dimmed.hosts.contains(&leaf.host),
+    };
     dimmed(draggable_row(row, payload, &target, &leaf.label, cx), dim)
         .when(dragged, |row| row.opacity(DRAGGED_ROW_OPACITY))
         .children(line)
@@ -2030,6 +2041,8 @@ struct DimmedRows<'a> {
     containers: HashSet<String>,
     /// The sessions, by id: their rows dim.
     sessions: HashSet<&'a str>,
+    /// The hosts, by key: their dispatch runs' rows dim.
+    hosts: Vec<HostKey>,
 }
 
 /// What every leaf row of one render shares.
@@ -2053,8 +2066,8 @@ struct LeafRows<'a> {
     hovered_row: Option<&'a str>,
     /// The Detached banner's Stop all is armed.
     detached_stop_all: bool,
-    /// The chip label of each remote host a tab container's leaf is on;
-    /// empty in the Repos view, whose host headers name the host.
+    /// The chip label of each remote host a tab or Unbound container's leaf
+    /// is on; empty in the Repos view, whose host headers name the host.
     host_chips: HashMap<HostKey, HostLabel>,
     /// The rows whose host is a remote host that is not open.
     dimmed: DimmedRows<'a>,
@@ -2747,7 +2760,12 @@ fn leaf_row(
     });
     match ctx.density {
         LeafDensity::Compact => {
-            let pill = ctx.pill(host, id).map(|pill| PillChip {
+            let pill = if leaf.kind == LeafKind::Session {
+                ctx.pill(host, id)
+            } else {
+                None
+            }
+            .map(|pill| PillChip {
                 pill,
                 attachable: ctx.attachable(id),
                 host,
@@ -2825,8 +2843,8 @@ fn leaf_frame(
     let id = leaf.id.clone();
     let host = host.clone();
     let name = format!("leaf-{key}");
-    // A dispatch run's id names no session: its click selects nothing.
-    let is_session = leaf.kind == LeafKind::Session;
+    // A dispatch run's id names no session: its click opens the run.
+    let kind = leaf.kind;
     div()
         .id(SharedString::from(name.clone()))
         .driver_id(|| name)
@@ -2855,8 +2873,10 @@ fn leaf_frame(
                 .bg(gpui::rgb(accent)),
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            if is_session {
+            if kind == LeafKind::Session {
                 this.select_session_on(&host, &id, window, cx);
+            } else {
+                this.open_dispatch_run(&host, &id, window, cx);
             }
         }))
 }
@@ -2912,6 +2932,24 @@ fn label_head(offset: i8, shift: i8, leaf: &Leaf, key: &str, t: &UiTheme) -> Vec
                 .flex_none()
                 .child(runtime_icon_view(icon, ui_px_at(offset, 12.0), &id, t))
                 .tooltip(tooltip(tip))
+                .into_any_element(),
+        );
+    }
+    if leaf.kind == LeafKind::Dispatch
+        && let Some((text, _)) = leaf.runtime_tag()
+    {
+        let id = format!("leaf-runtime-{key}");
+        parts.push(
+            div()
+                .id(SharedString::from(id.clone()))
+                .driver_id(move || id)
+                .flex_none()
+                .font_family(DEFAULT_FAMILY)
+                .font_weight(crate::fonts::mono_weight())
+                .text_size(ui_px_at(offset, TAG_TEXT_SIZE))
+                .text_color(gpui::rgb(t.subtle))
+                .tooltip(tooltip("Dispatch run".to_owned()))
+                .child(text)
                 .into_any_element(),
         );
     }
@@ -2994,7 +3032,11 @@ fn comfortable_lower(
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
     let t = theme(cx);
-    let pill = ctx.pill(host, &leaf.id);
+    let pill = if leaf.kind == LeafKind::Session {
+        ctx.pill(host, &leaf.id)
+    } else {
+        None
+    };
     let attachable = ctx.attachable(&leaf.id);
     let texts = chip_texts(leaf, pill.as_ref());
     let fits = chips_fit(

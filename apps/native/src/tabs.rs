@@ -635,6 +635,28 @@ pub fn find_tab_containing_session(
     })
 }
 
+/// The first tab, and its pane, whose pane follows dispatch run `run_id`
+/// of `host`.
+pub fn find_tab_following(
+    tabs: &[TabEntry],
+    host: &HostKey,
+    run_id: &str,
+) -> Option<(String, String)> {
+    tabs.iter().find_map(|tab| {
+        let grid = tab.grid()?;
+        collect_panes(grid)
+            .into_iter()
+            .find(|pane| {
+                pane.host == *host
+                    && matches!(
+                        pane.follow,
+                        Some(PaneFollow::DispatchRun { run_id: followed }) if followed == run_id
+                    )
+            })
+            .map(|pane| (tab.id.clone(), pane.id.to_owned()))
+    })
+}
+
 /// Which tabs show a session, as its sidebar leaf's pill tells it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabPill {
@@ -1927,6 +1949,18 @@ pub(crate) mod tests {
             pane_id: id.to_owned(),
             session_id: None,
             host: None,
+            follow: Some(PaneFollow::DispatchRun {
+                run_id: run_id.to_owned(),
+            }),
+        }
+    }
+
+    /// A pane following dispatch run `run_id` of remote host `host`.
+    pub(crate) fn follow_pane_on(id: &str, run_id: &str, host: &str) -> GridNode {
+        GridNode::Pane {
+            pane_id: id.to_owned(),
+            session_id: None,
+            host: Some(host.to_owned()),
             follow: Some(PaneFollow::DispatchRun {
                 run_id: run_id.to_owned(),
             }),
@@ -4325,6 +4359,44 @@ pub(crate) mod tests {
             find_tab_containing_session(&tabs, &SessionRef::new(remote("lab"), "s1")),
             None
         );
+    }
+
+    #[test]
+    fn find_tab_following_matches_run_and_host() {
+        let tabs = [
+            tab("t1", &pane("a", Some("s1"))),
+            tab("t2", &follow_pane("b", "run-1")),
+        ];
+        assert_eq!(
+            find_tab_following(&tabs, &HostKey::Local, "run-1"),
+            Some(("t2".to_owned(), "b".to_owned()))
+        );
+        assert_eq!(
+            find_tab_following(&tabs, &HostKey::Local, "run-2"),
+            None,
+            "no pane follows another run"
+        );
+    }
+
+    #[test]
+    fn find_tab_following_ignores_another_hosts_pane() {
+        let tabs = [tab("t1", &follow_pane_on("b", "run-1", "box"))];
+        assert_eq!(
+            find_tab_following(&tabs, &remote("box"), "run-1"),
+            Some(("t1".to_owned(), "b".to_owned()))
+        );
+        assert_eq!(
+            find_tab_following(&tabs, &HostKey::Local, "run-1"),
+            None,
+            "the same run id on This PC is another run"
+        );
+        assert_eq!(find_tab_following(&tabs, &remote("lab"), "run-1"), None);
+    }
+
+    #[test]
+    fn find_tab_following_ignores_a_session_pane() {
+        let tabs = [tab("t1", &pane("a", Some("run-1")))];
+        assert_eq!(find_tab_following(&tabs, &HostKey::Local, "run-1"), None);
     }
 
     fn s1() -> SessionRef {

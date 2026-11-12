@@ -7,7 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking; looking at one clears it.
-- Dispatch runs show in the sidebar under their repo, workspace or folder, newest first after its sessions.
+- Dispatch runs show in the sidebar under their repo, workspace or folder, tagged DS; clicking one opens a tab that follows it.
 
 ### Fixed
 

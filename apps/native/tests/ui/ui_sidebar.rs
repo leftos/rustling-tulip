@@ -10,16 +10,18 @@ use crate::support;
 
 use gpui::{Modifiers, MouseButton, TestAppContext, point, px};
 use protocol::{
-    AttentionReason, ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, SpawnConfig,
-    SpawnTarget, SplitDirection, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
+    AttentionReason, ClientMessage, DaemonMessage, PaneFollow, SessionMode, SessionSnapshot,
+    SpawnConfig, SpawnTarget, SplitDirection, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
     WorktreeReusePolicy,
 };
+use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{
-    Activity, DETACHED_BANNER, DIVIDER_WIDTH, RAIL_WIDTH, RepoFilter, RuntimeIcon, SidebarView,
-    TabPill, resume_all_label,
+    Activity, Connection, DETACHED_BANNER, DIVIDER_WIDTH, NetEvent, RAIL_WIDTH, RepoFilter,
+    RuntimeIcon, SidebarView, TabPill, resume_all_label,
 };
 use support::{
-    Fixture, Harness, TestDir, dispatch_run, pane, repo, session, split, tab, workspace,
+    Fixture, Harness, PROTOCOL, REMOTE, TestDir, dispatch_run, follow_pane, pane, repo,
+    saved_remote, seed_ui, session, split, tab, workspace,
 };
 
 /// The keys of the sidebar's containers, in the order it shows them.
@@ -2630,7 +2632,7 @@ fn a_removed_run_leaves_the_sidebar(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn clicking_a_dispatch_leaf_sends_nothing(cx: &mut TestAppContext) {
+fn clicking_a_dispatch_leaf_opens_a_tab_following_the_run(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &runs_fixture());
     h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
@@ -2641,5 +2643,161 @@ fn clicking_a_dispatch_leaf_sends_nothing(cx: &mut TestAppContext) {
     h.click_on("leaf-d1");
 
     let sent = h.sent();
-    assert!(sent.is_empty(), "sent {sent:?}");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::CreateTab {
+                name: None,
+                initial_session_id: None,
+                host: None,
+                follow: Some(PaneFollow::DispatchRun { run_id }),
+                request_id: Some(_),
+            }] if run_id == "d1"
+        ),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_dispatch_leaf_draws_the_ds_tag_and_no_pill(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(runs_msg());
+
+    assert!(
+        drawn(&mut h, "leaf-runtime-d1"),
+        "the leaf draws its DS tag"
+    );
+    assert!(
+        !drawn(&mut h, "leaf-pill-d1"),
+        "a dispatch leaf draws no pill"
+    );
+}
+
+/// The pane the window's active tab has focused.
+fn focused_pane(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.focused_pane())
+}
+
+#[gpui::test]
+fn clicking_a_followed_dispatch_leaf_focuses_its_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                follow_pane("p2", "d1"),
+            ),
+        )],
+        ..runs_fixture()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(runs_msg());
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p1"),
+        "the session's pane starts focused"
+    );
+
+    h.click_on("leaf-d1");
+
+    let sent = h.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::CreateTab { .. })),
+        "the click opens no tab: {sent:?}"
+    );
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p2"),
+        "the pane that follows the run takes the focus"
+    );
+}
+
+#[gpui::test]
+fn a_remote_run_in_unbound_shows_its_host_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": "box.tail1234.ts.net", "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+    let target = saved_remote();
+    h.host(&target)
+        .connect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.host(&target).send(DaemonMessage::DispatchRuns {
+        runs: vec![dispatch_run("d1").worktree("C:\\r1.wt\\b").build()],
+    });
+    h.host(&target).sent();
+
+    h.click_on("sidebar-view-tabs");
+
+    assert!(
+        drawn(&mut h, &format!("leaf-{REMOTE}::d1")),
+        "Unbound lists the run"
+    );
+    assert!(
+        drawn(&mut h, "sidebar-host-box-d1"),
+        "Unbound's remote run names its host"
+    );
+}
+
+/// The connection to `target` that was open and then dropped, as a
+/// disconnect reports it.
+fn dropped(target: Target) -> Connection {
+    let mut conn = Connection::for_target(target);
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_welcome(PROTOCOL, Vec::new(), None);
+    let _ = conn.on_closed("socket closed".to_owned());
+    conn
+}
+
+#[gpui::test]
+fn a_remote_hosts_run_dims_when_the_host_goes_offline(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": "box.tail1234.ts.net", "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+    let target = saved_remote();
+    h.host(&target)
+        .connect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.host(&target).send(DaemonMessage::DispatchRuns {
+        runs: vec![dispatch_run("d1").worktree("C:\\r1.wt\\b").build()],
+    });
+    h.host(&target).sent();
+    let host = h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .flat_map(|container| container.leaves)
+            .find(|leaf| leaf.id == "d1")
+            .expect("the run's leaf")
+            .host
+    });
+    assert_eq!(host, HostKey::of(&target));
+    assert!(
+        !h.root(|root, _| root.host_dimmed(&host)),
+        "open: not dimmed"
+    );
+
+    h.host(&target)
+        .event(NetEvent::State(dropped(target.clone())));
+
+    assert!(
+        h.root(|root, _| root.host_dimmed(&host)),
+        "the dropped host's run row dims"
+    );
+    assert!(
+        h.in_model(&format!("leaf-{REMOTE}::d1")),
+        "the run stays listed"
+    );
 }
