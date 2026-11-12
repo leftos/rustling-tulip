@@ -26,15 +26,19 @@ mod parse;
 mod tail;
 #[cfg(test)]
 mod tests;
+mod transcript;
 mod watch;
 
 use crate::session::SessionRegistry;
 use crate::stream_state::StreamState;
-use agent_api::HeadlessEvent;
+use agent_api::{AgentPlugin, HeadlessEvent};
 use chrono::{DateTime, Utc};
 pub(crate) use links::DispatchLinks;
 use parse::LiveRunFile;
-use protocol::{DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, SessionStatus};
+use protocol::{
+    DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, SessionStatus, TranscriptSource,
+    error_codes,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -42,6 +46,8 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use transcript::TranscriptLog;
+pub(crate) use transcript::{ConnectionId, Outbox};
 
 /// The broadcast channel's capacity; a receiver further behind lags.
 pub(crate) const EVENT_CAPACITY: usize = 256;
@@ -119,10 +125,38 @@ impl Timing {
     };
 }
 
+/// One tailer tick's input to [`DispatchRuns::fold`]: the events its lines
+/// parsed into, and the lines themselves with the agent that parses them into
+/// transcript entries.
+pub(super) struct Batch<'a> {
+    pub(super) events: Vec<HeadlessEvent>,
+    /// The tick's complete non-blank lines, oldest first.
+    pub(super) lines: &'a [String],
+    pub(super) plugin: &'a dyn AgentPlugin,
+}
+
+/// The transcript source of the run `run_id`.
+fn source_of(run_id: &str) -> TranscriptSource {
+    TranscriptSource::DispatchRun {
+        run_id: run_id.to_owned(),
+    }
+}
+
+/// The `Error` a follow is refused with.
+fn refusal(code: &str, message: String, request_id: Option<String>) -> DaemonMessage {
+    DaemonMessage::Error {
+        message,
+        request_id,
+        code: Some(code.to_owned()),
+    }
+}
+
 /// One listed run.
 struct RunEntry {
     file: LiveRunFile,
     stream: StreamState,
+    /// The stream's transcript, never part of the snapshot.
+    transcript: TranscriptLog,
     main_checkout: Option<PathBuf>,
     /// Stops the run's tailer.
     cancel: CancellationToken,
@@ -401,6 +435,7 @@ impl DispatchRuns {
         let mut entry = RunEntry {
             file,
             stream: StreamState::default(),
+            transcript: TranscriptLog::default(),
             main_checkout,
             cancel,
             generation,
@@ -440,6 +475,7 @@ impl DispatchRuns {
             entry.cancel.cancel();
             entry.cancel = fresh;
             entry.stream = StreamState::default();
+            entry.transcript.restarted(&source_of(run_id));
             entry.generation = next_generation;
         }
         self.log_change(run_id, entry);
@@ -465,10 +501,11 @@ impl DispatchRuns {
     }
 
     /// Finish removing `entry`, already taken out of `map`: stop its tailer,
-    /// unlink its conversation and send `Removed`, then release the lock and
-    /// send the sessions' updates.
+    /// tell its transcript's followers it ended, unlink its conversation and
+    /// send `Removed`, then release the lock and send the sessions' updates.
     fn removed(&self, map: MutexGuard<'_, RunMap>, run_id: &str, entry: &RunEntry) {
         entry.cancel.cancel();
+        entry.transcript.end(&source_of(run_id));
         let flipped = self.relink(None, entry.file.session_id.as_deref());
         if entry
             .logged
@@ -503,11 +540,12 @@ impl DispatchRuns {
         true
     }
 
-    /// Apply one tailer tick's events to the run listed at `generation` and
-    /// send its `Updated`; a run removed or listed again meanwhile is left
-    /// alone. `restart` (the stream shrank and is read again from its start)
-    /// clears the run's stream state first, so the replay adds nothing twice.
-    fn fold(&self, run_id: &str, generation: u64, restart: bool, events: Vec<HeadlessEvent>) {
+    /// Apply one tailer tick's events and lines to the run listed at
+    /// `generation` and send its `Updated`; a run removed or listed again
+    /// meanwhile is left alone. `restart` (the stream shrank and is read again
+    /// from its start) clears the run's stream state and transcript first, so
+    /// the replay adds nothing twice.
+    fn fold(&self, run_id: &str, generation: u64, restart: bool, batch: Batch<'_>) {
         let mut map = self.lock();
         let Some(entry) = map
             .entries
@@ -519,12 +557,69 @@ impl DispatchRuns {
         if restart {
             entry.stream = StreamState::default();
         }
-        for event in events {
+        for event in batch.events {
             entry.stream.apply(event);
         }
+        entry
+            .transcript
+            .fold(&source_of(run_id), restart, batch.lines, batch.plugin);
         self.log_change(run_id, entry);
         let snapshot = entry.snapshot(run_id);
         self.send(DispatchRunEvent::Updated(snapshot));
+    }
+
+    /// Make `connection` follow `source`'s transcript and send it the
+    /// transcript answering `request_id` on `outbox`, both under the runs lock
+    /// so every later append is sent after it. A run not listed, or a source
+    /// this build does not know, is answered with an `Error`.
+    pub(crate) fn follow_transcript(
+        &self,
+        source: &TranscriptSource,
+        request_id: Option<String>,
+        connection: ConnectionId,
+        outbox: &Outbox,
+    ) {
+        let TranscriptSource::DispatchRun { run_id } = source else {
+            let message = "This daemon cannot follow that transcript source.".to_owned();
+            let _ = outbox.send(refusal(
+                error_codes::UNSUPPORTED_MESSAGE,
+                message,
+                request_id,
+            ));
+            return;
+        };
+        let mut map = self.lock();
+        let Some(entry) = map.entries.get_mut(run_id) else {
+            drop(map);
+            let message = format!("No dispatch run {run_id}");
+            let _ = outbox.send(refusal(error_codes::NOT_FOUND, message, request_id));
+            return;
+        };
+        entry
+            .transcript
+            .follow(connection, outbox.clone(), source, request_id);
+        drop(map);
+    }
+
+    /// Stop sending `source`'s transcript to `connection`; nothing when it
+    /// does not follow it.
+    pub(crate) fn unfollow_transcript(&self, source: &TranscriptSource, connection: ConnectionId) {
+        let TranscriptSource::DispatchRun { run_id } = source else {
+            return;
+        };
+        if let Some(entry) = self.lock().entries.get_mut(run_id) {
+            entry.transcript.unfollow(connection);
+        }
+    }
+
+    /// The connections following `run_id`'s transcript, oldest follow first.
+    #[cfg(test)]
+    fn followers_of(&self, run_id: &str) -> Vec<ConnectionId> {
+        self.lock()
+            .entries
+            .get(run_id)
+            .map(|entry| entry.transcript.followers())
+            .unwrap_or_default()
     }
 
     /// What a Stop needs of the listed run `run_id`; `None` when it is not

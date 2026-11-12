@@ -1027,6 +1027,9 @@ mod tests {
                 include_str!("../tests/fixtures/transcripts/permission-amend-deny.jsonl")
             }
             "caps" => include_str!("../tests/fixtures/transcripts/caps.jsonl"),
+            "stream-json-run" => {
+                include_str!("../tests/fixtures/transcripts/stream-json-run.jsonl")
+            }
             other => unreachable!("no fixture {other}"),
         }
     }
@@ -1113,6 +1116,43 @@ mod tests {
             outputs[8],
             [],
             "a result whose card is unknown adds nothing"
+        );
+    }
+
+    #[test]
+    fn stream_json_records_parse_into_chat_entries() {
+        const CALL: &str = "call_00_K092JZdBfhv39k56iu6h5240";
+        let (outputs, _) = replay(fixture("stream-json-run"));
+
+        for (index, kind) in [
+            (0, "hook"),
+            (1, "hook"),
+            (2, "init"),
+            (3, "thinking tokens"),
+            (8, "result"),
+        ] {
+            assert_eq!(outputs[index], [], "the {kind} record yields nothing");
+        }
+        assert!(
+            matches!(&outputs[5][..], [ChatEntry::Tool { id, name, result: None, .. }] if id == CALL && name == "Bash"),
+            "{:?}",
+            outputs[5]
+        );
+        assert!(
+            matches!(
+                &outputs[6][..],
+                [ChatEntry::Tool { id, result: Some(ToolOutcome { is_error: false, .. }), .. }] if id == CALL
+            ),
+            "{:?}",
+            outputs[6]
+        );
+        assert_eq!(
+            outputs[7],
+            [ChatEntry::Answer {
+                id: "5f0c8a43-2d6e-4b7a-9c1e-3a8d7e6f1b20".to_owned(),
+                text: "All gates passed.".to_owned(),
+                live: false,
+            }]
         );
     }
 

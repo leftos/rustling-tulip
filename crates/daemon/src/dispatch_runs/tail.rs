@@ -1,8 +1,8 @@
 //! A run's stream tail: one task per run polls its stream file from the last
-//! byte read, cuts the new bytes into complete lines and folds the events the
-//! run's agent parses from them into the run's state.
+//! byte read, cuts the new bytes into complete lines and folds them, with the
+//! events the run's agent parses from them, into the run's state.
 
-use super::DispatchRuns;
+use super::{Batch, DispatchRuns};
 use protocol::AgentId;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -58,9 +58,14 @@ pub(super) async fn run(tailer: Tailer, cancel: CancellationToken) {
             .iter()
             .flat_map(|line| plugin.parse_headless_line(line))
             .collect();
+        let batch = Batch {
+            events,
+            lines: &lines,
+            plugin,
+        };
         tailer
             .runs
-            .fold(&tailer.run_id, tailer.generation, restart, events);
+            .fold(&tailer.run_id, tailer.generation, restart, batch);
         restart = false;
     }
 }

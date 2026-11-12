@@ -193,13 +193,13 @@ fn a_run_whose_stream_ends_logs_stopped_once() {
         "r1",
         generation,
         false,
-        vec![HeadlessEvent::Status(SessionStatus::Working)],
+        events(vec![HeadlessEvent::Status(SessionStatus::Working)]),
     );
     runs.fold(
         "r1",
         generation,
         false,
-        vec![HeadlessEvent::Status(SessionStatus::Stopped)],
+        events(vec![HeadlessEvent::Status(SessionStatus::Stopped)]),
     );
 
     assert!(runs.remove("r1"));
@@ -222,7 +222,7 @@ fn a_fold_that_keeps_the_status_logs_nothing() {
             "r1",
             generation,
             false,
-            vec![HeadlessEvent::RecentAction("x".to_owned())],
+            events(vec![HeadlessEvent::RecentAction("x".to_owned())]),
         );
     }
     assert_eq!(
@@ -240,13 +240,13 @@ fn a_restarted_stream_logs_working_again() {
         "r1",
         generation,
         false,
-        vec![HeadlessEvent::Status(SessionStatus::Stopped)],
+        events(vec![HeadlessEvent::Status(SessionStatus::Stopped)]),
     );
     runs.fold(
         "r1",
         generation,
         true,
-        vec![HeadlessEvent::Status(SessionStatus::Working)],
+        events(vec![HeadlessEvent::Status(SessionStatus::Working)]),
     );
     assert_eq!(
         logged_lines(&rx),
@@ -255,6 +255,362 @@ fn a_restarted_stream_logs_working_again() {
             ("dispatch-r1".to_owned(), SessionStatus::Stopped),
             ("dispatch-r1".to_owned(), SessionStatus::Working),
         ]
+    );
+}
+
+/// The default agent's plugin, which parses the transcript lines below.
+#[expect(clippy::expect_used, reason = "a test reads the registry with expect")]
+fn plugin() -> &'static dyn AgentPlugin {
+    agent_registry::plugin(&agent_registry::default_agent())
+        .expect("the default agent is registered")
+}
+
+/// A tick of `events` and no lines.
+fn events(events: Vec<HeadlessEvent>) -> Batch<'static> {
+    Batch {
+        events,
+        lines: &[],
+        plugin: plugin(),
+    }
+}
+
+/// An assistant record calling `Read`, whose card takes the call's id `t1`.
+const CALL_LINE: &str = concat!(
+    r#"{"type":"assistant","uuid":"a1","message":{"content":"#,
+    r#"[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.rs"}}]}}"#
+);
+/// The user record carrying the result of [`CALL_LINE`]'s call.
+const RESULT_LINE: &str = concat!(
+    r#"{"type":"user","uuid":"u1","message":{"content":"#,
+    r#"[{"type":"tool_result","tool_use_id":"t1","content":"one line","is_error":false}]}}"#
+);
+/// An assistant record answering `Done.` under its id `a2`.
+const TEXT_LINE: &str =
+    r#"{"type":"assistant","uuid":"a2","message":{"content":[{"type":"text","text":"Done."}]}}"#;
+
+/// Fold `lines`, with no events, into the run listed at `generation`.
+fn read(runs: &DispatchRuns, run_id: &str, generation: u64, lines: &[&str]) {
+    let lines: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+    let batch = Batch {
+        events: Vec::new(),
+        lines: &lines,
+        plugin: plugin(),
+    };
+    runs.fold(run_id, generation, false, batch);
+}
+
+/// What a follower saw of one message, its entries as their ids.
+#[derive(Debug, PartialEq, Eq)]
+enum Seen {
+    Backfill {
+        source: TranscriptSource,
+        ids: Vec<String>,
+        hidden: u32,
+        request_id: Option<String>,
+    },
+    Append {
+        source: TranscriptSource,
+        ids: Vec<String>,
+        ended: bool,
+    },
+    Refused {
+        code: Option<String>,
+        message: String,
+        request_id: Option<String>,
+    },
+}
+
+fn ids_of(entries: &[protocol::ChatEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(crate::chat_mirror::entry_id)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn seen(message: DaemonMessage) -> Seen {
+    match message {
+        DaemonMessage::Transcript {
+            source,
+            entries,
+            hidden,
+            request_id,
+        } => Seen::Backfill {
+            source,
+            ids: ids_of(&entries),
+            hidden,
+            request_id,
+        },
+        DaemonMessage::TranscriptAppend {
+            source,
+            entries,
+            ended,
+        } => Seen::Append {
+            source,
+            ids: ids_of(&entries),
+            ended,
+        },
+        DaemonMessage::Error {
+            message,
+            request_id,
+            code,
+        } => Seen::Refused {
+            code,
+            message,
+            request_id,
+        },
+        other => unreachable!("a follower got {other:?}"),
+    }
+}
+
+/// The messages already sent on `inbox`, in order.
+fn received(inbox: &mut mpsc::UnboundedReceiver<DaemonMessage>) -> Vec<DaemonMessage> {
+    let mut messages = Vec::new();
+    while let Ok(message) = inbox.try_recv() {
+        messages.push(message);
+    }
+    messages
+}
+
+fn seen_by(inbox: &mut mpsc::UnboundedReceiver<DaemonMessage>) -> Vec<Seen> {
+    received(inbox).into_iter().map(seen).collect()
+}
+
+fn backfill(run_id: &str, ids: &[&str], request_id: Option<&str>) -> Seen {
+    Seen::Backfill {
+        source: source_of(run_id),
+        ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+        hidden: 0,
+        request_id: request_id.map(str::to_owned),
+    }
+}
+
+fn append(run_id: &str, ids: &[&str], ended: bool) -> Seen {
+    Seen::Append {
+        source: source_of(run_id),
+        ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+        ended,
+    }
+}
+
+/// Make `connection` follow `run_id` on a fresh queue, returning its inbox.
+fn follow(
+    runs: &DispatchRuns,
+    run_id: &str,
+    connection: ConnectionId,
+    request_id: Option<&str>,
+) -> mpsc::UnboundedReceiver<DaemonMessage> {
+    let (outbox, inbox) = mpsc::unbounded_channel();
+    runs.follow_transcript(
+        &source_of(run_id),
+        request_id.map(str::to_owned),
+        connection,
+        &outbox,
+    );
+    inbox
+}
+
+#[test]
+fn a_follow_answers_the_runs_transcript_with_its_request_id() {
+    let runs = DispatchRuns::new();
+    let generation = runs.list_linked_for_test("r1", None);
+    read(&runs, "r1", generation, &[CALL_LINE, TEXT_LINE]);
+    read(&runs, "r1", generation + 1, &[RESULT_LINE]);
+
+    let mut inbox = follow(&runs, "r1", 1, Some("q1"));
+    let messages = received(&mut inbox);
+    assert!(
+        matches!(&messages[..], [DaemonMessage::Transcript { entries, .. }]
+            if matches!(&entries[..], [protocol::ChatEntry::Tool { result: None, .. }, protocol::ChatEntry::Answer { .. }])),
+        "a stale listing's fold changes nothing: {messages:?}"
+    );
+    assert_eq!(
+        messages.into_iter().map(seen).collect::<Vec<_>>(),
+        [backfill("r1", &["t1", "a2"], Some("q1"))]
+    );
+}
+
+#[test]
+fn a_connection_that_does_not_follow_gets_no_transcript() {
+    let runs = DispatchRuns::new();
+    let generation = runs.list_linked_for_test("r1", None);
+    runs.list_linked_for_test("r2", None);
+    let mut follower = follow(&runs, "r1", 1, None);
+    let mut elsewhere = follow(&runs, "r2", 2, None);
+    let mut updates = runs.subscribe();
+
+    read(&runs, "r1", generation, &[TEXT_LINE]);
+    assert_eq!(
+        seen_by(&mut follower),
+        [backfill("r1", &[], None), append("r1", &["a2"], false)]
+    );
+    assert_eq!(seen_by(&mut elsewhere), [backfill("r2", &[], None)]);
+    let Ok(DispatchRunEvent::Updated(snapshot)) = updates.try_recv() else {
+        unreachable!("the fold sends its update");
+    };
+    assert_eq!(
+        serde_json::to_value(&snapshot)
+            .map(|value| value.to_string().contains("Done."))
+            .ok(),
+        Some(false),
+        "the snapshot every client gets carries no transcript"
+    );
+}
+
+#[test]
+fn a_tool_result_re_sends_its_call_under_the_same_id() {
+    use protocol::{ChatEntry, ToolOutcome};
+    let runs = DispatchRuns::new();
+    let generation = runs.list_linked_for_test("r1", None);
+    let mut inbox = follow(&runs, "r1", 1, None);
+    read(&runs, "r1", generation, &[CALL_LINE]);
+    read(&runs, "r1", generation, &[RESULT_LINE]);
+
+    let messages = received(&mut inbox);
+    let appends: Vec<&[ChatEntry]> = messages
+        .iter()
+        .filter_map(|message| match message {
+            DaemonMessage::TranscriptAppend { entries, .. } => Some(&entries[..]),
+            _ => None,
+        })
+        .collect();
+    let [
+        [
+            ChatEntry::Tool {
+                id: call,
+                result: None,
+                ..
+            },
+        ],
+        [
+            ChatEntry::Tool {
+                id: card,
+                result: Some(outcome),
+                ..
+            },
+        ],
+    ] = appends.as_slice()
+    else {
+        unreachable!("a call's append, then its card's: {messages:?}");
+    };
+    assert_eq!((call.as_str(), card.as_str()), ("t1", "t1"));
+    assert_eq!(
+        outcome,
+        &ToolOutcome {
+            text: "one line".to_owned(),
+            is_error: false
+        }
+    );
+}
+
+#[test]
+fn a_second_follower_gets_the_same_backfill() {
+    let runs = DispatchRuns::new();
+    let generation = runs.list_linked_for_test("r1", None);
+    read(&runs, "r1", generation, &[CALL_LINE, TEXT_LINE]);
+    let mut first = follow(&runs, "r1", 1, Some("q1"));
+    let mut second = follow(&runs, "r1", 2, Some("q2"));
+    read(&runs, "r1", generation, &[RESULT_LINE]);
+
+    assert_eq!(
+        seen_by(&mut first),
+        [
+            backfill("r1", &["t1", "a2"], Some("q1")),
+            append("r1", &["t1"], false)
+        ]
+    );
+    assert_eq!(
+        seen_by(&mut second),
+        [
+            backfill("r1", &["t1", "a2"], Some("q2")),
+            append("r1", &["t1"], false)
+        ]
+    );
+}
+
+#[test]
+fn an_unfollowed_connection_gets_no_more_appends() {
+    let runs = DispatchRuns::new();
+    let generation = runs.list_linked_for_test("r1", None);
+    let mut inbox = follow(&runs, "r1", 1, None);
+    runs.unfollow_transcript(&source_of("r1"), 1);
+    runs.unfollow_transcript(&source_of("r1"), 9);
+    read(&runs, "r1", generation, &[TEXT_LINE]);
+
+    assert_eq!(seen_by(&mut inbox), [backfill("r1", &[], None)]);
+    assert_eq!(runs.followers_of("r1"), Vec::<ConnectionId>::new());
+}
+
+#[test]
+fn a_removed_run_tells_its_followers_it_ended() {
+    let runs = DispatchRuns::new();
+    let generation = runs.list_linked_for_test("r1", None);
+    let mut inbox = follow(&runs, "r1", 1, None);
+    read(&runs, "r1", generation, &[TEXT_LINE]);
+    assert!(runs.remove("r1"));
+
+    assert_eq!(
+        seen_by(&mut inbox),
+        [
+            backfill("r1", &[], None),
+            append("r1", &["a2"], false),
+            append("r1", &[], true)
+        ]
+    );
+}
+
+#[test]
+fn a_closed_followers_connection_is_dropped_without_failing_the_fold() {
+    let runs = DispatchRuns::new();
+    let generation = runs.list_linked_for_test("r1", None);
+    drop(follow(&runs, "r1", 1, None));
+    let mut open = follow(&runs, "r1", 2, None);
+    let mut updates = runs.subscribe();
+    read(&runs, "r1", generation, &[TEXT_LINE]);
+
+    assert_eq!(
+        seen_by(&mut open),
+        [backfill("r1", &[], None), append("r1", &["a2"], false)]
+    );
+    assert_eq!(runs.followers_of("r1"), [2]);
+    assert!(matches!(
+        updates.try_recv(),
+        Ok(DispatchRunEvent::Updated(run)) if run.run_id == "r1"
+    ));
+}
+
+#[test]
+fn following_an_unlisted_run_answers_not_found() {
+    let runs = DispatchRuns::new();
+    let mut inbox = follow(&runs, "r9", 1, Some("q1"));
+    assert_eq!(
+        seen_by(&mut inbox),
+        [Seen::Refused {
+            code: Some(error_codes::NOT_FOUND.to_owned()),
+            message: "No dispatch run r9".to_owned(),
+            request_id: Some("q1".to_owned()),
+        }]
+    );
+}
+
+#[test]
+fn following_an_unknown_source_answers_unsupported() {
+    let runs = DispatchRuns::new();
+    runs.list_linked_for_test("r1", None);
+    let (outbox, mut inbox) = mpsc::unbounded_channel();
+    runs.follow_transcript(
+        &TranscriptSource::Unknown,
+        Some("q1".to_owned()),
+        1,
+        &outbox,
+    );
+    assert_eq!(
+        seen_by(&mut inbox),
+        [Seen::Refused {
+            code: Some(error_codes::UNSUPPORTED_MESSAGE.to_owned()),
+            message: "This daemon cannot follow that transcript source.".to_owned(),
+            request_id: Some("q1".to_owned()),
+        }]
     );
 }
 
@@ -921,6 +1277,75 @@ mod runtime {
                 run.recent_actions == ["tool: Grep"]
             })
             .await;
+    }
+
+    /// The next message on a follower's `inbox`, failing as hung at the guard.
+    async fn next_seen(inbox: &mut mpsc::UnboundedReceiver<DaemonMessage>, what: &str) -> Seen {
+        tokio::time::timeout(HANG_GUARD, inbox.recv())
+            .await
+            .unwrap_or_else(|_| unreachable!("hung waiting for {what}"))
+            .map_or_else(|| unreachable!("the follower's queue closed"), seen)
+    }
+
+    #[tokio::test]
+    async fn lines_after_a_follow_reach_the_follower_as_an_append() {
+        let scratch = Scratch::new("follow-append");
+        let child = Pinger::spawn();
+        let mut runtime = Runtime::start(&scratch.live());
+        scratch.write_run(
+            "run-f",
+            &scratch.run_text("run-f", child.pid(), Some(child.start())),
+        );
+        runtime
+            .wait_updated("run-f", "the run's first update", |_| true)
+            .await;
+        let mut inbox = follow(&runtime.runs, "run-f", 1, Some("q1"));
+        assert_eq!(
+            next_seen(&mut inbox, "the backfill").await,
+            backfill("run-f", &[], Some("q1"))
+        );
+
+        scratch.append_stream(&format!("{CALL_LINE}\n"));
+        assert_eq!(
+            next_seen(&mut inbox, "the call's append").await,
+            append("run-f", &["t1"], false)
+        );
+        scratch.append_stream(&format!("{TEXT_LINE}\n"));
+        assert_eq!(
+            next_seen(&mut inbox, "the answer's append").await,
+            append("run-f", &["a2"], false)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shrunk_stream_sends_followers_a_fresh_transcript() {
+        let scratch = Scratch::new("follow-shrunk");
+        let child = Pinger::spawn();
+        let mut runtime = Runtime::start(&scratch.live());
+        scratch.append_stream(&format!("{CALL_LINE}\n{TEXT_LINE}\n"));
+        scratch.write_run(
+            "run-t",
+            &scratch.run_text("run-t", child.pid(), Some(child.start())),
+        );
+        runtime
+            .wait_updated("run-t", "the first stream's tool action", |run| {
+                run.recent_actions
+                    .iter()
+                    .any(|action| action == TOOL_ACTION)
+            })
+            .await;
+        let mut inbox = follow(&runtime.runs, "run-t", 1, Some("q1"));
+        assert_eq!(
+            next_seen(&mut inbox, "the backfill").await,
+            backfill("run-t", &["t1", "a2"], Some("q1"))
+        );
+
+        std::fs::write(scratch.stream(), format!("{TEXT_LINE}\n"))
+            .expect("the stream is rewritten shorter");
+        assert_eq!(
+            next_seen(&mut inbox, "the fresh transcript").await,
+            backfill("run-t", &["a2"], None)
+        );
     }
 
     #[tokio::test]

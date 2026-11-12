@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use protocol::{ClientMessage, DaemonMessage, error_codes};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::Hub;
 use super::connection::ConnCtx;
@@ -39,11 +39,19 @@ enum Outcome {
 /// kill.
 pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
     match msg {
-        ClientMessage::FollowTranscript { source, .. } => {
-            debug!(?source, "transcript follow received");
+        ClientMessage::FollowTranscript { source, request_id } => {
+            let Some(dispatch) = &hub.dispatch_runs else {
+                let _ = ctx.out_tx.send(not_followed(request_id));
+                return;
+            };
+            dispatch
+                .runs
+                .follow_transcript(&source, request_id, ctx.connection, ctx.out_tx);
         }
         ClientMessage::UnfollowTranscript { source } => {
-            debug!(?source, "transcript unfollow received");
+            if let Some(dispatch) = &hub.dispatch_runs {
+                dispatch.runs.unfollow_transcript(&source, ctx.connection);
+            }
         }
         ClientMessage::StopDispatchRun { run_id, request_id } => {
             stop_run(hub, ctx, run_id, request_id);
@@ -58,11 +66,7 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
 /// Stop the run, answering the requester's reply when nothing was stopped.
 fn stop_run(hub: &Hub, ctx: &ConnCtx<'_>, run_id: String, request_id: Option<String>) {
     let Some(dispatch) = hub.dispatch_runs.clone() else {
-        let _ = ctx.out_tx.send(DaemonMessage::Error {
-            message: "dispatch runs are not followed by this daemon".to_owned(),
-            request_id,
-            code: Some(error_codes::UNSUPPORTED_MESSAGE.to_owned()),
-        });
+        let _ = ctx.out_tx.send(not_followed(request_id));
         return;
     };
     let out_tx = ctx.out_tx.clone();
@@ -71,6 +75,15 @@ fn stop_run(hub: &Hub, ctx: &ConnCtx<'_>, run_id: String, request_id: Option<Str
             let _ = out_tx.send(reply);
         }
     });
+}
+
+/// The `Error` a dispatch-run request gets from a daemon that follows no runs.
+fn not_followed(request_id: Option<String>) -> DaemonMessage {
+    DaemonMessage::Error {
+        message: "dispatch runs are not followed by this daemon".to_owned(),
+        request_id,
+        code: Some(error_codes::UNSUPPORTED_MESSAGE.to_owned()),
+    }
 }
 
 /// Stop the run `run_id` and answer the requester's reply, if any: an
