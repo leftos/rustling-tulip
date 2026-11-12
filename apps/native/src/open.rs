@@ -19,6 +19,9 @@ use protocol::{RepoEntry, SessionSnapshot, WorkspaceEntry};
 use crate::links::TerminalLinkCandidate;
 use crate::sidebar::load_unc_hosts;
 
+#[cfg(any(unix, test))]
+mod page_unix;
+
 /// The extensions whose default action runs code, besides the types Windows
 /// itself counts a risk: a link to one asks before it opens.
 const EXECUTABLE_EXTENSIONS: &[&str] = &[
@@ -732,14 +735,35 @@ fn is_web_page(path: &Path) -> bool {
         })
 }
 
-/// The `file:` URL of `path`, `\` turned to `/` and every byte outside
-/// `A-Z a-z 0-9 - . _ ~ / :` percent-encoded, with `suffix` after it as
-/// written but for its spaces, quotes, controls and non-ASCII bytes, which
-/// are percent-encoded: the URL is always one command-line token.
+/// The `file:` URL of `path` with `suffix` after it, as [`page_url_of`]
+/// writes it for this OS.
 #[cfg(any(windows, test))]
 fn page_url(path: &Path, suffix: &str) -> String {
+    page_url_of(&path.to_string_lossy(), suffix, cfg!(windows))
+}
+
+/// The `file:` URL [`page_url`] gives `path`, or `None` when `path` is not
+/// valid UTF-8, whose URL could only be a lossy guess: such a page opens
+/// at its top.
+#[cfg(any(unix, test))]
+fn browser_page_url(path: &Path, suffix: &str) -> Option<String> {
+    path.to_str()
+        .map(|text| page_url_of(text, suffix, cfg!(windows)))
+}
+
+/// The `file:` URL of the path `text`, its `\` turned to `/` when `windows`
+/// says it is a Windows path, and every byte outside
+/// `A-Z a-z 0-9 - . _ ~ / :` percent-encoded (a Unix name's `\` included),
+/// with `suffix` after it as written but for its spaces, quotes, controls and
+/// non-ASCII bytes, which are percent-encoded: the URL is always one
+/// command-line token.
+fn page_url_of(text: &str, suffix: &str, windows: bool) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let text = path.to_string_lossy().replace('\\', "/");
+    let text = if windows {
+        text.replace('\\', "/")
+    } else {
+        text.to_owned()
+    };
     // A network path (`//host/share`) names its host after `file:`; any
     // other path is local, under `file:///`.
     let (mut url, rest) = match text.strip_prefix("//") {
@@ -823,8 +847,28 @@ fn open_page(path: &Path, suffix: &str) -> Result<(), String> {
     })
 }
 
-/// Off Windows the page opens at its top: `suffix` is dropped.
-#[cfg(not(windows))]
+/// Opens the web page `path` at `suffix` in the default browser, since
+/// `open` and `xdg-open` drop a `file:` URL's fragment when they open the
+/// file through its type; when that browser cannot be found or started, or
+/// `path` is not valid UTF-8, the page opens at its top.
+#[cfg(unix)]
+fn open_page(path: &Path, suffix: &str) -> Result<(), String> {
+    let Some(url) = browser_page_url(path, suffix) else {
+        tracing::warn!(
+            "{} is not valid UTF-8, so the page opens at its top",
+            path.display()
+        );
+        return shell_open(path.as_os_str())
+            .map_err(|err| format!("open {}: {err}", path.display()));
+    };
+    page_unix::open_in_browser(&url).or_else(|err| {
+        tracing::warn!("could not open {url} in the browser, so the page opens at its top: {err}");
+        shell_open(path.as_os_str()).map_err(|err| format!("open {}: {err}", path.display()))
+    })
+}
+
+/// Neither Windows nor Unix: the page opens at its top, `suffix` dropped.
+#[cfg(not(any(windows, unix)))]
 fn open_page(path: &Path, _suffix: &str) -> Result<(), String> {
     shell_open(path.as_os_str()).map_err(|err| format!("open {}: {err}", path.display()))
 }
@@ -1242,9 +1286,10 @@ mod tests {
 
     use super::{
         JobOutcome, OpenAction, OpenFailure, OpenJob, Opener, Resolution, VsCodeTarget, base_dirs,
-        browser_command, copy_path, existing_on_disk, macos_vscode_commands, open_action,
-        opener_for, page_only_for_a_file, page_url, repo_folder, resolve_with, runs_code,
-        simplify_path, unc_host, validate_http_url, workspace_vscode_target,
+        browser_command, browser_page_url, copy_path, existing_on_disk, macos_vscode_commands,
+        open_action, opener_for, page_only_for_a_file, page_url, page_url_of, repo_folder,
+        resolve_with, runs_code, simplify_path, unc_host, validate_http_url,
+        workspace_vscode_target,
     };
     use crate::links::TerminalLinkCandidate;
     use crate::temp_dir::TempDir;
@@ -1868,6 +1913,46 @@ mod tests {
             page_url(Path::new("X:/p.html"), "?q=a b&c=\"é\"\t#/r:1%20"),
             "file:///X:/p.html?q=a%20b&c=%22%C3%A9%22%09#/r:1%20",
             "the suffix keeps its marks and loses whatever could end the token"
+        );
+    }
+
+    #[test]
+    fn page_url_encodes_a_unix_path() {
+        assert_eq!(
+            page_url(Path::new("/home/u/a b.html"), "#q1"),
+            "file:///home/u/a%20b.html#q1"
+        );
+    }
+
+    #[test]
+    fn page_url_keeps_a_unix_backslash_in_the_name() {
+        assert_eq!(
+            page_url_of(r"/home/u/a\b.html", "#q1", false),
+            "file:///home/u/a%5Cb.html#q1"
+        );
+        assert_eq!(
+            page_url_of(r"X:\u\a.html", "#q1", true),
+            "file:///X:/u/a.html#q1",
+            "a Windows path's `\\` is its separator"
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_path_opens_the_plain_file() {
+        #[cfg(unix)]
+        let name = {
+            use std::os::unix::ffi::OsStringExt as _;
+            std::ffi::OsString::from_vec(b"/home/u/a\xFF.html".to_vec())
+        };
+        #[cfg(windows)]
+        let name = {
+            use std::os::windows::ffi::OsStringExt as _;
+            std::ffi::OsString::from_wide(&[0x58, 0x3A, 0x2F, 0xD800, 0x2E, 0x68])
+        };
+        assert_eq!(browser_page_url(Path::new(&name), "#q1"), None);
+        assert_eq!(
+            browser_page_url(Path::new("/home/u/a.html"), "#q1").as_deref(),
+            Some(page_url(Path::new("/home/u/a.html"), "#q1").as_str())
         );
     }
 

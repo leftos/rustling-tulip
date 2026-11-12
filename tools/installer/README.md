@@ -165,7 +165,7 @@ The files live in the owner's Private Config on Google Drive, `G:\My Drive\Priva
 With `-Sign` the script, after assembling the bundle:
 
 1. decodes the `.p12` into a temporary keychain under the Mac's temp folder (`security create-keychain`, `import`, `set-key-partition-list`) and adds it beside the user's keychain search list;
-2. signs inside out with the hardened runtime and a timestamp (`codesign --force --options runtime --timestamp`): `rt-tracer`, `rustling-tulipd`, `rustling-tulip-native`, then the `.app` without `--deep`; no entitlements file;
+2. signs inside out with the hardened runtime and a timestamp (`codesign --force --options runtime --timestamp`): `rt-tracer`, `rustling-tulipd`, `rustling-tulip-native`, then the `.app` without `--deep`; `rustling-tulip-native` and the `.app` are signed with `tools/installer/macos/rustling-tulip.entitlements`, whose Apple-events entitlement lets the `osascript` the client starts open a page in the browser at a link's `#fragment` or `?query` under the hardened runtime;
 3. zips the app with `ditto -c -k --keepParent`, notarizes it with `xcrun notarytool submit --wait` and the API key, and staples the app (`xcrun stapler staple`, up to three tries a minute apart, since a fresh ticket can take a moment to propagate);
 4. writes the update zip and its `.sha256` from the stapled app, builds the `.dmg` around it, signs the `.dmg`, notarizes and staples it;
 5. checks, failing on any refusal: `codesign --verify --deep --strict --verbose=2` on the app, `spctl --assess -vvv --type execute` on the app (it must say `accepted` and `source=Notarized Developer ID`), `spctl --assess -vvv --type open --context context:primary-signature` on the `.dmg` (`accepted`), and `xcrun stapler validate` on both.

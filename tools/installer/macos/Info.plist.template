@@ -28,5 +28,7 @@
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>rustling-tulip opens a web page in your browser at the section a link names.</string>
 </dict>
 </plist>

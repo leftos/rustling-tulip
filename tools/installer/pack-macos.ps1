@@ -123,9 +123,10 @@ function Import-SigningIdentity([string]$WorkDir, [string]$Keychain, [string[]]$
   }
 }
 
-function Invoke-DeveloperIdCodesign([string]$Path, [string]$Keychain, [switch]$Runtime) {
+function Invoke-DeveloperIdCodesign([string]$Path, [string]$Keychain, [switch]$Runtime, [string]$Entitlements) {
   $options = @('--force', '--timestamp', '--keychain', $Keychain, '-s', $env:MACOS_SIGN_APP_IDENTITY)
   if ($Runtime) { $options += '--options', 'runtime' }
+  if ($Entitlements) { $options += '--entitlements', $Entitlements }
   codesign @options $Path
   Assert-LastExit "codesign $(Split-Path -Leaf $Path)"
 }
@@ -238,11 +239,14 @@ try {
     [IO.File]::WriteAllBytes($notaryKey, [Convert]::FromBase64String($env:MACOS_NOTARY_API_KEY_P8_BASE64))
 
     # Inside out with the hardened runtime: each binary, then the bundle (no --deep), which seals
-    # Info.plist and Resources.
-    foreach ($bin in 'rt-tracer', 'rustling-tulipd', 'rustling-tulip-native') {
+    # Info.plist and Resources. The client and the bundle carry the Apple-events entitlement, without
+    # which the osascript that opens a page at a link's #fragment is denied by macOS.
+    $entitlements = Join-Path $root 'tools/installer/macos/rustling-tulip.entitlements'
+    foreach ($bin in 'rt-tracer', 'rustling-tulipd') {
       Invoke-DeveloperIdCodesign (Join-Path $macOS $bin) $keychain -Runtime
     }
-    Invoke-DeveloperIdCodesign $app $keychain -Runtime
+    Invoke-DeveloperIdCodesign (Join-Path $macOS 'rustling-tulip-native') $keychain -Runtime -Entitlements $entitlements
+    Invoke-DeveloperIdCodesign $app $keychain -Runtime -Entitlements $entitlements
 
     # A bundle is submitted zipped; the ticket is stapled to the app itself.
     $submission = Join-Path $signingDir 'rustling-tulip-notarize.zip'
