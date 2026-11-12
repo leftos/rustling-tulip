@@ -218,6 +218,15 @@ pub struct Leaf {
     pub state: LeafState,
     /// The label's hover text.
     pub tooltip: String,
+    /// How far the row nests: 1 for a dispatch run under the session that
+    /// dispatched it, 0 for every other row.
+    pub depth: u8,
+    /// The id of the session a nested row sits under; `None` at depth 0.
+    pub host_session: Option<String>,
+    /// How many nested rows follow this session's row.
+    pub nested: usize,
+    /// The session's nested rows are folded away ([`session_fold_key`]).
+    pub collapsed: bool,
 }
 
 /// What a leaf tags its session as besides its runtime.
@@ -1382,6 +1391,8 @@ struct HostSlice {
     unseen: HashSet<String>,
     /// The dispatch runs the daemon lists, in the order it sent them.
     pub dispatch_runs: Vec<DispatchRunSnapshot>,
+    /// The daemon has sent a whole session list.
+    sessions_loaded: bool,
 }
 
 impl HostSlice {
@@ -1448,6 +1459,7 @@ impl HostSlice {
                 self.unseen
                     .retain(|id| sessions.iter().any(|s| &s.id == id));
                 sessions.clone_into(&mut self.sessions);
+                self.sessions_loaded = true;
             }
             DaemonMessage::SessionUpdated { session, .. } => self.update_session(session, focused),
             DaemonMessage::SessionRemoved { session_id } => {
@@ -1547,6 +1559,12 @@ impl HostSlice {
             collapsed,
             runs: &self.dispatch_runs,
         }
+    }
+
+    /// Whether the host's connection is up and its daemon has listed its
+    /// sessions, so a session it does not list is gone.
+    fn connected(&self) -> bool {
+        self.sessions_loaded && !self.agents.is_empty()
     }
 
     /// Whether the registry is in and holds a repo or a workspace.
@@ -2091,6 +2109,9 @@ impl SidebarModel {
                 container.host = host.clone();
                 for leaf in &mut container.leaves {
                     leaf.host = host.clone();
+                    if leaf.nested > 0 {
+                        leaf.collapsed = collapsed.contains(&session_fold_key(host, &leaf.id));
+                    }
                 }
             }
         }
@@ -2262,13 +2283,35 @@ impl SidebarModel {
         true
     }
 
-    /// Drops the folds of the tabs that are not in `live`; returns whether
-    /// any went.
+    /// Drops the folds of the tabs that are not in `live`, and the session
+    /// folds ([`session_fold_key`]) whose session a connected host no
+    /// longer lists; returns whether any went.
     pub fn prune_tab_folds(&mut self, live: &HashSet<&str>) -> bool {
+        let gone = self.gone_session_folds();
         let collapsed = &mut self.ui.collapsed_containers;
         let before = collapsed.len();
-        collapsed.retain(|key| key.strip_prefix("tab:").is_none_or(|id| live.contains(id)));
+        collapsed.retain(|key| {
+            key.strip_prefix("tab:").is_none_or(|id| live.contains(id)) && !gone.contains(key)
+        });
         collapsed.len() != before
+    }
+
+    /// The saved session folds whose session its host, connected and
+    /// listing its sessions, no longer lists; a host that is not connected
+    /// keeps every fold.
+    fn gone_session_folds(&self) -> HashSet<String> {
+        let mut gone = HashSet::new();
+        for (host, slice) in self.slices().filter(|(_, slice)| slice.connected()) {
+            let prefix = session_fold_key(host, "");
+            for key in &self.ui.collapsed_containers {
+                if let Some(id) = key.strip_prefix(&prefix)
+                    && slice.session(id).is_none()
+                {
+                    gone.insert(key.clone());
+                }
+            }
+        }
+        gone
     }
 
     #[cfg(test)]
@@ -2292,6 +2335,19 @@ impl SidebarModel {
         if !collapsed.remove(key) {
             collapsed.insert(key.to_owned());
         }
+    }
+
+    /// Folds or unfolds the rows nested under `host`'s session `id`
+    /// ([`session_fold_key`]).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no control calls it until the sidebar draws a session fold"
+        )
+    )]
+    pub fn toggle_session_fold(&mut self, host: &HostKey, id: &str) {
+        self.toggle_container(&session_fold_key(host, id));
     }
 
     /// Folds or unfolds `host`'s header ([`host_fold_key`]); the folds of
@@ -3168,16 +3224,20 @@ impl<'a> Groups<'a> {
 
 /// The repos view: workspaces and repos (manual order first, the rest
 /// alphabetically), then standalone shells, then unregistered directories,
-/// then Detached when it holds anything. Each container's dispatch runs
-/// follow its sessions, newest first.
+/// then Detached when it holds anything. A dispatch run a listed session
+/// dispatched nests right after that session's leaf ([`nest_runs`]); each
+/// container's other runs follow its sessions, newest first.
 pub fn build_containers(inputs: &TreeInputs<'_>) -> Vec<Container> {
     let members = member_repo_ids(inputs.workspaces);
+    let conversations = conversation_ids(inputs.sessions);
     let mut groups = Groups::default();
     for s in inputs.sessions {
         groups.place(s, inputs, &members);
     }
     for run in inputs.runs {
-        groups.place_run(run, inputs, &members);
+        if host_conversation(run, &conversations).is_none() {
+            groups.place_run(run, inputs, &members);
+        }
     }
     let mut out = apply_container_order(
         workspace_containers(inputs, &mut groups),
@@ -3228,7 +3288,98 @@ pub fn build_containers(inputs: &TreeInputs<'_>) -> Vec<Container> {
             append_runs(container, runs);
         }
     }
+    nest_runs(&mut out, inputs, &conversations);
     out
+}
+
+/// The agent conversations `sessions` run.
+fn conversation_ids(sessions: &[SessionSnapshot]) -> HashSet<&str> {
+    sessions
+        .iter()
+        .filter_map(|s| s.conversation_id.as_deref())
+        .collect()
+}
+
+/// The conversation of the listed session that dispatched `run`; `None`
+/// when no session of `conversations` did.
+fn host_conversation<'a>(
+    run: &'a DispatchRunSnapshot,
+    conversations: &HashSet<&str>,
+) -> Option<&'a str> {
+    run.session_id
+        .as_deref()
+        .filter(|id| conversations.contains(id))
+}
+
+/// Nests each run a listed session dispatched under the first session leaf
+/// of `containers`, in their order, that runs its conversation.
+fn nest_runs<'a>(
+    containers: &mut [Container],
+    inputs: &TreeInputs<'a>,
+    conversations: &HashSet<&str>,
+) {
+    let mut runs: HashMap<&'a str, Vec<&'a DispatchRunSnapshot>> = HashMap::new();
+    for run in inputs.runs {
+        if let Some(conversation) = host_conversation(run, conversations) {
+            runs.entry(conversation).or_default().push(run);
+        }
+    }
+    if runs.is_empty() {
+        return;
+    }
+    let conversation_of: HashMap<&str, &str> = inputs
+        .sessions
+        .iter()
+        .filter_map(|s| Some((s.id.as_str(), s.conversation_id.as_deref()?)))
+        .collect();
+    for container in containers {
+        let mut at = 0;
+        while at < container.leaves.len() {
+            let leaf = &container.leaves[at];
+            let host_runs = (leaf.kind == LeafKind::Session)
+                .then(|| conversation_of.get(leaf.id.as_str()))
+                .flatten()
+                .and_then(|conversation| runs.remove(*conversation));
+            if let Some(host_runs) = host_runs {
+                at += nest_after(&mut container.leaves, at, host_runs, inputs.collapsed);
+            }
+            at += 1;
+        }
+    }
+}
+
+/// Puts a leaf per run of `runs`, oldest first, right after the session
+/// leaf at `at`, at depth 1 under it, and sets that leaf's nested count and
+/// fold from `collapsed`; returns how many went in.
+fn nest_after(
+    leaves: &mut Vec<Leaf>,
+    at: usize,
+    mut runs: Vec<&DispatchRunSnapshot>,
+    collapsed: &BTreeSet<String>,
+) -> usize {
+    let Some(host) = leaves.get_mut(at) else {
+        return 0;
+    };
+    runs.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.run_id.cmp(&b.run_id))
+    });
+    host.nested = runs.len();
+    host.collapsed = collapsed.contains(&session_fold_key(&host.host, &host.id));
+    let (host_key, host_id) = (host.host.clone(), host.id.clone());
+    let nested: Vec<Leaf> = runs
+        .into_iter()
+        .map(|run| Leaf {
+            depth: 1,
+            host_session: Some(host_id.clone()),
+            ..crate::dispatch_runs::dispatch_leaf(run, &host_key)
+        })
+        .collect();
+    let count = nested.len();
+    let after = at + 1;
+    leaves.splice(after..after, nested);
+    count
 }
 
 /// Appends a leaf per dispatch run to `container`, after its sessions,
@@ -3390,6 +3541,10 @@ fn leaf(
         background: s.background,
         state: LeafState::of(s),
         tooltip: leaf_tooltip(s, label_agents),
+        depth: 0,
+        host_session: None,
+        nested: 0,
+        collapsed: false,
     }
 }
 
@@ -3511,6 +3666,14 @@ fn container_key(kind: ContainerKind, id: &str) -> String {
     }
 }
 
+/// The key the rows nested under `host`'s session `id` fold by in the
+/// collapsed set: `session:<id>`, a remote host's carrying its host key in
+/// front as [`host_container_key`] does.
+#[must_use]
+pub fn session_fold_key(host: &HostKey, id: &str) -> String {
+    host_container_key(host, &format!("session:{id}"))
+}
+
 /// The per-session state the tabs view orders and marks its leaves by: each
 /// tab's manual session order, and the sessions that need attention or have
 /// output not yet seen.
@@ -3554,8 +3717,11 @@ impl TabHost<'_> {
 /// follow in pane order (a diff tab's is empty); then Unbound when it
 /// holds anything: This PC's sessions no pane shows sorted by label, then
 /// every host's dispatch runs no tab follows, in `hosts` order, each
-/// host's newest first and each leaf carrying its own host. `hosts` holds
-/// every host's part, each pane's session looked up in its own host's.
+/// host's newest first and each leaf carrying its own host. A run a session
+/// of its own host dispatched is never listed there or as followed: it nests
+/// under that session's leaf in each tab that shows it ([`nest_tab_runs`]),
+/// and shows nowhere while no tab does. `hosts` holds every host's part,
+/// each pane's session looked up in its own host's.
 pub fn build_tab_containers(
     tabs: &[TabEntry],
     hosts: &[TabHost<'_>],
@@ -3566,7 +3732,8 @@ pub fn build_tab_containers(
     let mut runs_shown: HashSet<(HostKey, String)> = HashSet::new();
     let mut out = Vec::new();
     for tab in tabs {
-        let leaves = tab_leaves(tab, hosts, &mut shown, &mut runs_shown);
+        let mut leaves = tab_leaves(tab, hosts, &mut shown, &mut runs_shown);
+        nest_tab_runs(&mut leaves, hosts, collapsed);
         out.push(tab_view_container(
             ContainerKind::Tab,
             &tab.id,
@@ -3589,7 +3756,10 @@ pub fn build_tab_containers(
         let mut runs: Vec<&DispatchRunSnapshot> = host
             .runs
             .iter()
-            .filter(|run| !runs_shown.contains(&(host.host.clone(), run.run_id.clone())))
+            .filter(|run| {
+                !runs_shown.contains(&(host.host.clone(), run.run_id.clone()))
+                    && !linked_on(run, host)
+            })
             .collect();
         crate::dispatch_runs::sort_newest_first(&mut runs);
         leaves.extend(
@@ -3642,7 +3812,11 @@ fn tab_leaves<'a>(
                 remote.push(host.leaf(s));
             }
         } else if let Some(run_id) = followed_run(pane.follow) {
-            let Some(run) = host.runs.iter().find(|run| run.run_id == run_id) else {
+            let Some(run) = host
+                .runs
+                .iter()
+                .find(|run| run.run_id == run_id && !linked_on(run, host))
+            else {
                 continue;
             };
             let followed_run = (pane.host.clone(), run_id.to_owned());
@@ -3669,6 +3843,61 @@ fn tab_leaves<'a>(
     leaves.extend(remote);
     leaves.extend(runs);
     leaves
+}
+
+/// Whether a session `host` lists dispatched `run`, which then shows only
+/// nested under that session ([`nest_tab_runs`]).
+fn linked_on(run: &DispatchRunSnapshot, host: &TabHost<'_>) -> bool {
+    run.session_id.as_deref().is_some_and(|id| {
+        host.sessions
+            .iter()
+            .any(|s| s.conversation_id.as_deref() == Some(id))
+    })
+}
+
+/// Nests the runs each session leaf of a tab's `leaves` dispatched right
+/// after it, as [`nest_after`] does; the first leaf of a host and
+/// conversation takes its runs.
+fn nest_tab_runs(leaves: &mut Vec<Leaf>, hosts: &[TabHost<'_>], collapsed: &BTreeSet<String>) {
+    let mut taken: HashSet<(HostKey, String)> = HashSet::new();
+    let mut at = 0;
+    while at < leaves.len() {
+        let runs = tab_host_runs(&leaves[at], hosts, &mut taken);
+        if !runs.is_empty() {
+            at += nest_after(leaves, at, runs, collapsed);
+        }
+        at += 1;
+    }
+}
+
+/// The runs session `leaf` dispatched on its own host; none for a run
+/// leaf, or when an earlier leaf in `taken` runs the same conversation.
+fn tab_host_runs<'a>(
+    leaf: &Leaf,
+    hosts: &[TabHost<'a>],
+    taken: &mut HashSet<(HostKey, String)>,
+) -> Vec<&'a DispatchRunSnapshot> {
+    if leaf.kind != LeafKind::Session {
+        return Vec::new();
+    }
+    let Some(host) = hosts.iter().find(|h| *h.host == leaf.host) else {
+        return Vec::new();
+    };
+    let sessions: &'a [SessionSnapshot] = host.sessions;
+    let Some(conversation) = sessions
+        .iter()
+        .find(|s| s.id == leaf.id)
+        .and_then(|s| s.conversation_id.as_deref())
+    else {
+        return Vec::new();
+    };
+    if !taken.insert((leaf.host.clone(), conversation.to_owned())) {
+        return Vec::new();
+    }
+    host.runs
+        .iter()
+        .filter(|run| run.session_id.as_deref() == Some(conversation))
+        .collect()
 }
 
 /// The run `follow` names, when it follows a dispatch run.
@@ -10159,6 +10388,335 @@ pub(crate) mod tests {
             .expect("the run's leaf");
         assert_eq!(leaf.runtime.as_deref(), Some("DS"));
         assert_eq!(leaf.label, "title d1");
+    }
+
+    /// Dispatch run `id` in `X:\r1`, dispatched by the session whose
+    /// conversation is `session_id`, started `started_secs` after the epoch.
+    fn run_of(id: &str, session_id: &str, started_secs: i64) -> DispatchRunSnapshot {
+        DispatchRunSnapshot {
+            session_id: Some(session_id.to_owned()),
+            ..run(id, "X:\\r1", Some("X:\\r1"), started_secs, Run::Working)
+        }
+    }
+
+    /// `s` running the agent conversation `conversation`.
+    fn talking(mut s: SessionSnapshot, conversation: &str) -> SessionSnapshot {
+        s.conversation_id = Some(conversation.to_owned());
+        s
+    }
+
+    /// Each leaf of container `key` as its id, depth and host session.
+    fn nesting(containers: &[Container], key: &str) -> Vec<(String, u8, Option<String>)> {
+        containers
+            .iter()
+            .find(|c| c.key == key)
+            .map(|c| {
+                c.leaves
+                    .iter()
+                    .map(|l| (l.id.clone(), l.depth, l.host_session.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn row(id: &str, depth: u8, host: Option<&str>) -> (String, u8, Option<String>) {
+        (id.to_owned(), depth, host.map(str::to_owned))
+    }
+
+    fn find_leaf<'a>(containers: &'a [Container], id: &str) -> &'a Leaf {
+        containers
+            .iter()
+            .flat_map(|c| &c.leaves)
+            .find(|l| l.id == id)
+            .expect("the leaf")
+    }
+
+    #[test]
+    fn a_run_nests_right_after_the_session_that_dispatched_it() {
+        let mut fixture = Fixture::new(
+            vec![repo("r1", "X:\\r1")],
+            Vec::new(),
+            vec![talking(in_repo("s1", "r1"), "c1"), in_repo("s2", "r1")],
+        );
+        fixture.runs = vec![run_of("d1", "c1", 10)];
+        assert_eq!(
+            nesting(&fixture.build(), "repo:r1"),
+            [
+                row("s1", 0, None),
+                row("d1", 1, Some("s1")),
+                row("s2", 0, None)
+            ]
+        );
+    }
+
+    #[test]
+    fn two_runs_of_one_session_nest_oldest_first() {
+        let mut fixture = Fixture::new(
+            vec![repo("r1", "X:\\r1")],
+            Vec::new(),
+            vec![talking(in_repo("s1", "r1"), "c1"), in_repo("s2", "r1")],
+        );
+        fixture.runs = vec![run_of("new", "c1", 20), run_of("old", "c1", 10)];
+        assert_eq!(
+            nesting(&fixture.build(), "repo:r1"),
+            [
+                row("s1", 0, None),
+                row("old", 1, Some("s1")),
+                row("new", 1, Some("s1")),
+                row("s2", 0, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_whose_session_id_matches_no_session_sits_after_the_sessions() {
+        let mut fixture = Fixture::new(
+            vec![repo("r1", "X:\\r1")],
+            Vec::new(),
+            vec![talking(in_repo("s1", "r1"), "c1"), in_repo("s2", "r1")],
+        );
+        fixture.runs = vec![run_of("d1", "gone", 10)];
+        assert_eq!(
+            nesting(&fixture.build(), "repo:r1"),
+            [row("s1", 0, None), row("s2", 0, None), row("d1", 0, None)]
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_session_id_sits_after_the_sessions() {
+        let mut fixture = Fixture::new(
+            vec![repo("r1", "X:\\r1")],
+            Vec::new(),
+            vec![talking(in_repo("s1", "r1"), "c1"), in_repo("s2", "r1")],
+        );
+        fixture.runs = vec![run("d1", "X:\\r1", Some("X:\\r1"), 10, Run::Working)];
+        let tree = fixture.build();
+        assert_eq!(
+            nesting(&tree, "repo:r1"),
+            [row("s1", 0, None), row("s2", 0, None), row("d1", 0, None)]
+        );
+        assert_eq!(find_leaf(&tree, "s1").nested, 0);
+    }
+
+    #[test]
+    fn a_shared_conversation_id_nests_under_the_first_session() {
+        let mut fixture = Fixture::new(
+            vec![repo("r1", "X:\\r1")],
+            Vec::new(),
+            vec![
+                talking(in_repo("s2", "r1"), "c1"),
+                talking(in_repo("s1", "r1"), "c1"),
+            ],
+        );
+        fixture.runs = vec![run_of("d1", "c1", 10)];
+        fixture
+            .session_order
+            .insert("r1".to_owned(), vec!["s2".to_owned(), "s1".to_owned()]);
+        assert_eq!(
+            nesting(&fixture.build(), "repo:r1"),
+            [
+                row("s2", 0, None),
+                row("d1", 1, Some("s2")),
+                row("s1", 0, None)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_never_links_to_a_session_on_another_host() {
+        let remote = remote_host(BOX);
+        let mut model = SidebarModel::default();
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![talking(session("a"), "c1")],
+            },
+        );
+        model.apply(
+            &remote,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run_of("d1", "c1", 10)],
+            },
+        );
+        let tree = model.containers();
+        let leaf = find_leaf(&tree, "d1");
+        assert_eq!((leaf.depth, leaf.host_session.as_deref()), (0, None));
+        assert_eq!(leaf.host, remote);
+        assert_eq!(find_leaf(&tree, "a").nested, 0);
+    }
+
+    /// This PC listing `s1` (conversation `c1`) and `s2` in `r1`, and two
+    /// runs `s1` dispatched.
+    fn nested_model() -> SidebarModel {
+        let mut model = model_with(vec![
+            talking(in_repo("s1", "r1"), "c1"),
+            in_repo("s2", "r1"),
+        ]);
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run_of("d1", "c1", 10), run_of("d2", "c1", 20)],
+            },
+        );
+        model
+    }
+
+    #[test]
+    fn a_session_with_nested_runs_counts_them_and_starts_open() {
+        let tree = nested_model().containers();
+        let host = find_leaf(&tree, "s1");
+        assert_eq!(host.nested, 2);
+        assert!(!host.collapsed, "nested rows start open");
+        let other = find_leaf(&tree, "s2");
+        assert_eq!((other.nested, other.collapsed), (0, false));
+    }
+
+    #[test]
+    fn toggling_a_session_fold_collapses_it_and_stores_its_key() {
+        let mut model = nested_model();
+        model.toggle_session_fold(&HostKey::Local, "s1");
+        assert!(find_leaf(&model.containers(), "s1").collapsed);
+        assert!(model.ui_state().collapsed_containers.contains("session:s1"));
+        model.toggle_session_fold(&HostKey::Local, "s1");
+        assert!(!find_leaf(&model.containers(), "s1").collapsed);
+        assert!(!model.ui_state().collapsed_containers.contains("session:s1"));
+    }
+
+    #[test]
+    fn a_remote_session_fold_key_carries_the_host_prefix() {
+        let remote = remote_host(BOX);
+        assert_eq!(session_fold_key(&HostKey::Local, "s1"), "session:s1");
+        assert_eq!(
+            session_fold_key(&remote, "s1"),
+            format!("{BOX}::session:s1")
+        );
+        let mut model = SidebarModel::default();
+        model.apply(
+            &remote,
+            &DaemonMessage::Sessions {
+                sessions: vec![talking(session("s1"), "c1")],
+            },
+        );
+        model.apply(
+            &remote,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run_of("d1", "c1", 10)],
+            },
+        );
+        model.toggle_session_fold(&remote, "s1");
+        assert!(
+            model
+                .ui_state()
+                .collapsed_containers
+                .contains(&format!("{BOX}::session:s1"))
+        );
+        let tree = model.containers();
+        let host = find_leaf(&tree, "s1");
+        assert_eq!((host.nested, host.collapsed), (1, true));
+    }
+
+    #[test]
+    fn a_session_fold_key_is_pruned_once_its_connected_host_drops_the_session() {
+        let mut model = nested_model();
+        model.toggle_session_fold(&HostKey::Local, "s1");
+        model.toggle_session_fold(&HostKey::Local, "gone");
+        model.toggle_container("repo:r1");
+        assert!(model.prune_tab_folds(&HashSet::new()), "gone's fold went");
+        let kept: Vec<&str> = model
+            .ui_state()
+            .collapsed_containers
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(kept, ["repo:r1", "session:s1"]);
+        assert!(
+            !model.prune_tab_folds(&HashSet::new()),
+            "nothing left to prune"
+        );
+    }
+
+    #[test]
+    fn a_disconnected_hosts_session_fold_keys_are_kept() {
+        let remote = remote_host(BOX);
+        let mut model = two_host_model(&["a"], &["b"]);
+        model.toggle_session_fold(&HostKey::Local, "gone");
+        model.toggle_session_fold(&remote, "gone");
+        assert!(
+            !model.prune_tab_folds(&HashSet::new()),
+            "no host is connected"
+        );
+        assert_eq!(model.ui_state().collapsed_containers.len(), 2);
+    }
+
+    /// This PC listing `s1` (conversation `c1`) and `s2`, and run `d1` that
+    /// `s1` dispatched.
+    fn tabs_model() -> SidebarModel {
+        let mut model = SidebarModel::default();
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![talking(session("s1"), "c1"), session("s2")],
+            },
+        );
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run_of("d1", "c1", 10)],
+            },
+        );
+        model
+    }
+
+    #[test]
+    fn in_the_tabs_view_a_run_nests_under_its_bound_host() {
+        let model = tabs_model();
+        let grid = GridNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(pane("p1", Some("s1"))),
+            second: Box::new(follow_pane("p2", "d1")),
+        };
+        let tree = model.tab_containers(&[tab("t1", &grid)]);
+        assert_eq!(
+            nesting(&tree, "tab:t1"),
+            [row("s1", 0, None), row("d1", 1, Some("s1"))]
+        );
+        assert_eq!(nesting(&tree, "unbound"), [row("s2", 0, None)]);
+        assert_eq!(find_leaf(&tree, "s1").nested, 1);
+    }
+
+    #[test]
+    fn in_the_tabs_view_a_run_whose_host_is_unbound_is_not_listed() {
+        let model = tabs_model();
+        let tree = model.tab_containers(&[tab("t1", &follow_pane("p1", "d1"))]);
+        assert!(
+            tree.iter().flat_map(|c| &c.leaves).all(|l| l.id != "d1"),
+            "the run is in no container"
+        );
+        assert_eq!(
+            nesting(&tree, "unbound"),
+            [row("s1", 0, None), row("s2", 0, None)]
+        );
+    }
+
+    #[test]
+    fn the_container_count_is_unchanged_by_nesting() {
+        let mut fixture = Fixture::new(
+            vec![repo("r1", "X:\\r1")],
+            Vec::new(),
+            vec![talking(in_repo("s1", "r1"), "c1"), in_repo("s2", "r1")],
+        );
+        fixture.runs = vec![run_of("d1", "gone", 10)];
+        let flat = fixture.build();
+        fixture.runs = vec![run_of("d1", "c1", 10)];
+        let nested = fixture.build();
+        let count = |tree: &[Container]| {
+            tree.iter()
+                .find(|c| c.key == "repo:r1")
+                .map(|c| c.leaves.len())
+        };
+        assert_eq!(count(&nested), Some(3));
+        assert_eq!(count(&nested), count(&flat));
     }
 
     #[test]

@@ -682,6 +682,12 @@ impl SessionBuilder {
         self.set("current_cwd", json!(cwd))
     }
 
+    /// The agent's conversation the session runs, which a dispatch run's
+    /// `session_id` names.
+    pub fn conversation_id(self, id: &str) -> Self {
+        self.set("conversation_id", json!(id))
+    }
+
     /// When the session started.
     pub fn started_at(self, at: DateTime<Utc>) -> Self {
         self.set("started_at", json!(at))
@@ -1459,6 +1465,12 @@ impl DispatchRunBuilder {
     /// The run's status.
     pub fn status(mut self, status: protocol::DispatchRunStatus) -> Self {
         self.0["status"] = json!(status);
+        self
+    }
+
+    /// The conversation id of the session that dispatched the run.
+    pub fn session_id(mut self, id: &str) -> Self {
+        self.0["session_id"] = json!(id);
         self
     }
 

@@ -3339,6 +3339,10 @@ mod tests {
             background: false,
             state: LeafState::Orphan,
             tooltip: "s1".to_owned(),
+            depth: 0,
+            host_session: None,
+            nested: 0,
+            collapsed: false,
         }
     }
 

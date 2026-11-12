@@ -75,6 +75,10 @@ pub fn dispatch_leaf(run: &DispatchRunSnapshot, host: &HostKey) -> Leaf {
         background: false,
         state: LeafState::Live,
         tooltip: hover_text(run),
+        depth: 0,
+        host_session: None,
+        nested: 0,
+        collapsed: false,
     }
 }
 
