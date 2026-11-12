@@ -115,7 +115,7 @@
 
 - [ ] RT-43 Bump gpui past 0.2.2 to drop the proc-macro-error2 warning
 - [ ] RT-44 Find what holds tracer_protocol's incremental session directory
-- [ ] RT-60 Add the agent-mail-guard prek hook
+- [ ] RT-60 Add the agent-mail-guard prek hook · release vNext
 - [ ] RT-70 Speed up the daemon's git-fixture tests with shared fixture templates
 - [ ] RT-128 Run fmt, clippy and the full suite in a Windows CI workflow
 - [ ] RT-130 Cut cold builds across worktrees: measure, then sccache or a safe shared target
@@ -126,7 +126,7 @@
 - [ ] RT-260 Autostart test: stop writing to the live HKCU Run key
 - [ ] RT-262 Run the ui_ellipsis specs: test-release builds without debug assertions
 - [ ] RT-324 Drive the native client headless: hidden window, virtual input, captures
-  - [ ] RT-316 Capture the native client in any state: native-shot views for the overlays and empty area, and a drive-and-capture command
+  - [ ] RT-316 Capture the native client in any state: native-shot views for the overlays and empty area, and a drive-and-capture command · release vNext
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-347 Make the UI test harness's in_model refuse a selector it does not know
 - [ ] RT-554 Make the UI specs' absence checks able to fail
@@ -510,21 +510,21 @@
 
 ## Dashboard, Gates and Linear
 
-- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries
-  - [ ] RT-501 Draw the repo lanes, the default view (DB.24)
-  - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25)
-  - [ ] RT-453 Document the summarizer and the Dashboard (SA.11)
-  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8)
-  - [ ] RT-528 Count a session's recent work from where its branch stood at start, not by commit time
-  - [ ] RT-529 Polish the Dashboard rows: the cut Agents summary and the first-frame column flicker
-  - [ ] RT-732 Send gate holds in the Dashboard's activity tracks
-  - [ ] RT-733 Draw a dispatch run's activity track under its Dashboard row
-  - [ ] RT-734 Show the Linear column in the Dashboard drawer
-  - [ ] RT-735 Show each session's Linear issue state and title from the Linear client
-  - [ ] RT-736 Count issues Done and release progress in the Dashboard header
-  - [ ] RT-737 Add the accounts card and Questions to the need-you band
-  - [ ] RT-738 Add Questions, Next up and the No live agent table to the repo lanes
-  - [ ] RT-739 Promote the Dashboard design and delete docs/plans/dashboard.md
+- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries · release vNext
+  - [ ] RT-501 Draw the repo lanes, the default view (DB.24) · release vNext
+  - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25) · release vNext
+  - [ ] RT-453 Document the summarizer and the Dashboard (SA.11) · release vNext
+  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8) · release vNext
+  - [ ] RT-528 Count a session's recent work from where its branch stood at start, not by commit time · release vNext
+  - [ ] RT-529 Polish the Dashboard rows: the cut Agents summary and the first-frame column flicker · release vNext
+  - [ ] RT-732 Send gate holds in the Dashboard's activity tracks · release vNext
+  - [ ] RT-733 Draw a dispatch run's activity track under its Dashboard row · release vNext
+  - [ ] RT-734 Show the Linear column in the Dashboard drawer · release vNext
+  - [ ] RT-735 Show each session's Linear issue state and title from the Linear client · release vNext
+  - [ ] RT-736 Count issues Done and release progress in the Dashboard header · release vNext
+  - [ ] RT-737 Add the accounts card and Questions to the need-you band · release vNext
+  - [ ] RT-738 Add Questions, Next up and the No live agent table to the repo lanes · release vNext
+  - [ ] RT-739 Promote the Dashboard design and delete docs/plans/dashboard.md · release vNext
   - [ ] RT-789 Draw nested agent rows under an open Dashboard drawer
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-92 Show context %, cost and prompt-cache expiry on each session
@@ -585,7 +585,7 @@
 
 ## Agents and subagents
 
-- [ ] RT-30 View a session's running subagents as read-only sessions
+- [ ] RT-30 View a session's running subagents as read-only sessions · release vNext
 - [ ] RT-49 Offer every popular agent harness in the spawn dialog's runtime dropdown
   - [ ] RT-214 AH.1 Spike: DSH per-invocation patch, hook payload and resume
   - [ ] RT-215 AH.2 Pi runtime: backend, session id and dialog entry
@@ -601,7 +601,7 @@
 - [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user
 - [ ] RT-687 Remove AgentDescriptor.accent and AccentToken with the next protocol bump
 - [ ] RT-716 Let the agent plugin name a permission prompt's allow, always-allow and deny options
-- [ ] RT-1510 Rewrite the subagent-streams design against the client's real views and the pane follow field
+- [ ] RT-1510 Rewrite the subagent-streams design against the client's real views and the pane follow field · release vNext
 - [ ] RT-1542 Stop dispatch-run tailers with their watcher, and keep a stop marker until the runner is gone
 - [ ] RT-1552 Keep a follow pane's host on undo and keep follows through a failed startup scan
 - [ ] RT-1558 Show a dispatch run's runner pid in its DS leaf's hover
