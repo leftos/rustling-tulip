@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- A followed dispatch run's recent actions no longer fill up with hook and thinking-token lines that pushed out its tool calls.
+
 ## v0.13.0-alpha
 
 ### Highlights

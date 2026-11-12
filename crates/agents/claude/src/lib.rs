@@ -724,10 +724,10 @@ fn headless_events(event: StreamEvent) -> Vec<HeadlessEvent> {
             subtype,
             session_id,
         } => {
-            let mut events = vec![
-                HeadlessEvent::Status(SessionStatus::Working),
-                HeadlessEvent::RecentAction(format!("system: {subtype}")),
-            ];
+            let mut events = vec![HeadlessEvent::Status(SessionStatus::Working)];
+            if subtype == "init" {
+                events.push(HeadlessEvent::RecentAction(format!("system: {subtype}")));
+            }
             events.extend(session_id.map(HeadlessEvent::SessionId));
             events
         }
@@ -1781,6 +1781,41 @@ mod tests {
                     HeadlessEvent::SessionId("s1".to_string()),
                 ]
             );
+        }
+
+        #[test]
+        fn system_hook_and_thinking_events_add_no_recent_action() {
+            let cases = [
+                (
+                    r#"{"type":"system","subtype":"hook_started","session_id":"s1"}"#,
+                    vec![
+                        HeadlessEvent::Status(SessionStatus::Working),
+                        HeadlessEvent::SessionId("s1".to_string()),
+                    ],
+                ),
+                (
+                    r#"{"type":"system","subtype":"hook_response"}"#,
+                    vec![HeadlessEvent::Status(SessionStatus::Working)],
+                ),
+                (
+                    r#"{"type":"system","subtype":"hook_progress"}"#,
+                    vec![HeadlessEvent::Status(SessionStatus::Working)],
+                ),
+                (
+                    r#"{"type":"system","subtype":"thinking_tokens","session_id":"s2"}"#,
+                    vec![
+                        HeadlessEvent::Status(SessionStatus::Working),
+                        HeadlessEvent::SessionId("s2".to_string()),
+                    ],
+                ),
+                (
+                    r#"{"type":"system","subtype":"task_started"}"#,
+                    vec![HeadlessEvent::Status(SessionStatus::Working)],
+                ),
+            ];
+            for (line, expected) in cases {
+                assert_eq!(parse(line), expected, "{line}");
+            }
         }
 
         #[test]
