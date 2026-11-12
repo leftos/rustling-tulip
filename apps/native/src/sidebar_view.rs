@@ -37,6 +37,7 @@ use crate::sidebar::{
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view, marker_mode};
+use crate::subagents;
 use crate::tab_bar::host_chip;
 use crate::tabs::{SessionRef, TabPill};
 use crate::target::HostKey;
@@ -1523,7 +1524,7 @@ fn leaf_drag_row(
     // An offline host's leaf is as inert as its other dimmed rows: like an
     // SH or DIR header it neither drags nor takes a drop, so no drag starts
     // and no drop mark shows while the host is away.
-    let is_session = leaf.kind == LeafKind::Session;
+    let kind = leaf.kind;
     let dim_host = ctx.dimmed.hosts.contains(&leaf.host);
     let payload = if ctx.dimmed.containers.contains(&container.key) || dim_host {
         None
@@ -1544,16 +1545,19 @@ fn leaf_drag_row(
         drop_line(selector, side, &t)
     });
     // The menu opens for the session of this row's host, whichever other
-    // host lists the same id; a dispatch run's leaf opens the run's menu.
+    // host lists the same id; a dispatch run's leaf opens the run's menu,
+    // and a subagent's opens none: Open, its click, is its only action.
     let menu_session = session.clone();
     let row = leaf_row(leaf, &session.host, ctx, window, cx).on_mouse_down(
         MouseButton::Right,
         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
             let SessionRef { host, id } = &menu_session;
-            if is_session {
-                this.open_session_menu(host, id, None, event.position, window, cx);
-            } else {
-                this.open_dispatch_menu(host, id, event.position, window, cx);
+            match kind {
+                LeafKind::Session => {
+                    this.open_session_menu(host, id, None, event.position, window, cx);
+                }
+                LeafKind::Dispatch => this.open_dispatch_menu(host, id, event.position, window, cx),
+                LeafKind::Subagent => {}
             }
             cx.stop_propagation();
         }),
@@ -2859,8 +2863,9 @@ fn leaf_ground(selected: bool, highlighted: bool, t: &UiTheme) -> Option<u32> {
 }
 
 /// The leaf's box: its fill `ground`, or the hover fill without one, its
-/// hover text, the accent stripe, and the clicks, which select `host`'s
-/// session. `key` is the leaf's [`leaf_key`].
+/// hover text, the accent stripe, and the click, which selects `host`'s
+/// session or opens the run or subagent the leaf follows. `key` is the
+/// leaf's [`leaf_key`].
 fn leaf_frame(
     leaf: &Leaf,
     host: &HostKey,
@@ -2873,6 +2878,7 @@ fn leaf_frame(
     let t = theme(cx);
     let id = leaf.id.clone();
     let host = host.clone();
+    let host_session = leaf.host_session.clone();
     let name = format!("leaf-{key}");
     // A dispatch run's id names no session: its click opens the run.
     let kind = leaf.kind;
@@ -2904,13 +2910,19 @@ fn leaf_frame(
                 .rounded(px(2.0))
                 .bg(gpui::rgb(accent)),
         )
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            if kind == LeafKind::Session {
-                this.select_session_on(&host, &id, window, cx);
-            } else {
-                this.open_dispatch_run(&host, &id, window, cx);
-            }
-        }))
+        .on_click(
+            cx.listener(move |this, _: &ClickEvent, window, cx| match kind {
+                LeafKind::Session => this.select_session_on(&host, &id, window, cx),
+                LeafKind::Dispatch => this.open_dispatch_run(&host, &id, window, cx),
+                // A subagent's id is its agent id; its host session names the
+                // session it runs under.
+                LeafKind::Subagent => {
+                    if let Some(session_id) = &host_session {
+                        this.open_subagent(&host, session_id, &id, window, cx);
+                    }
+                }
+            }),
+        )
 }
 
 /// The chevron after the label of a session row with rows nested under it,
@@ -2922,11 +2934,12 @@ fn session_fold(leaf: &Leaf, host: &HostKey, cx: &mut Context<RootView>) -> Opti
     }
     let t = theme(cx);
     let selector = format!("sidebar-session-fold-{}", leaf.id);
-    let (path, tip) = if leaf.collapsed {
-        (SIDEBAR_CHEVRON_RIGHT_ICON, "Show its dispatch runs")
+    let path = if leaf.collapsed {
+        SIDEBAR_CHEVRON_RIGHT_ICON
     } else {
-        (SIDEBAR_CHEVRON_DOWN_ICON, "Hide its dispatch runs")
+        SIDEBAR_CHEVRON_DOWN_ICON
     };
+    let tip = subagents::fold_tip(leaf.collapsed, leaf.nested, leaf.nested_subagents);
     let id = leaf.id.clone();
     let host = host.clone();
     Some(
@@ -3002,7 +3015,7 @@ fn label_head(offset: i8, shift: i8, leaf: &Leaf, key: &str, t: &UiTheme) -> Vec
                 .into_any_element(),
         );
     }
-    if leaf.kind == LeafKind::Dispatch
+    if let Some(tip) = nested_tag_tip(leaf.kind)
         && let Some((text, _)) = leaf.runtime_tag()
     {
         let id = format!("leaf-runtime-{key}");
@@ -3015,12 +3028,22 @@ fn label_head(offset: i8, shift: i8, leaf: &Leaf, key: &str, t: &UiTheme) -> Vec
                 .font_weight(crate::fonts::mono_weight())
                 .text_size(ui_px_at(offset, TAG_TEXT_SIZE))
                 .text_color(gpui::rgb(t.subtle))
-                .tooltip(tooltip("Dispatch run".to_owned()))
+                .tooltip(tooltip(tip.to_owned()))
                 .child(text)
                 .into_any_element(),
         );
     }
     parts
+}
+
+/// The tooltip of a nested row's runtime tag (`DS`, `SA`), which names what
+/// the row is; `None` for a session, whose tag draws as its runtime icon.
+fn nested_tag_tip(kind: LeafKind) -> Option<&'static str> {
+    match kind {
+        LeafKind::Session => None,
+        LeafKind::Dispatch => Some("Dispatch run"),
+        LeafKind::Subagent => Some("Subagent"),
+    }
 }
 
 /// The hover text of an excluded leaf's marker.

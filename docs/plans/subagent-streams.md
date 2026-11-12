@@ -62,7 +62,7 @@ Each is a symbol to read before building on it.
 - **Pane follow** (DF.8): `GridNode::Pane.follow: Option<PaneFollow>`, `PaneFollow::{DispatchRun { run_id }, Subagent { session_id, agent_id }, Unknown}`; `CreateTab`, `SplitPane` and `ReplacePaneSession` carry it; `tabs::prune_follows_not_in` clears dead run follows at daemon start, and `tabs::prune_subagent_follows_not_in` clears a subagent follow whose host session is neither live nor abandoned.
 - **Sidebar nesting** (RT-1580), in `apps/native/src/sidebar.rs` and `sidebar_view.rs`, described in `docs/native-client.md` "Sessions under repos":
   - the model: `Leaf.depth`, `Leaf.host_session`, `Leaf.nested`, `Leaf.collapsed`, `LeafKind::{Session, Dispatch}`, `nest_runs` and `nest_after` (repos view), `nest_tab_runs` and `linked_on` (tabs view), `session_fold_key`, `SidebarModel::toggle_session_fold`;
-  - the drawing: `shown_leaves`, `NEST_INDENT` (14 px), `session_fold` (the chevron, tooltip "Hide its dispatch runs" / "Show its dispatch runs") and `RootView::toggle_session_fold`.
+  - the drawing: `shown_leaves`, `NEST_INDENT` (14 px), `session_fold` (the chevron, tooltip by what is nested: "Hide its dispatch runs" / "Hide its subagents" / "Hide its subagents and dispatch runs", "Show its …" while folded, `subagents::fold_tip`) and `RootView::toggle_session_fold`.
 - **Session data**: `SessionSnapshot.conversation_id`; the record's folder from `history::primary_cwd` and its rows from `conversations::lookup_rows(&extra_env)`, as `chat_mirror.rs` resolves a transcript path.
 
 ## Decisions
@@ -231,7 +231,7 @@ Each step lands on `main` on its own and keeps the suite green. Hotspot files ar
   Files: `apps/native/src/sidebar.rs`, `apps/native/src/subagents.rs` (new, the twin of `dispatch_runs.rs`), `apps/native/src/sidebar_view.rs`, `apps/native/src/lib.rs` (hotspot: the `mod` line).
 
   Tests in `sidebar.rs`: rows follow the host in tree order at depths 1 and 2, before its runs; `nested` and `nested_subagents` count them; a folded host hides them; in the tabs view a bound host nests them in each tab that shows it, and an unbound host's are in no container, never Unbound, even while a pane follows one. Depends on: SS.1.
-- [ ] **SS.10 Client: rows drawn and opened.** The `SA` tag, label, subline, hover and status mapping; the chevron's wording by kind; `RootView::open_subagent` (focus the follower, else `CreateTab` to This PC with the follow); a `find_tab_following_subagent` beside `find_tab_following`.
+- [x] **SS.10 Client: rows drawn and opened.** The `SA` tag, label, subline, hover and status mapping; the chevron's wording by kind; `RootView::open_subagent` (focus the follower, else `CreateTab` to This PC with the follow); a `find_tab_following_subagent` beside `find_tab_following`.
 
   Files: `apps/native/src/sidebar_view.rs`, `apps/native/src/lib.rs` (hotspot), `apps/native/src/tabs.rs`, `apps/native/tests/ui/ui_sidebar.rs`.
 

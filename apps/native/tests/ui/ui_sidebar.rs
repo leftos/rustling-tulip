@@ -17,11 +17,11 @@ use protocol::{
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{
     Activity, Connection, DETACHED_BANNER, DIVIDER_WIDTH, NetEvent, RAIL_WIDTH, RepoFilter,
-    RuntimeIcon, SidebarView, TabPill, resume_all_label,
+    RuntimeIcon, SidebarView, TabPill, fold_tip, resume_all_label,
 };
 use support::{
-    Fixture, Harness, PROTOCOL, REMOTE, TestDir, dispatch_run, follow_pane, pane, repo,
-    saved_remote, seed_ui, session, split, tab, workspace,
+    Fixture, Harness, PROTOCOL, REMOTE, TestDir, dispatch_run, follow_pane, follow_subagent_pane,
+    pane, repo, saved_remote, seed_ui, session, split, subagent, tab, workspace,
 };
 
 /// The keys of the sidebar's containers, in the order it shows them.
@@ -2906,6 +2906,187 @@ fn a_remote_hosts_run_dims_when_the_host_goes_offline(cx: &mut TestAppContext) {
     assert!(
         h.in_model(&format!("leaf-{REMOTE}::d1")),
         "the run stays listed"
+    );
+}
+
+/// Session `s2` focused in pane `p1`, and session `s1` of conversation `c1`
+/// beside it in repo `r1`, running `subagents` and having dispatched `runs`;
+/// the fixture's `tabs` replace the default when given.
+fn nested_subagent_harness<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    subagents: Vec<serde_json::Value>,
+    runs: Vec<protocol::DispatchRunSnapshot>,
+) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s2").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "C:\\r1")];
+    fixture.sessions.push(
+        session("s1")
+            .in_repo("r1")
+            .conversation_id("c1")
+            .subagents(subagents)
+            .build(),
+    );
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(DaemonMessage::DispatchRuns { runs });
+    h.answer_scrollback("s2", b"");
+    h.sent();
+    h
+}
+
+/// Run `d1` that session `s1` (conversation `c1`) dispatched in repo `r1`.
+fn s1_run() -> protocol::DispatchRunSnapshot {
+    dispatch_run("d1")
+        .worktree("C:\\r1.wt\\a")
+        .main_checkout("C:\\r1")
+        .session_id("c1")
+        .build()
+}
+
+#[gpui::test]
+fn subagents_draw_indented_under_their_host_with_the_sa_tag(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_subagent_harness(cx, &dir, vec![subagent("a1"), subagent("a2")], Vec::new());
+
+    let host = h.bounds("leaf-s1");
+    for id in ["a1", "a2"] {
+        assert!(
+            drawn(&mut h, &format!("leaf-runtime-{id}")),
+            "{id} draws its SA tag"
+        );
+        let leaf = h.bounds(&format!("leaf-{id}"));
+        assert!(
+            leaf.top() >= host.bottom(),
+            "{id} draws below its host: {leaf:?} and {host:?}"
+        );
+        assert_eq!(
+            leaf.left() - host.left(),
+            px(14.0),
+            "{id}'s card sits one level right of its host's"
+        );
+    }
+    assert!(
+        !drawn(&mut h, "leaf-pill-a1"),
+        "a subagent leaf draws no pill"
+    );
+}
+
+#[gpui::test]
+fn the_fold_names_subagents_and_runs_and_hides_both(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_subagent_harness(cx, &dir, vec![subagent("a1")], vec![s1_run()]);
+    assert!(
+        drawn(&mut h, "leaf-runtime-a1") && drawn(&mut h, "leaf-runtime-d1"),
+        "precondition: the subagent and the run draw"
+    );
+    let host = h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .flat_map(|container| container.leaves)
+            .find(|leaf| leaf.id == "s1")
+            .expect("the host's leaf")
+    });
+    assert_eq!(
+        fold_tip(host.collapsed, host.nested, host.nested_subagents),
+        "Hide its subagents and dispatch runs"
+    );
+
+    h.click_on("sidebar-session-fold-s1");
+
+    // gpui keeps a gone element's bounds, so the row after the nested rows
+    // proves they left: s2 moves up into the subagent's place.
+    let s2 = h.bounds("leaf-s2").top();
+    assert!(
+        s2 < h.bounds("leaf-runtime-a1").bottom(),
+        "the fold hides the subagent: s2 takes its place"
+    );
+    assert!(
+        s2 < h.bounds("leaf-runtime-d1").bottom(),
+        "the fold hides the run"
+    );
+}
+
+#[gpui::test]
+fn clicking_a_subagent_leaf_opens_a_tab_following_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_subagent_harness(cx, &dir, vec![subagent("a1")], Vec::new());
+
+    h.click_on("leaf-a1");
+
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::CreateTab {
+                name: None,
+                initial_session_id: None,
+                host: None,
+                follow: Some(PaneFollow::Subagent { session_id, agent_id }),
+                request_id: Some(_),
+            }] if session_id == "s1" && agent_id == "a1"
+        ),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn clicking_a_followed_subagent_leaf_focuses_its_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                follow_subagent_pane("p2", "s1", "a1"),
+            ),
+        )],
+        ..Fixture::single(session("s1").subagents(vec![subagent("a1")]).build())
+    };
+    fixture.repos = vec![repo("r1", "C:\\r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p1"),
+        "the session's pane starts focused"
+    );
+
+    h.click_on("leaf-a1");
+
+    let sent = h.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::CreateTab { .. })),
+        "the click opens no tab: {sent:?}"
+    );
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p2"),
+        "the pane that follows the subagent takes the focus"
+    );
+}
+
+#[gpui::test]
+fn right_clicking_a_subagent_leaf_opens_no_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_subagent_harness(cx, &dir, vec![subagent("a1")], Vec::new());
+
+    h.right_click_on("leaf-a1");
+
+    // `in_model` counts a selector it has no model for as present, so the
+    // menu's rows and its painted Open row tell whether it opened.
+    assert!(
+        dispatch_menu_labels(&mut h).is_empty(),
+        "no dispatch menu opens for a subagent"
+    );
+    assert!(!drawn(&mut h, "dispatch-menu-open"), "no menu row draws");
+    assert!(
+        !h.in_model("session-menu"),
+        "the host session's menu stays closed"
     );
 }
 

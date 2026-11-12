@@ -293,7 +293,8 @@ use crate::status_glyph::{GlyphSize, glyph_view};
 use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{
     BindTarget, HostedSession, PaneTarget, Placement, SessionRef, TabsModel, auto_grid_resends,
-    find_tab_containing_session, find_tab_following, is_auto_grid, tab_pills,
+    find_tab_containing_session, find_tab_following, find_tab_following_subagent, is_auto_grid,
+    tab_pills,
 };
 use crate::target::HostKey;
 use crate::term::ShellCommand;
@@ -373,6 +374,7 @@ pub use crate::spawns::{OpenIn, PaneAim};
 pub use crate::stash_view::{
     ScStashPush, ScStashRow, ScStashes, StashAction, StashButton, StashDropView,
 };
+pub use crate::subagents::fold_tip;
 pub use crate::tabs::{TabBadge, TabPill};
 pub use crate::taskbar_badge::{BadgeOverlay, NoTaskbarBadge, TaskbarBadge};
 pub use crate::text_input::{TextInput, bind_keys};
@@ -3876,9 +3878,47 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let found = find_tab_following(self.tabs.tabs(), host, run_id);
+        let follow = PaneFollow::DispatchRun {
+            run_id: run_id.to_owned(),
+        };
+        self.open_followed(host, found, follow, window, cx);
+    }
+
+    /// A click on `host`'s subagent `agent_id` of session `session_id`:
+    /// focuses the pane that already follows it, else asks This PC's daemon
+    /// for a tab that does, as [`Self::open_dispatch_run`] does for a run.
+    pub(crate) fn open_subagent(
+        &mut self,
+        host: &HostKey,
+        session_id: &str,
+        agent_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found = find_tab_following_subagent(self.tabs.tabs(), host, session_id, agent_id);
+        let follow = PaneFollow::Subagent {
+            session_id: session_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+        };
+        self.open_followed(host, found, follow, window, cx);
+    }
+
+    /// Focuses `found`, the tab and pane already following what `follow`
+    /// names on `host`, popped-out tab included; without one, asks This
+    /// PC's daemon, where the layout lives, for a tab whose pane follows it
+    /// and names `host`.
+    fn open_followed(
+        &mut self,
+        host: &HostKey,
+        found: Option<(String, String)>,
+        follow: PaneFollow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.launched_highlight.clear();
         self.preselected_target = None;
-        if let Some((tab_id, pane_id)) = find_tab_following(self.tabs.tabs(), host, run_id) {
+        if let Some((tab_id, pane_id)) = found {
             if self.is_tab_popped(&tab_id) {
                 self.tabs.set_focused(&tab_id, &pane_id);
                 self.update_pane_roles(cx);
@@ -3895,9 +3935,7 @@ impl RootView {
                 initial_session_id: None,
                 host: host.wire().map(str::to_owned),
                 request_id: Some(request_id),
-                follow: Some(PaneFollow::DispatchRun {
-                    run_id: run_id.to_owned(),
-                }),
+                follow: Some(follow),
             };
             self.tabs.note_layout_request(&msg);
             self.send_to(&HostKey::Local, msg);

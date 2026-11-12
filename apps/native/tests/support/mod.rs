@@ -528,6 +528,12 @@ impl SessionBuilder {
         self
     }
 
+    /// The subagents the session's agent started, as [`subagent`] builds
+    /// them.
+    pub fn subagents(self, list: Vec<Value>) -> Self {
+        self.set("subagents", Value::Array(list))
+    }
+
     /// A plain shell outside every repo, in `cwd`.
     pub fn shell(self, cwd: &str) -> Self {
         self.set("mode", json!("plain_shell"))
@@ -1501,6 +1507,17 @@ impl DispatchRunBuilder {
     }
 }
 
+/// A subagent fixture for [`SessionBuilder::subagents`]: a running
+/// depth-1 subagent described as `task <agent_id>`.
+pub fn subagent(agent_id: &str) -> Value {
+    json!({
+        "agent_id": agent_id,
+        "depth": 1,
+        "description": format!("task {agent_id}"),
+        "state": "running",
+    })
+}
+
 pub fn pane(id: &str, session: Option<&str>) -> GridNode {
     GridNode::Pane {
         pane_id: id.to_owned(),
@@ -1518,6 +1535,20 @@ pub fn follow_pane(id: &str, run_id: &str) -> GridNode {
         host: None,
         follow: Some(PaneFollow::DispatchRun {
             run_id: run_id.to_owned(),
+        }),
+    }
+}
+
+/// A pane following subagent `agent_id` of session `session_id`, showing
+/// no session.
+pub fn follow_subagent_pane(id: &str, session_id: &str, agent_id: &str) -> GridNode {
+    GridNode::Pane {
+        pane_id: id.to_owned(),
+        session_id: None,
+        host: None,
+        follow: Some(PaneFollow::Subagent {
+            session_id: session_id.to_owned(),
+            agent_id: agent_id.to_owned(),
         }),
     }
 }
