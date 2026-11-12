@@ -150,6 +150,16 @@ A status watcher write (a screen read or the shell classifier) that moves a sess
 
 Token and cost figures exist only for headless runs, where they come from the CLI's stream-json (`crates/agents/claude/src/lib.rs`, `parse_headless_line`, applied by `crates/daemon/src/headless.rs`), so an interactive session's snapshot carries none. Headless mode (`claude --print --output-format stream-json`) uses `crates/daemon/src/headless.rs` for structured events.
 
+## Subagent list
+
+The subagent list service (`crates/daemon/src/subagents/mod.rs`, `SubagentList`, started in `start_hub_tasks` beside the Dashboard's ticker) keeps each session record's `subagents`, which `SessionSnapshot.subagents` carries to clients.
+
+While a client is connected it reads every live session's subagent tree through the agent plugin's activity reader every 2 s; with no client it parks, and a returning client gets one catch-up pass. A session is live when it runs an agent, is not parked or abandoned, has not stopped or failed, and its agent has not ended inside its shell. A session that stops being live gets an empty list once.
+
+A first-layer subagent is listed with its subtree while it or a descendant runs. A finished one stays listed while it ended after both the session's newest typed prompt and its agent process's start, the newest five at most; when no typed prompt is known (it lies before the reader's first-read tail) only the process start counts.
+
+The list is written through `SessionRegistry::update` only when it changed, and a reading for a session that stopped or changed conversation while it was read is dropped. In the Claude plugin, a subagent sidecar's `finished: true` counts only when the sidecar was written at least as late as the transcript's last write (an unknown time still counts), so a resumed subagent reads as running again.
+
 ## Multi-repo workspace sessions
 
 Multi-repo workspace sessions spawn one `claude` process with `cwd = members[0].worktree_path` and `--add-dir <path>` for every additional member. Worktrees are created/reused per member via `git -C <repo> worktree add` under the shared `<worktrees-root>/wt.<branch-slug>/<workspace-slug>/` directory (see [on-disk.md](on-disk.md) — the layout preserves inter-member relative paths within a workspace).

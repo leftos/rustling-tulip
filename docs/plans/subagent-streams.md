@@ -208,7 +208,7 @@ Each step lands on `main` on its own and keeps the suite green. Hotspot files ar
   Mechanical: every `SessionRecord` literal gains `subagents: Vec::new()` (the compiler names them: `session.rs`, `server/spawn.rs`, `server/test_support.rs`, `keep_awake.rs`, `idle_exit.rs`, `history.rs`, `pty_state.rs`), a one-line change each, which is why this step exceeds five files.
 
   Test in `session.rs`: a record with a list snapshots it; the sidecar written for it carries no list. Depends on: SS.1.
-- [ ] **SS.5 Daemon: the list service.** The tick task, readers, the listing rule (running subtree; finished after the typed prompt and the process start; five finished at most), the flattening to `SubagentSnapshot` in tree order, and compare-and-write through `SessionRegistry::update`; started beside the Dashboard's ticker.
+- [x] **SS.5 Daemon: the list service.** The tick task, readers, the listing rule (running subtree; finished after the typed prompt and the process start; five finished at most), the flattening to `SubagentSnapshot` in tree order, and compare-and-write through `SessionRegistry::update`; started beside the Dashboard's ticker.
 
   Files: `crates/daemon/src/subagents/mod.rs` (new), `crates/daemon/src/subagents/tests.rs` (new), `crates/daemon/src/server.rs` (hotspot: construct and spawn), `crates/daemon/src/main.rs` (the `mod` line).
 

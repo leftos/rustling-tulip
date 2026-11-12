@@ -22,8 +22,9 @@
 //!    launcher's transcript that ended the task and is newer than the
 //!    transcript's last line, ends it: `completed` as finished, any other
 //!    end as failed.
-//! 3. A sidecar marked `finished` finishes it, whether or not its last reply
-//!    was read.
+//! 3. A sidecar marked `finished` and written no earlier than the
+//!    transcript's last write finishes it, whether or not its last reply was
+//!    read.
 //! 4. A last reply with `end_turn` and no tool call, followed only by
 //!    attachments, finishes it.
 //! 5. Otherwise it runs; lines after a finished state make it run again.
@@ -344,8 +345,18 @@ impl AgentFile {
             Sidecar::Read(fields) => Some(fields),
             Sidecar::Missing | Sidecar::Unreadable => None,
         };
+        let flag_current = sidecar_is_current(
+            self.sidecar_stamp.and_then(|(_, modified)| modified),
+            self.modified,
+        );
         let state = &mut self.transcript.state;
-        let ending = ending(state, sidecar, joined.notice.as_ref(), process_started_at);
+        let ending = ending(
+            state,
+            sidecar,
+            joined.notice.as_ref(),
+            process_started_at,
+            flag_current,
+        );
         let call = joined.call.as_ref();
         let first_line = state
             .first_prompt
@@ -384,12 +395,14 @@ impl AgentFile {
     }
 }
 
-/// How a subagent's run stands, by the rules in this module's header.
+/// How a subagent's run stands, by the rules in this module's header;
+/// `flag_current` says whether the sidecar's `finished` flag still holds.
 fn ending(
     state: &State,
     sidecar: Option<&SidecarFields>,
     notice: Option<&Notice>,
     process_started_at: Option<DateTime<Utc>>,
+    flag_current: bool,
 ) -> Ending {
     let last = state.last_record_at;
     let ended = |state, status: Option<&str>, finished_at| Ending {
@@ -411,7 +424,7 @@ fn ending(
     {
         return ended(end, notice.status.as_deref(), notice.at);
     }
-    if sidecar.is_some_and(|fields| fields.finished) {
+    if flag_current && sidecar.is_some_and(|fields| fields.finished) {
         return ended(AgentState::Finished, None, last);
     }
     if state.run_ended {
@@ -446,6 +459,17 @@ fn attach(
         (left.started_at, &left.agent_id).cmp(&(right.started_at, &right.agent_id))
     });
     nodes
+}
+
+/// Whether a sidecar last modified at `sidecar` was written at or after the
+/// transcript's last write at `transcript`, so a resumed run's newer lines
+/// outweigh a `finished` flag left from its last run; `true` when either time
+/// is unknown.
+fn sidecar_is_current(sidecar: Option<SystemTime>, transcript: Option<SystemTime>) -> bool {
+    match (sidecar, transcript) {
+        (Some(sidecar), Some(transcript)) => sidecar >= transcript,
+        _ => true,
+    }
 }
 
 /// Whether a file last modified at `modified` was written after `start`;
@@ -701,6 +725,57 @@ mod tests {
             ..running_node()
         };
         assert_eq!(tree(&scratch, None, NOW), [expected]);
+    }
+
+    /// Moves the last write of subagent `id`'s transcript a minute past its
+    /// sidecar's, in every scratch conversation labelled `label`.
+    fn write_transcript_after_sidecar(label: &str, id: &str) {
+        let prefix = format!("rt-activity-{label}-");
+        let entries = std::fs::read_dir(std::env::temp_dir()).expect("list the temp folder");
+        let mut moved = 0;
+        for entry in entries.flatten() {
+            if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+                continue;
+            }
+            let folder = entry.path().join("transcript").join("subagents");
+            let Ok(sidecar) = std::fs::metadata(folder.join(format!("agent-{id}.meta.json")))
+                .and_then(|meta| meta.modified())
+            else {
+                continue;
+            };
+            let Ok(transcript) = std::fs::OpenOptions::new()
+                .write(true)
+                .open(folder.join(format!("agent-{id}.jsonl")))
+            else {
+                continue;
+            };
+            transcript
+                .set_modified(sidecar + std::time::Duration::from_secs(60))
+                .expect("move the transcript's last write");
+            moved += 1;
+        }
+        assert!(moved > 0, "no scratch conversation labelled {label}");
+    }
+
+    #[test]
+    fn a_finished_flag_older_than_the_transcripts_last_line_does_not_finish_it() {
+        let label = "stale-finished-flag";
+        let sidecar = FINISHED_META.replace('{', "{\"finished\":true,");
+        let transcript = lines(FINISHED, 0, 5);
+        let scratch = conversation(label, &[("a21", &transcript, Some(&sidecar))]);
+        let mut reader = scratch.reader(None);
+        assert_eq!(
+            only(&reader.read(at(NOW)).subagents).state,
+            AgentState::Finished
+        );
+
+        scratch.add("agent-a21.jsonl", &lines(FINISHED, 5, 7));
+        write_transcript_after_sidecar(label, "a21");
+        let resumed = reader.read(at("2026-09-27T10:06:00Z")).subagents;
+
+        let node = only(&resumed);
+        assert_eq!(node.state, AgentState::Running);
+        assert_eq!(node.finished_at, None);
     }
 
     #[test]

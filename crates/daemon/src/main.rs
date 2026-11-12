@@ -70,6 +70,7 @@ mod spawn_journal;
 mod spawn_plan;
 mod state;
 mod stream_state;
+mod subagents;
 mod summarizer;
 mod summary_lines;
 mod sync;
