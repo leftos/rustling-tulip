@@ -167,6 +167,7 @@
 - [ ] RT-1458 Let a driven cloaked client run its updater against a test feed, for release smoke runs
 - [ ] RT-1481 Scrub the owner's paths and status line from the screen fixtures
 - [ ] RT-1541 Check the dispatch dir in the isolated daemon's launch check
+- [ ] RT-1564 Map the native files test-map.json misses so -Validate passes again
 
 ## Elevated daemon and security
 
@@ -268,6 +269,9 @@
 - [ ] RT-707 Keep a repo's sessions out of Detached once the repo joins a workspace
 - [ ] RT-1484 Keep an offline host's leaf in the Tabs view from dragging, and dim it by its own host
 - [ ] RT-1548 Show the blue finished pill on a dragged tab's ghost
+- [ ] RT-1559 Name a closed follow pane in the undo toast instead of "Closed empty pane"
+- [ ] RT-1563 Close sidebar menus with their own window's focus, and on the first Escape
+- [ ] RT-1566 Clear an armed session Stop when its session exits so Escape is not swallowed
 
 ## Terminal, panes and links
 
@@ -583,11 +587,7 @@
 
 - [ ] RT-30 View a session's running subagents as read-only sessions
 - [/] RT-31 Follow DeepSeek dispatch runs as read-only sessions · release vNext
-  - [ ] RT-1503 DF.9: Show dispatch runs as DS leaves in the native sidebar · release vNext
-  - [ ] RT-1504 DF.10: Draw a followed dispatch run in its pane, with Stop · release vNext
-  - [ ] RT-1505 DF.11: Prove following and stopping a dispatch run end to end · release vNext
-  - [!] RT-1506 DF.12: Request live-run files and the stop marker from the dispatch tool · release vNext
-  - [ ] RT-1507 DF.13: Document following dispatch runs · release vNext
+  - [ ] RT-1506 DF.12: Request live-run files and the stop marker from the dispatch tool · release vNext
 - [ ] RT-49 Offer every popular agent harness in the spawn dialog's runtime dropdown
   - [ ] RT-214 AH.1 Spike: DSH per-invocation patch, hook payload and resume
   - [ ] RT-215 AH.2 Pi runtime: backend, session id and dialog entry
@@ -606,6 +606,14 @@
 - [ ] RT-1510 Rewrite the subagent-streams design against the client's real views and the pane follow field
 - [ ] RT-1542 Stop dispatch-run tailers with their watcher, and keep a stop marker until the runner is gone
 - [ ] RT-1552 Keep a follow pane's host on undo and keep follows through a failed startup scan
+- [ ] RT-1558 Show a dispatch run's runner pid in its DS leaf's hover
+- [ ] RT-1560 List panes that follow a dispatch run in the jump palette
+- [ ] RT-1561 Teach the any-menu-open checks and close paths about the dispatch run menu
+- [ ] RT-1562 Fade only the dragged row of a run listed in two tabs
+- [ ] RT-1565 Say a followed run's host is not connected instead of that the run ended
+- [ ] RT-1567 Show the ⋯ overflow and keep the title readable in a narrow run pane's header
+- [ ] RT-1569 Drop a dispatch run whose child reads unknown once its runner is dead
+- [ ] RT-1570 Read a dispatch run's last stream lines before dropping it
 
 ## macOS and Unix
 
@@ -663,6 +671,7 @@
 - [ ] RT-1354 Document RUSTLING_TULIP_BIN_TEMPLATES in the environment variables table
 - [ ] RT-1395 Reword the fake ssh README: it runs any rustling-tulipd verb, not only bridge
 - [ ] RT-1428 Note the session-driving verbs' quirks in the daemon CLI doc
+- [ ] RT-1571 Fix the missing reboot-resume design link in RT-277 and RT-725
 
 ## Backlog
 
@@ -688,7 +697,7 @@
 - [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789, RT-1509
 - [default-shell.md](default-shell.md) — RT-956
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
-- [dispatch-follow.md](dispatch-follow.md) — RT-31, RT-167, RT-1503, RT-1504, RT-1505, RT-1506, RT-1507, RT-1509, RT-1510, RT-1541, RT-1542, RT-1552
+- [dispatch-follow.md](dispatch-follow.md) — RT-31, RT-167, RT-1506, RT-1509, RT-1510, RT-1541, RT-1542, RT-1552, RT-1558
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-787, RT-867, RT-868, RT-869
 - [finished-toast.md](finished-toast.md) — RT-755, RT-757
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
