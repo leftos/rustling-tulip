@@ -433,7 +433,9 @@ The client sends no `SetPaneRatio` for a divider press that stays within 3 logic
 
 ## Drag model
 
-`apps/native/src/drag.rs` is the plain-Rust half of every drag. `DragPayload` is a `Pane`, a `Tab`, a `Container`, a session `Leaf` or a dispatch run's `Run`. `drop_edge` maps the pointer's fraction of a pane to a `PaneDropEdge`: the outer band (`OUTER_BAND`, 0.12) on a side that touches the grid boundary (`tabs::outer_edges`, within 0.5 px), the nearer outer edge at a corner; the centre box (`CENTRE_LOW` 0.35 to `CENTRE_HIGH` 0.65) is `Replace`; otherwise the half on the nearer axis.
+`apps/native/src/drag.rs` is the plain-Rust half of every drag. `DragPayload` is a `Pane`, a `Tab`, a `Container`, a session `Leaf`, a dispatch run's `Run` or a subagent's `Subagent`.
+
+`drop_edge` maps the pointer's fraction of a pane to a `PaneDropEdge`: the outer band (`OUTER_BAND`, 0.12) on a side that touches the grid boundary (`tabs::outer_edges`, within 0.5 px), the nearer outer edge at a corner; the centre box (`CENTRE_LOW` 0.35 to `CENTRE_HIGH` 0.65) is `Replace`; otherwise the half on the nearer axis.
 
 `pane_drop` builds a `PaneDrop` with its undo label: `undo::SWAPPED_PANES` for a centre drop onto a pane that shows a session, in the same tab or another, `undo::MOVED_PANE` otherwise. Every edge or centre drop on a pane sets `MovePane.touch`, so the daemon counts the destination as arranged by hand; a pill drop and the pane menu's Move to ▸ tab do not (the daemon rebuilds both tabs).
 
@@ -788,6 +790,10 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
   A click (`RootView::open_subagent`) focuses the pane already following the subagent, a popped-out tab included (`tabs::find_tab_following_subagent`), else asks This PC's daemon for a new tab whose pane follows it (`CreateTab` with a `PaneFollow::Subagent`). A right-click on a subagent row opens no menu.
 
   A run leaf drags as `DragPayload::Run` (not while its host is dimmed); `drag::run_drop`, the twin of `unbound_drop`, makes the same split-or-replace choice: a half edge of a pane that shows a session or follows a run splits it with a new pane following the run (`SplitPane` with the follow), and the centre, or any edge of an empty pane, makes that pane follow the run (`ReplacePaneSession` with the follow). A tab pill refuses a run, and a run is never in a reorder.
+
+  A subagent leaf drags as `DragPayload::Subagent` and `drag::subagent_drop` drops it the same way, both through one shared `follow_drop`: a half edge (or the outer edge on that side) of a pane that shows something splits it with a new pane following the subagent, and the centre, or any edge of an empty pane, makes that pane follow it in place.
+
+  The overlay shows where it lands and the dragged row fades; a tab pill shows its no-drop state and sends nothing, and nothing reorders. A remote subagent's drop over an offline host is refused, and its overlay clears if the host goes offline mid-drag.
 
   A right-click on a run leaf opens its own menu (`dispatch_menu.rs`, `RootView.dispatch_menu`): Open (as a click), Stop run (arms, reading `Confirm: stop run…`, then sends `StopDispatchRun` with a `request_id` to the run's host; disabled while the run is stopping or has ended) and Copy run folder (the run's `run_dir`). Opening any other context menu closes it, and it closes as soon as its run leaves the host's list (`drop_stale_session_ui`). A failed Stop shows through the usual action-failed notice.
 - **Sort repos**: the row after Sessions under repos (`settings-repo-sort-manual|active|needs-you`), saved as `general.repo_sort` (`"manual"`, `"active"`, `"needs_you"`; a missing key or an unknown value loads as `"needs_you"`, the default). The repos view sorts repos and workspaces together.

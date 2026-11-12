@@ -1531,12 +1531,23 @@ fn leaf_drag_row(
     } else {
         match leaf.kind {
             LeafKind::Session => drag::leaf_payload(container, &session),
-            // A dispatch run's leaf drags its run, to a pane that follows it.
+            // A dispatch run's leaf drags its run, and a subagent's drags the
+            // subagent, to a pane that follows it.
             LeafKind::Dispatch => Some(DragPayload::Run {
                 run_id: leaf.id.clone(),
                 host: leaf.host.clone(),
             }),
-            LeafKind::Subagent => None,
+            // The session it runs under is what the follow names, so a leaf
+            // without one drags nothing.
+            LeafKind::Subagent => {
+                leaf.host_session
+                    .as_ref()
+                    .map(|host_session| DragPayload::Subagent {
+                        session_id: host_session.clone(),
+                        agent_id: leaf.id.clone(),
+                        host: leaf.host.clone(),
+                    })
+            }
         }
     };
     let dragged = payload.is_some() && ctx.dragged == payload;

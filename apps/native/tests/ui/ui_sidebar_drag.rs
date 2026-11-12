@@ -4,7 +4,9 @@
 //! pills drop on each other, leaves reorder within their own container only,
 //! the local order holds until the daemon's broadcast, and Esc cancels. Any
 //! leaf drags onto a pane, where the pane drag's overlay shows where it
-//! lands, or onto a tab pill, which places it in that tab.
+//! lands, or onto a tab pill, which places it in that tab. A dispatch run's
+//! leaf and a subagent's drag onto a pane to start a follow of it, and a tab
+//! pill refuses them.
 
 use crate::support;
 
@@ -16,7 +18,8 @@ use protocol::{
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{RootView, Side, SidebarRow};
 use support::{
-    Fixture, Harness, REMOTE, TestDir, dispatch_run, pane, repo, session, split, tab, workspace,
+    Fixture, Harness, REMOTE, TestDir, dispatch_run, pane, repo, session, split, subagent, tab,
+    workspace,
 };
 
 /// Workspace `w1` (session `u`, shown in no pane); repos `r1` (sessions
@@ -894,6 +897,154 @@ fn a_run_leaf_dropped_on_a_tab_pill_sends_nothing(cx: &mut TestAppContext) {
     assert!(
         placements(&mut h).is_empty(),
         "a tab pill takes no dispatch run"
+    );
+}
+
+/// Repo `r1` at `C:\r1`, holding `s1`, which started the subagent `a1`, and
+/// `s2` beside it.
+fn subagents_fixture() -> Fixture {
+    Fixture {
+        repos: vec![repo("r1", "C:\\r1")],
+        sessions: vec![
+            session("s1")
+                .in_repo("r1")
+                .subagents(vec![subagent("a1")])
+                .build(),
+            session("s2").in_repo("r1").build(),
+        ],
+        ..Fixture::default()
+    }
+}
+
+/// A harness over [`subagents_fixture`], whose sidebar lists the subagent
+/// `a1` under its host `s1`, with tab `t1` laid out as `grid` and nothing
+/// sent left unread.
+fn subagent_beside<'a>(cx: &'a mut TestAppContext, dir: &TestDir, grid: &GridNode) -> Harness<'a> {
+    let mut fixture = subagents_fixture();
+    fixture.tabs = vec![tab("t1", grid)];
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.sent();
+    h
+}
+
+#[gpui::test]
+fn dragging_a_subagent_to_a_half_edge_splits_with_its_follow(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let mut h = subagent_beside(cx, &dir, &grid);
+
+    let to = at(&mut h, "p2", 0.1, 0.5);
+    drop_leaf(&mut h, "a1", to, ("p2", PaneDropEdge::Left));
+
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::SplitPane {
+                tab_id,
+                pane_id,
+                direction: SplitDirection::Horizontal,
+                place: SplitPlace::First,
+                touch: true,
+                new_session_id: None,
+                host: None,
+                request_id: Some(_),
+                follow: Some(PaneFollow::Subagent { session_id, agent_id }),
+            }] if tab_id == "t1" && pane_id == "p2" && session_id == "s1" && agent_id == "a1"
+        ),
+        "the split makes a new pane follow the subagent: sent {sent:?}"
+    );
+    assert!(undo_messages(&mut h).is_empty(), "a follow records no undo");
+}
+
+#[gpui::test]
+fn dragging_a_subagent_to_a_bound_centre_follows_there(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let mut h = subagent_beside(cx, &dir, &grid);
+
+    let to = at(&mut h, "p2", 0.5, 0.5);
+    drop_leaf(&mut h, "a1", to, ("p2", PaneDropEdge::Replace));
+
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::ReplacePaneSession {
+                tab_id,
+                pane_id,
+                session_id: None,
+                host: None,
+                follow: Some(PaneFollow::Subagent { session_id, agent_id }),
+            }] if tab_id == "t1" && pane_id == "p2" && session_id == "s1" && agent_id == "a1"
+        ),
+        "a bound pane's centre takes the follow in place: sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn dragging_a_subagent_to_an_empty_pane_follows_there(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", None),
+    );
+    let mut h = subagent_beside(cx, &dir, &grid);
+
+    let to = at(&mut h, "p2", 0.1, 0.5);
+    drop_leaf(&mut h, "a1", to, ("p2", PaneDropEdge::Replace));
+
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::ReplacePaneSession {
+                tab_id,
+                pane_id,
+                session_id: None,
+                host: None,
+                follow: Some(PaneFollow::Subagent { session_id, agent_id }),
+            }] if tab_id == "t1" && pane_id == "p2" && session_id == "s1" && agent_id == "a1"
+        ),
+        "an empty pane takes the follow in place, whatever edge the pointer is on: sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_tab_pill_refuses_a_subagent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = subagents_fixture();
+    fixture.tabs = vec![
+        tab("t1", &pane("p1", Some("s1"))),
+        tab("t2", &pane("p2", None)),
+    ];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    let from = on_row(&mut h, "leaf-a1", 0.5);
+    let to = on_pill(&mut h, "t2", 0.5);
+    h.start_drag(from);
+    assert!(h.dragging(), "the subagent's leaf drags");
+    h.drag_to(to);
+    assert!(
+        h.root(|root, cx| root.pill_no_drop("t2", cx)),
+        "the pill shows its no-drop state for a subagent"
+    );
+    h.release(to);
+    assert!(!h.dragging(), "the release ends the drag");
+
+    assert!(
+        placements(&mut h).is_empty(),
+        "a tab pill takes no subagent"
     );
 }
 

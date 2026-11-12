@@ -879,7 +879,7 @@ impl RootView {
     /// Whether `tab_id`'s pill shows the no-drop state: a pane drag is under
     /// way and that pill's tab takes no pane, a sidebar leaf drag is and that
     /// pill's tab takes no leaf, the dragged leaf's host is offline, or a
-    /// sidebar run drag is under way, which every pill refuses.
+    /// sidebar run or subagent drag is under way, which every pill refuses.
     #[must_use]
     pub fn pill_no_drop(&self, tab_id: &str, cx: &App) -> bool {
         let pane_refused = self.active_pane_drag(cx).is_some()
@@ -889,7 +889,7 @@ impl RootView {
             Some(DragPayload::Leaf { host, .. }) => {
                 self.is_remote_offline(host) || !drag::pill_takes_leaf(&self.tabs, tab_id)
             }
-            Some(DragPayload::Run { .. }) => true,
+            Some(DragPayload::Run { .. } | DragPayload::Subagent { .. }) => true,
             _ => false,
         };
         pane_refused || leaf_refused
@@ -994,9 +994,10 @@ impl RootView {
                     self.send_leaf_drop(drop, cx);
                 }
             }
-            // A pill takes no dispatch run: the run sits in a pane of the
-            // shown tab, or opens a tab of its own.
-            DragPayload::Container(_) | DragPayload::Run { .. } => {}
+            // A pill takes no dispatch run or subagent: a run sits in a pane
+            // of the shown tab, or opens a tab of its own, and a subagent is
+            // opened from its leaf.
+            DragPayload::Container(_) | DragPayload::Run { .. } | DragPayload::Subagent { .. } => {}
         }
     }
 

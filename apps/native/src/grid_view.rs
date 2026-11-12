@@ -2460,8 +2460,9 @@ impl RootView {
 
     /// The pane of the shown tab under `at`, the edge the drop lands on and
     /// what the drop of `payload` there does, when it would be accepted: a
-    /// pane from any tab and a sidebar leaf drop on a pane of the shown one.
-    /// The pane is found in the grid `window` laid out.
+    /// pane from any tab, and a sidebar leaf's, a run's or a subagent's drop
+    /// on a pane of the shown one. The pane is found in the grid `window`
+    /// laid out.
     fn drop_at(
         &self,
         payload: &DragPayload,
@@ -2473,7 +2474,10 @@ impl RootView {
         let tab = self.window_tab(here)?;
         if !matches!(
             payload,
-            DragPayload::Pane { .. } | DragPayload::Leaf { .. } | DragPayload::Run { .. }
+            DragPayload::Pane { .. }
+                | DragPayload::Leaf { .. }
+                | DragPayload::Run { .. }
+                | DragPayload::Subagent { .. }
         ) {
             return None;
         }
@@ -2516,6 +2520,30 @@ impl RootView {
                 edge,
             };
             let (edge, drop) = drag::run_drop(self.tabs.tabs(), host, run_id, &target, request_id)?;
+            return Some((pane_id, edge, drop));
+        }
+        if let DragPayload::Subagent {
+            session_id,
+            agent_id,
+            host,
+        } = payload
+        {
+            if self.is_remote_offline(host) {
+                return None;
+            }
+            let target = drag::LeafTarget {
+                tab_id: &tab.id,
+                pane_id: &pane_id,
+                edge,
+            };
+            let (edge, drop) = drag::subagent_drop(
+                self.tabs.tabs(),
+                host,
+                session_id,
+                agent_id,
+                &target,
+                request_id,
+            )?;
             return Some((pane_id, edge, drop));
         }
         let drop = drag::pane_drop(
@@ -3012,13 +3040,17 @@ impl RootView {
     }
 
     /// The pane the drop overlay is drawn on and the edge it shows, while a
-    /// pane drag, or a sidebar leaf or run drag, is under way.
+    /// pane drag, or a sidebar leaf, run or subagent drag, is under way.
     #[must_use]
     pub fn pane_drop_overlay(&self, cx: &App) -> Option<(String, PaneDropEdge)> {
         let dragging = self.active_pane_drag(cx).is_some()
             || matches!(
                 self.active_sidebar_drag(cx),
-                Some(DragPayload::Leaf { .. } | DragPayload::Run { .. })
+                Some(
+                    DragPayload::Leaf { .. }
+                        | DragPayload::Run { .. }
+                        | DragPayload::Subagent { .. }
+                )
             );
         self.pane_drop.clone().filter(|_| dragging)
     }
