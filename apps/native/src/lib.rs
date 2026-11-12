@@ -58,6 +58,7 @@ mod diff_tab;
 mod diff_tab_view;
 pub mod diff_view;
 mod discard_confirm;
+mod dispatch_menu;
 mod dispatch_runs;
 mod drag;
 #[cfg(feature = "driver")]
@@ -1024,6 +1025,8 @@ pub struct RootView {
     menu_focus: FocusHandle,
     /// The repo or workspace context menu, while open.
     container_menu: Option<ContainerMenu>,
+    /// A dispatch run leaf's context menu, while open.
+    dispatch_menu: Option<crate::dispatch_menu::DispatchMenu>,
     /// The sessions toolbar's ⋯ menu.
     more_menu: sidebar_view::MoreMenu,
     /// The appearance editor, or the Settings modal holding it at the app
@@ -1674,6 +1677,7 @@ impl RootView {
             link_menu: None,
             menu_focus: cx.focus_handle(),
             container_menu: None,
+            dispatch_menu: None,
             more_menu: sidebar_view::MoreMenu::Closed,
             appearance_editor: None,
             appearance_focus: cx.focus_handle(),
@@ -3300,6 +3304,7 @@ impl RootView {
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
         self.close_container_menu(window, cx);
+        self.close_dispatch_menu(window, cx);
         self.sidebar.toggle_sidebar();
         // The fold always gives the panes a new width.
         self.mark_active_panes_resized(cx);
@@ -5906,6 +5911,8 @@ impl RootView {
             self.close_session_menu(window, cx);
         } else if self.container_menu.is_some() && ks.key == "escape" {
             self.close_container_menu(window, cx);
+        } else if self.dispatch_menu.is_some() && ks.key == "escape" {
+            self.close_dispatch_menu(window, cx);
         } else if self.sidebar_more_open() && ks.key == "escape" {
             self.close_more_menu(window, cx);
         } else if self.shell_menu.is_some()
@@ -6298,7 +6305,7 @@ impl Render for RootView {
             .children(self.link_menu_layer(here, cx).into_iter().flatten())
             .children(self.tab_menu_layer(cx).into_iter().flatten())
             .children(self.pane_menu_layers(here, cx))
-            .children(self.container_menu_layer(cx).into_iter().flatten())
+            .children(self.sidebar_menu_layers(cx))
             .children(self.more_menu_layer())
             .children(self.gates_menu_layer(cx).into_iter().flatten())
             .children(self.sc_picker_layer())

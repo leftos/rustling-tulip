@@ -1525,14 +1525,16 @@ fn leaf_drag_row(
         drop_line(selector, side, &t)
     });
     // The menu opens for the session of this row's host, whichever other
-    // host lists the same id; a dispatch run's leaf opens none.
+    // host lists the same id; a dispatch run's leaf opens the run's menu.
     let menu_session = session.clone();
     let row = leaf_row(leaf, &session.host, ctx, window, cx).on_mouse_down(
         MouseButton::Right,
         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            let SessionRef { host, id } = &menu_session;
             if is_session {
-                let SessionRef { host, id } = &menu_session;
                 this.open_session_menu(host, id, None, event.position, window, cx);
+            } else {
+                this.open_dispatch_menu(host, id, event.position, window, cx);
             }
             cx.stop_propagation();
         }),

@@ -1163,6 +1163,7 @@ impl RootView {
         self.close_shell_menu(window, cx);
         self.close_empty_pane_menu(window, cx);
         self.close_pane_overflow_menu(window, cx);
+        self.close_dispatch_menu(window, cx);
         // A menu open in another window hands that window's keyboard back.
         self.close_session_menu(window, cx);
         self.prefills.clear();
@@ -1216,6 +1217,13 @@ impl RootView {
                 .is_none()
         }) {
             self.close_session_menu(window, cx);
+        }
+        if self
+            .dispatch_menu
+            .as_ref()
+            .is_some_and(|menu| self.sidebar.run_on(&menu.host, &menu.run_id).is_none())
+        {
+            self.close_dispatch_menu(window, cx);
         }
         if self.delete_dialog.as_ref().is_some_and(|dialog| {
             dialog.owner == ConfirmOwner::Menu
@@ -1895,6 +1903,7 @@ impl RootView {
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
+        self.close_dispatch_menu(window, cx);
         let target = container.preset_target();
         let host = container.host();
         let preset_request = target.as_ref().map(|_| crate::new_request_id());
@@ -2653,6 +2662,7 @@ impl RootView {
     pub(crate) fn reset_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_session_menu(window, cx);
         self.close_container_menu(window, cx);
+        self.close_dispatch_menu(window, cx);
         self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
         self.close_sc_picker(window, cx);
@@ -4265,6 +4275,7 @@ impl RootView {
         self.close_empty_pane_menu(window, cx);
         self.close_pane_overflow_menu(window, cx);
         self.close_link_menu(window, cx);
+        self.close_dispatch_menu(window, cx);
         self.overlays
             .opened(Overlay::ShellMenu, window.window_handle().window_id());
         self.shell_menu = Some(ShellMenu {

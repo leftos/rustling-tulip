@@ -1990,6 +1990,16 @@ impl SidebarModel {
         self.slice(host).and_then(|slice| slice.session(id))
     }
 
+    /// Dispatch run `run_id` as `host` lists it; `None` when that host does
+    /// not.
+    #[must_use]
+    pub fn run_on(&self, host: &HostKey, run_id: &str) -> Option<&DispatchRunSnapshot> {
+        self.slice(host)?
+            .dispatch_runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+    }
+
     /// Session `id` and the host that lists it.
     #[must_use]
     pub fn find_session(&self, id: &str) -> Option<(HostKey, &SessionSnapshot)> {
@@ -10240,6 +10250,27 @@ pub(crate) mod tests {
             "{}",
             container.key
         );
+    }
+
+    #[test]
+    fn run_on_finds_a_run_only_on_the_host_that_lists_it() {
+        let remote = remote_host(BOX);
+        let mut model = two_host_model(&["a"], &["b"]);
+        model.apply(
+            &remote,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run("d1", "X:\\wt", None, 10, Run::Working)],
+            },
+        );
+        assert_eq!(
+            model.run_on(&remote, "d1").map(|run| run.run_id.as_str()),
+            Some("d1")
+        );
+        assert!(
+            model.run_on(&HostKey::Local, "d1").is_none(),
+            "not This PC's"
+        );
+        assert!(model.run_on(&remote, "d2").is_none(), "no such run");
     }
 
     #[test]

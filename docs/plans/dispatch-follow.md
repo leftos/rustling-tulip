@@ -274,7 +274,7 @@ Proving commands run from the repo root through the gate, written here as `gate 
   - Files: `crates/protocol/src/lib.rs`, `apps/pwa/src/protocol.ts`, `crates/daemon/src/tabs.rs`, `crates/daemon/src/server/tabs.rs`, `crates/daemon/src/main.rs`, plus any `GridNode::Pane` destructuring the compiler names.
   - Proof: `gate … -- cargo nextest run -p protocol -p daemon --cargo-profile test-release -E 'test(/follow/)'`, then the `generated_protocol_ts_is_current` run.
   - Waits on: DF.1, DF.6. Hotspot: protocol.
-- [ ] **DF.9 Sidebar DS leaves.** Per-host run lists, placement by `main_checkout` else worktree, `LeafKind::Dispatch`, the `DS` tag, dot, hover and ordering, a click or drop that opens a follow pane, and the Open / Stop / Copy run folder menu.
+- [x] **DF.9 Sidebar DS leaves.** Per-host run lists, placement by `main_checkout` else worktree, `LeafKind::Dispatch`, the `DS` tag, dot, hover and ordering, a click or drop that opens a follow pane, and the Open / Stop / Copy run folder menu.
   - Files: `apps/native/src/sidebar.rs`, `apps/native/src/sidebar_view.rs`, `apps/native/src/session_menu.rs`, `apps/native/src/lib.rs`, `apps/native/tests/ui/ui_sidebar.rs`.
   - Proof: `gate … -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release -E 'test(/sidebar::.*dispatch|ui_sidebar::.*dispatch/)'`, covering placement (repo, workspace member, unregistered path, no `main_checkout`), the leaf appearing, updating and going, a click sending `CreateTab` with the follow, and Stop arming then sending. Then `.\rt.ps1 native-shot main`.
   - Waits on: DF.1, DF.8. Hotspot: `lib.rs`.

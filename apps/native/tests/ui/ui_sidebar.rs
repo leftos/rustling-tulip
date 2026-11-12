@@ -10,9 +10,9 @@ use crate::support;
 
 use gpui::{Modifiers, MouseButton, TestAppContext, point, px};
 use protocol::{
-    AttentionReason, ClientMessage, DaemonMessage, PaneFollow, SessionMode, SessionSnapshot,
-    SpawnConfig, SpawnTarget, SplitDirection, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
-    WorktreeReusePolicy,
+    AttentionReason, ClientMessage, DaemonMessage, DispatchRunStatus, PaneFollow, SessionMode,
+    SessionSnapshot, SpawnConfig, SpawnTarget, SplitDirection, VscodeWorkspaceFolder,
+    VscodeWorkspaceSuggestion, WorktreeReusePolicy,
 };
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{
@@ -2799,5 +2799,197 @@ fn a_remote_hosts_run_dims_when_the_host_goes_offline(cx: &mut TestAppContext) {
     assert!(
         h.in_model(&format!("leaf-{REMOTE}::d1")),
         "the run stays listed"
+    );
+}
+
+/// The open dispatch run menu's row labels, in order; empty when closed.
+fn dispatch_menu_labels(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| root.dispatch_menu_labels())
+}
+
+/// A harness whose This PC daemon lists run `d1`, with the sends so far
+/// drained.
+fn with_run<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &runs_fixture());
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(runs_msg());
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h
+}
+
+#[gpui::test]
+fn right_clicking_a_run_leaf_opens_its_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_run(cx, &dir);
+
+    h.right_click_on("leaf-d1");
+
+    for row in [
+        "dispatch-menu-open",
+        "dispatch-menu-stop",
+        "dispatch-menu-copy-folder",
+    ] {
+        assert!(h.in_model(row), "{row} is in the menu");
+    }
+    assert_eq!(
+        dispatch_menu_labels(&mut h),
+        ["Open", "Stop run", "Copy run folder"]
+    );
+}
+
+#[gpui::test]
+fn stop_arms_then_sends_stop_dispatch_run_to_the_runs_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_run(cx, &dir);
+    h.right_click_on("leaf-d1");
+    h.sent();
+
+    h.click_on("dispatch-menu-stop");
+    assert!(h.sent().is_empty(), "the first click only arms");
+    assert_eq!(
+        dispatch_menu_labels(&mut h),
+        ["Open", "Confirm: stop run…", "Copy run folder"],
+        "and the row says so"
+    );
+
+    h.click_on("dispatch-menu-stop");
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::StopDispatchRun {
+                run_id,
+                request_id: Some(_),
+            }] if run_id == "d1"
+        ),
+        "sent {sent:?}"
+    );
+    assert!(dispatch_menu_labels(&mut h).is_empty(), "the menu closes");
+}
+
+#[gpui::test]
+fn stop_goes_to_a_remote_runs_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": "box.tail1234.ts.net", "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+    let target = saved_remote();
+    h.host(&target)
+        .connect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.host(&target).send(DaemonMessage::DispatchRuns {
+        runs: vec![dispatch_run("d1").worktree("C:\\r1.wt\\b").build()],
+    });
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.host(&target).sent();
+    let leaf = format!("leaf-{REMOTE}::d1");
+
+    h.right_click_on(&leaf);
+    h.click_on("dispatch-menu-stop");
+    h.click_on("dispatch-menu-stop");
+
+    let remote_sent = h.host(&target).sent();
+    assert!(
+        matches!(
+            remote_sent.as_slice(),
+            [ClientMessage::StopDispatchRun {
+                run_id,
+                request_id: Some(_),
+            }] if run_id == "d1"
+        ),
+        "the run's host gets the stop: {remote_sent:?}"
+    );
+    let local_sent = h.sent();
+    assert!(
+        !local_sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::StopDispatchRun { .. })),
+        "This PC gets no stop: {local_sent:?}"
+    );
+}
+
+#[gpui::test]
+fn open_in_the_run_menu_opens_a_tab_following_the_run(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_run(cx, &dir);
+    h.right_click_on("leaf-d1");
+    h.sent();
+
+    h.click_on("dispatch-menu-open");
+
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::CreateTab {
+                name: None,
+                initial_session_id: None,
+                host: None,
+                follow: Some(PaneFollow::DispatchRun { run_id }),
+                request_id: Some(_),
+            }] if run_id == "d1"
+        ),
+        "sent {sent:?}"
+    );
+    assert!(dispatch_menu_labels(&mut h).is_empty(), "the menu closes");
+}
+
+#[gpui::test]
+fn copy_run_folder_copies_the_run_dir(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_run(cx, &dir);
+    h.right_click_on("leaf-d1");
+
+    h.click_on("dispatch-menu-copy-folder");
+
+    assert_eq!(h.clipboard().as_deref(), Some("C:\\runs\\d1"));
+    assert!(dispatch_menu_labels(&mut h).is_empty(), "the menu closes");
+}
+
+#[gpui::test]
+fn a_run_menu_closes_when_its_run_goes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_run(cx, &dir);
+    h.right_click_on("leaf-d1");
+    assert!(
+        h.root(|root, _| root.dispatch_menu_open()),
+        "precondition: the menu is open"
+    );
+
+    h.send(DaemonMessage::DispatchRunRemoved {
+        run_id: "d1".to_owned(),
+    });
+
+    assert!(
+        !h.root(|root, _| root.dispatch_menu_open()),
+        "the menu closes with its run, so a later Escape is not its"
+    );
+}
+
+#[gpui::test]
+fn stop_is_disabled_for_an_ended_run(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    let mut run = dispatch_run("d1")
+        .worktree("C:\\r1.wt\\a")
+        .main_checkout("C:\\r1")
+        .build();
+    run.status = DispatchRunStatus::Ended;
+    h.send(DaemonMessage::DispatchRuns { runs: vec![run] });
+    h.answer_scrollback("s1", b"");
+    h.right_click_on("leaf-d1");
+    h.sent();
+
+    h.click_on("dispatch-menu-stop");
+    h.click_on("dispatch-menu-stop");
+
+    let sent = h.sent();
+    assert!(
+        sent.is_empty(),
+        "an ended run's Stop sends nothing: {sent:?}"
     );
 }

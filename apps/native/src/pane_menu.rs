@@ -336,6 +336,7 @@ impl RootView {
         self.close_session_menu(window, cx);
         self.close_shell_menu(window, cx);
         self.close_pane_overflow_menu(window, cx);
+        self.close_dispatch_menu(window, cx);
         self.tab_menu = None;
         self.overlays
             .opened(Overlay::EmptyPaneMenu, window.window_handle().window_id());
@@ -484,6 +485,7 @@ impl RootView {
         self.close_tab_menu(window, cx);
         self.close_more_menu(window, cx);
         self.close_container_menu(window, cx);
+        self.close_dispatch_menu(window, cx);
         self.overlays.opened(
             Overlay::PaneOverflowMenu,
             window.window_handle().window_id(),
