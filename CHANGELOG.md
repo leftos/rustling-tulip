@@ -4,6 +4,15 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.13.0-alpha
+
+### Highlights
+
+- Dispatch runs show in the sidebar tagged DS, and a pane can follow one with its cost, tokens, recent actions and a Stop button.
+- The Dashboard lists the dispatch runs a session started under that session.
+- A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking.
+- Ctrl+clicking a file path in a terminal opens it in its app at once.
+
 ### Added
 
 - A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking; looking at one clears it.
