@@ -16,7 +16,7 @@ use protocol::{
     ClientMessage, DaemonMessage, SessionMode, SpawnRequest, SpawnTarget, SplitDirection,
     SuggestTarget,
 };
-use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
+use support::{Fixture, Harness, TestDir, follow_pane, pane, repo, session, split, tab};
 
 /// Whether the element tagged `selector` has been painted on screen.
 fn painted(h: &mut Harness<'_>, selector: &str) -> bool {
@@ -115,6 +115,93 @@ fn open_with<'a>(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -
     let mut h = Harness::with(cx, dir, fixture);
     h.sent();
     h
+}
+
+/// Repos `r0` and `r1`; tab `t1`: session `s1` of `r1` in `p1`, a pane
+/// following run `run-1` in `f2`, and the empty `p3`.
+fn follow_fixture() -> Fixture {
+    Fixture {
+        repos: vec![repo("r0", "C:/r0"), repo("r1", "C:/r1")],
+        sessions: vec![session("s1").in_repo("r1").build()],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                split(
+                    SplitDirection::Vertical,
+                    follow_pane("f2", "run-1"),
+                    pane("p3", None),
+                ),
+            ),
+        )],
+        ..Fixture::default()
+    }
+}
+
+#[gpui::test]
+fn a_pane_that_follows_a_run_is_not_drawn_empty(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_with(cx, &dir, &follow_fixture());
+
+    assert!(
+        !h.in_model("empty-pane-new-session-f2"),
+        "a pane that follows a run offers no empty-pane buttons"
+    );
+    assert!(
+        h.in_model("empty-pane-new-session-p3"),
+        "a plain empty pane beside it still does"
+    );
+}
+
+#[gpui::test]
+fn clicking_a_follow_pane_focuses_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_with(cx, &dir, &follow_fixture());
+    // The spec's window starts inactive and gets no focus events until it
+    // is activated, as the desktop does; a frame lets the activation land.
+    h.cx.update(|window, _| window.activate_window());
+    let _ = h.bounds("pane-follow-f2");
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p1"),
+        "the session's pane starts focused"
+    );
+
+    h.click_on("pane-follow-f2");
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("f2"),
+        "a click on the pane that follows a run gives it the focus"
+    );
+}
+
+#[gpui::test]
+fn move_panes_row_stays_hidden_with_three_follow_panes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                split(
+                    SplitDirection::Vertical,
+                    follow_pane("f1", "run-1"),
+                    follow_pane("f2", "run-2"),
+                ),
+                follow_pane("f3", "run-3"),
+            ),
+        )],
+        ..Fixture::default()
+    };
+    let mut h = open_with(cx, &dir, &fixture);
+
+    h.right_click_on("tab-t1");
+    assert!(h.in_model("tab-menu"));
+    assert!(
+        !h.in_model("tab-menu-move-panes"),
+        "no pane holds a session to move"
+    );
 }
 
 #[gpui::test]

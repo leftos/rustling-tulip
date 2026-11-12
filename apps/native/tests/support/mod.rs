@@ -20,8 +20,8 @@ use gpui::{
     TouchPhase, VisualTestContext, Window, WindowId, point, px,
 };
 use protocol::{
-    ClientMessage, DaemonMessage, GridNode, KeyState, RepoEntry, SessionSnapshot, SpawnTarget,
-    SplitDirection, SummarizerKey, SummarizerKeySource, SummarizerSettings, TabEntry,
+    ClientMessage, DaemonMessage, GridNode, KeyState, PaneFollow, RepoEntry, SessionSnapshot,
+    SpawnTarget, SplitDirection, SummarizerKey, SummarizerKeySource, SummarizerSettings, TabEntry,
     WorkspaceEntry,
 };
 use rustling_tulip_native::{
@@ -1467,6 +1467,18 @@ pub fn pane(id: &str, session: Option<&str>) -> GridNode {
         session_id: session.map(str::to_owned),
         host: None,
         follow: None,
+    }
+}
+
+/// A pane following dispatch run `run_id`, showing no session.
+pub fn follow_pane(id: &str, run_id: &str) -> GridNode {
+    GridNode::Pane {
+        pane_id: id.to_owned(),
+        session_id: None,
+        host: None,
+        follow: Some(PaneFollow::DispatchRun {
+            run_id: run_id.to_owned(),
+        }),
     }
 }
 

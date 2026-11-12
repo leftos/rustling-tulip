@@ -457,7 +457,8 @@ fn split_pane(grid: &mut GridNode, split: &SplitTarget, new_pane: GridNode) -> b
 }
 
 /// Whether the aimed pane is still there and shows exactly what it showed
-/// when the spawn was aimed.
+/// when the spawn was aimed: nothing for a spawn aimed at an empty pane, so
+/// a pane that has taken a session or a follow since is not it.
 fn pane_shows(tabs: &TabsModel, aim: &PaneAim) -> bool {
     tabs.tab(&aim.tab_id)
         .and_then(protocol::TabEntry::grid)
@@ -466,7 +467,7 @@ fn pane_shows(tabs: &TabsModel, aim: &PaneAim) -> bool {
                 pane.id == aim.pane_id
                     && match &aim.expected {
                         Some(expected) => pane.shows(expected),
-                        None => pane.session.is_none(),
+                        None => !pane.is_bound(),
                     }
             })
         })
@@ -554,7 +555,7 @@ fn is_in_place(request: &SpawnRequest) -> bool {
 mod tests {
     use super::*;
     use crate::tabs::tests::{
-        model_with, on_local, pane, pane_on, session, split, tab, updated, wire,
+        follow_pane, model_with, on_local, pane, pane_on, session, split, tab, updated, wire,
     };
     use crate::tabs::{SessionRef, destination};
     use protocol::{SessionMode, SplitDirection, WorktreeReusePolicy};
@@ -899,6 +900,32 @@ mod tests {
         assert!(
             matches!(only(&placed), ClientMessage::SplitPane { tab_id, pane_id, .. } if tab_id == "t1" && pane_id == "a"),
             "sent {:?}",
+            placed.messages
+        );
+    }
+
+    #[test]
+    fn empty_pane_spawn_whose_pane_now_follows_a_run_evicts_nothing() {
+        let mut tabs = model_with(&[tab("t1", &follow_pane("a", "run-1"))]);
+        let mut spawns = PendingSpawns::default();
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q1".to_owned(),
+            aim_at("t1", "a", None),
+        );
+
+        let placed = spawns
+            .place(
+                "q1",
+                HostedSession::local(&session("new", None, None)),
+                &mut tabs,
+                &[],
+            )
+            .expect("placed");
+        assert!(
+            matches!(only(&placed), ClientMessage::SplitPane { tab_id, pane_id, .. } if tab_id == "t1" && pane_id == "a"),
+            "a pane that follows a run keeps it; the new session goes beside it: {:?}",
             placed.messages
         );
     }

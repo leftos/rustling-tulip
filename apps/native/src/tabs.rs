@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use protocol::{
-    ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RearrangeLayout, SessionSnapshot,
-    SessionStatus, SplitDirection, SplitPlace, TabEntry,
+    ClientMessage, DaemonMessage, GridNode, PaneDropEdge, PaneFollow, RearrangeLayout,
+    SessionSnapshot, SessionStatus, SplitDirection, SplitPlace, TabEntry,
 };
 
 use crate::sidebar::CountMode;
@@ -123,6 +123,8 @@ fn find_hosted<'a>(
 pub struct Pane<'a> {
     pub id: &'a str,
     pub session: Option<&'a str>,
+    /// What the pane follows instead of a session, if anything.
+    pub follow: Option<&'a PaneFollow>,
     /// The host the pane's session belongs to; This PC for an empty pane
     /// that names none.
     pub host: HostKey,
@@ -133,6 +135,13 @@ impl Pane<'_> {
     #[must_use]
     pub fn shows(&self, session: &SessionRef) -> bool {
         self.session == Some(session.id.as_str()) && self.host == session.host
+    }
+
+    /// Whether the pane shows something: a session or a follow. An unbound
+    /// pane is free for a spawn or a moved pane.
+    #[must_use]
+    pub fn is_bound(&self) -> bool {
+        self.session.is_some() || self.follow.is_some()
     }
 }
 
@@ -303,10 +312,11 @@ fn walk_panes<'a>(node: &'a GridNode, out: &mut Vec<Pane<'a>>) {
             pane_id,
             session_id,
             host,
-            ..
+            follow,
         } => out.push(Pane {
             id: pane_id,
             session: session_id.as_deref(),
+            follow: follow.as_ref(),
             host: host_of_wire(host.as_deref()),
         }),
         GridNode::Split { first, second, .. } => {
@@ -600,8 +610,8 @@ pub fn pick_balanced_split_target(grid: &GridNode) -> Option<SplitTarget> {
 /// its right or its bottom. Ported from `pickBalancedDropTarget` in the
 /// Tauri app's `utils/grid.ts`.
 pub fn pick_balanced_drop_target(grid: &GridNode) -> Option<(String, PaneDropEdge)> {
-    if let Some(empty) = collect_panes(grid).iter().find(|p| p.session.is_none()) {
-        return Some((empty.id.to_owned(), PaneDropEdge::Replace));
+    if let Some(free) = collect_panes(grid).iter().find(|p| !p.is_bound()) {
+        return Some((free.id.to_owned(), PaneDropEdge::Replace));
     }
     let target = pick_balanced_split_target(grid)?;
     let edge = match target.direction {
@@ -738,9 +748,9 @@ pub fn pane_target_for_session(
     {
         return Some(target);
     }
-    if let Some(empty) = panes.iter().find(|p| p.session.is_none()) {
+    if let Some(free) = panes.iter().find(|p| !p.is_bound()) {
         return Some(PaneTarget::Replace {
-            pane_id: empty.id.to_owned(),
+            pane_id: free.id.to_owned(),
         });
     }
     pick_balanced_split_target(grid).map(PaneTarget::Split)
@@ -762,9 +772,9 @@ fn same_parent_target(
         .filter(|(_, p)| parent_of(p).as_deref() == Some(key))
         .map(|(index, _)| index)
         .collect();
-    let empty_at = |index: usize| panes.get(index).filter(|p| p.session.is_none());
+    let free_at = |index: usize| panes.get(index).filter(|p| !p.is_bound());
     for &index in &matching {
-        let neighbour = empty_at(index + 1).or_else(|| index.checked_sub(1).and_then(empty_at));
+        let neighbour = free_at(index + 1).or_else(|| index.checked_sub(1).and_then(free_at));
         if let Some(pane) = neighbour {
             return Some(PaneTarget::Replace {
                 pane_id: pane.id.to_owned(),
@@ -989,9 +999,18 @@ pub fn window_session_counts(
     counts
 }
 
-/// How many of `grid`'s panes hold a session.
+/// How many of `grid`'s panes show something: a session or a follow.
 #[must_use]
 pub fn bound_pane_count(grid: &GridNode) -> usize {
+    collect_panes(grid)
+        .iter()
+        .filter(|pane| pane.is_bound())
+        .count()
+}
+
+/// How many of `grid`'s panes hold a session, a follow leaving its pane out.
+#[must_use]
+pub fn session_pane_count(grid: &GridNode) -> usize {
     collect_panes(grid)
         .iter()
         .filter(|pane| pane.session.is_some())
@@ -999,11 +1018,11 @@ pub fn bound_pane_count(grid: &GridNode) -> usize {
 }
 
 /// Whether closing `tab` loses something worth a second click: a bound
-/// session, or a layout of two panes or more.
+/// pane, a session or a follow, or a layout of two panes or more.
 pub fn needs_confirm(tab: &TabEntry) -> bool {
     tab.grid().is_some_and(|grid| {
         let panes = collect_panes(grid);
-        panes.len() >= 2 || panes.iter().any(|p| p.session.is_some())
+        panes.len() >= 2 || panes.iter().any(Pane::is_bound)
     })
 }
 
@@ -1849,6 +1868,16 @@ impl TabsModel {
             .map_or(HostKey::Local, |pane| pane.host)
     }
 
+    /// What pane `pane_id` of tab `tab_id` follows instead of a session;
+    /// `None` for a pane that shows a session or nothing.
+    #[must_use]
+    pub fn pane_follow(&self, tab_id: &str, pane_id: &str) -> Option<&PaneFollow> {
+        collect_panes(self.tab(tab_id)?.grid()?)
+            .into_iter()
+            .find(|p| p.id == pane_id)
+            .and_then(|p| p.follow)
+    }
+
     /// How many panes, across every tab, show each session, host and id
     /// both.
     pub fn view_counts(&self) -> HashMap<SessionRef, usize> {
@@ -1889,6 +1918,18 @@ pub(crate) mod tests {
             session_id: session.map(str::to_owned),
             host: None,
             follow: None,
+        }
+    }
+
+    /// A pane following dispatch run `run_id`, showing no session.
+    pub(crate) fn follow_pane(id: &str, run_id: &str) -> GridNode {
+        GridNode::Pane {
+            pane_id: id.to_owned(),
+            session_id: None,
+            host: None,
+            follow: Some(PaneFollow::DispatchRun {
+                run_id: run_id.to_owned(),
+            }),
         }
     }
 
@@ -2559,6 +2600,40 @@ pub(crate) mod tests {
                 HostedSession::local(&no_parent)
             ),
             Some(replace("e1"))
+        );
+    }
+
+    #[test]
+    fn placement_skips_a_pane_that_follows_a_run() {
+        let sessions = [session("s1", Some("r"), None)];
+        let new = session("new", Some("r"), None);
+        let placed = |grid: &GridNode| {
+            pane_target_for_session(grid, &on_local(&sessions), HostedSession::local(&new))
+        };
+        let grid = split(H, 0.5, follow_pane("f", "run-1"), pane("e", None));
+        assert_eq!(
+            placed(&grid),
+            Some(replace("e")),
+            "the free pane takes the session, not the one following a run"
+        );
+        let alone = follow_pane("f", "run-1");
+        assert!(
+            !matches!(placed(&alone), Some(PaneTarget::Replace { .. })),
+            "a pane following a run is no free slot: {:?}",
+            placed(&alone)
+        );
+    }
+
+    #[test]
+    fn same_parent_target_skips_a_follow_pane() {
+        let sessions = [session("s1", Some("r"), None)];
+        let grid = split(H, 0.5, pane("a", Some("s1")), follow_pane("f", "run-1"));
+        let new = session("new", Some("r"), None);
+        let placed =
+            pane_target_for_session(&grid, &on_local(&sessions), HostedSession::local(&new));
+        assert!(
+            matches!(placed, Some(PaneTarget::Split(_))),
+            "the run's pane is no empty neighbour, so the session splits: {placed:?}"
         );
     }
 
@@ -3377,6 +3452,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn closing_a_tab_with_a_follow_pane_needs_confirm() {
+        assert!(needs_confirm(&tab("t", &follow_pane("f", "run-1"))));
+        assert!(
+            !needs_confirm(&tab("e", &pane("p", None))),
+            "a lone empty pane closes at once"
+        );
+    }
+
+    #[test]
     fn tabs_ui_state_keeps_the_active_tab() {
         let state = UiState {
             active_tab_id: Some("t2".to_owned()),
@@ -3771,6 +3855,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn bound_pane_count_counts_a_follow_pane() {
+        let grid = split(
+            H,
+            0.5,
+            split(H, 0.5, pane("a", Some("s1")), follow_pane("f", "run-1")),
+            pane("e", None),
+        );
+        assert_eq!(bound_pane_count(&grid), 2);
+    }
+
+    #[test]
+    fn session_pane_count_leaves_out_follow_panes() {
+        let grid = split(
+            H,
+            0.5,
+            pane("a", Some("s1")),
+            split(
+                V,
+                0.5,
+                split(H, 0.5, follow_pane("f", "run-1"), follow_pane("g", "run-2")),
+                pane("e", None),
+            ),
+        );
+        assert_eq!(session_pane_count(&grid), 1);
+        assert_eq!(
+            bound_pane_count(&grid),
+            3,
+            "the tab badge still counts a pane that follows a run"
+        );
+    }
+
+    #[test]
     fn tab_pill_is_unbound_one_or_many_panes() {
         let mut work = tab("t1", &pane("p1", Some("s1")));
         "work".clone_into(&mut work.name);
@@ -3815,6 +3931,22 @@ pub(crate) mod tests {
             pick_balanced_drop_target(&three()),
             Some(("b".to_owned(), PaneDropEdge::Replace)),
             "the empty pane takes it, though `a` is larger"
+        );
+    }
+
+    #[test]
+    fn drop_target_skips_a_pane_that_follows_a_run() {
+        let grid = split(
+            H,
+            0.5,
+            pane("a", Some("s1")),
+            split(V, 0.25, follow_pane("b", "run-1"), pane("c", Some("s2"))),
+        );
+        let target = pick_balanced_drop_target(&grid);
+        assert!(target.is_some(), "the largest pane takes the split");
+        assert!(
+            !matches!(&target, Some((id, PaneDropEdge::Replace)) if id == "b"),
+            "the pane following a run takes no replace: {target:?}"
         );
     }
 
@@ -4041,6 +4173,33 @@ pub(crate) mod tests {
                 ("a".to_owned(), HostKey::Local),
                 ("b".to_owned(), remote("box")),
                 ("c".to_owned(), HostKey::Local)
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_panes_carries_each_panes_follow() {
+        let grid = split(
+            H,
+            0.5,
+            pane("a", Some("s1")),
+            split(V, 0.5, follow_pane("f", "run-1"), pane("e", None)),
+        );
+        let follows: Vec<(&str, Option<&PaneFollow>)> = collect_panes(&grid)
+            .into_iter()
+            .map(|p| (p.id, p.follow))
+            .collect();
+        assert_eq!(
+            follows,
+            [
+                ("a", None),
+                (
+                    "f",
+                    Some(&PaneFollow::DispatchRun {
+                        run_id: "run-1".to_owned()
+                    })
+                ),
+                ("e", None)
             ]
         );
     }

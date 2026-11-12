@@ -357,6 +357,8 @@ A client's tabs and their split trees are daemon-side and keyed by client id (`s
 
 A tab's content is a grid, a diff, a viewer or the Dashboard. A viewer tab (`TabContent::Viewer { path }`) stores only the path of the file it shows, in the connected daemon's layout for the client id; it has no panes, so `TabEntry::grid()` and `grid_mut()` return `None` and every pane operation refuses it ("not a grid tab").
 
+A pane can follow a dispatch run instead of holding a session (`Pane.follow`). Such a pane counts as bound everywhere a free pane is looked for (`Pane::is_bound`): spawn and unbound-leaf placement, a moved pane's drop target, a spawn aimed at an empty pane, the tab badge and the close confirm. Until the run's view lands it draws a muted note, "Following dispatch run {run_id}." ("This pane needs a newer app." for a follow kind this client does not know), takes focus on a click, and reads "Dispatch run" ("Unknown pane") in its header and drag ghost. The tab menu's "Move panes to new tab…" row counts session panes only (`session_pane_count`).
+
 `OpenViewerTab { id, path }` opens or focuses by exact string match on the path, as `OpenDiffTab` does: a new path creates the tab, named after the path's basename (splitting `/` and `\`, else the whole path), and broadcasts `TabUpdated`; a path already open only focuses its tab and broadcasts nothing.
 
 The reply is `ViewerTabOpened { id, tab_id }`, and an empty path is refused with an `Error` carrying the open's id. The daemon compares the path as sent, so a client trims and normalises it first.

@@ -15,7 +15,7 @@ use gpui::{
     canvas, deferred, div, point, prelude::*, px, relative, svg,
 };
 use protocol::{
-    AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, SessionMember, SessionMode,
+    AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, PaneFollow, SessionMember, SessionMode,
     SessionSnapshot, SessionStatus, SplitDirection, SplitPlace, TabContent, TabEntry,
 };
 
@@ -1279,10 +1279,11 @@ impl RootView {
             .any(|host| !self.is_remote_offline(host) && !self.sidebar.repos_of(host).is_empty())
     }
 
-    /// The panes of the tab on screen that show no session.
+    /// The panes of the tab on screen that show nothing: no session and no
+    /// follow.
     #[must_use]
     pub fn empty_pane_ids(&self) -> Vec<String> {
-        self.active_panes(|session| session.is_none())
+        self.active_panes(|pane| !pane.is_bound())
     }
 
     /// Whether the main area with no tab open offers its spawn choices: only
@@ -1297,14 +1298,14 @@ impl RootView {
             && (self.sidebar.repos_loaded() || self.has_repos())
     }
 
-    fn active_panes(&self, keep: impl Fn(Option<&str>) -> bool) -> Vec<String> {
+    fn active_panes(&self, keep: impl Fn(&tabs::Pane<'_>) -> bool) -> Vec<String> {
         self.tabs
             .active_tab()
             .and_then(TabEntry::grid)
             .map(|grid| {
                 tabs::collect_panes(grid)
                     .into_iter()
-                    .filter(|pane| keep(pane.session))
+                    .filter(|pane| keep(pane))
                     .map(|pane| pane.id.to_owned())
                     .collect()
             })
@@ -1374,10 +1375,10 @@ impl RootView {
     }
 
     /// An empty pane's "Shell here": the quick shell, into this pane, on
-    /// the pane's own host; a pane that shows no session takes the host of
-    /// the focused session, else This PC (an empty pane focused is no
-    /// focused session). Nothing while a spawn aimed at the pane is on its
-    /// way.
+    /// the pane's own host when it is bound; a pane that shows nothing takes
+    /// the host of the focused session, else This PC (an empty pane focused
+    /// is no focused session). Nothing while a spawn aimed at the pane is on
+    /// its way.
     fn shell_in_pane(
         &mut self,
         tab_id: &str,
@@ -1388,7 +1389,7 @@ impl RootView {
         if self.spawns.aims_at(tab_id, pane_id) {
             return;
         }
-        let shows_session = self
+        let bound = self
             .tabs
             .tab(tab_id)
             .and_then(TabEntry::grid)
@@ -1397,8 +1398,8 @@ impl RootView {
                     .into_iter()
                     .find(|pane| pane.id == pane_id)
             })
-            .is_some_and(|pane| pane.session.is_some());
-        let host = if shows_session {
+            .is_some_and(|pane| pane.is_bound());
+        let host = if bound {
             self.tabs.pane_host(tab_id, pane_id)
         } else {
             self.focused_host()
@@ -1603,8 +1604,15 @@ impl RootView {
             GridNode::Pane {
                 pane_id,
                 session_id,
+                follow,
                 ..
-            } => self.render_pane(tab_id, pane_id, session_id.as_deref(), here, cx),
+            } => {
+                let shown = PaneShown {
+                    session: session_id.as_deref(),
+                    follow: follow.as_ref(),
+                };
+                self.render_pane(tab_id, pane_id, shown, here, cx)
+            }
             GridNode::Split {
                 direction,
                 ratio,
@@ -1670,32 +1678,18 @@ impl RootView {
         &self,
         tab_id: &str,
         pane_id: &str,
-        session_id: Option<&str>,
+        shown: PaneShown<'_>,
         here: WindowId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
+        let PaneShown { session, .. } = shown;
         if let Some(key) = self.popouts.popped_key(pane_id).cloned() {
             // One terminal draws in one window: the pop-out's.
-            return self.popped_card(key, pane_id, session_id, cx);
+            return self.popped_card(key, pane_id, session, cx);
         }
         let focused = self.tabs.focused_pane(tab_id).as_deref() == Some(pane_id);
-        let body = match (session_id, self.panes.get(pane_id)) {
-            (Some(id), Some(slot)) if slot.attached => {
-                let terminal = div()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .driver_id(|| format!("pane-grid-{pane_id}"))
-                    .child(slot.view.clone());
-                self.attached_body(pane_id, id, terminal, cx)
-            }
-            (Some(id), slot) => self.note_body(pane_id, id, slot, cx),
-            (None, Some(slot)) => {
-                let handle = slot.view.read(cx).focus_handle();
-                self.empty_pane(tab_id, pane_id, Some(handle), cx)
-            }
-            (None, None) => self.empty_pane(tab_id, pane_id, None, cx),
-        };
+        let body = self.pane_body(tab_id, pane_id, shown, cx);
         let host = self.tabs.pane_host(tab_id, pane_id);
         let body = div()
             .relative()
@@ -1707,27 +1701,27 @@ impl RootView {
                 crate::fonts::ui_text_size(cx),
                 pane_id,
                 &host,
-                session_id,
+                session,
                 &theme(cx),
             ))
             .child(body)
             .children(self.exited_overlay(
                 Some(tab_id),
                 pane_id,
-                session_id.map(|id| SessionRef::new(self.tabs.pane_host(tab_id, pane_id), id)),
+                session.map(|id| SessionRef::new(self.tabs.pane_host(tab_id, pane_id), id)),
                 cx,
             ))
-            .children(self.abandoned_overlay(pane_id, session_id, cx));
-        let colors = self.frame_colors(pane_id, session_id, focused, &t);
+            .children(self.abandoned_overlay(pane_id, session, cx));
+        let colors = self.frame_colors(pane_id, session, focused, &t);
         let overlay = self
             .pane_drop_overlay(cx)
             .filter(|(target, _)| target == pane_id)
             .map(|(_, edge)| drop_overlay(pane_id, edge, colors.accent_line, cx, &t));
         let frame = format!("pane-frame-{pane_id}");
-        let parts = session_id
+        let parts = session
             .and_then(|_| self.pane_session_in(tab_id, pane_id))
             .map(|(host, session)| self.session_header_parts(&host, session));
-        let target = self.header_target(tab_id, pane_id, session_id, parts.as_ref(), here);
+        let target = self.header_target(tab_id, pane_id, session, parts.as_ref(), here);
         let header_ground = header_fill(focused, &t);
         let (fade_from, fade_to) = header_fade_stops(header_ground, colors.accent_line);
         let header = self
@@ -1755,6 +1749,49 @@ impl RootView {
             .child(body)
             .children(overlay)
             .into_any_element()
+    }
+
+    /// What pane `pane_id` of `tab_id` draws as its body: its session's
+    /// terminal or note, a note for what the pane follows instead, or an
+    /// empty pane's spawn choices.
+    fn pane_body(
+        &self,
+        tab_id: &str,
+        pane_id: &str,
+        shown: PaneShown<'_>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let PaneShown { session, follow } = shown;
+        if let (None, Some(follow)) = (session, follow) {
+            let note = follow_placeholder(follow, pane_id, cx);
+            return match self.panes.get(pane_id) {
+                Some(slot) => {
+                    let handle = slot.view.read(cx).focus_handle();
+                    note.track_focus(&handle)
+                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            handle.focus(window);
+                        })
+                        .into_any_element()
+                }
+                None => note.into_any_element(),
+            };
+        }
+        match (session, self.panes.get(pane_id)) {
+            (Some(id), Some(slot)) if slot.attached => {
+                let terminal = div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .driver_id(|| format!("pane-grid-{pane_id}"))
+                    .child(slot.view.clone());
+                self.attached_body(pane_id, id, terminal, cx)
+            }
+            (Some(id), slot) => self.note_body(pane_id, id, slot, cx),
+            (None, Some(slot)) => {
+                let handle = slot.view.read(cx).focus_handle();
+                self.empty_pane(tab_id, pane_id, Some(handle), cx)
+            }
+            (None, None) => self.empty_pane(tab_id, pane_id, None, cx),
+        }
     }
 
     /// The card a popped pane leaves in its place in the main grid: its
@@ -1945,7 +1982,7 @@ impl RootView {
             return popout_column(toolbar, note.into_any_element());
         };
         let parts = self.session_header_parts(host, session);
-        let title = header_title(&slot_id, Some(&parts), TipAt::Mouse, true, cx);
+        let title = header_title(&slot_id, PaneTitle::Session(&parts), TipAt::Mouse, true, cx);
         let mut controls = self.header_stop(&slot_id, Some(session_id), StopPlace::Popout, cx);
         controls.push(Self::popout_close_window(&slot_id, cx));
         let toolbar = popout_toolbar_row(&slot_id, title, controls, cx);
@@ -2052,7 +2089,13 @@ impl RootView {
     ) -> AnyElement {
         let t = theme(cx);
         let parts = self.popout_header_parts(pane_id);
-        let mut title = header_title(pane_id, parts.as_ref(), TipAt::Mouse, true, cx);
+        let mut title = header_title(
+            pane_id,
+            pane_title(parts.as_ref(), None),
+            TipAt::Mouse,
+            true,
+            cx,
+        );
         if let Some(docked) = self.popout_docked_in(pane_id) {
             let name = format!("popout-tab-{pane_id}");
             let docked = div()
@@ -2092,13 +2135,17 @@ impl RootView {
             pane_id,
             session_id,
             parts,
+            follow,
             at,
             ..
         } = *target;
         let menu_ids = (tab_id.to_owned(), pane_id.to_owned());
         let menu_session = session_id.map(str::to_owned);
         let name = format!("pane-header-{pane_id}");
-        let label: SharedString = drag::ghost_label(parts.map(|parts| parts.title.as_str())).into();
+        let ghost = parts
+            .map(|parts| parts.title.as_str())
+            .or_else(|| follow.map(follow_label));
+        let label: SharedString = drag::ghost_label(ghost).into();
         let payload = DragPayload::Pane {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
@@ -2162,7 +2209,13 @@ impl RootView {
             .when(at == TipAt::BelowRow, |row| {
                 row.child(header_row_probe(pane_id))
             })
-            .children(header_title(pane_id, parts, at, floors, cx))
+            .children(header_title(
+                pane_id,
+                pane_title(parts, follow),
+                at,
+                floors,
+                cx,
+            ))
             .child(div().flex_1())
             .children(controls)
             .children(buttons)
@@ -2670,6 +2723,7 @@ impl RootView {
             pane_id,
             session_id,
             parts,
+            follow: self.tabs.pane_follow(tab_id, pane_id),
             at,
             here,
         }
@@ -3127,11 +3181,12 @@ fn header_fade_stops(fill: u32, accent: u32) -> (gpui::LinearColorStop, gpui::Li
 }
 
 /// The header's left side: the status glyph, the name and the chips, or
-/// "Empty pane", each tipping `at`. With `floors`, a text chip shrinks no
-/// further than [`CHIP_MIN_WIDTH`]; without, as far as nothing.
+/// what the pane follows instead, or "Empty pane", each tipping `at`. With
+/// `floors`, a text chip shrinks no further than [`CHIP_MIN_WIDTH`];
+/// without, as far as nothing.
 fn header_title(
     pane_id: &str,
-    parts: Option<&PaneHeaderParts>,
+    named: PaneTitle<'_>,
     at: TipAt,
     floors: bool,
     cx: &mut Context<RootView>,
@@ -3146,8 +3201,12 @@ fn header_title(
         .min_w(px(0.0))
         .overflow_hidden()
         .whitespace_nowrap();
-    let Some(parts) = parts else {
-        return vec![title.child(drag::EMPTY_PANE_LABEL).into_any_element()];
+    let PaneTitle::Session(parts) = named else {
+        let label = match named {
+            PaneTitle::Follow(follow) => follow_label(follow),
+            _ => drag::EMPTY_PANE_LABEL,
+        };
+        return vec![title.child(label).into_any_element()];
     };
     let title = title
         .text_size(ui_px(cx, TITLE_TEXT_SIZE))
@@ -3360,7 +3419,7 @@ fn status_label(status: SessionStatus, background: bool) -> &'static str {
 }
 
 /// Muted text centred in the space it is given.
-fn muted_note(offset: i8, text: &'static str, t: &UiTheme) -> Div {
+fn muted_note(offset: i8, text: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_1()
@@ -3369,7 +3428,19 @@ fn muted_note(offset: i8, text: &'static str, t: &UiTheme) -> Div {
         .justify_center()
         .text_size(ui_px_at(offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.muted))
-        .child(text)
+        .child(text.into())
+}
+
+/// What a pane that follows something instead of a session draws: a muted
+/// note naming what it follows.
+fn follow_placeholder(follow: &PaneFollow, pane_id: &str, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
+    let text = match follow {
+        PaneFollow::DispatchRun { run_id } => format!("Following dispatch run {run_id}."),
+        PaneFollow::Unknown => "This pane needs a newer app.".to_owned(),
+    };
+    muted_note(crate::fonts::ui_text_size(cx), text, &t)
+        .driver_id(|| format!("pane-follow-{pane_id}"))
 }
 
 /// A muted `heading` over a row of `buttons`, centred in the space it is
@@ -3807,16 +3878,59 @@ fn popout_column(toolbar: AnyElement, body: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
+/// What a pane shows: the session it holds, or what it follows instead.
+#[derive(Clone, Copy)]
+struct PaneShown<'a> {
+    session: Option<&'a str>,
+    follow: Option<&'a PaneFollow>,
+}
+
 /// What a pane header builds: its ids, the session it shows with the header
-/// parts it draws, its buttons' tip place and the window it draws in.
+/// parts it draws, what the pane follows instead, its buttons' tip place and
+/// the window it draws in.
 #[derive(Clone, Copy)]
 struct HeaderTarget<'a> {
     tab_id: &'a str,
     pane_id: &'a str,
     session_id: Option<&'a str>,
     parts: Option<&'a PaneHeaderParts>,
+    /// What the pane follows instead of a session, for its title.
+    follow: Option<&'a PaneFollow>,
     at: TipAt,
     here: WindowId,
+}
+
+/// What a pane's header names: the session it shows with the parts it
+/// draws, what it follows instead, or nothing for an empty pane.
+#[derive(Clone, Copy)]
+enum PaneTitle<'a> {
+    /// The session's parts.
+    Session(&'a PaneHeaderParts),
+    /// What the pane follows instead of a session.
+    Follow(&'a PaneFollow),
+    /// An empty pane.
+    Empty,
+}
+
+/// What a pane's header names, from the parts of the session it shows and
+/// what it follows instead.
+fn pane_title<'a>(
+    parts: Option<&'a PaneHeaderParts>,
+    follow: Option<&'a PaneFollow>,
+) -> PaneTitle<'a> {
+    match (parts, follow) {
+        (Some(parts), _) => PaneTitle::Session(parts),
+        (None, Some(follow)) => PaneTitle::Follow(follow),
+        (None, None) => PaneTitle::Empty,
+    }
+}
+
+/// What a pane that follows something is titled when it shows no session.
+fn follow_label(follow: &PaneFollow) -> &'static str {
+    match follow {
+        PaneFollow::DispatchRun { .. } => "Dispatch run",
+        PaneFollow::Unknown => "Unknown pane",
+    }
 }
 
 /// What a pane header's cluster, Pop out to the prompt arrows, holds.

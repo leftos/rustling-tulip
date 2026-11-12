@@ -2396,7 +2396,7 @@ pub enum GridNode {
 pub enum PaneFollow {
     /// The live view of a dispatch run, by its run id.
     DispatchRun { run_id: String },
-    /// A follow kind this build does not know (a newer client's); kept as is.
+    /// A follow kind this build does not know (a newer client's). It is written back as `{"kind":"unknown"}`, so the newer follow's fields are lost.
     #[serde(other)]
     Unknown,
 }
@@ -8416,6 +8416,11 @@ mod tests {
         };
         assert_eq!(pane_id, "p1");
         assert_eq!(follow, Some(PaneFollow::Unknown));
+        assert_eq!(
+            serde_json::to_string(&PaneFollow::Unknown).expect("an unknown follow serializes"),
+            r#"{"kind":"unknown"}"#,
+            "an unknown follow is written back by its kind alone, losing a newer follow's fields"
+        );
     }
 
     #[test]

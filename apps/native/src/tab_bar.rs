@@ -26,8 +26,8 @@ use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator,
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tab_menu::{MenuLine, TabAction, head_lines, merge_lines, rearrange_lines};
 use crate::tabs::{
-    PillClick, TabBadge, TabCounts, bound_pane_count, collect_panes, sole_remote_host,
-    tab_session_counts,
+    PillClick, TabBadge, TabCounts, bound_pane_count, collect_panes, session_pane_count,
+    sole_remote_host, tab_session_counts,
 };
 use crate::target::HostKey;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -196,6 +196,7 @@ impl RootView {
             return Vec::new();
         };
         let bound = tab.grid().map_or(0, bound_pane_count);
+        let session_panes = tab.grid().map_or(0, session_pane_count);
         let rearrange = if self.tabs.active_id() == Some(menu.tab_id.as_str())
             || self.is_tab_popped(&menu.tab_id)
         {
@@ -216,7 +217,7 @@ impl RootView {
             }
             lines.extend(rearrange);
         }
-        if bound >= 3 {
+        if session_panes >= 3 {
             lines.push(MenuLine::row(
                 "tab-menu-move-panes",
                 "Move panes to new tab…",
