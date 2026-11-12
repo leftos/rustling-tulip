@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Queued gates in the Gates panel show the command they will run, not the gate wrapper's own arguments.
 - A followed dispatch run's recent actions no longer fill up with hook and thinking-token lines that pushed out its tool calls.
 
 ## v0.13.0-alpha

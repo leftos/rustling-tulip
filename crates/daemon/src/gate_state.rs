@@ -35,6 +35,55 @@ fn command_key(command: &str) -> String {
     ::gate_state::normalize_command(command)
 }
 
+/// The byte spans of a command line's tokens, split on whitespace outside double quotes.
+fn token_spans(line: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut quoted = false;
+    for (index, ch) in line.char_indices() {
+        if ch == '"' {
+            quoted = !quoted;
+            start.get_or_insert(index);
+        } else if ch.is_whitespace() && !quoted {
+            if let Some(from) = start.take() {
+                spans.push((from, index));
+            }
+        } else {
+            start.get_or_insert(index);
+        }
+    }
+    if let Some(from) = start {
+        spans.push((from, line.len()));
+    }
+    spans
+}
+
+/// Whether a token names the gate program: its quotes and any folder removed, its file name is `gate` or
+/// `gate.exe`, in any case.
+fn is_gate_program(token: &str) -> bool {
+    let token = token.trim_matches('"');
+    let name = token.rsplit(['\\', '/']).next().unwrap_or(token);
+    name.eq_ignore_ascii_case("gate") || name.eq_ignore_ascii_case("gate.exe")
+}
+
+/// The command a gate run line wraps: the line after its first standalone `--` when the line is a gate run and
+/// something follows that `--`, the line itself otherwise.
+fn inner_command(line: &str) -> &str {
+    let spans = token_spans(line);
+    let first = spans.first().map(|&(from, to)| &line[from..to]);
+    let second = spans.get(1).map(|&(from, to)| &line[from..to]);
+    if !first.is_some_and(is_gate_program) || second != Some("run") {
+        return line;
+    }
+    let Some(&(_, end)) = spans.iter().find(|&&(from, to)| &line[from..to] == "--") else {
+        return line;
+    };
+    match line[end..].trim_start() {
+        "" => line,
+        inner => inner,
+    }
+}
+
 /// The repo a live gate's folder belongs to, as the history names it.
 fn repo_of(repos: &RepoFolders, cwd: Option<&str>) -> Option<String> {
     cwd.and_then(|cwd| repos.repo_of(cwd))
@@ -101,12 +150,14 @@ fn slot_of(row: &::gate_state::SlotRow, repos: &RepoFolders) -> protocol::GateSl
 
 /// A gate waiting for a slot.
 fn waiting_of(gate: &::gate_state::Waiting, repos: &RepoFolders) -> protocol::GateWaiting {
+    let command_line = inner_command(&gate.command_line).to_owned();
+    let command_key = Some(command_key(&command_line));
     protocol::GateWaiting {
         pid: gate.pid,
         since: gate.since.as_deref().and_then(iso),
         cwd: gate.cwd.clone(),
-        command_line: gate.command_line.clone(),
-        command_key: Some(command_key(&gate.command_line)),
+        command_line,
+        command_key,
         repo: repo_of(repos, gate.cwd.as_deref()),
     }
 }
@@ -168,6 +219,11 @@ fn covered_of(run: &::gate_state::CoveredRun) -> protocol::GateCoveredRun {
 
 /// One queued gate's ticket.
 fn ticket_of(ticket: &::gate_state::QueueTicket, repos: &RepoFolders) -> protocol::GateQueueTicket {
+    let command_line = ticket
+        .command_line
+        .as_deref()
+        .map(|line| inner_command(line).to_owned());
+    let command_key = command_line.as_deref().map(command_key);
     protocol::GateQueueTicket {
         kind: ticket.kind.clone(),
         holds: ticket.holds,
@@ -178,10 +234,10 @@ fn ticket_of(ticket: &::gate_state::QueueTicket, repos: &RepoFolders) -> protoco
         arrived: iso(&ticket.arrived),
         age_seconds: ticket.age_seconds,
         cwd: ticket.cwd.clone(),
-        command_line: ticket.command_line.clone(),
+        command_line,
         reason: ticket.reason.clone(),
         expected: ticket.expected.as_ref().map(expected_of),
-        command_key: ticket.command_line.as_deref().map(command_key),
+        command_key,
         repo: repo_of(repos, ticket.cwd.as_deref()),
     }
 }
@@ -733,14 +789,19 @@ mod tests {
     use crate::state::AppState;
 
     use super::{
-        GateHub, GateReader, POLL_INTERVAL, RepoFolders, gate_installed, history_to_wire,
-        read_once, same_state, spawn_poll, to_wire,
+        GateHub, GateReader, POLL_INTERVAL, RepoFolders, command_key, gate_installed,
+        history_to_wire, inner_command, read_once, same_state, spawn_poll, ticket_of, to_wire,
+        waiting_of,
     };
 
     /// The moment a test describes.
     const NOW: &str = "2026-10-01T12:00:00.1234567Z";
     /// When a test's gate started, as the gate writes it.
     const START: &str = "2026-10-01T11:00:00.5000000Z";
+    /// A gate run line as a waiting gate's or a ticket's `command_line` carries it.
+    const GATE_RUN: &str = "gate.exe run --cd X:/dev/repo --log .tmp/a.log --slot heavy -- cargo nextest run -p daemon";
+    /// The command `GATE_RUN` wraps.
+    const INNER: &str = "cargo nextest run -p daemon";
 
     /// A machine with no gate slot's mutex open and no process whose working directory can be read.
     struct QuietProbe;
@@ -889,6 +950,73 @@ mod tests {
             reason: None,
             expected: None,
         }
+    }
+
+    /// A gate run line shows the command it wraps: a quoted program path, and a second `--` inside the inner
+    /// command, both leave the rest of the line as written.
+    #[test]
+    fn inner_command_is_what_follows_the_first_double_dash() {
+        assert_eq!(inner_command(GATE_RUN), INNER);
+        assert_eq!(
+            inner_command(r#""C:\Users\me\bin\gate.exe" run --log X:\dev\x.log -- dotnet build"#),
+            "dotnet build"
+        );
+        assert_eq!(
+            inner_command("gate run --slot light -- prek run --files a.rs -- b"),
+            "prek run --files a.rs -- b"
+        );
+    }
+
+    /// A line that is not a gate run, a gate run with no `--`, and a gate run whose quoted reason holds a `--`
+    /// show their own command.
+    #[test]
+    fn inner_command_leaves_other_lines_alone() {
+        for line in [
+            "cargo build --release",
+            "gate.exe status",
+            "gate.exe run --slot heavy",
+        ] {
+            assert_eq!(inner_command(line), line);
+        }
+        assert_eq!(
+            inner_command(r#"gate.exe run --reason "a -- b" --slot heavy -- cargo test"#),
+            "cargo test"
+        );
+    }
+
+    /// A waiting gate's row shows the command its own gate run line wraps, keyed by that command.
+    #[test]
+    fn a_waiting_gate_shows_its_inner_command_and_key() {
+        let gate = Waiting {
+            pid: 700,
+            since: Some(START.to_owned()),
+            cwd: Some("X:\\dev\\repo".to_owned()),
+            command_line: GATE_RUN.to_owned(),
+        };
+
+        assert_eq!(
+            waiting_of(&gate, &no_repos()),
+            GateWaiting {
+                pid: 700,
+                since: Some(start()),
+                cwd: Some("X:\\dev\\repo".to_owned()),
+                command_line: INNER.to_owned(),
+                command_key: Some(command_key(INNER)),
+                repo: None,
+            }
+        );
+    }
+
+    /// A queue ticket's row shows the command its own gate run line wraps, keyed by that command.
+    #[test]
+    fn a_queue_ticket_shows_its_inner_command_and_key() {
+        let mut ticket = queued(5.0);
+        ticket.command_line = Some(GATE_RUN.to_owned());
+
+        let wire = ticket_of(&ticket, &no_repos());
+
+        assert_eq!(wire.command_line.as_deref(), Some(INNER));
+        assert_eq!(wire.command_key, Some(command_key(INNER)));
     }
 
     /// The state assembly runs from this crate: two empty pools, heavy then light.
