@@ -1701,8 +1701,8 @@ impl RootView {
             .min_h(px(0.0))
             .capture_any_mouse_down(cx.listener({
                 let pane_id = pane_id.to_owned();
-                move |this, _: &MouseDownEvent, window, cx| {
-                    this.focus_inactive_pane(&pane_id, window, cx);
+                move |this, event: &MouseDownEvent, window, cx| {
+                    this.focus_inactive_pane(&pane_id, event, window, cx);
                 }
             }))
             .children(self.orphan_banner(
@@ -1760,9 +1760,16 @@ impl RootView {
     }
 
     /// Tells the pressed pane whether it is the tab's focused one, then, with
-    /// the General setting off, focuses it and stops the press ahead of any
-    /// pane body's own handler: only one click's focus, nothing else.
-    fn focus_inactive_pane(&mut self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// the General setting off, drops what any press drops and gives the pane
+    /// its tab's focus and keyboard, stopping the press ahead of any pane
+    /// body's own handler: one click's focus, nothing else.
+    fn focus_inactive_pane(
+        &mut self,
+        pane_id: &str,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab_id) = self.panes.get(pane_id).map(|slot| slot.tab_id.clone()) else {
             return;
         };
@@ -1774,7 +1781,8 @@ impl RootView {
         if ClickThrough::get(cx) || !inactive {
             return;
         }
-        self.focus_pane_view(pane_id, window, cx);
+        self.on_any_mouse_down(event, window, cx);
+        self.focus_pane_in(&tab_id, pane_id, window, cx);
         cx.stop_propagation();
     }
 

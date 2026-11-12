@@ -15,7 +15,10 @@ use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use gpui::{
     Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Point, TestAppContext, point, px, size,
 };
-use protocol::{ClientMessage, DaemonMessage, ImagePaste, SessionSnapshot, SplitDirection};
+use protocol::{
+    ChatScreen, ClientMessage, ComposerState, DaemonMessage, ImagePaste, SessionSnapshot,
+    SplitDirection,
+};
 use rustling_tulip_native::fonts::FontSettings;
 use rustling_tulip_native::ui_theme::UiTheme;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
@@ -792,6 +795,29 @@ fn two_panes_on_s1<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a>
     Harness::with(cx, dir, &fixture)
 }
 
+/// `s1` in `p1` and `s2` in `p2`, both scrollbacks answered, `p1` focused
+/// and everything sent so far drained.
+fn two_panes_on_two_sessions<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    h.cx.update(|window, _| window.activate_window());
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
+    h
+}
+
 /// `two_panes_on_s1` with mouse reporting on and `p1` focused and drained,
 /// so a press on `p2` is the first one there with nothing left over.
 fn one_focused_pane_reporting<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
@@ -1052,6 +1078,92 @@ fn with_click_through_off_a_shift_right_press_that_brings_focus_sends_nothing(
     assert!(
         h.sent_input("s1").is_empty(),
         "a Shift+right press that brings focus reports nothing"
+    );
+}
+
+#[gpui::test]
+fn with_click_through_off_a_click_on_an_unfocused_chat_pane_focuses_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_panes_on_two_sessions(cx, &dir);
+    h.root_update(|root, window, cx| root.toggle_pane_view("p2", window, cx));
+    let request = h.sent().iter().find_map(|msg| match msg {
+        ClientMessage::LoadChat {
+            session_id,
+            request_id,
+        } if session_id == "s2" => request_id.clone(),
+        _ => None,
+    });
+    h.send(DaemonMessage::Chat {
+        session_id: "s2".to_owned(),
+        entries: Vec::new(),
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id: request,
+    });
+    set_click_through_off(&mut h);
+
+    let at = h.bounds("chat-composer").center();
+    h.click(at, Modifiers::none());
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "the click focuses the pane showing its chat, which no terminal handles"
+    );
+
+    h.click(at, Modifiers::none());
+    h.keys("h i");
+    assert_eq!(
+        h.root(|root, cx| root.chat_composer_text("s2", cx))
+            .as_deref(),
+        Some("hi"),
+        "and once focused, the next click and the keys reach the chat"
+    );
+}
+
+#[gpui::test]
+fn with_click_through_off_a_click_on_an_inactive_pane_disarms_an_armed_stop(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+    set_click_through_off(&mut h);
+    h.click_on("pane-stop-p1");
+    assert!(h.in_model("pane-stop-confirm-p1"), "one click arms Stop");
+
+    let at = h.cell_center("p2", 2, 3);
+    h.click(at, Modifiers::none());
+    assert!(
+        !h.in_model("pane-stop-confirm-p1"),
+        "the press into the inactive pane disarms it, as a press anywhere does"
+    );
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "and it focuses that pane"
+    );
+}
+
+#[gpui::test]
+fn with_click_through_off_a_click_on_an_inactive_pane_closes_the_jump_palette(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+    set_click_through_off(&mut h);
+    h.keys("ctrl-shift-p");
+    assert!(
+        h.root(|root, _| root.quick_jump_open()),
+        "the palette is open"
+    );
+
+    let at = h.cell_center("p2", 2, 3);
+    h.click(at, Modifiers::none());
+    assert!(
+        !h.root(|root, _| root.quick_jump_open()),
+        "the press into the inactive pane closes it, as a press anywhere does"
     );
 }
 
