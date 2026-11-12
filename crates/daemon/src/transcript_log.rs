@@ -138,6 +138,11 @@ impl TranscriptLog {
             .retain(|(follower, _)| *follower != connection);
     }
 
+    /// Whether any connection follows the log.
+    pub(crate) fn has_followers(&self) -> bool {
+        !self.followers.is_empty()
+    }
+
     /// Tell the followers the run ended.
     pub(crate) fn end(&self, source: &TranscriptSource) {
         for (_, outbox) in &self.followers {

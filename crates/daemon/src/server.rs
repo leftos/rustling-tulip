@@ -44,6 +44,7 @@ mod screen;
 mod settings;
 mod summarizer;
 mod tail;
+mod transcripts;
 mod update;
 pub(crate) use self::update::HostUpdate;
 /// What a bridge reads to refuse starting while an update is being applied.
@@ -253,6 +254,8 @@ pub struct Hub {
     /// The dispatch tool's live runs and their folder; `Some` exactly when
     /// the daemon watches a live-run folder.
     pub(crate) dispatch_runs: Option<crate::dispatch_runs::DispatchRunsHub>,
+    /// The subagent transcripts the connections follow read-only.
+    pub(crate) subagent_tails: crate::subagents::tail::SubagentTails,
     /// What a [`ClientMessage::RemoteUpdate`] checks the host against: where
     /// the install is, what runs from it, and whether an update is already
     /// running in this daemon.
@@ -613,6 +616,10 @@ pub async fn run(
     let devices = load_devices(&dirs);
     let live_devices =
         live_devices::LiveDevices::notifying(pairing::devices_notifier(&devices, &state_events));
+    let subagent_tails = crate::subagents::tail::SubagentTails::new(
+        Arc::clone(&sessions),
+        Arc::clone(&client_count),
+    );
     let hub = Hub {
         state,
         sessions,
@@ -662,6 +669,7 @@ pub async fn run(
             )
         }),
         dispatch_runs,
+        subagent_tails,
         host_update: Arc::new(HostUpdate::for_this_daemon()?),
     };
     start_hub_tasks(&hub, client_count_rx);
@@ -1223,9 +1231,10 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::SetGateSlotCount { .. } | ClientMessage::GateHistory { .. }) => {
             gate::handle(hub, m, ctx);
         }
-        m @ (ClientMessage::StopDispatchRun { .. }
-        | ClientMessage::FollowTranscript { .. }
-        | ClientMessage::UnfollowTranscript { .. }) => dispatch_runs::handle(hub, m, ctx),
+        m @ ClientMessage::StopDispatchRun { .. } => dispatch_runs::handle(hub, m, ctx),
+        m @ (ClientMessage::FollowTranscript { .. } | ClientMessage::UnfollowTranscript { .. }) => {
+            transcripts::handle(hub, m, ctx);
+        }
     }
     Ok(())
 }
@@ -1324,6 +1333,9 @@ async fn start_logins(
 
 /// Start the tasks that watch the hub for the daemon's lifetime.
 fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usize>) {
+    // Ends a removed session's subagent tails; it subscribes before any
+    // connection is served, so before any follow.
+    hub.subagent_tails.spawn_removal_watcher();
     start_history_broadcaster(hub);
     // The key store blocks, so the summarizer's key states are first read
     // here rather than at construction.

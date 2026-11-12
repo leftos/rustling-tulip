@@ -39,20 +39,6 @@ enum Outcome {
 /// kill.
 pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
     match msg {
-        ClientMessage::FollowTranscript { source, request_id } => {
-            let Some(dispatch) = &hub.dispatch_runs else {
-                let _ = ctx.out_tx.send(not_followed(request_id));
-                return;
-            };
-            dispatch
-                .runs
-                .follow_transcript(&source, request_id, ctx.connection, ctx.out_tx);
-        }
-        ClientMessage::UnfollowTranscript { source } => {
-            if let Some(dispatch) = &hub.dispatch_runs {
-                dispatch.runs.unfollow_transcript(&source, ctx.connection);
-            }
-        }
         ClientMessage::StopDispatchRun { run_id, request_id } => {
             stop_run(hub, ctx, run_id, request_id);
         }
@@ -78,7 +64,7 @@ fn stop_run(hub: &Hub, ctx: &ConnCtx<'_>, run_id: String, request_id: Option<Str
 }
 
 /// The `Error` a dispatch-run request gets from a daemon that follows no runs.
-fn not_followed(request_id: Option<String>) -> DaemonMessage {
+pub(super) fn not_followed(request_id: Option<String>) -> DaemonMessage {
     DaemonMessage::Error {
         message: "dispatch runs are not followed by this daemon".to_owned(),
         request_id,

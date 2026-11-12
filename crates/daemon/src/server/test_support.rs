@@ -167,6 +167,10 @@ pub(super) fn build_test_hub(
         live_lines.clone(),
         Arc::clone(&client_count),
     );
+    let subagent_tails = crate::subagents::tail::SubagentTails::new(
+        Arc::clone(&sessions),
+        Arc::clone(&client_count),
+    );
     let hub = Hub {
         state,
         sessions,
@@ -213,6 +217,7 @@ pub(super) fn build_test_hub(
         accounts: None,
         gate_state: None,
         dispatch_runs: None,
+        subagent_tails,
         host_update: Arc::new(super::HostUpdate::nothing_installed()),
     };
     (hub, scratch, attention_rx)

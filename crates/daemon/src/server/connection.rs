@@ -281,6 +281,7 @@ fn connection_watches(
     crate::dashboard::WatchGuard,
     crate::chat_mirror::ChatLoadGuard,
     Option<crate::dispatch_runs::TranscriptFollowGuard>,
+    crate::subagents::tail::SubagentFollowGuard,
     crate::presence::PresenceGuard,
     ClientGuard,
 ) {
@@ -290,6 +291,7 @@ fn connection_watches(
         hub.dispatch_runs
             .as_ref()
             .map(|dispatch| dispatch.runs.follow_guard(connection)),
+        hub.subagent_tails.follow_guard(connection),
         crate::presence::PresenceGuard::new(Arc::clone(&hub.presence), connection),
         register_client(hub, connection, handshake, out_tx, auth),
     )

@@ -160,6 +160,10 @@ A first-layer subagent is listed with its subtree while it or a descendant runs.
 
 The list is written through `SessionRegistry::update` only when it changed, and a reading for a session that stopped or changed conversation while it was read is dropped. In the Claude plugin, a subagent sidecar's `finished: true` counts only when the sidecar was written at least as late as the transcript's last write (an unknown time still counts), so a resumed subagent reads as running again.
 
+A client follows a subagent's transcript with `FollowTranscript` (`TranscriptSource::Subagent`; `SubagentTails` in `crates/daemon/src/subagents/tail.rs`, a `Hub` field). The first follower of a (session, agent) starts one tail that reads the agent plugin's transcript file from its start into a `TranscriptLog`; the path comes from the host session's record and the client's agent id alone, so the subagent need not be in the list.
+
+The tail stops when the last follower unfollows or its connection closes, or when the session is removed, which ends each follower with `TranscriptAppend { ended: true }`; with no client connected it parks. The wire shape is in [wire-protocol.md](./wire-protocol.md).
+
 ## Multi-repo workspace sessions
 
 Multi-repo workspace sessions spawn one `claude` process with `cwd = members[0].worktree_path` and `--add-dir <path>` for every additional member. Worktrees are created/reused per member via `git -C <repo> worktree add` under the shared `<worktrees-root>/wt.<branch-slug>/<workspace-slug>/` directory (see [on-disk.md](on-disk.md) — the layout preserves inter-member relative paths within a workspace).

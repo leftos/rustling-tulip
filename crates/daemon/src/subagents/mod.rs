@@ -15,6 +15,7 @@
 //! [`FINISHED_CAP`] of them at most. With no typed prompt read, only the
 //! process start and the cap apply.
 
+pub(crate) mod tail;
 #[cfg(test)]
 mod tests;
 

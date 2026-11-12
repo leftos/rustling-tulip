@@ -3226,6 +3226,10 @@ mod tests {
             live_lines.clone(),
             Arc::clone(&client_count),
         );
+        let subagent_tails = crate::subagents::tail::SubagentTails::new(
+            Arc::clone(&sessions),
+            Arc::clone(&client_count),
+        );
         let hub = Hub {
             state,
             sessions,
@@ -3272,6 +3276,7 @@ mod tests {
             accounts: None,
             gate_state: None,
             dispatch_runs: None,
+            subagent_tails,
             host_update: Arc::new(crate::server::HostUpdate::nothing_installed()),
         };
         (hub, preset_rx, scratch)

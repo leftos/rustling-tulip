@@ -218,7 +218,7 @@ Each step lands on `main` on its own and keeps the suite green. Hotspot files ar
   Files: `crates/daemon/src/dispatch_runs/transcript.rs` (moved), `crates/daemon/src/transcript_log.rs`, `crates/daemon/src/dispatch_runs/mod.rs`, `crates/daemon/src/main.rs` (the `mod` line).
 
   Test: the moved tests and `dispatch_runs/tests.rs` pass unchanged. Depends on: TV.3 landing on `main`.
-- [ ] **SS.7 Daemon: subagent tails and follow routing.** `SubagentTails` (started by the first follow; stopped by the last unfollow, a closed connection, or session removal with `ended: true`), the follow guard, and `server/transcripts.rs` routing both follow messages by source.
+- [x] **SS.7 Daemon: subagent tails and follow routing.** `SubagentTails` (started by the first follow; stopped by the last unfollow, a closed connection, or session removal with `ended: true`), the follow guard, and `server/transcripts.rs` routing both follow messages by source.
 
   Files: `crates/daemon/src/subagents/tail.rs` (new), `crates/daemon/src/server/transcripts.rs` (new), `crates/daemon/src/server.rs` (hotspot: the `Hub` field, and the or-pattern moving to `transcripts::handle`), `crates/daemon/src/server/dispatch_runs.rs` (its follow arms go), `crates/daemon/src/server/connection.rs` (the guard).
 
