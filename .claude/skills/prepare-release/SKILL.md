@@ -91,7 +91,7 @@ The assets are built from `HEAD`, which is the commit Phase 8 tags: nothing land
 1. Write the version's `CHANGELOG.md` section without its `## v<version>` heading to `.tmp/release-notes-v<version>.md`, the breaking marker kept as its first line.
 2. `gh release create v<version> target/installer/rustling-tulip-<version>-setup.exe target/installer/rustling-tulip-<version>-setup.exe.sha256 target/installer/rustling-tulip-<version>-macos-arm64.dmg target/installer/rustling-tulip-<version>-macos-arm64.zip target/installer/rustling-tulip-<version>-macos-arm64.zip.sha256 --repo leftos/rustling-tulip --title "rustling-tulip v<version>" --notes-file .tmp/release-notes-v<version>.md --latest`. Every build is an alpha, and the pre-release flag would hide the newest from the repo's home page, so the release is always a regular one.
 
-**Done when** `gh release view v<version> --repo leftos/rustling-tulip --json isLatest,isPrerelease,assets` shows it latest, not pre-release, with the five assets (two on an approved Windows-only release).
+**Done when** `gh release view v<version> --repo leftos/rustling-tulip --json isPrerelease,assets` shows it not pre-release, with the five assets (two on an approved Windows-only release), and `gh api repos/leftos/rustling-tulip/releases/latest --jq .tag_name` prints `v<version>` (`gh release view` has no latest field).
 
 ## Phase 10: Linear cut
 
