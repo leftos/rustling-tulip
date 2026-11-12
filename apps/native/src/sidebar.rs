@@ -4,8 +4,8 @@
 
 use protocol::{
     AgentDescriptor, AgentId, AppearanceOverrides, CharRange, ContainerRef, DaemonMessage,
-    RepoEntry, SessionChip, SessionKind, SessionMode, SessionRole, SessionSnapshot, SessionStatus,
-    SpawnConfig, SpawnTarget, TabEntry, WorkspaceEntry,
+    DispatchRunSnapshot, RepoEntry, SessionChip, SessionKind, SessionMode, SessionRole,
+    SessionSnapshot, SessionStatus, SpawnConfig, SpawnTarget, TabEntry, WorkspaceEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
@@ -167,6 +167,13 @@ pub enum RepoSort {
     NeedsYou,
 }
 
+/// What a leaf stands for: a session, or a dispatch run the daemon lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafKind {
+    Session,
+    Dispatch,
+}
+
 /// One session row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
@@ -175,6 +182,7 @@ pub enum RepoSort {
 )]
 pub struct Leaf {
     pub id: String,
+    pub kind: LeafKind,
     /// The host that lists the session: a Repos-view leaf's container's,
     /// a tab's leaf the host of the pane that shows it.
     pub host: HostKey,
@@ -381,6 +389,8 @@ pub struct TreeInputs<'a> {
     /// Agent sessions whose finished turn this client has not seen.
     pub unseen: &'a HashSet<String>,
     pub collapsed: &'a BTreeSet<String>,
+    /// The dispatch runs the host's daemon lists.
+    pub runs: &'a [DispatchRunSnapshot],
 }
 
 /// Where a working directory belongs.
@@ -1370,6 +1380,8 @@ struct HostSlice {
     /// Agent sessions whose turn ended while this client showed another
     /// session focused, until the user looks at them.
     unseen: HashSet<String>,
+    /// The dispatch runs the daemon lists, in the order it sent them.
+    pub dispatch_runs: Vec<DispatchRunSnapshot>,
 }
 
 impl HostSlice {
@@ -1392,8 +1404,38 @@ impl HostSlice {
                 self.session_order
                     .insert(container_id.clone(), ordered_ids.clone());
             }
+            DaemonMessage::DispatchRuns { .. }
+            | DaemonMessage::DispatchRunUpdated { .. }
+            | DaemonMessage::DispatchRunRemoved { .. } => self.apply_run_message(msg),
             _ => self.apply_session_message(msg, focused),
         }
+    }
+
+    /// Folds a dispatch run list, update or removal into the slice's runs.
+    fn apply_run_message(&mut self, msg: &DaemonMessage) {
+        match msg {
+            DaemonMessage::DispatchRuns { runs } => runs.clone_into(&mut self.dispatch_runs),
+            DaemonMessage::DispatchRunUpdated { run } => {
+                match self
+                    .dispatch_runs
+                    .iter_mut()
+                    .find(|r| r.run_id == run.run_id)
+                {
+                    Some(existing) => existing.clone_from(run),
+                    None => self.dispatch_runs.push(run.clone()),
+                }
+            }
+            DaemonMessage::DispatchRunRemoved { run_id } => {
+                self.dispatch_runs.retain(|r| &r.run_id != run_id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Forgets every dispatch run, as a new connection to the host must
+    /// before its daemon lists them again.
+    pub fn forget_runs(&mut self) {
+        self.dispatch_runs.clear();
     }
 
     fn apply_session_message(&mut self, msg: &DaemonMessage, focused: Option<&str>) {
@@ -1503,6 +1545,7 @@ impl HostSlice {
             attention: &self.attention,
             unseen: &self.unseen,
             collapsed,
+            runs: &self.dispatch_runs,
         }
     }
 
@@ -1791,6 +1834,14 @@ impl SidebarModel {
         self.slice_mut(host).apply(msg, focused.as_deref());
     }
 
+    /// Forgets `host`'s dispatch runs, as a new connection to it must; a
+    /// remote host that never sent a slice gains none.
+    pub fn forget_runs(&mut self, host: &HostKey) {
+        if let Some(slice) = self.listed_slice_mut(host) {
+            slice.forget_runs();
+        }
+    }
+
     /// Records the session this client shows focused, so a turn that ends
     /// there is not marked unseen.
     pub fn set_focused_session(&mut self, id: Option<&str>) {
@@ -2035,9 +2086,14 @@ impl SidebarModel {
     fn active_keys(&self) -> HashSet<String> {
         self.slices()
             .flat_map(|(host, slice)| {
-                active_container_keys(&slice.repos, &slice.workspaces, &slice.sessions)
-                    .into_iter()
-                    .map(move |key| host_container_key(host, &key))
+                active_container_keys(
+                    &slice.repos,
+                    &slice.workspaces,
+                    &slice.sessions,
+                    &slice.dispatch_runs,
+                )
+                .into_iter()
+                .map(move |key| host_container_key(host, &key))
             })
             .collect()
     }
@@ -2108,6 +2164,7 @@ impl SidebarModel {
             .map(|(host, slice)| TabHost {
                 host,
                 sessions: &slice.sessions,
+                runs: &slice.dispatch_runs,
                 label_agents: slice.label_agents(),
                 rollups: TabRollups {
                     session_order: &slice.session_order,
@@ -3002,9 +3059,32 @@ struct Groups<'a> {
     dirs: BTreeMap<String, Vec<&'a SessionSnapshot>>,
     shells: Vec<&'a SessionSnapshot>,
     detached: Vec<&'a SessionSnapshot>,
+    /// Dispatch runs by the key of the container that holds them.
+    runs: HashMap<String, Vec<&'a DispatchRunSnapshot>>,
 }
 
 impl<'a> Groups<'a> {
+    /// Files dispatch run `run` under its repo or workspace, else under a
+    /// Dir container for its folder, which is made when no session sits
+    /// there.
+    fn place_run(
+        &mut self,
+        run: &'a DispatchRunSnapshot,
+        inputs: &TreeInputs<'a>,
+        members: &HashSet<&str>,
+    ) {
+        let key = match run_container(run, inputs.repos, inputs.workspaces, members) {
+            CwdHome::Workspace(id) => container_key(ContainerKind::Workspace, &id),
+            CwdHome::Repo(id) => container_key(ContainerKind::Repo, &id),
+            CwdHome::Dir(path) => {
+                let key = container_key(ContainerKind::Dir, &path);
+                self.dirs.entry(path).or_default();
+                key
+            }
+        };
+        self.runs.entry(key).or_default().push(run);
+    }
+
     fn place(&mut self, s: &'a SessionSnapshot, inputs: &TreeInputs<'a>, members: &HashSet<&str>) {
         if s.mode == SessionMode::PlainShell
             && let Some(cwd) = s.current_cwd.as_deref().filter(|cwd| !cwd.is_empty())
@@ -3072,16 +3152,16 @@ impl<'a> Groups<'a> {
 
 /// The repos view: workspaces and repos (manual order first, the rest
 /// alphabetically), then standalone shells, then unregistered directories,
-/// then Detached when it holds anything.
+/// then Detached when it holds anything. Each container's dispatch runs
+/// follow its sessions, newest first.
 pub fn build_containers(inputs: &TreeInputs<'_>) -> Vec<Container> {
-    let members: HashSet<&str> = inputs
-        .workspaces
-        .iter()
-        .flat_map(|w| w.member_repo_ids.iter().map(String::as_str))
-        .collect();
+    let members = member_repo_ids(inputs.workspaces);
     let mut groups = Groups::default();
     for s in inputs.sessions {
         groups.place(s, inputs, &members);
+    }
+    for run in inputs.runs {
+        groups.place_run(run, inputs, &members);
     }
     let mut out = apply_container_order(
         workspace_containers(inputs, &mut groups),
@@ -3127,7 +3207,22 @@ pub fn build_containers(inputs: &TreeInputs<'_>) -> Vec<Container> {
             detached,
         ));
     }
+    for container in &mut out {
+        if let Some(runs) = groups.runs.remove(&container.key) {
+            append_runs(container, runs);
+        }
+    }
     out
+}
+
+/// Appends a leaf per dispatch run to `container`, after its sessions,
+/// newest first; the manual session order never moves them.
+fn append_runs(container: &mut Container, mut runs: Vec<&DispatchRunSnapshot>) {
+    crate::dispatch_runs::sort_newest_first(&mut runs);
+    container.leaves.extend(
+        runs.into_iter()
+            .map(|run| crate::dispatch_runs::dispatch_leaf(run, &HostKey::Local)),
+    );
 }
 
 fn workspace_containers(inputs: &TreeInputs<'_>, groups: &mut Groups<'_>) -> Vec<Container> {
@@ -3259,6 +3354,7 @@ fn leaf(
     let up = agent_up(s, runtime.as_deref(), label_agents).is_some();
     Leaf {
         id: s.id.clone(),
+        kind: LeafKind::Session,
         // This PC's, as a built container's; a remote host's caller sets
         // its own.
         host: HostKey::Local,
@@ -3416,6 +3512,8 @@ pub struct TabRollups<'a> {
 pub struct TabHost<'a> {
     pub host: &'a HostKey,
     pub sessions: &'a [SessionSnapshot],
+    /// The dispatch runs the host's daemon lists.
+    pub runs: &'a [DispatchRunSnapshot],
     pub label_agents: &'a [AgentDescriptor],
     pub rollups: TabRollups<'a>,
 }
@@ -3437,9 +3535,10 @@ impl TabHost<'_> {
 /// listed sessions its panes show, each once per host, This PC's in the
 /// tab's manual order from This PC's `session_order` and then pane order,
 /// then the other hosts' in pane order (a diff tab's is empty); then
-/// Unbound, This PC's sessions no pane shows sorted by label, when there
-/// are any. `hosts` holds every host's part, each pane's session looked up
-/// in its own host's.
+/// Unbound when it holds anything: This PC's sessions no pane shows sorted
+/// by label, then every host's dispatch runs in `hosts` order, each host's
+/// newest first and each leaf carrying its own host. `hosts` holds every
+/// host's part, each pane's session looked up in its own host's.
 pub fn build_tab_containers(
     tabs: &[TabEntry],
     hosts: &[TabHost<'_>],
@@ -3458,17 +3557,25 @@ pub fn build_tab_containers(
             collapsed,
         ));
     }
-    let Some(local) = local else {
-        return out;
-    };
-    let mut unbound: Vec<&SessionSnapshot> = local
-        .sessions
-        .iter()
-        .filter(|s| !shown.contains(s.id.as_str()))
-        .collect();
-    if !unbound.is_empty() {
+    let mut leaves: Vec<Leaf> = Vec::new();
+    if let Some(local) = local {
+        let mut unbound: Vec<&SessionSnapshot> = local
+            .sessions
+            .iter()
+            .filter(|s| !shown.contains(s.id.as_str()))
+            .collect();
         unbound.sort_by(|a, b| cmp_ci(&a.label, &b.label));
-        let leaves = unbound.into_iter().map(|s| local.leaf(s)).collect();
+        leaves.extend(unbound.into_iter().map(|s| local.leaf(s)));
+    }
+    for host in hosts {
+        let mut runs: Vec<&DispatchRunSnapshot> = host.runs.iter().collect();
+        crate::dispatch_runs::sort_newest_first(&mut runs);
+        leaves.extend(
+            runs.into_iter()
+                .map(|run| crate::dispatch_runs::dispatch_leaf(run, host.host)),
+        );
+    }
+    if !leaves.is_empty() {
         out.push(tab_view_container(
             ContainerKind::Unbound,
             "",
@@ -3602,9 +3709,58 @@ fn apply_container_order(
 /// count). A repo is active when a session's member names it, or a member's
 /// start folder, one of the session's worktrees or its current folder is the
 /// repo's folder or under it; a workspace when a session was spawned for it
-/// or any of its member repos is active.
+/// or any of its member repos is active. A dispatch run that can still work
+/// marks the repo or workspace it is placed in active.
 #[must_use]
 pub(crate) fn active_container_keys(
+    repos: &[RepoEntry],
+    workspaces: &[WorkspaceEntry],
+    sessions: &[SessionSnapshot],
+    runs: &[DispatchRunSnapshot],
+) -> HashSet<String> {
+    let members = member_repo_ids(workspaces);
+    let run_keys: Vec<String> = runs
+        .iter()
+        .filter(|run| crate::dispatch_runs::marks_active(run.status))
+        .filter_map(
+            |run| match run_container(run, repos, workspaces, &members) {
+                CwdHome::Workspace(id) => Some(container_key(ContainerKind::Workspace, &id)),
+                CwdHome::Repo(id) => Some(container_key(ContainerKind::Repo, &id)),
+                CwdHome::Dir(_) => None,
+            },
+        )
+        .collect();
+    let mut keys = session_container_keys(repos, workspaces, sessions);
+    keys.extend(run_keys);
+    keys
+}
+
+/// The ids of every workspace's member repos.
+fn member_repo_ids(workspaces: &[WorkspaceEntry]) -> HashSet<&str> {
+    workspaces
+        .iter()
+        .flat_map(|w| w.member_repo_ids.iter().map(String::as_str))
+        .collect()
+}
+
+/// Where dispatch run `run` belongs: the container of its main checkout,
+/// else of its worktree, found as a plain shell's folder is.
+fn run_container(
+    run: &DispatchRunSnapshot,
+    repos: &[RepoEntry],
+    workspaces: &[WorkspaceEntry],
+    members: &HashSet<&str>,
+) -> CwdHome {
+    find_container_for_cwd(
+        crate::dispatch_runs::run_home(run),
+        repos,
+        workspaces,
+        members,
+    )
+}
+
+/// [`active_container_keys`]' part a live session counts for.
+fn session_container_keys(
     repos: &[RepoEntry],
     workspaces: &[WorkspaceEntry],
     sessions: &[SessionSnapshot],
@@ -4567,6 +4723,7 @@ pub(crate) mod tests {
         sessions: Vec<SessionSnapshot>,
         container_order: Vec<ContainerRef>,
         session_order: HashMap<String, Vec<String>>,
+        runs: Vec<DispatchRunSnapshot>,
     }
 
     impl Fixture {
@@ -4581,6 +4738,7 @@ pub(crate) mod tests {
                 sessions,
                 container_order: Vec::new(),
                 session_order: HashMap::new(),
+                runs: Vec::new(),
             }
         }
 
@@ -4596,6 +4754,7 @@ pub(crate) mod tests {
                 attention: &HashSet::new(),
                 unseen: &HashSet::new(),
                 collapsed: &BTreeSet::new(),
+                runs: &self.runs,
             })
         }
     }
@@ -4793,6 +4952,7 @@ pub(crate) mod tests {
             &[TabHost {
                 host: &HostKey::Local,
                 sessions: &[session("s1")],
+                runs: &[],
                 label_agents: &[],
                 rollups: TabRollups {
                     session_order: &HashMap::new(),
@@ -5470,6 +5630,7 @@ pub(crate) mod tests {
             &[TabHost {
                 host: &HostKey::Local,
                 sessions: &[excluded],
+                runs: &[],
                 label_agents: &[],
                 rollups: TabRollups {
                     session_order: &HashMap::new(),
@@ -7673,6 +7834,7 @@ pub(crate) mod tests {
             &repos,
             &[],
             &[by_member, by_worktree, by_cwd, by_start_folder, beside],
+            &[],
         );
 
         assert_eq!(
@@ -7699,13 +7861,16 @@ pub(crate) mod tests {
             ("abandoned", abandoned),
             ("parked", parked),
         ] {
-            assert!(active_container_keys(&repos, &[], &[s]).is_empty(), "{why}");
+            assert!(
+                active_container_keys(&repos, &[], &[s], &[]).is_empty(),
+                "{why}"
+            );
         }
 
         let mut orphan = in_repo("s", "r1");
         orphan.is_orphan = true;
         assert_eq!(
-            sorted_keys(&active_container_keys(&repos, &[], &[orphan])),
+            sorted_keys(&active_container_keys(&repos, &[], &[orphan], &[])),
             ["repo:r1"],
             "an orphan still runs"
         );
@@ -7723,7 +7888,7 @@ pub(crate) mod tests {
         spawned_for.workspace_id = Some("w3".to_owned());
         let member = in_repo("s2", "r1");
 
-        let active = active_container_keys(&repos, &workspaces, &[spawned_for, member]);
+        let active = active_container_keys(&repos, &workspaces, &[spawned_for, member], &[]);
 
         assert_eq!(sorted_keys(&active), ["repo:r1", "ws:w1", "ws:w3"]);
     }
@@ -7778,7 +7943,12 @@ pub(crate) mod tests {
         );
         let rest = keys(&manual)[5..].to_vec();
         assert_eq!(rest.len(), 3, "a shell, a folder and Detached");
-        let active = active_container_keys(&fixture.repos, &fixture.workspaces, &fixture.sessions);
+        let active = active_container_keys(
+            &fixture.repos,
+            &fixture.workspaces,
+            &fixture.sessions,
+            &fixture.runs,
+        );
 
         for (sort, expected) in [
             (
@@ -7824,9 +7994,14 @@ pub(crate) mod tests {
                 attention: &attention,
                 unseen: &HashSet::new(),
                 collapsed: &BTreeSet::new(),
+                runs: &fixture.runs,
             });
-            let active =
-                active_container_keys(&fixture.repos, &fixture.workspaces, &fixture.sessions);
+            let active = active_container_keys(
+                &fixture.repos,
+                &fixture.workspaces,
+                &fixture.sessions,
+                &fixture.runs,
+            );
 
             let sorted = sort_containers(containers, RepoSort::NeedsYou, &active);
 
@@ -7846,7 +8021,12 @@ pub(crate) mod tests {
         left.status = SessionStatus::AwaitingInput;
         left.is_abandoned = true;
         fixture.sessions.push(left);
-        let active = active_container_keys(&fixture.repos, &fixture.workspaces, &fixture.sessions);
+        let active = active_container_keys(
+            &fixture.repos,
+            &fixture.workspaces,
+            &fixture.sessions,
+            &fixture.runs,
+        );
 
         let sorted = sort_containers(fixture.build(), RepoSort::NeedsYou, &active);
 
@@ -8553,6 +8733,7 @@ pub(crate) mod tests {
             &[TabHost {
                 host: &HostKey::Local,
                 sessions,
+                runs: &[],
                 label_agents: &[],
                 rollups: TabRollups {
                     session_order: &HashMap::new(),
@@ -8758,6 +8939,7 @@ pub(crate) mod tests {
             &[TabHost {
                 host: &HostKey::Local,
                 sessions: &[session("s1"), session("s2")],
+                runs: &[],
                 label_agents: &[],
                 rollups: TabRollups {
                     session_order: &HashMap::new(),
@@ -9756,5 +9938,312 @@ pub(crate) mod tests {
             groups[1].containers.is_empty(),
             "the remote host's idle repo is filtered out, its header stays"
         );
+    }
+
+    /// Dispatch run `id` working in `worktree` of `main_checkout`, started
+    /// `started_secs` after the epoch, titled `title {id}`.
+    pub(crate) fn run(
+        id: &str,
+        worktree: &str,
+        main_checkout: Option<&str>,
+        started_secs: i64,
+        status: protocol::DispatchRunStatus,
+    ) -> DispatchRunSnapshot {
+        DispatchRunSnapshot {
+            run_id: id.to_owned(),
+            title: format!("title {id}"),
+            backend: "backend-x".to_owned(),
+            tier: None,
+            worktree: worktree.to_owned(),
+            main_checkout: main_checkout.map(str::to_owned),
+            run_dir: format!("X:\\runs\\{id}"),
+            started_at: chrono::DateTime::from_timestamp(started_secs, 0).expect("run start"),
+            status,
+            metrics: protocol::SessionMetrics::default(),
+            recent_actions: Vec::new(),
+            agent_session_id: None,
+            session_id: None,
+            resumed_from: None,
+            auto_resume: false,
+        }
+    }
+
+    use protocol::DispatchRunStatus as Run;
+
+    /// Each leaf of container `key` as its id and kind.
+    fn leaf_kinds(containers: &[Container], key: &str) -> Vec<(String, LeafKind)> {
+        containers
+            .iter()
+            .find(|c| c.key == key)
+            .map(|c| c.leaves.iter().map(|l| (l.id.clone(), l.kind)).collect())
+            .unwrap_or_default()
+    }
+
+    fn kinds(list: &[(&str, LeafKind)]) -> Vec<(String, LeafKind)> {
+        list.iter()
+            .map(|(id, kind)| ((*id).to_owned(), *kind))
+            .collect()
+    }
+
+    #[test]
+    fn a_run_in_a_registered_repo_sits_in_its_repo_after_the_sessions() {
+        let mut fixture = Fixture::new(
+            vec![repo("r1", "X:\\r1")],
+            Vec::new(),
+            vec![in_repo("s1", "r1")],
+        );
+        fixture.runs = vec![run("d1", "X:\\r1.wt\\a", Some("X:\\r1"), 10, Run::Working)];
+        let tree = fixture.build();
+        assert_eq!(
+            leaf_kinds(&tree, "repo:r1"),
+            kinds(&[("s1", LeafKind::Session), ("d1", LeafKind::Dispatch)])
+        );
+        let leaf = tree
+            .iter()
+            .flat_map(|c| &c.leaves)
+            .find(|l| l.id == "d1")
+            .expect("the run's leaf");
+        assert_eq!(leaf.runtime.as_deref(), Some("DS"));
+        assert_eq!(leaf.label, "title d1");
+    }
+
+    #[test]
+    fn a_run_in_a_workspace_member_sits_in_the_workspace() {
+        let mut fixture = Fixture::new(
+            vec![repo("r1", "X:\\r1")],
+            vec![workspace("w1", &["r1"])],
+            Vec::new(),
+        );
+        fixture.runs = vec![run("d1", "X:\\r1.wt\\a", Some("X:\\r1"), 10, Run::Working)];
+        let tree = fixture.build();
+        assert_eq!(
+            leaf_kinds(&tree, "ws:w1"),
+            kinds(&[("d1", LeafKind::Dispatch)])
+        );
+    }
+
+    #[test]
+    fn a_run_in_an_unregistered_folder_gets_a_dir_container() {
+        let mut fixture = Fixture::new(Vec::new(), Vec::new(), Vec::new());
+        fixture.runs = vec![run("d1", "X:\\elsewhere\\wt", None, 10, Run::Working)];
+        let tree = fixture.build();
+        let key = container_key(ContainerKind::Dir, &normalize_fs_path("X:\\elsewhere\\wt"));
+        let dir = tree.iter().find(|c| c.key == key).expect("a Dir container");
+        assert_eq!(dir.kind, ContainerKind::Dir);
+        assert_eq!(
+            leaf_kinds(&tree, &key),
+            kinds(&[("d1", LeafKind::Dispatch)])
+        );
+    }
+
+    #[test]
+    fn a_run_without_a_main_checkout_is_placed_by_its_worktree() {
+        let mut fixture = Fixture::new(vec![repo("r1", "X:\\r1")], Vec::new(), Vec::new());
+        fixture.runs = vec![run("d1", "X:\\r1\\sub", None, 10, Run::Working)];
+        let tree = fixture.build();
+        assert_eq!(
+            leaf_kinds(&tree, "repo:r1"),
+            kinds(&[("d1", LeafKind::Dispatch)])
+        );
+    }
+
+    #[test]
+    fn runs_sort_newest_first_after_the_sessions_and_ignore_the_manual_order() {
+        let mut fixture = Fixture::new(
+            vec![repo("r1", "X:\\r1")],
+            Vec::new(),
+            vec![in_repo("s1", "r1"), in_repo("s2", "r1")],
+        );
+        fixture.runs = vec![
+            run("old", "X:\\r1", None, 10, Run::Working),
+            run("new", "X:\\r1", None, 20, Run::Working),
+        ];
+        fixture.session_order.insert(
+            "r1".to_owned(),
+            vec!["new".to_owned(), "s2".to_owned(), "s1".to_owned()],
+        );
+        let tree = fixture.build();
+        assert_eq!(
+            leaf_kinds(&tree, "repo:r1"),
+            kinds(&[
+                ("s2", LeafKind::Session),
+                ("s1", LeafKind::Session),
+                ("new", LeafKind::Dispatch),
+                ("old", LeafKind::Dispatch),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_remote_hosts_run_is_keyed_and_hosted_by_its_host() {
+        let remote = remote_host(BOX);
+        let mut model = two_host_model(&["a"], &["b"]);
+        model.apply(
+            &remote,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run("d1", "X:\\wt", None, 10, Run::Working)],
+            },
+        );
+        let tree = model.containers();
+        let (container, leaf) = tree
+            .iter()
+            .find_map(|c| c.leaves.iter().find(|l| l.id == "d1").map(|l| (c, l)))
+            .expect("the run's leaf");
+        assert_eq!(leaf.kind, LeafKind::Dispatch);
+        assert_eq!(leaf.host, remote);
+        assert!(
+            container.key.starts_with(&host_container_key(&remote, "")),
+            "{}",
+            container.key
+        );
+    }
+
+    #[test]
+    fn dispatch_runs_fold_update_and_remove() {
+        let ids = |slice: &HostSlice| -> Vec<(String, Run)> {
+            slice
+                .dispatch_runs
+                .iter()
+                .map(|r| (r.run_id.clone(), r.status))
+                .collect()
+        };
+        let pairs = |list: &[(&str, Run)]| -> Vec<(String, Run)> {
+            list.iter().map(|(id, s)| ((*id).to_owned(), *s)).collect()
+        };
+        let mut slice = HostSlice::default();
+        slice.apply(
+            &DaemonMessage::DispatchRuns {
+                runs: vec![
+                    run("a", "X:\\w", None, 1, Run::Working),
+                    run("b", "X:\\w", None, 2, Run::Starting),
+                ],
+            },
+            None,
+        );
+        assert_eq!(
+            ids(&slice),
+            pairs(&[("a", Run::Working), ("b", Run::Starting)])
+        );
+        slice.apply(
+            &DaemonMessage::DispatchRunUpdated {
+                run: run("a", "X:\\w", None, 1, Run::Ended),
+            },
+            None,
+        );
+        slice.apply(
+            &DaemonMessage::DispatchRunUpdated {
+                run: run("c", "X:\\w", None, 3, Run::Working),
+            },
+            None,
+        );
+        assert_eq!(
+            ids(&slice),
+            pairs(&[("a", Run::Ended), ("b", Run::Starting), ("c", Run::Working)])
+        );
+        slice.apply(
+            &DaemonMessage::DispatchRunRemoved {
+                run_id: "b".to_owned(),
+            },
+            None,
+        );
+        assert_eq!(
+            ids(&slice),
+            pairs(&[("a", Run::Ended), ("c", Run::Working)])
+        );
+        slice.forget_runs();
+        assert_eq!(ids(&slice), pairs(&[]));
+    }
+
+    #[test]
+    fn a_working_run_marks_its_repo_active_and_an_ended_one_does_not() {
+        let repos = [
+            repo("r1", "X:\\r1"),
+            repo("r2", "X:\\r2"),
+            repo("r3", "X:\\r3"),
+        ];
+        let workspaces = [workspace("w1", &["r3"])];
+        let runs = [
+            run("d1", "X:\\r1.wt\\a", Some("X:\\r1"), 1, Run::Working),
+            run("d2", "X:\\r2.wt\\a", Some("X:\\r2"), 1, Run::Ended),
+            run("d3", "X:\\r3.wt\\a", Some("X:\\r3"), 1, Run::Starting),
+        ];
+        let active = active_container_keys(&repos, &workspaces, &[], &runs);
+        assert_eq!(sorted_keys(&active), ["repo:r1", "ws:w1"]);
+    }
+
+    #[test]
+    fn the_busy_filter_shows_a_working_run_and_hides_an_ended_one() {
+        let leaf = |status| {
+            crate::dispatch_runs::dispatch_leaf(
+                &run("d1", "X:\\w", None, 1, status),
+                &HostKey::Local,
+            )
+        };
+        assert!(SessionsUnderRepos::Busy.shows(&leaf(Run::Working)));
+        assert!(!SessionsUnderRepos::Busy.shows(&leaf(Run::Ended)));
+    }
+
+    #[test]
+    fn tabs_view_puts_every_hosts_runs_in_unbound() {
+        let remote = remote_host(BOX);
+        let mut model = two_host_model(&["a"], &[]);
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run("d1", "X:\\w", None, 1, Run::Working)],
+            },
+        );
+        model.apply(
+            &remote,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run("d2", "X:\\w", None, 1, Run::Working)],
+            },
+        );
+        let tree = model.tab_containers(&[tab("t1", &pane("p1", Some("a")))]);
+        assert_eq!(
+            leaf_hosts(&tree, "unbound"),
+            [
+                ("d1".to_owned(), HostKey::Local),
+                ("d2".to_owned(), remote.clone())
+            ]
+        );
+
+        let runs = [run("d3", "X:\\w", None, 1, Run::Working)];
+        let tree = build_tab_containers(
+            &[],
+            &[TabHost {
+                host: &remote,
+                sessions: &[],
+                runs: &runs,
+                label_agents: &[],
+                rollups: TabRollups {
+                    session_order: &HashMap::new(),
+                    attention: &HashSet::new(),
+                    unseen: &HashSet::new(),
+                },
+            }],
+            &BTreeSet::new(),
+        );
+        assert_eq!(leaf_hosts(&tree, "unbound"), [("d3".to_owned(), remote)]);
+    }
+
+    #[test]
+    fn needs_you_and_the_dashboard_skip_a_dispatch_leaf() {
+        let mut asking = in_repo("s1", "r1");
+        asking.status = SessionStatus::AwaitingInput;
+        let mut model = model_with(vec![asking]);
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run("s1", "X:\\elsewhere", None, 1, Run::Working)],
+            },
+        );
+        assert_eq!(crate::needs_you::rows(&model).len(), 1);
+        let dashboard = crate::dashboard::model(&model, &BTreeMap::new());
+        let listed: usize = crate::dashboard::GroupKind::ALL
+            .into_iter()
+            .map(|kind| dashboard.rows(kind).len())
+            .sum();
+        assert_eq!(listed, 1);
     }
 }

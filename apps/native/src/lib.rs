@@ -58,6 +58,7 @@ mod diff_tab;
 mod diff_tab_view;
 pub mod diff_view;
 mod discard_confirm;
+mod dispatch_runs;
 mod drag;
 #[cfg(feature = "driver")]
 pub mod driver;
@@ -4767,6 +4768,9 @@ impl RootView {
         main_active: bool,
         cx: &mut Context<Self>,
     ) {
+        if !self.dispatch_runs_allowed(host, msg) {
+            return;
+        }
         let before = moves_needs_you(msg).then(|| self.needs_you_list());
         // The main window's focused session is watched only while that
         // window is active: a turn ending there while the owner is in
@@ -4794,6 +4798,20 @@ impl RootView {
         ) {
             self.refresh_popout_titles(cx);
         }
+    }
+
+    /// Whether `msg` may fold into `host`'s slice: a dispatch run list,
+    /// update or removal only from a connection that supports dispatch runs;
+    /// every other message always.
+    fn dispatch_runs_allowed(&self, host: &HostKey, msg: &DaemonMessage) -> bool {
+        !matches!(
+            msg,
+            DaemonMessage::DispatchRuns { .. }
+                | DaemonMessage::DispatchRunUpdated { .. }
+                | DaemonMessage::DispatchRunRemoved { .. }
+        ) || self
+            .conn_of(host)
+            .is_some_and(|conn| conn.supports(protocol::FEATURE_DISPATCH_RUNS))
     }
 
     /// Remembers the session the active terminal tab focuses, so the
@@ -5263,6 +5281,8 @@ impl RootView {
     /// and notice of the old one closed, and the session history asked for
     /// afresh.
     fn on_welcome(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        // The new connection lists its dispatch runs afresh, if it lists any.
+        self.sidebar.forget_runs(host);
         self.lists_since_welcome.remove(host);
         self.forget_uploads_of(host);
         self.reset_host(host, window, cx);

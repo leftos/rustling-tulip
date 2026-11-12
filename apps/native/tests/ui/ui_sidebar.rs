@@ -18,7 +18,9 @@ use rustling_tulip_native::{
     Activity, DETACHED_BANNER, DIVIDER_WIDTH, RAIL_WIDTH, RepoFilter, RuntimeIcon, SidebarView,
     TabPill, resume_all_label,
 };
-use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
+use support::{
+    Fixture, Harness, TestDir, dispatch_run, pane, repo, session, split, tab, workspace,
+};
 
 /// The keys of the sidebar's containers, in the order it shows them.
 fn tree_keys(h: &mut Harness<'_>) -> Vec<String> {
@@ -2553,4 +2555,91 @@ fn leaves_draw_their_runtime_as_an_icon(cx: &mut TestAppContext) {
         [tag("claude", "Running claude")],
         "the tooltip still names the runtime"
     );
+}
+
+/// Session `s1` in repo `r1` at `C:\r1`.
+fn runs_fixture() -> Fixture {
+    Fixture {
+        repos: vec![repo("r1", "C:\\r1")],
+        ..Fixture::single(session("s1").build())
+    }
+}
+
+/// The daemon's run list: run `d1` in a worktree of `C:\r1`.
+fn runs_msg() -> DaemonMessage {
+    DaemonMessage::DispatchRuns {
+        runs: vec![
+            dispatch_run("d1")
+                .worktree("C:\\r1.wt\\a")
+                .main_checkout("C:\\r1")
+                .build(),
+        ],
+    }
+}
+
+#[gpui::test]
+fn dispatch_runs_show_as_leaves_from_a_daemon_with_the_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+
+    h.send(runs_msg());
+
+    assert!(h.in_model("leaf-d1"), "the run shows as a leaf");
+}
+
+#[gpui::test]
+fn dispatch_runs_from_a_daemon_without_the_feature_are_ignored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+
+    h.send(runs_msg());
+
+    assert!(
+        !h.in_model("leaf-d1"),
+        "a daemon without the feature lists no run"
+    );
+}
+
+#[gpui::test]
+fn a_welcome_clears_the_hosts_runs(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(runs_msg());
+    assert!(h.in_model("leaf-d1"), "precondition: the run shows");
+
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+
+    assert!(!h.in_model("leaf-d1"), "a new connection forgets the runs");
+}
+
+#[gpui::test]
+fn a_removed_run_leaves_the_sidebar(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(runs_msg());
+    assert!(h.in_model("leaf-d1"), "precondition: the run shows");
+
+    h.send(DaemonMessage::DispatchRunRemoved {
+        run_id: "d1".to_owned(),
+    });
+
+    assert!(!h.in_model("leaf-d1"), "the removed run's leaf goes");
+}
+
+#[gpui::test]
+fn clicking_a_dispatch_leaf_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(runs_msg());
+    h.answer_scrollback("s1", b"");
+    h.sent();
+
+    h.click_on("leaf-d1");
+
+    let sent = h.sent();
+    assert!(sent.is_empty(), "sent {sent:?}");
 }

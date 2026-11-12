@@ -13,7 +13,7 @@ use protocol::{SessionFacts, SessionSnapshot, SessionStatus};
 use crate::RootView;
 use crate::dashboard_rows::{AskBlock, RowInput, ask_block, format_age, state_word};
 use crate::needs_you;
-use crate::sidebar::{Leaf, LeafState, SidebarModel};
+use crate::sidebar::{Leaf, LeafKind, LeafState, SidebarModel};
 use crate::status_glyph::{Glyph, glyph};
 use crate::ui_theme::UiTheme;
 
@@ -198,7 +198,7 @@ pub(crate) fn model(
     let mut placed: [Vec<Placed>; 4] = Default::default();
     for container in sidebar.containers() {
         for leaf in &container.leaves {
-            if !is_listed(leaf) {
+            if leaf.kind != LeafKind::Session || !is_listed(leaf) {
                 continue;
             }
             let Some(session) = sidebar.session(&leaf.id) else {

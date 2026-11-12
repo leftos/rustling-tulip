@@ -1427,6 +1427,40 @@ pub fn workspace(id: &str, members: &[&str]) -> WorkspaceEntry {
         .expect("workspace fixture")
 }
 
+/// A dispatch run fixture: a working run titled `title <run_id>` in
+/// `C:\elsewhere\wt`, with no main checkout.
+pub struct DispatchRunBuilder(Value);
+
+pub fn dispatch_run(run_id: &str) -> DispatchRunBuilder {
+    DispatchRunBuilder(json!({
+        "run_id": run_id,
+        "title": format!("title {run_id}"),
+        "backend": "backend-x",
+        "worktree": "C:\\elsewhere\\wt",
+        "run_dir": format!("C:\\runs\\{run_id}"),
+        "started_at": "2026-01-01T00:00:00Z",
+        "status": "working",
+    }))
+}
+
+impl DispatchRunBuilder {
+    /// The folder the run works in.
+    pub fn worktree(mut self, path: &str) -> Self {
+        self.0["worktree"] = json!(path);
+        self
+    }
+
+    /// The worktree's main checkout, which places the run.
+    pub fn main_checkout(mut self, path: &str) -> Self {
+        self.0["main_checkout"] = json!(path);
+        self
+    }
+
+    pub fn build(self) -> protocol::DispatchRunSnapshot {
+        serde_json::from_value(self.0).expect("dispatch run fixture")
+    }
+}
+
 pub fn pane(id: &str, session: Option<&str>) -> GridNode {
     GridNode::Pane {
         pane_id: id.to_owned(),

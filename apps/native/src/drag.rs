@@ -10,7 +10,7 @@ use protocol::{
     SplitPlace, TabEntry,
 };
 
-use crate::sidebar::{Container, ContainerKind, can_attach};
+use crate::sidebar::{Container, ContainerKind, LeafKind, can_attach};
 use crate::tabs::{
     self, HostSessions, HostedSession, OuterSides, PaneTarget, Placement, Rect, SessionRef,
     TabsModel,
@@ -518,11 +518,12 @@ pub fn sidebar_reorder(
                 return None;
             }
             // The order goes to the container's host, so it names only that
-            // host's leaves: a tab's remote leaves keep their place.
+            // host's leaves: a tab's remote leaves keep their place. A
+            // dispatch run's leaf is not a session and never reorders.
             let ids: Vec<String> = container
                 .leaves
                 .iter()
-                .filter(|l| l.host == container.host)
+                .filter(|l| l.host == container.host && l.kind == LeafKind::Session)
                 .map(|l| l.id.clone())
                 .collect();
             reorder_sessions(&ids, container_id, session_id, target, side)
@@ -1745,6 +1746,47 @@ mod tests {
             container_id: container_id.to_owned(),
             host: HostKey::Local,
         }
+    }
+
+    #[test]
+    fn reorder_ids_leave_out_dispatch_leaves() {
+        use crate::sidebar::tests::{in_repo, repo, run};
+        use protocol::{DaemonMessage, DispatchRunStatus};
+        let mut model = crate::sidebar::SidebarModel::default();
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "D:\\r1")],
+            },
+        );
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("a", "r1"), in_repo("b", "r1")],
+            },
+        );
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run("d1", "D:\\r1", None, 1, DispatchRunStatus::Working)],
+            },
+        );
+        let containers = model.containers();
+        let message = sidebar_reorder(
+            &leaf_drag("a", "r1"),
+            &containers,
+            &leaf_row("repo:r1", "b"),
+            Side::After,
+        )
+        .expect("a reorder");
+        assert_eq!(
+            wire(&message),
+            json!({
+                "type": "reorder_sessions",
+                "container_id": "r1",
+                "ordered_ids": ["b", "a"],
+            })
+        );
     }
 
     /// Session `id` of This PC.

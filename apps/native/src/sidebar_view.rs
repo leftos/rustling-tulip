@@ -32,8 +32,8 @@ use crate::session_menu::{
     menu_separator,
 };
 use crate::sidebar::{
-    Activity, Container, ContainerKind, DETACHED_BANNER, HostGroup, Leaf, LeafDensity, RepoFilter,
-    RepoSort, SessionsUnderRepos, SidebarView, can_attach, chip_tip,
+    Activity, Container, ContainerKind, DETACHED_BANNER, HostGroup, Leaf, LeafDensity, LeafKind,
+    RepoFilter, RepoSort, SessionsUnderRepos, SidebarView, can_attach, chip_tip,
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view, marker_mode};
@@ -1497,7 +1497,9 @@ fn leaf_drag_row(
     // An offline host's leaf is as inert as its other dimmed rows: like an
     // SH or DIR header it neither drags nor takes a drop, so no drag starts
     // and no drop mark shows while the host is away.
-    let payload = if ctx.dimmed.containers.contains(&container.key) {
+    // A dispatch run's leaf neither drags nor takes a drop.
+    let is_session = leaf.kind == LeafKind::Session;
+    let payload = if ctx.dimmed.containers.contains(&container.key) || !is_session {
         None
     } else {
         drag::leaf_payload(container, &session)
@@ -1508,13 +1510,15 @@ fn leaf_drag_row(
         drop_line(selector, side, &t)
     });
     // The menu opens for the session of this row's host, whichever other
-    // host lists the same id.
+    // host lists the same id; a dispatch run's leaf opens none.
     let menu_session = session.clone();
     let row = leaf_row(leaf, &session.host, ctx, window, cx).on_mouse_down(
         MouseButton::Right,
         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-            let SessionRef { host, id } = &menu_session;
-            this.open_session_menu(host, id, None, event.position, window, cx);
+            if is_session {
+                let SessionRef { host, id } = &menu_session;
+                this.open_session_menu(host, id, None, event.position, window, cx);
+            }
             cx.stop_propagation();
         }),
     );
@@ -1937,7 +1941,7 @@ fn detached_stop_all_shown(containers: &[Container]) -> bool {
             && container
                 .leaves
                 .iter()
-                .any(|leaf| leaf.status != SessionStatus::Stopped)
+                .any(|leaf| leaf.kind == LeafKind::Session && leaf.status != SessionStatus::Stopped)
     })
 }
 
@@ -1948,7 +1952,7 @@ fn detached_banner(container: &Container, armed: bool, cx: &mut Context<RootView
     let live: Vec<String> = container
         .leaves
         .iter()
-        .filter(|leaf| leaf.status != SessionStatus::Stopped)
+        .filter(|leaf| leaf.kind == LeafKind::Session && leaf.status != SessionStatus::Stopped)
         .map(|leaf| leaf.id.clone())
         .collect();
     let banner = div()
@@ -2821,6 +2825,8 @@ fn leaf_frame(
     let id = leaf.id.clone();
     let host = host.clone();
     let name = format!("leaf-{key}");
+    // A dispatch run's id names no session: its click selects nothing.
+    let is_session = leaf.kind == LeafKind::Session;
     div()
         .id(SharedString::from(name.clone()))
         .driver_id(|| name)
@@ -2849,7 +2855,9 @@ fn leaf_frame(
                 .bg(gpui::rgb(accent)),
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.select_session_on(&host, &id, window, cx);
+            if is_session {
+                this.select_session_on(&host, &id, window, cx);
+            }
         }))
 }
 
@@ -3226,7 +3234,7 @@ mod tests {
     use crate::grid_view::ADD_REPO_TIP;
     use crate::remote_mode::Capabilities;
     use crate::sidebar::{Container, ContainerKind, HostGroup};
-    use crate::sidebar::{Leaf, LeafState};
+    use crate::sidebar::{Leaf, LeafKind, LeafState};
     use crate::tabs::TabPill;
     use crate::target::HostKey;
     use crate::target::Target;
@@ -3256,6 +3264,7 @@ mod tests {
     fn leaf(chip: Option<&str>) -> Leaf {
         Leaf {
             id: "s1".to_owned(),
+            kind: LeafKind::Session,
             host: HostKey::Local,
             status: SessionStatus::Idle,
             mode: SessionMode::Interactive,

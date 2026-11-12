@@ -3,7 +3,7 @@
 //! Plain Rust over the sidebar model, so the list is unit-testable without
 //! GPUI; the view in `needs_you_view` draws these rows.
 
-use crate::sidebar::{Leaf, LeafState, SidebarModel, session_title};
+use crate::sidebar::{Leaf, LeafKind, LeafState, SidebarModel, session_title};
 use crate::target::HostKey;
 use chrono::{DateTime, Utc};
 use protocol::{
@@ -48,6 +48,9 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
     let mut ended = Vec::new();
     for container in model.containers() {
         for leaf in &container.leaves {
+            if leaf.kind != LeafKind::Session {
+                continue;
+            }
             let Some(session) = model.session_on(&container.host, &leaf.id) else {
                 continue;
             };
@@ -79,9 +82,10 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
 }
 
 /// Whether the session of `leaf` is in the list; the sidebar's Needs you on
-/// top sort lifts a container by this same test.
+/// top sort lifts a container by this same test. A dispatch run's leaf
+/// never is.
 pub(crate) fn is_listed(leaf: &Leaf) -> bool {
-    reason_of(leaf).is_some()
+    leaf.kind == LeafKind::Session && reason_of(leaf).is_some()
 }
 
 /// The Answer rule: the session is idle and its summary says it waits for the
