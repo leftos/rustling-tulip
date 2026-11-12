@@ -1234,11 +1234,18 @@ pub enum NotifySkip {
 }
 
 /// The General settings saved on this machine.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent settings a user switches on their own — copy on selection, click-through, update checks, detailed logging — not one state"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneralSettings {
     /// Whether a mouse selection in a terminal is copied on release.
     pub copy_on_select: bool,
+    /// Whether a press on a pane that isn't focused also acts in it; off,
+    /// the press only focuses that pane.
+    pub click_through_inactive_pane: bool,
     /// How much room each session leaf takes.
     pub leaf_density: LeafDensity,
     /// How many of a repo or workspace's sessions show under its row.
@@ -1257,6 +1264,7 @@ impl Default for GeneralSettings {
     fn default() -> Self {
         Self {
             copy_on_select: true,
+            click_through_inactive_pane: true,
             leaf_density: LeafDensity::Comfortable,
             sessions_under_repos: SessionsUnderRepos::Every,
             repo_sort: RepoSort::NeedsYou,
@@ -2594,6 +2602,11 @@ impl SidebarModel {
     /// Whether a terminal selection is copied on release.
     pub fn set_copy_on_select(&mut self, on: bool) {
         self.ui.general.copy_on_select = on;
+    }
+
+    /// Whether a press on a pane that isn't focused also acts in it.
+    pub fn set_click_through_inactive_pane(&mut self, on: bool) {
+        self.ui.general.click_through_inactive_pane = on;
     }
 
     /// Whether the client checks for updates on its own.
@@ -6560,6 +6573,7 @@ pub(crate) mod tests {
             popouts: Vec::new(),
             general: GeneralSettings {
                 copy_on_select: false,
+                click_through_inactive_pane: false,
                 leaf_density: LeafDensity::Compact,
                 sessions_under_repos: SessionsUnderRepos::Busy,
                 repo_sort: RepoSort::Active,

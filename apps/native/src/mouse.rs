@@ -23,6 +23,21 @@ impl CopyOnSelect {
     }
 }
 
+/// Whether the first press on a pane that isn't focused also acts in it: the
+/// General setting, which the root view keeps here for every pane to read.
+/// Off, the press only focuses the pane it lands in.
+#[derive(Debug, Clone, Copy)]
+pub struct ClickThrough(pub bool);
+
+impl gpui::Global for ClickThrough {}
+
+impl ClickThrough {
+    /// The setting as the app holds it; on when nothing set it.
+    pub fn get(cx: &gpui::App) -> bool {
+        cx.try_global::<Self>().is_none_or(|setting| setting.0)
+    }
+}
+
 /// X10 encodes a coordinate as one byte offset by 32, so it cannot go past 223.
 const X10_MAX_COORD: usize = 223;
 

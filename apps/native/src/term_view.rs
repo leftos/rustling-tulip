@@ -29,7 +29,7 @@ use crate::driver_id::DriverId as _;
 use crate::fonts::{self, FontSettings};
 use crate::hosts::HostSender;
 use crate::links::{LinkKind, LinkSegment, TerminalLink};
-use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
+use crate::mouse::{self, CellSize, ClickThrough, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::open::{self, LinkAction};
 use crate::paste_upload;
@@ -92,6 +92,10 @@ pub struct TerminalPane {
     /// began. Read in the capture phase, since a palette's close can hand
     /// focus back to this pane before the press reaches `on_mouse_down`.
     focused_at_press: bool,
+    /// Whether the press now being handled began on a pane that is not the
+    /// tab's focused one, which the grid records before the press reaches
+    /// this pane. Read in `on_mouse_down`.
+    inactive_pane_at_press: bool,
     /// Whether this pane may size the session's PTY yet.
     size_gate: SizeGate,
     /// Whether this pane answers its session's terminal queries: one pane
@@ -591,6 +595,7 @@ impl TerminalPane {
             tracker: Tracker::default(),
             last_motion: None,
             focused_at_press: false,
+            inactive_pane_at_press: false,
             size_gate: SizeGate::default(),
             answers_queries: false,
             marked: None,
@@ -1640,6 +1645,12 @@ impl TerminalPane {
         self.tracker.idle() && mouse::reports(self.term.mode(), shift)
     }
 
+    /// Records whether the press now being handled began on a pane that is
+    /// not the tab's focused one.
+    pub(crate) fn note_press_on_inactive_pane(&mut self, inactive: bool) {
+        self.inactive_pane_at_press = inactive;
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -1648,6 +1659,7 @@ impl TerminalPane {
     ) {
         self.focus.focus(window);
         self.note_input();
+        let inactive_pane = std::mem::take(&mut self.inactive_pane_at_press);
         // The gutter is the dots' own: a press there starts no selection
         // and reaches no program.
         if self.in_gutter(event.position) {
@@ -1688,11 +1700,16 @@ impl TerminalPane {
             cx.notify();
             return;
         }
-        // The press that brings focus to a pane, or the window itself forward,
-        // only focuses: under mouse reporting it would otherwise reach the
-        // program, and a click meant to focus a pane or bring the window
-        // forward could answer a question on screen.
-        if (!self.focused_at_press || event.first_mouse) && self.press_would_report(event) {
+        // The press that brings focus to a pane only focuses when
+        // click-through is off, as the press that brings the window itself
+        // forward always does, and a press on the tab's own pane while a
+        // palette or menu holds the keyboard does too: under mouse reporting
+        // it would otherwise reach the program, and a click meant to focus a
+        // pane, bring the window forward or dismiss an overlay could answer a
+        // question on screen.
+        let swallow = event.first_mouse
+            || (!self.focused_at_press && (!ClickThrough::get(cx) || !inactive_pane));
+        if swallow && self.press_would_report(event) {
             cx.notify();
             return;
         }

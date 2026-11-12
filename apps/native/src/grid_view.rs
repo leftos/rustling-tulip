@@ -30,6 +30,7 @@ use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::header_tip::SHOW_DELAY as HEADER_TIP_DELAY;
 use crate::link_menu::LinkMenu;
+use crate::mouse::ClickThrough;
 use crate::open_view::LinkSource;
 use crate::pane_header_fit;
 use crate::popouts::{self, PopoutKey};
@@ -1698,6 +1699,12 @@ impl RootView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
+            .capture_any_mouse_down(cx.listener({
+                let pane_id = pane_id.to_owned();
+                move |this, _: &MouseDownEvent, window, cx| {
+                    this.focus_inactive_pane(&pane_id, window, cx);
+                }
+            }))
             .children(self.orphan_banner(
                 crate::fonts::ui_text_size(cx),
                 pane_id,
@@ -1750,6 +1757,25 @@ impl RootView {
             .child(body)
             .children(overlay)
             .into_any_element()
+    }
+
+    /// Tells the pressed pane whether it is the tab's focused one, then, with
+    /// the General setting off, focuses it and stops the press ahead of any
+    /// pane body's own handler: only one click's focus, nothing else.
+    fn focus_inactive_pane(&mut self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab_id) = self.panes.get(pane_id).map(|slot| slot.tab_id.clone()) else {
+            return;
+        };
+        let inactive = self.tabs.focused_pane(&tab_id).as_deref() != Some(pane_id);
+        if let Some(slot) = self.panes.get(pane_id) {
+            slot.view
+                .update(cx, |pane, _| pane.note_press_on_inactive_pane(inactive));
+        }
+        if ClickThrough::get(cx) || !inactive {
+            return;
+        }
+        self.focus_pane_view(pane_id, window, cx);
+        cx.stop_propagation();
     }
 
     /// What pane `pane_id` of `tab_id` draws as its body: its session's

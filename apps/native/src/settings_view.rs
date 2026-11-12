@@ -34,7 +34,7 @@ use crate::buttons::{Layer, field_frame, focus_ring};
 use crate::chat::ChatMode;
 use crate::combobox::list_placement;
 use crate::driver_id::DriverId as _;
-use crate::mouse::CopyOnSelect;
+use crate::mouse::{ClickThrough, CopyOnSelect};
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::open::OpenJob;
 use crate::open_view::Then;
@@ -569,6 +569,7 @@ pub(crate) enum SettingsControl {
     SessionsUnderRepos(SessionsUnderRepos),
     RepoSort(RepoSort),
     CopyOnSelect,
+    ClickThrough,
     /// The Default shell row's dropdown, on the shown host.
     DefaultShell,
     /// The Default shell row's Custom command field, while Custom is chosen.
@@ -699,6 +700,7 @@ impl SettingsControl {
             Self::RepoSort(RepoSort::Active) => "settings-repo-sort-active",
             Self::RepoSort(RepoSort::NeedsYou) => "settings-repo-sort-needs-you",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
+            Self::ClickThrough => "settings-terminal-click-through",
             Self::DefaultShell => "settings-default-shell-field",
             Self::DefaultShellCommand => "settings-default-shell-command",
             Self::ChatMode(ChatMode::Compact) => "settings-chat-mode-compact",
@@ -3652,6 +3654,7 @@ impl RootView {
             | SettingsControl::SessionsUnderRepos(_)
             | SettingsControl::RepoSort(_)
             | SettingsControl::CopyOnSelect
+            | SettingsControl::ClickThrough
             | SettingsControl::ChatMode(_)
             | SettingsControl::CheckUpdates
             | SettingsControl::DetailedLogging
@@ -3732,6 +3735,9 @@ impl RootView {
             SettingsControl::SessionsUnderRepos(mode) => LocalPending::SessionsUnderRepos(mode),
             SettingsControl::RepoSort(sort) => LocalPending::RepoSort(sort),
             SettingsControl::CopyOnSelect => LocalPending::CopyOnSelect(!general.copy_on_select),
+            SettingsControl::ClickThrough => {
+                LocalPending::ClickThrough(!general.click_through_inactive_pane)
+            }
             SettingsControl::ChatMode(mode) => LocalPending::ChatMode(mode),
             SettingsControl::CheckUpdates => LocalPending::CheckUpdates(!general.check_updates),
             SettingsControl::DetailedLogging => {
@@ -5179,6 +5185,11 @@ impl RootView {
             LocalPending::CopyOnSelect(on) => {
                 self.sidebar.set_copy_on_select(on);
                 cx.set_global(CopyOnSelect(on));
+                true
+            }
+            LocalPending::ClickThrough(on) => {
+                self.sidebar.set_click_through_inactive_pane(on);
+                cx.set_global(ClickThrough(on));
                 true
             }
             LocalPending::CheckUpdates(on) => {
@@ -7107,6 +7118,21 @@ impl RootView {
              (when there's a selection) or Ctrl+Shift+C.",
             &t,
         ))
+        .child(toggle(
+            SettingsControl::ClickThrough,
+            ToggleState {
+                checked: shown.general.click_through_inactive_pane,
+                enabled: true,
+            },
+            "Clicking an inactive pane also acts in it",
+            focused,
+            cx,
+        ))
+        .child(hint(
+            crate::fonts::ui_text_size(cx),
+            "Off: the first click on a pane that isn't focused only focuses it.",
+            &t,
+        ))
         .child(self.default_shell_row(focused, cx));
         let mut rows = vec![
             power.into_any_element(),
@@ -8637,6 +8663,7 @@ pub(crate) fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsC
         .chain(REPO_SORT_CHOICES.map(SettingsControl::RepoSort))
         .chain([
             SettingsControl::CopyOnSelect,
+            SettingsControl::ClickThrough,
             SettingsControl::DefaultShell,
             SettingsControl::DefaultShellCommand,
         ])
@@ -8744,6 +8771,7 @@ pub(crate) enum LocalPending {
     SessionsUnderRepos(SessionsUnderRepos),
     RepoSort(RepoSort),
     CopyOnSelect(bool),
+    ClickThrough(bool),
     CheckUpdates(bool),
     DetailedLogging(bool),
     ChatMode(ChatMode),
@@ -9258,6 +9286,7 @@ impl ShownLocal {
             LocalPending::SessionsUnderRepos(mode) => self.general.sessions_under_repos = mode,
             LocalPending::RepoSort(sort) => self.general.repo_sort = sort,
             LocalPending::CopyOnSelect(on) => self.general.copy_on_select = on,
+            LocalPending::ClickThrough(on) => self.general.click_through_inactive_pane = on,
             LocalPending::CheckUpdates(on) => self.general.check_updates = on,
             LocalPending::DetailedLogging(on) => self.general.detailed_logging = on,
             LocalPending::ChatMode(mode) => self.chat_mode = mode,
@@ -9287,6 +9316,9 @@ impl ShownLocal {
             }
             LocalPending::RepoSort(_) => LocalPending::RepoSort(general.repo_sort),
             LocalPending::CopyOnSelect(_) => LocalPending::CopyOnSelect(general.copy_on_select),
+            LocalPending::ClickThrough(_) => {
+                LocalPending::ClickThrough(general.click_through_inactive_pane)
+            }
             LocalPending::CheckUpdates(_) => LocalPending::CheckUpdates(general.check_updates),
             LocalPending::DetailedLogging(_) => {
                 LocalPending::DetailedLogging(general.detailed_logging)

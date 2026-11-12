@@ -1608,6 +1608,7 @@ impl RootView {
             tracing::warn!("saving the layout after moving the app colours into a theme: {err:#}");
         }
         cx.set_global(mouse::CopyOnSelect(ui.general.copy_on_select));
+        cx.set_global(mouse::ClickThrough(ui.general.click_through_inactive_pane));
         fonts::set_ui_family(ui.ui_font_family.as_deref(), cx);
         fonts::set_ui_text_size(ui.ui_text_size, cx);
         fonts::set_ui_weight(ui.ui_font_weight, cx);

@@ -20,7 +20,7 @@ use rustling_tulip_native::{
     BadgeOverlay, Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, OpenOutcome,
     PopoutKey, SidebarView, TabBadge, UserHooksRow, chat::ChatMode, fonts,
 };
-use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, split, tab};
+use support::{Fixture, Harness, Opened, TestDir, pane, repo, seed_ui, session, split, tab};
 
 #[cfg(windows)]
 #[gpui::test]
@@ -603,6 +603,41 @@ fn copy_on_select_setting_saved_and_honoured(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn click_through_setting_defaults_on_saves_and_reads_an_old_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    assert!(
+        drawn(&mut h, "settings-terminal-click-through"),
+        "the Terminal behavior section draws the row"
+    );
+    h.scroll_into_view("settings-content", "settings-terminal-click-through");
+    h.click_on("settings-terminal-click-through");
+    h.click_on("settings-apply");
+    assert_eq!(
+        saved_ui(&dir)["general"]["click_through_inactive_pane"],
+        false,
+        "the row is on by default, so one press turns it off and saves it"
+    );
+    drop(h);
+
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "general": { "copy_on_select": false } }),
+    );
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.scroll_into_view("settings-content", "settings-terminal-click-through");
+    h.click_on("settings-terminal-click-through");
+    h.click_on("settings-apply");
+    assert_eq!(
+        saved_ui(&dir)["general"]["click_through_inactive_pane"],
+        false,
+        "a file written before the setting existed reads it as on"
+    );
+}
+
+#[gpui::test]
 fn the_general_tab_has_no_open_text_externally_row(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
@@ -1043,7 +1078,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     h.keys("space");
     h.keys("enter");
 
-    h.keys("tab tab tab tab");
+    h.keys("tab tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-general-check-updates")
@@ -1067,7 +1102,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     }
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"), "back to the tab list");
-    h.keys(&["shift-tab"; 12].join(" "));
+    h.keys(&["shift-tab"; 13].join(" "));
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-terminal-copy-on-selection"),
@@ -1387,6 +1422,7 @@ fn the_general_ring_reaches_the_chat_rows(cx: &mut TestAppContext) {
         Some("settings-terminal-copy-on-selection")
     );
     for stop in [
+        "settings-terminal-click-through",
         "settings-chat-mode-compact",
         "settings-chat-mode-comfortable",
         CHAT_WIDTH,

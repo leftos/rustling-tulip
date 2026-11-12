@@ -308,8 +308,8 @@ fn enter_in_the_search_box_focuses_the_highlighted_setting(cx: &mut TestAppConte
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-chat-mode-compact"),
-        "the ring goes on from there"
+        Some("settings-terminal-click-through"),
+        "the ring goes on to the next row"
     );
 }
 

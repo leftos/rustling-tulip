@@ -367,6 +367,16 @@ fn general_entries() -> Vec<Entry> {
             Gate::Always,
         ),
         Entry {
+            aliases: &["click", "inactive", "pane", "focus", "first", "through"],
+            ..entry(
+                SettingsTab::General,
+                "settings-terminal-click-through",
+                "Clicking an inactive pane also acts in it",
+                "Terminal behavior",
+                Gate::Always,
+            )
+        },
+        Entry {
             aliases: &["shell"],
             ..entry(
                 SettingsTab::General,

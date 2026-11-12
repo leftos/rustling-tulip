@@ -808,10 +808,44 @@ fn one_focused_pane_reporting<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> 
     h
 }
 
+/// Turns the General setting "Clicking an inactive pane also acts in it"
+/// off, through Settings as a user does.
+fn set_click_through_off(h: &mut Harness<'_>) {
+    h.keys("ctrl-,");
+    h.scroll_into_view("settings-content", "settings-terminal-click-through");
+    h.click_on("settings-terminal-click-through");
+    h.click_on("settings-apply");
+    h.keys("escape");
+}
+
 #[gpui::test]
-fn the_first_press_on_an_unfocused_pane_only_focuses_it(cx: &mut TestAppContext) {
+fn the_first_press_on_an_unfocused_mouse_mode_pane_reaches_the_program_by_default(
+    cx: &mut TestAppContext,
+) {
     let dir = TestDir::new();
     let mut h = one_focused_pane_reporting(cx, &dir);
+
+    let at = h.cell_center("p2", 2, 3);
+    h.click(at, Modifiers::none());
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\x1b[<0;3;4M\x1b[<0;3;4m",
+        "click-through is on by default, so the first press reaches the program"
+    );
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "and it focuses the pane as any press does"
+    );
+}
+
+#[gpui::test]
+fn with_click_through_off_the_first_press_on_an_unfocused_pane_only_focuses_it(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+    set_click_through_off(&mut h);
 
     let at = h.cell_center("p2", 2, 3);
     h.click(at, Modifiers::none());
@@ -827,15 +861,76 @@ fn the_first_press_on_an_unfocused_pane_only_focuses_it(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn with_click_through_off_a_first_selection_drag_on_an_unfocused_pane_selects_nothing(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = two_panes_on_s1(cx, &dir);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.cx.update(|window, _| window.activate_window());
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent_input("s1");
+    set_click_through_off(&mut h);
+    h.set_clipboard("keep");
+
+    let (from, to) = (h.cell_center("p2", 2, 3), h.cell_center("p2", 4, 3));
+    h.drag(from, to, [Modifiers::none(); 2]);
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "the press still focuses the pane"
+    );
+    assert_eq!(
+        h.clipboard().as_deref(),
+        Some("keep"),
+        "and starts no selection, so copy on select writes nothing"
+    );
+}
+
+#[gpui::test]
+fn a_window_activating_first_click_on_a_mouse_mode_pane_only_focuses_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+
+    let at = h.cell_center("p2", 2, 3);
+    h.cx.simulate_event(MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+        first_mouse: true,
+    });
+    h.cx.simulate_event(MouseUpEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+    });
+    h.cx.run_until_parked();
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the click that brings the window forward reaches no program, whatever the setting"
+    );
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "and still focuses the pane it clicked"
+    );
+}
+
+#[gpui::test]
 fn the_second_press_on_a_pane_reaches_the_program(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = one_focused_pane_reporting(cx, &dir);
 
     let at = h.cell_center("p2", 2, 3);
     h.click(at, Modifiers::none());
-    assert!(
-        h.sent_input("s1").is_empty(),
-        "the first press only focuses p2"
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\x1b[<0;3;4M\x1b[<0;3;4m",
+        "the first press, on the pane it brings focus to, is reported too"
     );
 
     h.click(at, Modifiers::none());
@@ -847,15 +942,31 @@ fn the_second_press_on_a_pane_reaches_the_program(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_drag_that_brings_focus_sends_nothing(cx: &mut TestAppContext) {
+fn with_click_through_off_a_drag_that_brings_focus_sends_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = one_focused_pane_reporting(cx, &dir);
+    set_click_through_off(&mut h);
 
     let (from, to) = (h.cell_center("p2", 0, 0), h.cell_center("p2", 4, 0));
     h.drag(from, to, [Modifiers::none(); 2]);
     assert!(
         h.sent_input("s1").is_empty(),
         "nor does the release, or the drag it was in: no gesture began"
+    );
+}
+
+#[gpui::test]
+fn a_drag_on_an_unfocused_mouse_mode_pane_reaches_the_program_by_default(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = one_focused_pane_reporting(cx, &dir);
+    h.pty("s1", b"\x1b[?1002h");
+
+    let (from, to) = (h.cell_center("p2", 0, 0), h.cell_center("p2", 4, 0));
+    h.drag(from, to, [Modifiers::none(); 2]);
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\x1b[<0;1;1M\x1b[<32;5;1M\x1b[<0;5;1m",
+        "the press, the drag motion and the release all reach the program"
     );
 }
 
@@ -929,9 +1040,12 @@ fn an_activating_right_click_neither_pastes_nor_reaches_the_program(cx: &mut Tes
 }
 
 #[gpui::test]
-fn a_shift_right_press_that_brings_focus_sends_nothing(cx: &mut TestAppContext) {
+fn with_click_through_off_a_shift_right_press_that_brings_focus_sends_nothing(
+    cx: &mut TestAppContext,
+) {
     let dir = TestDir::new();
     let mut h = one_focused_pane_reporting(cx, &dir);
+    set_click_through_off(&mut h);
 
     let at = h.cell_center("p2", 2, 3);
     h.right_click_with(at, Modifiers::shift());
