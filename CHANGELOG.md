@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- A dispatch run sits indented under the session that started it in the sidebar, and a chevron on that session's row folds its runs away.
+
 ### Fixed
 
 - A followed dispatch run's recent actions no longer fill up with hook and thinking-token lines that pushed out its tool calls.

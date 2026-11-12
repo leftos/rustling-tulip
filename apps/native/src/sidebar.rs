@@ -2339,13 +2339,6 @@ impl SidebarModel {
 
     /// Folds or unfolds the rows nested under `host`'s session `id`
     /// ([`session_fold_key`]).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no control calls it until the sidebar draws a session fold"
-        )
-    )]
     pub fn toggle_session_fold(&mut self, host: &HostKey, id: &str) {
         self.toggle_container(&session_fold_key(host, id));
     }
@@ -3158,68 +3151,80 @@ impl<'a> Groups<'a> {
     }
 
     fn place(&mut self, s: &'a SessionSnapshot, inputs: &TreeInputs<'a>, members: &HashSet<&str>) {
-        if s.mode == SessionMode::PlainShell
-            && let Some(cwd) = s.current_cwd.as_deref().filter(|cwd| !cwd.is_empty())
-        {
-            self.place_by_cwd(s, cwd, inputs, members);
-        } else if s.kind == SessionKind::Standalone {
-            self.shells.push(s);
-        } else {
-            self.place_by_owner(s, inputs, members);
+        match session_home(s, inputs.repos, inputs.workspaces, members) {
+            SessionHome::Workspace(id) => self.workspaces.entry(id).or_default().push(s),
+            SessionHome::Repo(id) => self.repos.entry(id).or_default().push(s),
+            SessionHome::Dir(path) => self.dirs.entry(path).or_default().push(s),
+            SessionHome::Shell => self.shells.push(s),
+            SessionHome::Detached => self.detached.push(s),
         }
     }
+}
 
-    fn place_by_cwd(
-        &mut self,
-        s: &'a SessionSnapshot,
-        cwd: &str,
-        inputs: &TreeInputs<'a>,
-        members: &HashSet<&str>,
-    ) {
-        match find_container_for_cwd(cwd, inputs.repos, inputs.workspaces, members) {
-            CwdHome::Workspace(id) => self.push_workspace(inputs, &id, s),
-            CwdHome::Repo(id) => self.push_repo(inputs, &id, s),
-            CwdHome::Dir(_) if s.kind == SessionKind::Standalone => self.shells.push(s),
-            CwdHome::Dir(path) => self.dirs.entry(path).or_default().push(s),
-        }
-    }
+/// The repos-view container a session's leaf sits in.
+enum SessionHome<'r> {
+    Workspace(&'r str),
+    Repo(&'r str),
+    Dir(String),
+    Shell,
+    Detached,
+}
 
-    fn place_by_owner(
-        &mut self,
-        s: &'a SessionSnapshot,
-        inputs: &TreeInputs<'a>,
-        members: &HashSet<&str>,
-    ) {
-        if let Some(workspace_id) = s.workspace_id.as_deref() {
-            self.push_workspace(inputs, workspace_id, s);
-            return;
-        }
-        let owner = s
-            .members
-            .first()
-            .map(|m| m.repo_id.as_str())
-            .filter(|id| !members.contains(id));
-        match owner {
-            Some(repo_id) => self.push_repo(inputs, repo_id, s),
-            None => self.detached.push(s),
+impl SessionHome<'_> {
+    /// The key [`active_container_keys`] gives this home; `None` for a
+    /// shell, folder or Detached row, which no filter cuts.
+    fn active_key(&self) -> Option<String> {
+        match self {
+            Self::Workspace(id) => Some(container_key(ContainerKind::Workspace, id)),
+            Self::Repo(id) => Some(container_key(ContainerKind::Repo, id)),
+            Self::Dir(_) | Self::Shell | Self::Detached => None,
         }
     }
+}
 
-    /// File under the registered workspace, or Detached when it is gone.
-    fn push_workspace(&mut self, inputs: &TreeInputs<'a>, id: &str, s: &'a SessionSnapshot) {
-        match inputs.workspaces.iter().find(|w| w.id == id) {
-            Some(w) => self.workspaces.entry(w.id.as_str()).or_default().push(s),
-            None => self.detached.push(s),
-        }
+/// Where session `s`'s leaf sits: a plain shell by its folder, a standalone
+/// session among the shells, any other under the workspace or repo it was
+/// spawned for; one whose workspace or repo is no longer registered under
+/// Detached.
+fn session_home<'r>(
+    s: &SessionSnapshot,
+    repos: &'r [RepoEntry],
+    workspaces: &'r [WorkspaceEntry],
+    members: &HashSet<&str>,
+) -> SessionHome<'r> {
+    let workspace = |id: &str| {
+        workspaces
+            .iter()
+            .find(|w| w.id == id)
+            .map_or(SessionHome::Detached, |w| SessionHome::Workspace(&w.id))
+    };
+    let repo = |id: &str| {
+        repos
+            .iter()
+            .find(|r| r.id == id)
+            .map_or(SessionHome::Detached, |r| SessionHome::Repo(&r.id))
+    };
+    if s.mode == SessionMode::PlainShell
+        && let Some(cwd) = s.current_cwd.as_deref().filter(|cwd| !cwd.is_empty())
+    {
+        return match find_container_for_cwd(cwd, repos, workspaces, members) {
+            CwdHome::Workspace(id) => workspace(&id),
+            CwdHome::Repo(id) => repo(&id),
+            CwdHome::Dir(_) if s.kind == SessionKind::Standalone => SessionHome::Shell,
+            CwdHome::Dir(path) => SessionHome::Dir(path),
+        };
     }
-
-    /// File under the registered repo, or Detached when it is gone.
-    fn push_repo(&mut self, inputs: &TreeInputs<'a>, id: &str, s: &'a SessionSnapshot) {
-        match inputs.repos.iter().find(|r| r.id == id) {
-            Some(r) => self.repos.entry(r.id.as_str()).or_default().push(s),
-            None => self.detached.push(s),
-        }
+    if s.kind == SessionKind::Standalone {
+        return SessionHome::Shell;
     }
+    if let Some(id) = s.workspace_id.as_deref() {
+        return workspace(id);
+    }
+    s.members
+        .first()
+        .map(|m| m.repo_id.as_str())
+        .filter(|id| !members.contains(id))
+        .map_or(SessionHome::Detached, repo)
 }
 
 /// The repos view: workspaces and repos (manual order first, the rest
@@ -3998,17 +4003,36 @@ pub(crate) fn active_container_keys(
     let run_keys: Vec<String> = runs
         .iter()
         .filter(|run| crate::dispatch_runs::marks_active(run.status))
-        .filter_map(
-            |run| match run_container(run, repos, workspaces, &members) {
-                CwdHome::Workspace(id) => Some(container_key(ContainerKind::Workspace, &id)),
-                CwdHome::Repo(id) => Some(container_key(ContainerKind::Repo, &id)),
-                CwdHome::Dir(_) => None,
-            },
-        )
+        .filter_map(|run| run_active_key(run, repos, workspaces, sessions, &members))
         .collect();
     let mut keys = session_container_keys(repos, workspaces, sessions);
     keys.extend(run_keys);
     keys
+}
+
+/// The container working run `run` keeps active: its host session's, the
+/// one it nests in ([`nest_runs`]), when a listed session dispatched it,
+/// else its own ([`run_container`]).
+fn run_active_key(
+    run: &DispatchRunSnapshot,
+    repos: &[RepoEntry],
+    workspaces: &[WorkspaceEntry],
+    sessions: &[SessionSnapshot],
+    members: &HashSet<&str>,
+) -> Option<String> {
+    let host = run.session_id.as_deref().and_then(|conversation| {
+        sessions
+            .iter()
+            .find(|s| s.conversation_id.as_deref() == Some(conversation))
+    });
+    if let Some(host) = host {
+        return session_home(host, repos, workspaces, members).active_key();
+    }
+    match run_container(run, repos, workspaces, members) {
+        CwdHome::Workspace(id) => Some(container_key(ContainerKind::Workspace, &id)),
+        CwdHome::Repo(id) => Some(container_key(ContainerKind::Repo, &id)),
+        CwdHome::Dir(_) => None,
+    }
 }
 
 /// The ids of every workspace's member repos.
@@ -10902,6 +10926,63 @@ pub(crate) mod tests {
         ];
         let active = active_container_keys(&repos, &workspaces, &[], &runs);
         assert_eq!(sorted_keys(&active), ["repo:r1", "ws:w1"]);
+    }
+
+    /// Under the Active filter: repos r1 at `X:\r1` and r2 at `X:\r2`,
+    /// parked session s1 of conversation c1 filed under r1, and working run
+    /// d1 of r2 dispatched from conversation `session_id`.
+    fn active_filter_model(session_id: Option<&str>) -> SidebarModel {
+        let mut model = SidebarModel::new(UiState::default());
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "X:\\r1"), repo("r2", "X:\\r2")],
+            },
+        );
+        let mut parked = talking(in_repo("s1", "r1"), "c1");
+        parked.is_inactive = true;
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![parked],
+            },
+        );
+        let working = DispatchRunSnapshot {
+            session_id: session_id.map(str::to_owned),
+            ..run("d1", "X:\\r2.wt\\a", Some("X:\\r2"), 1, Run::Working)
+        };
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![working],
+            },
+        );
+        model.set_repo_filter(RepoFilter::Active);
+        model
+    }
+
+    #[test]
+    fn a_working_linked_run_keeps_its_hosts_container_active_under_the_active_filter() {
+        let shown = active_filter_model(Some("c1")).display_containers();
+        assert_eq!(
+            keys(&shown),
+            ["repo:r1"],
+            "the run's own repo is not listed"
+        );
+        assert_eq!(
+            nesting(&shown, "repo:r1"),
+            [
+                ("s1".to_owned(), 0, None),
+                ("d1".to_owned(), 1, Some("s1".to_owned())),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unlinked_working_run_still_marks_its_own_repo_active() {
+        let shown = active_filter_model(None).display_containers();
+        assert_eq!(keys(&shown), ["repo:r2"]);
+        assert_eq!(leaf_ids(&shown, "repo:r2"), ["d1"]);
     }
 
     #[test]

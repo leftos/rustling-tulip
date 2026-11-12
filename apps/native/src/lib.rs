@@ -3343,6 +3343,13 @@ impl RootView {
         self.save_ui();
     }
 
+    /// Folds or unfolds the rows nested under `host`'s session `id`.
+    fn toggle_session_fold(&mut self, host: &HostKey, id: &str, cx: &mut Context<Self>) {
+        self.sidebar.toggle_session_fold(host, id);
+        self.save_ui();
+        cx.notify();
+    }
+
     /// Focuses a container row, so the sidebar's keys fold it and the ring
     /// follows it.
     /// Moving the focus to another row drops the preselected target.

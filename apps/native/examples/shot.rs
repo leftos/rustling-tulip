@@ -2022,13 +2022,20 @@ fn tulip_grid(view: View) -> GridNode {
     }
 }
 
-/// The `dispatch` shot's run: working, metered, with a tier and a dozen
-/// recent actions, in a worktree of the tulip repo.
+/// The conversation `s-petal` runs, which dispatched the `dispatch` shot's
+/// followed run.
+const SHOT_PETAL_CONVERSATION: &str = "c-petal";
+
+/// The `dispatch` shot's runs, both in worktrees of the tulip repo: the
+/// followed one `s-petal` dispatched, working, metered, with a tier and a
+/// dozen recent actions, which nests under it, and one no session
+/// dispatched, which sits after the repo's sessions.
 fn shot_dispatch_runs() -> Result<DaemonMessage> {
     parse_message(json!({
         "type": "dispatch_runs",
         "runs": [{
             "run_id": SHOT_RUN,
+            "session_id": SHOT_PETAL_CONVERSATION,
             "title": "Wire dispatch runs into the sidebar",
             "backend": "backend-flash",
             "tier": 2,
@@ -2052,6 +2059,15 @@ fn shot_dispatch_runs() -> Result<DaemonMessage> {
                 "Bash cargo nextest run --test ui -E 'test(/^ui_sidebar_drag::/)'",
                 "Bash prek run --files apps/native/src/drag.rs",
             ],
+        }, {
+            "run_id": "r-shot-solo",
+            "title": "Trim the dispatch log",
+            "backend": "backend-flash",
+            "worktree": format!("{TULIP_PATH}.wt\\df12"),
+            "main_checkout": TULIP_PATH,
+            "run_dir": r"C:\runs\r-shot-solo",
+            "started_at": "2026-01-01T00:05:00Z",
+            "status": "working",
         }],
     }))
     .context("the fixture's dispatch runs")
@@ -2174,6 +2190,7 @@ fn session_rows() -> Vec<Row> {
                 "has_per_session_worktree": true,
                 "worktree_paths": [PETAL_TREE],
                 "terminal_title": "Petal footer polish",
+                "conversation_id": SHOT_PETAL_CONVERSATION,
                 "appearance": { "accent_color": "#a3be8c", "terminal_frame_color": "#a3be8c" },
             }),
         },

@@ -2590,6 +2590,113 @@ fn dispatch_runs_show_as_leaves_from_a_daemon_with_the_feature(cx: &mut TestAppC
     assert!(h.in_model("leaf-d1"), "the run shows as a leaf");
 }
 
+/// Session `s2` focused in pane `p1`, and session `s1` of conversation `c1`
+/// beside it in repo `r1`, with run `d1` that `s1` dispatched.
+fn nested_run_harness<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s2").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "C:\\r1")];
+    fixture
+        .sessions
+        .push(session("s1").in_repo("r1").conversation_id("c1").build());
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(DaemonMessage::DispatchRuns {
+        runs: vec![
+            dispatch_run("d1")
+                .worktree("C:\\r1.wt\\a")
+                .main_checkout("C:\\r1")
+                .session_id("c1")
+                .build(),
+        ],
+    });
+    h.answer_scrollback("s2", b"");
+    h
+}
+
+#[gpui::test]
+fn a_dispatched_run_draws_indented_right_after_its_host_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_run_harness(cx, &dir);
+
+    let host = h.bounds("leaf-s1");
+    let run = h.bounds("leaf-d1");
+    assert!(drawn(&mut h, "leaf-d1"), "the run draws");
+    assert!(
+        run.top() >= host.bottom(),
+        "the run draws below its host: {run:?} and {host:?}"
+    );
+    assert_eq!(
+        run.left() - host.left(),
+        px(14.0),
+        "the run's card sits one level right of its host's"
+    );
+}
+
+#[gpui::test]
+fn the_session_fold_hides_and_shows_its_runs_and_saves_the_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_run_harness(cx, &dir);
+    assert!(drawn(&mut h, "leaf-d1"), "precondition: the run draws");
+    // gpui keeps a gone element's bounds, so the row after the run proves
+    // it left: s2 moves up into its place.
+    let open = h.bounds("leaf-s2").top();
+    assert!(
+        open >= h.bounds("leaf-d1").bottom(),
+        "precondition: s2 draws after the run"
+    );
+    let focused = h.root(|root, _| root.pane_session("p1"));
+    h.sent();
+
+    h.click_on("sidebar-session-fold-s1");
+
+    assert!(
+        h.bounds("leaf-s2").top() < h.bounds("leaf-d1").bottom(),
+        "the fold hides the run: s2 takes its place"
+    );
+    assert!(
+        saved_ui(&dir)["collapsed_containers"]
+            .as_array()
+            .is_some_and(|keys| keys.iter().any(|key| key == "session:s1")),
+        "the fold is saved"
+    );
+    assert_eq!(
+        h.root(|root, _| root.pane_session("p1")),
+        focused,
+        "the fold does not select the host"
+    );
+    let sent = h.sent();
+    assert!(sent.is_empty(), "the fold sends nothing: {sent:?}");
+
+    h.click_on("sidebar-session-fold-s1");
+
+    assert_eq!(
+        h.bounds("leaf-s2").top(),
+        open,
+        "a second click shows the run again"
+    );
+    assert!(
+        saved_ui(&dir)["collapsed_containers"]
+            .as_array()
+            .is_some_and(|keys| keys.iter().all(|key| key != "session:s1")),
+        "the open fold leaves the saved set"
+    );
+}
+
+#[gpui::test]
+fn a_session_without_runs_draws_no_fold(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_run_harness(cx, &dir);
+
+    assert!(
+        drawn(&mut h, "sidebar-session-fold-s1"),
+        "precondition: the host draws its fold"
+    );
+    assert!(
+        !drawn(&mut h, "sidebar-session-fold-s2"),
+        "a session with no runs draws none"
+    );
+}
+
 #[gpui::test]
 fn dispatch_runs_from_a_daemon_without_the_feature_are_ignored(cx: &mut TestAppContext) {
     let dir = TestDir::new();

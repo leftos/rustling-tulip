@@ -66,6 +66,9 @@ const BODY_INSET_X: f32 = 8.0;
 const BODY_INSET_Y: f32 = 2.0;
 /// A leaf's left padding, before its glyph.
 const LEAF_PAD_LEFT: f32 = 12.0;
+/// How far a nested leaf's card, stripe included, sits right of its host's
+/// per level of [`Leaf::depth`].
+const NEST_INDENT: f32 = 14.0;
 /// A Compact leaf's one line, in a pane that resizes.
 const COMPACT_LEAF_HEIGHT: f32 = 26.0;
 /// The subline's and chip row's indent under the label, past the glyph.
@@ -1439,11 +1442,7 @@ fn container_rows(
             let banner = detached_banner(container, ctx.detached_stop_all, cx);
             rows.push(dimmed(banner, dim).into_any_element());
         }
-        for leaf in container
-            .leaves
-            .iter()
-            .filter(|leaf| ctx.shows(container.kind, leaf))
-        {
+        for leaf in shown_leaves(&container.leaves, |leaf| ctx.shows(container.kind, leaf)) {
             rows.push(leaf_drag_row(container, leaf, ctx, window, cx).into_any_element());
         }
     }
@@ -1461,6 +1460,25 @@ fn container_rows(
         .children(rows)
         .children(line)
         .into_any_element()
+}
+
+/// The leaves of one container that draw: a row at depth 0 when `shows`
+/// answers yes for it, a nested row exactly when its host session's row in
+/// the same container draws and is not folded.
+fn shown_leaves(leaves: &[Leaf], shows: impl Fn(&Leaf) -> bool) -> Vec<&Leaf> {
+    // A tab's leaves span hosts, so a host row is matched by host and id.
+    let open_hosts: HashSet<(&HostKey, &str)> = leaves
+        .iter()
+        .filter(|leaf| leaf.host_session.is_none() && !leaf.collapsed && shows(leaf))
+        .map(|leaf| (&leaf.host, leaf.id.as_str()))
+        .collect();
+    leaves
+        .iter()
+        .filter(|leaf| match leaf.host_session.as_deref() {
+            Some(host_id) => open_hosts.contains(&(&leaf.host, host_id)),
+            None => shows(leaf),
+        })
+        .collect()
 }
 
 /// How opaque a dragged container's group or leaf stays in its place.
@@ -2767,6 +2785,7 @@ fn leaf_row(
         let name = format!("sidebar-host-{}-{id}", label.short);
         host_chip(crate::fonts::ui_text_size(cx), name, label.clone(), &t)
     });
+    let fold = session_fold(leaf, host, cx);
     match ctx.density {
         LeafDensity::Compact => {
             let pill = if leaf.kind == LeafKind::Session {
@@ -2791,6 +2810,7 @@ fn leaf_row(
                     &key,
                     &theme(cx),
                 ))
+                .children(fold)
                 .children(host_tag)
                 .children(inline_buttons(leaf, host, &key, cx))
                 .children(chips)
@@ -2807,6 +2827,7 @@ fn leaf_row(
                     &key,
                     &theme(cx),
                 ))
+                .children(fold)
                 .children(host_tag)
                 .children(inline_buttons(leaf, host, &key, cx));
             let lower = comfortable_lower(leaf, host, &key, ctx, window, cx);
@@ -2861,6 +2882,7 @@ fn leaf_frame(
         .flex()
         .flex_none()
         .my(px(ROW_GAP))
+        .ml(px(NEST_INDENT * f32::from(leaf.depth)))
         .pl(px(LEAF_PAD_LEFT))
         .pr(px(ROW_PADDING))
         .rounded(px(6.0))
@@ -2888,6 +2910,41 @@ fn leaf_frame(
                 this.open_dispatch_run(&host, &id, window, cx);
             }
         }))
+}
+
+/// The chevron after the label of a session row with rows nested under it,
+/// right while they are folded, down while open; none for any other row. It
+/// folds them on a click of its own, which never reaches the row.
+fn session_fold(leaf: &Leaf, host: &HostKey, cx: &mut Context<RootView>) -> Option<AnyElement> {
+    if leaf.kind != LeafKind::Session || leaf.nested == 0 {
+        return None;
+    }
+    let t = theme(cx);
+    let selector = format!("sidebar-session-fold-{}", leaf.id);
+    let (path, tip) = if leaf.collapsed {
+        (SIDEBAR_CHEVRON_RIGHT_ICON, "Show its dispatch runs")
+    } else {
+        (SIDEBAR_CHEVRON_DOWN_ICON, "Hide its dispatch runs")
+    };
+    let id = leaf.id.clone();
+    let host = host.clone();
+    Some(
+        div()
+            .id(SharedString::from(selector.clone()))
+            .driver_id(|| selector)
+            .flex_none()
+            .child(icon(path, 13.0, t.subtle))
+            .tooltip(tooltip(tip.to_owned()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.toggle_session_fold(&host, &id, cx);
+            }))
+            .into_any_element(),
+    )
 }
 
 /// Whether the leaf's label draws dimmed: the session is idle with no
@@ -3280,7 +3337,7 @@ impl RootView {
 mod tests {
     use super::{
         ADD_HOST_REPO_TIP, AddRepoGate, BodyChild, BodyNotes, body_children, body_rows, chip_texts,
-        row_child_index, seen_idle,
+        row_child_index, seen_idle, shown_leaves,
     };
     use crate::grid_view::ADD_REPO_TIP;
     use crate::remote_mode::Capabilities;
@@ -3473,5 +3530,69 @@ mod tests {
             &|_| false,
         );
         assert_eq!(none, [BodyChild::Note], "No sessions");
+    }
+
+    /// Session `s1` with run `d1` nested under it, `s1` folded when `folded`.
+    fn host_and_run(folded: bool) -> Vec<Leaf> {
+        let host = Leaf {
+            nested: 1,
+            collapsed: folded,
+            ..leaf(None)
+        };
+        let run = Leaf {
+            id: "d1".to_owned(),
+            kind: LeafKind::Dispatch,
+            depth: 1,
+            host_session: Some("s1".to_owned()),
+            ..leaf(None)
+        };
+        vec![host, run]
+    }
+
+    fn ids(leaves: Vec<&Leaf>) -> Vec<&str> {
+        leaves.into_iter().map(|leaf| leaf.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_nested_run_shows_with_its_host() {
+        let leaves = host_and_run(false);
+        assert_eq!(ids(shown_leaves(&leaves, |_| true)), ["s1", "d1"]);
+    }
+
+    #[test]
+    fn a_nested_run_hides_when_its_host_is_folded() {
+        let leaves = host_and_run(true);
+        assert_eq!(ids(shown_leaves(&leaves, |_| true)), ["s1"]);
+    }
+
+    #[test]
+    fn a_nested_run_hides_when_the_filter_hides_its_host() {
+        let leaves = host_and_run(false);
+        assert_eq!(
+            ids(shown_leaves(&leaves, |leaf| leaf.id != "s1")),
+            Vec::<&str>::new(),
+            "the run's own answer does not keep it"
+        );
+    }
+
+    #[test]
+    fn a_nested_run_of_the_focused_session_shows_when_the_filter_hides_idle_sessions() {
+        let leaves = host_and_run(false);
+        // The focused session always shows; the filter alone would hide its
+        // ended run.
+        assert_eq!(
+            ids(shown_leaves(&leaves, |leaf| leaf.id == "s1")),
+            ["s1", "d1"]
+        );
+    }
+
+    #[test]
+    fn an_unnested_run_keeps_the_filters_answer() {
+        let mut leaves = host_and_run(false);
+        leaves[0].nested = 0;
+        leaves[1].depth = 0;
+        leaves[1].host_session = None;
+        assert_eq!(ids(shown_leaves(&leaves, |leaf| leaf.id == "s1")), ["s1"]);
+        assert_eq!(ids(shown_leaves(&leaves, |_| true)), ["s1", "d1"]);
     }
 }
