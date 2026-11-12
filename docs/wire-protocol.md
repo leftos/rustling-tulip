@@ -91,6 +91,14 @@ The rules of the daemon/client protocol that the types in `crates/protocol/src/l
 
   A `DispatchRunSnapshot`'s `status` is `starting` until the run's stream shows its first status event, then `working`, `stopping` from a Stop until the run's removal, and `ended` after the stream's final status (the file usually goes moments later); an unknown value decodes as `Unknown`, and every field after `status` is defaulted. The tailer folds each 250 ms poll's lines into one `DispatchRunUpdated` per run, and updates and removals are sent in the order the runs changed, so `DispatchRunRemoved` is sent at most once per run and no update follows it. `main_checkout` is the worktree's main checkout, resolved by the daemon, absent for a plain checkout or an unreadable worktree.
 
+  `FollowTranscript { source, request_id? }` (`TranscriptSource::DispatchRun { run_id }`; an unknown source decodes as `Unknown`) follows a run's transcript, the run's stream lines parsed into `ChatEntry`s by the agent plugin's chat parser, the same one the chat mirror uses.
+
+  The daemon answers with `Transcript { source, entries, hidden, request_id }`, the newest 500 entries with `hidden` counting the dropped ones, and registers the follower under the same lock the log folds under, so every later `TranscriptAppend { source, entries, ended }` is sent after the answer and none is lost or doubled. An append goes to followers only; an entry whose id is held replaces it in place (a tool result re-sends its call's entry), any other is added.
+
+  A shrunk or replaced stream sends followers an unsolicited `Transcript` (`request_id` `None`), which replaces what they hold; a removed run sends `TranscriptAppend` with `ended` true. `UnfollowTranscript { source }` stops it, and a closed connection's follows are dropped.
+
+  A follow of a run not listed is answered `Error { code: "not_found", message: "No dispatch run {run_id}" }`, of an unknown source `Error { code: "unsupported_message" }`, and a daemon that watches no folder answers `unsupported_message` too, each with the `request_id`.
+
   `StopDispatchRun { run_id, request_id? }` (`stop_dispatch_run`, served on tailnet connections too, as a session stop is) stops a live run: the daemon broadcasts the run as `Stopping`, writes its stop marker, kills its process tree, and the run's removal follows as `DispatchRunRemoved`. It sends no reply on success. A run that is gone or is no longer its process is answered `ActionFailed` titled "The run already ended", and a failed kill "Could not stop the run", each to the requester alone, echoing `request_id`; a Stop for a run already `Stopping` does nothing. A daemon that watches no folder answers `Error { code: "unsupported_message" }`.
 
   The gate types (`GateState`, `GateSlot`, `GateClaim`, `GateHistoryRun` and the rest) are the daemon's own, converted from gate-state's, so a change to the gate's files never reaches the protocol: every field past the ids is defaulted.

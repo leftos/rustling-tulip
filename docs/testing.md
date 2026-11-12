@@ -23,7 +23,15 @@ The native client has three test tiers, and the driver MCP server has a live spe
   gpui's test platform uses `NoopTextSystem`, which never slices text by its runs, so a UI spec cannot catch a run-boundary fault in text shaping. `apps/native/tests/ellipsis_real_text.rs` can: it runs a `compute_layout` chain in a real window on the real text system, and `.\rt.ps1 native-smoke` runs it beside the smoke specs.
 
   Every spec file is a module of the one `tests/ui/main.rs` binary (a new spec is `tests/ui/ui_<name>.rs` plus its `mod` line there), since linking and starting a binary per file cost more than the tests themselves; the crate's lib has `doctest = false`.
-- **Live e2e** — `.\rt.ps1 native-e2e`: builds daemon + tracer in test-release and runs `tests/e2e_live.rs`, `tests/e2e_recover.rs`, `tests/e2e_remote.rs`, `tests/e2e_ssh.rs`, `tests/e2e_multi_host.rs` and `tests/e2e_update.rs` (a remote update driven through the host-update sandbox: the daemon runs from a scratch install, downloads and checks a release from `UpdateFeed`, and records the installer instead of starting it; and a host telling its connected clients to update, each by its kind) and `tests/e2e_dispatch.rs` (a run file for a fake child streaming stream-json through `FAKE_CLAUDE_STREAM_JSON`: its `DS` leaf, a pane following it, the pane header's Stop killing the child and writing the stop marker, the run's removal) under `nextest --run-ignored only` against a real daemon isolated under `.tmp/`; `e2e_remote` drives the daemon's tailnet listener as a tailnet client (pairing and approval, token reconnect, owner rule, refused commands, revoke, remote file fetch, a folder fetch landing byte-exact (`remote_folder_fetch_lands_the_tree_byte_exact`), remote access off). Needs `node` for the fake-claude, fake-tailscale and fake-ssh shims.
+- **Live e2e** — `.\rt.ps1 native-e2e`: builds daemon + tracer in test-release and runs `tests/e2e_live.rs`, `tests/e2e_recover.rs`, `tests/e2e_remote.rs`, `tests/e2e_ssh.rs`, `tests/e2e_multi_host.rs`, `tests/e2e_update.rs` and `tests/e2e_dispatch.rs` under `nextest --run-ignored only` against a real daemon isolated under `.tmp/`.
+
+  `e2e_update` covers a remote update driven through the host-update sandbox: the daemon runs from a scratch install, downloads and checks a release from `UpdateFeed`, and records the installer instead of starting it; and a host telling its connected clients to update, each by its kind.
+
+  `e2e_dispatch` covers a run file for a fake child streaming stream-json through `FAKE_CLAUDE_STREAM_JSON`: its `DS` leaf, a pane following it and drawing its transcript (a tool call and its output, from the stream's `tool_use` and `tool_result` records), the pane header's Stop killing the child and writing the stop marker, the run's removal.
+
+  `e2e_remote` drives the daemon's tailnet listener as a tailnet client (pairing and approval, token reconnect, owner rule, refused commands, revoke, remote file fetch, a folder fetch landing byte-exact (`remote_folder_fetch_lands_the_tree_byte_exact`), remote access off).
+
+  Needs `node` for the fake-claude, fake-tailscale and fake-ssh shims.
 
   `e2e_remote`, `e2e_ssh` and `e2e_multi_host` open the window as production does (`Harness::open_hosts`, `apps/native/tests/support/live.rs`): This PC runs on its own isolated home daemon and the daemon under test is a remote host beside it, on a real net thread of its own. Every daemon a spec starts is its own `LiveDaemon::start(<unique name>)`, since its roots, tracer pipe prefix and binaries dir derive from that name, and a spec has one fake ssh per process, which any ssh alias reaches.
 
@@ -125,7 +133,7 @@ The views:
 - `spawn-hosts`: the spawn dialog over those two hosts with its closed Target field.
 - `open-shell`: the Open a shell dialog with a folder path too long for its field, scrolled to the caret at its end.
 - `safe-start`: the prompt a start after a crashed one raises, "The last start crashed" with Open tabs and Start without tabs, over the window with no tab drawn.
-- `dispatch`: the tulip tab split with a pane following a working dispatch run (header with its `DS` chip and Stop, stats line, recent actions), its `DS` leaf under the tulip repo, one run nested under the "Petal footer polish" session and one unnested run, "Trim the dispatch log".
+- `dispatch`: the tulip tab split with a pane following a working dispatch run (header with its `DS` chip and Stop, stats line, the run's transcript: answers, a tool call with its output and one still running), its `DS` leaf under the tulip repo, one run nested under the "Petal footer polish" session and one unnested run, "Trim the dispatch log".
 - `panes-accent`: four panes in a 2x2 grid, the Theme pane focused, beside the Rose, Periwinkle and Lilac panes a chosen colour stores an accent and a frame for.
 - `panes-accent-chosen`: the same grid with the Periwinkle pane focused.
 - `settings-hosts`: Settings on the Claude page with the host selector showing This PC and a remote host on 0.9.0 wearing the Behind tag.

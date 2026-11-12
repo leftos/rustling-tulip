@@ -113,9 +113,9 @@
     },
     {
       "paths": [
-        "crates/daemon/src/dispatch_runs/transcript.rs"
+        "crates/daemon/src/transcript_log.rs"
       ],
-      "filter": "package(daemon) & test(/^dispatch_runs::/)"
+      "filter": "package(daemon) & (test(/^transcript_log::/) | test(/^dispatch_runs::/))"
     },
     {
       "paths": [
