@@ -1456,6 +1456,34 @@ impl DispatchRunBuilder {
         self
     }
 
+    /// The run's status.
+    pub fn status(mut self, status: protocol::DispatchRunStatus) -> Self {
+        self.0["status"] = json!(status);
+        self
+    }
+
+    /// The run's tier.
+    pub fn tier(mut self, tier: u8) -> Self {
+        self.0["tier"] = json!(tier);
+        self
+    }
+
+    /// The run's cost in dollars and its input and output tokens.
+    pub fn metrics(mut self, cost_usd: f64, input: u64, output: u64) -> Self {
+        self.0["metrics"] = json!({
+            "input_tokens": input,
+            "output_tokens": output,
+            "cost_usd": cost_usd,
+        });
+        self
+    }
+
+    /// The run's recent actions, oldest first.
+    pub fn actions(mut self, actions: &[&str]) -> Self {
+        self.0["recent_actions"] = json!(actions);
+        self
+    }
+
     pub fn build(self) -> protocol::DispatchRunSnapshot {
         serde_json::from_value(self.0).expect("dispatch run fixture")
     }

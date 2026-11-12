@@ -60,6 +60,7 @@ pub mod diff_view;
 mod discard_confirm;
 mod dispatch_menu;
 mod dispatch_runs;
+mod dispatch_view;
 mod drag;
 #[cfg(feature = "driver")]
 pub mod driver;
@@ -1118,6 +1119,10 @@ pub struct RootView {
     presence_timer: Option<Task<()>>,
     /// A header Stop waiting for its second click.
     confirm: HeaderStopConfirm,
+    /// The last snapshot of each dispatch run a pane follows.
+    kept_runs: dispatch_view::KeptRuns,
+    /// The log scroll of each pane that follows a dispatch run, by pane id.
+    run_scrolls: HashMap<String, dispatch_view::RunScroll>,
     /// The Detached banner's Stop all waiting for its second click.
     detached_stop_all: sidebar_view::DetachedStopAll,
     /// Restarts and resumes waiting for their duplicate.
@@ -1713,6 +1718,8 @@ impl RootView {
             presence: presence::PresenceReport::default(),
             presence_timer: None,
             confirm: HeaderStopConfirm::default(),
+            kept_runs: dispatch_view::KeptRuns::default(),
+            run_scrolls: HashMap::new(),
             detached_stop_all: sidebar_view::DetachedStopAll::default(),
             duplicates: Duplicates::default(),
             prefills: Prefills::default(),
@@ -4237,6 +4244,7 @@ impl RootView {
         self.reconcile_panes(window, cx);
         self.reconcile_diff_tabs(window, cx);
         self.prune_tab_font_sizes();
+        self.prune_kept_runs();
         self.apply_pane_fonts(false, cx);
         self.refresh_spawn_tabs();
         let keyboard_free = !self.overlay_open();
@@ -4734,6 +4742,7 @@ impl RootView {
                 .is_some_and(|old| old.target() != conn.target());
         if moved {
             tracing::info!(?host, "the host's address changed");
+            self.keep_followed_snapshots(host);
             self.clear_remote_slice(host, window, cx);
         }
         // A remote host's disconnect clears nothing: its slice stays as it
@@ -4829,6 +4838,7 @@ impl RootView {
         // another app, or the window is minimized, ends unseen.
         let focused = self.shown_session().filter(|_| main_active);
         self.sidebar.set_focused_session(focused.as_deref());
+        self.keep_followed_runs(host, msg);
         self.sidebar.apply(host, msg);
         // A session focused in a pop-out is shown too: a turn ending there
         // is seen. `popout_focused` holds a terminal only while its pop-out
@@ -5334,6 +5344,7 @@ impl RootView {
     /// afresh.
     fn on_welcome(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         // The new connection lists its dispatch runs afresh, if it lists any.
+        self.keep_runs_before_welcome(host);
         self.sidebar.forget_runs(host);
         self.lists_since_welcome.remove(host);
         self.forget_uploads_of(host);

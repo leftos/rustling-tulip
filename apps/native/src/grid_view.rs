@@ -1763,7 +1763,13 @@ impl RootView {
     ) -> AnyElement {
         let PaneShown { session, follow } = shown;
         if let (None, Some(follow)) = (session, follow) {
-            let note = follow_placeholder(follow, pane_id, cx);
+            let note = match follow {
+                PaneFollow::DispatchRun { run_id } => {
+                    let host = self.tabs.pane_host(tab_id, pane_id);
+                    self.dispatch_body(pane_id, &host, run_id, cx)
+                }
+                PaneFollow::Unknown => follow_placeholder(follow, pane_id, cx),
+            };
             return match self.panes.get(pane_id) {
                 Some(slot) => {
                     let handle = slot.view.read(cx).focus_handle();
@@ -3439,7 +3445,7 @@ fn status_label(status: SessionStatus, background: bool) -> &'static str {
 }
 
 /// Muted text centred in the space it is given.
-fn muted_note(offset: i8, text: impl Into<SharedString>, t: &UiTheme) -> Div {
+pub(crate) fn muted_note(offset: i8, text: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_1()
