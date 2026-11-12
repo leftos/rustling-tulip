@@ -511,7 +511,6 @@
 ## Dashboard, Gates and Linear
 
 - [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries
-  - [ ] RT-499 Nest dispatch runs under their session and track them (DB.21) · release vNext
   - [ ] RT-501 Draw the repo lanes, the default view (DB.24)
   - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25)
   - [ ] RT-453 Document the summarizer and the Dashboard (SA.11)
@@ -569,6 +568,7 @@
 - [ ] RT-1451 List a backgrounded subagent once on the Dashboard, not again as a bg shell
 - [ ] RT-1479 Keep the Dashboard's subagent name uncut while its row has room
 - [ ] RT-1509 Nest a dispatch run under its session by the live-run file's session id (DB.21)
+- [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts
 
 ## Repos, workspaces and worktrees
 
@@ -586,8 +586,6 @@
 ## Agents and subagents
 
 - [ ] RT-30 View a session's running subagents as read-only sessions
-- [/] RT-31 Follow DeepSeek dispatch runs as read-only sessions · release vNext
-  - [ ] RT-1506 DF.12: Request live-run files and the stop marker from the dispatch tool · release vNext
 - [ ] RT-49 Offer every popular agent harness in the spawn dialog's runtime dropdown
   - [ ] RT-214 AH.1 Spike: DSH per-invocation patch, hook payload and resume
   - [ ] RT-215 AH.2 Pi runtime: backend, session id and dialog entry
@@ -686,6 +684,8 @@
 - [ ] RT-1491 Keep Settings' saved look when open_settings runs again while Settings is open
 - [ ] RT-1547 Carry a link's #fragment and ?query on remote, file:// hyperlink and relative-join links
 - [ ] RT-1549 Keep session update broadcasts in record order and off unpublished records
+- [ ] RT-1572 Keep hook and thinking-token system events out of a stream's recent actions
+- [ ] RT-1576 Log dispatch runs that change or leave before the status log attaches at startup
 
 ## Design files
 
@@ -694,10 +694,10 @@
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
-- [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789, RT-1509
+- [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789, RT-1509, RT-1574
 - [default-shell.md](default-shell.md) — RT-956
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
-- [dispatch-follow.md](dispatch-follow.md) — RT-31, RT-167, RT-1506, RT-1509, RT-1510, RT-1541, RT-1542, RT-1552, RT-1558
+- [dispatch-follow.md](dispatch-follow.md) — RT-167, RT-1509, RT-1510, RT-1541, RT-1542, RT-1552, RT-1558
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-787, RT-867, RT-868, RT-869
 - [finished-toast.md](finished-toast.md) — RT-755, RT-757
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
