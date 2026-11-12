@@ -27,6 +27,6 @@ These are the orchestrator's decisions (not owner rulings), settled from the cod
 - [x] TV.1 Protocol: the four messages and `TranscriptSource` in `crates/protocol/src/lib.rs`, round-trip tests, `apps/pwa/src/protocol.ts` regenerated.
 - [x] TV.2 Parse: the agent's existing `chat_entries(line, known)` reads stream-json records as they are, proved by a real stream-json fixture.
 - [x] TV.3 Daemon: the entry log in `RunEntry`, folded in `fold`; follow and unfollow handled in `DispatchRuns`, a follower dropped at its first failed send and at run removal.
-- [ ] TV.4 Client: `apps/native/src/transcript_view.rs` (backfill, append upsert by id, the expanded set, the terminal-style lines), the follow and unfollow sends and the message fold in `RootView`, `dispatch_view.rs` drawing the transcript in place of recent actions once one has arrived, a `ui_transcript` spec.
-- [ ] TV.5 Shot and e2e: the `dispatch` native-shot fixture gains a transcript; fake-claude's stream mode writes `user`/`tool_result` records; `e2e_dispatch` follows a transcript.
+- [x] TV.4 Client: `apps/native/src/transcript_view.rs` (backfill, append upsert by id, the expanded set, the terminal-style lines), the follow and unfollow sends and the message fold in `RootView`, `dispatch_view.rs` drawing the transcript in place of recent actions once one has arrived, a `ui_transcript` spec.
+- [x] TV.5 Shot and e2e: the `dispatch` native-shot fixture gains a transcript; fake-claude's stream mode writes `user`/`tool_result` records; `e2e_dispatch` follows a transcript.
 - [ ] TV.6 Subagent source (RT-30, after RT-1510): `TranscriptSource::Subagent` and `PaneFollow` variant, a subagent-file tail feeding the same log.
