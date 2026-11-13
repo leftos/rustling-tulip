@@ -251,15 +251,16 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => this.submit_shell_dialog(window, cx),
                 TextInputEvent::Cancel => this.close_shell_dialog(window, cx),
             },
         );
-        let edits = cx.subscribe_in(input, window, |_, _, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, |_, _, _: &TextChanged, cx| {
             cx.notify();
         });
         let handle = input.read(cx).focus_handle(cx);

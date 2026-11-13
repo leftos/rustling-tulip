@@ -250,7 +250,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        let edits = cx.subscribe_in(input, window, move |this, input, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, move |this, input, _: &TextChanged, cx| {
             let text = input.read(cx).text().to_owned();
             if let Some(dialog) = &mut this.preset_wizard {
                 match &field {
@@ -263,9 +263,10 @@ impl RootView {
             }
             cx.notify();
         });
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             |this, _, event: &TextInputEvent, window, cx| {
                 if *event == TextInputEvent::Cancel && !this.preset_scripts_running() {
                     this.close_preset_wizard(window, cx);

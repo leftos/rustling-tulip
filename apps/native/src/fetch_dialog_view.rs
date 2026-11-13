@@ -232,15 +232,16 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => this.submit_fetch_dialog(window, cx),
                 TextInputEvent::Cancel => this.dismiss_fetch_dialog(window, cx),
             },
         );
-        let edits = cx.subscribe_in(input, window, |this, _, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, |this, _, _: &TextChanged, cx| {
             if let Some(dialog) = &mut this.fetch_dialog {
                 dialog.form.edited();
             }

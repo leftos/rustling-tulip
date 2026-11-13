@@ -4895,3 +4895,36 @@ fn esc_in_the_jump_palette_hands_the_main_windows_keyboard_back_there(cx: &mut T
         "the pop-out keeps its terminal's keyboard"
     );
 }
+
+/// Esc in the Shell… dialog's folder field, pressed in the main window while
+/// the pop-out drew last, closes the dialog and hands the main window's
+/// keyboard back to its pane.
+#[gpui::test]
+fn esc_in_a_dialog_field_hands_the_main_windows_keyboard_back_there_beside_a_popout(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = p2_popped_of_three(cx, &dir);
+    h.open_shell_dialog_from_more();
+    assert!(
+        h.root(|root, _| root.shell_dialog_open()),
+        "the Shell… dialog opens"
+    );
+    h.cx.simulate_input("C:/work");
+    popout_draws_last(&mut h);
+
+    h.keys("escape");
+    assert!(
+        !h.root(|root, _| root.shell_dialog_open()),
+        "Esc closes the Shell… dialog"
+    );
+    assert!(
+        focused_in_main(&mut h, "p1"),
+        "the main window's pane takes its keyboard back"
+    );
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p2"),
+        "the pop-out keeps its terminal's keyboard"
+    );
+}

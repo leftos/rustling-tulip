@@ -1100,18 +1100,20 @@ impl RootView {
                     .with_rows(COMMIT_MIN_ROWS, COMMIT_MAX_ROWS)
             });
             let key = section.clone();
-            let keys = cx.subscribe_in(
-                &input,
+            let keys = Self::subscribe_in_window(
                 window,
+                cx,
+                &input,
                 move |this, _, event: &TextInputEvent, window, cx| match event {
                     TextInputEvent::Submit => this.commit_changes(&key, cx),
                     TextInputEvent::Cancel => this.focus_active_pane(window, cx),
                 },
             );
             let key = section.clone();
-            let edits = cx.subscribe_in(
-                &input,
+            let edits = Self::subscribe_in_window(
                 window,
+                cx,
+                &input,
                 move |this, input, _: &TextChanged, window, cx| {
                     let text = input.read(cx).text().to_owned();
                     if this.changes.writes.set_draft(&key, text) {

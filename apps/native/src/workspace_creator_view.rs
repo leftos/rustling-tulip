@@ -128,15 +128,16 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => this.submit_workspace_creator(window, cx),
                 TextInputEvent::Cancel => this.close_workspace_creator(window, cx),
             },
         );
-        let edits = cx.subscribe_in(input, window, |this, input, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, |this, input, _: &TextChanged, cx| {
             let text = input.read(cx).text().to_owned();
             if let Some(dialog) = &mut this.workspace_creator {
                 dialog.creator.set_name(text);
@@ -162,15 +163,16 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => this.submit_workspace_file(cx),
                 TextInputEvent::Cancel => this.close_workspace_creator(window, cx),
             },
         );
-        let edits = cx.subscribe_in(input, window, |this, _, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, |this, _, _: &TextChanged, cx| {
             if let Some(dialog) = &mut this.workspace_creator {
                 dialog.creator.file_edited();
             }

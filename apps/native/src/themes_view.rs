@@ -1069,21 +1069,27 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        let name_keys = cx.subscribe_in(name, window, |this, _, _: &TextInputEvent, window, cx| {
-            this.focus_themes_control(ThemesControl::List, window, cx);
-        });
-        let name_edits = cx.subscribe_in(name, window, |this, _, _: &TextChanged, _, cx| {
+        let name_keys = Self::subscribe_in_window(
+            window,
+            cx,
+            name,
+            |this, _, _: &TextInputEvent, window, cx| {
+                this.focus_themes_control(ThemesControl::List, window, cx);
+            },
+        );
+        let name_edits = cx.subscribe(name, |this, _, _: &TextChanged, cx| {
             this.rename_editor(cx);
         });
-        let hex_keys = cx.subscribe_in(
-            hex,
+        let hex_keys = Self::subscribe_in_window(
             window,
+            cx,
+            hex,
             |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => this.submit_hex(window, cx),
                 TextInputEvent::Cancel => this.cancel_hex(window, cx),
             },
         );
-        let hex_edits = cx.subscribe_in(hex, window, |this, _, _: &TextChanged, _, cx| {
+        let hex_edits = cx.subscribe(hex, |this, _, _: &TextChanged, cx| {
             this.clear_enter_down();
             cx.notify();
         });

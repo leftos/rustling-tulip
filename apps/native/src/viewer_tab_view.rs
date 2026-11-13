@@ -660,15 +660,16 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
         let (key_tab, edit_tab) = (tab_id.to_owned(), tab_id.to_owned());
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             move |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => this.step_viewer_find(&key_tab, true, cx),
                 TextInputEvent::Cancel => this.close_viewer_find(&key_tab, window, cx),
             },
         );
-        let edits = cx.subscribe_in(input, window, move |this, input, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, move |this, input, _: &TextChanged, cx| {
             let query = input.read(cx).text().to_owned();
             this.search_viewer(&edit_tab, &query, cx);
         });

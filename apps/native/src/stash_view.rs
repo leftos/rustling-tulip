@@ -348,9 +348,10 @@ impl RootView {
             }
             let input = cx.new(|cx| TextInput::new("", STASH_PLACEHOLDER, cx));
             let key = section.clone();
-            let keys = cx.subscribe_in(
-                &input,
+            let keys = Self::subscribe_in_window(
                 window,
+                cx,
+                &input,
                 move |this, _, event: &TextInputEvent, window, cx| match event {
                     TextInputEvent::Submit => this.push_stash(&key, cx),
                     TextInputEvent::Cancel => this.focus_active_pane(window, cx),

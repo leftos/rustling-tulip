@@ -634,16 +634,17 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
         let ssh_field = matches!(control, PickerControl::SshHost | PickerControl::SshCommand);
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             move |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit if ssh_field => this.submit_ssh_field(window, cx),
                 TextInputEvent::Submit => this.add_submit(window, cx),
                 TextInputEvent::Cancel => this.connection_picker_escape(window, cx),
             },
         );
-        let edits = cx.subscribe_in(input, window, move |this, _, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, move |this, _, _: &TextChanged, cx| {
             if let Some(dialog) = &mut this.connection_picker {
                 dialog.error = None;
             }
