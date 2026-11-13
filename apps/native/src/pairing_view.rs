@@ -146,12 +146,10 @@ impl RootView {
         let (actions, mut pressed) = unbounded();
         cx.spawn_in(window, async move |this, cx| {
             while let Some(action) = pressed.next().await {
-                if this
-                    .update_in(cx, |view, window, cx| {
-                        view.on_pairing_action(action, window, cx);
-                    })
-                    .is_err()
-                {
+                let handled = RootView::update_in_task_window(&this, cx, |view, window, cx| {
+                    view.on_pairing_action(action, window, cx);
+                });
+                if handled.is_err() {
                     break;
                 }
             }
@@ -558,9 +556,9 @@ impl RootView {
         self.pairing.tick = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(TICK).await;
-                // Fails only when the view is gone, and the countdowns with it.
-                let going = this
-                    .update_in(cx, RootView::on_pairing_tick)
+                // Fails only when the view is gone or this task's window has closed,
+                // and the countdowns with it.
+                let going = RootView::update_in_task_window(&this, cx, RootView::on_pairing_tick)
                     .unwrap_or(false);
                 if !going {
                     break;

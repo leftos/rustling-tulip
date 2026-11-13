@@ -646,10 +646,12 @@ impl RootView {
             self.device_pairing.tick = Some(cx.spawn_in(window, async move |this, cx| {
                 loop {
                     cx.background_executor().timer(TICK).await;
-                    // Fails only when the view is gone, and the countdown with it.
-                    let going = this
-                        .update_in(cx, |view, _, cx| view.on_device_pairing_tick(cx))
-                        .unwrap_or(false);
+                    // Fails only when the view is gone or this task's window has closed,
+                    // and the countdown with it.
+                    let going = RootView::update_in_task_window(&this, cx, |view, _, cx| {
+                        view.on_device_pairing_tick(cx)
+                    })
+                    .unwrap_or(false);
                     if !going {
                         break;
                     }

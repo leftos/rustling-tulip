@@ -611,8 +611,9 @@ impl RootView {
             .spawn(async move { source.status() });
         cx.spawn_in(window, async move |this, cx| {
             let outcome = scan.await;
-            // Fails only when the view is gone, leaving nowhere to show it.
-            this.update_in(cx, |root, _, cx| {
+            // Fails only when the view is gone or this task's window has closed,
+            // leaving nowhere to show it.
+            RootView::update_in_task_window(&this, cx, |root, _, cx| {
                 if let Some(dialog) = &mut root.connection_picker {
                     dialog.picker.apply_scan(outcome);
                     cx.notify();
@@ -902,9 +903,12 @@ impl RootView {
         let answer = self.ssh_tester.test(host.clone(), cancelled);
         let task = cx.spawn_in(window, async move |this, cx| {
             let outcome = answer.await;
-            // Fails only when the view is gone, leaving nowhere to show it.
-            this.update_in(cx, |root, _, cx| root.finish_ssh_test(&host, outcome, cx))
-                .ok();
+            // Fails only when the view is gone or this task's window has closed,
+            // leaving nowhere to show it.
+            RootView::update_in_task_window(&this, cx, |root, _, cx| {
+                root.finish_ssh_test(&host, outcome, cx);
+            })
+            .ok();
         });
         if let Some(form) = self.add_form_mut() {
             if let Some(run) = form.running.replace(RunningTest { cancel, task }) {

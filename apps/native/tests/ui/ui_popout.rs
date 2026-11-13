@@ -4634,3 +4634,59 @@ fn an_open_session_popout_follows_its_session_to_the_new_owner(cx: &mut TestAppC
         "its terminal attaches on the owner's connection"
     );
 }
+
+/// The `active` of every `ReportPresence` in `sent`, oldest first.
+fn presence_reports(sent: &[ClientMessage]) -> Vec<bool> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ReportPresence { active } => Some(*active),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A pop-out drawn last is the root view's current window, so the pinned
+/// gpui's `update_in` would hand the presence recheck the pop-out and read
+/// its activation instead of the main window's.
+#[gpui::test]
+fn presence_reads_the_main_window_while_a_popout_drew_last(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").status("working").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.tabs = vec![tab(
+        "t1",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            pane("p2", Some("s2")),
+        ),
+    )];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    h.reconnect_with_features(&[protocol::FEATURE_CLIENT_PRESENCE]);
+    h.sent();
+
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    popout.update(Window::blur);
+    h.cx.update(|window, _| window.activate_window());
+    h.cx.run_until_parked();
+    assert!(!is_active(&mut popout), "the main window is in front");
+
+    end_s1_turn(&mut h);
+
+    // Resize the pop-out so it draws alone and last: it is then the root view's
+    // current window when the recheck runs.
+    let _ = h.root(|root, _| root.popout_count());
+    popout.simulate_resize(size(px(1200.0), px(760.0)));
+    popout.run_until_parked();
+
+    h.advance(std::time::Duration::from_secs(10));
+
+    assert_eq!(
+        presence_reports(&h.sent()),
+        vec![true],
+        "the presence recheck reads the main window's activity, not the pop-out's"
+    );
+}

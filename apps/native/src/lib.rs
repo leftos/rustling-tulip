@@ -229,17 +229,18 @@ mod worktrees_manager_view;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use alacritty_terminal::vte::ansi::CursorShape;
+use anyhow::Context as _;
 use daemon_client::device_tokens::DeviceTokenStore;
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::future::LocalBoxFuture;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, AnyView, AnyWindowHandle, App, Bounds, ClickEvent,
-    Context, CursorStyle, DisplayId, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
-    InputHandler, KeyDownEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, StyledText, Task, Window,
-    WindowBounds, WindowHandle, WindowId, WindowOptions, div, point, prelude::*, pulsating_between,
-    px, size,
+    Animation, AnimationExt as _, AnyElement, AnyView, AnyWindowHandle, App, AsyncWindowContext,
+    Bounds, ClickEvent, Context, CursorStyle, DisplayId, Div, ElementId, ElementInputHandler,
+    FocusHandle, FontWeight, InputHandler, KeyDownEvent, Keystroke, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
+    Stateful, StyledText, Task, WeakEntity, Window, WindowBounds, WindowHandle, WindowId,
+    WindowOptions, div, point, prelude::*, pulsating_between, px, size,
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, PaneFollow,
@@ -1945,6 +1946,19 @@ impl RootView {
         });
     }
 
+    /// Runs `update` on `this` with the window `cx`'s task was spawned in. The
+    /// pinned gpui's `update_in` follows the root view's current window
+    /// instead, which can be a pop-out window that has since closed. Fails
+    /// when the view is gone or that window has closed.
+    pub(crate) fn update_in_task_window<R>(
+        this: &WeakEntity<Self>,
+        cx: &mut AsyncWindowContext,
+        update: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> R,
+    ) -> anyhow::Result<R> {
+        let root = this.upgrade().context("the root view is gone")?;
+        cx.update(|window, cx| root.update(cx, |root, cx| update(root, window, cx)))
+    }
+
     /// Handles every event `host`'s `events` delivers, each tagged with
     /// `generation`, the connection it came on, until the view is gone.
     fn forward_net_events(
@@ -1956,12 +1970,10 @@ impl RootView {
     ) {
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
-                if this
-                    .update_in(cx, |view, window, cx| {
-                        view.on_net(&host, generation, event, window, cx);
-                    })
-                    .is_err()
-                {
+                let handled = Self::update_in_task_window(&this, cx, |view, window, cx| {
+                    view.on_net(&host, generation, event, window, cx);
+                });
+                if handled.is_err() {
                     break;
                 }
             }
@@ -3335,8 +3347,9 @@ impl RootView {
             cx.background_executor()
                 .timer(AUTO_GRID_RESIZE_DEBOUNCE)
                 .await;
-            // Fails only when the view is gone, and the re-pick with it.
-            this.update_in(cx, |this, _window, _cx| {
+            // Fails only when the view is gone or this task's window has closed,
+            // and the re-pick with it.
+            Self::update_in_task_window(&this, cx, |this, _window, _cx| {
                 let aspect = this.pane_area_aspect();
                 this.auto_grid_resends_at(aspect);
             })
@@ -5716,8 +5729,9 @@ impl RootView {
                 cx.background_executor()
                     .timer(presence::RECHECK_EVERY)
                     .await;
-                // Fails only when the view is gone, and the loop with it.
-                let checked = this.update_in(cx, |root, window, cx| {
+                // Fails only when the view is gone or this task's window has closed,
+                // and the loop with it.
+                let checked = Self::update_in_task_window(&this, cx, |root, window, cx| {
                     root.report_presence(window, cx);
                 });
                 if checked.is_err() {

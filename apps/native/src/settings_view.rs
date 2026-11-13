@@ -5413,9 +5413,12 @@ impl RootView {
         self.title_pending = Some(wanted);
         self.title_timer = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(TITLE_DEBOUNCE).await;
-            // Fails only when the view is gone, and its window with it.
-            this.update_in(cx, |this, window, _| this.apply_window_title(window))
-                .ok();
+            // Fails only when the view is gone or this task's window has closed,
+            // and its window with it.
+            RootView::update_in_task_window(&this, cx, |this, window, _| {
+                this.apply_window_title(window);
+            })
+            .ok();
         }));
     }
 

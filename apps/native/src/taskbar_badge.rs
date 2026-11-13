@@ -199,9 +199,12 @@ impl RootView {
         self.badge_pending = wanted;
         self.badge_timer = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(TITLE_DEBOUNCE).await;
-            // Fails only when the view is gone, and its window with it.
-            this.update_in(cx, |this, window, cx| this.apply_taskbar_badge(window, cx))
-                .ok();
+            // Fails only when the view is gone or this task's window has closed,
+            // and its window with it.
+            RootView::update_in_task_window(&this, cx, |this, window, cx| {
+                this.apply_taskbar_badge(window, cx);
+            })
+            .ok();
         }));
     }
 
@@ -230,7 +233,7 @@ impl RootView {
         };
         cx.spawn_in(window, async move |this, cx| {
             while created.next().await.is_some() {
-                let rescheduled = this.update_in(cx, |this, window, cx| {
+                let rescheduled = RootView::update_in_task_window(&this, cx, |this, window, cx| {
                     this.badge_unsure = true;
                     this.schedule_taskbar_badge(window, cx);
                 });

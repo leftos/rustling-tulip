@@ -1045,8 +1045,9 @@ impl RootView {
         let id = id.to_owned();
         cx.spawn_in(window, async move |this, cx| {
             let (media, skipped) = read.await;
-            // Fails only when the view is gone, leaving nowhere to report.
-            this.update_in(cx, |root, window, cx| {
+            // Fails only when the view is gone or this task's window has closed,
+            // leaving nowhere to report.
+            RootView::update_in_task_window(&this, cx, |root, window, cx| {
                 root.fetches.page_scanned(&id, media, skipped);
                 root.pump_batch(&id, window, cx);
             })
@@ -1076,8 +1077,9 @@ impl RootView {
             .spawn(async move { read_media(&path, &rel, html_media::stylesheet_media) });
         cx.spawn_in(window, async move |this, cx| {
             let (media, skipped) = read.await;
-            // Fails only when the view is gone, leaving nowhere to report.
-            this.update_in(cx, |root, window, cx| {
+            // Fails only when the view is gone or this task's window has closed,
+            // leaving nowhere to report.
+            RootView::update_in_task_window(&this, cx, |root, window, cx| {
                 root.fetches.add_media(&page_id, media, skipped);
                 root.fetches.child_ended(&page_id, MediaEnd::Landed);
                 root.pump_batch(&page_id, window, cx);
@@ -1264,8 +1266,9 @@ impl RootView {
         let id = id.to_owned();
         cx.spawn_in(window, async move |this, cx| {
             let outcome = write.await;
-            // Fails only when the view is gone, leaving nowhere to report.
-            this.update_in(cx, |root, window, cx| {
+            // Fails only when the view is gone or this task's window has closed,
+            // leaving nowhere to report.
+            RootView::update_in_task_window(&this, cx, |root, window, cx| {
                 root.after_write(&id, outcome, window, cx);
             })
             .ok();
@@ -1339,8 +1342,9 @@ impl RootView {
             let ended = outcome
                 .await
                 .unwrap_or_else(|_| WriteOutcome::Failed("the folder unpacker stopped".to_owned()));
-            // Fails only when the view is gone, leaving nowhere to report.
-            this.update_in(cx, |root, window, cx| {
+            // Fails only when the view is gone or this task's window has closed,
+            // leaving nowhere to report.
+            RootView::update_in_task_window(&this, cx, |root, window, cx| {
                 root.after_write(&id, ended, window, cx);
             })
             .ok();

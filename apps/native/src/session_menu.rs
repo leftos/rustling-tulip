@@ -1977,8 +1977,9 @@ impl RootView {
         });
         cx.spawn_in(window, async move |this, cx| {
             let missing = probe.await;
-            // Fails only when the view is gone, and the menu with it.
-            this.update_in(cx, |root, _, cx| {
+            // Fails only when the view is gone or this task's window has closed,
+            // and the menu with it.
+            RootView::update_in_task_window(&this, cx, |root, _, cx| {
                 root.on_container_targets(&container, check, missing, cx);
             })
             .ok();
