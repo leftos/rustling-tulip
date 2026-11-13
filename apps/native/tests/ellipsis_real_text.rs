@@ -12,10 +12,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Application, AvailableSpace, Bounds, Context, Element,
-    ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Render,
-    SharedString, Style, StyledText, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    size,
+    AnyElement, App, AppContext as _, AvailableSpace, Bounds, Context, Element, ElementId,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Render, SharedString,
+    Style, StyledText, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use rustling_tulip_native::offscreen::show_cloaked;
 
@@ -138,7 +137,7 @@ fn lay_out_three_times(text: &'static str) {
     let measured = Rc::new(Cell::new(false));
     let seen = measured.clone();
     let done = measured.clone();
-    Application::new().run(move |cx: &mut App| {
+    gpui_platform::application().run(move |cx: &mut App| {
         let window_size = (800, 200);
         let bounds = Bounds::centered(None, size(px(800.0), px(200.0)), cx);
         let opened = cx.open_window(

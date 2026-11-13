@@ -130,6 +130,7 @@ fn the_log_stops_following_once_scrolled_up(cx: &mut TestAppContext) {
         delta: ScrollDelta::Pixels(point(px(0.0), px(60.0))),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     });
     h.cx.run_until_parked();
 
@@ -206,6 +207,7 @@ fn a_new_run_on_the_same_pane_follows_from_the_bottom(cx: &mut TestAppContext) {
         delta: ScrollDelta::Pixels(point(px(0.0), px(60.0))),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     });
     h.cx.run_until_parked();
     assert_eq!(

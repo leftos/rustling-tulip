@@ -2638,20 +2638,18 @@ fn the_session_fold_hides_and_shows_its_runs_and_saves_the_key(cx: &mut TestAppC
     let dir = TestDir::new();
     let mut h = nested_run_harness(cx, &dir);
     assert!(drawn(&mut h, "leaf-d1"), "precondition: the run draws");
-    // gpui keeps a gone element's bounds, so the row after the run proves
-    // it left: s2 moves up into its place.
+    // gpui drops a gone element's bounds, so the row after the run proves
+    // it left: s2 moves up into the place the run had.
     let open = h.bounds("leaf-s2").top();
-    assert!(
-        open >= h.bounds("leaf-d1").bottom(),
-        "precondition: s2 draws after the run"
-    );
+    let run_bottom = h.bounds("leaf-d1").bottom();
+    assert!(open >= run_bottom, "precondition: s2 draws after the run");
     let focused = h.root(|root, _| root.pane_session("p1"));
     h.sent();
 
     h.click_on("sidebar-session-fold-s1");
 
     assert!(
-        h.bounds("leaf-s2").top() < h.bounds("leaf-d1").bottom(),
+        h.bounds("leaf-s2").top() < run_bottom,
         "the fold hides the run: s2 takes its place"
     );
     assert!(
@@ -3058,19 +3056,19 @@ fn the_fold_names_subagents_and_runs_and_hides_both(cx: &mut TestAppContext) {
         "Hide its subagents and dispatch runs"
     );
 
+    // gpui drops a gone element's bounds, so the row after the nested rows
+    // proves they left: s2 moves up into the places they had.
+    let subagent_bottom = h.bounds("leaf-runtime-a1").bottom();
+    let run_bottom = h.bounds("leaf-runtime-d1").bottom();
+
     h.click_on("sidebar-session-fold-s1");
 
-    // gpui keeps a gone element's bounds, so the row after the nested rows
-    // proves they left: s2 moves up into the subagent's place.
     let s2 = h.bounds("leaf-s2").top();
     assert!(
-        s2 < h.bounds("leaf-runtime-a1").bottom(),
+        s2 < subagent_bottom,
         "the fold hides the subagent: s2 takes its place"
     );
-    assert!(
-        s2 < h.bounds("leaf-runtime-d1").bottom(),
-        "the fold hides the run"
-    );
+    assert!(s2 < run_bottom, "the fold hides the run");
 }
 
 #[gpui::test]

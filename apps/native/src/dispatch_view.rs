@@ -17,7 +17,7 @@ use crate::driver_id::DriverId as _;
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, ui_px_at, ui_text_size};
 use crate::grid_view::{TipAt, header_tipped};
-use crate::session_menu::{header_text_button, on_press};
+use crate::session_menu::{disabled_header_text_button, header_text_button, on_press};
 use crate::spawn_view::DISABLED_OPACITY;
 use crate::target::HostKey;
 use crate::transcript_view::{LineKind, Transcript, TranscriptKey, transcript_lines};
@@ -497,10 +497,8 @@ impl RootView {
         let t = theme(cx);
         let stop_id = format!("dispatch-stop-{pane_id}");
         if let Some(tip) = stop_tip(status) {
-            let button = header_text_button(&stop_id, "Stop", t.muted, &t)
-                .opacity(DISABLED_OPACITY)
-                .cursor_default()
-                .hover(|style| style);
+            let button =
+                disabled_header_text_button(&stop_id, "Stop", t.muted).opacity(DISABLED_OPACITY);
             return vec![header_tipped(button, &stop_id, pane_id, tip, at, cx).into_any_element()];
         }
         let key = (host, run_id.to_owned());

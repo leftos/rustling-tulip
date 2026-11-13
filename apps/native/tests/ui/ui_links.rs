@@ -50,13 +50,13 @@ fn write_file(root: &Path, rel: &str) -> PathBuf {
 }
 
 fn ctrl() -> Modifiers {
-    Modifiers::secondary_key()
+    support::secondary_key()
 }
 
 fn ctrl_shift() -> Modifiers {
     Modifiers {
         shift: true,
-        ..Modifiers::secondary_key()
+        ..support::secondary_key()
     }
 }
 

@@ -75,8 +75,8 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
-    App, AppContext as _, Application, AsyncApp, Bounds, Context, Entity, IntoElement, Keystroke,
-    Render, Window, WindowBounds, WindowHandle, WindowOptions, div, prelude::*, px, size,
+    App, AppContext as _, AsyncApp, Bounds, Context, Entity, IntoElement, Keystroke, Render,
+    Window, WindowBounds, WindowHandle, WindowOptions, div, prelude::*, px, size,
 };
 use protocol::{
     AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab,
@@ -199,7 +199,7 @@ fn main() -> Result<()> {
     shot.prepare()?;
     let outcome: Rc<RefCell<Option<Result<()>>>> = Rc::new(RefCell::new(None));
     let slot = Rc::clone(&outcome);
-    Application::new()
+    gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             if let Err(err) = start(shot, Rc::clone(&slot), cx) {
@@ -1053,9 +1053,7 @@ fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Res
     cx.spawn(async move |cx| {
         let result = drive_and_capture(handle, &shot, address, cx, &failure).await;
         *slot.borrow_mut() = Some(result);
-        if let Err(err) = cx.update(|cx| cx.quit()) {
-            tracing::warn!("quitting after the shot: {err:#}");
-        }
+        cx.update(|cx| cx.quit());
     })
     .detach();
     Ok(())
@@ -1350,9 +1348,7 @@ fn start_toast_shot(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut 
         cx.background_executor().timer(LOAD_WAIT).await;
         let result = capture(shot.out, address, &Mutex::new(None)).await;
         *slot.borrow_mut() = Some(result);
-        if let Err(err) = cx.update(|cx| cx.quit()) {
-            tracing::warn!("quitting after the shot: {err:#}");
-        }
+        cx.update(|cx| cx.quit());
     })
     .detach();
     Ok(())
@@ -1872,8 +1868,8 @@ fn drive_settings_sounds(window: &mut Window, cx: &mut App) -> Result<()> {
 }
 
 fn press(key: &str, window: &mut Window, cx: &mut App) -> Result<()> {
-    let keystroke =
-        Keystroke::parse(key).map_err(|err| anyhow!("parsing the keystroke {key}: {err:?}"))?;
+    let keystroke = Keystroke::parse_with_os(key, cx.platform_info().os)
+        .map_err(|err| anyhow!("parsing the keystroke {key}: {err:?}"))?;
     window.dispatch_keystroke(keystroke, cx);
     Ok(())
 }

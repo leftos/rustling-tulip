@@ -1123,7 +1123,14 @@ mod tests {
 
     #[test]
     fn only_ctrl_alone_sends_a_file_link_out_of_the_viewer() {
-        let ctrl = Modifiers::secondary_key();
+        // `Modifiers::secondary_key` needs an `App`; this is its value on
+        // this platform, the key `prefers_viewer` reads.
+        let mac = cfg!(target_os = "macos");
+        let ctrl = Modifiers {
+            platform: mac,
+            control: !mac,
+            ..Modifiers::none()
+        };
         let ctrl_shift = Modifiers {
             shift: true,
             ..ctrl

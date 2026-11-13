@@ -1516,7 +1516,7 @@ mod tests {
         cx.update(|window, cx| {
             input.update(cx, |input, cx| {
                 input.set_text(text.to_owned(), cx);
-                input.focus_handle.focus(window);
+                input.focus_handle.focus(window, cx);
             });
         });
         cx.run_until_parked();

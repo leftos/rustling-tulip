@@ -14,8 +14,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Application, Bounds, Entity, ScrollStrategy, Window, WindowBounds, WindowOptions,
-    prelude::*, px, size,
+    App, Bounds, Entity, ScrollStrategy, Window, WindowBounds, WindowOptions, prelude::*, px, size,
 };
 use rustling_tulip_native::diff_model::{DiffModel, DiffOptions};
 use rustling_tulip_native::diff_view::DiffView;
@@ -34,7 +33,7 @@ fn main() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    Application::new().run(|cx: &mut App| {
+    gpui_platform::application().run(|cx: &mut App| {
         fonts::register_bundled(cx);
         let (old, new) = synthetic_pair();
         let started = Instant::now();
@@ -200,7 +199,7 @@ fn scroll_step(mut bench: Bench, window: &mut Window, cx: &mut App) {
         ScrollStrategy::Top,
     );
     let started = Instant::now();
-    window.draw(cx).clear();
+    window.draw(cx).clear(cx);
     let took = started.elapsed();
     bench.worst_draw = bench.worst_draw.max(took);
     bench.total_draw += took;

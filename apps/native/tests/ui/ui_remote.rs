@@ -208,7 +208,7 @@ fn url_link_opens_on_remote(cx: &mut TestAppContext) {
     h.host(&saved_target())
         .pty("s1", format!("see {URL} here").as_bytes());
     let on = h.cell_center("p2", 10, 0);
-    h.click(on, Modifiers::secondary_key());
+    h.click(on, support::secondary_key());
     assert_eq!(h.opened(), [Opened::Url(URL.to_owned())]);
     assert_eq!(toasts(&mut h), []);
 }

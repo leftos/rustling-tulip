@@ -537,6 +537,7 @@ fn click_outside_target_list_does_not_scroll_dialog(cx: &mut TestAppContext) {
         delta: ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     });
     h.cx.run_until_parked();
     let field = h.bounds("spawn-target");

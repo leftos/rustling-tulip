@@ -176,6 +176,7 @@ fn scroll_list_to_end(h: &mut Harness<'_>, id: &str) {
         delta: ScrollDelta::Pixels(point(px(0.0), px(-100_000.0))),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     });
     h.cx.run_until_parked();
 }

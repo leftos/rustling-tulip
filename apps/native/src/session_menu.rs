@@ -3087,14 +3087,15 @@ impl RootView {
             pane_id: pane_id.to_owned(),
         };
         let owner = format!("pane-popout-{pane_id}");
-        let button = header_text_button(&owner, "Pop out", theme(cx).muted, &theme(cx));
         if self.popouts.blocking(&key, self.tabs.tabs()).is_some() {
-            let button = button.opacity(0.6).cursor_default().hover(|style| style);
+            let button =
+                disabled_header_text_button(&owner, "Pop out", theme(cx).muted).opacity(0.6);
             return Some(
                 header_tipped(button, &owner, pane_id, POP_OUT_ALREADY_TIP, at, cx)
                     .into_any_element(),
             );
         }
+        let button = header_text_button(&owner, "Pop out", theme(cx).muted, &theme(cx));
         let button = header_tipped(button, &owner, pane_id, POP_OUT_TIP, at, cx);
         Some(
             on_press(button, cx, move |this, window, cx| {
@@ -4191,17 +4192,32 @@ pub(crate) fn header_text_button(
     color: u32,
     t: &UiTheme,
 ) -> Stateful<Div> {
-    let name = selector.to_owned();
     let hover = t.hover_bg;
+    header_text_label(selector, label, color)
+        .cursor_pointer()
+        .hover(move |style| style.bg(gpui::rgb(hover)))
+}
+
+/// [`header_text_button`] disabled: the default cursor and no hover, its
+/// caller dimming it.
+pub(crate) fn disabled_header_text_button(
+    selector: &str,
+    label: &'static str,
+    color: u32,
+) -> Stateful<Div> {
+    header_text_label(selector, label, color).cursor_default()
+}
+
+/// What an enabled and a disabled header text button share.
+fn header_text_label(selector: &str, label: &'static str, color: u32) -> Stateful<Div> {
+    let name = selector.to_owned();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .driver_id(|| name)
         .flex_none()
         .px(px(4.0))
         .rounded(px(3.0))
-        .cursor_pointer()
         .text_color(gpui::rgb(color))
-        .hover(move |style| style.bg(gpui::rgb(hover)))
         .child(label)
 }
 
@@ -4911,7 +4927,7 @@ mod tests {
 
     #[test]
     fn shift_f10_and_the_menu_key_open_a_menu_and_plain_f10_does_not() {
-        let opens = |text: &str| Keystroke::parse(text).is_ok_and(|ks| is_menu_key(&ks));
+        let opens = |text: &'static str| Keystroke::parse(text).is_ok_and(|ks| is_menu_key(&ks));
         assert!(opens("shift-f10"));
         assert!(opens("menu"));
         assert!(!opens("f10"));

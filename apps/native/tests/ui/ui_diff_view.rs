@@ -26,7 +26,7 @@ fn mount<'a>(
     let model = DiffModel::build(old, new, DiffOptions::default());
     let (view, cx) = cx.add_window_view(|_, cx| DiffView::new(model, FontSettings::default(), cx));
     let focus = cx.update(|_, cx| view.read(cx).focus_handle().clone());
-    cx.update(|window, _| focus.focus(window));
+    cx.update(|window, cx| focus.focus(window, cx));
     cx.run_until_parked();
     (view, cx)
 }
@@ -421,7 +421,7 @@ fn join(lines: &[String]) -> String {
 fn time_draw(cx: &mut VisualTestContext) -> Duration {
     cx.update(|window, cx| {
         let started = Instant::now();
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
         started.elapsed()
     })
 }

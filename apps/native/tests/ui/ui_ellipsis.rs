@@ -265,6 +265,7 @@ fn history_view_more_row_ends_in_an_ellipsis(cx: &mut TestAppContext) {
         delta: ScrollDelta::Pixels(point(px(0.0), px(-100_000.0))),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     });
     h.cx.run_until_parked();
     h.sent();

@@ -483,6 +483,7 @@ fn a_long_paste_leaves_the_rows_after_it_in_reach(cx: &mut TestAppContext) {
         delta: ScrollDelta::Pixels(point(px(0.0), px(-1_000_000.0))),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     });
     h.cx.run_until_parked();
     let column = h.bounds("chat-column-p1");
@@ -3422,6 +3423,7 @@ fn a_wheel_over_a_tail_box_leaves_the_chat_still(cx: &mut TestAppContext) {
         delta: ScrollDelta::Pixels(point(px(0.0), px(60.0))),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     });
     h.cx.run_until_parked();
     assert_eq!(

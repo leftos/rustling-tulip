@@ -380,7 +380,7 @@ mod tests {
     use crate::is_quick_jump_key;
     use gpui::Keystroke;
 
-    fn key(text: &str) -> Keystroke {
+    fn key(text: &'static str) -> Keystroke {
         Keystroke::parse(text).expect("a keystroke")
     }
 

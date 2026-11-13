@@ -140,6 +140,7 @@ fn a_menu_does_not_scroll_in_a_driver_build(cx: &mut TestAppContext) {
         delta: ScrollDelta::Pixels(point(px(0.0), px(-40.0))),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     });
     h.cx.run_until_parked();
 

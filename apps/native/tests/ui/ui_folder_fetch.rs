@@ -71,6 +71,9 @@ fn linked_with<'a>(
         ..Fixture::default()
     };
     let mut h = Harness::with(cx, dir, &fixture);
+    // The unpacker is a real thread that wakes the app, which gpui's test
+    // scheduler refuses unless the spec allows parking.
+    h.cx.executor().allow_parking();
     h.answer_scrollback("a1", b"");
     let mut host = h.host(&saved_remote());
     host.connect_with_features(extra);

@@ -73,7 +73,7 @@ fn view_cell(h: &mut Harness<'_>, col: usize, row: usize) {
     let on = h.cell_center("p1", col, row);
     let ctrl_shift = Modifiers {
         shift: true,
-        ..Modifiers::secondary_key()
+        ..support::secondary_key()
     };
     h.click(on, ctrl_shift);
     h.click_on("link-menu-viewer");

@@ -94,6 +94,14 @@ codegen-units = 16
 incremental = true
 strip = false
 
+# The pinned gpui records debug_selector bounds, which the UI specs read, only with debug assertions on.
+[profile.test-release.package.gpui]
+debug-assertions = true
+
+# gpui then calls the inspector macro, which its macros crate builds only with debug assertions on.
+[profile.test-release.package.gpui_macros]
+debug-assertions = true
+
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
 # Zed's own [patch.crates-io] does not reach a dependent, and gpui's scheduler needs these forks.

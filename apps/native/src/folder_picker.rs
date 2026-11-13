@@ -507,14 +507,14 @@ mod tests {
     fn the_offscreen_folder_picker_answers_none(cx: &mut gpui::TestAppContext) {
         let picker = offscreen_folder_picker();
         let picked = cx.update(|cx| picker(cx, None));
-        assert_eq!(cx.background_executor.block(picked), None);
+        assert_eq!(cx.foreground_executor().block_test(picked), None);
     }
 
     #[gpui::test]
     fn the_offscreen_file_picker_answers_none(cx: &mut gpui::TestAppContext) {
         let picker = offscreen_file_picker();
         let picked = cx.update(|cx| picker(cx, None, FileFilter::new("Theme", &["json"])));
-        assert_eq!(cx.background_executor.block(picked), None);
+        assert_eq!(cx.foreground_executor().block_test(picked), None);
     }
 
     #[gpui::test]
@@ -529,7 +529,7 @@ mod tests {
             )
         });
         assert_eq!(
-            cx.background_executor.block(picked),
+            cx.foreground_executor().block_test(picked),
             Err("native dialogs are off in a cloaked client".to_owned())
         );
     }

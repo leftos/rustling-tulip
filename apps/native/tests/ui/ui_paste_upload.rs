@@ -238,6 +238,29 @@ fn a_jpeg_on_the_clipboard_uploads_under_its_own_extension(cx: &mut TestAppConte
     assert_eq!(upload.bytes, [0xFF, 0xD8, 0xFF]);
 }
 
+/// The PNG the stubbed bitmap reader finds on the clipboard.
+const READER_PNG: [u8; 7] = [0x89, b'P', b'N', b'G', 9, 8, 7];
+
+/// A bitmap reader that finds [`READER_PNG`].
+#[expect(clippy::unnecessary_wraps, reason = "a bitmap reader returns a Result")]
+fn reads_a_png() -> anyhow::Result<Option<Vec<u8>>> {
+    Ok(Some(READER_PNG.to_vec()))
+}
+
+#[gpui::test]
+fn a_copied_bitmap_reported_as_bmp_pastes_a_png(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    h.cx.update(|_, cx| rustling_tulip_native::set_bitmap_reader(cx, reads_a_png));
+    let bmp = vec![b'B', b'M', 1, 2, 3];
+    h.set_clipboard_image(ImageFormat::Bmp, bmp.clone());
+    h.keys("ctrl-v");
+    let upload = the_upload(&mut h);
+    assert_eq!(upload.name, "paste.png");
+    assert_eq!(upload.bytes, READER_PNG, "the reader's PNG goes up");
+    assert_ne!(upload.bytes, bmp, "not the BMP entry's bytes");
+}
+
 #[gpui::test]
 fn a_host_without_upload_file_toasts_that_it_cannot_receive_images(cx: &mut TestAppContext) {
     let dir = TestDir::new();

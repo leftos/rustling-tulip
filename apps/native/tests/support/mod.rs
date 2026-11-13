@@ -44,6 +44,18 @@ pub mod update_feed;
 
 pub const PROTOCOL: u32 = 1;
 
+/// The platform's secondary modifier alone (Cmd on macOS, Ctrl elsewhere),
+/// as `Modifiers::secondary_key` reads it off the test platform, for code
+/// with no `App` at hand.
+pub fn secondary_key() -> Modifiers {
+    let mac = cfg!(target_os = "macos");
+    Modifiers {
+        platform: mac,
+        control: !mac,
+        ..Modifiers::none()
+    }
+}
+
 /// The `NetDeps::open_local` of every spec: a plain loopback connection, no
 /// daemon proof.
 pub fn plain_open() -> Box<dyn Fn(u16, String) -> OpenLocalFuture + Send> {
@@ -3159,6 +3171,9 @@ impl<'a> Harness<'a> {
     /// fake-daemon half of the harness ([`Self::send`], [`Self::sent`])
     /// does nothing here.
     pub fn open_on_net(cx: &'a mut TestAppContext, dir: &TestDir, net: NetDeps) -> Self {
+        // The real net thread wakes the app, which gpui's test scheduler
+        // refuses unless the spec allows parking.
+        cx.executor().allow_parking();
         cx.update(bind_keys);
         // A spec never reads the developer's own clipboard bitmap.
         cx.update(|cx| set_bitmap_reader(cx, || Ok(None)));
@@ -3954,7 +3969,8 @@ impl<'a> Harness<'a> {
     /// Ctrl+clicks a path link at `at`, which opens it in its app (VS Code
     /// at a `:line`).
     pub fn pick_link(&mut self, at: Point<Pixels>) {
-        self.click(at, Modifiers::secondary_key());
+        let modifiers = self.cx.update(|_, cx| Modifiers::secondary_key(cx));
+        self.click(at, modifiers);
     }
 
     /// Runs `change` on the root view, then lets the view settle.
@@ -4013,6 +4029,7 @@ impl<'a> Harness<'a> {
                 delta: ScrollDelta::Pixels(point(px(0.0), dy)),
                 modifiers: Modifiers::none(),
                 touch_phase: TouchPhase::Moved,
+                source: gpui::ScrollSource::Pointer,
             });
             self.cx.run_until_parked();
         }
@@ -4152,15 +4169,17 @@ impl<'a> Harness<'a> {
         self.cx.simulate_event(KeyDownEvent {
             keystroke,
             is_held: false,
+            prefer_character_input: false,
         });
         self.cx.run_until_parked();
     }
 
     /// Dispatches `key` as the repeat of a key held down.
-    pub fn held(&mut self, key: &str) {
+    pub fn held(&mut self, key: &'static str) {
         self.cx.simulate_event(KeyDownEvent {
             keystroke: Keystroke::parse(key).expect("a keystroke"),
             is_held: true,
+            prefer_character_input: false,
         });
         self.cx.run_until_parked();
     }

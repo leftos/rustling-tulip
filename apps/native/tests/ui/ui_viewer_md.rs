@@ -254,7 +254,7 @@ fn a_markdown_link_with_a_line_opens_source_at_the_line(cx: &mut TestAppContext)
     let link = h.cell_center("p1", 6, 0);
     let ctrl_shift = Modifiers {
         shift: true,
-        ..Modifiers::secondary_key()
+        ..support::secondary_key()
     };
     h.click(link, ctrl_shift);
     h.click_on("link-menu-viewer");

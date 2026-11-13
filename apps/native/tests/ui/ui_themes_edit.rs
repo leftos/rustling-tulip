@@ -600,7 +600,7 @@ fn export_stays_disabled(cx: &mut TestAppContext) {
 }
 
 /// Lifts `key`, the way the platform reports it.
-fn key_up(h: &mut Harness<'_>, key: &str) {
+fn key_up(h: &mut Harness<'_>, key: &'static str) {
     h.cx.simulate_event(gpui::KeyUpEvent {
         keystroke: gpui::Keystroke::parse(key).expect("a key"),
     });

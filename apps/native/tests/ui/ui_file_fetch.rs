@@ -645,7 +645,7 @@ fn the_folder_entry_on_a_remote_path_reveals_the_fetched_copy(cx: &mut TestAppCo
         on,
         Modifiers {
             shift: true,
-            ..Modifiers::secondary_key()
+            ..support::secondary_key()
         },
     );
     h.click_on("link-menu-folder");
