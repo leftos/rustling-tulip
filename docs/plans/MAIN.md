@@ -276,7 +276,9 @@
 - [ ] RT-1566 Clear an armed session Stop when its session exits so Escape is not swallowed
 - [ ] RT-1591 Show a subagent row's type and model once in its Compact hover
 - [ ] RT-1594 Unbind and rebind every session of one host, auto-split across tabs or following that host's layout · release vNext
-- [ ] RT-1598 Follow the moved pane when a move empties the active tab · release vNext
+  - [ ] RT-1612 HR.4: Unbind and rebind a host's sessions from Connections, the jump palette and the host header · release vNext
+  - [ ] RT-1613 HR.5: Document host rebind and add its shot view · release vNext
+- [ ] RT-1620 Keep the status bar readable at narrow widths with CPU and RAM pills
 
 ## Terminal, panes and links
 
@@ -561,9 +563,7 @@
 - [ ] RT-1045 Give two unknown-kind gate pools distinct selectors in the Gates view
 - [ ] RT-1052 Show seconds in a Gates row's time and usual under ten minutes
 - [ ] RT-1089 Monitor CPU and memory per pane, process tree and host in a Performance view
-  - [/] RT-1090 Sample each host's overall CPU and RAM in the daemon for subscribed clients · release vNext
   - [ ] RT-1091 Show a rail Performance view of each pane's process tree CPU and memory beside the machine's totals · release vNext+1
-  - [ ] RT-1092 Show tracked machines' CPU and RAM in status-bar pills, chosen by right-click · release vNext
   - [ ] RT-1093 Add a full Performance tab with PID, history, threads, command line and End process tree
   - [ ] RT-1597 Sample each session's process tree CPU and memory for the Performance view · release vNext+1
 - [ ] RT-1119 Open a clicked gate's log in an in-app tab that follows it, not the OS default app
@@ -594,6 +594,10 @@
 
 - [/] RT-30 View a session's running subagents as read-only sessions · release vNext
   - [ ] RT-1586 List a dispatch run's own subagents nested under its DS row · release vNext
+    - [ ] RT-1603 RS.3: Tail a dispatch run's subagent transcripts · release vNext
+    - [ ] RT-1606 RS.6: Open and drag a dispatch run's subagent · release vNext
+    - [ ] RT-1607 RS.7: Show a dispatch run's subagent in its read-only pane · release vNext
+    - [ ] RT-1608 RS.8: Document dispatch runs' subagents and close the subagent design · release vNext
 - [ ] RT-49 Offer every popular agent harness in the spawn dialog's runtime dropdown
   - [ ] RT-214 AH.1 Spike: DSH per-invocation patch, hook payload and resume
   - [ ] RT-215 AH.2 Pi runtime: backend, session id and dialog entry
@@ -700,6 +704,16 @@
 - [ ] RT-1588 Key the subagent list on the agent run's start, not the shell's
 - [ ] RT-1589 Keep one panicking activity reader from stalling every session's subagent list
 - [ ] RT-1593 Cap subagent transcript follows per connection and the first follow's append
+- [ ] RT-1614 Keep the macOS CPU figure across a tick counter wrap
+- [ ] RT-1615 Read every processor group's CPU times on Windows hosts with more than 64 logical processors
+- [ ] RT-1616 Raise a popped-out destination instead of showing its card after a move empties the active tab
+- [ ] RT-1617 Consume a Replace move's follow only on the update that shows the moved session
+- [ ] RT-1618 Focus the moved session after a drag drops it into an empty pane of another tab
+- [ ] RT-1619 Show a tracked duplicate host's CPU and RAM from the connection that kept it
+- [ ] RT-1621 Close an open footer menu when a shortcut opens a dialog
+- [ ] RT-1622 Rebuild a dispatch run's subagent reader when its host session's env rows appear
+- [ ] RT-1623 Rebuild a followed host tab to its picked layout after dropping panes
+- [ ] RT-1624 Leave subagent rows out of a container's count badge
 
 ## Design files
 
@@ -717,17 +731,18 @@
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
+- [host-rebind.md](host-rebind.md) — RT-1594, RT-1612, RT-1613
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
 - [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1520, RT-1521, RT-1522, RT-1523, RT-1524, RT-1525, RT-1526, RT-1527, RT-1528, RT-1529, RT-1530, RT-1531, RT-1532, RT-1533, RT-1534, RT-1535, RT-1536, RT-1537, RT-1538, RT-1539, RT-1540, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359
-- [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093, RT-1597
+- [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1091, RT-1093, RT-1597
 - [push-relay.md](push-relay.md) — RT-1511, RT-1512, RT-1513, RT-1514, RT-1515, RT-1516, RT-1517, RT-1518, RT-1519, RT-1530, RT-1536, RT-1537
 - [remote-access.md](remote-access.md) — Remote hosts and connections
 - [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1361, RT-1362, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
 - [remote-update.md](remote-update.md) — RT-1353, RT-1355, RT-1397, Updates and installer
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792, Remote hosts and connections
-- [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-1586, Agents and subagents
+- [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-1586, RT-1603, RT-1606, RT-1607, RT-1608, RT-1624, Agents and subagents
 - [toast-position.md](toast-position.md) — RT-1105
