@@ -111,6 +111,19 @@ pub enum LeafDensity {
     Comfortable,
 }
 
+/// How a finished or failed subagent row draws in the sidebar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FinishedSubagentRows {
+    /// One line, as Compact draws, whatever the leaf density.
+    Compact,
+    /// The leaf density's drawing; also what a value this build does not
+    /// know loads as (`serde(other)` must be the last variant).
+    #[default]
+    #[serde(other)]
+    Follow,
+}
+
 /// How many of a repo or workspace's sessions show under its row.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -409,6 +422,8 @@ pub struct TreeInputs<'a> {
     pub collapsed: &'a BTreeSet<String>,
     /// The dispatch runs the host's daemon lists.
     pub runs: &'a [DispatchRunSnapshot],
+    /// Whether finished and failed subagent rows show.
+    pub show_finished_subagents: bool,
 }
 
 /// Where a working directory belongs.
@@ -1264,6 +1279,11 @@ pub struct GeneralSettings {
     pub click_through_inactive_pane: bool,
     /// How much room each session leaf takes.
     pub leaf_density: LeafDensity,
+    /// Whether finished and failed subagent rows show in the sidebar;
+    /// running ones always do.
+    pub show_finished_subagents: bool,
+    /// How a finished or failed subagent row draws.
+    pub finished_subagent_rows: FinishedSubagentRows,
     /// How many of a repo or workspace's sessions show under its row.
     pub sessions_under_repos: SessionsUnderRepos,
     /// How the repos view orders its repo and workspace rows.
@@ -1282,6 +1302,8 @@ impl Default for GeneralSettings {
             copy_on_select: true,
             click_through_inactive_pane: true,
             leaf_density: LeafDensity::Comfortable,
+            show_finished_subagents: true,
+            finished_subagent_rows: FinishedSubagentRows::Follow,
             sessions_under_repos: SessionsUnderRepos::Every,
             repo_sort: RepoSort::NeedsYou,
             check_updates: true,
@@ -1569,8 +1591,13 @@ impl HostSlice {
         }
     }
 
-    /// The container tree's inputs from this slice, folded by `collapsed`.
-    fn tree_inputs<'a>(&'a self, collapsed: &'a BTreeSet<String>) -> TreeInputs<'a> {
+    /// The container tree's inputs from this slice, folded by `collapsed`,
+    /// with finished subagent rows shown when `show_finished_subagents`.
+    fn tree_inputs<'a>(
+        &'a self,
+        collapsed: &'a BTreeSet<String>,
+        show_finished_subagents: bool,
+    ) -> TreeInputs<'a> {
         TreeInputs {
             repos: &self.repos,
             workspaces: &self.workspaces,
@@ -1583,6 +1610,7 @@ impl HostSlice {
             unseen: &self.unseen,
             collapsed,
             runs: &self.dispatch_runs,
+            show_finished_subagents,
         }
     }
 
@@ -1601,7 +1629,8 @@ impl HostSlice {
     /// `None` when it files it under a Shell, Dir or Detached container.
     fn filed_group_name(&self, s: &SessionSnapshot) -> Option<String> {
         let collapsed = BTreeSet::new();
-        let inputs = self.tree_inputs(&collapsed);
+        // Nothing folds here and no leaf is built: every row shows.
+        let inputs = self.tree_inputs(&collapsed, true);
         let members: HashSet<&str> = self
             .workspaces
             .iter()
@@ -2126,7 +2155,8 @@ impl SidebarModel {
     /// its host key.
     fn host_containers(&self, host: &HostKey, slice: &HostSlice) -> Vec<Container> {
         let collapsed = &self.ui.collapsed_containers;
-        let mut built = build_containers(&slice.tree_inputs(collapsed));
+        let mut built =
+            build_containers(&slice.tree_inputs(collapsed, self.show_finished_subagents()));
         if *host != HostKey::Local {
             for container in &mut built {
                 container.key = host_container_key(host, &container.key);
@@ -2239,6 +2269,7 @@ impl SidebarModel {
             &self.shown_tabs(tabs),
             &hosts,
             &self.ui.collapsed_containers,
+            self.show_finished_subagents(),
         )
     }
 
@@ -2670,6 +2701,44 @@ impl SidebarModel {
             return false;
         }
         self.ui.general.leaf_density = density;
+        true
+    }
+
+    /// Whether finished and failed subagent rows show in the sidebar.
+    pub fn show_finished_subagents(&self) -> bool {
+        self.ui.general.show_finished_subagents
+    }
+
+    /// Records whether finished and failed subagent rows show; returns
+    /// whether it changed.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the tests save and load it; no row calls it")
+    )]
+    pub fn set_show_finished_subagents(&mut self, show: bool) -> bool {
+        if self.ui.general.show_finished_subagents == show {
+            return false;
+        }
+        self.ui.general.show_finished_subagents = show;
+        true
+    }
+
+    /// How a finished or failed subagent row draws.
+    pub fn finished_subagent_rows(&self) -> FinishedSubagentRows {
+        self.ui.general.finished_subagent_rows
+    }
+
+    /// Records how a finished or failed subagent row draws; returns whether
+    /// it changed.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the tests save and load it; no row calls it")
+    )]
+    pub fn set_finished_subagent_rows(&mut self, rows: FinishedSubagentRows) -> bool {
+        if self.ui.general.finished_subagent_rows == rows {
+            return false;
+        }
+        self.ui.general.finished_subagent_rows = rows;
         true
     }
 
@@ -3342,7 +3411,7 @@ pub fn build_containers(inputs: &TreeInputs<'_>) -> Vec<Container> {
     }
     for container in &mut out {
         if let Some(runs) = groups.runs.remove(&container.key) {
-            append_runs(container, runs);
+            append_runs(container, runs, inputs.show_finished_subagents);
         }
     }
     nest_runs(&mut out, inputs, &conversations);
@@ -3366,6 +3435,15 @@ fn host_conversation<'a>(
     run.session_id
         .as_deref()
         .filter(|id| conversations.contains(id))
+}
+
+/// What the nested-row builders fold by and which subagent rows they keep.
+#[derive(Clone, Copy)]
+struct NestOptions<'a> {
+    /// The containers the user folded.
+    collapsed: &'a BTreeSet<String>,
+    /// Whether a finished subagent row shows.
+    show_finished: bool,
 }
 
 /// Nests each subagent a listed session started, then each run it
@@ -3398,8 +3476,19 @@ fn nest_runs<'a>(
                     .as_deref()
                     .and_then(|conversation| runs.remove(conversation))
                     .unwrap_or_default();
-                if !host.subagents.is_empty() || !host_runs.is_empty() {
-                    at += nest_after(&mut container.leaves, at, host, host_runs, inputs.collapsed);
+                let shown =
+                    crate::subagents::shown(&host.subagents, inputs.show_finished_subagents);
+                if !shown.is_empty() || !host_runs.is_empty() {
+                    at += nest_after(
+                        &mut container.leaves,
+                        at,
+                        host,
+                        host_runs,
+                        NestOptions {
+                            collapsed: inputs.collapsed,
+                            show_finished: inputs.show_finished_subagents,
+                        },
+                    );
                 }
             }
             at += 1;
@@ -3416,7 +3505,7 @@ fn nest_after(
     at: usize,
     host_session: &SessionSnapshot,
     mut runs: Vec<&DispatchRunSnapshot>,
-    collapsed: &BTreeSet<String>,
+    options: NestOptions<'_>,
 ) -> usize {
     let Some(host) = leaves.get_mut(at) else {
         return 0;
@@ -3426,14 +3515,19 @@ fn nest_after(
             .cmp(&b.started_at)
             .then_with(|| a.run_id.cmp(&b.run_id))
     });
-    let run_subagents: usize = runs.iter().map(|run| run.subagents.len()).sum();
-    host.nested_subagents = host_session.subagents.len() + run_subagents;
-    host.nested = host.nested_subagents + runs.len();
-    host.collapsed = collapsed.contains(&session_fold_key(&host.host, &host.id));
-    let (host_key, host_id) = (host.host.clone(), host.id.clone());
-    let mut nested: Vec<Leaf> = host_session
-        .subagents
+    let subagents = crate::subagents::shown(&host_session.subagents, options.show_finished);
+    let run_subagents: usize = runs
         .iter()
+        .map(|run| crate::subagents::shown(&run.subagents, options.show_finished).len())
+        .sum();
+    host.nested_subagents = subagents.len() + run_subagents;
+    host.nested = host.nested_subagents + runs.len();
+    host.collapsed = options
+        .collapsed
+        .contains(&session_fold_key(&host.host, &host.id));
+    let (host_key, host_id) = (host.host.clone(), host.id.clone());
+    let mut nested: Vec<Leaf> = subagents
+        .into_iter()
         .map(|snapshot| crate::subagents::subagent_leaf(&host_key, &host_id, snapshot))
         .collect();
     for run in runs {
@@ -3442,7 +3536,13 @@ fn nest_after(
             host_session: Some(host_id.clone()),
             ..crate::dispatch_runs::dispatch_leaf(run, &host_key)
         });
-        nested.extend(run_subagent_leaves(&host_key, run, Some(&host_id), 1));
+        nested.extend(run_subagent_leaves(
+            &host_key,
+            run,
+            Some(&host_id),
+            1,
+            options.show_finished,
+        ));
     }
     let count = nested.len();
     let after = at + 1;
@@ -3457,9 +3557,10 @@ fn run_subagent_leaves(
     run: &DispatchRunSnapshot,
     host_session: Option<&str>,
     run_depth: u8,
+    show_finished: bool,
 ) -> Vec<Leaf> {
-    run.subagents
-        .iter()
+    crate::subagents::shown(&run.subagents, show_finished)
+        .into_iter()
         .map(|snapshot| {
             crate::subagents::run_subagent_leaf(host, run, host_session, run_depth, snapshot)
         })
@@ -3468,15 +3569,23 @@ fn run_subagent_leaves(
 
 /// Appends a leaf per dispatch run to `container`, after its sessions,
 /// newest first; the manual session order never moves them.
-fn append_runs(container: &mut Container, mut runs: Vec<&DispatchRunSnapshot>) {
+fn append_runs(
+    container: &mut Container,
+    mut runs: Vec<&DispatchRunSnapshot>,
+    show_finished: bool,
+) {
     crate::dispatch_runs::sort_newest_first(&mut runs);
     for run in runs {
         container
             .leaves
             .push(crate::dispatch_runs::dispatch_leaf(run, &HostKey::Local));
-        container
-            .leaves
-            .extend(run_subagent_leaves(&HostKey::Local, run, None, 0));
+        container.leaves.extend(run_subagent_leaves(
+            &HostKey::Local,
+            run,
+            None,
+            0,
+            show_finished,
+        ));
     }
 }
 
@@ -3811,19 +3920,27 @@ impl TabHost<'_> {
 /// of its own host dispatched is never listed there or as followed: it nests
 /// under that session's leaf in each tab that shows it ([`nest_tab_runs`]),
 /// and shows nowhere while no tab does. `hosts` holds every host's part,
-/// each pane's session looked up in its own host's.
+/// each pane's session looked up in its own host's. A finished subagent row
+/// shows only when `show_finished_subagents`.
 pub fn build_tab_containers(
     tabs: &[TabEntry],
     hosts: &[TabHost<'_>],
     collapsed: &BTreeSet<String>,
+    show_finished_subagents: bool,
 ) -> Vec<Container> {
     let local = hosts.iter().find(|h| *h.host == HostKey::Local);
     let mut shown: HashSet<&str> = HashSet::new();
     let mut runs_shown: HashSet<(HostKey, String)> = HashSet::new();
     let mut out = Vec::new();
     for tab in tabs {
-        let mut leaves = tab_leaves(tab, hosts, &mut shown, &mut runs_shown);
-        nest_tab_runs(&mut leaves, hosts, collapsed);
+        let mut leaves = tab_leaves(
+            tab,
+            hosts,
+            &mut shown,
+            &mut runs_shown,
+            show_finished_subagents,
+        );
+        nest_tab_runs(&mut leaves, hosts, collapsed, show_finished_subagents);
         out.push(tab_view_container(
             ContainerKind::Tab,
             &tab.id,
@@ -3879,6 +3996,7 @@ fn tab_leaves<'a>(
     hosts: &[TabHost<'a>],
     shown: &mut HashSet<&'a str>,
     runs_shown: &mut HashSet<(HostKey, String)>,
+    show_finished: bool,
 ) -> Vec<Leaf> {
     let mut seen: HashSet<SessionRef> = HashSet::new();
     let mut followed: HashSet<(HostKey, String)> = HashSet::new();
@@ -3913,7 +4031,7 @@ fn tab_leaves<'a>(
             runs_shown.insert(followed_run.clone());
             if followed.insert(followed_run) {
                 runs.push(crate::dispatch_runs::dispatch_leaf(run, &pane.host));
-                runs.extend(run_subagent_leaves(&pane.host, run, None, 0));
+                runs.extend(run_subagent_leaves(&pane.host, run, None, 0, show_finished));
             }
         }
     }
@@ -3949,14 +4067,29 @@ fn linked_on(run: &DispatchRunSnapshot, host: &TabHost<'_>) -> bool {
 /// Nests the subagents and runs each session leaf of a tab's `leaves`
 /// started right after it, as [`nest_after`] does; the first leaf of a host
 /// and conversation takes its runs.
-fn nest_tab_runs(leaves: &mut Vec<Leaf>, hosts: &[TabHost<'_>], collapsed: &BTreeSet<String>) {
+fn nest_tab_runs(
+    leaves: &mut Vec<Leaf>,
+    hosts: &[TabHost<'_>],
+    collapsed: &BTreeSet<String>,
+    show_finished: bool,
+) {
     let mut taken: HashSet<(HostKey, String)> = HashSet::new();
     let mut at = 0;
     while at < leaves.len() {
         if let Some((session, runs)) = tab_host_rows(&leaves[at], hosts, &mut taken)
-            && (!session.subagents.is_empty() || !runs.is_empty())
+            && (!crate::subagents::shown(&session.subagents, show_finished).is_empty()
+                || !runs.is_empty())
         {
-            at += nest_after(leaves, at, session, runs, collapsed);
+            at += nest_after(
+                leaves,
+                at,
+                session,
+                runs,
+                NestOptions {
+                    collapsed,
+                    show_finished,
+                },
+            );
         }
         at += 1;
     }
@@ -4703,8 +4836,8 @@ pub(crate) mod tests {
     use crate::agent_options::test_selection as agent_selection;
     use crate::tabs::tests::{follow_pane, pane, tab};
     use protocol::{
-        AgentSelection, AttentionReason, GridNode, OptionValue, PaneFollow, SessionMember,
-        SplitDirection, SubagentSnapshot,
+        AgentSelection, AgentState, AttentionReason, GridNode, OptionValue, PaneFollow,
+        SessionMember, SplitDirection, SubagentSnapshot,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -5139,6 +5272,7 @@ pub(crate) mod tests {
                 unseen: &HashSet::new(),
                 collapsed: &self.collapsed,
                 runs: &self.runs,
+                show_finished_subagents: true,
             })
         }
     }
@@ -5345,6 +5479,7 @@ pub(crate) mod tests {
                 },
             }],
             &BTreeSet::new(),
+            true,
         );
         let tab_container = tab_tree.first().expect("TAB");
         assert_eq!(tab_container.kind, ContainerKind::Tab);
@@ -6023,6 +6158,7 @@ pub(crate) mod tests {
                 },
             }],
             &BTreeSet::new(),
+            true,
         );
         assert!(
             tree.iter().all(|c| !c.attention),
@@ -6645,6 +6781,8 @@ pub(crate) mod tests {
                 copy_on_select: false,
                 click_through_inactive_pane: false,
                 leaf_density: LeafDensity::Compact,
+                show_finished_subagents: false,
+                finished_subagent_rows: FinishedSubagentRows::Compact,
                 sessions_under_repos: SessionsUnderRepos::Busy,
                 repo_sort: RepoSort::Active,
                 check_updates: false,
@@ -7954,6 +8092,90 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn show_finished_subagents_round_trips_and_loads_true_when_missing() {
+        let dir = TestDir::new("show-finished-subagents");
+        let mut model = SidebarModel::new(UiState::default());
+        assert!(model.show_finished_subagents(), "the default shows them");
+        assert!(model.set_show_finished_subagents(false));
+        assert!(!model.set_show_finished_subagents(false), "unchanged");
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(saved["general"]["show_finished_subagents"], json!(false));
+        assert!(!load_ui_state(&dir.0).general.show_finished_subagents);
+
+        for older in [
+            r#"{ "sidebar_collapsed": true }"#,
+            r#"{ "general": { "copy_on_select": false } }"#,
+        ] {
+            std::fs::write(dir.0.join(UI_FILE), older).expect("write");
+            assert!(
+                load_ui_state(&dir.0).general.show_finished_subagents,
+                "{older}"
+            );
+        }
+    }
+
+    #[test]
+    fn finished_subagent_rows_round_trips_and_loads_follow_when_missing_or_unknown() {
+        let dir = TestDir::new("finished-subagent-rows");
+        let mut model = SidebarModel::new(UiState::default());
+        assert_eq!(
+            model.finished_subagent_rows(),
+            FinishedSubagentRows::Follow,
+            "the default"
+        );
+        for (rows, saved) in [
+            (FinishedSubagentRows::Compact, "compact"),
+            (FinishedSubagentRows::Follow, "follow"),
+        ] {
+            assert!(model.set_finished_subagent_rows(rows), "{saved}");
+            assert!(!model.set_finished_subagent_rows(rows), "unchanged");
+            save_ui_state(&dir.0, model.ui_state()).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+            let written: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(written["general"]["finished_subagent_rows"], saved);
+            assert_eq!(load_ui_state(&dir.0).general.finished_subagent_rows, rows);
+        }
+
+        for older in [
+            r#"{ "sidebar_collapsed": true }"#,
+            r#"{ "general": { "copy_on_select": false } }"#,
+        ] {
+            std::fs::write(dir.0.join(UI_FILE), older).expect("write");
+            assert_eq!(
+                load_ui_state(&dir.0).general.finished_subagent_rows,
+                FinishedSubagentRows::Follow,
+                "{older}"
+            );
+        }
+
+        let unknown =
+            r#"{ "general": { "copy_on_select": false, "finished_subagent_rows": "dense" } }"#;
+        std::fs::write(dir.0.join(UI_FILE), unknown).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(
+            loaded.general.finished_subagent_rows,
+            FinishedSubagentRows::Follow
+        );
+        assert!(
+            !loaded.general.copy_on_select,
+            "the rest of the group loads"
+        );
+    }
+
+    #[test]
+    fn a_v0_5_1_alpha_ui_file_loads_show_finished_subagents_and_follow_rows() {
+        let dir = TestDir::new("released-subagent-rows");
+        let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
+        assert!(ui.general.show_finished_subagents, "it shows them");
+        assert_eq!(
+            ui.general.finished_subagent_rows,
+            FinishedSubagentRows::Follow
+        );
+    }
+
     /// The leaf of a session with `status`, `background`, `unseen` and
     /// `attention` set.
     fn busy_leaf(status: SessionStatus, background: bool, unseen: bool, attention: bool) -> Leaf {
@@ -8409,6 +8631,7 @@ pub(crate) mod tests {
                 unseen: &HashSet::new(),
                 collapsed: &BTreeSet::new(),
                 runs: &fixture.runs,
+                show_finished_subagents: true,
             });
             let active = active_container_keys(
                 &fixture.repos,
@@ -9165,6 +9388,7 @@ pub(crate) mod tests {
                 },
             }],
             &BTreeSet::new(),
+            true,
         )
     }
 
@@ -9274,6 +9498,7 @@ pub(crate) mod tests {
                 },
             ],
             &BTreeSet::new(),
+            true,
         );
         let in_tab = containers
             .iter()
@@ -9468,6 +9693,7 @@ pub(crate) mod tests {
                 },
             }],
             &BTreeSet::new(),
+            true,
         );
         let marks: Vec<(bool, bool)> = tree
             .iter()
@@ -10750,6 +10976,64 @@ pub(crate) mod tests {
         assert_eq!(find_leaf(&tree, "s2").nested_subagents, 0);
     }
 
+    /// `fixture`'s tree, with finished subagent rows shown or hidden.
+    fn build_with(fixture: &Fixture, show_finished: bool) -> Vec<Container> {
+        build_containers(&TreeInputs {
+            repos: &fixture.repos,
+            workspaces: &fixture.workspaces,
+            sessions: &fixture.sessions,
+            agents: &[],
+            label_agents: &[],
+            container_order: &fixture.container_order,
+            session_order: &fixture.session_order,
+            attention: &HashSet::new(),
+            unseen: &HashSet::new(),
+            collapsed: &fixture.collapsed,
+            runs: &fixture.runs,
+            show_finished_subagents: show_finished,
+        })
+    }
+
+    #[test]
+    fn finished_subagents_hide_when_the_setting_is_off() {
+        let mut fixture = subagent_fixture();
+        fixture.sessions[0].subagents = vec![subagent("a1", 1)];
+        fixture.sessions[0].subagents[0].state = AgentState::Finished;
+        let tree = build_with(&fixture, false);
+        assert_eq!(
+            nesting(&tree, "repo:r1"),
+            [
+                row("s1", 0, None),
+                row("d1", 1, Some("s1")),
+                row("s2", 0, None),
+            ]
+        );
+        let host = find_leaf(&tree, "s1");
+        assert_eq!(
+            (host.nested, host.nested_subagents),
+            (1, 0),
+            "only the run is nested and counted"
+        );
+
+        fixture.sessions[0].subagents[0].state = AgentState::Running;
+        let tree = build_with(&fixture, false);
+        assert_eq!(
+            nesting(&tree, "repo:r1"),
+            [
+                row("s1", 0, None),
+                row("a1", 1, Some("s1")),
+                row("d1", 1, Some("s1")),
+                row("s2", 0, None),
+            ]
+        );
+        let host = find_leaf(&tree, "s1");
+        assert_eq!(
+            (host.nested, host.nested_subagents),
+            (2, 1),
+            "a running one stays and is counted"
+        );
+    }
+
     #[test]
     fn a_nested_subagent_keeps_its_depth_up_to_three() {
         let mut fixture = subagent_fixture();
@@ -11511,6 +11795,7 @@ pub(crate) mod tests {
                 },
             }],
             &BTreeSet::new(),
+            true,
         );
         assert_eq!(leaf_hosts(&tree, "unbound"), [("d3".to_owned(), remote)]);
     }

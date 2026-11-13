@@ -32,8 +32,9 @@ use crate::session_menu::{
     menu_separator,
 };
 use crate::sidebar::{
-    Activity, Container, ContainerKind, DETACHED_BANNER, HostGroup, Leaf, LeafDensity, LeafKind,
-    RepoFilter, RepoSort, SessionsUnderRepos, SidebarView, can_attach, chip_tip,
+    Activity, Container, ContainerKind, DETACHED_BANNER, FinishedSubagentRows, HostGroup, Leaf,
+    LeafDensity, LeafKind, RepoFilter, RepoSort, SessionsUnderRepos, SidebarView, can_attach,
+    chip_tip,
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view, marker_mode};
@@ -311,6 +312,7 @@ impl RootView {
                 .map(|s| s.id.as_str())
                 .collect(),
             density: self.sidebar.leaf_density(),
+            finished_subagent_rows: self.sidebar.finished_subagent_rows(),
             under_repos: self.sidebar.sessions_under_repos(),
             focused_row,
             hovered_row: crate::sidebar::shown_hovered_row(
@@ -2244,6 +2246,8 @@ struct LeafRows<'a> {
     /// The sessions that cannot be shown in a pane.
     headless: HashSet<&'a str>,
     density: LeafDensity,
+    /// How a finished or failed subagent row draws.
+    finished_subagent_rows: FinishedSubagentRows,
     /// How many of a repo or workspace's sessions show under its row.
     under_repos: SessionsUnderRepos,
     /// The width a Comfortable subline's text and chips share, in px.
@@ -2939,7 +2943,8 @@ fn leaf_row(
     let accent = ctx.accents.get(id).copied().unwrap_or(t.accent);
     let ground = leaf_ground(selected, ctx.highlighted.contains(id), &t);
     let key = leaf_key(host, id);
-    let row = leaf_frame(leaf, host, &key, ground, accent, ctx.density, cx);
+    let density = crate::subagents::row_density(leaf, ctx.density, ctx.finished_subagent_rows);
+    let row = leaf_frame(leaf, host, &key, ground, accent, density, cx);
     // A Tabs-view leaf of a remote host names it, at the end of its name
     // row before the inline buttons.
     let host_tag = ctx.host_chips.get(host).map(|label| {
@@ -2947,7 +2952,7 @@ fn leaf_row(
         host_chip(crate::fonts::ui_text_size(cx), name, label.clone(), &t)
     });
     let fold = session_fold(leaf, host, cx);
-    match ctx.density {
+    match density {
         LeafDensity::Compact => {
             let pill = if leaf.kind == LeafKind::Session {
                 ctx.pill(host, id)

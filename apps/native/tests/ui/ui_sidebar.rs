@@ -22,7 +22,7 @@ use rustling_tulip_native::{
 use support::{
     Fixture, Harness, PROTOCOL, REMOTE, TestDir, dispatch_run, follow_pane,
     follow_run_subagent_pane, follow_subagent_pane, pane, repo, saved_remote, seed_ui, session,
-    split, subagent, tab, workspace,
+    split, subagent, subagent_with, tab, workspace,
 };
 
 /// The keys of the sidebar's containers, in the order it shows them.
@@ -2977,6 +2977,64 @@ fn subagents_draw_indented_under_their_host_with_the_sa_tag(cx: &mut TestAppCont
     assert!(
         !drawn(&mut h, "leaf-pill-a1"),
         "a subagent leaf draws no pill"
+    );
+}
+
+#[gpui::test]
+fn finished_subagents_hide_when_the_setting_is_off(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "show_finished_subagents": false } }"#,
+    )
+    .expect("write the layout");
+    let mut h = nested_subagent_harness(
+        cx,
+        &dir,
+        vec![subagent_with("a1", "", "", "finished"), subagent("a2")],
+        Vec::new(),
+    );
+
+    assert!(!h.in_model("leaf-a1"), "a finished row hides");
+    assert!(!drawn(&mut h, "leaf-runtime-a1"));
+    assert!(h.in_model("leaf-a2"), "a running row stays");
+    assert!(drawn(&mut h, "leaf-runtime-a2"));
+}
+
+#[gpui::test]
+fn finished_subagent_rows_draw_compact_in_a_comfortable_sidebar(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "finished_subagent_rows": "compact" } }"#,
+    )
+    .expect("write the layout");
+    let mut h = nested_subagent_harness(
+        cx,
+        &dir,
+        vec![
+            subagent_with("a1", "Explore", "sonnet", "finished"),
+            subagent_with("a2", "Explore", "sonnet", "running"),
+        ],
+        Vec::new(),
+    );
+
+    assert_eq!(
+        h.bounds("leaf-a1").size.height,
+        px(26.0),
+        "the finished row draws on one line"
+    );
+    assert!(
+        !drawn(&mut h, "leaf-subline-a1"),
+        "its subline moved into the hover"
+    );
+    assert!(
+        drawn(&mut h, "leaf-subline-a2"),
+        "a running row keeps the density's subline"
+    );
+    assert!(
+        h.bounds("leaf-a2").size.height > px(26.0),
+        "the running row draws two lines"
     );
 }
 

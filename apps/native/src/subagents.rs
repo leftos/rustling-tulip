@@ -4,7 +4,7 @@
 
 use protocol::{AgentState, DispatchRunSnapshot, SessionMode, SessionStatus, SubagentSnapshot};
 
-use crate::sidebar::{Leaf, LeafKind, LeafState};
+use crate::sidebar::{FinishedSubagentRows, Leaf, LeafDensity, LeafKind, LeafState};
 use crate::target::HostKey;
 
 /// The shallowest row a subagent draws at: one the session's main
@@ -22,6 +22,46 @@ pub fn leaf_status(state: AgentState) -> SessionStatus {
         AgentState::Running | AgentState::Queued => SessionStatus::Working,
         AgentState::Finished => SessionStatus::Idle,
         AgentState::Failed | AgentState::Unknown => SessionStatus::Stopped,
+    }
+}
+
+/// Whether a subagent runs: the states [`leaf_status`] draws as working.
+fn runs(sub: &SubagentSnapshot) -> bool {
+    matches!(sub.state, AgentState::Running | AgentState::Queued)
+}
+
+/// The subagents of `list` that show in the sidebar: with `show_finished`,
+/// every one, else a running one and a finished one whose subtree (the
+/// entries after it more deeply nested) has a running row, so a running
+/// child never draws orphaned. `list` is flat in tree order.
+#[must_use]
+pub fn shown(list: &[SubagentSnapshot], show_finished: bool) -> Vec<&SubagentSnapshot> {
+    let mut kept = Vec::new();
+    for (at, sub) in list.iter().enumerate() {
+        let subtree_runs = list[at + 1..]
+            .iter()
+            .take_while(|later| later.depth > sub.depth)
+            .any(runs);
+        if show_finished || runs(sub) || subtree_runs {
+            kept.push(sub);
+        }
+    }
+    kept
+}
+
+/// The density `leaf` draws at: `Compact` for a finished or failed subagent
+/// when `finished_rows` draws those so, else the sidebar's `density`.
+#[must_use]
+pub fn row_density(
+    leaf: &Leaf,
+    density: LeafDensity,
+    finished_rows: FinishedSubagentRows,
+) -> LeafDensity {
+    let finished = leaf.kind == LeafKind::Subagent && leaf.status != SessionStatus::Working;
+    if finished && finished_rows == FinishedSubagentRows::Compact {
+        LeafDensity::Compact
+    } else {
+        density
     }
 }
 
@@ -310,5 +350,147 @@ mod tests {
         assert_eq!(leaf.subline, subline(&s));
         assert_eq!(leaf.tooltip, hover_text(&s));
         assert_eq!(leaf.host_session.as_deref(), Some("s1"));
+    }
+
+    /// Subagent `id` at `depth` in `state`.
+    fn in_state(id: &str, depth: u8, state: AgentState) -> SubagentSnapshot {
+        SubagentSnapshot {
+            depth,
+            state,
+            ..sub(id)
+        }
+    }
+
+    fn ids<'a>(list: &[&'a SubagentSnapshot]) -> Vec<&'a str> {
+        list.iter().map(|s| s.agent_id.as_str()).collect()
+    }
+
+    #[test]
+    fn shown_keeps_every_row_when_finished_ones_show() {
+        let list = [
+            in_state("a1", 1, AgentState::Failed),
+            in_state("a2", 1, AgentState::Running),
+        ];
+        assert_eq!(ids(&shown(&list, true)), ["a1", "a2"]);
+    }
+
+    #[test]
+    fn shown_hides_a_finished_row() {
+        let list = [in_state("a1", 1, AgentState::Finished)];
+        assert!(shown(&list, false).is_empty(), "a finished row hides");
+    }
+
+    #[test]
+    fn shown_hides_failed_and_unknown_rows() {
+        let list = [
+            in_state("a1", 1, AgentState::Failed),
+            in_state("a2", 1, AgentState::Unknown),
+        ];
+        assert!(shown(&list, false).is_empty(), "neither row shows");
+    }
+
+    #[test]
+    fn shown_keeps_a_running_row() {
+        let list = [
+            in_state("a1", 1, AgentState::Running),
+            in_state("a2", 1, AgentState::Queued),
+        ];
+        assert_eq!(ids(&shown(&list, false)), ["a1", "a2"]);
+    }
+
+    #[test]
+    fn shown_keeps_a_finished_parent_of_a_running_child() {
+        let list = [
+            in_state("a1", 1, AgentState::Finished),
+            in_state("c1", 2, AgentState::Running),
+        ];
+        assert_eq!(ids(&shown(&list, false)), ["a1", "c1"]);
+    }
+
+    #[test]
+    fn shown_hides_a_finished_parent_whose_children_finished() {
+        let list = [
+            in_state("a1", 1, AgentState::Finished),
+            in_state("c1", 2, AgentState::Finished),
+            in_state("c2", 3, AgentState::Failed),
+        ];
+        assert!(shown(&list, false).is_empty(), "{list:?}");
+    }
+
+    #[test]
+    fn shown_keeps_a_running_sibling_after_a_hidden_subtree() {
+        let list = [
+            in_state("a1", 1, AgentState::Finished),
+            in_state("c1", 2, AgentState::Finished),
+            in_state("a2", 1, AgentState::Running),
+        ];
+        assert_eq!(ids(&shown(&list, false)), ["a2"]);
+    }
+
+    /// A subagent leaf of a subagent in `state`.
+    fn subagent_row(state: AgentState) -> Leaf {
+        subagent_leaf(&HostKey::Local, "s1", &in_state("a1", 1, state))
+    }
+
+    #[test]
+    fn row_density_draws_a_finished_subagent_compact_when_asked() {
+        for state in [
+            AgentState::Finished,
+            AgentState::Failed,
+            AgentState::Unknown,
+        ] {
+            assert_eq!(
+                row_density(
+                    &subagent_row(state),
+                    LeafDensity::Comfortable,
+                    FinishedSubagentRows::Compact,
+                ),
+                LeafDensity::Compact,
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn row_density_keeps_a_running_subagent_at_the_leaf_density() {
+        for state in [AgentState::Running, AgentState::Queued] {
+            for density in [LeafDensity::Comfortable, LeafDensity::Compact] {
+                assert_eq!(
+                    row_density(&subagent_row(state), density, FinishedSubagentRows::Compact),
+                    density,
+                    "{state:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn row_density_follows_by_default() {
+        for density in [LeafDensity::Comfortable, LeafDensity::Compact] {
+            assert_eq!(
+                row_density(
+                    &subagent_row(AgentState::Finished),
+                    density,
+                    FinishedSubagentRows::Follow,
+                ),
+                density
+            );
+        }
+    }
+
+    #[test]
+    fn row_density_leaves_a_session_leaf_alone() {
+        let session = Leaf {
+            kind: LeafKind::Session,
+            ..subagent_row(AgentState::Finished)
+        };
+        assert_eq!(
+            row_density(
+                &session,
+                LeafDensity::Comfortable,
+                FinishedSubagentRows::Compact,
+            ),
+            LeafDensity::Comfortable
+        );
     }
 }
