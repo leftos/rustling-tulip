@@ -143,6 +143,9 @@ const TULIP_PATH: &str = r"D:\src\rustling-tulip";
 /// The dispatch run the `dispatch` shot shows, and the pane following it.
 const SHOT_RUN: &str = "r-shot";
 const SHOT_RUN_PANE: &str = "p-run";
+/// The subagent the `subagents` shot follows, and the pane following it.
+const SHOT_SUBAGENT: &str = "a1c0ffee";
+const SHOT_SUBAGENT_PANE: &str = "p-sub";
 const YAAT_PATH: &str = r"D:\src\yaat";
 const DECK_SERVER: &str = "deck-server";
 const DECK_CLIENT: &str = "deck-client";
@@ -243,10 +246,11 @@ enum View {
     UpdateHost,
     UpdateHostBreaks,
     Dispatch,
+    Subagents,
 }
 
 impl View {
-    const ALL: [Self; 41] = [
+    const ALL: [Self; 42] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -288,6 +292,7 @@ impl View {
         Self::UpdateHost,
         Self::UpdateHostBreaks,
         Self::Dispatch,
+        Self::Subagents,
     ];
 
     fn name(self) -> &'static str {
@@ -333,6 +338,7 @@ impl View {
             Self::UpdateHostBreaks => "update-host-breaks",
             Self::Toast => "toast",
             Self::Dispatch => "dispatch",
+            Self::Subagents => "subagents",
         }
     }
 
@@ -433,6 +439,7 @@ impl View {
                         .flat_map(|container| &container.leaves)
                         .any(|leaf| leaf.id == SHOT_RUN)
             }
+            Self::Subagents => subagents_reached(root),
             // The Update host confirm over "box", listing its two sessions.
             Self::UpdateHost => root
                 .host_update_dialog()
@@ -639,6 +646,7 @@ impl Shot {
             | View::UpdateHost
             | View::UpdateHostBreaks
             | View::Dispatch
+            | View::Subagents
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -1364,6 +1372,7 @@ fn drive(
         | View::PanesAccent
         | View::UpdateCountdown
         | View::Dispatch
+        | View::Subagents
         | View::Toast => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
@@ -1880,6 +1889,9 @@ impl Fixture {
         if view == View::DashboardCompact {
             compact_rows(&mut rows);
         }
+        if view == View::Subagents {
+            subagent_rows(&mut rows, now);
+        }
         let sessions = rows
             .into_iter()
             .map(|row| row.snapshot(now))
@@ -1987,6 +1999,22 @@ fn tulip_grid(view: View) -> GridNode {
                 host: None,
                 follow: Some(PaneFollow::DispatchRun {
                     run_id: SHOT_RUN.to_owned(),
+                }),
+            }),
+        };
+    }
+    if view == View::Subagents {
+        return GridNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(pane("p1", "s-petal")),
+            second: Box::new(GridNode::Pane {
+                pane_id: SHOT_SUBAGENT_PANE.to_owned(),
+                session_id: None,
+                host: None,
+                follow: Some(PaneFollow::Subagent {
+                    session_id: "s-petal".into(),
+                    agent_id: SHOT_SUBAGENT.into(),
                 }),
             }),
         };
@@ -2128,6 +2156,89 @@ fn shot_run_transcript() -> Vec<ChatEntry> {
             None,
         ),
     ]
+}
+
+/// Gives `s-petal` the `subagents` shot's subagents, in tree order with the
+/// first layer oldest first: a reviewer that was killed, then the followed
+/// one running with a finished child under it.
+fn subagent_rows(rows: &mut [Row], now: DateTime<Utc>) {
+    let ago = |minutes| now - chrono::Duration::minutes(minutes);
+    let subagents = json!([
+        {
+            "agent_id": "a3d00d02", "depth": 1, "agent_type": "code-reviewer",
+            "description": "Review the diff", "model": "Sonnet 5.5", "state": "failed",
+            "end_status": "killed", "started_at": ago(9), "finished_at": ago(8),
+        },
+        {
+            "agent_id": SHOT_SUBAGENT, "depth": 1, "agent_type": "Explore",
+            "description": "Map the sidebar nesting", "model": "Opus 5.5", "effort": "high",
+            "state": "running", "started_at": ago(3),
+        },
+        {
+            "agent_id": "a2beef01", "parent_agent_id": SHOT_SUBAGENT, "depth": 2,
+            "agent_type": "general-purpose", "description": "Read drag.rs", "model": "Opus 5.5",
+            "state": "finished", "started_at": ago(2), "finished_at": ago(1),
+        },
+    ]);
+    if let Some(Value::Object(extra)) = rows
+        .iter_mut()
+        .find(|row| row.id == "s-petal")
+        .map(|row| &mut row.extra)
+    {
+        extra.insert("subagents".to_owned(), subagents);
+    }
+}
+
+/// The followed subagent's transcript in the `subagents` shot: an answer, a
+/// read, a search, and a test run still going.
+fn shot_subagent_transcript() -> Vec<ChatEntry> {
+    vec![
+        ChatEntry::Answer {
+            id: "t1".to_owned(),
+            text: "I'll map how the sidebar nests rows, starting with sidebar.rs.".to_owned(),
+            live: false,
+        },
+        chat_tool(
+            "t2",
+            "Read",
+            ToolKind::Read,
+            "apps/native/src/sidebar.rs",
+            Some("pub struct Leaf {\n    pub depth: u8,\n    pub host_session: Option<String>,"),
+        ),
+        chat_tool(
+            "t3",
+            "Grep",
+            ToolKind::Search,
+            "nest_after",
+            Some("apps/native/src/sidebar.rs\napps/native/src/subagents.rs"),
+        ),
+        chat_tool(
+            "t4",
+            "Bash",
+            ToolKind::Run,
+            "cargo nextest run -p rustling-tulip-native --lib sidebar::",
+            None,
+        ),
+    ]
+}
+
+/// Whether the `subagents` shot is drawn: the pane following the running
+/// subagent shows its header and a tool call, and the sidebar lists both the
+/// subagent and the dispatch run nested under `s-petal`.
+fn subagents_reached(root: &RootView) -> bool {
+    let leaves: Vec<String> = root
+        .sidebar_containers()
+        .iter()
+        .flat_map(|container| &container.leaves)
+        .map(|leaf| leaf.id.clone())
+        .collect();
+    root.subagent_view_header(SHOT_SUBAGENT_PANE).is_some()
+        && root
+            .subagent_view_lines(SHOT_SUBAGENT_PANE)
+            .iter()
+            .any(|line| line.starts_with("● "))
+        && leaves.iter().any(|id| id == SHOT_SUBAGENT)
+        && leaves.iter().any(|id| id == SHOT_RUN)
 }
 
 /// The version the shot fixtures' remote host reports: older than this
@@ -2441,9 +2552,9 @@ impl FakeDaemon {
         if self.view == View::Gates {
             features.push(protocol::FEATURE_GATE_STATE.to_owned());
         }
-        // Only the dispatch shot follows a run, so the other views list
-        // none and no run leaf appears under their repos.
-        if self.view == View::Dispatch {
+        // Only the dispatch and subagents shots list runs, so the other views
+        // list none and no run leaf appears under their repos.
+        if matches!(self.view, View::Dispatch | View::Subagents) {
             features.push(protocol::FEATURE_DISPATCH_RUNS.to_owned());
         }
         conn.on_welcome(version, features.clone(), None);
@@ -2475,7 +2586,7 @@ impl FakeDaemon {
             sessions: fixture.sessions.clone(),
         })?;
         self.send(fixture.tabs.clone())?;
-        if self.view == View::Dispatch {
+        if matches!(self.view, View::Dispatch | View::Subagents) {
             self.send(shot_dispatch_runs()?)?;
         }
         self.send(fixture.keep_awake.clone())?;
@@ -2674,19 +2785,26 @@ impl FakeDaemon {
     }
 }
 
-/// The `dispatch` shot's reply to a follow of its run's transcript; `None`
-/// for any other message.
+/// The `dispatch` shot's reply to a follow of its run's transcript, and the
+/// `subagents` shot's to a follow of its subagent's; `None` for any other
+/// message.
 fn follow_reply(msg: &ClientMessage) -> Option<DaemonMessage> {
-    let ClientMessage::FollowTranscript {
-        source: source @ protocol::TranscriptSource::DispatchRun { run_id },
-        request_id,
-    } = msg
-    else {
+    let ClientMessage::FollowTranscript { source, request_id } = msg else {
         return None;
     };
-    (run_id == SHOT_RUN).then(|| DaemonMessage::Transcript {
+    let entries = match source {
+        protocol::TranscriptSource::DispatchRun { run_id } if run_id == SHOT_RUN => {
+            shot_run_transcript()
+        }
+        protocol::TranscriptSource::Subagent {
+            session_id,
+            agent_id,
+        } if session_id == "s-petal" && agent_id == SHOT_SUBAGENT => shot_subagent_transcript(),
+        _ => return None,
+    };
+    Some(DaemonMessage::Transcript {
         source: source.clone(),
-        entries: shot_run_transcript(),
+        entries,
         hidden: 0,
         request_id: request_id.clone(),
     })

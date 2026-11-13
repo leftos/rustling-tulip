@@ -978,6 +978,152 @@ fn spawn_fake_claude(
     (pane, id)
 }
 
+/// The subagent the fake CLI's first `rt-subagent` cue writes, and its
+/// sidebar leaf.
+const CUE_SUBAGENT: &str = "a1c0ffee00000001";
+const CUE_SUBAGENT_LEAF: &str = "leaf-a1c0ffee00000001";
+/// The subagent the cue launches once the first one's end woke the host
+/// with a task notification; it stays running.
+const SECOND_SUBAGENT: &str = "a1c0ffee00000101";
+
+/// Subagent `id`'s leaf's status, and whether it nests under session
+/// `host`: tagged `SA`, naming `host`, in the container of `host`'s leaf and
+/// after it. `None` while the sidebar lists no such leaf.
+fn subagent_leaf(h: &mut Harness<'_>, id: &str, host: &str) -> Option<(SessionStatus, bool)> {
+    h.root(|root, _| {
+        root.sidebar_containers().iter().find_map(|container| {
+            let at = container.leaves.iter().position(|leaf| leaf.id == id)?;
+            let leaf = container.leaves.get(at)?;
+            let host_at = container.leaves.iter().position(|leaf| leaf.id == host);
+            let nested = leaf.runtime.as_deref() == Some("SA")
+                && leaf.host_session.as_deref() == Some(host)
+                && host_at.is_some_and(|host_at| host_at < at);
+            Some((leaf.status, nested))
+        })
+    })
+}
+
+/// Waits until subagent `id`'s leaf reports `want`, then asserts it sits
+/// under session `host`.
+fn wait_subagent_leaf(h: &mut Harness<'_>, id: &str, host: &str, want: SessionStatus) {
+    h.wait_until(&format!("subagent {id}'s leaf to report {want:?}"), |h| {
+        subagent_leaf(h, id, host).is_some_and(|(status, _)| status == want)
+    });
+    let nested = subagent_leaf(h, id, host).is_some_and(|(_, nested)| nested);
+    assert!(nested, "subagent {id}'s leaf nests under its host session");
+}
+
+/// The transcript lines pane `pane` draws for the subagent it follows.
+fn subagent_lines(h: &mut Harness<'_>, pane: &str) -> Vec<String> {
+    h.root(|root, _| root.subagent_view_lines(pane))
+}
+
+/// Waits until pane `pane`'s transcript holds a line containing `want`.
+fn wait_subagent_line(h: &mut Harness<'_>, pane: &str, want: &str) {
+    h.wait_until(&format!("the followed transcript to show {want}"), |h| {
+        subagent_lines(h, pane)
+            .iter()
+            .any(|line| line.contains(want))
+    });
+}
+
+/// Clicks the subagent's leaf and waits for a pane following it to show
+/// the first batch's tool output; returns the pane.
+fn follow_subagent(h: &mut Harness<'_>) -> String {
+    h.wait_until("the subagent's leaf laid out in the sidebar", |h| {
+        h.in_model(CUE_SUBAGENT_LEAF) && h.bounds(CUE_SUBAGENT_LEAF).size.height > px(0.0)
+    });
+    h.click_on(CUE_SUBAGENT_LEAF);
+    let mut pane = None;
+    h.wait_until("a pane following the subagent with rt-sub-1", |h| {
+        pane = h.root(|root, _| {
+            root.active_pane_ids().into_iter().find(|id| {
+                root.subagent_view_lines(id)
+                    .iter()
+                    .any(|line| line.contains("rt-sub-1"))
+            })
+        });
+        pane.is_some()
+    });
+    pane.expect("the wait just found the pane")
+}
+
+/// Lets the fake CLI's first subagent cue take its next step: it waits for
+/// release file `k` in its Claude home.
+fn release_subagent(daemon: &LiveDaemon, k: u8) {
+    let home = daemon.agent_home(&agent_registry::default_agent());
+    std::fs::write(home.join(format!("rt-subagent-1-release-{k}")), "")
+        .expect("write the subagent's release file");
+}
+
+/// Brings session `session_id`'s pane `pane` back on screen by clicking
+/// its leaf, then types `text` into it.
+fn type_into_session(h: &mut Harness<'_>, session_id: &str, pane: &str, text: &str) {
+    h.click_on(&format!("leaf-{session_id}"));
+    h.wait_until("the session's pane back on screen", |h| {
+        h.root(|root, _| root.active_pane_ids().iter().any(|id| id == pane))
+    });
+    h.type_into(pane, text);
+}
+
+/// Asserts pane `pane` still follows the subagent: its header is drawn and
+/// its transcript keeps every step.
+fn assert_follow_kept(h: &mut Harness<'_>, pane: &str) {
+    let header = h.root(|root, _| root.subagent_view_header(pane));
+    assert!(header.is_some(), "the follow pane keeps its header");
+    let lines = subagent_lines(h, pane);
+    for want in ["rt-sub-1", "rt-sub-2", "rt-sub-done"] {
+        assert!(
+            lines.iter().any(|line| line.contains(want)),
+            "the follow pane keeps {want}: {lines:#?}"
+        );
+    }
+}
+
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn live_subagent_row_streams_finishes_and_leaves_after_a_typed_prompt(cx: &mut TestAppContext) {
+    let daemon = LiveDaemon::start("subagent");
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+    let (session_pane, session_id) = spawn_fake_claude(&mut h, &client, &daemon);
+
+    h.type_into(&session_pane, "rt-subagent go\n");
+    wait_subagent_leaf(&mut h, CUE_SUBAGENT, &session_id, SessionStatus::Working);
+    let pane = follow_subagent(&mut h);
+
+    release_subagent(&daemon, 1);
+    wait_subagent_line(&mut h, &pane, "rt-sub-2");
+
+    release_subagent(&daemon, 2);
+    wait_subagent_leaf(&mut h, CUE_SUBAGENT, &session_id, SessionStatus::Idle);
+    h.wait_until("the follow pane's header to read finished", |h| {
+        h.root(|root, _| root.subagent_view_header(&pane))
+            .is_some_and(|(_, _, state)| state.starts_with("finished"))
+    });
+    wait_subagent_line(&mut h, &pane, "rt-sub-done");
+
+    // The finish wakes the host with a task notification and a second
+    // subagent; seeing that one listed proves a list pass read past the
+    // notification, which must leave the finished one listed.
+    release_subagent(&daemon, 3);
+    wait_subagent_leaf(&mut h, SECOND_SUBAGENT, &session_id, SessionStatus::Working);
+    assert!(
+        subagent_leaf(&mut h, CUE_SUBAGENT, &session_id).is_some(),
+        "the finished subagent stays listed after a task notification"
+    );
+
+    type_into_session(&mut h, &session_id, &session_pane, "next prompt\n");
+    h.wait_until("the finished subagent's leaf to leave the sidebar", |h| {
+        subagent_leaf(h, CUE_SUBAGENT, &session_id).is_none()
+    });
+    assert!(
+        subagent_leaf(&mut h, SECOND_SUBAGENT, &session_id).is_some(),
+        "the running subagent stays listed after the typed prompt"
+    );
+    assert_follow_kept(&mut h, &pane);
+}
+
 /// Waits until the session's persisted scrollback holds `want`, asking the
 /// daemon for it again until it does.
 fn wait_scrollback(h: &mut Harness<'_>, client: &LiveClient, session_id: &str, want: &str) {

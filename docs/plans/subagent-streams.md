@@ -244,7 +244,7 @@ Each step lands on `main` on its own and keeps the suite green. Hotspot files ar
   Files: `apps/native/src/subagent_view.rs` (new), `apps/native/src/grid_view.rs`, `apps/native/src/lib.rs` (hotspot), `apps/native/tests/ui/ui_subagents.rs` (new, with its `mod` line in `tests/ui/main.rs`).
 
   Spec: a pane with the follow sends `FollowTranscript` with the `Subagent` source to the pane's host; the reply's answer and tool card draw; an append adds a row; the header follows the snapshot's state; a snapshot that drops the subagent leaves the transcript and the last header; `ended: true` shows the session-ended note; closing the pane sends `UnfollowTranscript`; a `Welcome` re-follows. Depends on: SS.10 and TV.4.
-- [ ] **SS.13 Shot and live e2e.** A `subagents` `native-shot` view (a host with nested subagent and run rows beside an open subagent pane); a fake-claude mode that writes a sidecar and a transcript under `$CLAUDE_CONFIG_DIR/projects/<encoded cwd>/<conversation id>/subagents/`, appends to it, then finishes it; an `e2e_live` spec run through `.\rt.ps1 native-e2e -Test e2e_live`.
+- [x] **SS.13 Shot and live e2e.** A `subagents` `native-shot` view (a host with nested subagent and run rows beside an open subagent pane); a fake-claude mode that writes a sidecar and a transcript under `$CLAUDE_CONFIG_DIR/projects/<encoded cwd>/<conversation id>/subagents/`, appends to it, then finishes it; an `e2e_live` spec run through `.\rt.ps1 native-e2e -Test e2e_live`.
 
   Files: `apps/native/examples/shot.rs`, `crates/agents/claude/fake/index.mjs`, `crates/agents/claude/fake/README.md`, `apps/native/tests/e2e_live.rs`.
 

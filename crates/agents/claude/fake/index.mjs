@@ -31,11 +31,22 @@
  *     message holding "rt-perm" first writes a `Bash` `tool_use` record, runs
  *     `PermissionRequest` and paints the permission dialog; a bare `1`/`2`
  *     there writes the `tool_result`, runs `PostToolUse` and answers, a `3`
- *     denies it and runs `Stop`.
+ *     denies it and runs `Stop`. A message holding "rt-subagent" also
+ *     launches a background subagent, the cue's number `n` counted per
+ *     process: an `Agent` `tool_use` record (`toolu_rtsub<n>`) in the main
+ *     transcript, then the sidecar and first step (a `Bash` call and its
+ *     result) of subagent `a1c0ffee` + `n` in eight hex digits under
+ *     `<id>/subagents/`; its second step once
+ *     `<CLAUDE_CONFIG_DIR>/rt-subagent-<n>-release-1` exists; its final
+ *     `end_turn` answer, then the sidecar marked finished, once
+ *     `rt-subagent-<n>-release-2` does; and once `rt-subagent-<n>-release-3`
+ *     does, a task-notification `user` record in the main transcript and a
+ *     second subagent (`n` + 0x100, `toolu_rtsub<n>b`, "Second pass") left
+ *     running. The turn itself ends as usual.
  *   - Writes that transcript to
  *     `<CLAUDE_CONFIG_DIR>/projects/<encoded cwd>/<id>.jsonl`, the id from
  *     `--session-id` or `--resume`, else a uuid it mints at start, as Claude
- *     Code does.
+ *     Code does, and a subagent's beside it in `<id>/subagents/`.
  *   - Echoes lines from stdin back so input from the harness is observable.
  *   - Reports the exact byte count + sha256 of an EOT-terminated payload as
  *     "RT_PASTE_RESULT bytes=<n> sha=<hex>" for paste byte-fidelity assertions
@@ -81,6 +92,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -103,6 +115,21 @@ const STOP_AFTER_MS = 5000;
 const AUTO_FOOTER = "  ⏵⏵ auto mode on (shift+tab to cycle)";
 /// The substring that makes a submitted message's turn ask a tool permission.
 const PERMISSION_CUE = "rt-perm";
+/// The substring that makes a submitted message's turn launch a background
+/// subagent, which writes its transcript and sidecar as Claude Code does.
+const SUBAGENT_CUE = "rt-subagent";
+/// The start of every subagent id the cue writes; eight hex digits follow:
+/// the cue's number `n`, counted per process, for the subagent it launches,
+/// and `n` plus [`SECOND_SUBAGENT_OFFSET`] for the one its end wakes.
+const SUBAGENT_ID_PREFIX = "a1c0ffee";
+const SECOND_SUBAGENT_OFFSET = 0x100;
+/// What the cue's subagent is asked to do: its description and its prompt.
+const SUBAGENT_TASK = "Map the crate";
+/// What the subagent launched once the first one's end woke the host is
+/// asked to do.
+const SECOND_SUBAGENT_TASK = "Second pass";
+/// How often the cue's subagent looks for the release file of its next step.
+const SUBAGENT_POLL_MS = 100;
 /// The pause between the steps of a message's turn, so each step reaches the
 /// screen and the transcript on its own.
 const TURN_STEP_MS = 300;
@@ -135,6 +162,9 @@ let lastRecordUuid = null;
 let turnStartedAt = 0;
 /// The id of the tool call the permission dialog on screen asks about.
 let pendingToolId = null;
+/// How many subagent cues this process has run; the next cue's number is
+/// one more.
+let subagentCues = 0;
 
 /// The row strings of the bottom region painted last; empty while none is on
 /// screen.
@@ -674,6 +704,9 @@ function startTurn(text) {
     permission_mode: "auto",
   });
   paint("working", [`${TAG} echo: ${text}`]);
+  if (text.includes(SUBAGENT_CUE)) {
+    startSubagent();
+  }
   const next = text.includes(PERMISSION_CUE)
     ? askPermission
     : () => endTurn(`Done: ${text}`);
@@ -827,6 +860,256 @@ function appendRecord(fields) {
   mkdirSync(dirname(transcriptFile), { recursive: true });
   appendFileSync(transcriptFile, `${JSON.stringify(record)}\n`);
   lastRecordUuid = uuid;
+}
+
+/**
+ * The folder Claude Code keeps this conversation's subagents in: beside the
+ * main transcript, `<id>/subagents/`. Null when the run has no transcript.
+ *
+ * @returns {string | null}
+ */
+function subagentsDir() {
+  if (transcriptFile === null) {
+    return null;
+  }
+  return join(dirname(transcriptFile), flags.conversationId, "subagents");
+}
+
+/**
+ * @typedef {{ id: string, callId: string, task: string, lastUuid: string | null }} Subagent
+ * A subagent the cue writes: its agent id, the main transcript's `Agent`
+ * call that launched it, what it was asked, and the uuid of the record
+ * written last to its transcript, the next one's parent.
+ */
+
+/**
+ * The subagent id ending in `n` as eight hex digits.
+ *
+ * @param {number} n
+ * @returns {string}
+ */
+function subagentId(n) {
+  return `${SUBAGENT_ID_PREFIX}${n.toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * Appends one record to subagent `sub`'s transcript, chained to the one
+ * before it in that file and marked as a sidechain of this conversation;
+ * writes nothing when the run has no transcript.
+ *
+ * @param {Subagent} sub
+ * @param {object} fields
+ */
+function appendSubagentRecord(sub, fields) {
+  const dir = subagentsDir();
+  if (dir === null) {
+    return;
+  }
+  const uuid = randomUUID();
+  const record = {
+    parentUuid: sub.lastUuid,
+    uuid,
+    isSidechain: true,
+    agentId: sub.id,
+    sessionId: flags.conversationId,
+    cwd: process.cwd(),
+    timestamp: new Date().toISOString(),
+    ...fields,
+  };
+  mkdirSync(dir, { recursive: true });
+  appendFileSync(join(dir, `agent-${sub.id}.jsonl`), `${JSON.stringify(record)}\n`);
+  sub.lastUuid = uuid;
+}
+
+/**
+ * Writes subagent `sub`'s sidecar whole, `finished` added once it ended.
+ *
+ * @param {Subagent} sub
+ * @param {boolean} finished
+ */
+function writeSubagentSidecar(sub, finished) {
+  const dir = subagentsDir();
+  if (dir === null) {
+    return;
+  }
+  const sidecar = {
+    agentType: "Explore",
+    description: sub.task,
+    toolUseId: sub.callId,
+    spawnDepth: 1,
+    ...(finished ? { finished: true } : {}),
+  };
+  mkdirSync(dir, { recursive: true });
+  writeAtomic(join(dir, `agent-${sub.id}.meta.json`), `${JSON.stringify(sidecar)}\n`);
+}
+
+/**
+ * One assistant step of subagent `sub`: a text block, then a tool call when
+ * `tool` is given.
+ *
+ * @param {Subagent} sub
+ * @param {string} id
+ * @param {string} text
+ * @param {{ id: string, name: string, input: object } | null} tool
+ */
+function subagentStep(sub, id, text, tool) {
+  const content = [{ type: "text", text }];
+  if (tool !== null) {
+    content.push({ type: "tool_use", ...tool });
+  }
+  appendSubagentRecord(sub, {
+    type: "assistant",
+    message: {
+      id,
+      role: "assistant",
+      model: "fake-model",
+      content,
+      stop_reason: tool === null ? "end_turn" : "tool_use",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  });
+}
+
+/**
+ * The `tool_result` answering subagent `sub`'s call `toolId`.
+ *
+ * @param {Subagent} sub
+ * @param {string} toolId
+ * @param {string} output
+ */
+function subagentResult(sub, toolId, output) {
+  appendSubagentRecord(sub, {
+    type: "user",
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: toolId, content: output, is_error: false }],
+    },
+  });
+}
+
+/**
+ * Calls `then` once `<CLAUDE_CONFIG_DIR>/rt-subagent-<n>-release-<k>`
+ * exists, looking for it every [`SUBAGENT_POLL_MS`]; never without a Claude
+ * home.
+ *
+ * @param {number} n
+ * @param {number} k
+ * @param {() => void} then
+ */
+function awaitSubagentRelease(n, k, then) {
+  const home = process.env.CLAUDE_CONFIG_DIR;
+  if (home === undefined || home === "") {
+    return;
+  }
+  const release = join(home, `rt-subagent-${n}-release-${k}`);
+  const timer = setInterval(() => {
+    if (existsSync(release)) {
+      clearInterval(timer);
+      then();
+    }
+  }, SUBAGENT_POLL_MS);
+}
+
+/**
+ * Launches subagent `sub` in the background: the main transcript's `Agent`
+ * call, then its sidecar and its prompt, the first line of its transcript.
+ *
+ * @param {Subagent} sub
+ */
+function launchSubagent(sub) {
+  appendRecord({
+    type: "assistant",
+    message: {
+      id: `msg_${sub.callId}`,
+      role: "assistant",
+      model: "fake-model",
+      content: [
+        {
+          type: "tool_use",
+          id: sub.callId,
+          name: "Agent",
+          input: {
+            description: sub.task,
+            subagent_type: "Explore",
+            prompt: sub.task,
+            run_in_background: true,
+          },
+        },
+      ],
+      stop_reason: "tool_use",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  });
+  writeSubagentSidecar(sub, false);
+  appendSubagentRecord(sub, { type: "user", message: { role: "user", content: sub.task } });
+}
+
+/**
+ * The subagent cue, number `n` in this process: the launch and the
+ * subagent's first step at once, its second step once release file 1
+ * exists, and its end once release file 2 does, the sidecar marked finished
+ * only after the last transcript line.
+ */
+function startSubagent() {
+  subagentCues += 1;
+  const n = subagentCues;
+  /** @type {Subagent} */
+  const sub = { id: subagentId(n), callId: `toolu_rtsub${n}`, task: SUBAGENT_TASK, lastUuid: null };
+  launchSubagent(sub);
+  subagentStep(sub, "msg_s1", "rt-sub-step-1", {
+    id: "toolu_s1",
+    name: "Bash",
+    input: { command: "echo rt-sub-1" },
+  });
+  subagentResult(sub, "toolu_s1", "rt-sub-1");
+  awaitSubagentRelease(n, 1, () => {
+    subagentStep(sub, "msg_s2", "rt-sub-step-2", {
+      id: "toolu_s2",
+      name: "Read",
+      input: { file_path: "README.md" },
+    });
+    subagentResult(sub, "toolu_s2", "rt-sub-2");
+    awaitSubagentRelease(n, 2, () => {
+      subagentStep(sub, "msg_s3", "rt-sub-done", null);
+      writeSubagentSidecar(sub, true);
+      awaitSubagentRelease(n, 3, () => wakeOnSubagentEnd(n, sub));
+    });
+  });
+}
+
+/**
+ * Subagent `sub`'s end wakes the host as Claude Code does: a `user` record
+ * holding its task notification, with `origin.kind` `task-notification`,
+ * so it is no typed prompt. The woken turn launches a second subagent and
+ * leaves it running with its prompt and a first step; nothing moves it on.
+ *
+ * @param {number} n
+ * @param {Subagent} sub
+ */
+function wakeOnSubagentEnd(n, sub) {
+  appendRecord({
+    type: "user",
+    message: {
+      role: "user",
+      content:
+        `<task-notification><task-id>${sub.id}</task-id><tool-use-id>${sub.callId}</tool-use-id>` +
+        `<status>completed</status><summary>Agent "${sub.task}" completed</summary></task-notification>`,
+    },
+    origin: { kind: "task-notification" },
+  });
+  /** @type {Subagent} */
+  const second = {
+    id: subagentId(n + SECOND_SUBAGENT_OFFSET),
+    callId: `${sub.callId}b`,
+    task: SECOND_SUBAGENT_TASK,
+    lastUuid: null,
+  };
+  launchSubagent(second);
+  subagentStep(second, "msg_sb1", "rt-sub-b-step-1", {
+    id: "toolu_sb1",
+    name: "Bash",
+    input: { command: "echo rt-sub-b-1" },
+  });
 }
 
 /**

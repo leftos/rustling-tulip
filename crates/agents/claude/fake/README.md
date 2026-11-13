@@ -30,7 +30,17 @@ A message containing `rt-perm` asks a permission before it answers. It writes an
 
 The digit typed at that dialog, with no Enter, answers it. `1` or `2` writes the `tool_result`, runs `PostToolUse` and ends the turn answering `Ran echo rt-fake and it printed rt-fake.`. `3` writes an error `tool_result` and an interrupted-by-user record, then runs `Stop`.
 
-The transcript goes where the daemon's chat mirror reads it: `<CLAUDE_CONFIG_DIR>/projects/<encoded working directory>/<id>.jsonl`, one JSON record per line, chained by `parentUuid`. The `<id>` comes from the `--session-id` or `--resume` argument, else the uuid the run minted. The folder name is the working directory with every character outside `[A-Za-z0-9-]` turned into `-`. A run with no `CLAUDE_CONFIG_DIR` writes no transcript.
+A message containing `rt-subagent` launches a background subagent the way Claude Code writes one, and its own turn ends as usual. Each such message is the process's next cue, numbered `n` from 1, and its subagent's id is `a1c0ffee` followed by `n` in eight hex digits (`a1c0ffee00000001` for the first).
+
+The cue appends an assistant `Agent` `tool_use` record (`toolu_rtsub<n>`, an `Explore` subagent asked to `Map the crate`) to the main transcript, writes the sidecar `agent-<agent id>.meta.json` whose `toolUseId` names that call, and appends the subagent's first step to `agent-<agent id>.jsonl`: its prompt, an `rt-sub-step-1` text with a `Bash` `echo rt-sub-1` call, and that call's `rt-sub-1` result.
+
+The subagent then waits on files a test writes, so no timer moves it on. Once `<CLAUDE_CONFIG_DIR>/rt-subagent-<n>-release-1` exists it appends an `rt-sub-step-2` text with a `Read` call and its `rt-sub-2` result. Once `rt-subagent-<n>-release-2` exists it appends a final `rt-sub-done` answer ending its turn, then rewrites the sidecar with `"finished": true`.
+
+Once `rt-subagent-<n>-release-3` exists, the subagent's end wakes the host as Claude Code does: a `user` record in the main transcript holding a `<task-notification>` for it, with `origin.kind` `task-notification`, so it is no typed prompt. That woken turn launches a second subagent, `a1c0ffee` followed by `n` + 0x100 in eight hex digits, through `toolu_rtsub<n>b`, asked to do `Second pass`; it writes its sidecar, prompt and a first `Bash` call, and stays running.
+
+Each subagent record carries `isSidechain`, `agentId`, the conversation id and a timestamp, chained by `parentUuid` within its own file.
+
+The transcript goes where the daemon's chat mirror reads it: `<CLAUDE_CONFIG_DIR>/projects/<encoded working directory>/<id>.jsonl`, one JSON record per line, chained by `parentUuid`. The `<id>` comes from the `--session-id` or `--resume` argument, else the uuid the run minted. The folder name is the working directory with every character outside `[A-Za-z0-9-]` turned into `-`. A run with no `CLAUDE_CONFIG_DIR` writes no transcript. A subagent's transcript and sidecar go beside it, in `<id>/subagents/`.
 
 ## `auth login`
 
