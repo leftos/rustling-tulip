@@ -673,16 +673,19 @@ pub fn prune_sessions_not_in(
     }
 }
 
-/// Clear the follow of every local pane (no `host`) whose dispatch run is not
-/// in `live`. Used on daemon startup, after the first scan of the live-run
-/// folder; a pane of another daemon, and a follow kind this build does not
-/// know, are not this daemon's to judge and stay as they are. Returns true if
-/// at least one pane was modified.
+/// Clear the follow of every local pane (no `host`) that follows a dispatch
+/// run, or one of its subagents, whose run is not in `live`. Used on daemon
+/// startup, after the first scan of the live-run folder; a pane of another
+/// daemon, and a follow kind this build does not know, are not this daemon's
+/// to judge and stay as they are. Returns true if at least one pane was
+/// modified.
 pub fn prune_follows_not_in(grid: &mut GridNode, live: &HashSet<String>) -> bool {
     match grid {
         GridNode::Pane { host, follow, .. } => {
             if host.is_none()
-                && let Some(PaneFollow::DispatchRun { run_id }) = follow.as_ref()
+                && let Some(
+                    PaneFollow::DispatchRun { run_id } | PaneFollow::RunSubagent { run_id, .. },
+                ) = follow.as_ref()
                 && !live.contains(run_id)
             {
                 *follow = None;
@@ -1715,6 +1718,24 @@ mod tests {
         }
     }
 
+    fn run_subagent(run_id: &str, agent_id: &str) -> PaneFollow {
+        PaneFollow::RunSubagent {
+            run_id: run_id.to_string(),
+            agent_id: agent_id.to_string(),
+        }
+    }
+
+    /// A pane following subagent `agent_id` of dispatch run `run_id` on `host`
+    /// (`None` is this daemon).
+    fn run_subagent_pane(id: &str, run_id: &str, agent_id: &str, host: Option<&str>) -> GridNode {
+        GridNode::Pane {
+            pane_id: id.to_string(),
+            session_id: None,
+            host: host.map(str::to_string),
+            follow: Some(run_subagent(run_id, agent_id)),
+        }
+    }
+
     /// The pane `id` of `tab`, as the layout builders read it.
     fn pane_in(tab: &TabEntry, id: &str) -> PaneRef {
         collect_panes(tab.grid().expect("a grid tab"))
@@ -1902,6 +1923,67 @@ mod tests {
         assert!(
             !prune_follows_not_in(&mut grid, &live),
             "nothing left to clear"
+        );
+    }
+
+    #[test]
+    fn prune_clears_local_run_subagent_follows_of_runs_not_live() {
+        let mut grid = split(
+            Horizontal,
+            0.5,
+            split(
+                Vertical,
+                0.5,
+                run_subagent_pane("p1", "run-dead", "a1", None),
+                run_subagent_pane("p2", "run-live", "a2", None),
+            ),
+            split(
+                Vertical,
+                0.5,
+                run_subagent_pane("p3", "run-dead", "a1", Some("ssh:devbox")),
+                subagent_pane("p4", "s1", "a3", None),
+            ),
+        );
+        let live: HashSet<String> = ["run-live".to_string()].into();
+
+        assert!(prune_follows_not_in(&mut grid, &live));
+        let follows: Vec<Option<PaneFollow>> = collect_panes(&grid)
+            .into_iter()
+            .map(|pane| pane.follow)
+            .collect();
+        assert_eq!(
+            follows,
+            vec![
+                None,
+                Some(run_subagent("run-live", "a2")),
+                Some(run_subagent("run-dead", "a1")),
+                Some(subagent("s1", "a3")),
+            ]
+        );
+        assert!(
+            !prune_follows_not_in(&mut grid, &live),
+            "nothing left to clear"
+        );
+    }
+
+    #[test]
+    fn rebind_and_rehost_leave_run_subagent_follows() {
+        let local = run_subagent_pane("p1", "r1", "a1", None);
+        let foreign = run_subagent_pane("p2", "r1", "a2", Some("a"));
+        let mut tabs = vec![grid_tab(
+            "A",
+            split(Horizontal, 0.5, local.clone(), foreign.clone()),
+        )];
+
+        let updated = rebind_session(&mut tabs, None, "r1", "r2");
+        assert!(updated.is_empty(), "a run id is not a session binding");
+
+        let updated = rehost_panes(&mut tabs, "a", None, &["r1".to_string()]);
+        assert!(updated.is_empty(), "a run id is not a session id");
+
+        assert_eq!(
+            tabs[0].grid(),
+            Some(&split(Horizontal, 0.5, local, foreign))
         );
     }
 
