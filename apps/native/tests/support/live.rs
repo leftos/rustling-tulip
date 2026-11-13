@@ -1028,6 +1028,9 @@ impl<'a> Harness<'a> {
         tokens: Arc<MemoryTokens>,
         make_transport: impl FnOnce(&Rc<RefCell<Vec<Target>>>) -> Transport,
     ) -> Self {
+        // The real net thread wakes the app, which gpui's test scheduler
+        // refuses unless the spec allows parking.
+        cx.executor().allow_parking();
         cx.update(bind_keys);
         let clock = TestClock::new();
         let quits = Rc::new(std::cell::Cell::new(0));
