@@ -4,14 +4,22 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.14.0-alpha
+
+### Highlights
+
+- Dispatch runs and subagents nest under their session in the sidebar, and a pane following one shows its full transcript.
+- Unbind every session of one machine, or rebind them into new tabs by a layout.
+- The status bar shows CPU and RAM for this PC and the remote hosts you pick.
+
 ### Added
 
-- Unbind every session of one machine, or rebind them into new tabs by a grid, side by side or stacked, or following that machine's own layout.
-- A session's dispatch runs and subagents sit indented under it in the sidebar, a run's own subagents under the run, finished subagents until your next prompt, and a chevron on its row folds them away.
+- Unbind every session of one machine, or rebind them into new tabs by grid, side by side, stacked, or that machine's own layout.
+- Dispatch runs and subagents nest under their session in the sidebar, a run's own subagents under the run; a chevron folds them away.
 - Right-click the version in the status bar to check for updates at once; it says when you're up to date or why it couldn't check.
-- A setting in Settings › General decides whether the first click on a pane that isn't focused also acts in it (on by default) or only focuses it.
-- A pane following a dispatch run or a subagent shows its transcript the way Claude Code's terminal does: its replies, each tool call and the tool's output, which a click expands.
-- The status bar shows CPU and RAM for This PC and any remote hosts you choose; right-click the pills to pick them, and a busy machine turns amber.
+- Settings › General decides whether the first click on an unfocused pane also acts in it (the default) or only focuses it.
+- A pane following a dispatch run or subagent shows its transcript like Claude Code's terminal: replies, tool calls and their output, which a click expands.
+- The status bar shows CPU and RAM for This PC and remote hosts you pick by right-clicking the pills; a busy machine turns amber.
 
 ### Fixed
 
