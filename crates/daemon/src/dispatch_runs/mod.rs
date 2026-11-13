@@ -735,6 +735,22 @@ impl DispatchRuns {
             .collect()
     }
 
+    /// What a follow of `run_id`'s subagents reads, while the run is listed
+    /// and its stream has named its conversation; ended runs included.
+    pub(crate) fn subagent_source(&self, run_id: &str) -> Option<RunSource> {
+        let map = self.lock();
+        let entry = map.entries.get(run_id)?;
+        Some(RunSource {
+            run_id: run_id.to_owned(),
+            generation: entry.generation,
+            agent: entry.file.agent_id(),
+            worktree: entry.file.worktree.clone(),
+            agent_session_id: entry.stream.agent_session_id.clone()?,
+            started_at: entry.file.started_at,
+            session_id: entry.file.session_id.clone(),
+        })
+    }
+
     /// The listed runs no longer read, ended or without a conversation, that
     /// still list subagents, as `(run id, generation)`.
     pub(crate) fn ended_with_subagents(&self) -> Vec<(String, u64)> {

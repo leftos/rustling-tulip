@@ -3229,6 +3229,7 @@ mod tests {
         let subagent_tails = crate::subagents::tail::SubagentTails::new(
             Arc::clone(&sessions),
             Arc::clone(&client_count),
+            None,
         );
         let hub = Hub {
             state,

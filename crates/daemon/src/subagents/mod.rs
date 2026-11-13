@@ -335,7 +335,7 @@ fn run_live(source: RunSource, extra_env: Vec<(String, String)>) -> Live {
 
 /// The stored env rows of the first listed session on the conversation
 /// `session_id`, which a run it dispatched inherits; empty when none is.
-fn host_env(
+pub(crate) fn host_env(
     sessions: &SessionRegistry,
     snapshots: &[SessionSnapshot],
     session_id: Option<&str>,

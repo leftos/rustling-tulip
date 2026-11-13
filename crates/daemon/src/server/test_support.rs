@@ -170,6 +170,7 @@ pub(super) fn build_test_hub(
     let subagent_tails = crate::subagents::tail::SubagentTails::new(
         Arc::clone(&sessions),
         Arc::clone(&client_count),
+        None,
     );
     let hub = Hub {
         state,
@@ -233,6 +234,11 @@ pub(crate) fn enable_dispatch_runs(
     folder: PathBuf,
 ) -> Arc<crate::dispatch_runs::DispatchRuns> {
     let runs = crate::dispatch_runs::DispatchRuns::new();
+    hub.subagent_tails = crate::subagents::tail::SubagentTails::new(
+        Arc::clone(&hub.sessions),
+        Arc::clone(&hub.client_count),
+        Some(Arc::clone(&runs)),
+    );
     hub.dispatch_runs = Some(crate::dispatch_runs::DispatchRunsHub {
         runs: Arc::clone(&runs),
         folder,

@@ -623,6 +623,7 @@ pub async fn run(
     let subagent_tails = crate::subagents::tail::SubagentTails::new(
         Arc::clone(&sessions),
         Arc::clone(&client_count),
+        dispatch_runs.as_ref().map(|hub| Arc::clone(&hub.runs)),
     );
     let hub = Hub {
         state,

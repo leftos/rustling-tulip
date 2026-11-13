@@ -1,13 +1,14 @@
 //! Subagent tails: one subagent's transcript followed read-only by the
 //! connections that sent `FollowTranscript` for it.
 //!
-//! One tail runs per `(session id, agent id)` while that key has a follower.
-//! Every follower operation, every tail event and every removal runs under
-//! one tails lock, a leaf: the record's fields are copied out and its lock
-//! released before it is taken, and nothing awaits under it. A follow joins
-//! the running tail or starts one from byte 0; the last unfollow, or the last
-//! following connection closing, drops the entry and with it the tail.
-//! Removing the session from the registry ends each of its tails, sending
+//! One tail runs per `(owner, agent id)` while that key has a follower; an
+//! owner is a session or a dispatch run. Every follower operation, every tail
+//! event and every removal runs under one tails lock, a leaf: the record's
+//! fields are copied out and its lock released before it is taken, and
+//! nothing awaits under it. A follow joins the running tail or starts one from
+//! byte 0; the last unfollow, or the last following connection closing, drops
+//! the entry and with it the tail. Removing the session from the registry, or
+//! the run from the run list, ends each of its tails, sending
 //! `TranscriptAppend { ended: true }`; a shutdown ends none.
 
 #[cfg(test)]
@@ -20,17 +21,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use agent_api::AgentPlugin;
-use protocol::{DaemonMessage, TranscriptSource, error_codes};
+use protocol::{AgentId, DaemonMessage, TranscriptSource, error_codes};
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, warn};
 
+use crate::dispatch_runs::{DispatchRunEvent, DispatchRuns};
 use crate::session::{SessionEvent, SessionRegistry};
 use crate::sync::lock;
 use crate::transcript_log::{ConnectionId, Outbox, TranscriptLog};
 use crate::transcript_tail::{self, TailEvent, TailHandle};
 
-/// A followed subagent: its session's id and its agent id.
-pub(crate) type Key = (String, String);
+/// Whose subagent a tail follows.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Owner {
+    /// A session's, by session id.
+    Session(String),
+    /// A dispatch run's, by run id.
+    Run(String),
+}
+
+impl Owner {
+    /// The session or run id the owner names.
+    fn id(&self) -> &str {
+        match self {
+            Owner::Session(id) | Owner::Run(id) => id,
+        }
+    }
+}
+
+/// A followed subagent: its owner and its agent id.
+pub(crate) type Key = (Owner, String);
 
 type Map = HashMap<Key, Entry>;
 
@@ -65,6 +85,9 @@ pub(crate) struct SubagentTails {
     tails: Arc<Mutex<Map>>,
     registry: Arc<SessionRegistry>,
     client_count: Arc<watch::Sender<usize>>,
+    /// The listed runs, whose own subagents a run follow reads; `None` when
+    /// the daemon follows no live-run folder.
+    runs: Option<Arc<DispatchRuns>>,
     /// A spec's hook, run between the record read and the tails lock.
     #[cfg(test)]
     lock_gap: Arc<Mutex<Option<LockGap>>>,
@@ -83,16 +106,18 @@ impl Drop for SubagentFollowGuard {
 }
 
 impl SubagentTails {
-    /// The tails over `registry`'s sessions; each tail parks while
-    /// `client_count` is 0.
+    /// The tails over `registry`'s sessions and `runs`' runs; each tail parks
+    /// while `client_count` is 0.
     pub(crate) fn new(
         registry: Arc<SessionRegistry>,
         client_count: Arc<watch::Sender<usize>>,
+        runs: Option<Arc<DispatchRuns>>,
     ) -> Self {
         Self {
             tails: Arc::default(),
             registry,
             client_count,
+            runs,
             #[cfg(test)]
             lock_gap: Arc::default(),
         }
@@ -100,7 +125,7 @@ impl SubagentTails {
 
     /// Make `connection` follow subagent `key`, sending the backfill
     /// answering `request_id` on `outbox`, or a `NOT_FOUND` `Error` when the
-    /// session is not held or its plugin names no transcript for the agent.
+    /// owner is not held or its plugin names no transcript for the agent.
     pub(crate) fn follow(
         &self,
         key: &Key,
@@ -109,7 +134,7 @@ impl SubagentTails {
         outbox: &Outbox,
     ) {
         let Some((path, plugin)) = self.resolve(key) else {
-            let message = format!("unknown subagent: {}/{}", key.0, key.1);
+            let message = format!("unknown subagent: {}/{}", key.0.id(), key.1);
             let _ = outbox.send(DaemonMessage::Error {
                 message,
                 request_id,
@@ -133,7 +158,7 @@ impl SubagentTails {
         }
         // A removal between the record read and the lock found no entry to
         // end: end it now.
-        if self.registry.get(&key.0).is_none() {
+        if self.owner_gone(&key.0) {
             end_where(&self.tails, |held| held == key);
         }
     }
@@ -167,19 +192,35 @@ impl SubagentTails {
         }
     }
 
-    /// Start the task that ends a removed session's tails, for the daemon's
-    /// life. It subscribes before returning, so a removal after this call
-    /// is seen.
+    /// Start the tasks that end a removed session's tails and a removed run's,
+    /// for the daemon's life. Each subscribes before returning, so a removal
+    /// after this call is seen.
     pub(crate) fn spawn_removal_watcher(&self) -> tokio::task::JoinHandle<()> {
         let receiver = self.registry.subscribe();
+        if let Some(runs) = &self.runs {
+            let run_events = runs.subscribe();
+            tokio::spawn(follow_run_removals(self.clone(), run_events));
+        }
         tokio::spawn(follow_removals(self.clone(), receiver))
     }
 
-    /// The transcript the plugin keeps for `key`'s agent, and the plugin,
-    /// from the session's record; the record lock is released on return.
+    /// The transcript the plugin keeps for `key`'s agent, and the plugin; the
+    /// record or the run list is read and released on return.
     fn resolve(&self, key: &Key) -> Option<(PathBuf, &'static dyn AgentPlugin)> {
+        match &key.0 {
+            Owner::Session(session_id) => self.resolve_session(session_id, &key.1),
+            Owner::Run(run_id) => self.resolve_run(run_id, &key.1),
+        }
+    }
+
+    /// The transcript of `agent_id` in the session `session_id`'s record.
+    fn resolve_session(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+    ) -> Option<(PathBuf, &'static dyn AgentPlugin)> {
         let (agent, conversation_id, folder, extra_env) = {
-            let record = self.registry.get(&key.0)?;
+            let record = self.registry.get(session_id)?;
             let record = lock(&record);
             (
                 record.agent.clone(),
@@ -192,17 +233,54 @@ impl SubagentTails {
                     .unwrap_or_default(),
             )
         };
-        let plugin = agent_registry::plugin(&agent)?;
-        let rows = crate::conversations::lookup_rows(&extra_env);
-        let path =
-            plugin.subagent_transcript_path(Path::new(&folder), &conversation_id, &key.1, &rows)?;
-        Some((path, plugin))
+        transcript_path(
+            &agent,
+            Path::new(&folder),
+            &conversation_id,
+            agent_id,
+            &extra_env,
+        )
+    }
+
+    /// The transcript of `agent_id` in the run `run_id`'s entry, read with the
+    /// env rows of the session that dispatched it.
+    fn resolve_run(
+        &self,
+        run_id: &str,
+        agent_id: &str,
+    ) -> Option<(PathBuf, &'static dyn AgentPlugin)> {
+        let runs = self.runs.as_ref()?;
+        let source = runs.subagent_source(run_id)?;
+        let extra_env = crate::subagents::host_env(
+            &self.registry,
+            &self.registry.snapshots(),
+            source.session_id.as_deref(),
+        );
+        transcript_path(
+            &source.agent,
+            &source.worktree,
+            &source.agent_session_id,
+            agent_id,
+            &extra_env,
+        )
+    }
+
+    /// Whether `owner` is gone: its session removed from the registry, or its
+    /// run no longer listed.
+    fn owner_gone(&self, owner: &Owner) -> bool {
+        match owner {
+            Owner::Session(session_id) => self.registry.get(session_id).is_none(),
+            Owner::Run(run_id) => self
+                .runs
+                .as_ref()
+                .is_none_or(|runs| !runs.is_listed(run_id)),
+        }
     }
 
     /// A fresh entry for `key`, tailing `path` from its start.
     fn start(&self, key: &Key, path: PathBuf, plugin: &'static dyn AgentPlugin) -> Entry {
         let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-        debug!(session_id = %key.0, agent_id = %key.1, path = %path.display(), generation, "subagent tail: started");
+        debug!(owner = ?key.0, agent_id = %key.1, path = %path.display(), generation, "subagent tail: started");
         let weak: Weak<Mutex<Map>> = Arc::downgrade(&self.tails);
         let event_key = key.clone();
         let tail = transcript_tail::spawn(
@@ -226,19 +304,19 @@ impl SubagentTails {
         }
     }
 
-    /// End and drop every tail whose session the registry no longer holds,
-    /// after removals were lost. The registry is read outside the tails lock.
+    /// End and drop every tail whose owner is gone, after removals were
+    /// lost. The registry and the run list are read outside the tails lock.
     fn end_missing(&self) {
-        let sessions: HashSet<String> = lock(&self.tails)
+        let owners: HashSet<Owner> = lock(&self.tails)
             .keys()
-            .map(|(session_id, _)| session_id.clone())
+            .map(|(owner, _)| owner.clone())
             .collect();
-        let gone: HashSet<String> = sessions
+        let gone: HashSet<Owner> = owners
             .into_iter()
-            .filter(|session_id| self.registry.get(session_id).is_none())
+            .filter(|owner| self.owner_gone(owner))
             .collect();
         if !gone.is_empty() {
-            end_where(&self.tails, |(session_id, _)| gone.contains(session_id));
+            end_where(&self.tails, |(owner, _)| gone.contains(owner));
         }
     }
 
@@ -284,11 +362,33 @@ impl SubagentTails {
     }
 }
 
+/// The transcript `agent`'s plugin keeps in `folder` for `conversation_id`,
+/// with the env rows `extra_env` names.
+fn transcript_path(
+    agent: &AgentId,
+    folder: &Path,
+    conversation_id: &str,
+    agent_id: &str,
+    extra_env: &[(String, String)],
+) -> Option<(PathBuf, &'static dyn AgentPlugin)> {
+    let plugin = agent_registry::plugin(agent)?;
+    let rows = crate::conversations::lookup_rows(extra_env);
+    let path = plugin.subagent_transcript_path(folder, conversation_id, agent_id, &rows)?;
+    Some((path, plugin))
+}
+
 /// The wire source of subagent `key`.
 fn source_of(key: &Key) -> TranscriptSource {
-    TranscriptSource::Subagent {
-        session_id: key.0.clone(),
-        agent_id: key.1.clone(),
+    let (owner, agent_id) = key;
+    match owner {
+        Owner::Session(session_id) => TranscriptSource::Subagent {
+            session_id: session_id.clone(),
+            agent_id: agent_id.clone(),
+        },
+        Owner::Run(run_id) => TranscriptSource::RunSubagent {
+            run_id: run_id.clone(),
+            agent_id: agent_id.clone(),
+        },
     }
 }
 
@@ -297,7 +397,7 @@ fn sweep(map: &mut Map) {
     map.retain(|key, entry| {
         let keep = entry.log.has_followers();
         if !keep {
-            debug!(session_id = %key.0, agent_id = %key.1, path = %entry.path.display(), "subagent tail: stopped");
+            debug!(owner = ?key.0, agent_id = %key.1, path = %entry.path.display(), "subagent tail: stopped");
         }
         keep
     });
@@ -312,7 +412,7 @@ fn end_where(tails: &Mutex<Map>, ends: impl Fn(&Key) -> bool) {
             return true;
         }
         entry.log.end(&source_of(key));
-        debug!(session_id = %key.0, agent_id = %key.1, path = %entry.path.display(), "subagent tail: ended");
+        debug!(owner = ?key.0, agent_id = %key.1, path = %entry.path.display(), "subagent tail: ended");
         false
     });
 }
@@ -355,7 +455,9 @@ async fn follow_removals(tails: SubagentTails, mut receiver: broadcast::Receiver
     loop {
         match receiver.recv().await {
             Ok(SessionEvent::Removed(session_id)) => {
-                end_where(&tails.tails, |(held, _)| *held == session_id);
+                end_where(&tails.tails, |(owner, _)| {
+                    *owner == Owner::Session(session_id.clone())
+                });
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -365,6 +467,37 @@ async fn follow_removals(tails: SubagentTails, mut receiver: broadcast::Receiver
                 );
                 // Subscribe before reading: a removal after the sweep is seen.
                 receiver = tails.registry.subscribe();
+                tails.end_missing();
+            }
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+/// End the tails of each run the run list removes, until the run list closes;
+/// lost events end every tail whose run is no longer listed.
+async fn follow_run_removals(
+    tails: SubagentTails,
+    mut receiver: broadcast::Receiver<DispatchRunEvent>,
+) {
+    loop {
+        match receiver.recv().await {
+            Ok(DispatchRunEvent::Removed(run_id)) => {
+                end_where(&tails.tails, |(owner, _)| {
+                    *owner == Owner::Run(run_id.clone())
+                });
+            }
+            Ok(DispatchRunEvent::Updated(_)) => {}
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                warn!(
+                    skipped,
+                    "subagent tails: run events lagged; ending the tails of removed runs"
+                );
+                // Subscribe before reading: a removal after the sweep is seen.
+                let Some(runs) = tails.runs.as_ref() else {
+                    return;
+                };
+                receiver = runs.subscribe();
                 tails.end_missing();
             }
             Err(broadcast::error::RecvError::Closed) => return,

@@ -1,7 +1,8 @@
 //! Following a transcript read-only (`FollowTranscript`,
 //! `UnfollowTranscript`): each source goes to the service that tails it, a
-//! dispatch run's to the dispatch-run list and a subagent's to the subagent
-//! tails. A tailnet client may follow one too.
+//! dispatch run's own to the dispatch-run list and a subagent's, whether a
+//! session's or a run's, to the subagent tails. A tailnet client may follow
+//! one too.
 
 use protocol::{ClientMessage, DaemonMessage, TranscriptSource, error_codes};
 use tracing::warn;
@@ -9,6 +10,7 @@ use tracing::warn;
 use super::Hub;
 use super::connection::ConnCtx;
 use super::dispatch_runs::not_followed;
+use crate::subagents::tail::Owner;
 
 /// Handle the transcript messages `dispatch` routes here. A follow answers
 /// on the requester's queue before this returns; nothing is spawned.
@@ -43,13 +45,21 @@ fn follow(hub: &Hub, source: TranscriptSource, request_id: Option<String>, ctx: 
             agent_id,
         } => {
             hub.subagent_tails.follow(
-                &(session_id, agent_id),
+                &(Owner::Session(session_id), agent_id),
                 request_id,
                 ctx.connection,
                 ctx.out_tx,
             );
         }
-        TranscriptSource::Unknown | TranscriptSource::RunSubagent { .. } => {
+        TranscriptSource::RunSubagent { run_id, agent_id } => {
+            hub.subagent_tails.follow(
+                &(Owner::Run(run_id), agent_id),
+                request_id,
+                ctx.connection,
+                ctx.out_tx,
+            );
+        }
+        TranscriptSource::Unknown => {
             let _ = ctx.out_tx.send(error(
                 error_codes::UNSUPPORTED_MESSAGE,
                 "This daemon cannot follow that transcript source.".to_owned(),
@@ -72,8 +82,11 @@ fn unfollow(hub: &Hub, source: TranscriptSource, ctx: &ConnCtx<'_>) {
             agent_id,
         } => hub
             .subagent_tails
-            .unfollow(&(session_id, agent_id), ctx.connection),
-        TranscriptSource::Unknown | TranscriptSource::RunSubagent { .. } => {}
+            .unfollow(&(Owner::Session(session_id), agent_id), ctx.connection),
+        TranscriptSource::RunSubagent { run_id, agent_id } => hub
+            .subagent_tails
+            .unfollow(&(Owner::Run(run_id), agent_id), ctx.connection),
+        TranscriptSource::Unknown => {}
     }
 }
 
@@ -173,6 +186,31 @@ mod tests {
             }
             other => panic!("expected the run's backfill, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_run_subagent_follow_reaches_the_tails() {
+        let (mut hub, scratch) = test_hub("transcripts-run-subagent");
+        let runs = enable_dispatch_runs(&mut hub, scratch.path().join("live"));
+        let worktree = scratch.path().join("worktree").display().to_string();
+        runs.list_streaming_for_test("run-1", &worktree, Some("conv-1"), Some("run-conv-1"));
+        let source = TranscriptSource::RunSubagent {
+            run_id: "run-1".to_owned(),
+            agent_id: "a1b2".to_owned(),
+        };
+
+        match follow_reply(&hub, source.clone()).await {
+            DaemonMessage::Transcript {
+                source: got,
+                request_id,
+                ..
+            } => {
+                assert_eq!(got, source);
+                assert_eq!(request_id.as_deref(), Some("r1"));
+            }
+            other => panic!("expected the run subagent's backfill, got {other:?}"),
+        }
+        assert_eq!(hub.subagent_tails.tail_count(), 1);
     }
 
     #[tokio::test]
