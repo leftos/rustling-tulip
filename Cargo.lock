@@ -1827,7 +1827,6 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 name = "daemon"
 version = "0.14.0-alpha"
 dependencies = [
- "aes-gcm",
  "agent-api",
  "agent-claude",
  "agent-registry",
@@ -1841,7 +1840,6 @@ dependencies = [
  "directories",
  "futures",
  "gate-state",
- "hkdf 0.13.0",
  "interprocess",
  "jiff",
  "keyring-core",
@@ -1852,6 +1850,7 @@ dependencies = [
  "portable-pty",
  "proc-table",
  "protocol",
+ "push-crypto",
  "rand 0.8.6",
  "rcgen",
  "regex",
@@ -5555,6 +5554,18 @@ name = "pulp-wasm-simd-flag"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d8f70e07b9c3962945a74e59ca1c511bba65b6419468acc217c457d93f3c740"
+
+[[package]]
+name = "push-crypto"
+version = "0.14.0-alpha"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "base64 0.22.1",
+ "hkdf 0.13.0",
+ "p256",
+ "sha2 0.11.0",
+]
 
 [[package]]
 name = "pxfm"

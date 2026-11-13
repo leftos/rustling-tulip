@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/protocol",
+    "crates/push-crypto",
     "crates/tracer-protocol",
     "crates/tracer",
     "crates/daemon",
@@ -47,6 +48,7 @@ gate-state = { git = "https://github.com/leftos/gate", rev = "15659c9e38a8227068
 proc-table = { git = "https://github.com/leftos/gate", rev = "15659c9e38a82270688c3371af2c5b6d7c19a0b6" }
 
 protocol = { path = "crates/protocol" }
+push-crypto = { path = "crates/push-crypto" }
 tracer-protocol = { path = "crates/tracer-protocol" }
 daemon-client = { path = "crates/daemon-client" }
 tailnet = { path = "crates/tailnet" }

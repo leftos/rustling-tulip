@@ -15,6 +15,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use protocol::{RemoteState, SessionMode, SessionSnapshot, SessionStatus};
+use push_crypto::Subscriber;
 use reqwest::Url;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{Instant, sleep_until};
@@ -23,7 +24,6 @@ use super::send::{self, Outcome, PushPolicy};
 use super::state::PushState;
 use super::store::Subscription;
 use super::vapid::{JwtCache, VapidKey};
-use super::webpush::{self, Subscriber};
 use crate::devices::DeviceStore;
 use crate::presence::Presence;
 use crate::session::{SessionEvent, SessionRegistry};
@@ -593,7 +593,7 @@ impl Trigger {
                 tracing::debug!(device_id = %target.device_id, push_service = %target.audience, "push: the push service is backed off; skipped");
                 continue;
             }
-            match webpush::encrypt(&target.subscriber, plaintext) {
+            match push_crypto::encrypt(&target.subscriber, plaintext) {
                 Ok(body) => prepared.push((target, body)),
                 Err(err) => {
                     tracing::warn!(device_id = %target.device_id, err = format!("{err:#}"), "push: the payload did not encrypt");
@@ -1032,6 +1032,7 @@ mod tests {
     use p256::elliptic_curve::Generate;
     use p256::elliptic_curve::sec1::ToSec1Point;
     use protocol::{RemoteState, SessionSnapshot, SessionStatus};
+    use push_crypto::Subscriber;
     use reqwest::Url;
     use tokio::sync::broadcast::error::RecvError;
     use tokio::time::Instant;
@@ -1051,7 +1052,6 @@ mod tests {
         Fake, Server, TESTS, fake_push_service, fake_push_service_by_path, fake_push_service_gated,
         fake_push_service_hooked, fake_push_service_with,
     };
-    use crate::push::webpush::{self, Subscriber};
     use crate::server::test_support::idle_record;
     use crate::session::{SessionEvent, SessionRegistry};
     use crate::sync::lock;
@@ -1863,7 +1863,7 @@ mod tests {
                 .expect("65 octets"),
             auth: [7; 16],
         };
-        webpush::encrypt(&subscriber, body.as_bytes()).expect("the payload fits one record");
+        push_crypto::encrypt(&subscriber, body.as_bytes()).expect("the payload fits one record");
     }
 
     #[tokio::test]

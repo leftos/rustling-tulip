@@ -25,7 +25,7 @@ iPhone notification service extension: decrypts the body, sets the title, body, 
 
 The relay is, to the daemon, one more Web Push service: the daemon posts an RFC 8291 `aes128gcm` body with an RFC 8292 VAPID `Authorization` header and the `TTL`, `Urgency` and `Topic` headers, and the relay answers with RFC 8030's statuses. The endpoint is `https://{relay}/v1/apns/{environment}/{token}` or `https://{relay}/v1/fcm/{token}`, which the daemon builds from the device's registration; the phone never sends a URL.
 
-Reason: the daemon's sender (`push/send.rs` `send`, its `Outcome` map, the `JwtCache`, `webpush::encrypt`) and the trigger's round (`push/trigger.rs` `Target`, `send_all`, the per-audience back-off and the five-failures rule) already do exactly this and are tested against a fake push service. A relay target differs from a Web Push target only in its URL, its JWT subject and the plaintext it encrypts, so `Target` and `send_all` stay one generic path rather than gaining a second sender.
+Reason: the daemon's sender (`push/send.rs` `send`, its `Outcome` map, the `JwtCache`, `push_crypto::encrypt`) and the trigger's round (`push/trigger.rs` `Target`, `send_all`, the per-audience back-off and the five-failures rule) already do exactly this and are tested against a fake push service. A relay target differs from a Web Push target only in its URL, its JWT subject and the plaintext it encrypts, so `Target` and `send_all` stay one generic path rather than gaining a second sender.
 
 ### What the relay sees: ciphertext and a fixed fallback alert
 
@@ -151,7 +151,7 @@ These are the native app's steps, named here so the relay's steps can wait on th
 
 Each step is one brief. Daemon steps that touch `crates/protocol/src/lib.rs` run one at a time.
 
-- [ ] **PR.1 Share the RFC 8291 code as a `push-crypto` crate with decrypt.** Move `encrypt` and `Subscriber` from `crates/daemon/src/push/webpush.rs` into a new workspace crate `crates/push-crypto` (no daemon, tokio or GPUI dependency, builds for iOS targets), add the `decrypt` the tests already carry as public API, and have the daemon call it.
+- [x] **PR.1 Share the RFC 8291 code as a `push-crypto` crate with decrypt.** Move `encrypt` and `Subscriber` from `crates/daemon/src/push/webpush.rs` into a new workspace crate `crates/push-crypto` (no daemon, tokio or GPUI dependency, builds for iOS targets), add the `decrypt` the tests already carry as public API, and have the daemon call it.
   - Files: `Cargo.toml`, `crates/push-crypto/Cargo.toml`, `crates/push-crypto/src/lib.rs`, `crates/daemon/Cargo.toml`, `crates/daemon/src/push/webpush.rs`, `crates/daemon/src/push/trigger.rs`.
   - Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/pr1-crypto.log --timeout 1800 --slot heavy -- cargo nextest run -p push-crypto --cargo-profile test-release`, then the same with `-p daemon --cargo-profile test-release push::` (the RFC 8291 Appendix A vector both ways, a round trip, and the daemon's push tests unchanged).
   - Waits on: nothing. Needs the owner: no.

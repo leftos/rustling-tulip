@@ -218,7 +218,7 @@ fn subscription(
     // never the endpoint or the secret itself.
     crate::push::send::check_endpoint(&endpoint.0, policy)
         .map_err(|err| Refusal::invalid(err.to_string()))?;
-    crate::push::webpush::Subscriber::from_b64url(p256dh, &auth.0)
+    push_crypto::Subscriber::from_b64url(p256dh, &auth.0)
         .map_err(|err| Refusal::invalid(err.to_string()))?;
     Ok(Subscription {
         kind: "web_push".to_owned(),

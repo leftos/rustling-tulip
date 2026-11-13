@@ -16,7 +16,6 @@ pub(crate) mod store;
 pub(crate) mod test_fake;
 pub(crate) mod trigger;
 pub(crate) mod vapid;
-pub(crate) mod webpush;
 
 /// Create the push folder `dir` if it is missing. On Unix it is owner-only,
 /// so the VAPID private key and the device subscriptions stay private to the
