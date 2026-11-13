@@ -63,6 +63,7 @@ The pid fields use `run.json`'s names and units, so the daemon's guard is the sa
 - `tier`, `resumed_from` (a conversation id), `auto_resume`: optional, shown on hover and in the view's header.
 - `session_id`: the dispatching session's `CLAUDE_CODE_SESSION_ID` (the same value as `run.json`'s `sessionId`), nullable for a run started from a plain shell. It links the run to the RT session that launched it (section 7) and gives RT-499's Dashboard nesting a direct link.
 - `agent`: optional agent id naming the stream's format; absent means `agent_registry::default_agent()`. The tool omits it.
+- The file records no Claude home. A run's own subagents are read from `<claude home>/projects/<encoded worktree>/<agent_session_id>/subagents/`, so the daemon infers the home from the dispatching session's env rows (the stored `extra_env` of the listed session whose conversation is the run's `session_id`, since the tool inherits its caller's environment), else the daemon's own home (`docs/session-runtime.md` "A dispatch run's own subagents").
 - `worktree`: the `--root` the run works in. `run_dir`: the run's output folder. `stream`: the stream file the daemon tails.
 - `child_pid`, `child_start`: the `claude` child; Stop kills this tree. `runner_pid`, `runner_start`: the Python dispatch process, shown on hover, used by nobody to kill.
 - `started_at`: UTC, written right after `Popen`; the guard's fallback when `child_start` is null (section 6).
@@ -179,7 +180,9 @@ Tool-side sites: the tool's `executor.py` (register, unregister, marker check) a
 
 ### 11. Pane follow: a run's view in a daemon tab
 
-`GridNode::Pane` gains `follow: Option<PaneFollow>` (`#[serde(default, skip_serializing_if = "Option::is_none")]`). `PaneFollow` is an internally tagged enum with `DispatchRun { run_id }` and `#[serde(other)] Unknown`. RT-30 (read-only subagent streams, `docs/plans/subagent-streams.md`) adds its subagent variant to the same enum rather than a second pane field. A follow names what a pane shows instead of a session, so no fake session id ever reaches a session path.
+`GridNode::Pane` gains `follow: Option<PaneFollow>` (`#[serde(default, skip_serializing_if = "Option::is_none")]`). `PaneFollow` is an internally tagged enum with `DispatchRun { run_id }` and `#[serde(other)] Unknown`.
+
+Read-only subagent streams add their `Subagent` and `RunSubagent` variants to the same enum rather than a second pane field (`docs/wire-protocol.md`, `docs/session-runtime.md` "Subagent tails"). A follow names what a pane shows instead of a session, so no fake session id ever reaches a session path.
 
 Rules:
 

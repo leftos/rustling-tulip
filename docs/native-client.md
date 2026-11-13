@@ -387,13 +387,15 @@ A click on any line of a tool call expands or collapses its output (the expanded
 
 The snapshot's recent actions (the last 200 the daemon keeps) show until the host answers the follow, on a host that refuses it with anything but `not_found` (an older host's `unsupported_message`), and on a host that does not list `dispatch_runs`; a `not_found` refusal keeps the transcript held. The run folder the sidebar menu copies holds the full stream. A follow kind this client does not know draws a muted note, "This pane needs a newer app.".
 
-A subagent follow draws the same transcript column under its own header (`subagent_view.rs`, `RootView::subagent_body`): the label (description, else agent type, else "Subagent"), `SA · {agent type} · {model}` with the missing parts left out (just `SA` when both are), and the state word `running`, `queued`, `finished`, `failed` or `unknown`, followed by ` · {end status}` when one is set. The pane title stays "Subagent", and it has no input box and no stats line.
+A subagent follow, of a session's subagent (`PaneFollow::Subagent`) or of a dispatch run's own (`PaneFollow::RunSubagent`), draws the same transcript column under its own header (`subagent_view.rs`, `RootView::subagent_body`): the label (description, else agent type, else "Subagent"), `SA · {agent type} · {model}` with the missing parts left out (just `SA` when both are), and the state word `running`, `queued`, `finished`, `failed` or `unknown`, followed by ` · {end status}` when one is set.
 
-Two notes show under that header: "Its session has ended" after a `TranscriptAppend` with `ended: true`, and "This subagent is no longer available" for a refused follow with nothing held.
+The pane title stays "Subagent", and it has no input box and no stats line.
 
-While a pane follows a subagent the client keeps its last `SubagentSnapshot`, refreshed from each session message and kept when the subagent leaves the list or its session is removed, so the header outlives the row. A Resume that moves the pane's follow to the new session unfollows the old key and follows the new one with no ended note.
+Two notes show under that header: "Its session has ended" after a `TranscriptAppend` with `ended: true` (for a run's subagent "Its run has ended"), and "This subagent is no longer available" for a refused follow with nothing held.
 
-The client sends `FollowTranscript` and `UnfollowTranscript` with `TranscriptSource::Subagent` to the pane's host with no feature gate, only while that host connection is open, and follows again after `Welcome`.
+While a pane follows a subagent the client keeps its last `SubagentSnapshot`, refreshed from each session message (a run's subagent from each run message) and kept when the subagent leaves the list or its session or run is removed, so the header outlives the row. A finished subagent's pane shows its state and keeps its transcript. A Resume that moves the pane's follow to the new session unfollows the old key and follows the new one with no ended note.
+
+The client derives a `TranscriptSource` from any pane follow (`DispatchRun`, `Subagent`, `RunSubagent`; `TranscriptKey` in `transcript_view.rs`), sends `FollowTranscript` to the pane's host when such a pane appears and `UnfollowTranscript` when it closes or rebinds, with no feature gate, only while that host connection is open, and follows again after `Welcome`, replacing its model with the reply.
 
 Either takes focus on a click.
 
@@ -467,7 +469,7 @@ The client sends no `SetPaneRatio` for a divider press that stays within 3 logic
 
 ## Drag model
 
-`apps/native/src/drag.rs` is the plain-Rust half of every drag. `DragPayload` is a `Pane`, a `Tab`, a `Container`, a session `Leaf`, a dispatch run's `Run` or a subagent's `Subagent`.
+`apps/native/src/drag.rs` is the plain-Rust half of every drag. `DragPayload` is a `Pane`, a `Tab`, a `Container`, a session `Leaf`, a dispatch run's `Run`, a session's subagent's `Subagent` or a run's subagent's `RunSubagent`.
 
 `drop_edge` maps the pointer's fraction of a pane to a `PaneDropEdge`: the outer band (`OUTER_BAND`, 0.12) on a side that touches the grid boundary (`tabs::outer_edges`, within 0.5 px), the nearer outer edge at a corner; the centre box (`CENTRE_LOW` 0.35 to `CENTRE_HIGH` 0.65) is `Replace`; otherwise the half on the nearer axis.
 
@@ -815,19 +817,31 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
   A run with no matching session sits after the container's sessions, newest first; a run in an unregistered folder gets a `Dir` container of its own.
   A session row with nested rows ends its label line with a 13 px chevron (down when open, right when folded; hover "Hide its dispatch runs", "Hide its subagents" or "Hide its subagents and dispatch runs" by what is nested, "Show its …" while folded, `subagents::fold_tip`; driver id `sidebar-session-fold-{session id}`); a click folds or unfolds and does not select the session, mouse only, and nested rows start open.
   The fold is saved in `native-ui.json`'s `collapsed_containers` as `session:{id}` (`{host}::session:{id}` for a remote host) and removed when unfolded; keys of sessions a connected host no longer lists are pruned when the tab list changes, a disconnected host's keys are kept.
-  The tabs view nests a linked run under its host session in each tab that shows the host, and lists it nowhere (not in Unbound, not as a followed-run leaf) when no tab shows the host. Every other run is listed in every tab with a pane following it (by the pane's host), and the host's remaining runs go in Unbound, a remote one with its host chip.
+  The tabs view nests a host's subagents, and a linked run with its own subagents, under its host session in each tab that shows the host; a subagent is never in Unbound, never a followed leaf of its own, and in no tab while none shows its host, even when a pane follows it.
+
+  It nests a linked run under its host session in each tab that shows the host, and lists it nowhere (not in Unbound, not as a followed-run leaf) when no tab shows the host. Every other run is listed in every tab with a pane following it (by the pane's host), and the host's remaining runs go in Unbound, a remote one with its host chip.
 
   A run leaf draws the `DS` tag and no tab pill or session chips, and dims with its own host. Its hover (`dispatch_runs::hover_text`) starts with the run's full title, a blank one adding no line, then "Dispatch run", "Backend: …", "Tier: …" when it has one, "Started: …" and "Worktree: …". A click (`RootView::open_dispatch_run`) focuses the pane already following the run, else asks This PC's daemon for a new tab whose pane follows it (`CreateTab` with a `DispatchRun` follow naming the run's host).
 
-  A subagent's leaf (`LeafKind::Subagent`) nests under its host session like a run and draws the `SA` tag the way a run draws `DS` (tooltip "Subagent"), no tab pill and no session chips.
+  A subagent's leaf (`LeafKind::Subagent`) nests under its host session like a run and draws the `SA` tag the way a run draws `DS` (tooltip "Subagent"), no tab pill and no session chips. Under one host the subagents come first, in tree order, then the host's runs, oldest first; `Leaf.depth` is the subagent's depth (1 to 3, a deeper one drawing at 3), each level indenting the whole card 14 px.
+
+  `Leaf.nested` counts both kinds with `Leaf.nested_subagents` counting the subagents for the chevron's wording.
+
+  Its status reads `Working` while it runs or is queued, `Idle` once finished (so the label dims like a seen idle session) and `Stopped` when it failed or is unknown (`subagents::leaf_status`). A subagent never makes its container active, adds to a count, raises attention, a Needs-you entry or a notification, or shows a badge on a folded host; it has no fold of its own, shows only when its host's row shows and is not folded, and follows the host's chevron.
+
+  A dispatch run's own subagents are `LeafKind::Subagent` leaves with `Leaf.run_id` set (`subagents::run_subagent_leaf`), spliced right after their run's leaf at the run's depth plus the subagent's depth, clamped to 3. Under a host session `host_session` stays the host's id, so the host's chevron folds them with the run and `nested` and `nested_subagents` count them.
+
+  A run with no host session still lists them under its row at depth 1 and up, shown whenever the run's row shows and with no fold of their own; an unbound host's are in no container in the Tabs view, as its runs are.
 
   Its label and subline come from `subagents::label` and `subagents::subline` (the agent type and model joined with " · "), and its hover (`subagents::hover_text`) lists the full description first when it has a non-blank one, then "Subagent", "Type: …", "Model: …", "Effort: …", "Started: YYYY-MM-DD HH:MM", then "Finished" or "Failed" when it has ended, leaving out each line the subagent lacks.
 
-  A click (`RootView::open_subagent`) focuses the pane already following the subagent, a popped-out tab included (`tabs::find_tab_following_subagent`), else asks This PC's daemon for a new tab whose pane follows it (`CreateTab` with a `PaneFollow::Subagent`), which draws the subagent pane described under the dispatch-run follow. A right-click on a subagent row opens no menu.
+  A click (`RootView::open_subagent`) focuses the pane already following the subagent, a popped-out tab included (`tabs::find_tab_following_subagent`), else asks This PC's daemon for a new tab whose pane follows it (`CreateTab` with a `PaneFollow::Subagent`, the pane's host the session's host), which draws the subagent pane described under the dispatch-run follow.
+
+  A run's subagent opens the same way through `RootView::open_run_subagent` and `tabs::find_tab_following_run_subagent` with a `PaneFollow::RunSubagent`. A right-click on a subagent row opens no menu: Open is the only action, and read-only rules out Stop.
 
   A run leaf drags as `DragPayload::Run` (not while its host is dimmed); `drag::run_drop`, the twin of `unbound_drop`, makes the same split-or-replace choice: a half edge of a pane that shows a session or follows a run splits it with a new pane following the run (`SplitPane` with the follow), and the centre, or any edge of an empty pane, makes that pane follow the run (`ReplacePaneSession` with the follow). A tab pill refuses a run, and a run is never in a reorder.
 
-  A subagent leaf drags as `DragPayload::Subagent` and `drag::subagent_drop` drops it the same way, both through one shared `follow_drop`: a half edge (or the outer edge on that side) of a pane that shows something splits it with a new pane following the subagent, and the centre, or any edge of an empty pane, makes that pane follow it in place.
+  A subagent leaf drags as `DragPayload::Subagent` (a run's as `DragPayload::RunSubagent`) and `drag::subagent_drop` drops it the same way, both through one shared `follow_drop`: a half edge (or the outer edge on that side) of a pane that shows something splits it with a new pane following the subagent, and the centre, or any edge of an empty pane, makes that pane follow it in place.
 
   The overlay shows where it lands and the dragged row fades; a tab pill shows its no-drop state and sends nothing, and nothing reorders. A remote subagent's drop over an offline host is refused, and its overlay clears if the host goes offline mid-drag.
 

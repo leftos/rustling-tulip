@@ -198,4 +198,6 @@ Once nothing open links a design file, its durable decisions are promoted into `
 
 Don't go looking for these — they're explicitly out of scope until their plan item comes up:
 
-- **Sub-agent / Task-tool interception**, **attach from outside the tailnet** by internet exposure or a relay, **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine over the network, and clients over OpenSSH are being built (`docs/plans/ssh-remote.md`; `docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`). Viewing a subagent's transcript read-only is planned (project "Agents and subagents"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.
+- **Sub-agent / Task-tool interception**, **attach from outside the tailnet** by internet exposure or a relay, **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine over the network, and clients over OpenSSH are being built (`docs/plans/ssh-remote.md`; `docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`).
+
+  A subagent's transcript is viewed read-only (`docs/session-runtime.md` "Subagent list"), never messaged or stopped. The mobile app is planned (`docs/plans/mobile-app.md`) but not started.

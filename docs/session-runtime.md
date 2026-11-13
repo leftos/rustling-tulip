@@ -152,17 +152,66 @@ Token and cost figures exist only for headless runs, where they come from the CL
 
 ## Subagent list
 
-The subagent list service (`crates/daemon/src/subagents/mod.rs`, `SubagentList`, started in `start_hub_tasks` beside the Dashboard's ticker) keeps each session record's `subagents`, which `SessionSnapshot.subagents` carries to clients.
+The subagent list service (`crates/daemon/src/subagents/mod.rs`, `SubagentList`, started in `start_hub_tasks` beside the Dashboard's ticker) keeps each session record's `subagents`, which `SessionSnapshot.subagents` carries to clients, and each listed dispatch run's, which `DispatchRunSnapshot.subagents` carries.
 
-While a client is connected it reads every live session's subagent tree through the agent plugin's activity reader every 2 s; with no client it parks, and a returning client gets one catch-up pass. A session is live when it runs an agent, is not parked or abandoned, has not stopped or failed, and its agent has not ended inside its shell. A session that stops being live gets an empty list once.
+Discovery stays in the agent plugin: the daemon reads `ActivitySnapshot.subagents` through `agent_registry::plugin(&agent)?.activity_reader(&source)` and names no file, field or agent. Files are the only source; the `SubagentStart` and `SubagentStop` hooks are not used, so sessions started without hooks are covered.
 
-A first-layer subagent is listed with its subtree while it or a descendant runs. A finished one stays listed while it ended after both the session's newest typed prompt and its agent process's start, the newest five at most; when no typed prompt is known (it lies before the reader's first-read tail) only the process start counts.
+One task runs for the daemon's life. While a client is connected it makes a pass every `TICK` (2 s); with no client it parks and reads nothing, and a returning client gets one catch-up pass (the `git_watch` and `transcript_tail` pattern). Each pass keeps one activity reader per owner, a session or a run, and reads them on the blocking pool.
 
-The list is written through `SessionRegistry::update` only when it changed, and a reading for a session that stopped or changed conversation while it was read is dropped. In the Claude plugin, a subagent sidecar's `finished: true` counts only when the sidecar was written at least as late as the transcript's last write (an unknown time still counts), so a resumed subagent reads as running again.
+A reader is keyed by conversation id, folder and process start, and a change of any makes a fresh one. The readers are the service's own, not the Dashboard's: the Dashboard reads only while watched, and the list must read whenever a client is connected.
 
-A client follows a subagent's transcript with `FollowTranscript` (`TranscriptSource::Subagent`; `SubagentTails` in `crates/daemon/src/subagents/tail.rs`, a `Hub` field). The first follower of a (session, agent) starts one tail that reads the agent plugin's transcript file from its start into a `TranscriptLog`; the path comes from the host session's record and the client's agent id alone, so the subagent need not be in the list.
+A session is live when it runs an agent with a conversation id and a folder, is not parked or abandoned, has not stopped or failed, and its agent has not ended inside its shell. A session that stops being live gets an empty list once. The record's `SessionRecord.subagents` is runtime-only (never in the sidecar or history); a daemon restart starts it empty and the first pass refills it.
 
-The tail stops when the last follower unfollows or its connection closes, or when the session is removed, which ends each follower with `TranscriptAppend { ended: true }`; with no client connected it parks. The wire shape is in [wire-protocol.md](./wire-protocol.md).
+A first-layer subagent is listed with its whole subtree while it or a descendant runs. A finished or failed one stays listed while it ended after both the session's newest typed prompt and its agent process's start, the newest five finished first-layer subagents at most. The next typed prompt, a restart of the agent, or a sixth finish removes it. When no typed prompt is known (it lies before the reader's first-read tail) only the process start and the cap count.
+
+Not "gone when it finishes", because a short subagent would vanish before it could be clicked. Not "until the host's next turn", the Dashboard's rule, because a background subagent's finish wakes the main agent at once, so its row would vanish the moment it finished. The typed prompt is where the user has moved on; the cap keeps a loop that never sees one from growing the list without end.
+
+The typed-prompt time comes from the plugin: `ActivitySnapshot.last_typed_prompt_at` is the newest main-thread `user` record the plugin's `line_facts` calls a prompt whose `origin.kind` is not `task-notification`. The daemon compares times only.
+
+In the Claude plugin, a subagent sidecar's `finished: true` counts only when the sidecar was written at least as late as the transcript's last write (an unknown time still counts), so a resumed subagent reads as running again, and a sidecar without the field keeps the transcript rules.
+
+The list is in tree order (each first-layer subagent, oldest first, then its subtree) and carries only fields that change when a subagent starts, finishes or first replies, never its open call or last text, since each change costs a `SessionUpdated`. It is written through `SessionRegistry::update` only when it changed, and a reading for a session that stopped or changed conversation while it was read is dropped; a pass whose lists match the records sends nothing.
+
+### A dispatch run's own subagents
+
+A dispatch run that starts subagents has them in its own conversation: `<claude home>/projects/<encoded worktree>/<agent_session_id>/subagents/`, where the worktree is the run's and `agent_session_id` is `DispatchRunSnapshot.agent_session_id`.
+
+The live-run file records no Claude home, so the env rows that find it are the stored `extra_env` of the first listed session whose conversation is the run's `session_id` (the dispatch tool inherits its caller's environment), else none, the daemon's own home (`subagents::host_env`).
+
+The same pass reads each listed run that has named its `agent_session_id` and has not ended, with a reader per run listing (a run listed again, as a resume is, gets a fresh one) and the same listing rule, the run's `started_at` standing for the process start.
+
+A run with no `agent_session_id` yet, or `Ended`, reads nothing and has its list emptied once. `DispatchRuns::set_subagents(run_id, generation, list)` compares and stores under the runs lock and sends `DispatchRunUpdated` only on a change; a stale generation is dropped, and no file is read under the runs lock.
+
+## Subagent tails
+
+A client follows a subagent's transcript with `FollowTranscript` (`TranscriptSource::Subagent` for a session's, `RunSubagent` for a run's; the wire shape is in [wire-protocol.md](./wire-protocol.md)). `server/transcripts.rs` takes both follow messages and routes by source: a dispatch run's own to `DispatchRuns`, a subagent's to `SubagentTails` (`crates/daemon/src/subagents/tail.rs`, a `Hub` field), an unknown source to `Error` `unsupported_message`.
+
+`SubagentTails` keys one tail by an owner (`Owner::Session` or `Owner::Run`) plus the agent id. Each holds a `TranscriptLog` (shared with the dispatch-run follow), the `TailHandle` of a `transcript_tail::spawn` from byte 0 and the plugin; `Line` events fold through `TranscriptLog::fold` under the tails lock and `Restarted` calls `restarted`.
+
+The path comes from the plugin's `subagent_transcript_path(folder, conversation_id, agent_id, rows)`, defaulted to `None`, which the Claude plugin builds from `transcripts::transcript_path` and `subagents_dir`, refusing ids that are not plain.
+
+Only the agent id comes from the client: a session follow takes the folder, conversation and env rows from the session's record, a run follow from the run entry (worktree, `agent_session_id`, and the host's rows above), so a client never hands the daemon a path, and the subagent need not be in the list. A follow whose owner is not held, whose agent has no transcript path, or whose agent id is refused answers `Error` `not_found` with the `request_id`. A tailnet client may follow: it is read-only.
+
+The tail lives exactly while followed. The first follow starts it; the last unfollow, the last follower's connection closing (a guard dropped with the connection) or the owner's removal stops it and drops its log, and a later follow replays the file from byte 0. With no client connected a tail parks. Removing a session, or a run from the run list, first sends each follower `TranscriptAppend { ended: true }`; a daemon shutdown ends none.
+
+`ended` means the owner is gone, never that the subagent finished: a resume appends to the same file, and a finished subagent's state shows in the pane's header from its snapshot, not from the transcript messages. The follow always reads from byte 0; the log keeps the newest `CHAT_REPLY_CAP` entries and counts the rest in `hidden`, and a tool result whose call was dropped is dropped.
+
+At daemon start, after sessions are restored, `tabs::prune_subagent_follows_not_in` clears a local pane's `Subagent` follow whose session did not survive, and `tabs::prune_follows_not_in` clears a `DispatchRun` or `RunSubagent` follow whose run is not live, as for a dead run; a pane of another host is not this daemon's to judge, and a follow of a session that survived is kept.
+
+A Resume of the host (`tabs::rebind_session`: a resume, rerun or recovery) moves a pane following one of the old session's subagents to the new session id, and `tabs::rehost_panes` moves it with its session's panes; a `RunSubagent` follow stays where it is.
+
+### Rules the code keeps
+
+Actors: the agent process (appends the transcript and sidecar files), the list service's task (one pass per tick, readers on the blocking pool), one tail task per followed subagent, the connection tasks (follow, unfollow, the guard dropped on close), the session registry (status, conversation id, process start, removal), daemon startup (session restore, then the tab prune) and the clients (fold updates, follow, re-follow after `Welcome`).
+
+- **A file growing.** Every complete line reaches a follower exactly once, in file order: the backfill is built and the follower registered under the tails lock that `fold` takes, so a line is in the backfill or in a later append, never both and never neither. A partial line is never parsed.
+- **A new subagent.** It is listed on the first pass after its files exist and a launch joins it; a sidecar that does not parse yet keeps it out until it does. A tail followed before its file exists waits for it and sends an empty backfill first.
+- **An owner ending.** A session whose agent process stops gets an empty list on the next pass; its removal, or a run's, sends `ended: true` to every follower and stops their tails. Panes keep their content and close only when the user closes them.
+- **A daemon restart.** Nothing is persisted: lists start empty and the first pass after a client connects rebuilds them; subagents last written before the agent process started read finished. Clients re-follow after `Welcome` and each tail replays from byte 0, and the prune runs after session restore, so a follow of a surviving session is kept.
+- **A conversation change.** A `/clear` or resume gives the record a new conversation id or process start, so the next pass uses a fresh reader and lists the new conversation's subagents; a tail already running keeps its resolved path until it is unfollowed.
+- **Lock order.** The record lock and the runs lock are never held while reading files, and the tails lock, a leaf, is never held while taking either (a follow reads the record or run entry, releases it, then takes the tails lock).
+- **No idle traffic.** With no client connected the service and every tail read nothing.
+- **Agent seam.** `SubagentSnapshot`, `SA`, `subagents` and `subagent_transcript_path` name no agent; every path, field and file name stays in `crates/agents/claude/`.
 
 ## Multi-repo workspace sessions
 

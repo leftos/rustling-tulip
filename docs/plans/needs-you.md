@@ -85,7 +85,7 @@ Orca's agents board (`docs/site/content/docs/model/agents-sessions.mdx` in `gith
 
 - A fourth column, Idle, hidden by default, for sessions quiet about 30 minutes. Here idle sessions stay out of the list and belong to the Dashboard.
 - Filters by project, workspace status and PR state.
-- Each card shows the last user or agent message, and a session's subagents appear as child rows (compare `subagent-streams.md`).
+- Each card shows the last user or agent message, and a session's subagents appear as child rows (compare [session-runtime.md](../session-runtime.md) "Subagent list").
 - A separate chronological Agents feed of completions, blocking questions and worktree creation, with unread badges (`activity.mdx`).
 
 ## Steps
