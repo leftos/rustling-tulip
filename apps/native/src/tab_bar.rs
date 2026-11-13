@@ -889,7 +889,11 @@ impl RootView {
             Some(DragPayload::Leaf { host, .. }) => {
                 self.is_remote_offline(host) || !drag::pill_takes_leaf(&self.tabs, tab_id)
             }
-            Some(DragPayload::Run { .. } | DragPayload::Subagent { .. }) => true,
+            Some(
+                DragPayload::Run { .. }
+                | DragPayload::Subagent { .. }
+                | DragPayload::RunSubagent { .. },
+            ) => true,
             _ => false,
         };
         pane_refused || leaf_refused
@@ -997,7 +1001,10 @@ impl RootView {
             // A pill takes no dispatch run or subagent: a run sits in a pane
             // of the shown tab, or opens a tab of its own, and a subagent is
             // opened from its leaf.
-            DragPayload::Container(_) | DragPayload::Run { .. } | DragPayload::Subagent { .. } => {}
+            DragPayload::Container(_)
+            | DragPayload::Run { .. }
+            | DragPayload::Subagent { .. }
+            | DragPayload::RunSubagent { .. } => {}
         }
     }
 

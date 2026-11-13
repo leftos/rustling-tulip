@@ -1674,9 +1674,16 @@ fn leaf_drag_row(
                 run_id: leaf.id.clone(),
                 host: leaf.host.clone(),
             }),
-            // The session it runs under is what the follow names, so a leaf
-            // without one, or one of a run's subagents, drags nothing.
-            LeafKind::Subagent if leaf.run_id.is_some() => None,
+            // A session subagent's follow names the session it runs under,
+            // so a leaf without one drags nothing, and a run's subagent
+            // drags the run's subagent by its run and agent id.
+            LeafKind::Subagent if leaf.run_id.is_some() => {
+                leaf.run_id.clone().map(|run_id| DragPayload::RunSubagent {
+                    run_id,
+                    agent_id: leaf.id.clone(),
+                    host: leaf.host.clone(),
+                })
+            }
             LeafKind::Subagent => {
                 leaf.host_session
                     .as_ref()
@@ -3064,13 +3071,13 @@ fn leaf_frame(
             cx.listener(move |this, _: &ClickEvent, window, cx| match kind {
                 LeafKind::Session => this.select_session_on(&host, &id, window, cx),
                 LeafKind::Dispatch => this.open_dispatch_run(&host, &id, window, cx),
-                // A subagent's id is its agent id; its host session names the
-                // session it runs under, which a run's subagent has none of,
-                // so that row does nothing.
+                // A subagent's id is its agent id: a run's subagent names
+                // its run beside it, and a session's the host session it
+                // runs under, either of which opens what follows it.
                 LeafKind::Subagent => {
-                    if run_id.is_none()
-                        && let Some(session_id) = &host_session
-                    {
+                    if let Some(run_id) = &run_id {
+                        this.open_run_subagent(&host, run_id, &id, window, cx);
+                    } else if let Some(session_id) = &host_session {
                         this.open_subagent(&host, session_id, &id, window, cx);
                     }
                 }

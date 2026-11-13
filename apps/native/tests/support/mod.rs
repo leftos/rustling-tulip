@@ -1584,6 +1584,20 @@ pub fn follow_subagent_pane(id: &str, session_id: &str, agent_id: &str) -> GridN
     }
 }
 
+/// A pane following the subagent `agent_id` of dispatch run `run_id`,
+/// showing no session.
+pub fn follow_run_subagent_pane(id: &str, run_id: &str, agent_id: &str) -> GridNode {
+    GridNode::Pane {
+        pane_id: id.to_owned(),
+        session_id: None,
+        host: None,
+        follow: Some(PaneFollow::RunSubagent {
+            run_id: run_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+        }),
+    }
+}
+
 pub fn split(direction: SplitDirection, first: GridNode, second: GridNode) -> GridNode {
     GridNode::Split {
         direction,

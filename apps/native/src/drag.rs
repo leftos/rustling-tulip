@@ -60,6 +60,13 @@ pub enum DragPayload {
         agent_id: String,
         host: HostKey,
     },
+    /// A dispatch run's subagent's sidebar leaf: its run, its agent id and
+    /// the host that lists it.
+    RunSubagent {
+        run_id: String,
+        agent_id: String,
+        host: HostKey,
+    },
 }
 
 /// Which half of a row or pill a pointer points at.
@@ -934,6 +941,36 @@ pub fn subagent_drop(
         host,
         PaneFollow::Subagent {
             session_id: session_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+        },
+        target,
+        request_id,
+    )
+}
+
+/// Where the subagent `agent_id` of the dispatch run `run_id`, listed by
+/// `host`, dropped at `target` goes: an empty pane or the centre makes that
+/// pane follow the subagent in place of what it showed, and a half (or the
+/// outer edge on that side) of a pane that shows something splits it with a
+/// new pane following the subagent. Every drop starts a follow of its own,
+/// so two panes may follow one subagent. Either request names the
+/// subagent's host and goes to This PC, the layout home; none while the tab
+/// is gone or holds no such pane. The caller refuses a drop from a host
+/// that is not connected.
+#[must_use]
+pub fn run_subagent_drop(
+    tabs: &[TabEntry],
+    host: &HostKey,
+    run_id: &str,
+    agent_id: &str,
+    target: &LeafTarget<'_>,
+    request_id: Option<String>,
+) -> Option<(PaneDropEdge, LeafDrop)> {
+    follow_drop(
+        tabs,
+        host,
+        PaneFollow::RunSubagent {
+            run_id: run_id.to_owned(),
             agent_id: agent_id.to_owned(),
         },
         target,
@@ -2407,6 +2444,72 @@ mod tests {
             assert!(
                 sidebar_reorder(&payload, &repos, &row, Side::After).is_none(),
                 "a subagent reorders nothing: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_subagent_drop_on_a_half_edge_splits_with_a_following_pane() {
+        let (edge, message) = landed(run_subagent_drop(
+            &run_tabs(),
+            &HostKey::Local,
+            "d1",
+            "r1a",
+            &onto("t1", "b", PaneDropEdge::Left),
+            Some("r".to_owned()),
+        ));
+        assert_eq!(edge, PaneDropEdge::Left);
+        assert_eq!(
+            message,
+            json!({
+                "type": "split_pane",
+                "tab_id": "t1",
+                "pane_id": "b",
+                "direction": "horizontal",
+                "place": "first",
+                "touch": true,
+                "new_session_id": null,
+                "request_id": "r",
+                "follow": {"kind": "run_subagent", "run_id": "d1", "agent_id": "r1a"},
+            })
+        );
+    }
+
+    #[test]
+    fn run_subagent_drop_on_a_bound_centre_replaces_with_the_follow() {
+        let (edge, message) = landed(run_subagent_drop(
+            &run_tabs(),
+            &HostKey::Local,
+            "d1",
+            "r1a",
+            &onto("t1", "a", PaneDropEdge::Replace),
+            Some("r".to_owned()),
+        ));
+        assert_eq!(edge, PaneDropEdge::Replace);
+        assert_eq!(
+            message,
+            json!({
+                "type": "replace_pane_session",
+                "tab_id": "t1",
+                "pane_id": "a",
+                "session_id": null,
+                "follow": {"kind": "run_subagent", "run_id": "d1", "agent_id": "r1a"},
+            })
+        );
+    }
+
+    #[test]
+    fn a_run_subagent_payload_reorders_nothing() {
+        let repos = repos_view();
+        let payload = DragPayload::RunSubagent {
+            run_id: "d1".to_owned(),
+            agent_id: "r1a".to_owned(),
+            host: HostKey::Local,
+        };
+        for row in [leaf_row("repo:r1", "a"), header("repo:r1")] {
+            assert!(
+                sidebar_reorder(&payload, &repos, &row, Side::After).is_none(),
+                "a run's subagent reorders nothing: {row:?}"
             );
         }
     }

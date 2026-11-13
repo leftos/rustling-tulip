@@ -20,8 +20,9 @@ use rustling_tulip_native::{
     RuntimeIcon, SidebarView, TabPill, fold_tip, resume_all_label,
 };
 use support::{
-    Fixture, Harness, PROTOCOL, REMOTE, TestDir, dispatch_run, follow_pane, follow_subagent_pane,
-    pane, repo, saved_remote, seed_ui, session, split, subagent, tab, workspace,
+    Fixture, Harness, PROTOCOL, REMOTE, TestDir, dispatch_run, follow_pane,
+    follow_run_subagent_pane, follow_subagent_pane, pane, repo, saved_remote, seed_ui, session,
+    split, subagent, tab, workspace,
 };
 
 /// The keys of the sidebar's containers, in the order it shows them.
@@ -2944,6 +2945,13 @@ fn s1_run() -> protocol::DispatchRunSnapshot {
         .build()
 }
 
+/// [`s1_run`] running the subagent `r1a`.
+fn s1_run_with_r1a() -> protocol::DispatchRunSnapshot {
+    let mut run = s1_run();
+    run.subagents = vec![serde_json::from_value(subagent("r1a")).expect("subagent fixture")];
+    run
+}
+
 #[gpui::test]
 fn subagents_draw_indented_under_their_host_with_the_sa_tag(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -3031,15 +3039,9 @@ fn clicking_a_subagent_leaf_opens_a_tab_following_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_run_subagent_row_opens_nothing_yet(cx: &mut TestAppContext) {
+fn clicking_a_run_subagent_leaf_opens_a_tab_following_it(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut run = dispatch_run("d1")
-        .worktree("C:\\r1.wt\\a")
-        .main_checkout("C:\\r1")
-        .session_id("c1")
-        .build();
-    run.subagents = vec![serde_json::from_value(subagent("r1a")).expect("subagent fixture")];
-    let mut h = nested_subagent_harness(cx, &dir, Vec::new(), vec![run]);
+    let mut h = nested_subagent_harness(cx, &dir, Vec::new(), vec![s1_run_with_r1a()]);
     h.answer_scrollback("s1", b"");
     h.sent();
     assert!(
@@ -3051,10 +3053,65 @@ fn a_run_subagent_row_opens_nothing_yet(cx: &mut TestAppContext) {
 
     let sent = h.sent();
     assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::CreateTab {
+                name: None,
+                initial_session_id: None,
+                host: None,
+                follow: Some(PaneFollow::RunSubagent { run_id, agent_id }),
+                request_id: Some(_),
+            }] if run_id == "d1" && agent_id == "r1a"
+        ),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn clicking_a_followed_run_subagent_leaf_focuses_its_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                follow_run_subagent_pane("p2", "d1", "r1a"),
+            ),
+        )],
+        ..Fixture::single(session("s1").conversation_id("c1").build())
+    };
+    fixture.repos = vec![repo("r1", "C:\\r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(DaemonMessage::DispatchRuns {
+        runs: vec![s1_run_with_r1a()],
+    });
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    assert!(
+        h.in_model("leaf-r1a"),
+        "precondition: the run's subagent draws under it"
+    );
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p1"),
+        "the session's pane starts focused"
+    );
+
+    h.click_on("leaf-r1a");
+
+    let sent = h.sent();
+    assert!(
         !sent
             .iter()
             .any(|msg| matches!(msg, ClientMessage::CreateTab { .. })),
-        "a run's subagent row opens no tab: {sent:?}"
+        "the click opens no tab: {sent:?}"
+    );
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p2"),
+        "the pane that follows the run's subagent takes the focus"
     );
 }
 

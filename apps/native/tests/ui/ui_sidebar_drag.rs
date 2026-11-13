@@ -5,8 +5,8 @@
 //! the local order holds until the daemon's broadcast, and Esc cancels. Any
 //! leaf drags onto a pane, where the pane drag's overlay shows where it
 //! lands, or onto a tab pill, which places it in that tab. A dispatch run's
-//! leaf and a subagent's drag onto a pane to start a follow of it, and a tab
-//! pill refuses them.
+//! leaf and a subagent's drag onto a pane to start a follow of it, and so
+//! does a run's subagent's, and a tab pill refuses them.
 
 use crate::support;
 
@@ -1045,6 +1045,142 @@ fn a_tab_pill_refuses_a_subagent(cx: &mut TestAppContext) {
     assert!(
         placements(&mut h).is_empty(),
         "a tab pill takes no subagent"
+    );
+}
+
+/// Repo `r1` at `C:\r1`, holding `s1` (conversation `c1`, which dispatched
+/// the run `d1`) and `s2` beside it.
+fn run_subagents_fixture() -> Fixture {
+    Fixture {
+        repos: vec![repo("r1", "C:\\r1")],
+        sessions: vec![
+            session("s1").in_repo("r1").conversation_id("c1").build(),
+            session("s2").in_repo("r1").build(),
+        ],
+        ..Fixture::default()
+    }
+}
+
+/// The daemon's run list: run `d1` in a worktree of `r1`, dispatched by
+/// `s1` and running the subagent `r1a`.
+fn run_subagents_msg() -> DaemonMessage {
+    let mut run = dispatch_run("d1")
+        .worktree("C:\\r1.wt\\a")
+        .main_checkout("C:\\r1")
+        .session_id("c1")
+        .build();
+    run.subagents = vec![serde_json::from_value(subagent("r1a")).expect("subagent fixture")];
+    DaemonMessage::DispatchRuns { runs: vec![run] }
+}
+
+/// A harness over [`run_subagents_fixture`] whose sidebar lists the run
+/// `d1` under its host `s1` with the subagent `r1a`, with tab `t1` laid out
+/// as `grid` and nothing sent left unread.
+fn run_subagent_beside<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    grid: &GridNode,
+) -> Harness<'a> {
+    let mut fixture = run_subagents_fixture();
+    fixture.tabs = vec![tab("t1", grid)];
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(run_subagents_msg());
+    h.sent();
+    h
+}
+
+#[gpui::test]
+fn dragging_a_run_subagent_to_a_half_edge_splits_with_its_follow(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let mut h = run_subagent_beside(cx, &dir, &grid);
+
+    let to = at(&mut h, "p2", 0.1, 0.5);
+    drop_leaf(&mut h, "r1a", to, ("p2", PaneDropEdge::Left));
+
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::SplitPane {
+                tab_id,
+                pane_id,
+                direction: SplitDirection::Horizontal,
+                place: SplitPlace::First,
+                touch: true,
+                new_session_id: None,
+                host: None,
+                request_id: Some(_),
+                follow: Some(PaneFollow::RunSubagent { run_id, agent_id }),
+            }] if tab_id == "t1" && pane_id == "p2" && run_id == "d1" && agent_id == "r1a"
+        ),
+        "the split makes a new pane follow the run's subagent: sent {sent:?}"
+    );
+    assert!(undo_messages(&mut h).is_empty(), "a follow records no undo");
+}
+
+#[gpui::test]
+fn dragging_a_run_subagent_to_a_bound_centre_follows_there(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let mut h = run_subagent_beside(cx, &dir, &grid);
+
+    let to = at(&mut h, "p2", 0.5, 0.5);
+    drop_leaf(&mut h, "r1a", to, ("p2", PaneDropEdge::Replace));
+
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::ReplacePaneSession {
+                tab_id,
+                pane_id,
+                session_id: None,
+                host: None,
+                follow: Some(PaneFollow::RunSubagent { run_id, agent_id }),
+            }] if tab_id == "t1" && pane_id == "p2" && run_id == "d1" && agent_id == "r1a"
+        ),
+        "a bound pane's centre takes the follow in place: sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_tab_pill_refuses_a_run_subagent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = run_subagents_fixture();
+    fixture.tabs = vec![
+        tab("t1", &pane("p1", Some("s1"))),
+        tab("t2", &pane("p2", None)),
+    ];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(run_subagents_msg());
+    h.sent();
+
+    let from = on_row(&mut h, "leaf-r1a", 0.5);
+    let to = on_pill(&mut h, "t2", 0.5);
+    h.start_drag(from);
+    assert!(h.dragging(), "the run's subagent leaf drags");
+    h.drag_to(to);
+    assert!(
+        h.root(|root, cx| root.pill_no_drop("t2", cx)),
+        "the pill shows its no-drop state for a run's subagent"
+    );
+    h.release(to);
+    assert!(!h.dragging(), "the release ends the drag");
+
+    assert!(
+        placements(&mut h).is_empty(),
+        "a tab pill takes no run's subagent"
     );
 }
 

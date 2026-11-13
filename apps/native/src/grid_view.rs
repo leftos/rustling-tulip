@@ -2489,6 +2489,7 @@ impl RootView {
                 | DragPayload::Leaf { .. }
                 | DragPayload::Run { .. }
                 | DragPayload::Subagent { .. }
+                | DragPayload::RunSubagent { .. }
         ) {
             return None;
         }
@@ -2500,15 +2501,15 @@ impl RootView {
         if self.is_pane_popped(&pane_id) {
             return None;
         }
+        let target = drag::LeafTarget {
+            tab_id: &tab.id,
+            pane_id: &pane_id,
+            edge,
+        };
         if let DragPayload::Leaf {
             session_id, host, ..
         } = payload
         {
-            let target = drag::LeafTarget {
-                tab_id: &tab.id,
-                pane_id: &pane_id,
-                edge,
-            };
             let session = SessionRef::new(host.clone(), session_id.clone());
             let source_online = !self.is_remote_offline(host);
             let (edge, drop) = drag::leaf_drop(
@@ -2521,40 +2522,39 @@ impl RootView {
             )?;
             return Some((pane_id, edge, drop));
         }
-        if let DragPayload::Run { run_id, host } = payload {
-            if self.is_remote_offline(host) {
-                return None;
-            }
-            let target = drag::LeafTarget {
-                tab_id: &tab.id,
-                pane_id: &pane_id,
-                edge,
-            };
-            let (edge, drop) = drag::run_drop(self.tabs.tabs(), host, run_id, &target, request_id)?;
-            return Some((pane_id, edge, drop));
-        }
-        if let DragPayload::Subagent {
-            session_id,
-            agent_id,
-            host,
-        } = payload
-        {
-            if self.is_remote_offline(host) {
-                return None;
-            }
-            let target = drag::LeafTarget {
-                tab_id: &tab.id,
-                pane_id: &pane_id,
-                edge,
-            };
-            let (edge, drop) = drag::subagent_drop(
-                self.tabs.tabs(),
+        let following = match payload {
+            DragPayload::Run { run_id, host } => Some((
                 host,
+                PaneFollow::DispatchRun {
+                    run_id: run_id.clone(),
+                },
+            )),
+            DragPayload::Subagent {
                 session_id,
                 agent_id,
-                &target,
-                request_id,
-            )?;
+                host,
+            } => Some((
+                host,
+                PaneFollow::Subagent {
+                    session_id: session_id.clone(),
+                    agent_id: agent_id.clone(),
+                },
+            )),
+            DragPayload::RunSubagent {
+                run_id,
+                agent_id,
+                host,
+            } => Some((
+                host,
+                PaneFollow::RunSubagent {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                },
+            )),
+            _ => None,
+        };
+        if let Some((host, follow)) = following {
+            let (edge, drop) = self.follow_drop_at(host, follow, &target, request_id)?;
             return Some((pane_id, edge, drop));
         }
         let drop = drag::pane_drop(
@@ -2566,6 +2566,35 @@ impl RootView {
             request_id,
         )?;
         Some((pane_id, edge, LeafDrop::Move(drop)))
+    }
+
+    /// The drop of the sidebar `follow`, listed by `host`, at `target`: a
+    /// split with a new pane following it, or the pane's content replaced by
+    /// it; none while `host` is offline.
+    fn follow_drop_at(
+        &self,
+        host: &HostKey,
+        follow: PaneFollow,
+        target: &drag::LeafTarget<'_>,
+        request_id: Option<String>,
+    ) -> Option<(PaneDropEdge, LeafDrop)> {
+        if self.is_remote_offline(host) {
+            return None;
+        }
+        let tabs = self.tabs.tabs();
+        match follow {
+            PaneFollow::DispatchRun { run_id } => {
+                drag::run_drop(tabs, host, &run_id, target, request_id)
+            }
+            PaneFollow::Subagent {
+                session_id,
+                agent_id,
+            } => drag::subagent_drop(tabs, host, &session_id, &agent_id, target, request_id),
+            PaneFollow::RunSubagent { run_id, agent_id } => {
+                drag::run_subagent_drop(tabs, host, &run_id, &agent_id, target, request_id)
+            }
+            PaneFollow::Unknown => None,
+        }
     }
 
     /// A left press on a header button, chip or Stop: it disarms what any
@@ -3061,6 +3090,7 @@ impl RootView {
                     DragPayload::Leaf { .. }
                         | DragPayload::Run { .. }
                         | DragPayload::Subagent { .. }
+                        | DragPayload::RunSubagent { .. }
                 )
             );
         self.pane_drop.clone().filter(|_| dragging)

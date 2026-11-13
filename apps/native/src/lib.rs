@@ -299,8 +299,8 @@ use crate::status_glyph::{GlyphSize, glyph_view};
 use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{
     BindTarget, HostedSession, PaneTarget, Placement, SessionRef, TabsModel, auto_grid_resends,
-    find_tab_containing_session, find_tab_following, find_tab_following_subagent, is_auto_grid,
-    tab_pills,
+    find_tab_containing_session, find_tab_following, find_tab_following_run_subagent,
+    find_tab_following_subagent, is_auto_grid, tab_pills,
 };
 use crate::target::HostKey;
 use crate::term::ShellCommand;
@@ -3938,6 +3938,25 @@ impl RootView {
         self.open_followed(host, found, follow, window, cx);
     }
 
+    /// A click on `host`'s subagent `agent_id` of dispatch run `run_id`:
+    /// focuses the pane that already follows it, else asks This PC's daemon
+    /// for a tab that does, as [`Self::open_dispatch_run`] does for a run.
+    pub(crate) fn open_run_subagent(
+        &mut self,
+        host: &HostKey,
+        run_id: &str,
+        agent_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found = find_tab_following_run_subagent(self.tabs.tabs(), host, run_id, agent_id);
+        let follow = PaneFollow::RunSubagent {
+            run_id: run_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+        };
+        self.open_followed(host, found, follow, window, cx);
+    }
+
     /// Focuses `found`, the tab and pane already following what `follow`
     /// names on `host`, popped-out tab included; without one, asks This
     /// PC's daemon, where the layout lives, for a tab whose pane follows it
@@ -4883,6 +4902,8 @@ impl RootView {
                     } | DragPayload::Run {
                         host: leaf_host, ..
                     } | DragPayload::Subagent {
+                        host: leaf_host, ..
+                    } | DragPayload::RunSubagent {
                         host: leaf_host, ..
                     }
                 ) if leaf_host == host

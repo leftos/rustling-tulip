@@ -696,6 +696,30 @@ pub fn find_tab_following_subagent(
     })
 }
 
+/// The first tab, and its pane, whose pane follows subagent `agent_id` of
+/// dispatch run `run_id` of `host`.
+pub fn find_tab_following_run_subagent(
+    tabs: &[TabEntry],
+    host: &HostKey,
+    run_id: &str,
+    agent_id: &str,
+) -> Option<(String, String)> {
+    tabs.iter().find_map(|tab| {
+        let grid = tab.grid()?;
+        collect_panes(grid)
+            .into_iter()
+            .find(|pane| {
+                pane.host == *host
+                    && matches!(
+                        pane.follow,
+                        Some(PaneFollow::RunSubagent { run_id: followed_run, agent_id: followed_agent })
+                            if followed_run == run_id && followed_agent == agent_id
+                    )
+            })
+            .map(|pane| (tab.id.clone(), pane.id.to_owned()))
+    })
+}
+
 /// Which tabs show a session, as its sidebar leaf's pill tells it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabPill {
@@ -4666,6 +4690,20 @@ pub(crate) mod tests {
         }
     }
 
+    /// A pane following the subagent `agent_id` of dispatch run `run_id` on
+    /// `host`, This PC when `None`.
+    fn run_subagent_pane(id: &str, run_id: &str, agent_id: &str, host: Option<&str>) -> GridNode {
+        GridNode::Pane {
+            pane_id: id.to_owned(),
+            session_id: None,
+            host: host.map(str::to_owned),
+            follow: Some(PaneFollow::RunSubagent {
+                run_id: run_id.to_owned(),
+                agent_id: agent_id.to_owned(),
+            }),
+        }
+    }
+
     #[test]
     fn find_tab_following_subagent_matches_both_ids_and_host() {
         let tabs = [
@@ -4709,6 +4747,50 @@ pub(crate) mod tests {
         ];
         assert_eq!(
             find_tab_following_subagent(&tabs, &HostKey::Local, "s1", "a1"),
+            None
+        );
+    }
+
+    #[test]
+    fn find_tab_following_run_subagent_matches_both_ids_and_host() {
+        let tabs = [
+            tab("t1", &pane("a", Some("s1"))),
+            tab("t2", &run_subagent_pane("b", "d1", "a1", None)),
+        ];
+        assert_eq!(
+            find_tab_following_run_subagent(&tabs, &HostKey::Local, "d1", "a1"),
+            Some(("t2".to_owned(), "b".to_owned()))
+        );
+        assert_eq!(
+            find_tab_following_run_subagent(&tabs, &HostKey::Local, "d2", "a1"),
+            None,
+            "the same agent id under another run is another subagent"
+        );
+    }
+
+    #[test]
+    fn find_tab_following_run_subagent_ignores_another_hosts_pane() {
+        let tabs = [tab("t1", &run_subagent_pane("b", "d1", "a1", Some("box")))];
+        assert_eq!(
+            find_tab_following_run_subagent(&tabs, &remote("box"), "d1", "a1"),
+            Some(("t1".to_owned(), "b".to_owned()))
+        );
+        assert_eq!(
+            find_tab_following_run_subagent(&tabs, &HostKey::Local, "d1", "a1"),
+            None,
+            "the same ids on This PC name another subagent"
+        );
+        assert_eq!(
+            find_tab_following_run_subagent(&tabs, &remote("lab"), "d1", "a1"),
+            None
+        );
+    }
+
+    #[test]
+    fn find_tab_following_run_subagent_ignores_a_session_subagent_with_the_same_agent_id() {
+        let tabs = [tab("t1", &subagent_pane("b", "d1", "a1", None))];
+        assert_eq!(
+            find_tab_following_run_subagent(&tabs, &HostKey::Local, "d1", "a1"),
             None
         );
     }
