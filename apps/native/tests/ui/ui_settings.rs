@@ -6423,6 +6423,30 @@ fn default_shell_field_follows_saved_command_after_echo_and_refusal(cx: &mut Tes
     );
 }
 
+/// A selector drawn only inside the Settings window is in the model while it
+/// is open and gone from it once it closes, so a click helper cannot aim at
+/// a control whose window went away.
+#[gpui::test]
+fn a_settings_selector_is_not_in_the_model_once_settings_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "ctrl-, opens Settings"
+    );
+    assert!(h.in_model("settings-ok"), "the footer's OK is in the model");
+    h.keys("escape");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "Escape closes Settings"
+    );
+    assert!(
+        !h.in_model("settings-ok"),
+        "the footer's OK is not in the model once Settings closes"
+    );
+}
+
 #[gpui::test]
 fn default_shell_refusal_clears_when_settings_close(cx: &mut TestAppContext) {
     let dir = TestDir::new();

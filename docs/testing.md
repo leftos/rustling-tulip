@@ -22,7 +22,7 @@ The native client has three test tiers, and the driver MCP server has a live spe
 
   A routed `--test ui` run brings back `rustling-tulip-native.exe` built without the `driver` feature, over the driver build the `rt-driver` server and smoke tier launch, so rebuild with `--features rustling-tulip-native/driver` before the next driven run.
 
-  The pinned gpui's `Frame::clear` (`crates/gpui/src/window.rs`) clears the recorded element bounds every frame, so a selector not painted in the latest frame reads as not drawn (bounds -1): a UI spec can prove an element disappeared, and a click on a selector that is no longer painted finds nothing. The harness's model check reads a Settings selector it does not know as shown even with Settings closed, so a click helper cannot tell Settings is closed from that check alone; assert on bounds or on an outcome.
+  The pinned gpui's `Frame::clear` (`crates/gpui/src/window.rs`) clears the recorded element bounds every frame, so a selector not painted in the latest frame reads as not drawn (bounds -1): a UI spec can prove an element disappeared, and a click on a selector that is no longer painted finds nothing. The harness's model check (`Harness::in_model`) reads a `settings-` or `themes-` selector as shown only while Settings is open, so a click helper refuses a Settings control once Settings has closed.
 
   gpui's test platform uses `NoopTextSystem`, which lists no font families on the pinned gpui. A spec that needs system families (the Appearance font pickers) runs as a plain `#[test]` through `support::with_listed_families(name, support::LISTED_FAMILIES, |cx| { … })`, which builds the test context on a text system that lists them.
 

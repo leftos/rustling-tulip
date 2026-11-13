@@ -446,6 +446,15 @@ fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     Some(shown)
 }
 
+/// Whether `selector` tags a part drawn only inside the Settings window: its
+/// own controls, and the themes editor the Settings window's Appearance tab
+/// opens. The activity bar's Settings button is tagged `settings-open` and
+/// stays out, since the rail draws it with Settings closed.
+fn is_settings_only(selector: &str) -> bool {
+    selector != "settings-open"
+        && (selector.starts_with("settings-") || selector.starts_with("themes-"))
+}
+
 /// Whether the sessions panel's model still shows what a sidebar selector
 /// tags, assuming the panel itself is shown: a leaf while an expanded
 /// container lists the session, its pill too once the tab list is in, the
@@ -3946,9 +3955,8 @@ impl<'a> Harness<'a> {
         self.cx.update(|_, cx| read(root.read(cx), cx))
     }
 
-    /// The bounds the element tagged `selector` was last painted at. gpui
-    /// keeps them after the element leaves the tree, so they never prove it
-    /// is still there: [`Self::center`] asks the model first.
+    /// The bounds the element tagged `selector` was painted at in its
+    /// window's latest frame, or (-1, -1) if it was not painted there.
     pub fn bounds(&mut self, selector: &str) -> Bounds<Pixels> {
         let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
         self.cx.run_until_parked();
@@ -4056,6 +4064,8 @@ impl<'a> Harness<'a> {
                 root.no_tab_choices_shown()
             } else if selector == "empty-repo-hint" || selector == "empty-add-repo" {
                 root.no_tab_choices_shown() && !root.has_repos()
+            } else if is_settings_only(&selector) {
+                root.settings_open() && side_part_shown(root, &selector)
             } else {
                 side_part_shown(root, &selector)
             }
