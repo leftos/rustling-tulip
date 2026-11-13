@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - Choose in Settings whether finished subagents stay in the sidebar, how many and for how long, and whether their rows draw compact.
+- Choose where the app's toasts appear: any of eight spots around the screen's edge, in Settings › Notifications.
 
 ### Fixed
 

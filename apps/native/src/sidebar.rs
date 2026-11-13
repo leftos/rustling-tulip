@@ -25,6 +25,7 @@ use crate::source_control::{Part, ScKey, ScUiState};
 use crate::tab_name;
 use crate::tabs::{SessionRef, collect_panes};
 use crate::target::{HostKey, Target};
+use crate::toast_stack::ToastAnchor;
 use crate::window_state::WindowState;
 
 pub use crate::start_guard::UI_FILE;
@@ -1083,6 +1084,11 @@ pub struct NotificationSettings {
     /// the key, as every release before this one wrote, keeps the OS's.
     #[serde(deserialize_with = "toast_style_or_default")]
     pub toast_style: ToastStyle,
+    /// Where on the screen's edge the app's own toasts stack; a file
+    /// without the key, as every release before this one wrote, or with an
+    /// unknown value, reads as bottom right.
+    #[serde(deserialize_with = "toast_anchor_or_default")]
+    pub toast_anchor: ToastAnchor,
     /// How long a Finished toast is held before it is raised, one of
     /// [`FINISHED_GRACE_CHOICES`] seconds; a file without the key, as every
     /// release before this one wrote, holds it 5 s.
@@ -1195,6 +1201,14 @@ fn toast_style_or_default<'de, D: serde::Deserializer<'de>>(
     read_choice(deserializer, "notifications.toast_style", "os")
 }
 
+/// Reads `toast_anchor` so that any value that is not one of the eight
+/// spots loads as bottom right and never fails the rest of the file.
+fn toast_anchor_or_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ToastAnchor, D::Error> {
+    read_choice(deserializer, "notifications.toast_anchor", "bottom_right")
+}
+
 /// The finished grace a file without `finished_grace_secs` loads.
 fn default_finished_grace() -> u32 {
     DEFAULT_FINISHED_GRACE_SECS
@@ -1243,6 +1257,7 @@ impl Default for NotificationSettings {
             needs_you_sound: ToastSound::default(),
             finished_sound: ToastSound::default(),
             toast_style: ToastStyle::default(),
+            toast_anchor: ToastAnchor::default(),
             finished_grace_secs: DEFAULT_FINISHED_GRACE_SECS,
             account_switches: true,
         }
@@ -2835,6 +2850,15 @@ impl SidebarModel {
             return false;
         }
         self.ui.notifications.toast_style = style;
+        true
+    }
+
+    /// Records where the app's own toasts stack; returns whether it changed.
+    pub fn set_toast_anchor(&mut self, anchor: ToastAnchor) -> bool {
+        if self.ui.notifications.toast_anchor == anchor {
+            return false;
+        }
+        self.ui.notifications.toast_anchor = anchor;
         true
     }
 
@@ -6792,6 +6816,7 @@ pub(crate) mod tests {
                 needs_you_sound: ToastSound::Off,
                 finished_sound: ToastSound::Default,
                 toast_style: ToastStyle::Os,
+                toast_anchor: ToastAnchor::BottomRight,
                 finished_grace_secs: 10,
                 account_switches: false,
             },
@@ -7023,6 +7048,7 @@ pub(crate) mod tests {
                 needs_you_sound: ToastSound::Default,
                 finished_sound: ToastSound::Default,
                 toast_style: ToastStyle::Os,
+                toast_anchor: ToastAnchor::BottomRight,
                 finished_grace_secs: DEFAULT_FINISHED_GRACE_SECS,
                 account_switches: true,
             },
@@ -9094,6 +9120,46 @@ pub(crate) mod tests {
         );
         assert!(!ui.notifications.finished, "the saved toggle survives");
         assert_eq!(ui.notifications.skip_when, NotifySkip::Never);
+    }
+
+    #[test]
+    fn a_file_without_toast_anchor_loads_bottom_right() {
+        let dir = TestDir::new("notify-toast-anchor-released");
+        let file = v0_5_1_alpha_ui_file();
+        assert!(
+            file["notifications"].get("toast_anchor").is_none(),
+            "no release before this one wrote toast_anchor"
+        );
+        let ui = load_released(&dir, &file);
+        assert_eq!(ui.notifications.toast_anchor, ToastAnchor::BottomRight);
+        assert!(
+            !ui.notifications.awaiting_input,
+            "the saved toggle survives"
+        );
+        assert!(!ui.notifications.finished, "the saved toggle survives");
+        assert_eq!(ui.notifications.skip_when, NotifySkip::Never);
+    }
+
+    #[test]
+    fn an_unknown_toast_anchor_reads_as_bottom_right() {
+        let dir = TestDir::new("notify-toast-anchor-unknown");
+        for value in [
+            json!("centre"),
+            json!("middle_middle"),
+            json!(7),
+            serde_json::Value::Null,
+        ] {
+            let mut file = v0_5_1_alpha_ui_file();
+            file["notifications"]["toast_anchor"] = value.clone();
+            let ui = load_released(&dir, &file);
+            assert_eq!(
+                ui.notifications.toast_anchor,
+                ToastAnchor::BottomRight,
+                "{value}"
+            );
+            assert_eq!(ui.notifications.skip_when, NotifySkip::Never, "{value}");
+            assert!(!ui.notifications.finished, "{value}");
+        }
     }
 
     #[test]

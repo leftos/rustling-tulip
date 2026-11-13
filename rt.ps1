@@ -81,7 +81,7 @@
       native-shot
                  Write a PNG of the native client's window showing one view
                  (`main`, `main-compact`, `main-narrow`, `source-control`, `diff`, `settings`,
-                 `settings-claude`, `spawn`, `viewer`, `viewer-md`, `dashboard`, `dashboard-compact`, `connections`, `connections-ssh`, `connections-scan-error`, `menu`, `safe-start`, `panes-accent`, `panes-accent-chosen`, `update`, `update-countdown`, `chat`, `chat-compact`, `summary`, `themes`, `themes-edit`, `multi-host`, `spawn-hosts` or `settings-hosts`, `settings-accounts`, `settings-sounds`, `accounts`, `dispatch`, `subagents`, `host-rebind`, `perf`, `exited`, `abandoned`, `empty-main`, `first-connect`; default `main`) over a fake daemon with fixed
+                 `settings-claude`, `spawn`, `viewer`, `viewer-md`, `dashboard`, `dashboard-compact`, `connections`, `connections-ssh`, `connections-scan-error`, `menu`, `safe-start`, `panes-accent`, `panes-accent-chosen`, `update`, `update-countdown`, `chat`, `chat-compact`, `summary`, `themes`, `themes-edit`, `multi-host`, `spawn-hosts` or `settings-hosts`, `settings-accounts`, `settings-sounds`, `settings-toast-position`, `accounts`, `dispatch`, `subagents`, `host-rebind`, `perf`, `exited`, `abandoned`, `empty-main`, `first-connect`; default `main`) over a fake daemon with fixed
                  content, via
                  `cargo run --example shot`. No daemon starts; the window
                  stays cloaked and never takes focus. Writes
@@ -1531,7 +1531,7 @@ Commands:
              update-countdown,
              chat, chat-compact, summary,
              themes, themes-edit, multi-host, spawn-hosts, settings-hosts, settings-accounts,
-             settings-sounds,
+             settings-sounds, settings-toast-position,
              accounts, dispatch, subagents, host-rebind, perf,
              exited, abandoned, empty-main, first-connect;
              default main)

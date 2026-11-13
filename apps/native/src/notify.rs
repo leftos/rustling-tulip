@@ -35,8 +35,8 @@ use crate::target::HostKey;
 #[cfg(windows)]
 use crate::toast_activation;
 use crate::toast_stack::{
-    ACCOUNTS_TOAST_KEY, AppToast, AppToastKind, MAX_TOAST_CHOICES, SessionKey, ToastStack, WIDTH,
-    WorkArea, key_of, place,
+    ACCOUNTS_TOAST_KEY, AppToast, AppToastKind, MAX_TOAST_CHOICES, SessionKey, TEST_TOAST_KEY,
+    ToastAnchor, ToastStack, WIDTH, WorkArea, key_of, place,
 };
 use crate::toast_view::{CardText, ToastView, card_height};
 use crate::toast_window::{PhysicalRect, ToastPlacer, to_physical};
@@ -438,6 +438,9 @@ struct ToastHost {
     windows: HashMap<SessionKey, ToastWindow>,
     /// Sleeps until the stack's next deadline; replaced after every change.
     timer: Option<Task<()>>,
+    /// Where Settings' sample toast sits: the spot staged when it was
+    /// shown, which may not be saved yet.
+    test_anchor: ToastAnchor,
 }
 
 /// One toast's open window.
@@ -448,6 +451,35 @@ struct ToastWindow {
     /// Whether an answer was out for the session when the window was last
     /// placed: its card is shorter then, so a change places it again.
     sent: bool,
+}
+
+/// Places `toasts` (kind and height, newest last) in `area`, each at its
+/// anchor in `anchors`: the toasts sharing an anchor stack together through
+/// [`place`]. Returns each kept toast's index in `toasts` with its top-left.
+fn place_by_anchor(
+    area: WorkArea,
+    anchors: &[ToastAnchor],
+    toasts: &[(AppToastKind, f32)],
+) -> Vec<(usize, (f32, f32))> {
+    let mut distinct: Vec<ToastAnchor> = Vec::new();
+    for anchor in anchors {
+        if !distinct.contains(anchor) {
+            distinct.push(*anchor);
+        }
+    }
+    let mut placed = Vec::with_capacity(toasts.len());
+    for anchor in distinct {
+        let members: Vec<usize> = (0..toasts.len())
+            .filter(|&index| anchors[index] == anchor)
+            .collect();
+        let group: Vec<(AppToastKind, f32)> = members.iter().map(|&index| toasts[index]).collect();
+        placed.extend(
+            place(area, anchor, &group)
+                .into_iter()
+                .map(|(kept, top_left)| (members[kept], top_left)),
+        );
+    }
+    placed
 }
 
 /// Removes the toast window `handle`; one already closed is logged at debug.
@@ -478,6 +510,7 @@ impl Notifications {
                 stack: ToastStack::default(),
                 windows: HashMap::new(),
                 timer: None,
+                test_anchor: ToastAnchor::default(),
             },
             sounder,
             sound_problem: None,
@@ -1456,20 +1489,24 @@ impl RootView {
     /// timer, as this ends every change to the stack.
     fn place_app_toasts(&mut self, screen: &ToastScreen, cx: &mut Context<Self>) {
         let items = self.notifications.toasts.stack.items().to_vec();
-        // A toast taller than the work area's room cannot be shown: its card
-        // is cut there.
-        let room = crate::toast_stack::room(screen.area);
+        let anchors = self.toast_anchors(&items);
         let sent: Vec<bool> = items
             .iter()
             .map(|toast| self.toast_answer_out(&toast.key))
             .collect();
         let measure = CardText::new(cx);
+        // A toast taller than the room its anchor's row leaves cannot be
+        // shown: its card is cut there.
         let heights: Vec<(AppToastKind, f32)> = items
             .iter()
             .zip(&sent)
-            .map(|(toast, sent)| (toast.kind, card_height(toast, *sent, &measure, room)))
+            .zip(&anchors)
+            .map(|((toast, sent), anchor)| {
+                let room = crate::toast_stack::room(screen.area, *anchor);
+                (toast.kind, card_height(toast, *sent, &measure, room))
+            })
             .collect();
-        let placed = place(screen.area, &heights);
+        let placed = place_by_anchor(screen.area, &anchors, &heights);
         for (index, toast) in items.iter().enumerate() {
             if !placed.iter().any(|(kept, _)| *kept == index) {
                 let now = cx.background_executor().now();
@@ -1615,10 +1652,56 @@ impl RootView {
         Self::after_toast_change(cx);
     }
 
+    /// Each of `items`' anchor: Settings' sample toast at the spot staged
+    /// when it was shown, every other toast at the saved one.
+    fn toast_anchors(&self, items: &[AppToast]) -> Vec<ToastAnchor> {
+        let saved = self.sidebar.ui_state().notifications.toast_anchor;
+        let test = key_of(&HostKey::Local, TEST_TOAST_KEY);
+        items
+            .iter()
+            .map(|toast| {
+                if toast.key == test {
+                    self.notifications.toasts.test_anchor
+                } else {
+                    saved
+                }
+            })
+            .collect()
+    }
+
+    /// Shows Settings' sample toast at `anchor`, the spot staged there,
+    /// whether or not it is saved yet; real toasts keep the saved spot. A
+    /// later press replaces it in place. A cloaked run shows none. Waits for
+    /// the effects to flush, as the press runs while the main window
+    /// updates, when which monitor holds it cannot be read.
+    pub(crate) fn show_test_toast(anchor: ToastAnchor, cx: &mut Context<Self>) {
+        if offscreen::requested() && !driven_toasts() {
+            tracing::debug!("offscreen window: the test toast not shown");
+            return;
+        }
+        let root = cx.weak_entity();
+        cx.defer(move |cx| {
+            // Fails only when the view is gone, and its toasts with it.
+            root.update(cx, |this, cx| {
+                let now = cx.background_executor().now();
+                this.notifications.toasts.test_anchor = anchor;
+                let toast = AppToast::new(
+                    key_of(&HostKey::Local, TEST_TOAST_KEY),
+                    AppToastKind::Finished,
+                    "Test toast".to_owned(),
+                    "This is where toasts appear.".to_owned(),
+                    now,
+                );
+                this.show_app_toast(toast, None, cx);
+            })
+            .ok();
+        });
+    }
+
     /// Moves the windows to fit the stack; with no work area they stay
     /// where they are. Waits for the effects to flush, as a change made
     /// while the main window updates cannot read which monitor holds it.
-    fn after_toast_change(cx: &mut Context<Self>) {
+    pub(crate) fn after_toast_change(cx: &mut Context<Self>) {
         let root = cx.weak_entity();
         cx.defer(move |cx| {
             // Fails only when the view is gone, and its toasts with it.

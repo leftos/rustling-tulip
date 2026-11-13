@@ -33,7 +33,8 @@
 //! Nord with its Ground edited) and `themes` (the Themes modal over Settings,
 //! over a user theme, a broken file and a file named after a built-in).
 //! `settings-sounds` shows Settings on the Notifications tab with the Needs
-//! you sound dropdown open, and `toast` a Needs you card on a permission,
+//! you sound dropdown open, `settings-toast-position` the same tab scrolled
+//! to the Toast position picker by a search for it, and `toast` a Needs you card on a permission,
 //! with Allow and Deny, and a Finished card, as
 //! the app's own toasts draw them. `open-shell` shows the Open a shell
 //! dialog with a folder path longer than its field, the caret at its end.
@@ -247,6 +248,7 @@ enum View {
     SettingsAccounts,
     Toast,
     SettingsSounds,
+    SettingsToastPosition,
     Accounts,
     Gates,
     OpenShell,
@@ -266,7 +268,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 48] = [
+    const ALL: [Self; 49] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -298,6 +300,7 @@ impl View {
         Self::SettingsDashboard,
         Self::SettingsAccounts,
         Self::SettingsSounds,
+        Self::SettingsToastPosition,
         Self::Accounts,
         Self::Gates,
         Self::Toast,
@@ -350,6 +353,7 @@ impl View {
             Self::SettingsDashboard => "settings-dashboard",
             Self::SettingsAccounts => "settings-accounts",
             Self::SettingsSounds => "settings-sounds",
+            Self::SettingsToastPosition => "settings-toast-position",
             Self::Accounts => "accounts",
             Self::Gates => "gates",
             Self::OpenShell => "open-shell",
@@ -511,6 +515,9 @@ impl View {
             Self::SettingsAccounts => root.settings_open() && root.settings_tab() == "Accounts",
             Self::SettingsSounds => {
                 root.settings_open() && root.open_sound_list() == Some(NotifyKind::NeedsYou)
+            }
+            Self::SettingsToastPosition => {
+                root.settings_open() && root.settings_tab() == "Notifications"
             }
             Self::Spawn => root.spawn_dialog_open(),
             Self::Jump => root.quick_jump_open(),
@@ -698,6 +705,7 @@ impl Shot {
             | View::SettingsDashboard
             | View::SettingsAccounts
             | View::SettingsSounds
+            | View::SettingsToastPosition
             | View::Accounts
             | View::Gates
             | View::OpenShell
@@ -1495,6 +1503,7 @@ fn drive(
         View::Settings => press("ctrl-,", window, cx),
         View::SettingsClaude | View::SettingsHosts => drive_claude_page(step, address, window, cx),
         View::SettingsSounds => drive_settings_sounds(window, cx),
+        View::SettingsToastPosition => drive_settings_toast_position(window, cx),
         View::SettingsAccounts => drive_settings_accounts(step, address, window, cx),
         View::Spawn => {
             press("ctrl-shift-n", window, cx)?;
@@ -1867,6 +1876,22 @@ fn drive_settings_accounts(
 fn drive_settings_sounds(window: &mut Window, cx: &mut App) -> Result<()> {
     for key in ["ctrl-,", "down", "tab", "tab", "tab", "enter"] {
         press(key, window, cx)?;
+    }
+    Ok(())
+}
+
+/// Opens Settings and searches for the Toast position row, which the search
+/// scrolls into view on the Notifications tab and outlines.
+fn drive_settings_toast_position(window: &mut Window, cx: &mut App) -> Result<()> {
+    press("ctrl-,", window, cx)?;
+    press("ctrl-f", window, cx)?;
+    for c in "toast position".chars() {
+        let key = if c == ' ' {
+            "space".to_owned()
+        } else {
+            c.to_string()
+        };
+        press(&key, window, cx)?;
     }
     Ok(())
 }

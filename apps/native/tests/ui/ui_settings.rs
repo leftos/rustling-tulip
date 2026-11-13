@@ -90,6 +90,92 @@ fn the_finished_grace_row_hides_with_the_toggle(cx: &mut TestAppContext) {
     );
 }
 
+/// The harness on one session with Settings open on Notifications and the
+/// toast position picker scrolled into view.
+fn on_toast_picker<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &Fixture::single(session("s1").build()));
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-notifications");
+    h.scroll_into_view("settings-content", "settings-toast-anchor-test");
+    h
+}
+
+/// The toast anchor `native-ui.json` holds: bottom right, the default,
+/// while nothing has been saved.
+fn saved_anchor(dir: &TestDir) -> String {
+    let Ok(text) = std::fs::read_to_string(dir.path().join("native-ui.json")) else {
+        return "bottom_right".to_owned();
+    };
+    let saved: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    saved["notifications"]["toast_anchor"]
+        .as_str()
+        .unwrap_or("bottom_right")
+        .to_owned()
+}
+
+#[gpui::test]
+fn a_toast_anchor_spot_click_waits_for_apply(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_toast_picker(cx, &dir);
+
+    h.click_on("settings-toast-anchor-top_left");
+    assert_eq!(
+        saved_anchor(&dir),
+        "bottom_right",
+        "the click only stages it"
+    );
+
+    h.click_on("settings-apply");
+    assert_eq!(saved_anchor(&dir), "top_left", "Apply saves the spot");
+}
+
+#[gpui::test]
+fn arrow_keys_move_the_toast_anchor_round_the_grid(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_toast_picker(cx, &dir);
+    h.click_on("settings-toast-anchor-top_middle");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-toast-anchor-top_middle")
+    );
+    for (key, spot, why) in [
+        ("down", "bottom_middle", "Down skips the empty centre"),
+        ("left", "bottom_left", "Left moves one spot"),
+        ("left", "bottom_left", "the grid's edge stops it, no wrap"),
+        ("up", "middle_left", "Up moves one spot"),
+        ("right", "middle_right", "Right skips the empty centre"),
+        ("up", "top_right", "Up moves one spot"),
+        ("right", "top_right", "the grid's edge stops it, no wrap"),
+        ("space", "top_right", "Space does nothing more"),
+        ("enter", "top_right", "nor does Enter"),
+    ] {
+        h.keys(key);
+        let selector = format!("settings-toast-anchor-{spot}");
+        assert_eq!(settings_focus(&mut h), Some(selector.as_str()), "{why}");
+    }
+    assert_eq!(saved_anchor(&dir), "bottom_right", "the keys only stage it");
+    h.click_on("settings-apply");
+    assert_eq!(saved_anchor(&dir), "top_right");
+}
+
+#[gpui::test]
+fn show_a_test_toast_uses_the_staged_anchor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_toast_picker(cx, &dir);
+    h.click_on("settings-toast-anchor-top_left");
+
+    h.click_on("settings-toast-anchor-test");
+
+    let shown = h.toasts_shown();
+    assert_eq!(shown.len(), 1, "one sample toast");
+    assert_eq!(
+        (shown[0].x, shown[0].y),
+        (16, 16),
+        "at the staged top left, 16 px in"
+    );
+    assert_eq!(saved_anchor(&dir), "bottom_right", "the saved spot stays");
+}
+
 const TAB_SELECTORS: [&str; 8] = [
     "settings-tab-general",
     "settings-tab-notifications",

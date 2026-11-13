@@ -8,6 +8,7 @@
 use std::time::{Duration, Instant};
 
 use protocol::PendingInput;
+use serde::{Deserialize, Serialize};
 
 use crate::dashboard_rows::AskBlock;
 use crate::target::HostKey;
@@ -30,6 +31,10 @@ pub const ACCOUNT_FOR: Duration = Duration::from_secs(8);
 /// The second half of every account toast's key: a host has one account
 /// toast at a time, and a later one replaces it in place.
 pub const ACCOUNTS_TOAST_KEY: &str = "accounts";
+
+/// The second half of Settings' sample toast's key, on This PC: one sample
+/// at a time, and a later press replaces it in place.
+pub const TEST_TOAST_KEY: &str = "test-toast";
 
 /// How long a Needs you toast without answer buttons stays up.
 pub const NEEDS_YOU_FOR: Duration = Duration::from_secs(30);
@@ -387,28 +392,174 @@ pub struct WorkArea {
     pub bottom: f32,
 }
 
-/// The tallest a toast may be in `area`: its height less both margins, and a
-/// pixel less, floored, so a card capped at it still passes [`place`]'s fit
-/// check whatever the rounding of a fractional work area.
+/// Where on the work area's edge the toasts stack: one of eight spots,
+/// clockwise from top left, with no centre. Saved in `native-ui.json` as
+/// its `snake_case` name; bottom right, where every release before this one
+/// put them, is the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToastAnchor {
+    /// The top-left corner; the stack grows downward.
+    TopLeft,
+    /// The top edge, centred; the stack grows downward.
+    TopMiddle,
+    /// The top-right corner; the stack grows downward.
+    TopRight,
+    /// The right edge, from the middle line downward.
+    MiddleRight,
+    /// The bottom-right corner; the stack grows upward.
+    #[default]
+    BottomRight,
+    /// The bottom edge, centred; the stack grows upward.
+    BottomMiddle,
+    /// The bottom-left corner; the stack grows upward.
+    BottomLeft,
+    /// The left edge, from the middle line downward.
+    MiddleLeft,
+}
+
+/// A spot's row or column on the work area: its start, middle or end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// The top row or the left column.
+    Start,
+    /// The middle row or column.
+    Middle,
+    /// The bottom row or the right column.
+    End,
+}
+
+impl ToastAnchor {
+    /// The eight spots, clockwise from top left.
+    pub const ALL: [Self; 8] = [
+        Self::TopLeft,
+        Self::TopMiddle,
+        Self::TopRight,
+        Self::MiddleRight,
+        Self::BottomRight,
+        Self::BottomMiddle,
+        Self::BottomLeft,
+        Self::MiddleLeft,
+    ];
+
+    /// The spot's name as Settings shows it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::TopLeft => "Top left",
+            Self::TopMiddle => "Top middle",
+            Self::TopRight => "Top right",
+            Self::MiddleRight => "Middle right",
+            Self::BottomRight => "Bottom right",
+            Self::BottomMiddle => "Bottom middle",
+            Self::BottomLeft => "Bottom left",
+            Self::MiddleLeft => "Middle left",
+        }
+    }
+
+    /// The spot's row and column.
+    #[must_use]
+    pub fn cell(self) -> (Edge, Edge) {
+        match self {
+            Self::TopLeft => (Edge::Start, Edge::Start),
+            Self::TopMiddle => (Edge::Start, Edge::Middle),
+            Self::TopRight => (Edge::Start, Edge::End),
+            Self::MiddleRight => (Edge::Middle, Edge::End),
+            Self::BottomRight => (Edge::End, Edge::End),
+            Self::BottomMiddle => (Edge::End, Edge::Middle),
+            Self::BottomLeft => (Edge::End, Edge::Start),
+            Self::MiddleLeft => (Edge::Middle, Edge::Start),
+        }
+    }
+
+    /// The spot at `row` and `column`; `None` for the empty centre.
+    #[must_use]
+    pub fn at(row: Edge, column: Edge) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|anchor| anchor.cell() == (row, column))
+    }
+
+    /// The neighbouring spot one step `down` (rows) and `right` (columns)
+    /// away, each -1, 0 or 1, passing over the empty centre; at the grid's
+    /// edge the spot stays where it is.
+    #[must_use]
+    pub fn step(self, down: i8, right: i8) -> Self {
+        let (row, column) = self.cell();
+        let (mut row, mut column) = (index_of(row), index_of(column));
+        for _ in 0..2 {
+            row += down;
+            column += right;
+            let (Some(r), Some(c)) = (edge_at(row), edge_at(column)) else {
+                return self;
+            };
+            if let Some(anchor) = Self::at(r, c) {
+                return anchor;
+            }
+        }
+        self
+    }
+}
+
+/// `edge` as a grid index, 0 to 2.
+fn index_of(edge: Edge) -> i8 {
+    match edge {
+        Edge::Start => 0,
+        Edge::Middle => 1,
+        Edge::End => 2,
+    }
+}
+
+/// The edge at grid index `index`; `None` off the grid.
+fn edge_at(index: i8) -> Option<Edge> {
+    match index {
+        0 => Some(Edge::Start),
+        1 => Some(Edge::Middle),
+        2 => Some(Edge::End),
+        _ => None,
+    }
+}
+
+/// The work area's middle line, where a middle-row stack's newest toast
+/// has its top.
+fn middle_line(area: WorkArea) -> f32 {
+    f32::midpoint(area.top, area.bottom)
+}
+
+/// The tallest a toast may be in `area` at `anchor`: the height its row
+/// leaves (the whole work area less both margins, or below the middle line
+/// less the bottom margin for a middle row), and a pixel less, floored, so a
+/// card capped at it still passes [`place`]'s fit check whatever the
+/// rounding of a fractional work area.
 #[must_use]
-pub fn room(area: WorkArea) -> f32 {
-    (area.bottom - area.top - 2.0 * MARGIN - 1.0).floor()
+pub fn room(area: WorkArea, anchor: ToastAnchor) -> f32 {
+    let free = match anchor.cell().0 {
+        Edge::Middle => area.bottom - MARGIN - middle_line(area),
+        Edge::Start | Edge::End => area.bottom - area.top - 2.0 * MARGIN,
+    };
+    (free - 1.0).floor()
 }
 
 /// Where each toast of `toasts` (its kind and height, newest last) sits in
-/// `area`: the newest nearest the bottom-right corner, older ones stacked
-/// upward a [`GAP`] apart, each [`WIDTH`] wide and [`MARGIN`] from the right
-/// edge. Returns each kept toast's index in `toasts` with its top-left, in
-/// the order given.
+/// `area` at `anchor`: the newest nearest the anchor's edge, each [`WIDTH`]
+/// wide, a [`MARGIN`] in from the edges and a [`GAP`] apart. A bottom-row
+/// stack grows upward; a top-row one downward from the top margin; a
+/// middle-row one downward from the work area's middle line. A middle
+/// column is centred. Returns each kept toast's index in `toasts` with its
+/// top-left, in the order given.
 ///
 /// A stack too tall for the work area leaves out its oldest Finished toast
 /// first, so a Needs you is never hidden while a Finished toast could go;
 /// only when no Finished toast is left does the oldest toast of any kind go.
 #[must_use]
-pub fn place(area: WorkArea, toasts: &[(AppToastKind, f32)]) -> Vec<(usize, (f32, f32))> {
+pub fn place(
+    area: WorkArea,
+    anchor: ToastAnchor,
+    toasts: &[(AppToastKind, f32)],
+) -> Vec<(usize, (f32, f32))> {
     let mut kept: Vec<usize> = (0..toasts.len()).collect();
     loop {
-        if let Some(placed) = layout(area, toasts, &kept) {
+        if let Some(placed) = layout(area, anchor, toasts, &kept) {
             return kept.into_iter().zip(placed).collect();
         }
         let victim = kept
@@ -419,23 +570,53 @@ pub fn place(area: WorkArea, toasts: &[(AppToastKind, f32)]) -> Vec<(usize, (f32
     }
 }
 
-/// Each kept toast's top-left, or `None` when one of them falls above the
-/// work area.
+/// The left edge of a toast in `column` of `area`.
+fn column_left(area: WorkArea, column: Edge) -> f32 {
+    match column {
+        Edge::Start => area.left + MARGIN,
+        Edge::Middle => area.left + (area.right - area.left - WIDTH) / 2.0,
+        Edge::End => area.right - MARGIN - WIDTH,
+    }
+}
+
+/// Each kept toast's top-left, or `None` when one of them crosses the work
+/// area's far margin: the top one for a bottom-row stack, the bottom one
+/// for a top- or middle-row stack.
 fn layout(
     area: WorkArea,
+    anchor: ToastAnchor,
     toasts: &[(AppToastKind, f32)],
     kept: &[usize],
 ) -> Option<Vec<(f32, f32)>> {
-    let left = area.right - MARGIN - WIDTH;
-    let mut bottom = area.bottom - MARGIN;
+    let (row, column) = anchor.cell();
+    let left = column_left(area, column);
     let mut placed = Vec::with_capacity(kept.len());
-    for &index in kept.iter().rev() {
-        let top = bottom - toasts[index].1;
-        if top < area.top + MARGIN {
-            return None;
+    match row {
+        Edge::End => {
+            let mut bottom = area.bottom - MARGIN;
+            for &index in kept.iter().rev() {
+                let top = bottom - toasts[index].1;
+                if top < area.top + MARGIN {
+                    return None;
+                }
+                placed.push((left, top));
+                bottom = top - GAP;
+            }
         }
-        placed.push((left, top));
-        bottom = top - GAP;
+        Edge::Start | Edge::Middle => {
+            let mut top = match row {
+                Edge::Start => area.top + MARGIN,
+                _ => middle_line(area),
+            };
+            for &index in kept.iter().rev() {
+                let height = toasts[index].1;
+                if top + height > area.bottom - MARGIN {
+                    return None;
+                }
+                placed.push((left, top));
+                top += height + GAP;
+            }
+        }
     }
     placed.reverse();
     Some(placed)
@@ -767,10 +948,132 @@ mod tests {
         1920.0 - MARGIN - WIDTH
     }
 
+    /// Three toasts, oldest first: a Needs you 80 high, a Finished 100 high
+    /// and a Needs you 120 high.
+    fn three() -> [(AppToastKind, f32); 3] {
+        [
+            (needs_you(false), 80.0),
+            (AppToastKind::Finished, 100.0),
+            (needs_you(true), 120.0),
+        ]
+    }
+
+    /// Three toasts, oldest first, each `height` high: a Needs you, a
+    /// Finished, then an answerable Needs you.
+    fn three_of(height: f32) -> [(AppToastKind, f32); 3] {
+        [
+            (needs_you(false), height),
+            (AppToastKind::Finished, height),
+            (needs_you(true), height),
+        ]
+    }
+
+    #[test]
+    fn place_at_top_left_stacks_three_toasts() {
+        assert_eq!(
+            place(area(), ToastAnchor::TopLeft, &three()),
+            vec![(0, (16.0, 252.0)), (1, (16.0, 144.0)), (2, (16.0, 16.0))]
+        );
+    }
+
+    #[test]
+    fn place_at_top_middle_stacks_three_toasts() {
+        assert_eq!(
+            place(area(), ToastAnchor::TopMiddle, &three()),
+            vec![(0, (780.0, 252.0)), (1, (780.0, 144.0)), (2, (780.0, 16.0))]
+        );
+    }
+
+    #[test]
+    fn place_at_top_right_stacks_three_toasts() {
+        assert_eq!(
+            place(area(), ToastAnchor::TopRight, &three()),
+            vec![
+                (0, (1544.0, 252.0)),
+                (1, (1544.0, 144.0)),
+                (2, (1544.0, 16.0))
+            ]
+        );
+    }
+
+    #[test]
+    fn place_at_middle_right_stacks_three_toasts() {
+        assert_eq!(
+            place(area(), ToastAnchor::MiddleRight, &three()),
+            vec![
+                (0, (1544.0, 776.0)),
+                (1, (1544.0, 668.0)),
+                (2, (1544.0, 540.0))
+            ]
+        );
+    }
+
+    #[test]
+    fn place_at_bottom_right_stacks_three_toasts() {
+        assert_eq!(
+            place(area(), ToastAnchor::BottomRight, &three()),
+            vec![
+                (0, (1544.0, 748.0)),
+                (1, (1544.0, 836.0)),
+                (2, (1544.0, 944.0))
+            ]
+        );
+    }
+
+    #[test]
+    fn place_at_bottom_middle_stacks_three_toasts() {
+        assert_eq!(
+            place(area(), ToastAnchor::BottomMiddle, &three()),
+            vec![
+                (0, (780.0, 748.0)),
+                (1, (780.0, 836.0)),
+                (2, (780.0, 944.0))
+            ]
+        );
+    }
+
+    #[test]
+    fn place_at_bottom_left_stacks_three_toasts() {
+        assert_eq!(
+            place(area(), ToastAnchor::BottomLeft, &three()),
+            vec![(0, (16.0, 748.0)), (1, (16.0, 836.0)), (2, (16.0, 944.0))]
+        );
+    }
+
+    #[test]
+    fn place_at_middle_left_stacks_three_toasts() {
+        assert_eq!(
+            place(area(), ToastAnchor::MiddleLeft, &three()),
+            vec![(0, (16.0, 776.0)), (1, (16.0, 668.0)), (2, (16.0, 540.0))]
+        );
+    }
+
+    #[test]
+    fn place_at_a_top_anchor_drops_the_oldest_finished_first() {
+        assert_eq!(
+            place(area(), ToastAnchor::TopMiddle, &three_of(400.0)),
+            vec![(0, (780.0, 424.0)), (2, (780.0, 16.0))],
+            "the third toast would cross the bottom margin, so the Finished one goes"
+        );
+    }
+
+    #[test]
+    fn place_at_a_middle_anchor_drops_the_oldest_finished_first() {
+        assert_eq!(
+            place(area(), ToastAnchor::MiddleLeft, &three_of(200.0)),
+            vec![(0, (16.0, 748.0)), (2, (16.0, 540.0))],
+            "the third toast would cross the bottom margin, so the Finished one goes"
+        );
+    }
+
     #[test]
     fn place_puts_the_newest_in_the_corner() {
         assert_eq!(
-            place(area(), &[(AppToastKind::Finished, 100.0)]),
+            place(
+                area(),
+                ToastAnchor::BottomRight,
+                &[(AppToastKind::Finished, 100.0)]
+            ),
             vec![(0, (left_edge(), 1080.0 - MARGIN - 100.0))]
         );
     }
@@ -782,6 +1085,7 @@ mod tests {
         assert_eq!(
             place(
                 area(),
+                ToastAnchor::BottomRight,
                 &[(needs_you(false), 80.0), (AppToastKind::Finished, 100.0)]
             ),
             vec![
@@ -799,9 +1103,14 @@ mod tests {
             right: 1536.0,
             bottom: 825.6,
         };
-        let tallest = room(fractional);
+        let tallest = room(fractional, ToastAnchor::BottomRight);
         assert_eq!(
-            place(fractional, &[(needs_you(false), tallest)]).len(),
+            place(
+                fractional,
+                ToastAnchor::BottomRight,
+                &[(needs_you(false), tallest)]
+            )
+            .len(),
             1,
             "a toast capped at the room is kept, not dismissed"
         );
@@ -812,6 +1121,7 @@ mod tests {
         assert_eq!(
             place(
                 area(),
+                ToastAnchor::BottomRight,
                 &[(needs_you(false), 100.0), (needs_you(false), 1000.0)]
             ),
             vec![(1, (left_edge(), 1080.0 - MARGIN - 1000.0))],
@@ -826,6 +1136,7 @@ mod tests {
         assert_eq!(
             place(
                 area(),
+                ToastAnchor::BottomRight,
                 &[
                     (needs_you(false), 400.0),
                     (AppToastKind::Finished, 400.0),

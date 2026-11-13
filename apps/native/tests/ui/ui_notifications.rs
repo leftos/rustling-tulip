@@ -504,6 +504,8 @@ fn notifications_tab_has_needs_you_and_finished_toggles(cx: &mut TestAppContext)
         "settings-toast-style-os",
         #[cfg(windows)]
         "settings-toast-style-app",
+        "settings-toast-anchor-bottom_right",
+        "settings-toast-anchor-test",
     ] {
         h.keys("tab");
         assert_eq!(settings_focus(&mut h), Some(stop), "each choice is a stop");

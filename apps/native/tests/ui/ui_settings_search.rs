@@ -176,6 +176,33 @@ fn the_selected_tab_stays_when_it_matches_else_the_first_match_opens(cx: &mut Te
 }
 
 #[gpui::test]
+fn a_toast_position_search_lands_on_the_picker_at_any_saved_spot(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    support::seed_ui(
+        &dir,
+        &serde_json::json!({ "notifications": { "toast_anchor": "top_left" } }),
+    );
+    let mut h = searching(cx, &dir);
+    type_text(&mut h, "toast position");
+    assert_eq!(shown_tab(&mut h), "Notifications");
+    assert_eq!(hit(&mut h), Some("settings-toast-anchor"));
+    assert!(
+        outlined(&mut h, "settings-toast-anchor-top_left"),
+        "the outline rings the picker, the saved spot in it"
+    );
+    assert!(
+        inside(&mut h, "settings-content", "settings-toast-anchor-top_left"),
+        "the picker is scrolled into view"
+    );
+    h.keys("enter");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-toast-anchor-top_left"),
+        "Enter gives the picker the keyboard on its chosen spot"
+    );
+}
+
+#[gpui::test]
 fn picking_a_filtered_tab_highlights_its_first_match(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = searching(cx, &dir);
