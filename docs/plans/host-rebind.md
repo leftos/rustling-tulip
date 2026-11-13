@@ -24,7 +24,7 @@ Every decision below is an orchestrator decision (not an owner ruling), settled 
 - `ClientMessage::BindHostSessions { host: Option<String>, session_ids: Vec<String>, arrangement: HostArrangement, request_id: Option<String> }`, sent to This PC: builds new tabs at the end of the tab list holding those sessions, in one step, and answers with a `TabUpdated` per new tab. Sessions already shown by a pane of this client are skipped.
 - `HostArrangement` (tagged, `#[serde(other)] Unknown`): `Auto { layout: RearrangeLayout, max_per_tab: Option<u32> }` or `Follow { tabs: Vec<TabEntry> }`, the host's own tabs as its daemon sent them.
 - `ClientMessage::ListHostLayouts { request_id }` answered by the host's own daemon with `DaemonMessage::HostLayouts { host_name: String, layouts: Vec<HostLayout>, request_id }`, `HostLayout { client_id, name, tabs: Vec<TabEntry> }`: every other client's non-empty layout on that daemon, and the daemon's own hostname. Listed in `Welcome.features` as `host_layouts`; a client asks only a host that lists it. Tailnet clients may ask (read-only ids and names, the same trust as the session list).
-- "The host's own layout" is the layout whose `name` equals `host_name`: a client names its layout after its machine's hostname, so the window running on the host made it. The dialog preselects it and lists the others. No `state.json` change.
+- "The host's own layout" is the layout whose `name` equals `host_name`: a client names its layout after its machine's hostname, so the window running on the host made it. The dialog lists it first among the layouts to follow; Auto stays the choice until the user picks one. No `state.json` change.
 
 ### Daemon (This PC, the layout home)
 
@@ -34,7 +34,7 @@ Every decision below is an orchestrator decision (not an owner ruling), settled 
 
 ### Client
 
-- The action takes **two steps in one dialog**: "Unbind {host}'s sessions" (sends `UnbindHostPanes`) and "Rebind {host}'s sessions…" (opens the dialog, whose confirm sends `UnbindHostPanes` then `BindHostSessions` with the host's active sessions in their sidebar order).
+- The action takes **two steps in one dialog**: "Unbind {host}'s sessions" (sends `UnbindHostPanes`) and "Rebind {host}'s sessions…" (opens the dialog, whose confirm sends `UnbindHostPanes` then `BindHostSessions` with the host's active sessions ordered by start time, ties by id). The model (`apps/native/src/host_rebind.rs`) holds the session list it was opened with, so the dialog rebuilds it when the host's sessions change while it is open.
 - The dialog reuses the chooser's picker (Grid with shapes and Auto, Side by side, Stacked; Max per tab), extracted into a shared module, plus a "Follow {host}'s layout" choice listing the host's layouts (the host's own first), shown only when the host lists `host_layouts` and has a non-empty layout. Nothing is remembered between openings.
 - Entry points: the host's row in the Connections view (which lists This PC too) gets **Unbind** and **Rebind…** controls; the jump palette gets one "Unbind {host}'s sessions" and one "Rebind {host}'s sessions…" row per host; the sidebar's host header (shown when more than one host is configured) gets a right-click menu with the same two items. An offline host's controls are disabled with "{name} is offline".
 - Pop-outs are not tab panes and are left as they are. The new tabs take no focus; the active tab stays unless it was removed, when the first new tab shows.

@@ -4,7 +4,7 @@
 
 use protocol::{ClientMessage, RearrangeLayout};
 
-use crate::layout_chooser::grid_shapes;
+use crate::layout_picker::grid_shapes;
 use crate::tab_menu::grid_label;
 
 pub(crate) const TITLE: &str = "Move panes to a new tab";

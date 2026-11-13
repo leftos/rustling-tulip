@@ -3,7 +3,7 @@
 
 use protocol::{MergeLayout, RearrangeLayout, TabContent, TabEntry};
 
-use crate::layout_chooser::grid_shapes;
+use crate::layout_picker::grid_shapes;
 use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, Popouts};
 use crate::tabs::TabSelection;
 

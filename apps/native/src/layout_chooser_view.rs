@@ -10,7 +10,8 @@ use protocol::{ClientMessage, ClonableLayout, InitLayoutKind, TabEntry};
 
 use crate::RootView;
 use crate::driver_id::DriverId as _;
-use crate::layout_chooser::{Control, FALLBACK_ASPECT, LayoutChooser, Mode, arrangement_messages};
+use crate::layout_chooser::{Control, LayoutChooser, arrangement_messages};
+use crate::layout_picker::{FALLBACK_ASPECT, Mode};
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::tabs::collect_panes;

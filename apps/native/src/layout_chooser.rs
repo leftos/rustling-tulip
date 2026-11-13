@@ -1,26 +1,15 @@
 //! The first-connect layout chooser's model: which options it shows, the
-//! "Open all active sessions" picker, the keyboard's focus ring, and the
-//! messages that lay the chosen arrangement out once the daemon answers;
-//! and the import modal a tailnet host's changed session count offers,
-//! which shares the chooser's picker.
+//! "Open all active sessions" picker (a [`LayoutPicker`]), the keyboard's
+//! focus ring, and the messages that lay the chosen arrangement out once the
+//! daemon answers.
 
-use protocol::{ClientMessage, ClonableLayout, InitLayoutKind, RearrangeLayout};
+use protocol::{ClientMessage, ClonableLayout, InitLayoutKind};
 
-/// The pane area's aspect the Auto grid shape assumes before the area has
-/// been measured.
-pub(crate) const FALLBACK_ASPECT: f32 = 16.0 / 10.0;
-/// The largest "Max sessions per tab".
-const MAX_PER_TAB_LIMIT: usize = 64;
+pub(crate) use crate::layout_picker::Arrangement;
+use crate::layout_picker::{LayoutPicker, Mode};
+
 /// How much of a nameless client's id its option shows.
 const SHORT_ID_LEN: usize = 6;
-
-/// How "Open all active sessions" lays the panes out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Mode {
-    Grid,
-    SideBySide,
-    Stacked,
-}
 
 /// A control of the chooser that takes a press and the keyboard's focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,26 +48,9 @@ impl Control {
     }
 }
 
-/// How the panes of every active session are laid out once the daemon has
-/// put them in one tab.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Arrangement {
-    pub(crate) layout: RearrangeLayout,
-    /// At most this many panes per tab; `None` keeps them all in one.
-    pub(crate) max_per_tab: Option<usize>,
-}
-
 /// What a press chose: the layout to ask the daemon for, and the
 /// arrangement to apply to its answer.
 pub(crate) type Choice = (InitLayoutKind, Option<Arrangement>);
-
-/// A grid shape the picker offers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GridShape {
-    /// Columns per row; 0 is Auto.
-    pub(crate) cols: usize,
-    pub(crate) label: String,
-}
 
 /// The open chooser.
 #[derive(Debug, Clone)]
@@ -87,13 +59,10 @@ pub(crate) struct LayoutChooser {
     /// window does not draw.
     remote: bool,
     has_legacy: bool,
-    count: usize,
     clonable: Vec<ClonableLayout>,
     expanded: bool,
-    mode: Mode,
-    /// The grid shape picked; 0 is Auto.
-    cols: usize,
-    max_per_tab: Option<usize>,
+    /// The "Open all" picker, over the active sessions' count.
+    picker: LayoutPicker,
     focus: Control,
 }
 
@@ -110,12 +79,9 @@ impl LayoutChooser {
         Self {
             remote,
             has_legacy,
-            count: active_session_count,
             clonable,
             expanded: false,
-            mode: Mode::Grid,
-            cols: 0,
-            max_per_tab: None,
+            picker: LayoutPicker::new(active_session_count, None),
             focus: Control::StartEmpty,
         }
     }
@@ -128,12 +94,12 @@ impl LayoutChooser {
         if self.remote {
             return out;
         }
-        if self.count > 0 {
+        if self.picker.count() > 0 {
             out.push(Control::OpenAll);
             if self.expanded {
                 out.push(Control::Mode(Mode::Grid));
-                if self.mode == Mode::Grid {
-                    out.extend(std::iter::once(0).chain(2..self.count).map(Control::Shape));
+                if self.picker.mode() == Mode::Grid {
+                    out.extend(self.picker.shape_cols().map(Control::Shape));
                 }
                 out.extend([
                     Control::Mode(Mode::SideBySide),
@@ -191,22 +157,13 @@ impl LayoutChooser {
         match control {
             Control::StartEmpty => return Some((InitLayoutKind::Empty, None)),
             Control::OpenAll => self.expanded = !self.expanded,
-            Control::Mode(mode) => self.mode = *mode,
-            Control::Shape(cols) => self.cols = *cols,
-            Control::MaxDown => {
-                self.max_per_tab = self
-                    .max_per_tab
-                    .and_then(|max| max.checked_sub(1))
-                    .filter(|max| *max > 0);
-            }
-            Control::MaxUp => {
-                self.max_per_tab = Some(
-                    self.max_per_tab
-                        .map_or(1, |max| (max + 1).min(MAX_PER_TAB_LIMIT)),
-                );
-            }
+            Control::Mode(mode) => self.picker.set_mode(*mode),
+            Control::Shape(cols) => self.picker.set_shape(*cols),
+            Control::MaxDown => self.picker.max_down(),
+            Control::MaxUp => self.picker.max_up(),
             Control::Confirm => {
-                return Some((InitLayoutKind::AllSessions, Some(self.arrangement(aspect))));
+                let arrangement = self.picker.arrangement(aspect);
+                return Some((InitLayoutKind::AllSessions, Some(arrangement)));
             }
             Control::AdoptLegacy => return Some((InitLayoutKind::CloneLegacy, None)),
             Control::Clone(client_id) => {
@@ -229,8 +186,8 @@ impl LayoutChooser {
     pub(crate) fn is_selected(&self, control: &Control) -> bool {
         match control {
             Control::OpenAll => self.expanded,
-            Control::Mode(mode) => self.mode == *mode,
-            Control::Shape(cols) => self.cols == *cols,
+            Control::Mode(mode) => self.picker.mode() == *mode,
+            Control::Shape(cols) => self.picker.cols() == *cols,
             _ => false,
         }
     }
@@ -244,11 +201,7 @@ impl LayoutChooser {
             Control::Mode(Mode::Grid) => "Grid".to_owned(),
             Control::Mode(Mode::SideBySide) => "Side by side".to_owned(),
             Control::Mode(Mode::Stacked) => "Stacked".to_owned(),
-            Control::Shape(cols) => grid_shapes(self.count)
-                .into_iter()
-                .find(|shape| shape.cols == *cols)
-                .map(|shape| shape.label)
-                .unwrap_or_default(),
+            Control::Shape(cols) => self.picker.shape_label(*cols),
             Control::MaxDown => "−".to_owned(),
             Control::MaxUp => "+".to_owned(),
             Control::Confirm => self.confirm_label(),
@@ -261,7 +214,9 @@ impl LayoutChooser {
     pub(crate) fn detail(&self, control: &Control) -> Option<String> {
         let detail = match control {
             Control::StartEmpty => "add the sessions you want yourself".to_owned(),
-            Control::OpenAll => format!("one pane per running session ({})", self.count),
+            Control::OpenAll => {
+                format!("one pane per running session ({})", self.picker.count())
+            }
             Control::AdoptLegacy => "the tabs from before per-window layouts".to_owned(),
             Control::Clone(_) => "same sessions, your own independent panes".to_owned(),
             _ => return None,
@@ -271,16 +226,16 @@ impl LayoutChooser {
 
     /// The max-per-tab stepper's value: `all`, or the limit.
     pub(crate) fn max_label(&self) -> String {
-        self.max_per_tab
-            .map_or_else(|| "all".to_owned(), |max| max.to_string())
+        self.picker.max_label()
     }
 
     fn confirm_label(&self) -> String {
-        let sessions = format!("Open {} {}", self.count, plural(self.count, "session"));
-        let Some(max) = self.max_per_tab else {
+        let count = self.picker.count();
+        let sessions = format!("Open {count} {}", plural(count, "session"));
+        let Some(max) = self.picker.max_per_tab() else {
             return sessions;
         };
-        let tabs = self.count.div_ceil(max);
+        let tabs = count.div_ceil(max);
         format!("{sessions}, {tabs} {}", plural(tabs, "tab"))
     }
 
@@ -297,31 +252,6 @@ impl LayoutChooser {
             format!("Copy another window's layout ({short})")
         }
     }
-
-    fn arrangement(&self, aspect: f32) -> Arrangement {
-        let layout = match self.mode {
-            Mode::SideBySide => RearrangeLayout::Horizontal,
-            Mode::Stacked => RearrangeLayout::Vertical,
-            Mode::Grid => {
-                // Auto names no count and carries the area's shape, so the
-                // daemon re-picks the columns when the area changes; a picked
-                // shape keeps the fixed count it names.
-                let auto = self.cols == 0;
-                RearrangeLayout::Grid {
-                    cols: if auto {
-                        0
-                    } else {
-                        u32::try_from(self.cols).unwrap_or(u32::MAX)
-                    },
-                    aspect: auto.then_some(aspect),
-                }
-            }
-        };
-        Arrangement {
-            layout,
-            max_per_tab: self.max_per_tab,
-        }
-    }
 }
 
 fn plural(count: usize, noun: &str) -> String {
@@ -330,22 +260,6 @@ fn plural(count: usize, noun: &str) -> String {
     } else {
         format!("{noun}s")
     }
-}
-
-/// The grid shapes for `n` panes: Auto, then every column count strictly
-/// between one column and `n`, each `cols × rows`. Auto's count belongs to the
-/// daemon, which fits it to the pane area.
-pub(crate) fn grid_shapes(n: usize) -> Vec<GridShape> {
-    let auto_shape = GridShape {
-        cols: 0,
-        label: "Auto".to_owned(),
-    };
-    std::iter::once(auto_shape)
-        .chain((2..n).map(|cols| GridShape {
-            cols,
-            label: format!("{cols} × {}", n.div_ceil(cols)),
-        }))
-        .collect()
 }
 
 /// What lays `pane_ids`, the first tab's panes in order, out as
@@ -397,7 +311,10 @@ fn step_focus<T: PartialEq + Clone>(controls: &[T], current: &T, forward: bool) 
 
 #[cfg(test)]
 mod tests {
+    use protocol::RearrangeLayout;
+
     use super::*;
+    use crate::layout_picker::grid_shapes;
 
     const ASPECT: f32 = 16.0 / 10.0;
 
