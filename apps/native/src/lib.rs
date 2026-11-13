@@ -5134,6 +5134,7 @@ impl RootView {
         self.on_client_update_message(host, &msg, cx);
         self.on_remote_update_message(host, &msg, cx);
         self.on_shell_message(host, &msg, window, cx);
+        self.on_subagent_listing(host, &msg);
         self.on_transcript_message(host, &msg, cx);
         self.on_host_rebind_message(host, &msg, cx);
         if self.on_panel_message(host, &msg, window, cx) {

@@ -30,6 +30,8 @@ use crate::target::{HostKey, Target};
 pub(crate) struct HostMirrors {
     /// The daemon's keep-awake state.
     pub(crate) keep_awake: Option<KeepAwake>,
+    /// How the daemon lists finished subagents.
+    pub(crate) subagent_listing: Option<protocol::SubagentListing>,
     /// The daemon's remote access status.
     pub(crate) remote_status: Option<RemoteStatusView>,
     /// The daemon's launch commands, by agent.
@@ -652,6 +654,7 @@ impl RootView {
     pub(crate) fn forget_daemon_settings(&mut self, host: &HostKey) {
         if let Some(mirrors) = self.mirrors_of_mut(host) {
             mirrors.keep_awake = None;
+            mirrors.subagent_listing = None;
             mirrors.agent_commands = None;
             mirrors.agent_user_hooks.clear();
             mirrors.agent_user_hooks_pending.clear();

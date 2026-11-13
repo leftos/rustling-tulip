@@ -3460,8 +3460,13 @@ impl RootView {
     /// listed.
     #[must_use]
     pub fn leaf_hover(&self, id: &str) -> Option<String> {
-        self.listed_leaf(id)
-            .map(|leaf| leaf.hover(self.sidebar.leaf_density()))
+        self.listed_leaf(id).map(|leaf| {
+            leaf.hover(crate::subagents::row_density(
+                &leaf,
+                self.sidebar.leaf_density(),
+                self.sidebar.finished_subagent_rows(),
+            ))
+        })
     }
 
     /// Leaf `id`'s inline buttons: selector and hover text.

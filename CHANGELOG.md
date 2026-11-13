@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- Choose in Settings whether finished subagents stay in the sidebar, how many and for how long, and whether their rows draw compact.
+
 ### Fixed
 
 - Rebinding a machine's sessions, or opening them from the first-connect layout chooser, now fits each session to its new pane at once.

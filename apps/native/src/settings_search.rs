@@ -345,6 +345,23 @@ fn general_entries() -> Vec<Entry> {
             "Sidebar",
             Gate::Always,
         ),
+        Entry {
+            aliases: &["hide"],
+            ..entry(
+                SettingsTab::General,
+                "settings-show-finished-subagents-on",
+                "Show finished subagents",
+                "Sidebar",
+                Gate::Always,
+            )
+        },
+        entry(
+            SettingsTab::General,
+            "settings-finished-subagent-rows-follow",
+            "Finished subagent rows",
+            "Sidebar",
+            Gate::Always,
+        ),
         entry(
             SettingsTab::General,
             "settings-sessions-under-repos-every",
@@ -392,6 +409,26 @@ fn general_entries() -> Vec<Entry> {
                 SettingsTab::General,
                 "settings-default-shell-command",
                 "Custom shell command",
+                "Terminal behavior",
+                Gate::Always,
+            )
+        },
+        Entry {
+            aliases: &["cap"],
+            ..entry(
+                SettingsTab::General,
+                "settings-subagent-cap-1",
+                "Finished subagents kept",
+                "Terminal behavior",
+                Gate::Always,
+            )
+        },
+        Entry {
+            aliases: &["minutes"],
+            ..entry(
+                SettingsTab::General,
+                "settings-subagent-keep-until-prompt",
+                "Keep finished subagents for",
                 "Terminal behavior",
                 Gate::Always,
             )
@@ -916,6 +953,46 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
     (
         "settings-leaf-density-compact",
         "another choice of the Leaf density row",
+    ),
+    (
+        "settings-show-finished-subagents-off",
+        "another choice of the Show finished subagents row",
+    ),
+    (
+        "settings-finished-subagent-rows-compact",
+        "another choice of the Finished subagent rows row",
+    ),
+    (
+        "settings-subagent-cap-3",
+        "another choice of the Finished subagents kept row",
+    ),
+    (
+        "settings-subagent-cap-5",
+        "another choice of the Finished subagents kept row",
+    ),
+    (
+        "settings-subagent-cap-10",
+        "another choice of the Finished subagents kept row",
+    ),
+    (
+        "settings-subagent-cap-20",
+        "another choice of the Finished subagents kept row",
+    ),
+    (
+        "settings-subagent-keep-5",
+        "another choice of the Keep finished subagents for row",
+    ),
+    (
+        "settings-subagent-keep-15",
+        "another choice of the Keep finished subagents for row",
+    ),
+    (
+        "settings-subagent-keep-60",
+        "another choice of the Keep finished subagents for row",
+    ),
+    (
+        "settings-subagent-keep-240",
+        "another choice of the Keep finished subagents for row",
     ),
     (
         "settings-sessions-under-repos-busy",

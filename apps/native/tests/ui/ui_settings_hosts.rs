@@ -12,6 +12,7 @@ use crate::support;
 use gpui::{TestAppContext, px};
 use protocol::{
     AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, OptionValue,
+    SubagentListing,
 };
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
@@ -777,6 +778,188 @@ fn keep_awake_label_names_the_selected_host(cx: &mut TestAppContext) {
 
     h.click_on(LOCAL_ROW);
     assert_eq!(label(&mut h), "Keep this PC awake", "back on This PC");
+}
+
+fn listing(finished_cap: u32, keep_minutes: Option<u32>) -> SubagentListing {
+    SubagentListing {
+        finished_cap,
+        keep_minutes,
+    }
+}
+
+fn listing_echo(listing: SubagentListing) -> DaemonMessage {
+    DaemonMessage::SubagentListing { listing }
+}
+
+/// The listing of every `SetSubagentListing` among `sent`.
+fn listing_sets(sent: &[ClientMessage]) -> Vec<SubagentListing> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetSubagentListing { listing, .. } => Some(*listing),
+            _ => None,
+        })
+        .collect()
+}
+
+fn listing_shown(h: &mut Harness<'_>) -> Option<SubagentListing> {
+    h.root(|root, _| root.subagent_listing_shown())
+}
+
+/// Clicks the General page's `selector` once it is scrolled into view.
+fn click_general(h: &mut Harness<'_>, selector: &str) {
+    h.scroll_into_view("settings-content", selector);
+    h.click_on(selector);
+}
+
+/// This PC, whose daemon has no finished-subagent setting, and box, whose
+/// daemon has one and reported `listing`; Settings open on box's General
+/// page, nothing sent yet.
+fn box_listing<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    listing: SubagentListing,
+) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &Fixture::single(session("a1").build()));
+    let mut host = h.host(&remote());
+    host.connect_with_features(&[protocol::FEATURE_SUBAGENT_LISTING]);
+    host.send(listing_echo(listing));
+    host.sent();
+    h.sent();
+    h.keys("ctrl-,");
+    h.click_on(&remote_row());
+    h.click_on("settings-tab-general");
+    h
+}
+
+#[gpui::test]
+fn subagent_listing_apply_sends_set_subagent_listing_to_the_selected_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = box_listing(cx, &dir, listing(5, None));
+    click_general(&mut h, "settings-subagent-cap-10");
+    click_general(&mut h, "settings-subagent-keep-60");
+    assert!(
+        listing_sets(&h.host(&remote()).sent()).is_empty(),
+        "the choices wait for Apply"
+    );
+    assert_eq!(
+        listing_shown(&mut h),
+        Some(listing(10, Some(60))),
+        "both pending choices draw"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(
+        listing_sets(&h.host(&remote()).sent()),
+        [listing(10, Some(60))],
+        "one message carries both rows to box"
+    );
+    let local = listing_sets(&h.sent());
+    assert!(local.is_empty(), "nothing goes to This PC: {local:?}");
+}
+
+#[gpui::test]
+fn ok_waits_for_the_subagent_listing_echo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = box_listing(cx, &dir, listing(5, None));
+    click_general(&mut h, "settings-subagent-cap-3");
+    h.click_on("settings-ok");
+    assert_eq!(listing_sets(&h.host(&remote()).sent()), [listing(3, None)]);
+    assert!(
+        h.root(|root, _| root.settings_ok_waiting()),
+        "OK waits for box's echo"
+    );
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Settings stays open"
+    );
+    h.host(&remote()).send(listing_echo(listing(3, None)));
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "the echo closed Settings"
+    );
+}
+
+#[gpui::test]
+fn subagent_listing_rows_hide_for_a_host_without_the_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = box_listing(cx, &dir, listing(5, None));
+    let ring = tab_ring(&mut h);
+    assert!(
+        ring.contains(&"settings-subagent-cap-1")
+            && ring.contains(&"settings-subagent-keep-until-prompt"),
+        "box's General ring walks both rows: {ring:?}"
+    );
+
+    h.click_on(LOCAL_ROW);
+    h.click_on("settings-tab-general");
+    assert_eq!(shown_host(&mut h), HostKey::Local);
+    // Painted bounds keep their last paint, so box's rows would still
+    // report drawn: the ring is what proves the rows are gone.
+    let ring = tab_ring(&mut h);
+    assert!(
+        !ring
+            .iter()
+            .any(|selector| selector.starts_with("settings-subagent-")),
+        "This PC's daemon has no such setting, so its ring holds neither row: {ring:?}"
+    );
+    assert_eq!(listing_shown(&mut h), None, "This PC reported none");
+    assert_tab_reaches_only_drawn_controls(&mut h);
+}
+
+#[gpui::test]
+fn a_held_listing_takes_a_new_echo_for_the_row_not_touched(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = box_listing(cx, &dir, listing(5, None));
+    click_general(&mut h, "settings-subagent-cap-10");
+    // Another client sets the other row on box.
+    h.host(&remote()).send(listing_echo(listing(5, Some(60))));
+    assert_eq!(
+        listing_shown(&mut h),
+        Some(listing(10, Some(60))),
+        "the held cap stays, the untouched row takes the echo"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(
+        listing_sets(&h.host(&remote()).sent()),
+        [listing(10, Some(60))],
+        "Apply keeps the other client's window"
+    );
+}
+
+#[gpui::test]
+fn a_held_listing_that_matches_a_new_echo_is_dropped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = box_listing(cx, &dir, listing(5, None));
+    click_general(&mut h, "settings-subagent-cap-10");
+    h.host(&remote()).send(listing_echo(listing(10, None)));
+    assert!(
+        !h.root(|root, _| root.settings_have_pending_edits()),
+        "the held listing equals box's and is dropped"
+    );
+    h.click_on("settings-apply");
+    assert!(
+        listing_sets(&h.host(&remote()).sent()).is_empty(),
+        "Apply sends nothing"
+    );
+}
+
+#[gpui::test]
+fn the_subagent_listing_rows_show_the_hosts_echoed_value(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = box_listing(cx, &dir, listing(3, Some(15)));
+    assert_eq!(listing_shown(&mut h), Some(listing(3, Some(15))));
+
+    h.host(&remote()).send(listing_echo(listing(20, Some(240))));
+    assert_eq!(
+        listing_shown(&mut h),
+        Some(listing(20, Some(240))),
+        "a later echo, as another client's set, shows"
+    );
+    click_general(&mut h, "settings-subagent-keep-until-prompt");
+    assert_eq!(
+        listing_shown(&mut h),
+        Some(listing(20, None)),
+        "a pending choice keeps the other row's echoed value"
+    );
 }
 
 /// One of a host's default-shell choices, every one installed and hosting

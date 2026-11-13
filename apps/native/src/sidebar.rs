@@ -2711,10 +2711,6 @@ impl SidebarModel {
 
     /// Records whether finished and failed subagent rows show; returns
     /// whether it changed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the tests save and load it; no row calls it")
-    )]
     pub fn set_show_finished_subagents(&mut self, show: bool) -> bool {
         if self.ui.general.show_finished_subagents == show {
             return false;
@@ -2730,10 +2726,6 @@ impl SidebarModel {
 
     /// Records how a finished or failed subagent row draws; returns whether
     /// it changed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the tests save and load it; no row calls it")
-    )]
     pub fn set_finished_subagent_rows(&mut self, rows: FinishedSubagentRows) -> bool {
         if self.ui.general.finished_subagent_rows == rows {
             return false;

@@ -20,8 +20,9 @@ use gpui::{
 use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, AutoSwitchStrategy, ClientMessage, DaemonMessage,
     FEATURE_AGENT_COMMANDS, FEATURE_AGENT_USER_HOOKS, FEATURE_DEFAULT_SHELL,
-    FEATURE_DETAILED_LOGGING, FieldKind, KeepAwakeMode, KeyState, OptionValue, RemoteState, Secret,
-    SummarizerKeySource, SummarizerSettings, SummarySource, UserHooksWire, error_codes,
+    FEATURE_DETAILED_LOGGING, FEATURE_SUBAGENT_LISTING, FieldKind, KeepAwakeMode, KeyState,
+    OptionValue, RemoteState, Secret, SubagentListing, SummarizerKeySource, SummarizerSettings,
+    SummarySource, UserHooksWire, error_codes,
 };
 
 use crate::accounts_settings::{AccountsControl, AliasFields, RemoveConfirm};
@@ -48,8 +49,8 @@ use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_search::{self, DrawnTab, TabHits, Visibility};
 use crate::shell_choice::{self, HostShell, RowState, ShellEntry, ShellSetting};
 use crate::sidebar::{
-    CountMode, FINISHED_GRACE_CHOICES, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos,
-    SidebarView, ToastSound, ToastStyle,
+    CountMode, FINISHED_GRACE_CHOICES, FinishedSubagentRows, LeafDensity, NotifySkip, RepoSort,
+    SessionsUnderRepos, SidebarView, ToastSound, ToastStyle,
 };
 use crate::sound::{self, BundledSound, NotifyKind, SOUND_EXTENSIONS};
 use crate::spawn_view::{
@@ -415,6 +416,20 @@ const SIDEBAR_VIEW_CHOICES: [SidebarView; 2] = [SidebarView::Repos, SidebarView:
 /// The General tab's Leaf density choices, in the order they show.
 const LEAF_DENSITY_CHOICES: [LeafDensity; 2] = [LeafDensity::Comfortable, LeafDensity::Compact];
 
+/// The General tab's Show finished subagents choices, On then Off.
+const SHOW_FINISHED_SUBAGENTS_CHOICES: [bool; 2] = [true, false];
+
+/// The General tab's Finished subagent rows choices, in the order they show.
+const FINISHED_SUBAGENT_ROWS_CHOICES: [FinishedSubagentRows; 2] =
+    [FinishedSubagentRows::Follow, FinishedSubagentRows::Compact];
+
+/// The Finished subagents kept choices, in the order they show.
+const SUBAGENT_CAP_CHOICES: [u32; 5] = [1, 3, 5, 10, 20];
+
+/// The Keep finished subagents for choices in minutes, in the order they
+/// show; `None` keeps one until the next prompt.
+const SUBAGENT_KEEP_CHOICES: [Option<u32>; 5] = [None, Some(5), Some(15), Some(60), Some(240)];
+
 /// The General tab's Sessions under repos choices, in the order they show.
 const SESSIONS_UNDER_REPOS_CHOICES: [SessionsUnderRepos; 3] = [
     SessionsUnderRepos::Every,
@@ -566,6 +581,9 @@ pub(crate) enum SettingsControl {
     KeepAwake(KeepAwakeMode),
     SidebarView(SidebarView),
     LeafDensity(LeafDensity),
+    /// A Show finished subagents choice: On (`true`) or Off.
+    ShowFinishedSubagents(bool),
+    FinishedSubagentRows(FinishedSubagentRows),
     SessionsUnderRepos(SessionsUnderRepos),
     RepoSort(RepoSort),
     CopyOnSelect,
@@ -574,6 +592,12 @@ pub(crate) enum SettingsControl {
     DefaultShell,
     /// The Default shell row's Custom command field, while Custom is chosen.
     DefaultShellCommand,
+    /// A Finished subagents kept choice of the shown host, one of
+    /// [`SUBAGENT_CAP_CHOICES`].
+    SubagentCap(u32),
+    /// A Keep finished subagents for choice of the shown host, one of
+    /// [`SUBAGENT_KEEP_CHOICES`].
+    SubagentKeep(Option<u32>),
     ChatMode(ChatMode),
     ChatWidth,
     CheckUpdates,
@@ -675,6 +699,34 @@ pub(crate) enum KeySourceChoice {
 const KEY_SOURCE_CHOICES: [KeySourceChoice; 2] = [KeySourceChoice::Stored, KeySourceChoice::Env];
 
 impl SettingsControl {
+    /// The selector of a finished-subagent control: the two Sidebar rows'
+    /// and the shown host's two listing rows'.
+    const fn subagent_selector(self) -> &'static str {
+        match self {
+            Self::ShowFinishedSubagents(true) => "settings-show-finished-subagents-on",
+            Self::ShowFinishedSubagents(false) => "settings-show-finished-subagents-off",
+            Self::FinishedSubagentRows(FinishedSubagentRows::Follow) => {
+                "settings-finished-subagent-rows-follow"
+            }
+            Self::FinishedSubagentRows(FinishedSubagentRows::Compact) => {
+                "settings-finished-subagent-rows-compact"
+            }
+            Self::SubagentCap(1) => "settings-subagent-cap-1",
+            Self::SubagentCap(3) => "settings-subagent-cap-3",
+            Self::SubagentCap(5) => "settings-subagent-cap-5",
+            Self::SubagentCap(10) => "settings-subagent-cap-10",
+            // Only the offered caps are built, so no other value reaches here.
+            Self::SubagentCap(_) => "settings-subagent-cap-20",
+            Self::SubagentKeep(None) => "settings-subagent-keep-until-prompt",
+            Self::SubagentKeep(Some(5)) => "settings-subagent-keep-5",
+            Self::SubagentKeep(Some(15)) => "settings-subagent-keep-15",
+            Self::SubagentKeep(Some(60)) => "settings-subagent-keep-60",
+            // Only the offered windows are built, so no other value reaches
+            // here; nor does any other control.
+            _ => "settings-subagent-keep-240",
+        }
+    }
+
     pub(crate) const fn selector(self) -> &'static str {
         match self {
             Self::KeepAwake(mode) => match mode {
@@ -687,6 +739,10 @@ impl SettingsControl {
             Self::SidebarView(SidebarView::Tabs) => "settings-sidebar-view-tabs",
             Self::LeafDensity(LeafDensity::Comfortable) => "settings-leaf-density-comfortable",
             Self::LeafDensity(LeafDensity::Compact) => "settings-leaf-density-compact",
+            Self::ShowFinishedSubagents(_)
+            | Self::FinishedSubagentRows(_)
+            | Self::SubagentCap(_)
+            | Self::SubagentKeep(_) => self.subagent_selector(),
             Self::SessionsUnderRepos(SessionsUnderRepos::Every) => {
                 "settings-sessions-under-repos-every"
             }
@@ -2175,6 +2231,38 @@ impl RootView {
             .map(|state| pending.unwrap_or(state.mode))
     }
 
+    /// The shown host's finished-subagent listing: its daemon's last report
+    /// with any pending choice over it, or `None` while that daemon has not
+    /// reported one and the rows choose nothing.
+    #[must_use]
+    pub fn subagent_listing_shown(&self) -> Option<SubagentListing> {
+        let pending = self
+            .settings_pending
+            .host(&self.settings_host)
+            .iter()
+            .find_map(|value| match value {
+                HostPending::SubagentListing(listing) => Some(*listing),
+                _ => None,
+            });
+        self.settings_mirrors()
+            .subagent_listing
+            .map(|saved| pending.unwrap_or(saved))
+    }
+
+    /// Whether Show finished subagents draws On: the saved value with any
+    /// pending press over it.
+    #[must_use]
+    pub fn show_finished_subagents_shown(&self) -> bool {
+        self.shown_local().general.show_finished_subagents
+    }
+
+    /// Whether Finished subagent rows draws Always compact: the saved value
+    /// with any pending press over it.
+    #[must_use]
+    pub fn finished_subagent_rows_compact_shown(&self) -> bool {
+        self.shown_local().general.finished_subagent_rows == FinishedSubagentRows::Compact
+    }
+
     /// The keep-awake status line of the host Settings shows.
     #[must_use]
     pub fn keep_awake_status(&self) -> &'static str {
@@ -2252,9 +2340,12 @@ impl RootView {
                 );
                 let live = self.shell_row_state() == RowState::Live;
                 let command = self.shell_command_drawn();
+                let listing = self.subagent_listing_shown().is_some()
+                    && self.subagent_listing_supported(&self.settings_host);
                 controls.retain(|control| match control {
                     SettingsControl::DefaultShell => live,
                     SettingsControl::DefaultShellCommand => command,
+                    SettingsControl::SubagentCap(_) | SettingsControl::SubagentKeep(_) => listing,
                     _ => true,
                 });
                 controls
@@ -2310,9 +2401,13 @@ impl RootView {
         match tab {
             SettingsTab::General => {
                 let mut controls = general_controls(true, true);
-                if !self.shell_command_drawn() {
-                    controls.retain(|control| *control != SettingsControl::DefaultShellCommand);
-                }
+                let command = self.shell_command_drawn();
+                let listing = self.subagent_listing_supported(&self.settings_host);
+                controls.retain(|control| match control {
+                    SettingsControl::DefaultShellCommand => command,
+                    SettingsControl::SubagentCap(_) | SettingsControl::SubagentKeep(_) => listing,
+                    _ => true,
+                });
                 controls
             }
             SettingsTab::Dashboard => self.dashboard_controls(true),
@@ -2833,6 +2928,7 @@ impl RootView {
                         | HostPending::AgentField { .. }
                         | HostPending::RemoteEnabled(_)
                         | HostPending::DefaultShell(_)
+                        | HostPending::SubagentListing(_)
                         | HostPending::UserHooks { .. }
                         | HostPending::AutoSwitchEnabled(_)
                         | HostPending::AutoSwitchThreshold(_)
@@ -2991,6 +3087,7 @@ impl RootView {
                 } => self.set_agent_setting(host, &agent, &field, value, false),
                 HostPending::RemoteEnabled(on) => remote = Some(on),
                 HostPending::DefaultShell(setting) => self.apply_default_shell(host, setting),
+                HostPending::SubagentListing(listing) => self.apply_subagent_listing(host, listing),
                 HostPending::UserHooks { agent, enabled } => {
                     self.apply_user_hooks(host, agent, enabled);
                 }
@@ -3605,6 +3702,9 @@ impl RootView {
         }
         match control {
             SettingsControl::KeepAwake(mode) => self.choose_keep_awake_mode(mode),
+            SettingsControl::SubagentCap(_) | SettingsControl::SubagentKeep(_) => {
+                self.choose_subagent_listing(control);
+            }
             SettingsControl::CheckNow => self.check_for_updates_now(cx),
             SettingsControl::OpenLogsFolder => self.open_logs_folder(window, cx),
             SettingsControl::NotifySettingsLink => self.open_windows_notification_settings(cx),
@@ -3651,6 +3751,8 @@ impl RootView {
             | SettingsControl::DashboardCap
             | SettingsControl::SidebarView(_)
             | SettingsControl::LeafDensity(_)
+            | SettingsControl::ShowFinishedSubagents(_)
+            | SettingsControl::FinishedSubagentRows(_)
             | SettingsControl::SessionsUnderRepos(_)
             | SettingsControl::RepoSort(_)
             | SettingsControl::CopyOnSelect
@@ -3732,6 +3834,10 @@ impl RootView {
         Some(match control {
             SettingsControl::SidebarView(view) => LocalPending::SidebarView(view),
             SettingsControl::LeafDensity(density) => LocalPending::LeafDensity(density),
+            SettingsControl::ShowFinishedSubagents(show) => {
+                LocalPending::ShowFinishedSubagents(show)
+            }
+            SettingsControl::FinishedSubagentRows(rows) => LocalPending::FinishedSubagentRows(rows),
             SettingsControl::SessionsUnderRepos(mode) => LocalPending::SessionsUnderRepos(mode),
             SettingsControl::RepoSort(sort) => LocalPending::RepoSort(sort),
             SettingsControl::CopyOnSelect => LocalPending::CopyOnSelect(!general.copy_on_select),
@@ -5052,6 +5158,56 @@ impl RootView {
         }
     }
 
+    /// Takes `host`'s daemon's [`DaemonMessage::SubagentListing`] into that
+    /// host's settings, rebasing a listing held for Apply onto it: a row the
+    /// user left takes the new value, and a held listing equal to the new one
+    /// is dropped.
+    pub(crate) fn on_subagent_listing(&mut self, host: &HostKey, msg: &DaemonMessage) {
+        let DaemonMessage::SubagentListing { listing } = *msg else {
+            return;
+        };
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
+            return;
+        };
+        let previous = mirrors.subagent_listing.replace(listing);
+        let held = self
+            .settings_pending
+            .host(host)
+            .iter()
+            .find_map(|value| match value {
+                HostPending::SubagentListing(held) => Some(*held),
+                _ => None,
+            });
+        if let (Some(previous), Some(held)) = (previous, held) {
+            self.settings_pending.set_host(
+                host,
+                HostPending::SubagentListing(rebase_listing(held, previous, listing)),
+                Some(&HostPending::SubagentListing(listing)),
+            );
+        }
+    }
+
+    /// Chooses a Finished subagents kept or Keep finished subagents for
+    /// value on the shown host, pending both rows at once until Apply.
+    /// Nothing is chosen while the daemon has not reported its listing.
+    fn choose_subagent_listing(&mut self, control: SettingsControl) {
+        let Some(saved) = self.settings_mirrors().subagent_listing else {
+            return;
+        };
+        let mut listing = self.subagent_listing_shown().unwrap_or(saved);
+        match control {
+            SettingsControl::SubagentCap(cap) => listing.finished_cap = cap,
+            SettingsControl::SubagentKeep(keep) => listing.keep_minutes = keep,
+            _ => return,
+        }
+        let host = self.settings_host.clone();
+        self.settings_pending.set_host(
+            &host,
+            HostPending::SubagentListing(listing),
+            Some(&HostPending::SubagentListing(saved)),
+        );
+    }
+
     /// Apply reaching a pending This PC setting: it is recorded and saved,
     /// and what it changes follows now. Returns whether it could not be
     /// applied, in which case it stays pending.
@@ -5180,6 +5336,12 @@ impl RootView {
     fn commit_general(&mut self, value: &LocalPending, cx: &mut Context<Self>) -> bool {
         match *value {
             LocalPending::LeafDensity(density) => self.sidebar.set_leaf_density(density),
+            LocalPending::ShowFinishedSubagents(show) => {
+                self.sidebar.set_show_finished_subagents(show)
+            }
+            LocalPending::FinishedSubagentRows(rows) => {
+                self.sidebar.set_finished_subagent_rows(rows)
+            }
             LocalPending::SessionsUnderRepos(mode) => self.sidebar.set_sessions_under_repos(mode),
             LocalPending::RepoSort(sort) => self.sidebar.set_repo_sort(sort),
             LocalPending::CopyOnSelect(on) => {
@@ -6861,6 +7023,74 @@ impl RootView {
         );
     }
 
+    /// Whether `host`'s connection is open on a daemon that lists finished
+    /// subagents by a setting.
+    fn subagent_listing_supported(&self, host: &HostKey) -> bool {
+        self.conn_of(host)
+            .is_some_and(|conn| conn.is_open() && conn.supports(FEATURE_SUBAGENT_LISTING))
+    }
+
+    /// Apply reaching `host`'s pending finished-subagent listing: both rows
+    /// sent in one message, unless the host can no longer take it.
+    fn apply_subagent_listing(&mut self, host: &HostKey, listing: SubagentListing) {
+        if !self.subagent_listing_supported(host) {
+            tracing::info!(
+                ?host,
+                ?listing,
+                "settings: dropped a subagent listing the host cannot take"
+            );
+            return;
+        }
+        let request_id = crate::new_request_id();
+        tracing::info!(?host, ?listing, %request_id, "settings: applying the subagent listing");
+        self.send_setting(
+            host,
+            ClientMessage::SetSubagentListing {
+                listing,
+                request_id: Some(request_id),
+            },
+        );
+    }
+
+    /// The Finished subagents kept and Keep finished subagents for rows of
+    /// the shown host, none for a host whose daemon has no such setting; the
+    /// choices are dimmed, none chosen, until the daemon reports its listing.
+    fn subagent_listing_rows(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        if !self.subagent_listing_supported(&self.settings_host) {
+            return Vec::new();
+        }
+        let shown = self.subagent_listing_shown();
+        let lock = || {
+            if shown.is_some() {
+                RowLock::Live
+            } else {
+                RowLock::Dimmed
+            }
+        };
+        let caps = SUBAGENT_CAP_CHOICES.map(|cap| {
+            (
+                SettingsControl::SubagentCap(cap),
+                subagent_cap_text(cap),
+                shown.is_some_and(|listing| listing.finished_cap == cap),
+            )
+        });
+        let keeps = SUBAGENT_KEEP_CHOICES.map(|keep| {
+            (
+                SettingsControl::SubagentKeep(keep),
+                subagent_keep_text(keep),
+                shown.is_some_and(|listing| listing.keep_minutes == keep),
+            )
+        });
+        vec![
+            choice_row("Finished subagents kept", &caps, lock(), focused, cx),
+            choice_row("Keep finished subagents for", &keeps, lock(), focused, cx),
+        ]
+    }
+
     /// Folds `host`'s daemon's `DefaultShell` or `ShellChoices`; any other
     /// message is left alone.
     pub(crate) fn on_shell_message(
@@ -7133,7 +7363,8 @@ impl RootView {
             "Off: the first click on a pane that isn't focused only focuses it.",
             &t,
         ))
-        .child(self.default_shell_row(focused, cx));
+        .child(self.default_shell_row(focused, cx))
+        .children(self.subagent_listing_rows(focused, cx));
         let mut rows = vec![
             power.into_any_element(),
             sidebar,
@@ -7411,6 +7642,8 @@ impl RootView {
             )
         });
         let general = self.shown_local().general;
+        let finished = show_finished_subagents_choices(general.show_finished_subagents);
+        let finished_rows = finished_subagent_rows_choices(general.finished_subagent_rows);
         let under = sessions_under_repos_choices(general.sessions_under_repos);
         let sorts = repo_sort_choices(general.repo_sort);
         section(
@@ -7428,6 +7661,20 @@ impl RootView {
         .child(choice_row(
             "Leaf density",
             &densities,
+            RowLock::Live,
+            focused,
+            cx,
+        ))
+        .child(choice_row(
+            "Show finished subagents",
+            &finished,
+            RowLock::Live,
+            focused,
+            cx,
+        ))
+        .child(choice_row(
+            "Finished subagent rows",
+            &finished_rows,
             RowLock::Live,
             focused,
             cx,
@@ -8650,8 +8897,9 @@ fn field_part(id: &str) -> String {
 /// The General tab's controls in drawing order; the keep-awake choices
 /// only with `keep_awake`, once the daemon reported its state, and the
 /// Diagnostics rows only with `logging`, while This PC is chosen. The
-/// Default shell row's dropdown and Custom command field are both listed;
-/// the ring leaves them out while they take no input or are not drawn.
+/// Default shell row's dropdown and Custom command field, and the
+/// finished-subagent listing rows, are all listed; the ring leaves them out
+/// while they take no input or are not drawn.
 pub(crate) fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsControl> {
     let keep_awake = keep_awake.then_some(KEEP_AWAKE_CHOICES.map(SettingsControl::KeepAwake));
     keep_awake
@@ -8659,6 +8907,8 @@ pub(crate) fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsC
         .flatten()
         .chain(SIDEBAR_VIEW_CHOICES.map(SettingsControl::SidebarView))
         .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
+        .chain(SHOW_FINISHED_SUBAGENTS_CHOICES.map(SettingsControl::ShowFinishedSubagents))
+        .chain(FINISHED_SUBAGENT_ROWS_CHOICES.map(SettingsControl::FinishedSubagentRows))
         .chain(SESSIONS_UNDER_REPOS_CHOICES.map(SettingsControl::SessionsUnderRepos))
         .chain(REPO_SORT_CHOICES.map(SettingsControl::RepoSort))
         .chain([
@@ -8667,6 +8917,8 @@ pub(crate) fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsC
             SettingsControl::DefaultShell,
             SettingsControl::DefaultShellCommand,
         ])
+        .chain(SUBAGENT_CAP_CHOICES.map(SettingsControl::SubagentCap))
+        .chain(SUBAGENT_KEEP_CHOICES.map(SettingsControl::SubagentKeep))
         .chain(CHAT_MODE_CHOICES.map(SettingsControl::ChatMode))
         .chain([
             SettingsControl::ChatWidth,
@@ -8768,6 +9020,8 @@ enum PendingRow {
 pub(crate) enum LocalPending {
     SidebarView(SidebarView),
     LeafDensity(LeafDensity),
+    ShowFinishedSubagents(bool),
+    FinishedSubagentRows(FinishedSubagentRows),
     SessionsUnderRepos(SessionsUnderRepos),
     RepoSort(RepoSort),
     CopyOnSelect(bool),
@@ -8810,6 +9064,9 @@ pub(crate) enum HostPending {
     RemoteEnabled(bool),
     /// The Default shell row's pick, as Apply sends it.
     DefaultShell(ShellSetting),
+    /// The Finished subagents kept and Keep finished subagents for rows,
+    /// both at once, as Apply sends them.
+    SubagentListing(SubagentListing),
     /// Agent `agent`'s Hooks switch: install (`enabled`) or remove its
     /// hooks in the agent's user settings.
     UserHooks {
@@ -8987,6 +9244,7 @@ enum EchoKind {
     Summarizer,
     DetailedLogging,
     DefaultShell,
+    SubagentListing,
     UserHooks,
     /// An Accounts page write: alias, order or auto-switch.
     Accounts,
@@ -9016,6 +9274,9 @@ impl OwedEcho {
             ClientMessage::SetDetailedLogging { .. } => (EchoKind::DetailedLogging, None),
             ClientMessage::SetDefaultShell { request_id, .. } => {
                 (EchoKind::DefaultShell, request_id.clone())
+            }
+            ClientMessage::SetSubagentListing { request_id, .. } => {
+                (EchoKind::SubagentListing, request_id.clone())
             }
             ClientMessage::ConfigureRemote { .. } => (EchoKind::Remote, None),
             ClientMessage::SetAgentUserHooks { request_id, .. } => {
@@ -9061,6 +9322,7 @@ const fn echo_kind(msg: &DaemonMessage) -> Option<(EchoKind, EchoState)> {
         DaemonMessage::KeepAwakeStatus { .. } => EchoKind::KeepAwake,
         DaemonMessage::DetailedLogging { .. } => EchoKind::DetailedLogging,
         DaemonMessage::DefaultShell { .. } => EchoKind::DefaultShell,
+        DaemonMessage::SubagentListing { .. } => EchoKind::SubagentListing,
         DaemonMessage::RemoteStatus { state, .. } => {
             return Some((EchoKind::Remote, remote_echo(state)));
         }
@@ -9283,6 +9545,10 @@ impl ShownLocal {
         match value.clone() {
             LocalPending::SidebarView(view) => self.sidebar_view = view,
             LocalPending::LeafDensity(density) => self.general.leaf_density = density,
+            LocalPending::ShowFinishedSubagents(show) => {
+                self.general.show_finished_subagents = show;
+            }
+            LocalPending::FinishedSubagentRows(rows) => self.general.finished_subagent_rows = rows,
             LocalPending::SessionsUnderRepos(mode) => self.general.sessions_under_repos = mode,
             LocalPending::RepoSort(sort) => self.general.repo_sort = sort,
             LocalPending::CopyOnSelect(on) => self.general.copy_on_select = on,
@@ -9311,6 +9577,12 @@ impl ShownLocal {
         match like {
             LocalPending::SidebarView(_) => LocalPending::SidebarView(self.sidebar_view),
             LocalPending::LeafDensity(_) => LocalPending::LeafDensity(general.leaf_density),
+            LocalPending::ShowFinishedSubagents(_) => {
+                LocalPending::ShowFinishedSubagents(general.show_finished_subagents)
+            }
+            LocalPending::FinishedSubagentRows(_) => {
+                LocalPending::FinishedSubagentRows(general.finished_subagent_rows)
+            }
             LocalPending::SessionsUnderRepos(_) => {
                 LocalPending::SessionsUnderRepos(general.sessions_under_repos)
             }
@@ -9719,6 +9991,80 @@ pub(crate) enum RowLock {
     /// The choices are dimmed and inert; a line elsewhere on the tab says
     /// why.
     Dimmed,
+}
+
+/// The General tab's Show finished subagents choices, `current` selected.
+fn show_finished_subagents_choices(current: bool) -> [(SettingsControl, &'static str, bool); 2] {
+    SHOW_FINISHED_SUBAGENTS_CHOICES.map(|choice| {
+        let text = if choice { "On" } else { "Off" };
+        (
+            SettingsControl::ShowFinishedSubagents(choice),
+            text,
+            choice == current,
+        )
+    })
+}
+
+/// The Finished subagent rows row's choices, `current` marked.
+fn finished_subagent_rows_choices(
+    current: FinishedSubagentRows,
+) -> [(SettingsControl, &'static str, bool); 2] {
+    FINISHED_SUBAGENT_ROWS_CHOICES.map(|choice| {
+        let text = match choice {
+            FinishedSubagentRows::Follow => "Follow leaf density",
+            FinishedSubagentRows::Compact => "Always compact",
+        };
+        (
+            SettingsControl::FinishedSubagentRows(choice),
+            text,
+            choice == current,
+        )
+    })
+}
+
+/// `held` rebased onto the host's new `reported` listing: a field still at
+/// the `previous` report takes the reported value, and a field the user
+/// changed keeps the user's.
+fn rebase_listing(
+    held: SubagentListing,
+    previous: SubagentListing,
+    reported: SubagentListing,
+) -> SubagentListing {
+    SubagentListing {
+        finished_cap: if held.finished_cap == previous.finished_cap {
+            reported.finished_cap
+        } else {
+            held.finished_cap
+        },
+        keep_minutes: if held.keep_minutes == previous.keep_minutes {
+            reported.keep_minutes
+        } else {
+            held.keep_minutes
+        },
+    }
+}
+
+/// A Finished subagents kept choice's text; only the offered caps are built.
+const fn subagent_cap_text(cap: u32) -> &'static str {
+    match cap {
+        1 => "1",
+        3 => "3",
+        5 => "5",
+        10 => "10",
+        _ => "20",
+    }
+}
+
+/// A Keep finished subagents for choice's text; only the offered windows are
+/// built.
+const fn subagent_keep_text(keep: Option<u32>) -> &'static str {
+    match keep {
+        None => "Until the next prompt",
+        Some(5) => "5 min",
+        Some(15) => "15 min",
+        Some(60) => "1 h",
+        Some(_) => "4 h",
+    }
 }
 
 /// The General tab's Sessions under repos choices, `current` selected.
