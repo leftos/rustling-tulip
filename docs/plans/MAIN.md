@@ -167,7 +167,7 @@
 - [ ] RT-1396 Map the remote-update and spawn files in tools/test-map.json
 - [ ] RT-1458 Let a driven cloaked client run its updater against a test feed, for release smoke runs
 - [ ] RT-1481 Scrub the owner's paths and status line from the screen fixtures
-- [ ] RT-1541 Check the dispatch dir in the isolated daemon's launch check · release vNext
+- [ ] RT-1541 Check the dispatch dir in the isolated daemon's launch check
 - [ ] RT-1564 Map the native files test-map.json misses so -Validate passes again · release vNext
 - [ ] RT-1590 Make the UI harness's in_model fail for a selector it has no model for
 
@@ -270,8 +270,8 @@
 - [ ] RT-1378 Word the crash box for a panic past the start's stable window
 - [ ] RT-707 Keep a repo's sessions out of Detached once the repo joins a workspace
 - [ ] RT-1484 Keep an offline host's leaf in the Tabs view from dragging, and dim it by its own host
-- [ ] RT-1548 Show the blue finished pill on a dragged tab's ghost · release vNext
-- [ ] RT-1559 Name a closed follow pane in the undo toast instead of "Closed empty pane" · release vNext
+- [ ] RT-1548 Show the blue finished pill on a dragged tab's ghost
+- [ ] RT-1559 Name a closed follow pane in the undo toast instead of "Closed empty pane"
 - [ ] RT-1563 Close sidebar menus with their own window's focus, and on the first Escape
 - [ ] RT-1566 Clear an armed session Stop when its session exits so Escape is not swallowed
 - [ ] RT-1591 Show a subagent row's type and model once in its Compact hover
@@ -307,7 +307,7 @@
 - [ ] RT-1371 Drop a bound pane's pending size claim once another client claims first
 - [ ] RT-1404 Focus the main window's root when its focused pane is popped out
 - [ ] RT-1426 Drop shell-integration dots on a remote pane's cls
-- [ ] RT-1592 Profile why the app uses up to 6.5% CPU with about 10 panes open, and fix what it finds · release vNext
+- [ ] RT-1592 Profile why the app uses up to 6.5% CPU with about 10 panes open, and fix what it finds
 
 ## Spawn, launch and shells
 
@@ -481,56 +481,56 @@
 - [ ] RT-1391 Align the phone's resume order with the daemon's and close ResumeSession's test gaps
 - [ ] RT-1453 Show a plan longer than 2000 characters in full on the phone before approving
 - [ ] RT-1460 Sort phone Home's groups by the desktop's sort, needs-you first
-- [ ] RT-1508 Move the push trigger round's file I/O out from under the device lock
-- [ ] RT-1511 PR.1: Share the RFC 8291 push encryption as a push-crypto crate with decrypt
-- [ ] RT-1512 PR.2: Add the apns and fcm push registrations and the push notice to the wire
-- [ ] RT-1513 PR.3: Store a push subscription as switches plus a kind-tagged channel
-- [ ] RT-1514 PR.4: Accept apns and fcm push registrations from a paired phone
-- [ ] RT-1515 PR.5: Build the push relay Worker with its APNs sender
-- [ ] RT-1516 PR.6: Deploy the push relay on the owner's Cloudflare account
-- [ ] RT-1517 PR.7: Send Needs you and Finished to native phones through the push relay
-- [ ] RT-1518 PR.8: Prove a relay push end to end on a real iPhone
-- [ ] RT-1519 PR.9: Add the FCM sender to the push relay for the Android app
-- [ ] RT-1520 MA.1: Take the spike's GPUI upgrade onto feat/gpui-upgrade
-- [ ] RT-1521 MA.2: Fix the GPUI upgrade's test and example targets
-- [ ] RT-1522 MA.3: Clear the GPUI upgrade's warnings and runtime traps
-- [ ] RT-1523 MA.4: Carry the first-mouse fix on the pinned GPUI revision and drop vendor/gpui
-- [ ] RT-1524 MA.5: Pass the desktop checks on the GPUI upgrade and merge it
-- [ ] RT-1525 MA.6: Build the phone app for the iOS simulator
-- [ ] RT-1526 MA.7: Make TextInput work with the soft keyboard and Return
-- [ ] RT-1527 MA.8: Give iOS its TLS roots, Keychain token store and config dir
-- [ ] RT-1528 MA.9: Build the phone root over RootView with no This PC
-- [ ] RT-1529 MA.10: Reconnect when the phone app returns to the foreground
-- [ ] RT-1530 MA.11: Sign the phone app and upload it to TestFlight
-- [ ] RT-1531 MA.12: Run the phone app on the owner's iPhone against the PC's daemon
-- [ ] RT-1532 MA.13: Build the phone's Home
-- [ ] RT-1533 MA.14: Build the phone's session screen with its chat
-- [ ] RT-1534 MA.15: Build the phone's terminal
-- [ ] RT-1535 MA.16: Check the phone screens on the owner's iPhone
-- [ ] RT-1536 MA.17: Build the phone app's notification service extension
-- [ ] RT-1537 MA.18: Register the phone app for push
-- [ ] RT-1538 MA.19: Open the session a notification names
-- [ ] RT-1539 MA.20: Add the in-process SSH transport for the phone
-- [ ] RT-1540 MA.21: Add SSH hosts on the phone
+- [ ] RT-1508 Move the push trigger round's file I/O out from under the device lock · release vNext
+- [ ] RT-1511 PR.1: Share the RFC 8291 push encryption as a push-crypto crate with decrypt · release vNext
+- [ ] RT-1512 PR.2: Add the apns and fcm push registrations and the push notice to the wire · release vNext
+- [ ] RT-1513 PR.3: Store a push subscription as switches plus a kind-tagged channel · release vNext
+- [ ] RT-1514 PR.4: Accept apns and fcm push registrations from a paired phone · release vNext
+- [ ] RT-1515 PR.5: Build the push relay Worker with its APNs sender · release vNext
+- [ ] RT-1516 PR.6: Deploy the push relay on the owner's Cloudflare account · release vNext
+- [ ] RT-1517 PR.7: Send Needs you and Finished to native phones through the push relay · release vNext
+- [ ] RT-1518 PR.8: Prove a relay push end to end on a real iPhone · release vNext
+- [ ] RT-1519 PR.9: Add the FCM sender to the push relay for the Android app · release vNext
+- [ ] RT-1520 MA.1: Take the spike's GPUI upgrade onto feat/gpui-upgrade · release vNext
+- [ ] RT-1521 MA.2: Fix the GPUI upgrade's test and example targets · release vNext
+- [ ] RT-1522 MA.3: Clear the GPUI upgrade's warnings and runtime traps · release vNext
+- [ ] RT-1523 MA.4: Carry the first-mouse fix on the pinned GPUI revision and drop vendor/gpui · release vNext
+- [ ] RT-1524 MA.5: Pass the desktop checks on the GPUI upgrade and merge it · release vNext
+- [ ] RT-1525 MA.6: Build the phone app for the iOS simulator · release vNext
+- [ ] RT-1526 MA.7: Make TextInput work with the soft keyboard and Return · release vNext
+- [ ] RT-1527 MA.8: Give iOS its TLS roots, Keychain token store and config dir · release vNext
+- [ ] RT-1528 MA.9: Build the phone root over RootView with no This PC · release vNext
+- [ ] RT-1529 MA.10: Reconnect when the phone app returns to the foreground · release vNext
+- [ ] RT-1530 MA.11: Sign the phone app and upload it to TestFlight · release vNext
+- [ ] RT-1531 MA.12: Run the phone app on the owner's iPhone against the PC's daemon · release vNext
+- [ ] RT-1532 MA.13: Build the phone's Home · release vNext
+- [ ] RT-1533 MA.14: Build the phone's session screen with its chat · release vNext
+- [ ] RT-1534 MA.15: Build the phone's terminal · release vNext
+- [ ] RT-1535 MA.16: Check the phone screens on the owner's iPhone · release vNext
+- [ ] RT-1536 MA.17: Build the phone app's notification service extension · release vNext
+- [ ] RT-1537 MA.18: Register the phone app for push · release vNext
+- [ ] RT-1538 MA.19: Open the session a notification names · release vNext
+- [ ] RT-1539 MA.20: Add the in-process SSH transport for the phone · release vNext
+- [ ] RT-1540 MA.21: Add SSH hosts on the phone · release vNext
 
 ## Dashboard, Gates and Linear
 
-- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries · release vNext
-  - [ ] RT-501 Draw the repo lanes, the default view (DB.24) · release vNext
-  - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25) · release vNext
-  - [ ] RT-453 Document the summarizer and the Dashboard (SA.11) · release vNext
-  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8) · release vNext
-  - [ ] RT-528 Count a session's recent work from where its branch stood at start, not by commit time · release vNext
-  - [ ] RT-529 Polish the Dashboard rows: the cut Agents summary and the first-frame column flicker · release vNext
-  - [ ] RT-732 Send gate holds in the Dashboard's activity tracks · release vNext
-  - [ ] RT-733 Draw a dispatch run's activity track under its Dashboard row · release vNext
-  - [ ] RT-734 Show the Linear column in the Dashboard drawer · release vNext
-  - [ ] RT-735 Show each session's Linear issue state and title from the Linear client · release vNext
-  - [ ] RT-736 Count issues Done and release progress in the Dashboard header · release vNext
-  - [ ] RT-737 Add the accounts card and Questions to the need-you band · release vNext
-  - [ ] RT-738 Add Questions, Next up and the No live agent table to the repo lanes · release vNext
-  - [ ] RT-739 Promote the Dashboard design and delete docs/plans/dashboard.md · release vNext
-  - [ ] RT-789 Draw nested agent rows under an open Dashboard drawer · release vNext
+- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries
+  - [ ] RT-501 Draw the repo lanes, the default view (DB.24)
+  - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25)
+  - [ ] RT-453 Document the summarizer and the Dashboard (SA.11)
+  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8)
+  - [ ] RT-528 Count a session's recent work from where its branch stood at start, not by commit time
+  - [ ] RT-529 Polish the Dashboard rows: the cut Agents summary and the first-frame column flicker
+  - [ ] RT-732 Send gate holds in the Dashboard's activity tracks
+  - [ ] RT-733 Draw a dispatch run's activity track under its Dashboard row
+  - [ ] RT-734 Show the Linear column in the Dashboard drawer
+  - [ ] RT-735 Show each session's Linear issue state and title from the Linear client
+  - [ ] RT-736 Count issues Done and release progress in the Dashboard header
+  - [ ] RT-737 Add the accounts card and Questions to the need-you band
+  - [ ] RT-738 Add Questions, Next up and the No live agent table to the repo lanes
+  - [ ] RT-739 Promote the Dashboard design and delete docs/plans/dashboard.md
+  - [ ] RT-789 Draw nested agent rows under an open Dashboard drawer
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-92 Show context %, cost and prompt-cache expiry on each session
 - [ ] RT-133 Linear issue links: detect IDs in terminal text and session titles, hover card, open in the app
@@ -560,9 +560,9 @@
 - [ ] RT-1045 Give two unknown-kind gate pools distinct selectors in the Gates view
 - [ ] RT-1052 Show seconds in a Gates row's time and usual under ten minutes
 - [ ] RT-1089 Monitor CPU and memory per pane, process tree and host in a Performance view
-  - [ ] RT-1091 Show a rail Performance view of each pane's process tree CPU and memory beside the machine's totals · release vNext
+  - [ ] RT-1091 Show a rail Performance view of each pane's process tree CPU and memory beside the machine's totals
   - [ ] RT-1093 Add a full Performance tab with PID, history, threads, command line and End process tree
-  - [ ] RT-1597 Sample each session's process tree CPU and memory for the Performance view · release vNext
+  - [ ] RT-1597 Sample each session's process tree CPU and memory for the Performance view
 - [ ] RT-1119 Open a clicked gate's log in an in-app tab that follows it, not the OS default app
   - [ ] RT-1120 Follow a gate run's log through the daemon by run id, never by path
   - [ ] RT-1121 Show a gate's log in a tab that follows it like tail -f
@@ -572,7 +572,7 @@
 - [ ] RT-1451 List a backgrounded subagent once on the Dashboard, not again as a bg shell
 - [ ] RT-1479 Keep the Dashboard's subagent name uncut while its row has room
 - [ ] RT-1509 Nest a dispatch run under its session by the live-run file's session id (DB.21)
-- [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts · release vNext
+- [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts
 
 ## Repos, workspaces and worktrees
 
@@ -603,19 +603,19 @@
 - [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user
 - [ ] RT-687 Remove AgentDescriptor.accent and AccentToken with the next protocol bump
 - [ ] RT-716 Let the agent plugin name a permission prompt's allow, always-allow and deny options
-- [ ] RT-1542 Stop dispatch-run tailers with their watcher, and keep a stop marker until the runner is gone · release vNext
-- [ ] RT-1552 Keep a follow pane's host on undo and keep follows through a failed startup scan · release vNext
-- [ ] RT-1558 Show a dispatch run's runner pid in its DS leaf's hover · release vNext
-- [ ] RT-1560 List panes that follow a dispatch run in the jump palette · release vNext
-- [ ] RT-1561 Teach the any-menu-open checks and close paths about the dispatch run menu · release vNext
-- [ ] RT-1562 Fade only the dragged row of a run listed in two tabs · release vNext
-- [ ] RT-1565 Say a followed run's host is not connected instead of that the run ended · release vNext
-- [ ] RT-1567 Show the ⋯ overflow and keep the title readable in a narrow run pane's header · release vNext
-- [ ] RT-1569 Drop a dispatch run whose child reads unknown once its runner is dead · release vNext
-- [ ] RT-1570 Read a dispatch run's last stream lines before dropping it · release vNext
-- [ ] RT-1577 Polish found by the v0.13.0-alpha dispatch smoke run · release vNext
-  - [ ] RT-1578 Name a tab that follows a dispatch run after its repo or run, not Tab N · release vNext
-  - [ ] RT-1579 Show a nested dispatch run's cost in its Dashboard row · release vNext
+- [ ] RT-1542 Stop dispatch-run tailers with their watcher, and keep a stop marker until the runner is gone
+- [ ] RT-1552 Keep a follow pane's host on undo and keep follows through a failed startup scan
+- [ ] RT-1558 Show a dispatch run's runner pid in its DS leaf's hover
+- [ ] RT-1560 List panes that follow a dispatch run in the jump palette
+- [ ] RT-1561 Teach the any-menu-open checks and close paths about the dispatch run menu
+- [ ] RT-1562 Fade only the dragged row of a run listed in two tabs
+- [ ] RT-1565 Say a followed run's host is not connected instead of that the run ended
+- [ ] RT-1567 Show the ⋯ overflow and keep the title readable in a narrow run pane's header
+- [ ] RT-1569 Drop a dispatch run whose child reads unknown once its runner is dead
+- [ ] RT-1570 Read a dispatch run's last stream lines before dropping it
+- [ ] RT-1577 Polish found by the v0.13.0-alpha dispatch smoke run
+  - [ ] RT-1578 Name a tab that follows a dispatch run after its repo or run, not Tab N
+  - [ ] RT-1579 Show a nested dispatch run's cost in its Dashboard row
 - [ ] RT-1587 Keep a wrapped transcript line's indent in a followed run's pane
 
 ## macOS and Unix
@@ -689,7 +689,7 @@
 - [ ] RT-1491 Keep Settings' saved look when open_settings runs again while Settings is open
 - [ ] RT-1547 Carry a link's #fragment and ?query on remote, file:// hyperlink and relative-join links
 - [ ] RT-1549 Keep session update broadcasts in record order and off unpublished records
-- [ ] RT-1576 Log dispatch runs that change or leave before the status log attaches at startup · release vNext
+- [ ] RT-1576 Log dispatch runs that change or leave before the status log attaches at startup
 - [ ] RT-1583 Credit a linked run's activity to the same host session it nests under when sessions share a conversation
 - [ ] RT-1585 Stop two dispatch-run runtime tests leaking a handle
 - [ ] RT-1588 Key the subagent list on the agent run's start, not the shell's
