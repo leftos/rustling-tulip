@@ -1,0 +1,9 @@
+# pnpm settings for this workspace, as apps/pwa/pnpm-workspace.yaml: no
+# dependency published in the last day, and no package runs an install script.
+minimumReleaseAge: 1440
+ignoreScripts: true
+# The two packages that ship install scripts, refused by name so pnpm does not
+# fail the install over them; the Workers test pool runs without them.
+allowBuilds:
+  esbuild: false
+  workerd: false

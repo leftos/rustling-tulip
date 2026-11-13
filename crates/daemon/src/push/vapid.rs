@@ -306,4 +306,28 @@ mod tests {
         );
         open(&new, &new_key);
     }
+
+    /// The push relay's test fixture is this signer's own output: ES256 in
+    /// `p256` is deterministic (RFC 6979), so a fixed key, audience, subject
+    /// and `exp` always give the same token.
+    #[test]
+    fn relay_fixture_is_the_daemons_jwt() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../services/push-relay/test/fixtures/daemon-vapid.json"
+        ))
+        .expect("the fixture is JSON");
+        let key = VapidKey::from_raw(&[1u8; 32]).expect("a valid scalar");
+        assert_eq!(fixture["key_raw_hex"], "01".repeat(32).as_str());
+        let aud = fixture["aud"].as_str().expect("aud");
+        let sub = fixture["sub"].as_str().expect("sub");
+        let exp = fixture["exp"].as_i64().expect("exp");
+        let public = key.public_b64url();
+        let jwt = super::sign_jwt(&key, aud, sub, exp).expect("signs");
+        assert_eq!(
+            fixture["k"],
+            public.as_str(),
+            "computed k={public} jwt={jwt}"
+        );
+        assert_eq!(fixture["jwt"], jwt.as_str(), "computed jwt={jwt}");
+    }
 }

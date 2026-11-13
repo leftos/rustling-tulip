@@ -1,0 +1,27 @@
+{
+  // The push relay (docs/plans/push-relay.md). PR.6 fills every REPLACE_AT_DEPLOY id,
+  // the relay's origin and the secrets (APNS_KEY_P8, APNS_KEY_ID, APNS_TEAM_ID) at deploy.
+  "name": "rustling-tulip-push-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "kv_namespaces": [
+    // Owner-written deny list: `sender:{sha256 hex of the raw k= point}` and `token:{sha256 hex of the token}`.
+    { "binding": "DENY_LIST", "id": "REPLACE_AT_DEPLOY" },
+    // Daily per-token counters and the cached APNs provider token (`apns-jwt`).
+    { "binding": "RELAY_STATE", "id": "REPLACE_AT_DEPLOY" }
+  ],
+  // PR.6 fills each namespace_id with an integer unique to the account.
+  "ratelimits": [
+    { "name": "TOKEN_LIMITER", "namespace_id": "REPLACE_AT_DEPLOY", "simple": { "limit": 20, "period": 60 } },
+    { "name": "SENDER_LIMITER", "namespace_id": "REPLACE_AT_DEPLOY", "simple": { "limit": 120, "period": 60 } },
+    { "name": "IP_LIMITER", "namespace_id": "REPLACE_AT_DEPLOY", "simple": { "limit": 600, "period": 60 } }
+  ],
+  "vars": {
+    // The relay's own origin, the VAPID JWT `aud` it accepts; PR.6 sets the real one.
+    "RELAY_ORIGIN": "https://relay.invalid",
+    // "true" serves; anything else is the kill switch (503).
+    "RELAY_ENABLED": "true",
+    // The app's bundle ID; PR.6 sets it.
+    "APNS_TOPIC": "REPLACE_AT_DEPLOY"
+  }
+}
