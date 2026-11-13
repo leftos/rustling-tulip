@@ -275,9 +275,6 @@
 - [ ] RT-1563 Close sidebar menus with their own window's focus, and on the first Escape
 - [ ] RT-1566 Clear an armed session Stop when its session exits so Escape is not swallowed
 - [ ] RT-1591 Show a subagent row's type and model once in its Compact hover
-- [ ] RT-1594 Unbind and rebind every session of one host, auto-split across tabs or following that host's layout · release vNext
-  - [ ] RT-1612 HR.4: Unbind and rebind a host's sessions from Connections, the jump palette and the host header · release vNext
-  - [ ] RT-1613 HR.5: Document host rebind and add its shot view · release vNext
 - [ ] RT-1620 Keep the status bar readable at narrow widths with CPU and RAM pills
 
 ## Terminal, panes and links
@@ -592,12 +589,6 @@
 
 ## Agents and subagents
 
-- [/] RT-30 View a session's running subagents as read-only sessions · release vNext
-  - [ ] RT-1586 List a dispatch run's own subagents nested under its DS row · release vNext
-    - [ ] RT-1603 RS.3: Tail a dispatch run's subagent transcripts · release vNext
-    - [ ] RT-1606 RS.6: Open and drag a dispatch run's subagent · release vNext
-    - [ ] RT-1607 RS.7: Show a dispatch run's subagent in its read-only pane · release vNext
-    - [ ] RT-1608 RS.8: Document dispatch runs' subagents and close the subagent design · release vNext
 - [ ] RT-49 Offer every popular agent harness in the spawn dialog's runtime dropdown
   - [ ] RT-214 AH.1 Spike: DSH per-invocation patch, hook payload and resume
   - [ ] RT-215 AH.2 Pi runtime: backend, session id and dialog entry
@@ -714,6 +705,9 @@
 - [ ] RT-1622 Rebuild a dispatch run's subagent reader when its host session's env rows appear
 - [ ] RT-1623 Rebuild a followed host tab to its picked layout after dropping panes
 - [ ] RT-1624 Leave subagent rows out of a container's count badge
+- [ ] RT-1625 Give the keyboard back to the host rebind dialog when a notice closes over it
+- [ ] RT-1626 Count and lay out only active sessions in the first-connect layout chooser
+- [ ] RT-1627 Keep a run subagent pane's header across a reconnect before anything was kept
 
 ## Design files
 
@@ -731,7 +725,6 @@
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
-- [host-rebind.md](host-rebind.md) — RT-1594, RT-1612, RT-1613
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
 - [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1520, RT-1521, RT-1522, RT-1523, RT-1524, RT-1525, RT-1526, RT-1527, RT-1528, RT-1529, RT-1530, RT-1531, RT-1532, RT-1533, RT-1534, RT-1535, RT-1536, RT-1537, RT-1538, RT-1539, RT-1540, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
@@ -744,5 +737,4 @@
 - [remote-update.md](remote-update.md) — RT-1353, RT-1355, RT-1397, Updates and installer
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792, Remote hosts and connections
-- [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-1586, RT-1603, RT-1606, RT-1607, RT-1608, RT-1624, Agents and subagents
 - [toast-position.md](toast-position.md) — RT-1105
