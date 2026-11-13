@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Queued gates in the Gates panel show the command they will run, not the gate wrapper's own arguments.
 - A followed dispatch run's recent actions no longer fill up with hook and thinking-token lines that pushed out its tool calls.
+- Hovering a dispatch run or a subagent in the sidebar shows its full task name first, as a session's hover does.
 
 ## v0.13.0-alpha
 

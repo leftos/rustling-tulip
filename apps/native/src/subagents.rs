@@ -46,16 +46,23 @@ pub fn subline(sub: &SubagentSnapshot) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// The subagent leaf's hover text: what it is, its agent type, model and
-/// effort, when it started in local time, and how it ended, one per line,
-/// each left out when the subagent does not have it.
+/// The subagent leaf's hover text: its full description first when it has
+/// one, then what it is, its agent type, model and effort, when it started
+/// in local time, and how it ended, one per line, each left out when the
+/// subagent does not have it.
 #[must_use]
 pub fn hover_text(sub: &SubagentSnapshot) -> String {
     let started = sub.started_at.map(|at| {
         let at = at.with_timezone(&chrono::Local);
         format!("Started: {}", at.format("%Y-%m-%d %H:%M"))
     });
+    let description = sub
+        .description
+        .as_ref()
+        .filter(|d| !d.trim().is_empty())
+        .cloned();
     [
+        description,
         Some("Subagent".to_owned()),
         sub.agent_type.as_ref().map(|t| format!("Type: {t}")),
         sub.model.as_ref().map(|m| format!("Model: {m}")),
@@ -194,12 +201,14 @@ mod tests {
     #[test]
     fn hover_text_lists_type_model_effort_start_and_end() {
         let mut s = full("a1");
+        s.description = Some("Map the tail code".to_owned());
         s.state = AgentState::Finished;
         let text = hover_text(&s);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines,
             [
+                "Map the tail code",
                 "Subagent",
                 "Type: explore",
                 "Model: model-x",
@@ -232,6 +241,17 @@ mod tests {
         s.model = Some("model-x".to_owned());
         s.state = AgentState::Running;
         assert_eq!(hover_text(&s), "Subagent\nModel: model-x");
+
+        let mut s = sub("a1");
+        s.state = AgentState::Running;
+        s.description = Some("  ".to_owned());
+        assert_eq!(
+            hover_text(&s),
+            "Subagent",
+            "a blank description adds no line"
+        );
+        s.description = Some("Map the tail code".to_owned());
+        assert_eq!(hover_text(&s), "Map the tail code\nSubagent");
     }
 
     #[test]

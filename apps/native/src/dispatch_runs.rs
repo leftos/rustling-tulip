@@ -35,14 +35,17 @@ pub fn run_home(run: &DispatchRunSnapshot) -> &str {
     run.main_checkout.as_deref().unwrap_or(&run.worktree)
 }
 
-/// The run leaf's hover text: what it is, its backend, its tier when it has
-/// one, when it started in local time, and its worktree, one per line.
+/// The run leaf's hover text: its full title first when it has one, then
+/// what it is, its backend, its tier when it has one, when it started in
+/// local time, and its worktree, one per line.
 #[must_use]
 pub fn hover_text(run: &DispatchRunSnapshot) -> String {
-    let mut lines = vec![
-        "Dispatch run".to_owned(),
-        format!("Backend: {}", run.backend),
-    ];
+    let mut lines = Vec::new();
+    if !run.title.trim().is_empty() {
+        lines.push(run.title.clone());
+    }
+    lines.push("Dispatch run".to_owned());
+    lines.push(format!("Backend: {}", run.backend));
     if let Some(tier) = run.tier {
         lines.push(format!("Tier: {tier}"));
     }
@@ -146,12 +149,26 @@ mod tests {
         let r = run("d1", "X:\\w", None, 0, DispatchRunStatus::Working);
         let text = hover_text(&r);
         let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 5, "{text}");
+        assert_eq!(lines[0], "title d1");
+        assert_eq!(lines[1], "Dispatch run");
+        assert_eq!(lines[2], format!("Backend: {}", r.backend));
+        assert!(lines[3].starts_with("Started: "), "{text}");
+        assert_eq!(lines[4], "Worktree: X:\\w");
+        assert!(!text.contains("Tier:"), "{text}");
+    }
+
+    #[test]
+    fn hover_text_leaves_out_a_blank_title() {
+        let mut r = run("d1", "X:\\w", None, 0, DispatchRunStatus::Working);
+        r.title = "  ".to_owned();
+        let text = hover_text(&r);
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 4, "{text}");
         assert_eq!(lines[0], "Dispatch run");
         assert_eq!(lines[1], format!("Backend: {}", r.backend));
         assert!(lines[2].starts_with("Started: "), "{text}");
         assert_eq!(lines[3], "Worktree: X:\\w");
-        assert!(!text.contains("Tier:"), "{text}");
     }
 
     #[test]
@@ -160,12 +177,13 @@ mod tests {
         r.tier = Some(2);
         let text = hover_text(&r);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 5, "{text}");
-        assert_eq!(lines[0], "Dispatch run");
-        assert_eq!(lines[1], format!("Backend: {}", r.backend));
-        assert_eq!(lines[2], "Tier: 2");
-        assert!(lines[3].starts_with("Started: "), "{text}");
-        assert_eq!(lines[4], "Worktree: X:\\w");
+        assert_eq!(lines.len(), 6, "{text}");
+        assert_eq!(lines[0], "title d1");
+        assert_eq!(lines[1], "Dispatch run");
+        assert_eq!(lines[2], format!("Backend: {}", r.backend));
+        assert_eq!(lines[3], "Tier: 2");
+        assert!(lines[4].starts_with("Started: "), "{text}");
+        assert_eq!(lines[5], "Worktree: X:\\w");
     }
 
     #[test]
