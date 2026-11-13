@@ -46,6 +46,14 @@ impl PopoutView {
             this.remember_place(window, cx);
         })
         .detach();
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.claim_for_focus(cx);
+            } else {
+                this.drop_focus_claims(cx);
+            }
+        })
+        .detach();
         let focus = watch_terminal_focus(&root, &key, window, cx);
         Self {
             root,
@@ -73,6 +81,40 @@ impl PopoutView {
         });
         if let Err(err) = marked {
             tracing::debug!("pop-out resized after the root view went: {err:#}");
+        }
+    }
+
+    /// The window gained focus: its terminal, or each of a popped tab's,
+    /// claims its session's size when it drives it.
+    fn claim_for_focus(&self, cx: &mut Context<Self>) {
+        let key = self.key.clone();
+        let claimed = self.root.update(cx, |root, cx| match &key {
+            PopoutKey::Tab { tab_id } => root.claim_tab_panes_for_focus(tab_id, cx),
+            PopoutKey::Pane { .. } | PopoutKey::Session { .. } => {
+                if let Some(slot_id) = popouts::terminal_slot(&key) {
+                    root.claim_pane_for_focus(&slot_id, cx);
+                }
+            }
+        });
+        if let Err(err) = claimed {
+            tracing::debug!("pop-out focused after the root view went: {err:#}");
+        }
+    }
+
+    /// The window lost focus: a focus claim its terminal, or any of a
+    /// popped tab's, has not sent yet is dropped.
+    fn drop_focus_claims(&self, cx: &mut Context<Self>) {
+        let key = self.key.clone();
+        let dropped = self.root.update(cx, |root, cx| match &key {
+            PopoutKey::Tab { tab_id } => root.drop_tab_panes_focus_claims(tab_id, cx),
+            PopoutKey::Pane { .. } | PopoutKey::Session { .. } => {
+                if let Some(slot_id) = popouts::terminal_slot(&key) {
+                    root.drop_pane_focus_claim(&slot_id, cx);
+                }
+            }
+        });
+        if let Err(err) = dropped {
+            tracing::debug!("pop-out lost focus after the root view went: {err:#}");
         }
     }
 

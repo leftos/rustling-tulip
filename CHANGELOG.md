@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Rebinding a machine's sessions, or opening them from the first-connect layout chooser, now fits each session to its new pane at once.
 - Connecting or pairing from another device no longer waits while the host sends phone alerts and tidies their subscriptions.
+- A window you switch to now fits the sessions it shows to its own panes, even when another computer sized them last.
 
 ## v0.14.0-alpha
 

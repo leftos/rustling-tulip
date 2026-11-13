@@ -369,9 +369,13 @@ const CLAIM_WINDOW: Duration = Duration::from_secs(5);
 /// input within [`CLAIM_WINDOW`], when it is the first changed measure
 /// after this client resized the pane (the window, a split divider, the
 /// sidebar or a font size), or when the user bound the pane's session in
-/// this client since the pane last sent a size. An attach, a reconnect, a
-/// tab switch, a focus change and another client's layout or appearance
-/// change do not claim.
+/// this client since the pane last sent a size. The pane's window gaining
+/// focus claims too: a measured pane sends its size claimed at once, an
+/// unmeasured one at its first measure. That focus claim is kept across a
+/// reconnect, and dropped when the pane lets its session go, stops driving,
+/// or its window loses focus. An attach, a reconnect, a tab
+/// switch, a pane or tab focus change inside a window and another client's
+/// layout or appearance change do not claim.
 #[derive(Debug, Default, Clone, Copy)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -385,6 +389,9 @@ struct SizeGate {
     /// The user bound this pane's session in this client, so the next size
     /// the pane sends claims it.
     bound: bool,
+    /// The pane's window gained focus, so the next size the pane sends
+    /// claims; kept across a reconnect reset.
+    focus: bool,
     /// When the pane last had keyboard or pointer input.
     last_input: Option<Instant>,
     /// Where the pointer last moved over the pane, so a move event at the
@@ -468,11 +475,38 @@ impl SizeGate {
         self.bound = false;
     }
 
+    /// The pane's window gained focus: the next size the pane sends claims.
+    fn mark_focus(&mut self) {
+        self.focus = true;
+    }
+
+    /// Takes whether the pane's window gained focus since the pane last
+    /// sent a size, so the size being sent claims.
+    fn take_focus(&mut self) -> bool {
+        std::mem::take(&mut self.focus)
+    }
+
+    /// The pane let its session go, stopped driving, or its window lost
+    /// focus: a focus gain before it does not claim what follows.
+    fn drop_focus(&mut self) {
+        self.focus = false;
+    }
+
+    /// A new connection: a resize or a bind marked before it does not claim
+    /// what follows, while a focus gain still does.
+    fn reset_for_reconnect(&mut self) {
+        self.drop_resized();
+        self.drop_bound();
+    }
+
     /// Returns whether to send the size now: when the pane takes over with
-    /// a measured size.
+    /// a measured size. A pane that stops driving drops its focus claim.
     fn set_driving(&mut self, driving: bool) -> bool {
         let takes_over = driving && !self.driving;
         self.driving = driving;
+        if !driving {
+            self.drop_focus();
+        }
         takes_over && self.measured
     }
 
@@ -940,6 +974,26 @@ impl TerminalPane {
         self.size_gate.mark_bound();
     }
 
+    /// This pane's window gained focus: a pane that drives its session's
+    /// size sends it now with `claim: true`, even when it is unchanged, and
+    /// one not measured yet claims at its first measure. A pane that does
+    /// not drive the size claims nothing.
+    pub fn claim_for_focus(&mut self) {
+        if !self.size_gate.driving {
+            return;
+        }
+        self.size_gate.mark_focus();
+        if self.size_gate.measured {
+            self.send_resize(false);
+        }
+    }
+
+    /// This pane's window lost focus: a focus claim the pane has not sent
+    /// yet is dropped.
+    pub fn drop_focus_claim(&mut self) {
+        self.size_gate.drop_focus();
+    }
+
     /// Whether this pane answers its session's terminal queries, from
     /// history and live output alike. The others drop their answers.
     pub fn set_answers_queries(&mut self, answers: bool) {
@@ -1125,11 +1179,13 @@ impl TerminalPane {
         self.size_gate.forget_input();
         self.size_gate.drop_resized();
         self.size_gate.drop_bound();
+        self.size_gate.drop_focus();
     }
 
     /// Forget the attachment for a new connection, which starts unattached.
     /// The pane's recent input is kept, so a reconnecting typist still
-    /// claims the size.
+    /// claims the size, and so is a focus claim not sent yet, so a pane
+    /// whose window gained focus claims once its host lists it.
     pub fn reset_for_reconnect(&mut self) {
         if self.attachment.take().is_some() {
             self.fresh_terminal(CursorShape::Block, false);
@@ -1140,8 +1196,7 @@ impl TerminalPane {
         self.load_timer = None;
         self.sync_timer = None;
         self.sync_deadline = None;
-        self.size_gate.drop_resized();
-        self.size_gate.drop_bound();
+        self.size_gate.reset_for_reconnect();
     }
 
     /// Whether the attached session takes input; a composition is only
@@ -1383,7 +1438,8 @@ impl TerminalPane {
 
     /// Sends the terminal's size when the size gate allows, claimed when
     /// `resized` (a shown pane's measured size changed), the pane had recent
-    /// input, or the user bound its session in this client.
+    /// input, the user bound its session in this client, or its window
+    /// gained focus.
     fn send_resize(&mut self, resized: bool) {
         if !self.size_gate.allows() {
             return;
@@ -1396,11 +1452,12 @@ impl TerminalPane {
             return;
         };
         let bound = self.size_gate.take_bound();
+        let focus = self.size_gate.take_focus();
         self.send(ClientMessage::Resize {
             session_id,
             cols,
             rows,
-            claim: resized || self.size_gate.claims((self.now)()) || bound,
+            claim: resized || self.size_gate.claims((self.now)()) || bound || focus,
         });
     }
 
@@ -3076,6 +3133,31 @@ mod tests {
         gate.set_driving(true);
         gate.measure(false);
         assert_eq!(gate.measure(true), Some(false));
+    }
+
+    #[test]
+    fn focus_claim_survives_a_reconnect_reset_and_is_taken_once() {
+        let mut gate = SizeGate::default();
+        gate.set_driving(true);
+        gate.mark_focus();
+        gate.mark_bound();
+        gate.reset_for_reconnect();
+        assert!(!gate.take_bound(), "a reconnect drops the bind claim");
+        assert!(gate.take_focus(), "a reconnect keeps the focus claim");
+        assert!(!gate.take_focus(), "the focus claim is taken once");
+    }
+
+    #[test]
+    fn stopping_driving_drops_the_focus_claim() {
+        let mut gate = SizeGate::default();
+        gate.set_driving(true);
+        gate.mark_focus();
+        gate.set_driving(false);
+        gate.set_driving(true);
+        assert!(
+            !gate.take_focus(),
+            "a pane that stopped driving claims nothing on taking over again"
+        );
     }
 
     #[test]

@@ -390,6 +390,50 @@ fn open_all_with_a_max_claims_only_the_panes_the_first_tab_keeps(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn the_first_connect_chooser_keeps_its_claim_rule_after_a_launch_focus_gain(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    h.cx.update(|window, _| window.activate_window());
+    h.cx.run_until_parked();
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build(), session("s2").build()],
+    });
+    h.sent();
+    h.send(init_required(2, Vec::new()));
+    h.sent();
+    h.click_on("layout-choose-all");
+    h.click_on("chooser-max-up");
+    h.click_on("chooser-confirm-all");
+    h.sent();
+
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", Some("s2")),
+            ),
+        )],
+    });
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    let sent = h.sent();
+    assert_eq!(
+        resize_claims(&sent, "s1").first(),
+        Some(&true),
+        "the pane the first tab keeps claims its size: {sent:?}"
+    );
+    assert_sized_unclaimed(
+        &sent,
+        "s2",
+        "the pane the arrangement moves to another tab claims nothing, focus gain or not",
+    );
+}
+
+#[gpui::test]
 fn start_empty_then_a_later_tab_list_does_not_claim(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = Fixture {

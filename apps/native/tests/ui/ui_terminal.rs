@@ -21,7 +21,10 @@ use protocol::{
 };
 use rustling_tulip_native::fonts::FontSettings;
 use rustling_tulip_native::ui_theme::UiTheme;
-use support::{Fixture, Harness, TestDir, pane, session, split, tab};
+use support::{
+    Fixture, Harness, REMOTE, TestDir, pane, remote_lists, saved_remote, saved_remote_over,
+    seed_ui, session, split, tab, two_tab_fixture,
+};
 
 /// `s` alone in pane `p1`, its scrollback answered, the pane focused and
 /// everything sent so far drained.
@@ -1663,35 +1666,343 @@ fn showing_a_hidden_tab_does_not_claim(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
-fn a_focus_change_alone_does_not_claim(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
+/// Brings the main window to the front, its frames settled.
+fn activate(h: &mut Harness<'_>) {
+    h.cx.update(|window, _| window.activate_window());
+    h.cx.run_until_parked();
+}
+
+/// `s1` and `s2` split in tab `t1` (panes `p1`, `p2`), and `s3` alone in
+/// tab `t2` (pane `p3`).
+fn split_beside_a_tab() -> Fixture {
     let grid = split(
         SplitDirection::Horizontal,
         pane("p1", Some("s1")),
         pane("p2", Some("s2")),
     );
+    Fixture {
+        sessions: vec![
+            session("s1").build(),
+            session("s2").build(),
+            session("s3").build(),
+        ],
+        tabs: vec![tab("t1", &grid), tab("t2", &pane("p3", Some("s3")))],
+        ..Fixture::default()
+    }
+}
+
+#[gpui::test]
+fn a_pane_focus_change_inside_a_focused_window_does_not_claim(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &split_beside_a_tab());
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    h.sent();
+    activate(&mut h);
+    let sent = h.sent();
+    assert_eq!(
+        resize_claims(&sent, "s1"),
+        [true],
+        "the focus gain claims s1"
+    );
+    assert_eq!(
+        resize_claims(&sent, "s2"),
+        [true],
+        "the focus gain claims s2"
+    );
+
+    h.click_on("leaf-s2");
+    assert_eq!(h.root(|root, _| root.focused_pane()), Some("p2".to_owned()));
+    h.click_on("tab-t2");
+    h.answer_scrollback("s3", b"");
+    h.click_on("tab-t1");
+    let sent = h.sent();
+    // Showing t1 again sizes its sessions, unclaimed, as any tab shown.
+    assert_eq!(
+        resize_claims(&sent, "s1"),
+        [false],
+        "moving the focus and switching tabs claims nothing for s1"
+    );
+    assert_eq!(
+        resize_claims(&sent, "s2"),
+        [false],
+        "moving the focus and switching tabs claims nothing for s2"
+    );
+    assert_eq!(
+        resize_claims(&sent, "s3"),
+        [false, false],
+        "the shown tab's measures do not claim"
+    );
+}
+
+#[gpui::test]
+fn gaining_focus_claims_the_size_of_a_shown_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    let before = resize_cols(&h.sent(), "s1");
+
+    activate(&mut h);
+    let sent = h.sent();
+    assert_eq!(
+        resize_claims(&sent, "s1"),
+        [true],
+        "the focus gain claims the unchanged size: {sent:?}"
+    );
+    assert_eq!(
+        resize_cols(&sent, "s1").last(),
+        before.last(),
+        "the claim sends the size the pane has"
+    );
+}
+
+#[gpui::test]
+fn gaining_focus_claims_once_per_session_shown_twice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s1")),
+    );
     let fixture = Fixture {
-        sessions: vec![session("s1").build(), session("s2").build()],
+        sessions: vec![session("s1").build()],
         tabs: vec![tab("t1", &grid)],
         ..Fixture::default()
     };
     let mut h = Harness::with(cx, &dir, &fixture);
-    h.cx.update(|window, _| window.activate_window());
     h.answer_scrollback("s1", b"");
-    h.answer_scrollback("s2", b"");
     h.sent();
 
-    h.click_on("leaf-s2");
-    assert_eq!(h.root(|root, _| root.focused_pane()), Some("p2".to_owned()));
+    activate(&mut h);
+    assert_eq!(
+        resize_claims(&h.sent(), "s1"),
+        [true],
+        "only the driving pane claims"
+    );
+}
+
+#[gpui::test]
+fn focus_gained_again_after_a_loss_claims_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    activate(&mut h);
+    assert_eq!(resize_claims(&h.sent(), "s1"), [true]);
+
+    h.cx.deactivate_window();
+    h.cx.run_until_parked();
+    assert_eq!(
+        resize_claims(&h.sent(), "s1"),
+        Vec::<bool>::new(),
+        "losing the focus sends no size"
+    );
+    activate(&mut h);
+    assert_eq!(
+        resize_claims(&h.sent(), "s1"),
+        [true],
+        "the focus gained again claims again"
+    );
+}
+
+#[gpui::test]
+fn an_unfocused_window_never_claims(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &split_beside_a_tab());
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    h.click_on("tab-t2");
+    h.answer_scrollback("s3", b"");
+    h.click_on("tab-t1");
+    h.cx.run_until_parked();
+    let sent = h.sent();
+    for id in ["s1", "s2", "s3"] {
+        assert_sized_unclaimed(&sent, id, "a window never focused claims nothing");
+    }
+}
+
+#[gpui::test]
+fn gaining_focus_skips_a_chat_view_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &split_beside_a_tab());
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    h.click_on("pane-view-chat-p1");
+    assert!(h.root(|root, _| root.pane_shows_chat("p1")));
+    h.sent();
+
+    activate(&mut h);
+    let sent = h.sent();
+    assert_eq!(
+        resize_claims(&sent, "s1"),
+        Vec::<bool>::new(),
+        "a pane showing its chat claims nothing"
+    );
+    assert_eq!(
+        resize_claims(&sent, "s2"),
+        [true],
+        "its terminal neighbour claims"
+    );
+}
+
+#[gpui::test]
+fn gaining_focus_claims_only_the_active_tabs_panes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &split_beside_a_tab());
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    h.click_on("tab-t2");
+    h.answer_scrollback("s3", b"");
+    h.click_on("tab-t1");
+    h.sent();
+
+    activate(&mut h);
+    let sent = h.sent();
+    assert_eq!(resize_claims(&sent, "s1"), [true]);
+    assert_eq!(resize_claims(&sent, "s2"), [true]);
+    assert_eq!(
+        resize_claims(&sent, "s3"),
+        Vec::<bool>::new(),
+        "a hidden tab's pane claims nothing"
+    );
+}
+
+#[gpui::test]
+fn a_focus_gain_before_the_first_tab_list_claims_its_panes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    activate(&mut h);
+    h.sent();
+
+    h.load(&split_beside_a_tab());
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
     let sent = h.sent();
     for id in ["s1", "s2"] {
-        let claims = resize_claims(&sent, id);
-        assert!(
-            claims.iter().all(|claim| !claim),
-            "moving the focus claims no size for {id}: {claims:?}"
+        assert_eq!(
+            resize_claims(&sent, id).first(),
+            Some(&true),
+            "the first list's pane claims {id} at its first measure: {sent:?}"
         );
     }
+
+    h.click_on("tab-t2");
+    h.answer_scrollback("s3", b"");
+    assert_sized_unclaimed(
+        &h.sent(),
+        "s3",
+        "a hidden tab of the first list claims nothing",
+    );
+}
+
+#[gpui::test]
+fn gaining_focus_sends_a_remote_panes_claim_to_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+    h.answer_scrollback("a1", b"");
+    h.host(&saved_remote()).answer_scrollback("b1", b"");
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    activate(&mut h);
+    assert_eq!(
+        resize_claims(&h.host(&saved_remote()).sent(), "b1"),
+        [true],
+        "the remote pane's claim goes to its host"
+    );
+    assert_eq!(
+        resize_claims(&h.sent(), "a1"),
+        [true],
+        "This PC's pane claims on This PC"
+    );
+}
+
+/// [`REMOTE`] saved, the window opened and the host connected, with no tab
+/// list from This PC and no session list from [`REMOTE`] yet; nothing sent
+/// is left unread on either host.
+fn remote_saved_before_any_list<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::open(cx, dir);
+    h.host(&saved_remote()).connect();
+    h.sent();
+    h
+}
+
+#[gpui::test]
+fn a_remote_panes_focus_claim_survives_its_hosts_first_session_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_saved_before_any_list(cx, &dir);
+    activate(&mut h);
+    h.sent();
+
+    h.load(&two_tab_fixture());
+    remote_lists(&mut h, &["b1", "b2"]);
+    h.host(&saved_remote()).answer_scrollback("b1", b"");
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        resize_claims(&sent, "b1").first(),
+        Some(&true),
+        "the remote pane's first size claims b1 on its host: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_focus_gain_before_the_tab_list_claims_only_driving_panes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    activate(&mut h);
+    h.sent();
+
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s1")),
+    );
+    h.load(&Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    });
+    h.answer_scrollback("s1", b"");
+    let sent = h.sent();
+    // The driving pane sends s1's size twice at the same size; only its
+    // first send claims.
+    assert_eq!(
+        resize_claims(&sent, "s1"),
+        [true, false],
+        "only the driving pane sizes s1, claimed once: {sent:?}"
+    );
+
+    h.click_on("pane-view-chat-p1");
+    assert!(h.root(|root, _| root.pane_shows_chat("p1")));
+    let sent = h.sent();
+    assert_eq!(
+        resize_claims(&sent, "s1"),
+        [false],
+        "the pane that takes over sizes s1 unclaimed: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn losing_focus_drops_a_pending_focus_claim(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_saved_before_any_list(cx, &dir);
+    activate(&mut h);
+    h.load(&two_tab_fixture());
+    h.sent();
+
+    h.cx.deactivate_window();
+    h.cx.run_until_parked();
+    remote_lists(&mut h, &["b1", "b2"]);
+    h.host(&saved_remote()).answer_scrollback("b1", b"");
+    assert_sized_unclaimed(
+        &h.host(&saved_remote()).sent(),
+        "b1",
+        "a focus claim the window lost before the pane attached claims nothing",
+    );
 }
 
 #[gpui::test]

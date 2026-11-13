@@ -285,6 +285,12 @@ impl RootView {
         }
         self.sync_chat_loads(cx);
         self.update_pane_roles(cx);
+        // The main window gained focus before This PC's first tab list:
+        // the panes that list shows there, and that drive their sessions'
+        // sizes, claim them.
+        if self.tabs.take_focus_claim() {
+            self.claim_active_panes_for_focus(cx);
+        }
         self.follow_pane_focus_windows(cx);
     }
 
@@ -695,6 +701,81 @@ impl RootView {
             && !self.is_tab_popped(tab_id)
         {
             self.mark_tab_panes_resized(tab_id, cx);
+        }
+    }
+
+    /// The window that draws the panes of `tab_id` gained focus: each one
+    /// that drives its session's size claims it.
+    pub(crate) fn claim_tab_panes_for_focus(&self, tab_id: &str, cx: &mut Context<Self>) {
+        self.update_tab_panes(tab_id, cx, TerminalPane::claim_for_focus);
+    }
+
+    /// The pop-out window that draws pane `pane_id` gained focus: the pane
+    /// claims its session's size when it drives it.
+    pub(crate) fn claim_pane_for_focus(&self, pane_id: &str, cx: &mut Context<Self>) {
+        self.update_pane(pane_id, cx, TerminalPane::claim_for_focus);
+    }
+
+    /// The main window gained focus: the active tab's panes it draws claim
+    /// their sessions' sizes. A tab open in a pop-out, and a pane popped
+    /// out on its own, draw in their pop-outs, which claim for them.
+    pub(crate) fn claim_active_panes_for_focus(&self, cx: &mut Context<Self>) {
+        self.update_main_window_panes(cx, TerminalPane::claim_for_focus);
+    }
+
+    /// The window that draws the panes of `tab_id` lost focus: a focus
+    /// claim none of them has sent yet is dropped.
+    pub(crate) fn drop_tab_panes_focus_claims(&self, tab_id: &str, cx: &mut Context<Self>) {
+        self.update_tab_panes(tab_id, cx, TerminalPane::drop_focus_claim);
+    }
+
+    /// The pop-out window that draws pane `pane_id` lost focus: a focus
+    /// claim the pane has not sent yet is dropped.
+    pub(crate) fn drop_pane_focus_claim(&self, pane_id: &str, cx: &mut Context<Self>) {
+        self.update_pane(pane_id, cx, TerminalPane::drop_focus_claim);
+    }
+
+    /// The main window lost focus: a focus claim the panes it draws have
+    /// not sent yet is dropped. A pop-out's panes keep theirs.
+    pub(crate) fn drop_active_panes_focus_claims(&self, cx: &mut Context<Self>) {
+        self.update_main_window_panes(cx, TerminalPane::drop_focus_claim);
+    }
+
+    /// Runs `update` on every pane of `tab_id`.
+    fn update_tab_panes(
+        &self,
+        tab_id: &str,
+        cx: &mut Context<Self>,
+        update: fn(&mut TerminalPane),
+    ) {
+        for slot in self.panes.values().filter(|slot| slot.tab_id == tab_id) {
+            slot.view.update(cx, |pane, _| update(pane));
+        }
+    }
+
+    /// Runs `update` on pane `pane_id`, when there is one.
+    fn update_pane(&self, pane_id: &str, cx: &mut Context<Self>, update: fn(&mut TerminalPane)) {
+        if let Some(slot) = self.panes.get(pane_id) {
+            slot.view.update(cx, |pane, _| update(pane));
+        }
+    }
+
+    /// Runs `update` on every pane the main window draws: the active tab's,
+    /// less a tab open in a pop-out and a pane popped out on its own.
+    fn update_main_window_panes(&self, cx: &mut Context<Self>, update: fn(&mut TerminalPane)) {
+        let Some(tab_id) = self.tabs.active_id() else {
+            return;
+        };
+        if self.is_tab_popped(tab_id) {
+            return;
+        }
+        let popped = self.popouts.popped_panes();
+        let shown = self
+            .panes
+            .iter()
+            .filter(|(pane_id, slot)| slot.tab_id == tab_id && !popped.contains(&pane_id.as_str()));
+        for (_, slot) in shown {
+            slot.view.update(cx, |pane, _| update(pane));
         }
     }
 
