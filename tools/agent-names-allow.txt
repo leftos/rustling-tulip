@@ -20,3 +20,4 @@ tools/rt-driver-mcp/src/tools.rs:RUSTLING_TULIP_CLAUDE # the dev-only driver too
 tools/rt-driver-mcp/src/token.rs # the dev-only driver tool's driver token is a `claude setup-token` token, set as Claude Code's CLAUDE_CODE_OAUTH_TOKEN when a launch sets RUSTLING_TULIP_CLAUDE
 tools/rt-driver-mcp/src/launch.rs:Claude's home|\.claude\.json # the dev-only driver tool seeds a real Claude's home with Claude Code's .claude.json to skip onboarding
 tools/rt-driver-mcp/set-driver-token.ps1 # the owner's setup script for the dev-only driver token, which `claude setup-token` prints
+tools/agent-mail-guard.ps1 # the Agent Mail lease guard launcher, synced verbatim from the user-level config, names its home folder

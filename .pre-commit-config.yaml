@@ -93,6 +93,15 @@ repos:
         pass_filenames: false
         always_run: true
 
+      # Blocks a commit touching a file another Claude Code session holds an
+      # exclusive Agent Mail lease on; passes on a machine without the guard.
+      - id: agent-mail-guard
+        name: agent-mail lease guard
+        entry: pwsh -NoProfile -File tools/agent-mail-guard.ps1
+        language: system
+        pass_filenames: true
+        stages: [pre-commit]
+
       - id: cargo-clippy
         name: cargo clippy (-D warnings)
         entry: pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/prek-clippy.log --timeout 1800 --slot heavy -- cargo clippy --workspace --all-targets --all-features -- -D warnings
