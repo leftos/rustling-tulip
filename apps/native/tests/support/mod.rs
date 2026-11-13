@@ -1,6 +1,7 @@
 //! A fake daemon for the native client's UI specs: the root view on a test
 //! window, fed daemon messages, read back through the commands it sends.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -15,9 +16,11 @@ use chrono::{DateTime, Utc};
 use daemon_client::device_tokens::MemoryTokens;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
-    App, Bounds, Entity, InputHandler, KeyDownEvent, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext,
-    TouchPhase, VisualTestContext, Window, WindowId, point, px,
+    App, Bounds, DevicePixels, Entity, Font, FontId, FontMetrics, FontRun, GlyphId, InputHandler,
+    KeyDownEvent, Keystroke, LineLayout, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+    NoopTextSystem, Pixels, PlatformTextSystem, Point, RenderGlyphParams, ScrollDelta, ScrollEvent,
+    Size, TestAppContext, TextRenderingMode, TouchPhase, VisualTestContext, Window, WindowId,
+    point, px,
 };
 use protocol::{
     ClientMessage, DaemonMessage, GridNode, KeyState, PaneFollow, RepoEntry, SessionSnapshot,
@@ -54,6 +57,113 @@ pub fn secondary_key() -> Modifiers {
         control: !mac,
         ..Modifiers::none()
     }
+}
+
+/// The families gpui 0.2.2's test text system listed; the pinned gpui's lists none.
+pub const LISTED_FAMILIES: &[&str] = &[
+    "Adwaita Sans",
+    "Arial",
+    "Cantarell",
+    "DejaVu Sans",
+    "Helvetica",
+    "Noto Sans",
+    "Segoe UI",
+    "Ubuntu",
+];
+
+/// The test text system with a list of font families, as gpui 0.2.2's had.
+struct ListedFamilies {
+    families: &'static [&'static str],
+    inner: NoopTextSystem,
+}
+
+impl PlatformTextSystem for ListedFamilies {
+    fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> gpui::Result<()> {
+        self.inner.add_fonts(fonts)
+    }
+
+    fn all_font_names(&self) -> Vec<String> {
+        self.families
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn font_id(&self, descriptor: &Font) -> gpui::Result<FontId> {
+        self.inner.font_id(descriptor)
+    }
+
+    fn font_metrics(&self, font_id: FontId) -> FontMetrics {
+        self.inner.font_metrics(font_id)
+    }
+
+    fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> gpui::Result<Bounds<f32>> {
+        self.inner.typographic_bounds(font_id, glyph_id)
+    }
+
+    fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> gpui::Result<Size<f32>> {
+        self.inner.advance(font_id, glyph_id)
+    }
+
+    fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
+        self.inner.glyph_for_char(font_id, ch)
+    }
+
+    fn glyph_raster_bounds(
+        &self,
+        params: &RenderGlyphParams,
+    ) -> gpui::Result<Bounds<DevicePixels>> {
+        self.inner.glyph_raster_bounds(params)
+    }
+
+    fn rasterize_glyph(
+        &self,
+        params: &RenderGlyphParams,
+        raster_bounds: Bounds<DevicePixels>,
+    ) -> gpui::Result<(Size<DevicePixels>, Vec<u8>)> {
+        self.inner.rasterize_glyph(params, raster_bounds)
+    }
+
+    fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
+        self.inner.layout_line(text, font_size, runs)
+    }
+
+    fn recommended_rendering_mode(&self, font_id: FontId, font_size: Pixels) -> TextRenderingMode {
+        self.inner.recommended_rendering_mode(font_id, font_size)
+    }
+}
+
+/// Runs `spec` as `#[gpui::test]` does, on a test platform whose text system lists `families`.
+pub fn with_listed_families(
+    name: &'static str,
+    families: &'static [&'static str],
+    spec: impl Fn(&mut TestAppContext) + std::panic::RefUnwindSafe,
+) {
+    gpui::run_test(
+        1,
+        &[],
+        0,
+        &mut |dispatcher, _| {
+            let text_system = Arc::new(ListedFamilies {
+                families,
+                inner: NoopTextSystem,
+            });
+            let mut cx =
+                TestAppContext::build_with_text_system(dispatcher.clone(), Some(name), text_system);
+            let _entity_refcounts = cx.app.borrow().ref_counts_drop_handle();
+            spec(&mut cx);
+            cx.run_until_parked();
+            cx.update(|cx| {
+                cx.background_executor().forbid_parking();
+                cx.quit();
+            });
+            cx.run_until_parked();
+            drop(cx);
+            dispatcher.drain_tasks();
+            drop(dispatcher);
+        },
+        None,
+    );
 }
 
 /// The `NetDeps::open_local` of every spec: a plain loopback connection, no

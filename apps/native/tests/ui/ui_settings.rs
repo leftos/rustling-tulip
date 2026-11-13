@@ -4122,51 +4122,55 @@ fn ui_family(h: &mut Harness<'_>) -> String {
     h.cx.update(|_, cx| fonts::ui_family(cx).to_string())
 }
 
-#[gpui::test]
-fn a_ui_font_pick_redraws_the_interface_and_is_saved_and_reset_restores_the_default(
-    cx: &mut TestAppContext,
-) {
-    let dir = TestDir::new();
-    let mut h = appearance_tab(cx, &dir);
-    assert_eq!(ui_family(&mut h), "Inter", "nothing picked: the default");
+#[test]
+fn a_ui_font_pick_redraws_the_interface_and_is_saved_and_reset_restores_the_default() {
+    support::with_listed_families(
+        "a_ui_font_pick_redraws_the_interface_and_is_saved_and_reset_restores_the_default",
+        support::LISTED_FAMILIES,
+        |cx| {
+            let dir = TestDir::new();
+            let mut h = appearance_tab(cx, &dir);
+            assert_eq!(ui_family(&mut h), "Inter", "nothing picked: the default");
 
-    h.click_on("appearance-ui-family-option-Geist");
-    assert_eq!(ui_family(&mut h), "Geist", "the pick draws at once");
-    assert_eq!(
-        saved_ui(&dir)["ui_font_family"],
-        serde_json::Value::Null,
-        "a preview until Apply"
-    );
-    h.click_on("settings-apply");
-    assert_eq!(
-        saved_ui(&dir)["ui_font_family"],
-        "Geist",
-        "Apply saves it on this machine"
-    );
+            h.click_on("appearance-ui-family-option-Geist");
+            assert_eq!(ui_family(&mut h), "Geist", "the pick draws at once");
+            assert_eq!(
+                saved_ui(&dir)["ui_font_family"],
+                serde_json::Value::Null,
+                "a preview until Apply"
+            );
+            h.click_on("settings-apply");
+            assert_eq!(
+                saved_ui(&dir)["ui_font_family"],
+                "Geist",
+                "Apply saves it on this machine"
+            );
 
-    // A family the test text system knows: one of gpui's fallbacks.
-    h.click_on("appearance-ui-family-filter");
-    type_text(&mut h, "segoe");
-    h.click_on("appearance-ui-family-option-Segoe UI");
-    assert_eq!(ui_family(&mut h), "Segoe UI", "the pick draws at once");
-    assert_eq!(saved_ui(&dir)["ui_font_family"], "Geist");
-    h.click_on("settings-apply");
-    assert_eq!(saved_ui(&dir)["ui_font_family"], "Segoe UI");
-    assert_eq!(
-        h.root(|root, cx| root.pane_font("p1", cx).and_then(|font| font.family)),
-        None,
-        "the terminal font is not the UI font"
-    );
+            // A family the test text system knows: one of `support::LISTED_FAMILIES`.
+            h.click_on("appearance-ui-family-filter");
+            type_text(&mut h, "segoe");
+            h.click_on("appearance-ui-family-option-Segoe UI");
+            assert_eq!(ui_family(&mut h), "Segoe UI", "the pick draws at once");
+            assert_eq!(saved_ui(&dir)["ui_font_family"], "Geist");
+            h.click_on("settings-apply");
+            assert_eq!(saved_ui(&dir)["ui_font_family"], "Segoe UI");
+            assert_eq!(
+                h.root(|root, cx| root.pane_font("p1", cx).and_then(|font| font.family)),
+                None,
+                "the terminal font is not the UI font"
+            );
 
-    h.click_on("appearance-ui-family-reset");
-    assert_eq!(
-        ui_family(&mut h),
-        "Inter",
-        "Use built-in restores the default"
+            h.click_on("appearance-ui-family-reset");
+            assert_eq!(
+                ui_family(&mut h),
+                "Inter",
+                "Use built-in restores the default"
+            );
+            assert_eq!(saved_ui(&dir)["ui_font_family"], "Segoe UI");
+            h.click_on("settings-apply");
+            assert_eq!(saved_ui(&dir)["ui_font_family"], serde_json::Value::Null);
+        },
     );
-    assert_eq!(saved_ui(&dir)["ui_font_family"], "Segoe UI");
-    h.click_on("settings-apply");
-    assert_eq!(saved_ui(&dir)["ui_font_family"], serde_json::Value::Null);
 }
 
 /// The offset every UI text size is drawn at.
@@ -4586,53 +4590,59 @@ fn a_click_on_an_appearance_control_moves_the_keyboard_there(cx: &mut TestAppCon
     assert_eq!(settings_focus(&mut h), Some("appearance-size-up"));
 }
 
-#[gpui::test]
-fn a_family_row_click_keeps_the_clicked_row_in_view(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = appearance_tab(cx, &dir);
-    let names = h.root(rustling_tulip_native::RootView::appearance_family_names);
-    let far = names.last().expect("a family").clone();
-    let before_far = names
-        .len()
-        .checked_sub(2)
-        .and_then(|at| names.get(at))
-        .expect("two families")
-        .clone();
-    let far_row = format!("appearance-family-option-{far}");
-    tab_to(&mut h, "appearance-family-list");
-    for _ in 0..names.len() {
-        h.keys("down");
-    }
-    h.keys("shift-tab");
-    assert_eq!(settings_focus(&mut h), Some("appearance-family-filter"));
-    let list = h.bounds("appearance-family-list");
-    let shown = |row: gpui::Bounds<gpui::Pixels>| {
-        row.origin.y >= list.origin.y && row.bottom() <= list.bottom()
-    };
-    assert!(
-        h.bounds("appearance-family-reset").origin.y < list.origin.y,
-        "the list scrolled past its first row"
-    );
-    assert!(
-        shown(h.bounds(&far_row)),
-        "{far} is in view before the click"
-    );
+#[test]
+fn a_family_row_click_keeps_the_clicked_row_in_view() {
+    support::with_listed_families(
+        "a_family_row_click_keeps_the_clicked_row_in_view",
+        support::LISTED_FAMILIES,
+        |cx| {
+            let dir = TestDir::new();
+            let mut h = appearance_tab(cx, &dir);
+            let names = h.root(rustling_tulip_native::RootView::appearance_family_names);
+            let far = names.last().expect("a family").clone();
+            let before_far = names
+                .len()
+                .checked_sub(2)
+                .and_then(|at| names.get(at))
+                .expect("two families")
+                .clone();
+            let far_row = format!("appearance-family-option-{far}");
+            tab_to(&mut h, "appearance-family-list");
+            for _ in 0..names.len() {
+                h.keys("down");
+            }
+            h.keys("shift-tab");
+            assert_eq!(settings_focus(&mut h), Some("appearance-family-filter"));
+            let list = h.bounds("appearance-family-list");
+            let shown = |row: gpui::Bounds<gpui::Pixels>| {
+                row.origin.y >= list.origin.y && row.bottom() <= list.bottom()
+            };
+            assert!(
+                h.bounds("appearance-family-reset").origin.y < list.origin.y,
+                "the list scrolled past its first row"
+            );
+            assert!(
+                shown(h.bounds(&far_row)),
+                "{far} is in view before the click"
+            );
 
-    h.click_on(&far_row);
-    assert_eq!(settings_focus(&mut h), Some("appearance-family-list"));
-    assert!(
-        shown(h.bounds(&far_row)),
-        "{far} stays in view after the click"
-    );
-    assert_eq!(
-        appearance_hint(&mut h, "family"),
-        format!("Resolved: {far} from app")
-    );
-    h.keys("up enter");
-    assert_eq!(
-        appearance_hint(&mut h, "family"),
-        format!("Resolved: {before_far} from app"),
-        "the highlight stood on the clicked row"
+            h.click_on(&far_row);
+            assert_eq!(settings_focus(&mut h), Some("appearance-family-list"));
+            assert!(
+                shown(h.bounds(&far_row)),
+                "{far} stays in view after the click"
+            );
+            assert_eq!(
+                appearance_hint(&mut h, "family"),
+                format!("Resolved: {far} from app")
+            );
+            h.keys("up enter");
+            assert_eq!(
+                appearance_hint(&mut h, "family"),
+                format!("Resolved: {before_far} from app"),
+                "the highlight stood on the clicked row"
+            );
+        },
     );
 }
 
@@ -6355,8 +6365,8 @@ fn default_shell_pending_not_sent_to_older_or_closed_host(cx: &mut TestAppContex
     h.send(default_shell("pwsh", None));
     shell_row_open(&mut h, true);
     pick_shell(&mut h, "wsl");
-    let mut closed = Connection::for_target(rustling_tulip_native::target::Target::Local);
-    closed.on_connecting();
+    let mut closed = shell_connection();
+    let _ = closed.on_closed("dropped".to_owned());
     h.event(NetEvent::State(closed));
     h.click_on("settings-ok");
     assert_eq!(

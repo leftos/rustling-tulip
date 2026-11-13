@@ -512,11 +512,13 @@ fn a_reconnect_closes_the_remove_confirm(cx: &mut TestAppContext) {
     let mut h = opened(cx, &dir);
     page(&mut h, trio(), None);
     press(&mut h, "settings-accounts-remove-3");
-    // A new connection: its Welcome forgets the host's accounts, and its
-    // first list brings the same three back.
+    // A new connection: its Welcome forgets the host's accounts and closes
+    // Settings; its first list brings the same three back, and the page opens
+    // on them again.
     h.send_welcome(PROTOCOL);
     let id = listed(&mut h);
     h.send(accounts_reply(trio(), None, &id));
+    on_page(&mut h, trio(), None);
     assert!(
         drawn(&mut h, "settings-accounts-name-3=lab"),
         "the list came back with the account the confirm named"
