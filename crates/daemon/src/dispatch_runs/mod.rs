@@ -37,8 +37,8 @@ use chrono::{DateTime, Utc};
 pub(crate) use links::DispatchLinks;
 use parse::LiveRunFile;
 use protocol::{
-    DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, SessionStatus, TranscriptSource,
-    error_codes,
+    AgentId, DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, SessionStatus,
+    SubagentSnapshot, TranscriptSource, error_codes,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -167,9 +167,34 @@ struct RunEntry {
     /// The last status line queued for the run's log; `None` until the log is
     /// attached.
     logged: Option<SessionStatus>,
+    /// The run's own subagents as the subagent list last wrote them; empty
+    /// when listed, and again when listed under a new generation.
+    subagents: Vec<SubagentSnapshot>,
+}
+
+/// What the subagent list reads of one listed run, copied under the runs
+/// lock: the conversation the run's agent records and where it records it.
+pub(crate) struct RunSource {
+    pub(crate) run_id: String,
+    /// The listing the read belongs to; its write is dropped under another.
+    pub(crate) generation: u64,
+    pub(crate) agent: AgentId,
+    pub(crate) worktree: PathBuf,
+    /// The run's own conversation, from its stream.
+    pub(crate) agent_session_id: String,
+    pub(crate) started_at: DateTime<Utc>,
+    /// The dispatching session's conversation, when the file names one.
+    pub(crate) session_id: Option<String>,
 }
 
 impl RunEntry {
+    /// Whether the run's subagents are read: its stream named its
+    /// conversation and has not ended.
+    fn reads_subagents(&self) -> bool {
+        self.stream.agent_session_id.is_some()
+            && status_of(self.stream.status) != DispatchRunStatus::Ended
+    }
+
     fn snapshot(&self, run_id: &str) -> DispatchRunSnapshot {
         let file = &self.file;
         DispatchRunSnapshot {
@@ -195,7 +220,7 @@ impl RunEntry {
             session_id: file.session_id.clone(),
             resumed_from: file.resumed_from.clone(),
             auto_resume: file.auto_resume,
-            subagents: Vec::new(),
+            subagents: self.subagents.clone(),
         }
     }
 }
@@ -441,6 +466,7 @@ impl DispatchRuns {
             generation,
             stopping: false,
             logged: None,
+            subagents: Vec::new(),
         };
         self.log_change(run_id, &mut entry);
         let snapshot = entry.snapshot(run_id);
@@ -477,6 +503,7 @@ impl DispatchRuns {
             entry.stream = StreamState::default();
             entry.transcript.restarted(&source_of(run_id));
             entry.generation = next_generation;
+            entry.subagents = Vec::new();
         }
         self.log_change(run_id, entry);
         let snapshot = entry.snapshot(run_id);
@@ -687,6 +714,58 @@ impl DispatchRuns {
         MarkStopping::Marked
     }
 
+    /// What the subagent list reads of every listed run whose stream named
+    /// its conversation and has not ended.
+    pub(crate) fn subagent_sources(&self) -> Vec<RunSource> {
+        self.lock()
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.reads_subagents())
+            .filter_map(|(run_id, entry)| {
+                Some(RunSource {
+                    run_id: run_id.clone(),
+                    generation: entry.generation,
+                    agent: entry.file.agent_id(),
+                    worktree: entry.file.worktree.clone(),
+                    agent_session_id: entry.stream.agent_session_id.clone()?,
+                    started_at: entry.file.started_at,
+                    session_id: entry.file.session_id.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// The listed runs no longer read, ended or without a conversation, that
+    /// still list subagents, as `(run id, generation)`.
+    pub(crate) fn ended_with_subagents(&self) -> Vec<(String, u64)> {
+        self.lock()
+            .entries
+            .iter()
+            .filter(|(_, entry)| !entry.reads_subagents() && !entry.subagents.is_empty())
+            .map(|(run_id, entry)| (run_id.clone(), entry.generation))
+            .collect()
+    }
+
+    /// Store `list` as the subagents of the run listed at `generation` and
+    /// send its `Updated`, only when it differs from the stored one; a run
+    /// removed or listed again meanwhile is left alone.
+    pub(crate) fn set_subagents(&self, run_id: &str, generation: u64, list: Vec<SubagentSnapshot>) {
+        let mut map = self.lock();
+        let Some(entry) = map
+            .entries
+            .get_mut(run_id)
+            .filter(|entry| entry.generation == generation)
+        else {
+            return;
+        };
+        if entry.subagents == list {
+            return;
+        }
+        entry.subagents = list;
+        let snapshot = entry.snapshot(run_id);
+        self.send(DispatchRunEvent::Updated(snapshot));
+    }
+
     /// List `run_id` as a run of `child_pid` without a watcher, for the
     /// server's tests; returns its generation.
     #[cfg(test)]
@@ -708,6 +787,62 @@ impl DispatchRuns {
         let mut file = test_file(run_id, 4242, Some(7), Utc::now());
         file.session_id = session_id.map(str::to_owned);
         self.insert(run_id, file, None, CancellationToken::new())
+    }
+
+    /// List `run_id` working in `worktree` for the conversation `session_id`,
+    /// its stream having named its own conversation `agent_session_id`, for
+    /// the subagent list's tests; returns its generation.
+    #[cfg(test)]
+    pub(crate) fn list_streaming_for_test(
+        &self,
+        run_id: &str,
+        worktree: &str,
+        session_id: Option<&str>,
+        agent_session_id: Option<&str>,
+    ) -> u64 {
+        let mut file = test_file(run_id, 4242, Some(7), Utc::now());
+        file.worktree = PathBuf::from(worktree);
+        file.session_id = session_id.map(str::to_owned);
+        let generation = self.insert(run_id, file, None, CancellationToken::new());
+        self.set_stream_for_test(run_id, agent_session_id, None);
+        generation
+    }
+
+    /// List `run_id` again under a new generation, as a new stream file does,
+    /// its new stream having named `agent_session_id`; returns the new
+    /// generation; `None` when the run is not listed.
+    #[cfg(test)]
+    pub(crate) fn relist_for_test(
+        &self,
+        run_id: &str,
+        agent_session_id: Option<&str>,
+    ) -> Option<u64> {
+        let mut file = self.listed_file(run_id)?;
+        file.stream.set_extension("next.jsonl");
+        let generation = self.replace(run_id, file, CancellationToken::new())?;
+        self.set_stream_for_test(run_id, agent_session_id, None);
+        Some(generation)
+    }
+
+    /// Set the listed run's stream conversation and last status, sending no
+    /// event; nothing when the run is not listed.
+    #[cfg(test)]
+    pub(crate) fn set_stream_for_test(
+        &self,
+        run_id: &str,
+        agent_session_id: Option<&str>,
+        status: Option<SessionStatus>,
+    ) {
+        if let Some(entry) = self.lock().entries.get_mut(run_id) {
+            entry.stream.agent_session_id = agent_session_id.map(str::to_owned);
+            entry.stream.status = status;
+        }
+    }
+
+    /// [`Self::remove`], for the subagent list's tests.
+    #[cfg(test)]
+    pub(crate) fn remove_for_test(&self, run_id: &str) -> bool {
+        self.remove(run_id)
     }
 }
 

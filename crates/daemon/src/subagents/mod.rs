@@ -7,7 +7,9 @@
 //! connected it parks and reads nothing. A pass reads every live session with
 //! a reader of its own, builds the session's list and writes it only when it
 //! differs from the record's. A session that leaves the live set has its list
-//! emptied.
+//! emptied. Each listed dispatch run whose stream named its conversation is
+//! read the same way, its list stored on its run entry; one that ends has its
+//! list emptied.
 //!
 //! A first-layer subagent is listed with its whole subtree while any of it
 //! runs. One that ended stays listed while it ended after both the host's
@@ -31,6 +33,7 @@ use tokio::sync::watch;
 use tracing::warn;
 
 use crate::dashboard::ReaderFactory;
+use crate::dispatch_runs::{DispatchRuns, RunSource};
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
 
@@ -48,9 +51,20 @@ pub(crate) struct SubagentList {
 
 struct Inner {
     sessions: Arc<SessionRegistry>,
+    /// The listed dispatch runs, whose own subagents are read too.
+    runs: Option<Arc<DispatchRuns>>,
     factory: ReaderFactory,
-    /// Each live session's reader between passes, by session id.
-    readers: Mutex<HashMap<String, Cached>>,
+    /// Each live owner's reader between passes.
+    readers: Mutex<HashMap<Owner, Cached>>,
+}
+
+/// Whose subagents a reader reads: a session, or one listing of a dispatch
+/// run, so a session and a run never share a reader and a run listed again
+/// gets a fresh one.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Owner {
+    Session(String),
+    Run { id: String, generation: u64 },
 }
 
 /// Which transcript a reader follows; a change needs a fresh reader.
@@ -66,9 +80,10 @@ struct Cached {
     reader: Box<dyn ActivityReader>,
 }
 
-/// What a pass needs of one live session, copied out of its record.
+/// What a pass needs of one live session or run, copied out of its record or
+/// its run entry.
 struct Live {
-    id: String,
+    owner: Owner,
     agent: AgentId,
     key: ReaderKey,
     extra_env: Vec<(String, String)>,
@@ -88,19 +103,23 @@ struct Window {
 }
 
 impl SubagentList {
-    /// The service over `sessions`, reading with each agent plugin's reader.
-    pub(crate) fn new(sessions: Arc<SessionRegistry>) -> Self {
-        Self::with_reader_factory(sessions, Arc::new(plugin_reader))
+    /// The service over `sessions` and the dispatch runs `runs` lists,
+    /// reading with each agent plugin's reader.
+    pub(crate) fn new(sessions: Arc<SessionRegistry>, runs: Option<Arc<DispatchRuns>>) -> Self {
+        Self::with_reader_factory(sessions, runs, Arc::new(plugin_reader))
     }
 
-    /// The service over `sessions`, reading with `factory`'s readers.
+    /// The service over `sessions` and `runs`, reading with `factory`'s
+    /// readers.
     pub(crate) fn with_reader_factory(
         sessions: Arc<SessionRegistry>,
+        runs: Option<Arc<DispatchRuns>>,
         factory: ReaderFactory,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 sessions,
+                runs,
                 factory,
                 readers: Mutex::new(HashMap::new()),
             }),
@@ -141,12 +160,14 @@ impl SubagentList {
         })
     }
 
-    /// One pass: read every live session on the blocking pool, write each
-    /// one's list where it changed, and empty the list of every session that
-    /// is no longer live.
+    /// One pass: read every live session and run on the blocking pool, write
+    /// each one's list where it changed, and empty the list of every session
+    /// that is no longer live and every run no longer read.
     pub(crate) async fn pass(&self) {
         let snapshots = self.inner.sessions.snapshots();
-        let jobs = self.take_jobs(live_sessions(&self.inner.sessions, &snapshots));
+        let mut live = live_sessions(&self.inner.sessions, &snapshots);
+        live.extend(self.live_runs(&snapshots));
+        let jobs = self.take_jobs(live);
         let factory = Arc::clone(&self.inner.factory);
         let done = match tokio::task::spawn_blocking(move || run_jobs(jobs, &factory)).await {
             Ok(done) => done,
@@ -158,7 +179,13 @@ impl SubagentList {
                 return;
             }
         };
-        let live: HashSet<String> = done.iter().map(|job| job.live.id.clone()).collect();
+        let live: HashSet<String> = done
+            .iter()
+            .filter_map(|job| match &job.live.owner {
+                Owner::Session(id) => Some(id.clone()),
+                Owner::Run { .. } => None,
+            })
+            .collect();
         for job in done {
             self.apply(job);
         }
@@ -167,23 +194,54 @@ impl SubagentList {
                 clear_list(&self.inner.sessions, &snapshot.id);
             }
         }
+        self.clear_ended_runs();
     }
 
-    /// Drop the readers of sessions no longer live, and take each live
-    /// session's reader out for the pass; a reader of another transcript is
-    /// dropped, so the pass builds a fresh one.
+    /// The listed runs to read: each that named its conversation and has not
+    /// ended, read with the rows of the session on the conversation that
+    /// dispatched it. The runs lock is released before any record lock.
+    fn live_runs(&self, snapshots: &[SessionSnapshot]) -> Vec<Live> {
+        let Some(runs) = &self.inner.runs else {
+            return Vec::new();
+        };
+        runs.subagent_sources()
+            .into_iter()
+            .map(|source| {
+                let extra_env = host_env(
+                    &self.inner.sessions,
+                    snapshots,
+                    source.session_id.as_deref(),
+                );
+                run_live(source, extra_env)
+            })
+            .collect()
+    }
+
+    /// Empty the list of every run no longer read, once.
+    fn clear_ended_runs(&self) {
+        let Some(runs) = &self.inner.runs else {
+            return;
+        };
+        for (run_id, generation) in runs.ended_with_subagents() {
+            runs.set_subagents(&run_id, generation, Vec::new());
+        }
+    }
+
+    /// Drop the readers of owners no longer live, and take each live owner's
+    /// reader out for the pass; a reader of another transcript is dropped,
+    /// so the pass builds a fresh one.
     fn take_jobs(&self, live: Vec<Live>) -> Vec<Job> {
         let mut readers = lock(&self.inner.readers);
-        let ids: HashSet<&str> = live.iter().map(|session| session.id.as_str()).collect();
-        readers.retain(|id, _| ids.contains(id.as_str()));
+        let owners: HashSet<&Owner> = live.iter().map(|live| &live.owner).collect();
+        readers.retain(|owner, _| owners.contains(owner));
         live.into_iter()
-            .map(|session| {
+            .map(|live| {
                 let reader = readers
-                    .remove(&session.id)
-                    .filter(|cached| cached.key == session.key)
+                    .remove(&live.owner)
+                    .filter(|cached| cached.key == live.key)
                     .map(|cached| cached.reader);
                 Job {
-                    live: session,
+                    live,
                     reader,
                     snapshot: None,
                 }
@@ -191,7 +249,7 @@ impl SubagentList {
             .collect()
     }
 
-    /// Keep a job's reader for the next pass and write its session's list.
+    /// Keep a job's reader for the next pass and write its owner's list.
     fn apply(&self, job: Job) {
         let Job {
             live,
@@ -202,10 +260,17 @@ impl SubagentList {
             .as_ref()
             .map(|snapshot| listed(snapshot, live.key.process_started_at))
             .unwrap_or_default();
-        write_list(&self.inner.sessions, &live.id, &live.key, list);
+        match &live.owner {
+            Owner::Session(id) => write_list(&self.inner.sessions, id, &live.key, list),
+            Owner::Run { id, generation } => {
+                if let Some(runs) = &self.inner.runs {
+                    runs.set_subagents(id, *generation, list);
+                }
+            }
+        }
         if let Some(reader) = reader {
             lock(&self.inner.readers).insert(
-                live.id.clone(),
+                live.owner,
                 Cached {
                     key: live.key,
                     reader,
@@ -233,7 +298,7 @@ fn live_sessions(sessions: &SessionRegistry, snapshots: &[SessionSnapshot]) -> V
             }
             let folder = crate::history::primary_cwd(&record)?;
             Some(Live {
-                id: snapshot.id.clone(),
+                owner: Owner::Session(snapshot.id.clone()),
                 agent: record.agent.clone(),
                 key: ReaderKey {
                     conversation_id: record.conversation_id.clone()?,
@@ -248,6 +313,53 @@ fn live_sessions(sessions: &SessionRegistry, snapshots: &[SessionSnapshot]) -> V
             })
         })
         .collect()
+}
+
+/// What a pass needs of one listed run: its own conversation in its
+/// worktree, its start as the process start, and `extra_env`'s rows.
+fn run_live(source: RunSource, extra_env: Vec<(String, String)>) -> Live {
+    Live {
+        owner: Owner::Run {
+            id: source.run_id,
+            generation: source.generation,
+        },
+        agent: source.agent,
+        key: ReaderKey {
+            conversation_id: source.agent_session_id,
+            folder: source.worktree,
+            process_started_at: source.started_at,
+        },
+        extra_env,
+    }
+}
+
+/// The stored env rows of the first listed session on the conversation
+/// `session_id`, which a run it dispatched inherits; empty when none is.
+fn host_env(
+    sessions: &SessionRegistry,
+    snapshots: &[SessionSnapshot],
+    session_id: Option<&str>,
+) -> Vec<(String, String)> {
+    let Some(session_id) = session_id else {
+        return Vec::new();
+    };
+    snapshots
+        .iter()
+        .find_map(|snapshot| {
+            let record = sessions.get(&snapshot.id)?;
+            let record = lock(&record);
+            if record.conversation_id.as_deref() != Some(session_id) {
+                return None;
+            }
+            Some(
+                record
+                    .spawn_config
+                    .as_ref()
+                    .map(|config| config.extra_env.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default()
 }
 
 /// Build the readers the jobs lack and read every one: blocking file IO.

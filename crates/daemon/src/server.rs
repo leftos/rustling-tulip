@@ -1362,7 +1362,12 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
     // subscribes, and starts only where the host has a source.
     hub.perf.spawn_ticker();
     // The 2 s subagent list tick; it parks while no client is connected.
-    crate::subagents::SubagentList::new(Arc::clone(&hub.sessions)).spawn(client_count_rx.clone());
+    let runs = hub
+        .dispatch_runs
+        .as_ref()
+        .map(|dispatch| Arc::clone(&dispatch.runs));
+    crate::subagents::SubagentList::new(Arc::clone(&hub.sessions), runs)
+        .spawn(client_count_rx.clone());
     // Keep an agent's user-settings hooks install pointing at a current shim.
     agent_hooks::spawn_startup_refresh(hub);
     // The 3-minute working refresh; it parks while no connection watches.

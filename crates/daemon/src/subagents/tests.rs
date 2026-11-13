@@ -1,16 +1,20 @@
 #![expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use agent_api::{ActivitySnapshot, SubagentNode};
+use agent_api::{ActivitySnapshot, ActivitySource, SubagentNode};
 use chrono::{DateTime, Duration, TimeZone as _, Utc};
 use protocol::{AgentState, SessionMember, SessionMode, SessionStatus};
 use tokio::sync::{broadcast, watch};
 
 use super::{Job, SubagentList, TICK, live_sessions};
+use crate::dashboard::ReaderFactory;
 use crate::dashboard::test_support::Script;
+use crate::dispatch_runs::{DispatchRunEvent, DispatchRuns};
 use crate::server::test_support::{ScratchDir, idle_record, scratch_dirs};
 use crate::session::{SessionEvent, SessionRegistry};
+use crate::sync::lock;
 
 /// The host session's conversation, which the script reads by.
 const CONVERSATION: &str = "conv1";
@@ -74,6 +78,16 @@ struct Fixture {
 }
 
 fn fixture(tag: &str) -> Fixture {
+    fixture_with(tag, None, Script::factory)
+}
+
+/// [`fixture`], its service reading `runs` too, with the readers `factory`
+/// builds over the fixture's script.
+fn fixture_with(
+    tag: &str,
+    runs: Option<Arc<DispatchRuns>>,
+    factory: impl FnOnce(&Script) -> ReaderFactory,
+) -> Fixture {
     let scratch = ScratchDir::new(tag);
     let sessions = SessionRegistry::new(scratch_dirs(scratch.path(), None));
     let mut record = idle_record("s1");
@@ -87,7 +101,7 @@ fn fixture(tag: &str) -> Fixture {
     }];
     sessions.insert(record);
     let script = Script::default();
-    let list = SubagentList::with_reader_factory(Arc::clone(&sessions), script.factory());
+    let list = SubagentList::with_reader_factory(Arc::clone(&sessions), runs, factory(&script));
     let events = sessions.subscribe();
     Fixture {
         _scratch: scratch,
@@ -443,4 +457,321 @@ async fn newer_transcript_lines_make_a_finished_flagged_subagent_running() {
     fx.list.pass().await;
 
     assert_eq!(fx.listed(), vec![row("a1", 1, AgentState::Running)]);
+}
+
+/// The fixture's dispatch run, and the conversation its stream names.
+const RUN: &str = "run1";
+const RUN_CONVERSATION: &str = "run-conv1";
+
+/// What one reader build was asked to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Built {
+    conversation_id: String,
+    folder: PathBuf,
+    rows: Vec<(String, String)>,
+}
+
+/// A factory over `script` that records each build in `built`.
+fn recording(script: &Script, built: &Arc<Mutex<Vec<Built>>>) -> ReaderFactory {
+    let inner = script.factory();
+    let built = Arc::clone(built);
+    Arc::new(move |agent, source: &ActivitySource| {
+        lock(&built).push(Built {
+            conversation_id: source.conversation_id.clone(),
+            folder: source.folder.clone(),
+            rows: source
+                .rows
+                .iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+        });
+        inner(agent, source)
+    })
+}
+
+/// [`fixture`] whose service reads the listed dispatch runs too, recording
+/// every reader build, with the runs' events from before any run is listed.
+struct RunFixture {
+    fx: Fixture,
+    runs: Arc<DispatchRuns>,
+    run_events: broadcast::Receiver<DispatchRunEvent>,
+    built: Arc<Mutex<Vec<Built>>>,
+}
+
+fn run_fixture(tag: &str) -> RunFixture {
+    let runs = DispatchRuns::new();
+    let built = Arc::default();
+    let fx = fixture_with(tag, Some(Arc::clone(&runs)), |script| {
+        recording(script, &built)
+    });
+    let run_events = runs.subscribe();
+    RunFixture {
+        fx,
+        runs,
+        run_events,
+        built,
+    }
+}
+
+impl RunFixture {
+    /// List [`RUN`] for the host session's conversation, its stream naming
+    /// `agent_session_id`, and drop its listing's event; returns its
+    /// generation.
+    fn list_run(&mut self, agent_session_id: Option<&str>) -> u64 {
+        let generation = self.runs.list_streaming_for_test(
+            RUN,
+            "C:/work/run",
+            Some(CONVERSATION),
+            agent_session_id,
+        );
+        self.run_updates();
+        generation
+    }
+
+    /// [`RUN`]'s list as each `Updated` since the last call carried it.
+    fn run_updates(&mut self) -> Vec<Vec<(String, u8, AgentState)>> {
+        let mut updates = Vec::new();
+        while let Ok(event) = self.run_events.try_recv() {
+            if let DispatchRunEvent::Updated(snapshot) = event
+                && snapshot.run_id == RUN
+            {
+                updates.push(rows(&snapshot.subagents));
+            }
+        }
+        updates
+    }
+
+    /// [`RUN`]'s list as its snapshot carries it now.
+    fn run_listed(&self) -> Vec<(String, u8, AgentState)> {
+        let snapshot = self
+            .runs
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.run_id == RUN)
+            .expect("the run is listed");
+        rows(&snapshot.subagents)
+    }
+
+    /// The conversations the readers were built for, in build order.
+    fn built_conversations(&self) -> Vec<String> {
+        lock(&self.built)
+            .iter()
+            .map(|built| built.conversation_id.clone())
+            .collect()
+    }
+
+    /// How many readers were built for `conversation_id`.
+    fn builds_of(&self, conversation_id: &str) -> usize {
+        self.built_conversations()
+            .iter()
+            .filter(|built| *built == conversation_id)
+            .count()
+    }
+}
+
+#[tokio::test]
+async fn a_running_subagent_of_a_run_reaches_its_dispatch_run_updated() {
+    let mut rx = run_fixture("subagents-run-running");
+    rx.list_run(Some(RUN_CONVERSATION));
+    rx.fx
+        .script
+        .set(RUN_CONVERSATION, reading(vec![running("r1")], None));
+
+    rx.fx.list.pass().await;
+
+    let expected = vec![row("r1", 1, AgentState::Running)];
+    assert_eq!(rx.run_updates(), vec![expected.clone()]);
+    assert_eq!(rx.run_listed(), expected);
+    assert_eq!(rx.fx.listed(), Vec::new(), "the host session lists none");
+    let built = lock(&rx.built)
+        .iter()
+        .find(|built| built.conversation_id == RUN_CONVERSATION)
+        .cloned()
+        .expect("a reader was built for the run");
+    assert_eq!(built.folder, PathBuf::from("C:/work/run"));
+}
+
+#[tokio::test]
+async fn an_unchanged_run_list_sends_nothing() {
+    let mut rx = run_fixture("subagents-run-unchanged");
+    rx.list_run(Some(RUN_CONVERSATION));
+    rx.fx
+        .script
+        .set(RUN_CONVERSATION, reading(vec![running("r1")], None));
+    rx.fx.list.pass().await;
+    assert_eq!(rx.run_updates().len(), 1);
+
+    rx.fx.list.pass().await;
+
+    assert_eq!(rx.run_updates(), Vec::<Vec<_>>::new());
+    assert_eq!(rx.builds_of(RUN_CONVERSATION), 1, "with the same reader");
+}
+
+#[tokio::test]
+async fn a_run_without_its_conversation_yet_reads_nothing() {
+    let mut rx = run_fixture("subagents-run-no-conversation");
+    rx.list_run(None);
+
+    rx.fx.list.pass().await;
+
+    assert_eq!(rx.built_conversations(), vec![CONVERSATION.to_owned()]);
+    assert_eq!(rx.run_updates(), Vec::<Vec<_>>::new());
+}
+
+#[tokio::test]
+async fn a_run_relisted_under_a_new_generation_gets_a_fresh_reader() {
+    let mut rx = run_fixture("subagents-run-relisted");
+    let old = rx.list_run(Some(RUN_CONVERSATION));
+    rx.fx
+        .script
+        .set(RUN_CONVERSATION, reading(vec![running("r1")], None));
+    rx.fx.list.pass().await;
+    assert_eq!(rx.builds_of(RUN_CONVERSATION), 1);
+
+    let new = rx
+        .runs
+        .relist_for_test(RUN, Some(RUN_CONVERSATION))
+        .expect("the run is relisted");
+    assert_ne!(new, old);
+    rx.run_updates();
+    rx.fx.list.pass().await;
+
+    assert_eq!(rx.builds_of(RUN_CONVERSATION), 2, "a fresh reader");
+    let expected = vec![row("r1", 1, AgentState::Running)];
+    assert_eq!(rx.run_updates(), vec![expected.clone()]);
+
+    rx.runs.set_subagents(RUN, old, Vec::new());
+    assert_eq!(rx.run_updates(), Vec::<Vec<_>>::new(), "no update is sent");
+    assert_eq!(
+        rx.run_listed(),
+        expected,
+        "the old generation's write is dropped"
+    );
+}
+
+#[tokio::test]
+async fn a_removed_run_drops_its_reader() {
+    let mut rx = run_fixture("subagents-run-removed");
+    rx.list_run(Some(RUN_CONVERSATION));
+    rx.fx
+        .script
+        .set(RUN_CONVERSATION, reading(vec![running("r1")], None));
+    rx.fx.list.pass().await;
+    assert_eq!(lock(&rx.fx.list.inner.readers).len(), 2);
+    assert!(rx.runs.remove_for_test(RUN));
+    let reads = rx.fx.script.reads();
+
+    rx.fx.list.pass().await;
+
+    assert_eq!(rx.fx.script.reads(), reads + 1, "only the session is read");
+    assert_eq!(rx.builds_of(RUN_CONVERSATION), 1);
+    assert_eq!(
+        lock(&rx.fx.list.inner.readers).len(),
+        1,
+        "only the session's reader is kept"
+    );
+}
+
+#[tokio::test]
+async fn an_ended_run_clears_its_list_once() {
+    let mut rx = run_fixture("subagents-run-ended");
+    rx.list_run(Some(RUN_CONVERSATION));
+    rx.fx
+        .script
+        .set(RUN_CONVERSATION, reading(vec![running("r1")], None));
+    rx.fx.list.pass().await;
+    assert_eq!(rx.run_listed(), vec![row("r1", 1, AgentState::Running)]);
+    rx.runs
+        .set_stream_for_test(RUN, Some(RUN_CONVERSATION), Some(SessionStatus::Stopped));
+    rx.run_updates();
+
+    rx.fx.list.pass().await;
+    assert_eq!(rx.run_updates(), vec![Vec::new()]);
+    rx.fx.list.pass().await;
+
+    assert_eq!(rx.run_updates(), Vec::<Vec<_>>::new());
+    assert_eq!(
+        rx.builds_of(RUN_CONVERSATION),
+        1,
+        "an ended run is not read"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn at_no_clients_no_run_is_read() {
+    let mut rx = run_fixture("subagents-run-no-clients");
+    rx.list_run(Some(RUN_CONVERSATION));
+    rx.fx
+        .script
+        .set(RUN_CONVERSATION, reading(vec![running("r1")], None));
+    let (clients, clients_rx) = watch::channel(0usize);
+    let task = rx.fx.list.spawn(clients_rx);
+
+    tokio::time::sleep(TICK * 10).await;
+    assert_eq!(rx.fx.script.reads(), 0, "no pass runs with no client");
+    assert_eq!(rx.built_conversations(), Vec::<String>::new());
+
+    clients.send_replace(1);
+    tokio::time::sleep(TICK / 2).await;
+    assert_eq!(
+        rx.builds_of(RUN_CONVERSATION),
+        1,
+        "a returning client reads the run"
+    );
+    assert_eq!(rx.run_listed(), vec![row("r1", 1, AgentState::Running)]);
+
+    clients.send_replace(0);
+    // A pass already under way when the last client left may still finish.
+    tokio::time::sleep(TICK).await;
+    let settled = rx.fx.script.reads();
+    tokio::time::sleep(TICK * 10).await;
+    assert_eq!(
+        rx.fx.script.reads(),
+        settled,
+        "no pass runs once none is left"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_run_reads_with_its_host_sessions_env_rows() {
+    let rx = run_fixture("subagents-run-env");
+    let mut host = idle_record("s2");
+    host.conversation_id = Some("host-conv".to_owned());
+    host.spawn_config = Some(protocol::SpawnConfig {
+        target: protocol::SpawnTarget::Standalone {
+            cwd: None,
+            add_dirs: Vec::new(),
+        },
+        mode: SessionMode::Interactive,
+        dangerously_skip_permissions: false,
+        agent: None,
+        extra_env: vec![("AGENT_HOME_DIR".to_owned(), "X:/home".to_owned())],
+        extra_args: Vec::new(),
+    });
+    rx.fx.sessions.insert(host);
+    rx.runs.list_streaming_for_test(
+        RUN,
+        "C:/work/run",
+        Some("host-conv"),
+        Some(RUN_CONVERSATION),
+    );
+    rx.runs
+        .list_streaming_for_test("run2", "C:/work/run2", Some("nobody"), Some("run-conv2"));
+
+    rx.fx.list.pass().await;
+
+    let built = lock(&rx.built).clone();
+    let rows_of = |conversation_id: &str| {
+        built
+            .iter()
+            .find(|built| built.conversation_id == conversation_id)
+            .map(|built| built.rows.clone())
+            .expect("a reader was built for the run")
+    };
+    assert_eq!(
+        rows_of(RUN_CONVERSATION),
+        vec![("AGENT_HOME_DIR".to_owned(), "X:/home".to_owned())]
+    );
+    assert_eq!(rows_of("run-conv2"), Vec::new(), "no host session: no rows");
 }
