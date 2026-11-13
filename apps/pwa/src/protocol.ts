@@ -121,6 +121,14 @@ export const FEATURE_GATE_STATE = "gate_state";
 export const FEATURE_PERF_MONITOR = "perf_monitor";
 
 /**
+ * `Welcome.features` entry: the daemon answers
+ * [`ClientMessage::ListHostLayouts`] with [`DaemonMessage::HostLayouts`],
+ * listing its own hostname and every other client's non-empty layout on it.
+ * A client asks a host for its layouts only when the host's daemon lists it.
+ */
+export const FEATURE_HOST_LAYOUTS = "host_layouts";
+
+/**
  * `Welcome.features` entry: the daemon watches the dispatch tool's live-run
  * folder and sends [`DaemonMessage::DispatchRuns`],
  * [`DaemonMessage::DispatchRunUpdated`] and
@@ -720,6 +728,27 @@ export interface HostRebind {
   old_id: string;
   new_id: string;
 }
+
+/**
+ * How [`ClientMessage::BindHostSessions`] lays out the sessions it binds.
+ * Grows over time, so it carries a catch-all `Unknown` so an older daemon
+ * keeps decoding a newer client's choice.
+ */
+export type HostArrangement =
+  /**
+   * Split the sessions across tabs of at most `max_per_tab` panes, in the
+   * order the client sent them; `None` puts every session in one tab. Each
+   * tab is laid out by `layout`.
+   */
+  | { kind: "auto"; layout: RearrangeLayout; max_per_tab?: number | null }
+  /**
+   * Copy the host's tabs the user chose to follow — any layout its daemon
+   * sent in [`DaemonMessage::HostLayouts`], the host's own by default —
+   * with their split trees, ratios and names. Sessions in `session_ids`
+   * the tabs do not place go into Auto Grid tabs of at most four panes
+   * after the copied ones.
+   */
+  | { kind: "follow"; tabs: TabEntry[] };
 
 /**
  * One subagent a session's agent or a dispatch run started, as its host
@@ -2302,6 +2331,15 @@ export interface ClonableLayout {
   client_id: string;
   /** Display label (e.g. the other machine's hostname), if it reported one. */
   name: string | null;
+}
+
+/** One client's layout on a host, as [`DaemonMessage::HostLayouts`] lists it. */
+export interface HostLayout {
+  /** The client that made the layout. */
+  client_id: string;
+  /** The client's name for its machine; `None` when the client sent none. */
+  name?: string | null;
+  tabs: TabEntry[];
 }
 
 /**
@@ -4506,6 +4544,49 @@ export type ClientMessage =
    */
   | { type: "rehost_panes"; from: string; to?: string | null; session_ids: string[]; request_id?: string | null }
   /**
+   * Close, in this client's layout only, every pane showing a session of
+   * `host`: each pane whose `session_id` is a session of `host`. A pane
+   * following a dispatch run or a subagent is not a session and stays. Each
+   * client's host keys are its own, so another client's layout keeps its
+   * panes of the same key. A closed pane goes the way a removed local
+   * session's pane goes: its sibling fills the space, an emptied tab is
+   * removed and a tab still on its picked layout is rebuilt, so a change
+   * gets its usual [`DaemonMessage::TabUpdated`] or
+   * [`DaemonMessage::TabRemoved`]. Sent only to This PC, whose layouts hold
+   * the panes of remote hosts. A refusal is an [`DaemonMessage::Error`]
+   * with this `request_id`.
+   *
+   * `host`: The host whose sessions go unbound; `None` is This PC.
+   *
+   * `request_id`: Echoed on a [`DaemonMessage::Error`] answering it.
+   */
+  | { type: "unbind_host_panes"; host: string | null; request_id?: string | null }
+  /**
+   * Add tabs at the end of this client's tab list holding sessions of
+   * `host`, built by `arrangement`, each answered by a
+   * [`DaemonMessage::TabUpdated`]. A session a pane of this client already
+   * shows is skipped. Sent only to This PC, whose layouts hold the panes of
+   * remote hosts. A refusal is an [`DaemonMessage::Error`] with this
+   * `request_id`.
+   *
+   * `host`: The host whose sessions are bound; `None` is This PC.
+   *
+   * `request_id`: Echoed on a [`DaemonMessage::Error`] answering it.
+   */
+  | { type: "bind_host_sessions"; host: string | null; session_ids: string[]; arrangement: HostArrangement; request_id?: string | null }
+  /**
+   * Ask a host's daemon for its own hostname and every other client's
+   * non-empty layout on it, the choices a "follow the host's layout" bind
+   * offers. The host's own layout is the one whose `name` equals
+   * `host_name`, and none when either is `None`. Answered by
+   * [`DaemonMessage::HostLayouts`] with this `request_id`, or by a
+   * [`DaemonMessage::Error`] carrying it. Sent only to a daemon that lists
+   * [`FEATURE_HOST_LAYOUTS`].
+   *
+   * `request_id`: Echoed on the answer, or on a [`DaemonMessage::Error`] refusing it.
+   */
+  | { type: "list_host_layouts"; request_id?: string | null }
+  /**
    * Request the list of presets available for a repo or workspace. The
    * daemon reads `.rustling-tulip/presets.json` from the target repo (or
    * from each member repo of a workspace) and replies with
@@ -5613,6 +5694,17 @@ export type DaemonMessage =
    * `clonable`: Other clients' non-empty layouts that can be cloned.
    */
   | { type: "layout_init_required"; has_legacy: boolean; active_session_count: number; clonable: ClonableLayout[] }
+  /**
+   * Answer to [`ClientMessage::ListHostLayouts`]: the daemon's own hostname
+   * and every other client's non-empty layout on it. The host's own layout
+   * is the one whose `name` equals `host_name`, and none when either is
+   * `None`.
+   *
+   * `host_name`: The daemon's own hostname; `None` when it cannot be read.
+   *
+   * `request_id`: Echoed from the [`ClientMessage::ListHostLayouts`] answering it.
+   */
+  | { type: "host_layouts"; host_name?: string | null; layouts: HostLayout[]; request_id?: string | null }
   /**
    * Broadcast on any structural change to a single tab (create, rename,
    * split, close pane, ratio adjustment, move, session-prune).

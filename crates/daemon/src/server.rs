@@ -1241,6 +1241,15 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::FollowTranscript { .. } | ClientMessage::UnfollowTranscript { .. }) => {
             transcripts::handle(hub, m, ctx);
         }
+        ClientMessage::UnbindHostPanes { request_id, .. }
+        | ClientMessage::BindHostSessions { request_id, .. }
+        | ClientMessage::ListHostLayouts { request_id } => {
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: "This daemon does not support that request yet.".to_owned(),
+                request_id,
+                code: Some(protocol::error_codes::UNSUPPORTED_MESSAGE.to_owned()),
+            });
+        }
     }
     Ok(())
 }
@@ -1503,6 +1512,31 @@ mod tests {
                 DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
                     if message == "unknown session: s1" && id == "d1"
                         && code == protocol::error_codes::NOT_FOUND
+            ),
+            "{reply:?}"
+        );
+    }
+
+    /// An unbind request is refused with an `unsupported_message` error
+    /// echoing its request id rather than dropped.
+    #[tokio::test]
+    async fn unbind_host_panes_is_refused_as_unsupported() {
+        let (hub, _scratch) = test_hub("unbind-host-unsupported");
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::UnbindHostPanes {
+                host: None,
+                request_id: Some("r1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
+                    if message == "This daemon does not support that request yet."
+                        && id == "r1"
+                        && code == protocol::error_codes::UNSUPPORTED_MESSAGE
             ),
             "{reply:?}"
         );

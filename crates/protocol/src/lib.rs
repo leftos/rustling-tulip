@@ -104,6 +104,12 @@ pub const FEATURE_GATE_STATE: &str = "gate_state";
 /// daemon lists it.
 pub const FEATURE_PERF_MONITOR: &str = "perf_monitor";
 
+/// `Welcome.features` entry: the daemon answers
+/// [`ClientMessage::ListHostLayouts`] with [`DaemonMessage::HostLayouts`],
+/// listing its own hostname and every other client's non-empty layout on it.
+/// A client asks a host for its layouts only when the host's daemon lists it.
+pub const FEATURE_HOST_LAYOUTS: &str = "host_layouts";
+
 /// `Welcome.features` entry: the daemon watches the dispatch tool's live-run
 /// folder and sends [`DaemonMessage::DispatchRuns`],
 /// [`DaemonMessage::DispatchRunUpdated`] and
@@ -964,6 +970,33 @@ pub struct SessionMetrics {
 pub struct HostRebind {
     pub old_id: String,
     pub new_id: String,
+}
+
+/// How [`ClientMessage::BindHostSessions`] lays out the sessions it binds.
+/// Grows over time, so it carries a catch-all `Unknown` so an older daemon
+/// keeps decoding a newer client's choice.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HostArrangement {
+    /// Split the sessions across tabs of at most `max_per_tab` panes, in the
+    /// order the client sent them; `None` puts every session in one tab. Each
+    /// tab is laid out by `layout`.
+    Auto {
+        layout: RearrangeLayout,
+        #[serde(default)]
+        max_per_tab: Option<u32>,
+    },
+    /// Copy the host's tabs the user chose to follow — any layout its daemon
+    /// sent in [`DaemonMessage::HostLayouts`], the host's own by default —
+    /// with their split trees, ratios and names. Sessions in `session_ids`
+    /// the tabs do not place go into Auto Grid tabs of at most four panes
+    /// after the copied ones.
+    Follow { tabs: Vec<TabEntry> },
+    /// Forward-compat fallback: an arrangement the current build does not
+    /// know. Serializes as `{"kind":"unknown"}` if ever round-tripped; a
+    /// daemon refuses it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One subagent a session's agent or a dispatch run started, as its host
@@ -3091,6 +3124,17 @@ pub struct ClonableLayout {
     pub client_id: String,
     /// Display label (e.g. the other machine's hostname), if it reported one.
     pub name: Option<String>,
+}
+
+/// One client's layout on a host, as [`DaemonMessage::HostLayouts`] lists it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HostLayout {
+    /// The client that made the layout.
+    pub client_id: String,
+    /// The client's name for its machine; `None` when the client sent none.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub tabs: Vec<TabEntry>,
 }
 
 /// How a client wants to seed its brand-new per-client layout, chosen at first
@@ -5757,6 +5801,51 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Close, in this client's layout only, every pane showing a session of
+    /// `host`: each pane whose `session_id` is a session of `host`. A pane
+    /// following a dispatch run or a subagent is not a session and stays. Each
+    /// client's host keys are its own, so another client's layout keeps its
+    /// panes of the same key. A closed pane goes the way a removed local
+    /// session's pane goes: its sibling fills the space, an emptied tab is
+    /// removed and a tab still on its picked layout is rebuilt, so a change
+    /// gets its usual [`DaemonMessage::TabUpdated`] or
+    /// [`DaemonMessage::TabRemoved`]. Sent only to This PC, whose layouts hold
+    /// the panes of remote hosts. A refusal is an [`DaemonMessage::Error`]
+    /// with this `request_id`.
+    UnbindHostPanes {
+        /// The host whose sessions go unbound; `None` is This PC.
+        host: Option<String>,
+        /// Echoed on a [`DaemonMessage::Error`] answering it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Add tabs at the end of this client's tab list holding sessions of
+    /// `host`, built by `arrangement`, each answered by a
+    /// [`DaemonMessage::TabUpdated`]. A session a pane of this client already
+    /// shows is skipped. Sent only to This PC, whose layouts hold the panes of
+    /// remote hosts. A refusal is an [`DaemonMessage::Error`] with this
+    /// `request_id`.
+    BindHostSessions {
+        /// The host whose sessions are bound; `None` is This PC.
+        host: Option<String>,
+        session_ids: Vec<String>,
+        arrangement: HostArrangement,
+        /// Echoed on a [`DaemonMessage::Error`] answering it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Ask a host's daemon for its own hostname and every other client's
+    /// non-empty layout on it, the choices a "follow the host's layout" bind
+    /// offers. The host's own layout is the one whose `name` equals
+    /// `host_name`, and none when either is `None`. Answered by
+    /// [`DaemonMessage::HostLayouts`] with this `request_id`, or by a
+    /// [`DaemonMessage::Error`] carrying it. Sent only to a daemon that lists
+    /// [`FEATURE_HOST_LAYOUTS`].
+    ListHostLayouts {
+        /// Echoed on the answer, or on a [`DaemonMessage::Error`] refusing it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Request the list of presets available for a repo or workspace. The
     /// daemon reads `.rustling-tulip/presets.json` from the target repo (or
     /// from each member repo of a workspace) and replies with
@@ -7138,6 +7227,19 @@ pub enum DaemonMessage {
         /// Other clients' non-empty layouts that can be cloned.
         clonable: Vec<ClonableLayout>,
     },
+    /// Answer to [`ClientMessage::ListHostLayouts`]: the daemon's own hostname
+    /// and every other client's non-empty layout on it. The host's own layout
+    /// is the one whose `name` equals `host_name`, and none when either is
+    /// `None`.
+    HostLayouts {
+        /// The daemon's own hostname; `None` when it cannot be read.
+        #[serde(default)]
+        host_name: Option<String>,
+        layouts: Vec<HostLayout>,
+        /// Echoed from the [`ClientMessage::ListHostLayouts`] answering it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Broadcast on any structural change to a single tab (create, rename,
     /// split, close pane, ratio adjustment, move, session-prune).
     TabUpdated {
@@ -8369,7 +8471,7 @@ mod tests {
     }
 
     /// The tab-layout requests, each carrying `request_id`.
-    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 10] {
+    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 12] {
         let request_id = request_id.map(str::to_owned);
         [
             ClientMessage::SplitPane {
@@ -8408,6 +8510,22 @@ mod tests {
                 from: "ssh:devbox".to_owned(),
                 to: Some("tailnet:laptop".to_owned()),
                 session_ids: vec!["s1".to_owned()],
+                request_id: request_id.clone(),
+            },
+            ClientMessage::UnbindHostPanes {
+                host: Some("ssh:devbox".to_owned()),
+                request_id: request_id.clone(),
+            },
+            ClientMessage::BindHostSessions {
+                host: Some("ssh:devbox".to_owned()),
+                session_ids: vec!["s1".to_owned()],
+                arrangement: HostArrangement::Auto {
+                    layout: RearrangeLayout::Grid {
+                        cols: 0,
+                        aspect: None,
+                    },
+                    max_per_tab: Some(4),
+                },
                 request_id: request_id.clone(),
             },
             ClientMessage::MergeTabs {
@@ -8457,7 +8575,9 @@ mod tests {
             | ClientMessage::ExtractToNewTab { request_id, .. }
             | ClientMessage::ForgetHostSessions { request_id, .. }
             | ClientMessage::RebindHostSessions { request_id, .. }
-            | ClientMessage::RehostPanes { request_id, .. } => request_id.as_deref(),
+            | ClientMessage::RehostPanes { request_id, .. }
+            | ClientMessage::UnbindHostPanes { request_id, .. }
+            | ClientMessage::BindHostSessions { request_id, .. } => request_id.as_deref(),
             other => panic!("not a tab-layout request: {other:?}"),
         }
     }
@@ -8772,6 +8892,214 @@ mod tests {
             ),
             "{json}"
         );
+    }
+
+    #[test]
+    fn unbind_host_panes_round_trips() {
+        let msg = ClientMessage::UnbindHostPanes {
+            host: None,
+            request_id: None,
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert_eq!(json, r#"{"type":"unbind_host_panes","host":null}"#);
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                back,
+                ClientMessage::UnbindHostPanes {
+                    host: None,
+                    request_id: None
+                }
+            ),
+            "{json}"
+        );
+
+        let msg = ClientMessage::UnbindHostPanes {
+            host: Some("ssh:devbox".to_owned()),
+            request_id: Some("req-1".to_owned()),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                back,
+                ClientMessage::UnbindHostPanes { host: Some(ref host), request_id: Some(ref id) }
+                    if host == "ssh:devbox" && id == "req-1"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn bind_host_sessions_round_trips_both_arrangements() {
+        let auto_arrangement = HostArrangement::Auto {
+            layout: RearrangeLayout::Grid {
+                cols: 0,
+                aspect: Some(1.6),
+            },
+            max_per_tab: Some(4),
+        };
+        let msg = ClientMessage::BindHostSessions {
+            host: None,
+            session_ids: vec!["s1".to_owned(), "s2".to_owned()],
+            arrangement: auto_arrangement.clone(),
+            request_id: Some("req-2".to_owned()),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""arrangement":{"kind":"auto","#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        match back {
+            ClientMessage::BindHostSessions {
+                host,
+                session_ids,
+                arrangement,
+                request_id,
+            } => {
+                assert_eq!(host, None);
+                assert_eq!(session_ids, ["s1", "s2"]);
+                assert_eq!(arrangement, auto_arrangement);
+                assert_eq!(request_id.as_deref(), Some("req-2"));
+            }
+            other => panic!("decoded as another message: {other:?}"),
+        }
+
+        let follow_arrangement = HostArrangement::Follow {
+            tabs: vec![sample_tab()],
+        };
+        let msg = ClientMessage::BindHostSessions {
+            host: Some("ssh:devbox".to_owned()),
+            session_ids: vec!["s1".to_owned()],
+            arrangement: follow_arrangement.clone(),
+            request_id: None,
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(!json.contains("request_id"), "None is omitted: {json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        match back {
+            ClientMessage::BindHostSessions {
+                host,
+                session_ids,
+                arrangement,
+                request_id,
+            } => {
+                assert_eq!(host.as_deref(), Some("ssh:devbox"));
+                assert_eq!(session_ids, ["s1"]);
+                assert_eq!(arrangement, follow_arrangement);
+                assert_eq!(request_id, None);
+            }
+            other => panic!("decoded as another message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_host_arrangement_decodes_as_unknown() {
+        let decoded: HostArrangement =
+            serde_json::from_str(r#"{"kind":"mirror","x":1}"#).expect("decodes");
+        assert_eq!(decoded, HostArrangement::Unknown);
+    }
+
+    #[test]
+    fn auto_arrangement_max_per_tab_defaults_to_none() {
+        let decoded: HostArrangement =
+            serde_json::from_str(r#"{"kind":"auto","layout":{"kind":"balanced"}}"#)
+                .expect("an auto arrangement without max_per_tab decodes");
+        assert!(
+            matches!(
+                decoded,
+                HostArrangement::Auto {
+                    layout: RearrangeLayout::Balanced,
+                    max_per_tab: None
+                }
+            ),
+            "{decoded:?}"
+        );
+    }
+
+    #[test]
+    fn list_host_layouts_and_reply_round_trip() {
+        let ask = ClientMessage::ListHostLayouts {
+            request_id: Some("r1".to_owned()),
+        };
+        let json = serde_json::to_string(&ask).expect("serializes");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        match back {
+            ClientMessage::ListHostLayouts { request_id } => {
+                assert_eq!(request_id.as_deref(), Some("r1"));
+            }
+            other => panic!("decoded as another message: {other:?}"),
+        }
+
+        let reply = DaemonMessage::HostLayouts {
+            host_name: Some("box".to_owned()),
+            layouts: vec![HostLayout {
+                client_id: "c1".to_owned(),
+                name: Some("box".to_owned()),
+                tabs: Vec::new(),
+            }],
+            request_id: Some("r1".to_owned()),
+        };
+        let json = serde_json::to_string(&reply).expect("serializes");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        match back {
+            DaemonMessage::HostLayouts {
+                host_name,
+                layouts,
+                request_id,
+            } => {
+                assert_eq!(host_name.as_deref(), Some("box"));
+                assert_eq!(
+                    layouts,
+                    vec![HostLayout {
+                        client_id: "c1".to_owned(),
+                        name: Some("box".to_owned()),
+                        tabs: Vec::new(),
+                    }]
+                );
+                assert_eq!(request_id.as_deref(), Some("r1"));
+            }
+            other => panic!("decoded as another message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_host_layout_without_names_round_trips() {
+        let reply = DaemonMessage::HostLayouts {
+            host_name: None,
+            layouts: vec![HostLayout {
+                client_id: "c1".to_owned(),
+                name: None,
+                tabs: Vec::new(),
+            }],
+            request_id: None,
+        };
+        let json = serde_json::to_string(&reply).expect("serializes");
+        assert!(json.contains(r#""host_name":null"#), "{json}");
+        assert!(json.contains(r#""name":null"#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        match back {
+            DaemonMessage::HostLayouts {
+                host_name,
+                layouts,
+                request_id,
+            } => {
+                assert_eq!(host_name, None);
+                assert_eq!(
+                    layouts,
+                    vec![HostLayout {
+                        client_id: "c1".to_owned(),
+                        name: None,
+                        tabs: Vec::new(),
+                    }]
+                );
+                assert_eq!(request_id, None);
+            }
+            other => panic!("decoded as another message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn feature_host_layouts_is_its_wire_name() {
+        assert_eq!(FEATURE_HOST_LAYOUTS, "host_layouts");
     }
 
     #[test]
