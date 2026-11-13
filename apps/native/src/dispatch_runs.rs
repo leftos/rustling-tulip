@@ -80,6 +80,7 @@ pub fn dispatch_leaf(run: &DispatchRunSnapshot, host: &HostKey) -> Leaf {
         tooltip: hover_text(run),
         depth: 0,
         host_session: None,
+        run_id: None,
         nested: 0,
         nested_subagents: 0,
         collapsed: false,

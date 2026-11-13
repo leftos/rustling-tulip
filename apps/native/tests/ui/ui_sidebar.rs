@@ -3031,6 +3031,34 @@ fn clicking_a_subagent_leaf_opens_a_tab_following_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_run_subagent_row_opens_nothing_yet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut run = dispatch_run("d1")
+        .worktree("C:\\r1.wt\\a")
+        .main_checkout("C:\\r1")
+        .session_id("c1")
+        .build();
+    run.subagents = vec![serde_json::from_value(subagent("r1a")).expect("subagent fixture")];
+    let mut h = nested_subagent_harness(cx, &dir, Vec::new(), vec![run]);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    assert!(
+        h.in_model("leaf-r1a"),
+        "precondition: the run's subagent draws under it"
+    );
+
+    h.click_on("leaf-r1a");
+
+    let sent = h.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::CreateTab { .. })),
+        "a run's subagent row opens no tab: {sent:?}"
+    );
+}
+
+#[gpui::test]
 fn clicking_a_followed_subagent_leaf_focuses_its_pane(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut fixture = Fixture {

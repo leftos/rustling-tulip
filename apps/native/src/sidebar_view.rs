@@ -1465,19 +1465,30 @@ fn container_rows(
 
 /// The leaves of one container that draw: a row at depth 0 when `shows`
 /// answers yes for it, a nested row exactly when its host session's row in
-/// the same container draws and is not folded.
+/// the same container draws and is not folded, and a run's subagent exactly
+/// when its run's row draws.
 fn shown_leaves(leaves: &[Leaf], shows: impl Fn(&Leaf) -> bool) -> Vec<&Leaf> {
-    // A tab's leaves span hosts, so a host row is matched by host and id.
+    // A tab's leaves span hosts, so a row is matched by host and id.
     let open_hosts: HashSet<(&HostKey, &str)> = leaves
         .iter()
         .filter(|leaf| leaf.host_session.is_none() && !leaf.collapsed && shows(leaf))
+        .map(|leaf| (&leaf.host, leaf.id.as_str()))
+        .collect();
+    let shown_runs: HashSet<(&HostKey, &str)> = leaves
+        .iter()
+        .filter(|leaf| {
+            leaf.kind == LeafKind::Dispatch && leaf.host_session.is_none() && shows(leaf)
+        })
         .map(|leaf| (&leaf.host, leaf.id.as_str()))
         .collect();
     leaves
         .iter()
         .filter(|leaf| match leaf.host_session.as_deref() {
             Some(host_id) => open_hosts.contains(&(&leaf.host, host_id)),
-            None => shows(leaf),
+            None => match leaf.run_id.as_deref() {
+                Some(run_id) => shown_runs.contains(&(&leaf.host, run_id)),
+                None => shows(leaf),
+            },
         })
         .collect()
 }
@@ -1538,7 +1549,8 @@ fn leaf_drag_row(
                 host: leaf.host.clone(),
             }),
             // The session it runs under is what the follow names, so a leaf
-            // without one drags nothing.
+            // without one, or one of a run's subagents, drags nothing.
+            LeafKind::Subagent if leaf.run_id.is_some() => None,
             LeafKind::Subagent => {
                 leaf.host_session
                     .as_ref()
@@ -2890,6 +2902,7 @@ fn leaf_frame(
     let id = leaf.id.clone();
     let host = host.clone();
     let host_session = leaf.host_session.clone();
+    let run_id = leaf.run_id.clone();
     let name = format!("leaf-{key}");
     // A dispatch run's id names no session: its click opens the run.
     let kind = leaf.kind;
@@ -2926,9 +2939,12 @@ fn leaf_frame(
                 LeafKind::Session => this.select_session_on(&host, &id, window, cx),
                 LeafKind::Dispatch => this.open_dispatch_run(&host, &id, window, cx),
                 // A subagent's id is its agent id; its host session names the
-                // session it runs under.
+                // session it runs under, which a run's subagent has none of,
+                // so that row does nothing.
                 LeafKind::Subagent => {
-                    if let Some(session_id) = &host_session {
+                    if run_id.is_none()
+                        && let Some(session_id) = &host_session
+                    {
                         this.open_subagent(&host, session_id, &id, window, cx);
                     }
                 }
@@ -3376,7 +3392,7 @@ mod tests {
     };
     use crate::grid_view::ADD_REPO_TIP;
     use crate::remote_mode::Capabilities;
-    use crate::sidebar::{Container, ContainerKind, HostGroup};
+    use crate::sidebar::{Container, ContainerKind, HostGroup, SessionsUnderRepos};
     use crate::sidebar::{Leaf, LeafKind, LeafState};
     use crate::tabs::TabPill;
     use crate::target::HostKey;
@@ -3433,6 +3449,7 @@ mod tests {
             tooltip: "s1".to_owned(),
             depth: 0,
             host_session: None,
+            run_id: None,
             nested: 0,
             nested_subagents: 0,
             collapsed: false,
@@ -3608,6 +3625,56 @@ mod tests {
             ids(shown_leaves(&leaves, |leaf| leaf.id != "s1")),
             Vec::<&str>::new(),
             "the run's own answer does not keep it"
+        );
+    }
+
+    /// A dispatch run's leaf `id`, drawing the status `status` maps to.
+    fn run_row(id: &str, status: protocol::DispatchRunStatus) -> Leaf {
+        Leaf {
+            id: id.to_owned(),
+            kind: LeafKind::Dispatch,
+            status: crate::dispatch_runs::leaf_status(status),
+            ..leaf(None)
+        }
+    }
+
+    /// Subagent `id`'s leaf, one of run `run_id`'s, drawing `status`.
+    fn run_subagent_row(id: &str, run_id: &str, status: SessionStatus) -> Leaf {
+        Leaf {
+            id: id.to_owned(),
+            kind: LeafKind::Subagent,
+            status,
+            depth: 1,
+            run_id: Some(run_id.to_owned()),
+            ..leaf(None)
+        }
+    }
+
+    #[test]
+    fn an_unhosted_runs_subagents_hide_with_their_run() {
+        let leaves = [
+            run_row("d1", protocol::DispatchRunStatus::Stopping),
+            run_subagent_row("r1", "d1", SessionStatus::Working),
+        ];
+        let busy = |leaf: &Leaf| SessionsUnderRepos::Busy.shows(leaf);
+        assert_eq!(
+            ids(shown_leaves(&leaves, busy)),
+            Vec::<&str>::new(),
+            "the run's row is hidden, so its running subagent does not show alone"
+        );
+    }
+
+    #[test]
+    fn an_unhosted_runs_subagents_show_with_their_run() {
+        let leaves = [
+            run_row("d1", protocol::DispatchRunStatus::Working),
+            run_subagent_row("r1", "d1", SessionStatus::Idle),
+        ];
+        let busy = |leaf: &Leaf| SessionsUnderRepos::Busy.shows(leaf);
+        assert_eq!(
+            ids(shown_leaves(&leaves, busy)),
+            ["d1", "r1"],
+            "the working run shows, so its finished subagent shows with it"
         );
     }
 

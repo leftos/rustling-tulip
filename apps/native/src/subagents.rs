@@ -2,7 +2,7 @@
 //! leaf itself, nested under its host session. Plain Rust, so every rule is
 //! unit-tested.
 
-use protocol::{AgentState, SessionMode, SessionStatus, SubagentSnapshot};
+use protocol::{AgentState, DispatchRunSnapshot, SessionMode, SessionStatus, SubagentSnapshot};
 
 use crate::sidebar::{Leaf, LeafKind, LeafState};
 use crate::target::HostKey;
@@ -109,6 +109,34 @@ pub fn fold_tip(collapsed: bool, nested: usize, nested_subagents: usize) -> &'st
 #[must_use]
 pub fn subagent_leaf(host: &HostKey, host_session: &str, snapshot: &SubagentSnapshot) -> Leaf {
     Leaf {
+        host_session: Some(host_session.to_owned()),
+        ..base_leaf(host, snapshot)
+    }
+}
+
+/// The leaf of `snapshot`, listed by `host`: one of `run`'s subagents,
+/// which `host_session` hosts when the run nests under a session, drawing
+/// `run_depth` levels below the run's own row.
+#[must_use]
+pub fn run_subagent_leaf(
+    host: &HostKey,
+    run: &DispatchRunSnapshot,
+    host_session: Option<&str>,
+    run_depth: u8,
+    snapshot: &SubagentSnapshot,
+) -> Leaf {
+    Leaf {
+        run_id: Some(run.run_id.clone()),
+        host_session: host_session.map(str::to_owned),
+        depth: run_depth.saturating_add(snapshot.depth).min(MAX_DEPTH),
+        ..base_leaf(host, snapshot)
+    }
+}
+
+/// `snapshot`'s leaf, listed by `host`, nested under no session and
+/// belonging to no run.
+fn base_leaf(host: &HostKey, snapshot: &SubagentSnapshot) -> Leaf {
+    Leaf {
         id: snapshot.agent_id.clone(),
         kind: LeafKind::Subagent,
         host: host.clone(),
@@ -129,7 +157,8 @@ pub fn subagent_leaf(host: &HostKey, host_session: &str, snapshot: &SubagentSnap
         state: LeafState::Live,
         tooltip: hover_text(snapshot),
         depth: snapshot.depth.clamp(MIN_DEPTH, MAX_DEPTH),
-        host_session: Some(host_session.to_owned()),
+        host_session: None,
+        run_id: None,
         nested: 0,
         nested_subagents: 0,
         collapsed: false,
