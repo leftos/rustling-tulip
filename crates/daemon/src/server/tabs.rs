@@ -4,7 +4,10 @@ use super::git::repo_path_or_err;
 use super::{Hub, StateEvent, TabEvent};
 use crate::registry::{reorder_containers, set_session_order};
 use chrono::Utc;
-use protocol::{ClientMessage, DaemonMessage, HostRebind, InitLayoutKind, TabContent, TabEntry};
+use protocol::{
+    ClientMessage, DaemonMessage, HostArrangement, HostLayout, HostRebind, InitLayoutKind,
+    TabContent, TabEntry,
+};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -456,6 +459,41 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                 send_tab_failure(out_tx, &err, request_id);
             }
         }
+        ClientMessage::UnbindHostPanes { host, request_id } => {
+            if let Err(err) = unbind_host_panes(hub, client_id, host.as_deref()) {
+                send_tab_failure(out_tx, &err, request_id);
+            }
+        }
+        ClientMessage::BindHostSessions {
+            host,
+            session_ids,
+            arrangement,
+            request_id,
+        } => {
+            if matches!(arrangement, HostArrangement::Unknown) {
+                let _ = out_tx.send(DaemonMessage::Error {
+                    message: "This daemon cannot build that arrangement.".to_owned(),
+                    request_id,
+                    code: Some(protocol::error_codes::UNSUPPORTED_MESSAGE.to_owned()),
+                });
+                return Ok(());
+            }
+            let bind = HostBind {
+                host: host.as_deref(),
+                session_ids: &session_ids,
+                arrangement: &arrangement,
+            };
+            if let Err(err) = bind_host_sessions(hub, client_id, &bind) {
+                send_tab_failure(out_tx, &err, request_id);
+            }
+        }
+        ClientMessage::ListHostLayouts { request_id } => {
+            let _ = out_tx.send(DaemonMessage::HostLayouts {
+                host_name: sysinfo::System::host_name(),
+                layouts: host_layouts(hub, client_id),
+                request_id,
+            });
+        }
         _ => warn!("tabs::handle: dispatch routed a message this module does not handle"),
     }
     Ok(())
@@ -699,7 +737,8 @@ fn short_rev(rev: &str) -> &str {
 
 /// Answers a failed tab-layout request (`CreateTab`, `SplitPane`, `ClosePane`,
 /// `MergeTabs`, `MovePane`, `SwapPanes`, `ReorderTabs`, `ExtractToNewTab`,
-/// `ForgetHostSessions`, `RebindHostSessions`, `RehostPanes`) with
+/// `ForgetHostSessions`, `RebindHostSessions`, `RehostPanes`,
+/// `UnbindHostPanes`, `BindHostSessions`) with
 /// an `Error` to this requester only, carrying the `request_id` it asked with
 /// so the client can drop what it armed for it.
 fn send_tab_failure(
@@ -859,6 +898,130 @@ fn forget_host_panes(
         hub.emit_tab(client_id, TabEvent::Removed(tab_id));
     }
     written
+}
+
+/// Whether `tabs` holds a pane of `host` showing a session, the panes
+/// [`crate::tabs::unbind_host_panes`] closes: read-only, so an unbind that
+/// matches nothing writes nothing.
+fn unbinds_any_pane(tabs: &[TabEntry], host: Option<&str>) -> bool {
+    tabs.iter().filter_map(TabEntry::grid).any(|grid| {
+        crate::tabs::collect_panes(grid)
+            .iter()
+            .any(|pane| pane.host.as_deref() == host && pane.session_id.is_some())
+    })
+}
+
+/// Close every pane of `host` showing a session in the requester's layout,
+/// then emit that client's scoped `TabUpdated` / `TabRemoved` events. Another
+/// client's layout keeps its panes of the same host key. No matching pane
+/// writes nothing and emits nothing.
+fn unbind_host_panes(hub: &Hub, client_id: &str, host: Option<&str>) -> anyhow::Result<()> {
+    let any_pane = hub.state.with_persisted(|state| {
+        state
+            .layouts
+            .get(client_id)
+            .is_some_and(|layout| unbinds_any_pane(&layout.tabs, host))
+    });
+    if !any_pane {
+        return Ok(());
+    }
+    let mut changed: Vec<TabEntry> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    let written = hub.state.mutate_client_layout(client_id, |tabs| {
+        let closed = crate::tabs::unbind_host_panes(tabs, host);
+        changed = closed.updated;
+        removed = closed.removed_tab_ids;
+    });
+    // [`crate::state::AppState::mutate`] changes the live state before it
+    // writes the file, so a failed write is returned only after the emit:
+    // clients must see the layout the daemon now holds.
+    for tab in changed {
+        hub.emit_tab(client_id, TabEvent::Updated(tab));
+    }
+    for tab_id in removed {
+        hub.emit_tab(client_id, TabEvent::Removed(tab_id));
+    }
+    written
+}
+
+/// A bind request's sessions of `host` and how to lay them out.
+struct HostBind<'a> {
+    host: Option<&'a str>,
+    session_ids: &'a [String],
+    arrangement: &'a HostArrangement,
+}
+
+impl HostBind<'_> {
+    /// The new tabs this bind adds after `existing`; an arrangement this
+    /// build does not know adds none.
+    fn tabs(&self, existing: &[TabEntry]) -> Vec<TabEntry> {
+        match self.arrangement {
+            HostArrangement::Auto {
+                layout,
+                max_per_tab,
+            } => crate::tabs::auto_host_tabs(
+                existing,
+                self.host,
+                self.session_ids,
+                *layout,
+                *max_per_tab,
+            ),
+            HostArrangement::Follow { tabs } => {
+                crate::tabs::follow_host_tabs(existing, self.host, tabs, self.session_ids)
+            }
+            HostArrangement::Unknown => Vec::new(),
+        }
+    }
+}
+
+/// Append the tabs `bind` builds to the requester's layout, then emit a scoped
+/// `TabUpdated` for each. A bind that adds no tab writes nothing and emits
+/// nothing.
+fn bind_host_sessions(hub: &Hub, client_id: &str, bind: &HostBind<'_>) -> anyhow::Result<()> {
+    let adds_any = hub.state.with_persisted(|state| {
+        let existing = state
+            .layouts
+            .get(client_id)
+            .map_or(&[][..], |layout| layout.tabs.as_slice());
+        !bind.tabs(existing).is_empty()
+    });
+    if !adds_any {
+        return Ok(());
+    }
+    let mut added: Vec<TabEntry> = Vec::new();
+    let written = hub.state.mutate_client_layout(client_id, |tabs| {
+        added = bind.tabs(tabs);
+        tabs.extend(added.iter().cloned());
+    });
+    // A failed write is returned only after the emit, as in
+    // [`unbind_host_panes`]: clients must see the layout the daemon now holds.
+    for tab in added {
+        hub.emit_tab(client_id, TabEvent::Updated(tab));
+    }
+    written
+}
+
+/// Every other client's non-empty layout in the persisted state, sorted by
+/// client id: not the requester's own and not the legacy layout.
+fn host_layouts(hub: &Hub, client_id: &str) -> Vec<HostLayout> {
+    hub.state.with_persisted(|state| {
+        let mut out: Vec<HostLayout> = state
+            .layouts
+            .iter()
+            .filter(|(id, layout)| {
+                id.as_str() != client_id
+                    && id.as_str() != crate::state::LEGACY_CLIENT_ID
+                    && !layout.tabs.is_empty()
+            })
+            .map(|(id, layout)| HostLayout {
+                client_id: id.clone(),
+                name: layout.name.clone(),
+                tabs: layout.tabs.clone(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.client_id.cmp(&b.client_id));
+        out
+    })
 }
 
 /// Run `close` on every client's layout, then emit each client's scoped
@@ -2105,6 +2268,228 @@ mod tests {
             assert!(
                 again.is_empty(),
                 "forgetting again changes nothing: {again:?}"
+            );
+        }
+
+        fn bind(
+            host: &str,
+            session_ids: &[&str],
+            arrangement: protocol::HostArrangement,
+        ) -> ClientMessage {
+            ClientMessage::BindHostSessions {
+                host: Some(host.to_string()),
+                session_ids: session_ids.iter().map(|id| (*id).to_string()).collect(),
+                arrangement,
+                request_id: Some("b1".to_string()),
+            }
+        }
+
+        fn sessions_of(tab: &TabEntry) -> Vec<Option<String>> {
+            crate::tabs::collect_panes(tab.grid().expect("grid"))
+                .into_iter()
+                .map(|pane| pane.session_id)
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn unbind_host_panes_emits_updates_and_removals_to_the_requester() {
+            let (hub, _scratch) = test_hub("unbind-host-panes");
+            seed_foreign_four_panes(&hub, "c1", None);
+            hub.state
+                .mutate_client_layout("c1", |tabs| {
+                    tabs.push(super::seeded_tab("t2", &["q1"]));
+                    let grid = tabs[1].grid_mut().expect("grid");
+                    if let GridNode::Pane { host, .. } = grid {
+                        *host = Some("ssh:devbox".to_string());
+                    }
+                })
+                .expect("seed a devbox-only tab");
+            seed_foreign_four_panes(&hub, "c2", None);
+            let other_before = hub.state.client_layout("c2");
+            let mut events = hub.tab_events.subscribe();
+
+            dispatch_ok(
+                &hub,
+                ClientMessage::UnbindHostPanes {
+                    host: Some("ssh:devbox".to_string()),
+                    request_id: Some("u1".to_string()),
+                },
+            )
+            .await;
+
+            let tab = only_tab(&hub, "c1");
+            assert_eq!(tab.id, "t1");
+            assert_eq!(
+                crate::tabs::collect_panes(tab.grid().expect("grid")),
+                four_panes()[1..].to_vec(),
+                "the devbox pane closed, the local panes stay"
+            );
+            assert_eq!(hub.state.client_layout("c2"), other_before);
+            let scoped = super::scoped_tab_events(&mut events);
+            assert!(
+                matches!(
+                    scoped.as_slice(),
+                    [
+                        crate::server::ScopedTabEvent { client_id: a, event: TabEvent::Updated(tab) },
+                        crate::server::ScopedTabEvent { client_id: b, event: TabEvent::Removed(gone) },
+                    ] if a == "c1" && tab.id == "t1" && b == "c1" && gone == "t2"
+                ),
+                "{scoped:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn bind_host_sessions_appends_auto_tabs() {
+            let (hub, _scratch) = test_hub("bind-host-auto");
+            seed_four_panes(&hub, "c1", None);
+            let mut events = hub.tab_events.subscribe();
+            let arrangement = protocol::HostArrangement::Auto {
+                layout: RearrangeLayout::Grid {
+                    cols: 0,
+                    aspect: None,
+                },
+                max_per_tab: Some(2),
+            };
+
+            let sent =
+                super::dispatch_all(&hub, bind("ssh:devbox", &["a", "b", "c"], arrangement)).await;
+
+            assert!(sent.is_empty(), "{sent:?}");
+            let tabs = hub.state.client_layout("c1");
+            assert_eq!(tabs.len(), 3, "{tabs:?}");
+            assert_eq!(tabs[0].id, "t1", "the new tabs go after the existing ones");
+            assert_eq!(
+                sessions_of(&tabs[1]),
+                [Some("a".to_string()), Some("b".to_string())]
+            );
+            assert_eq!(sessions_of(&tabs[2]), [Some("c".to_string())]);
+            let scoped = super::scoped_tab_events(&mut events);
+            let updated: Vec<&str> = scoped
+                .iter()
+                .filter_map(|scoped| match &scoped.event {
+                    TabEvent::Updated(tab) if scoped.client_id == "c1" => Some(tab.id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(updated, [tabs[1].id.as_str(), tabs[2].id.as_str()]);
+            assert_eq!(scoped.len(), 2, "{scoped:?}");
+        }
+
+        #[tokio::test]
+        async fn bind_host_sessions_follows_the_hosts_tabs() {
+            let (hub, _scratch) = test_hub("bind-host-follow");
+            seed_four_panes(&hub, "c1", None);
+            let mut events = hub.tab_events.subscribe();
+            let mut host_tab = super::seeded_tab("Work", &["x", "y"]);
+            host_tab.picked_layout = Some(RearrangeLayout::Horizontal);
+            let arrangement = protocol::HostArrangement::Follow {
+                tabs: vec![host_tab],
+            };
+
+            let sent =
+                super::dispatch_all(&hub, bind("tailnet:box", &["s-x", "s-y"], arrangement)).await;
+
+            assert!(sent.is_empty(), "{sent:?}");
+            let tabs = hub.state.client_layout("c1");
+            assert_eq!(tabs.len(), 2, "{tabs:?}");
+            let copied = &tabs[1];
+            assert_eq!(copied.name, "Work");
+            assert_ne!(copied.id, "Work");
+            assert_eq!(copied.picked_layout, Some(RearrangeLayout::Horizontal));
+            let panes = crate::tabs::collect_panes(copied.grid().expect("grid"));
+            assert!(
+                panes
+                    .iter()
+                    .all(|pane| pane.host.as_deref() == Some("tailnet:box")),
+                "{panes:?}"
+            );
+            assert_eq!(
+                sessions_of(copied),
+                [Some("s-x".to_string()), Some("s-y".to_string())]
+            );
+            let scoped = super::scoped_tab_events(&mut events);
+            assert!(
+                matches!(
+                    scoped.as_slice(),
+                    [crate::server::ScopedTabEvent { client_id, event: TabEvent::Updated(tab) }]
+                        if client_id == "c1" && tab.id == copied.id
+                ),
+                "{scoped:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unknown_arrangement_is_refused_with_its_request_id() {
+            let (hub, _scratch) = test_hub("bind-host-unknown");
+            seed_four_panes(&hub, "c1", None);
+            let before = hub.state.client_layout("c1");
+            let mut events = hub.tab_events.subscribe();
+
+            let sent = super::dispatch_all(
+                &hub,
+                bind("ssh:devbox", &["a"], protocol::HostArrangement::Unknown),
+            )
+            .await;
+
+            assert!(
+                matches!(
+                    sent.as_slice(),
+                    [DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }]
+                        if message == "This daemon cannot build that arrangement."
+                            && id == "b1"
+                            && code == protocol::error_codes::UNSUPPORTED_MESSAGE
+                ),
+                "{sent:?}"
+            );
+            assert_eq!(hub.state.client_layout("c1"), before);
+            assert!(super::scoped_tab_events(&mut events).is_empty());
+        }
+
+        #[tokio::test]
+        #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+        async fn list_host_layouts_lists_other_clients_non_empty_layouts() {
+            let (hub, _scratch) = test_hub("list-host-layouts");
+            let tab = || vec![super::seeded_tab("t", &["p"])];
+            let set = |id: &str, name: Option<&str>, tabs: Vec<TabEntry>| {
+                hub.state
+                    .set_client_layout(id, name.map(str::to_owned), tabs)
+                    .expect("seed a layout");
+            };
+            set("c3", None, tab());
+            set("c2", Some("laptop"), tab());
+            set("c4", Some("empty"), Vec::new());
+            set(crate::state::LEGACY_CLIENT_ID, None, tab());
+            set("c1", Some("me"), tab());
+            let mut events = hub.tab_events.subscribe();
+
+            let sent = super::dispatch_all(
+                &hub,
+                ClientMessage::ListHostLayouts {
+                    request_id: Some("l1".to_string()),
+                },
+            )
+            .await;
+
+            let [
+                DaemonMessage::HostLayouts {
+                    host_name,
+                    layouts,
+                    request_id,
+                },
+            ] = sent.as_slice()
+            else {
+                panic!("one host layout list: {sent:?}");
+            };
+            assert_eq!(host_name, &sysinfo::System::host_name());
+            assert_eq!(request_id.as_deref(), Some("l1"));
+            let listed: Vec<(&str, Option<&str>, usize)> = layouts
+                .iter()
+                .map(|l| (l.client_id.as_str(), l.name.as_deref(), l.tabs.len()))
+                .collect();
+            assert_eq!(listed, [("c2", Some("laptop"), 1), ("c3", None, 1)]);
+            assert!(
+                super::scoped_tab_events(&mut events).is_empty(),
+                "the list goes to this connection only"
             );
         }
 

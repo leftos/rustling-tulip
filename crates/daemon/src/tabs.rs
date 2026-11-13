@@ -188,6 +188,12 @@ pub fn restore_tab_snapshot(tabs: &mut [TabEntry], tab: TabEntry) -> anyhow::Res
 /// names. Lets a closed-and-reopened tab reuse the freed slot instead of
 /// growing monotonically.
 fn next_default_name(existing: &[TabEntry]) -> String {
+    next_default_name_among(existing.iter())
+}
+
+/// [`next_default_name`] over any run of tabs, such as a layout's tabs
+/// followed by the ones being built for it.
+fn next_default_name_among<'a>(existing: impl Iterator<Item = &'a TabEntry>) -> String {
     let mut used: std::collections::HashSet<u32> = std::collections::HashSet::new();
     for t in existing {
         if t.name == "Tab" {
@@ -591,6 +597,145 @@ pub fn forget_host_panes(
             && (all || sid.is_some_and(|sid| session_ids.iter().any(|id| id == sid)))
     };
     close_panes_where(tabs, &|grid| panes_where(grid, &matches))
+}
+
+/// Close every pane of `host` (`None` is this daemon) across `tabs` that shows
+/// a session. A pane following a run or a subagent shows no session and stays,
+/// and so does an empty pane. See [`close_panes_where`].
+pub fn unbind_host_panes(tabs: &mut Vec<TabEntry>, host: Option<&str>) -> SessionCloseResult {
+    let matches = |pane_host: Option<&str>, sid: Option<&str>| pane_host == host && sid.is_some();
+    close_panes_where(tabs, &|grid| panes_where(grid, &matches))
+}
+
+/// New tabs holding `session_ids` of `host`, in the order given, minus any
+/// session a pane of `existing` already shows for that host: chunked into tabs
+/// of at most `max_per_tab` panes (`None` or `0` is one tab), each laid out by
+/// `layout`, marked as picked with it and given the next free default name.
+/// No session left to bind makes no tab.
+#[must_use]
+pub fn auto_host_tabs(
+    existing: &[TabEntry],
+    host: Option<&str>,
+    session_ids: &[String],
+    layout: RearrangeLayout,
+    max_per_tab: Option<u32>,
+) -> Vec<TabEntry> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let fresh: Vec<&String> = session_ids
+        .iter()
+        .filter(|id| !shows_session(existing, host, id) && seen.insert(id.as_str()))
+        .collect();
+    let per_tab = match max_per_tab {
+        None | Some(0) => fresh.len().max(1),
+        Some(n) => usize::try_from(n).unwrap_or(usize::MAX),
+    };
+    let mut made: Vec<TabEntry> = Vec::new();
+    for chunk in fresh.chunks(per_tab) {
+        let panes: Vec<PaneRef> = chunk
+            .iter()
+            .map(|id| PaneRef {
+                pane_id: new_id(),
+                session_id: Some((*id).clone()),
+                host: host.map(str::to_owned),
+                follow: None,
+            })
+            .collect();
+        let Some(grid) = build_for_layout(&panes, layout) else {
+            continue;
+        };
+        let name = next_default_name_among(existing.iter().chain(&made));
+        made.push(TabEntry {
+            id: new_id(),
+            name,
+            content: TabContent::Grid { grid },
+            created_at: Utc::now(),
+            picked_layout: Some(built_layout(layout)),
+        });
+    }
+    made
+}
+
+/// New tabs copying `host_tabs`, the host's own view of its tabs, for this
+/// client's panes of `host`: each grid tab with fresh tab and pane ids, its
+/// split tree, name and picked layout, every pane stamped with `host`. A pane
+/// is kept only when its session is in `session_ids` and not already shown by
+/// a pane of `existing`, and it names no host of its own and follows nothing;
+/// the rest close and their siblings fill. A tab left empty, and any non-grid
+/// tab, is skipped. Sessions the copies do not place go after them into
+/// automatic grid tabs of at most four panes, as [`auto_host_tabs`] builds.
+#[must_use]
+pub fn follow_host_tabs(
+    existing: &[TabEntry],
+    host: Option<&str>,
+    host_tabs: &[TabEntry],
+    session_ids: &[String],
+) -> Vec<TabEntry> {
+    let mut remaining: HashSet<&str> = session_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !shows_session(existing, host, id))
+        .collect();
+    let mut made: Vec<TabEntry> = clone_tabs_fresh_ids(host_tabs)
+        .into_iter()
+        .filter_map(|mut tab| follow_one_tab(&mut tab, host, &mut remaining).then_some(tab))
+        .collect();
+    let leftover: Vec<String> = session_ids
+        .iter()
+        .filter(|id| remaining.contains(id.as_str()))
+        .cloned()
+        .collect();
+    let before: Vec<TabEntry> = existing.iter().chain(&made).cloned().collect();
+    let grid = RearrangeLayout::Grid {
+        cols: 0,
+        aspect: None,
+    };
+    made.extend(auto_host_tabs(&before, host, &leftover, grid, Some(4)));
+    made
+}
+
+/// Trim one copied tab for [`follow_host_tabs`]: close every pane it does not
+/// keep (taking a kept session out of `remaining`, so no session shows twice)
+/// and stamp `host` on the rest. Returns whether the tab is a grid tab with a
+/// pane left.
+fn follow_one_tab(tab: &mut TabEntry, host: Option<&str>, remaining: &mut HashSet<&str>) -> bool {
+    let Some(grid) = tab.grid_mut() else {
+        return false;
+    };
+    let dropped: Vec<String> = collect_panes(grid)
+        .into_iter()
+        .filter(|pane| {
+            let keep = pane.host.is_none()
+                && pane.follow.is_none()
+                && pane
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|sid| remaining.remove(sid));
+            !keep
+        })
+        .map(|pane| pane.pane_id)
+        .collect();
+    stamp_host(grid, host);
+    for pane_id in &dropped {
+        match close_pane(grid, pane_id) {
+            Ok(true) => return false,
+            Ok(false) => {}
+            Err(err) => tracing::warn!(?err, %pane_id, "follow_host_tabs: pane vanished"),
+        }
+    }
+    true
+}
+
+/// Set every pane of `grid` to show its session from `host`.
+fn stamp_host(grid: &mut GridNode, host: Option<&str>) {
+    match grid {
+        GridNode::Pane {
+            host: pane_host, ..
+        } => *pane_host = host.map(str::to_owned),
+        GridNode::Split { first, second, .. } => {
+            stamp_host(first, host);
+            stamp_host(second, host);
+        }
+    }
 }
 
 /// Close, across `tabs`, the panes `select` picks from each grid (by pane id,
@@ -2763,6 +2908,268 @@ mod tests {
         assert_eq!(updated, ["A"]);
         assert_eq!(tabs.len(), 1);
         assert_eq!(pane_ids(&tabs[0]), ["a1", "a3"]);
+    }
+
+    fn tab_ids(tabs: &[TabEntry]) -> Vec<&str> {
+        tabs.iter().map(|t| t.id.as_str()).collect()
+    }
+
+    fn sessions(tab: &TabEntry) -> Vec<String> {
+        collect_panes(tab.grid().expect("a grid tab"))
+            .into_iter()
+            .filter_map(|pane| pane.session_id)
+            .collect()
+    }
+
+    fn hosts(tab: &TabEntry) -> Vec<Option<String>> {
+        collect_panes(tab.grid().expect("a grid tab"))
+            .into_iter()
+            .map(|pane| pane.host)
+            .collect()
+    }
+
+    fn ids(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    const AUTO_GRID: RearrangeLayout = RearrangeLayout::Grid {
+        cols: 0,
+        aspect: None,
+    };
+
+    #[test]
+    fn unbind_closes_only_that_hosts_session_panes() {
+        let mut tabs = mixed_host_tabs();
+
+        let result = unbind_host_panes(&mut tabs, Some("ssh:devbox"));
+
+        assert_eq!(result.removed_tab_ids, ["B".to_string()]);
+        assert_eq!(tab_ids(&result.updated), ["A"]);
+        assert_eq!(tab_ids(&tabs), ["A"], "the tab of only devbox panes goes");
+        assert_eq!(
+            pane_ids(&tabs[0]),
+            ["a1", "a3"],
+            "the local and laptop panes stay"
+        );
+    }
+
+    #[test]
+    fn unbind_this_pc_closes_local_session_panes() {
+        let mut tabs = mixed_host_tabs();
+
+        let result = unbind_host_panes(&mut tabs, None);
+
+        assert_eq!(result.removed_tab_ids, [] as [String; 0]);
+        assert_eq!(tab_ids(&result.updated), ["A"]);
+        assert_eq!(pane_ids(&tabs[0]), ["a2", "a3"]);
+        assert_eq!(pane_ids(&tabs[1]), ["b1", "b2"], "every hosted pane stays");
+    }
+
+    #[test]
+    fn unbind_keeps_follow_and_empty_panes() {
+        let mut tabs = vec![grid_tab(
+            "A",
+            split(
+                Horizontal,
+                0.5,
+                follow_pane("f1", "r1", Some("box")),
+                split(
+                    Vertical,
+                    0.5,
+                    pane("e1", None),
+                    foreign_pane("s1p", "s1", "box"),
+                ),
+            ),
+        )];
+
+        let result = unbind_host_panes(&mut tabs, Some("box"));
+        assert_eq!(tab_ids(&result.updated), ["A"]);
+        assert_eq!(pane_ids(&tabs[0]), ["f1", "e1"], "the follow pane stays");
+
+        let local = unbind_host_panes(&mut tabs, None);
+        assert!(
+            local.updated.is_empty() && local.removed_tab_ids.is_empty(),
+            "an empty local pane shows no session"
+        );
+        assert_eq!(pane_ids(&tabs[0]), ["f1", "e1"]);
+    }
+
+    #[test]
+    fn auto_splits_by_max_per_tab() {
+        let existing = vec![grid_tab("Tab", pane("x", Some("other")))];
+        let wanted = ids(&["s1", "s2", "s3", "s4", "s5"]);
+
+        let made = auto_host_tabs(&existing, Some("box"), &wanted, AUTO_GRID, Some(2));
+
+        let counts: Vec<usize> = made.iter().map(|t| sessions(t).len()).collect();
+        assert_eq!(counts, [2, 2, 1]);
+        let all: Vec<String> = made.iter().flat_map(sessions).collect();
+        assert_eq!(all, wanted, "the sessions in the order given");
+        for tab in &made {
+            assert!(hosts(tab).iter().all(|h| h.as_deref() == Some("box")));
+            assert_eq!(tab.picked_layout, Some(AUTO_GRID));
+        }
+        let names: Vec<&str> = made.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Tab 2", "Tab 3", "Tab 4"],
+            "default names, distinct"
+        );
+    }
+
+    #[test]
+    fn auto_without_a_max_is_one_tab() {
+        let wanted = ids(&["s1", "s2", "s3"]);
+
+        let made = auto_host_tabs(&[], None, &wanted, RearrangeLayout::Horizontal, None);
+
+        assert_eq!(made.len(), 1);
+        assert_eq!(sessions(&made[0]), wanted);
+        assert_eq!(made[0].name, "Tab");
+        assert_eq!(made[0].picked_layout, Some(RearrangeLayout::Horizontal));
+        assert_eq!(
+            auto_host_tabs(&[], None, &[], AUTO_GRID, None),
+            Vec::<TabEntry>::new(),
+            "no session makes no tab"
+        );
+    }
+
+    #[test]
+    fn auto_skips_sessions_already_shown() {
+        let existing = mixed_host_tabs();
+
+        let made = auto_host_tabs(
+            &existing,
+            Some("ssh:devbox"),
+            &ids(&["s1", "s4"]),
+            AUTO_GRID,
+            None,
+        );
+        assert_eq!(made.len(), 1);
+        assert_eq!(sessions(&made[0]), ["s4"], "devbox's s1 has a pane");
+
+        let local = auto_host_tabs(&existing, None, &ids(&["s1", "s2"]), AUTO_GRID, None);
+        assert_eq!(sessions(&local[0]), ["s2"], "only the local s1 has a pane");
+
+        let none = auto_host_tabs(
+            &existing,
+            Some("ssh:devbox"),
+            &ids(&["s2"]),
+            AUTO_GRID,
+            None,
+        );
+        assert!(none.is_empty(), "nothing left to bind makes no tab");
+    }
+
+    #[test]
+    fn follow_copies_the_hosts_tabs_with_the_host_stamped() {
+        let host_tabs = vec![
+            grid_tab(
+                "H1",
+                split(
+                    Horizontal,
+                    0.3,
+                    pane("h1", Some("s1")),
+                    pane("h2", Some("s2")),
+                ),
+            ),
+            grid_tab("H2", pane("h3", Some("s3"))),
+        ];
+
+        let made = follow_host_tabs(&[], Some("box"), &host_tabs, &ids(&["s1", "s2", "s3"]));
+
+        let names: Vec<&str> = made.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["H1", "H2"]);
+        assert!(
+            made.iter().all(|t| t.id != "H1" && t.id != "H2"),
+            "fresh tab ids"
+        );
+        assert!(
+            made.iter()
+                .flat_map(pane_ids)
+                .all(|id| !["h1", "h2", "h3"].contains(&id.as_str())),
+            "fresh pane ids"
+        );
+        assert!(
+            matches!(
+                made[0].grid(),
+                Some(GridNode::Split { direction: Horizontal, ratio, .. })
+                    if (*ratio - 0.3).abs() < f32::EPSILON
+            ),
+            "the split shape is kept: {:?}",
+            made[0].grid()
+        );
+        assert_eq!(sessions(&made[0]), ["s1", "s2"]);
+        assert_eq!(sessions(&made[1]), ["s3"]);
+        for tab in &made {
+            assert!(hosts(tab).iter().all(|h| h.as_deref() == Some("box")));
+        }
+    }
+
+    #[test]
+    fn follow_drops_unlisted_follow_and_foreign_panes() {
+        let host_tabs = vec![
+            grid_tab(
+                "H1",
+                split(
+                    Horizontal,
+                    0.5,
+                    pane("k", Some("s1")),
+                    split(
+                        Vertical,
+                        0.5,
+                        pane("u", Some("unlisted")),
+                        split(
+                            Horizontal,
+                            0.5,
+                            follow_pane("f", "r1", None),
+                            foreign_pane("o", "s2", "third"),
+                        ),
+                    ),
+                ),
+            ),
+            grid_tab("H2", pane("u2", Some("unlisted2"))),
+            diff_tab("D"),
+        ];
+
+        let made = follow_host_tabs(&[], Some("box"), &host_tabs, &ids(&["s1", "s2"]));
+
+        let names: Vec<&str> = made.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["H1", "Tab"],
+            "the emptied and non-grid tabs are skipped"
+        );
+        assert!(
+            matches!(
+                made[0].grid(),
+                Some(GridNode::Pane { session_id: Some(sid), host: Some(host), follow: None, .. })
+                    if sid == "s1" && host == "box"
+            ),
+            "the kept pane fills the tab: {:?}",
+            made[0].grid()
+        );
+        assert_eq!(
+            sessions(&made[1]),
+            ["s2"],
+            "a session shown there only through a third host is placed after"
+        );
+    }
+
+    #[test]
+    fn follow_puts_leftover_sessions_in_grid_tabs_of_four() {
+        let host_tabs = vec![grid_tab("H", pane("h", Some("s1")))];
+        let wanted = ids(&["s1", "s2", "s3", "s4", "s5", "s6"]);
+
+        let made = follow_host_tabs(&[], Some("box"), &host_tabs, &wanted);
+
+        let counts: Vec<usize> = made.iter().map(|t| sessions(t).len()).collect();
+        assert_eq!(counts, [1, 4, 1]);
+        assert_eq!(made[0].name, "H");
+        assert_eq!(sessions(&made[1]), ["s2", "s3", "s4", "s5"]);
+        assert_eq!(sessions(&made[2]), ["s6"]);
+        assert_eq!(made[1].picked_layout, Some(AUTO_GRID));
+        assert_eq!(made[2].picked_layout, Some(AUTO_GRID));
     }
 
     #[test]

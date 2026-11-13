@@ -297,6 +297,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_NEW_SESSION,
     protocol::FEATURE_SPAWN_EXTRA_ARGS,
     protocol::FEATURE_REMOTE_UPDATE,
+    protocol::FEATURE_HOST_LAYOUTS,
     protocol::FEATURE_CLIENT_UPDATE,
 ];
 
