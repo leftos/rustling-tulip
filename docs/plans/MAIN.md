@@ -83,6 +83,7 @@
 - [ ] RT-1431 Clear a host update in flight when apply-update cannot stop the daemon
 - [ ] RT-1432 Start the new daemon after an update even if the relaunched app crashes
 - [ ] RT-1456 Stop apply-update logging a failed .staging removal on every update
+- [ ] RT-1599 Show one toast when a manual update check meets the end of a remote-update countdown
 
 ## Session lifecycle and daemon CLI
 
@@ -168,6 +169,7 @@
 - [ ] RT-1481 Scrub the owner's paths and status line from the screen fixtures
 - [ ] RT-1541 Check the dispatch dir in the isolated daemon's launch check · release vNext+1
 - [ ] RT-1564 Map the native files test-map.json misses so -Validate passes again · release vNext+1
+- [ ] RT-1590 Make the UI harness's in_model fail for a selector it has no model for
 
 ## Elevated daemon and security
 
@@ -272,6 +274,9 @@
 - [ ] RT-1559 Name a closed follow pane in the undo toast instead of "Closed empty pane" · release vNext+1
 - [ ] RT-1563 Close sidebar menus with their own window's focus, and on the first Escape
 - [ ] RT-1566 Clear an armed session Stop when its session exits so Escape is not swallowed
+- [ ] RT-1591 Show a subagent row's type and model once in its Compact hover
+- [ ] RT-1594 Unbind and rebind every session of one host, auto-split across tabs or following that host's layout · release vNext
+- [ ] RT-1598 Follow the moved pane when a move empties the active tab · release vNext
 
 ## Terminal, panes and links
 
@@ -303,6 +308,7 @@
 - [ ] RT-1371 Drop a bound pane's pending size claim once another client claims first
 - [ ] RT-1404 Focus the main window's root when its focused pane is popped out
 - [ ] RT-1426 Drop shell-integration dots on a remote pane's cls
+- [ ] RT-1592 Profile why the app uses up to 6.5% CPU with about 10 panes open, and fix what it finds · release vNext+1
 
 ## Spawn, launch and shells
 
@@ -555,10 +561,11 @@
 - [ ] RT-1045 Give two unknown-kind gate pools distinct selectors in the Gates view
 - [ ] RT-1052 Show seconds in a Gates row's time and usual under ten minutes
 - [ ] RT-1089 Monitor CPU and memory per pane, process tree and host in a Performance view
-  - [ ] RT-1090 Sample each host's CPU, memory and every session's process tree in the daemon for subscribed clients
-  - [ ] RT-1091 Show a rail Performance view of each pane's process tree CPU and memory beside the machine's totals
-  - [ ] RT-1092 Show the focused host's CPU and memory in a footer pill that opens the Performance view
+  - [/] RT-1090 Sample each host's overall CPU and RAM in the daemon for subscribed clients · release vNext
+  - [ ] RT-1091 Show a rail Performance view of each pane's process tree CPU and memory beside the machine's totals · release vNext+1
+  - [ ] RT-1092 Show tracked machines' CPU and RAM in status-bar pills, chosen by right-click · release vNext
   - [ ] RT-1093 Add a full Performance tab with PID, history, threads, command line and End process tree
+  - [ ] RT-1597 Sample each session's process tree CPU and memory for the Performance view · release vNext+1
 - [ ] RT-1119 Open a clicked gate's log in an in-app tab that follows it, not the OS default app
   - [ ] RT-1120 Follow a gate run's log through the daemon by run id, never by path
   - [ ] RT-1121 Show a gate's log in a tab that follows it like tail -f
@@ -598,7 +605,6 @@
 - [ ] RT-176 Import a DeepSeek session started with a model alias as DeepSeek
 - [ ] RT-192 Verify the DeepSeek provider's model and env handling
 - [ ] RT-403 Take the prompt-echo marker for prompt navigation from the agent descriptor
-- [/] RT-406 Show a session's subagents nested under it in the sidebar · release vNext
 - [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user
 - [ ] RT-687 Remove AgentDescriptor.accent and AccentToken with the next protocol bump
 - [ ] RT-716 Let the agent plugin name a permission prompt's allow, always-allow and deny options
@@ -691,6 +697,9 @@
 - [ ] RT-1576 Log dispatch runs that change or leave before the status log attaches at startup · release vNext+1
 - [ ] RT-1583 Credit a linked run's activity to the same host session it nests under when sessions share a conversation
 - [ ] RT-1585 Stop two dispatch-run runtime tests leaking a handle
+- [ ] RT-1588 Key the subagent list on the agent run's start, not the shell's
+- [ ] RT-1589 Keep one panicking activity reader from stalling every session's subagent list
+- [ ] RT-1593 Cap subagent transcript follows per connection and the first follow's append
 
 ## Design files
 
@@ -713,12 +722,12 @@
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359
-- [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093
+- [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1090, RT-1091, RT-1093, RT-1597
 - [push-relay.md](push-relay.md) — RT-1511, RT-1512, RT-1513, RT-1514, RT-1515, RT-1516, RT-1517, RT-1518, RT-1519, RT-1530, RT-1536, RT-1537
 - [remote-access.md](remote-access.md) — Remote hosts and connections
 - [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1361, RT-1362, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
 - [remote-update.md](remote-update.md) — RT-1353, RT-1355, RT-1397, Updates and installer
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792, Remote hosts and connections
-- [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406, RT-1586, Agents and subagents
+- [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-1586, Agents and subagents
 - [toast-position.md](toast-position.md) — RT-1105
