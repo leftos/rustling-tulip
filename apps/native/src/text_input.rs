@@ -1445,7 +1445,8 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::{
-        ClipboardItem, Entity, EntityInputHandler as _, TestAppContext, VisualTestContext, px,
+        AppContext as _, ClipboardItem, Entity, EntityInputHandler as _, IntoElement,
+        ParentElement, Pixels, Render, Styled, TestAppContext, VisualTestContext, Window, div, px,
     };
 
     use super::{
@@ -1778,35 +1779,91 @@ mod tests {
         assert_eq!(text.as_deref(), Some("sk-é1xy"), "unmasked, the text");
     }
 
+    /// A window root holding one input, so the input keeps its own measured height (gpui stretches an auto-sized window root to the window).
+    struct Holder(Entity<TextInput>);
+
+    impl Render for Holder {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            div().flex().flex_col().size_full().child(self.0.clone())
+        }
+    }
+
     #[gpui::test]
     fn text_input_multi_line_height_clamps_between_min_and_max_rows(cx: &mut TestAppContext) {
-        /// The drawn height in rows, if it is a whole number of them.
+        /// The drawn height in whole rows, within the device pixel the layout rounds it up to, and the input's vertical scroll.
         fn rows(
             cx: &mut TestAppContext,
             build: fn(&mut gpui::Context<TextInput>) -> TextInput,
             text: &str,
-        ) -> Option<usize> {
-            let (input, cx) = open(cx, build, text);
+            scale: f32,
+        ) -> Option<(usize, Pixels)> {
+            cx.update(bind_keys);
+            let (holder, cx) = cx.add_window_view(|_, cx| Holder(cx.new(build)));
+            let input = cx.update(|_, cx| holder.read(cx).0.clone());
+            cx.update(|window, cx| {
+                input.update(cx, |input, cx| {
+                    input.set_text(text.to_owned(), cx);
+                    input.focus_handle.focus(window, cx);
+                });
+            });
+            cx.run_until_parked();
+            cx.simulate_scale_factor_change(scale);
+            cx.run_until_parked();
             let line_height = cx.update(|window, _| window.line_height());
-            let height = cx.update(|_, cx| input.read(cx).last_bounds)?.size.height;
-            (0..20).find(|rows| line_height * *rows == height)
+            let (height, scroll_y) = cx.update(|_, cx| {
+                let input = input.read(cx);
+                input
+                    .last_bounds
+                    .map(|bounds| (bounds.size.height, input.scroll_y))
+            })?;
+            let drawn = (0..20).find(|rows| {
+                line_height * *rows <= height && height - line_height * *rows < px(1.0 / scale)
+            })?;
+            Some((drawn, scroll_y))
         }
-        assert_eq!(rows(cx, multi, "one"), Some(2), "min_rows");
-        assert_eq!(rows(cx, multi, "1\n2\n3"), Some(3));
-        assert_eq!(
-            rows(cx, multi, "1\n2\n3\n4\n5\n6\n7\n8"),
-            Some(6),
-            "max_rows"
-        );
-        assert_eq!(
-            rows(
-                cx,
-                |cx| TextInput::multi_line("", "", cx).with_rows(1, 3),
-                "a\nb\nc\nd"
-            ),
-            Some(3)
-        );
-        assert_eq!(rows(cx, single, "one"), Some(1), "single-line is one row");
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let one = rows(cx, multi, "one", scale);
+            assert_eq!(one.map(|r| r.0), Some(2), "min_rows at {scale}");
+            let three = rows(cx, multi, "1\n2\n3", scale);
+            assert_eq!(three.map(|r| r.0), Some(3), "three lines at {scale}");
+            assert_eq!(
+                rows(cx, multi, "1\n2\n3\n4\n5\n6\n7\n8", scale).map(|r| r.0),
+                Some(6),
+                "max_rows at {scale}"
+            );
+            assert_eq!(
+                rows(
+                    cx,
+                    |cx| TextInput::multi_line("", "", cx).with_rows(1, 3),
+                    "a\nb\nc\nd",
+                    scale
+                )
+                .map(|r| r.0),
+                Some(3),
+                "with_rows(1, 3) at {scale}"
+            );
+            let single_one = rows(cx, single, "one", scale);
+            assert_eq!(
+                single_one.map(|r| r.0),
+                Some(1),
+                "single-line is one row at {scale}"
+            );
+            assert_eq!(
+                one.map(|r| r.1),
+                Some(px(0.)),
+                "a fitting text is not scrolled at {scale}"
+            );
+            assert_eq!(
+                three.map(|r| r.1),
+                Some(px(0.)),
+                "a fitting text is not scrolled at {scale}"
+            );
+            assert_eq!(
+                single_one.map(|r| r.1),
+                Some(px(0.)),
+                "a fitting text is not scrolled at {scale}"
+            );
+        }
     }
 
     #[gpui::test]
