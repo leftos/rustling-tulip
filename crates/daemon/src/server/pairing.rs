@@ -21,8 +21,10 @@
 //! file work under `push` alone, then takes `devices` then `push` to sweep
 //! and check the device again, undoing a subscription stored for a device
 //! that changed meanwhile; a block, a forget and a re-pair delete the
-//! device's subscription after their `devices` change. Nothing takes
-//! `devices` or `live_devices` while holding `push`.
+//! device's subscription after their `devices` change. The push trigger
+//! reads `devices`, takes `push` before releasing `devices`, and does its
+//! file I/O under `push` alone. Nothing takes `devices` or `live_devices`
+//! while holding `push`; releasing `devices` while holding it is allowed.
 use super::connection::{AuthKind, ConnCtx, ConnLife, Inbound, undecoded_reply};
 use super::live_devices::{LiveDevices, Notifier};
 use super::{Hub, StateEvent};
@@ -1840,7 +1842,7 @@ mod tests {
         {
             let devices = crate::sync::lock(&hub.devices);
             let mut push = crate::sync::lock(&hub.push);
-            push.load(&devices)
+            push.load(crate::push::state::unrevoked_ids(&devices).as_ref())
                 .expect("load the push state")
                 .subs
                 .put(
@@ -1864,7 +1866,9 @@ mod tests {
         assert_ne!(new_id, old_id, "the re-pair replaced the record");
         let devices = crate::sync::lock(&hub.devices);
         let mut push = crate::sync::lock(&hub.push);
-        let loaded = push.load(&devices).expect("the push state is loaded");
+        let loaded = push
+            .load(crate::push::state::unrevoked_ids(&devices).as_ref())
+            .expect("the push state is loaded");
         assert!(
             loaded.subs.iter().next().is_none(),
             "the replaced record's subscription is gone"

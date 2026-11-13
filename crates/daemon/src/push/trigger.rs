@@ -3,13 +3,15 @@
 //! round that encrypts and posts it to every subscribed device and acts on
 //! the push services' answers (`docs/plans/mobile-app.md`, "Push").
 //!
-//! A round takes `Hub::devices` then `Hub::push` to collect its targets,
-//! releases both before any network call, and takes them again in that
-//! order afterwards to delete a subscription its push service dropped.
+//! A round takes `Hub::devices` then `Hub::push` to collect its targets and
+//! releases `devices` as soon as it holds `push`, so the push state's file
+//! I/O runs under `push` alone; it releases `push` before any network call,
+//! and takes both again the same way afterwards to delete a subscription its
+//! push service dropped.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -288,10 +290,28 @@ pub(crate) fn payload(
 /// The hub's stores a round reads and writes, locked in this order.
 #[derive(Clone, Copy)]
 pub(crate) struct Stores<'a> {
-    /// `Hub::devices`, taken first.
+    /// `Hub::devices`, taken first and released once `push` is held.
     pub devices: &'a Mutex<DeviceStore>,
-    /// `Hub::push`, a leaf taken after `devices`.
+    /// `Hub::push`, a leaf taken after `devices`; the push state's file
+    /// I/O runs under it alone.
     pub push: &'a Mutex<PushState>,
+}
+
+/// Lock `Hub::devices`, read its unrevoked ids, lock `Hub::push`, then
+/// release `devices`, returning the ids and the `push` guard; the caller
+/// loads the state with those ids and does its file I/O under `push` alone.
+///
+/// `devices` is released only once `push` is held: a revoke whose
+/// `remove_device` found the state unloaded changed `devices` before this
+/// read, so the first-load sweep drops its subscription, and a revoke after
+/// this read waits on `push` and then deletes the subscription from the
+/// loaded state.
+fn lock_push(stores: Stores<'_>) -> (Option<HashSet<String>>, MutexGuard<'_, PushState>) {
+    let devices = lock(stores.devices);
+    let paired = super::state::unrevoked_ids(&devices);
+    let push = lock(stores.push);
+    drop(devices);
+    (paired, push)
 }
 
 /// One push to deliver.
@@ -464,8 +484,9 @@ impl Trigger {
         self.apply(stores, answers)
     }
 
-    /// The round's targets, read under `devices` then `push`; both are
-    /// released when it returns. A target whose subscription holds at the
+    /// The round's targets: [`lock_push`] reads `devices` and releases it
+    /// once `push` is held, and the state is loaded and read under `push`
+    /// alone, released when it returns. A target whose subscription holds at the
     /// desk is left out while `at_desk`, and counted in [`Round::held`], so
     /// its session can be delivered when the owner leaves; `only_held` is
     /// that later round, keeping only those targets. `None` when the push
@@ -479,14 +500,12 @@ impl Trigger {
         at_desk: bool,
         only_held: bool,
     ) -> Option<Round> {
-        let devices = lock(stores.devices);
         // A push request stores a subscription under `push` alone and
         // undoes it if the device was revoked meanwhile; until it does, the
         // subscription of a device that is not an unrevoked record is skipped.
-        let paired = super::state::unrevoked_ids(&devices);
-        let mut push = lock(stores.push);
+        let (paired, mut push) = lock_push(stores);
         let policy = push.policy();
-        let loaded = match push.load(&devices) {
+        let loaded = match push.load(paired.as_ref()) {
             Ok(loaded) => loaded,
             Err(err) => {
                 tracing::warn!(
@@ -724,8 +743,9 @@ impl Trigger {
     }
 
     /// Act on the answers: count failures and delete each subscription that
-    /// is gone or failed too often, under `devices` then `push`, loading the
-    /// state again if it was unloaded since the round collected.
+    /// is gone or failed too often, under `push` alone once [`lock_push`]
+    /// has read `devices`, loading the state again if it was unloaded since
+    /// the round collected.
     fn apply(&mut self, stores: Stores<'_>, answers: Vec<(Target, Outcome)>) -> Vec<Delivery> {
         let accepted: HashSet<String> = answers
             .iter()
@@ -738,9 +758,8 @@ impl Trigger {
             .map(|(target, _)| target)
             .collect();
         if !doomed.is_empty() {
-            let devices = lock(stores.devices);
-            let mut push = lock(stores.push);
-            match push.load(&devices).map(|_| ()) {
+            let (paired, mut push) = lock_push(stores);
+            match push.load(paired.as_ref()).map(|_| ()) {
                 Ok(()) => {
                     for target in doomed {
                         push.remove_if_address(&target.device_id, &target.address);
@@ -1057,15 +1076,15 @@ mod tests {
 
     use super::{
         Alert, BACKOFF_FIRST, BACKOFF_MOST, Delivery, FINISHED_GRACE, FinishedHolds, PushKind,
-        Sources, Step, Stores, Tracker, Trigger, deliver_finished, deliver_held, label,
+        Sources, Step, Stores, Tracker, Trigger, deliver_finished, deliver_held, label, lock_push,
         needs_you_count, origin, payload, run, spawn,
     };
     use crate::devices::DeviceStore;
     use crate::paths::Dirs;
     use crate::presence::Presence;
     use crate::push::send::{Outcome, client, topic};
-    use crate::push::state::PushState;
-    use crate::push::store::{Channel, Subscription};
+    use crate::push::state::{PushState, unrevoked_ids};
+    use crate::push::store::{Channel, SUBSCRIPTIONS_FILE, Subscription, SubscriptionStore};
     use crate::push::test_fake::{
         Fake, Server, TESTS, fake_push_service, fake_push_service_by_path, fake_push_service_gated,
         fake_push_service_hooked, fake_push_service_with,
@@ -1308,16 +1327,15 @@ mod tests {
 
         /// Pair a device; returns its id.
         fn pair(&self, n: u32) -> String {
-            let peer = tailnet::PeerIdentity {
-                stable_id: format!("nPeer{n}"),
-                name: format!("phone{n}.tail1234.ts.net"),
-                user_id: 2,
-                login: "owner@example.com".to_owned(),
-            };
-            lock(&self.devices)
-                .issue(&peer, Utc::now())
-                .expect("issue a device token")
-                .0
+            issue(&self.devices, n)
+        }
+
+        /// Whether `subscriptions.json` holds a subscription for
+        /// `device_id`, read from the file without loading the state.
+        fn filed(&self, device_id: &str) -> bool {
+            SubscriptionStore::load(&self.dir.join("push").join(SUBSCRIPTIONS_FILE))
+                .get(device_id)
+                .is_some()
         }
 
         fn subscribe(&self, device_id: &str, endpoint: &str, needs_you: bool, finished: bool) {
@@ -1347,12 +1365,35 @@ mod tests {
         fn endpoint_of(&self, device_id: &str) -> Option<String> {
             let devices = lock(&self.devices);
             let mut push = lock(&self.push);
-            let loaded = push.load(&devices).expect("load the push state");
+            let loaded = push
+                .load(unrevoked_ids(&devices).as_ref())
+                .expect("load the push state");
             loaded
                 .subs
                 .get(device_id)
                 .map(|sub| sub.channel.address().to_owned())
         }
+    }
+
+    /// Pair (or pair again) the device of peer `n`; returns its id.
+    fn issue(devices: &Mutex<DeviceStore>, n: u32) -> String {
+        let peer = tailnet::PeerIdentity {
+            stable_id: format!("nPeer{n}"),
+            name: format!("phone{n}.tail1234.ts.net"),
+            user_id: 2,
+            login: "owner@example.com".to_owned(),
+        };
+        lock(devices)
+            .issue(&peer, Utc::now())
+            .expect("issue a device token")
+            .0
+    }
+
+    /// Block `device_id` as the pairing path does: revoke its record, then
+    /// delete its subscription from the push state.
+    fn block(devices: &Mutex<DeviceStore>, push: &Mutex<PushState>, device_id: &str) {
+        lock(devices).revoke(device_id).expect("revoke");
+        lock(push).remove_device(device_id);
     }
 
     fn put(
@@ -1369,7 +1410,7 @@ mod tests {
         let auth = URL_SAFE_NO_PAD.encode(<[u8; 16]>::try_generate().expect("16 random bytes"));
         let devices = lock(devices);
         let mut push = lock(push);
-        push.load(&devices)
+        push.load(unrevoked_ids(&devices).as_ref())
             .expect("load the push state")
             .subs
             .put(
@@ -1644,6 +1685,162 @@ mod tests {
             Some(fresh),
             "the re-registered endpoint stays"
         );
+    }
+
+    #[test]
+    fn the_round_holds_no_device_lock_during_its_push_work() {
+        let setup = setup("lock-push");
+
+        let (_paired, push) = lock_push(setup.stores());
+
+        assert!(
+            setup.devices.try_lock().is_ok(),
+            "devices is free while the round holds push"
+        );
+        drop(push);
+    }
+
+    #[tokio::test]
+    async fn a_round_after_a_block_sends_the_device_nothing() {
+        let (setup, device, _url, fake, _server) = one_device("after-block", 201).await;
+        block(&setup.devices, &setup.push, &device);
+
+        let delivered = round(&mut trigger(), &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert!(delivered.is_empty(), "{delivered:?}");
+        assert_eq!(fake.posts(), 0, "no POST to a blocked device");
+        assert!(!setup.filed(&device), "the file no longer holds the device");
+        assert_eq!(setup.endpoint_of(&device), None, "nor does memory");
+    }
+
+    #[tokio::test]
+    async fn a_round_that_loads_the_state_sweeps_a_device_blocked_while_unloaded() {
+        let (setup, device, _url, fake, _server) = one_device("blocked-unloaded", 201).await;
+        lock(&setup.push).unload();
+        block(&setup.devices, &setup.push, &device);
+        assert!(
+            setup.filed(&device),
+            "the block found the state unloaded, so the file still holds the device"
+        );
+
+        let delivered = round(&mut trigger(), &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert!(delivered.is_empty(), "{delivered:?}");
+        assert_eq!(fake.posts(), 0, "no POST to a blocked device");
+        assert!(!setup.filed(&device), "the round's load swept the device");
+    }
+
+    /// A device blocked by the fake's hook while its POST is in flight, the
+    /// fake answering `code`; checks that only that POST went out, that the
+    /// device's subscription is gone and that a second round sends nothing.
+    /// Returns the first round's outcome.
+    async fn block_during_the_post(tag: &str, code: u16) -> Outcome {
+        let setup = setup(tag);
+        let device = setup.pair(1);
+        let hook = {
+            let devices = Arc::clone(&setup.devices);
+            let push = Arc::clone(&setup.push);
+            let device = device.clone();
+            Box::new(move || block(&devices, &push, &device))
+        };
+        let (url, fake, _server) = fake_push_service_hooked(code, hook).await;
+        setup.subscribe(&device, url.as_str(), true, true);
+        let mut trigger = trigger();
+
+        let delivered = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(fake.posts(), 1, "only the POST in flight at the block");
+        assert!(lock(&setup.push).is_loaded(), "the state stays loaded");
+        assert!(!setup.filed(&device), "the file no longer holds the device");
+        assert_eq!(setup.endpoint_of(&device), None, "nor does memory");
+        let again = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+        assert!(again.is_empty(), "{again:?}");
+        assert_eq!(fake.posts(), 1, "no later push to the blocked device");
+        delivered[0].outcome.clone()
+    }
+
+    #[tokio::test]
+    async fn a_block_during_the_post_leaves_no_subscription_and_no_later_push() {
+        let outcome = block_during_the_post("block-during-post", 201).await;
+
+        assert_eq!(outcome, Outcome::Sent);
+    }
+
+    #[tokio::test]
+    async fn a_block_during_the_post_leaves_no_subscription_and_no_later_push_with_a_gone_answer() {
+        // `remove_if_address` finds nothing to delete and reports no error.
+        let outcome = block_during_the_post("block-during-post-gone", 410).await;
+
+        assert_eq!(outcome, Outcome::Gone);
+    }
+
+    #[tokio::test]
+    async fn a_gone_answer_that_reloads_the_state_sweeps_a_device_blocked_meanwhile() {
+        let setup = setup("gone-reload-sweep");
+        let resting = setup.pair(1);
+        let target = setup.pair(2);
+        let hook = {
+            let devices = Arc::clone(&setup.devices);
+            let push = Arc::clone(&setup.push);
+            let resting = resting.clone();
+            Box::new(move || {
+                lock(&push).unload();
+                block(&devices, &push, &resting);
+            })
+        };
+        let (url, fake, _server) = fake_push_service_hooked(410, hook).await;
+        setup.subscribe(&resting, url.as_str(), false, true);
+        setup.subscribe(&target, url.as_str(), true, true);
+
+        let delivered = round(&mut trigger(), &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(delivered[0].outcome, Outcome::Gone);
+        assert_eq!(
+            fake.posts(),
+            1,
+            "only the device wanting Needs you is pushed"
+        );
+        assert!(
+            !setup.filed(&resting),
+            "the reload's sweep dropped the blocked device"
+        );
+        assert!(!setup.filed(&target), "the gone answer dropped the target");
+        assert_eq!(setup.endpoint_of(&resting), None);
+        assert_eq!(setup.endpoint_of(&target), None);
+    }
+
+    #[tokio::test]
+    async fn a_re_pair_during_the_post_leaves_no_subscription_for_the_old_record() {
+        let setup = setup("re-pair-during-post");
+        let old = setup.pair(1);
+        let hook = {
+            let devices = Arc::clone(&setup.devices);
+            let push = Arc::clone(&setup.push);
+            let old = old.clone();
+            Box::new(move || {
+                let new = issue(&devices, 1);
+                assert_ne!(new, old, "the re-pair replaced the record");
+                lock(&push).remove_device(&old);
+            })
+        };
+        let (url, fake, _server) = fake_push_service_hooked(201, hook).await;
+        setup.subscribe(&old, url.as_str(), true, true);
+        let mut trigger = trigger();
+
+        let delivered = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(fake.posts(), 1);
+        assert!(
+            !setup.filed(&old),
+            "the file no longer holds the old record"
+        );
+        assert_eq!(setup.endpoint_of(&old), None, "nor does memory");
+        let again = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+        assert!(again.is_empty(), "{again:?}");
+        assert_eq!(fake.posts(), 1, "nothing more is sent to the old record");
     }
 
     #[tokio::test]
