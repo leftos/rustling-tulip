@@ -155,7 +155,7 @@ export const FEATURE_WEB_PUSH = "web_push";
 
 /**
  * `Welcome.features` entry: the daemon sends relay pushes to `apns` and
- * `fcm` subscriptions ([`PushRegistration`]). No daemon lists it yet.
+ * `fcm` subscriptions ([`PushRegistration`]). A daemon lists it once it sends relay pushes.
  */
 export const FEATURE_RELAY_PUSH = "relay_push";
 

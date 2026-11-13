@@ -130,7 +130,7 @@ pub const FEATURE_DISPATCH_RUNS: &str = "dispatch_runs";
 pub const FEATURE_WEB_PUSH: &str = "web_push";
 
 /// `Welcome.features` entry: the daemon sends relay pushes to `apns` and
-/// `fcm` subscriptions ([`PushRegistration`]). No daemon lists it yet.
+/// `fcm` subscriptions ([`PushRegistration`]). A daemon lists it once it sends relay pushes.
 pub const FEATURE_RELAY_PUSH: &str = "relay_push";
 
 /// `Welcome.features` entry: the daemon saves a file a client sends into a

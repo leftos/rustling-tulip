@@ -16,12 +16,16 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
-use protocol::{RemoteState, SessionMode, SessionSnapshot, SessionStatus};
+use protocol::{
+    PUSH_NOTICE_VERSION, PushNotice, PushNoticeKind, RemoteState, SessionMode, SessionSnapshot,
+    SessionStatus,
+};
 use push_crypto::Subscriber;
 use reqwest::Url;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{Instant, sleep_until};
 
+use super::relay;
 use super::send::{self, Outcome, PushPolicy};
 use super::state::PushState;
 use super::store::{Channel, Subscription};
@@ -287,6 +291,93 @@ pub(crate) fn payload(
     })
 }
 
+/// The tailnet name the listener serves under, without the port: the
+/// `host` of a relay push. `None` while the listener is not serving.
+fn host_name(state: &RemoteState) -> Option<&str> {
+    match state {
+        RemoteState::Serving { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+/// The relay push's plaintext for the same alert [`payload`] carries: the
+/// title, the session's label ([`label`]), its id, the tailnet `host` and
+/// the Needs you count as the badge.
+pub(crate) fn notice(
+    kind: PushKind,
+    session: &SessionSnapshot,
+    host: Option<&str>,
+    count: u32,
+) -> PushNotice {
+    PushNotice {
+        v: PUSH_NOTICE_VERSION,
+        kind: match kind {
+            PushKind::NeedsYou => PushNoticeKind::NeedsYou,
+            PushKind::Finished => PushNoticeKind::Finished,
+        },
+        title: kind.title().to_owned(),
+        body: label(session),
+        session_id: session.id.clone(),
+        host: host.map(str::to_owned),
+        badge: count,
+    }
+}
+
+/// Which plaintext a target is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Plaintext {
+    /// The declarative Web Push JSON ([`payload`]).
+    WebPush,
+    /// The relay's [`PushNotice`] JSON ([`notice`]).
+    Notice,
+}
+
+/// A round's plaintexts, built once: the declarative JSON only while the
+/// listener serves the phone app's origin, the notice unless it failed to
+/// serialize.
+struct Plaintexts {
+    web_push: Option<Vec<u8>>,
+    notice: Option<Vec<u8>>,
+}
+
+impl Plaintexts {
+    /// Both plaintexts for `alert`, the declarative one under `origin`.
+    fn of(alert: Alert<'_>, origin: Option<&str>, remote: &RemoteState) -> Self {
+        let session = alert.session;
+        let web_push = origin.map(|origin| {
+            payload(
+                alert.kind,
+                &label(session),
+                origin,
+                &session.id,
+                alert.count,
+            )
+            .to_string()
+            .into_bytes()
+        });
+        let notice = notice(alert.kind, session, host_name(remote), alert.count);
+        let notice = match serde_json::to_vec(&notice) {
+            Ok(bytes) => Some(bytes),
+            Err(err) => {
+                tracing::warn!(
+                    err = format!("{err:#}"),
+                    "push: the relay notice did not serialize; no relay push is sent this round"
+                );
+                None
+            }
+        };
+        Self { web_push, notice }
+    }
+
+    /// The plaintext a target of `kind` is sent, if the round has it.
+    fn get(&self, kind: Plaintext) -> Option<&[u8]> {
+        match kind {
+            Plaintext::WebPush => self.web_push.as_deref(),
+            Plaintext::Notice => self.notice.as_deref(),
+        }
+    }
+}
+
 /// The hub's stores a round reads and writes, locked in this order.
 #[derive(Clone, Copy)]
 pub(crate) struct Stores<'a> {
@@ -363,28 +454,173 @@ struct Target {
     /// failures and a late "gone" are recorded under.
     address: String,
     url: Url,
-    /// The push service's origin: the JWT's audience and the back-off key.
+    /// The push service's or the relay's origin: the JWT's audience, and
+    /// what a round's accepted pushes are counted by for the failure rule.
     audience: String,
+    /// The key the back-off is kept under: the audience for Web Push, so a
+    /// push service is backed off as one; the audience and the token's
+    /// [`relay::fingerprint`] for a relay target, so one phone's throttling
+    /// pauses no other phone. Never logged.
+    backoff_key: String,
+    /// Which of the round's plaintexts it is sent.
+    plaintext: Plaintext,
     subscriber: Subscriber,
     jwt: String,
 }
 
-/// A round's targets, the daemon's VAPID public key, and how many targets
-/// the desk held back.
+/// Where a target's push goes and how it is signed, before its keys are
+/// read: one arm of [`Trigger::target`].
+struct Route<'a> {
+    url: Url,
+    audience: String,
+    backoff_key: String,
+    plaintext: Plaintext,
+    /// The JWT's `sub`.
+    subject: &'a str,
+}
+
+/// A round's targets, the daemon's VAPID public key, how many targets the
+/// desk held back, and what the store holds.
 struct Round {
     public_key: String,
     targets: Vec<Target>,
     held: u32,
+    live: Live,
 }
 
 /// What a round signs its JWTs with: the daemon's key, its public point
-/// (base64url, computed once a round), the phone app's origin as the
-/// subject, and the time.
+/// (base64url, computed once a round), the phone app's origin as a Web Push
+/// subject (`None` while the listener is not serving, when no Web Push
+/// target is built), the relay's origin (`None` when [`send::check_relay`]
+/// refused it, when no relay target is built), and the time.
 struct Signer<'a> {
     key: &'a VapidKey,
     public_key: &'a str,
-    origin: &'a str,
+    origin: Option<&'a str>,
+    relay: Option<&'a Url>,
     now: DateTime<Utc>,
+}
+
+/// The relay origin a round posts under: `origin` when [`send::check_relay`]
+/// admits it, else `None`, warned once for the round.
+fn checked_relay(origin: &Url, policy: PushPolicy) -> Option<Url> {
+    match send::check_relay(origin, policy) {
+        Ok(()) => Some(origin.clone()),
+        Err(err) => {
+            tracing::warn!(
+                err = format!("{err:#}"),
+                "push: the relay origin is refused; this round sends no relay push"
+            );
+            None
+        }
+    }
+}
+
+/// The p256dh and auth keys of any channel.
+fn channel_keys(channel: &Channel) -> (&str, &str) {
+    match channel {
+        Channel::WebPush { p256dh, auth, .. }
+        | Channel::Apns { p256dh, auth, .. }
+        | Channel::Fcm { p256dh, auth, .. } => (p256dh, auth),
+    }
+}
+
+/// A Web Push subscription's route: its endpoint checked, its push service's
+/// origin as audience and back-off key, the phone app's origin as subject.
+/// `None`, with a debug line, while the listener is not serving.
+fn web_push_route<'a>(
+    signer: &Signer<'a>,
+    device_id: &str,
+    endpoint: &str,
+    policy: PushPolicy,
+) -> anyhow::Result<Option<Route<'a>>> {
+    let Some(origin) = signer.origin else {
+        tracing::debug!(
+            %device_id,
+            "push: the tailnet listener is not serving; the Web Push subscription is skipped"
+        );
+        return Ok(None);
+    };
+    let url = send::check_endpoint(endpoint, policy)?;
+    let audience = url.origin().ascii_serialization();
+    Ok(Some(Route {
+        url,
+        backoff_key: audience.clone(),
+        audience,
+        plaintext: Plaintext::WebPush,
+        subject: origin,
+    }))
+}
+
+/// A relay subscription's route: the relay URL for its token, the relay's
+/// origin as audience, a per-token back-off key and the fixed product
+/// subject. `None` when the round's relay origin was refused, and for an
+/// `fcm` subscription until the relay sends FCM (it answers 404 there, which
+/// would delete the subscription).
+fn relay_route(signer: &Signer<'_>, device_id: &str, channel: &Channel) -> Option<Route<'static>> {
+    if matches!(channel, Channel::Fcm { .. }) {
+        tracing::debug!(
+            %device_id,
+            "push: the relay has no FCM sender yet; the fcm subscription is skipped"
+        );
+        return None;
+    }
+    let origin = signer.relay?;
+    let url = relay::relay_url(origin, channel)?;
+    let audience = origin.origin().ascii_serialization();
+    let backoff_key = relay_backoff_key(&audience, channel);
+    Some(Route {
+        url,
+        audience,
+        backoff_key,
+        plaintext: Plaintext::Notice,
+        subject: relay::SUBJECT,
+    })
+}
+
+/// A relay subscription's back-off key under the relay `audience`: the
+/// audience and its token's [`relay::fingerprint`], never the token.
+fn relay_backoff_key(audience: &str, channel: &Channel) -> String {
+    format!("{audience}#{}", relay::fingerprint(channel.address()))
+}
+
+/// The back-off key a stored subscription's targets have: its endpoint's
+/// origin for Web Push, [`relay_backoff_key`] under `relay_origin` for a
+/// relay channel. `None` for an endpoint that is not a URL.
+fn backoff_key_of(channel: &Channel, relay_origin: &Url) -> Option<String> {
+    match channel {
+        Channel::WebPush { endpoint, .. } => Url::parse(endpoint)
+            .ok()
+            .map(|url| url.origin().ascii_serialization()),
+        Channel::Apns { .. } | Channel::Fcm { .. } => Some(relay_backoff_key(
+            &relay_origin.origin().ascii_serialization(),
+            channel,
+        )),
+    }
+}
+
+/// What the store holds, whichever subscriptions a round pushes to: the
+/// back-off keys and the (device id, address) pairs of every stored
+/// subscription of a paired device. A back-off or a failure count goes only
+/// once its subscription leaves the store.
+#[derive(Default)]
+struct Live {
+    keys: HashSet<String>,
+    addresses: HashSet<(String, String)>,
+}
+
+impl Live {
+    /// The live sets of `subs`, relay keys under `relay_origin`.
+    fn of<'s>(subs: impl Iterator<Item = (&'s str, &'s Subscription)>, relay_origin: &Url) -> Self {
+        let mut live = Self::default();
+        for (device_id, subscription) in subs {
+            let channel = &subscription.channel;
+            live.keys.extend(backoff_key_of(channel, relay_origin));
+            live.addresses
+                .insert((device_id.to_owned(), channel.address().to_owned()));
+        }
+        live
+    }
 }
 
 /// A push service skipped until `until`.
@@ -401,6 +637,8 @@ pub(crate) struct Trigger {
     pub tracker: Tracker,
     client: reqwest::Client,
     jwt: JwtCache,
+    /// Back-offs by [`Target::backoff_key`]: a push service's origin, or a
+    /// relay origin and a token's fingerprint.
     backoff: HashMap<String, Backoff>,
     /// Failures in a row by (device id, address), so a new address starts at
     /// zero.
@@ -432,8 +670,9 @@ impl Trigger {
 
     /// Push `alert` to every subscribed device whose switch for its kind is
     /// on, signing at `now`, and act on the answers: a dropped subscription
-    /// is deleted, a throttled or failing push service is backed off. Sends
-    /// nothing while `remote` is not serving. Returns each answer.
+    /// is deleted, a throttled or failing push service or relay token is
+    /// backed off. While `remote` is not serving, only the relay targets are
+    /// pushed. Returns each answer.
     pub(crate) async fn deliver(
         &mut self,
         stores: Stores<'_>,
@@ -441,17 +680,17 @@ impl Trigger {
         alert: Alert<'_>,
         now: DateTime<Utc>,
     ) -> Vec<Delivery> {
-        let Some(origin) = origin(remote) else {
+        let origin = origin(remote);
+        if origin.is_none() {
             tracing::debug!(
                 kind = ?alert.kind,
-                "push: the tailnet listener is not serving; no push is sent"
+                "push: the tailnet listener is not serving; only relay pushes are sent"
             );
-            return Vec::new();
-        };
-        let Some(round) = self.collect(
+        }
+        let Some(mut round) = self.collect(
             stores,
             alert.kind,
-            &origin,
+            origin.as_deref(),
             now,
             alert.at_desk,
             alert.only_held,
@@ -461,27 +700,23 @@ impl Trigger {
         if alert.kind == PushKind::NeedsYou && round.held > 0 {
             self.held.insert(alert.session.id.clone());
         }
-        let live: HashSet<(&str, &str)> = round
-            .targets
-            .iter()
-            .map(|target| (target.device_id.as_str(), target.address.as_str()))
-            .collect();
-        self.failures.retain(|(device_id, address), _| {
-            live.contains(&(device_id.as_str(), address.as_str()))
-        });
-        let session = alert.session;
-        let body = payload(
-            alert.kind,
-            &label(session),
-            &origin,
-            &session.id,
-            alert.count,
-        );
-        let plaintext = body.to_string().into_bytes();
+        let live = std::mem::take(&mut round.live);
+        self.failures.retain(|key, _| live.addresses.contains(key));
+        let plaintexts = Plaintexts::of(alert, origin.as_deref(), remote);
         let answers = self
-            .send_all(round, &plaintext, &send::topic(&session.id))
+            .send_all(round, &plaintexts, &send::topic(&alert.session.id))
             .await;
+        self.prune_backoff(&live.keys);
         self.apply(stores, answers)
+    }
+
+    /// Drop every back-off that has run out and whose key no stored
+    /// subscription has, so a token deleted or replaced while backed off
+    /// leaves no entry behind.
+    fn prune_backoff(&mut self, keys: &HashSet<String>) {
+        let now = Instant::now();
+        self.backoff
+            .retain(|key, backoff| keys.contains(key) || now < backoff.until);
     }
 
     /// The round's targets: [`lock_push`] reads `devices` and releases it
@@ -495,7 +730,7 @@ impl Trigger {
         &mut self,
         stores: Stores<'_>,
         kind: PushKind,
-        origin: &str,
+        origin: Option<&str>,
         now: DateTime<Utc>,
         at_desk: bool,
         only_held: bool,
@@ -505,6 +740,8 @@ impl Trigger {
         // subscription of a device that is not an unrevoked record is skipped.
         let (paired, mut push) = lock_push(stores);
         let policy = push.policy();
+        let relay_origin = push.relay_origin().clone();
+        let relay = checked_relay(&relay_origin, policy);
         let loaded = match push.load(paired.as_ref()) {
             Ok(loaded) => loaded,
             Err(err) => {
@@ -520,13 +757,19 @@ impl Trigger {
             key: &loaded.key,
             public_key: &public_key,
             origin,
+            relay: relay.as_ref(),
             now,
         };
         let mut targets = Vec::new();
         let mut held = 0_u32;
-        let wanted = loaded.subs.iter().filter(|(id, s)| {
-            kind.wanted_by(s) && paired.as_ref().is_none_or(|ids| ids.contains(*id))
-        });
+        let stored = || {
+            loaded
+                .subs
+                .iter()
+                .filter(|(id, _)| paired.as_ref().is_none_or(|ids| ids.contains(*id)))
+        };
+        let live = Live::of(stored(), &relay_origin);
+        let wanted = stored().filter(|(_, s)| kind.wanted_by(s));
         for (device_id, subscription) in wanted {
             if only_held && !subscription.hold_at_desk {
                 continue;
@@ -540,6 +783,7 @@ impl Trigger {
                 Ok(None) => {}
                 Err(err) => tracing::warn!(
                     %device_id,
+                    kind = subscription.channel.kind(),
                     err = format!("{err:#}"),
                     "push: the device's subscription cannot be pushed to"
                 ),
@@ -556,6 +800,7 @@ impl Trigger {
             public_key,
             targets,
             held,
+            live,
         })
     }
 
@@ -570,10 +815,10 @@ impl Trigger {
             .collect()
     }
 
-    /// One subscription as a target: its endpoint checked, its keys read
-    /// and the JWT for its push service. A channel that is not Web Push has
-    /// no target yet, so it is skipped with a debug line rather than warned
-    /// about every round.
+    /// One subscription as a target: a Web Push endpoint checked or a relay
+    /// URL built for its token, its keys read and the JWT for the audience.
+    /// A Web Push subscription while the listener is not serving, and a relay
+    /// one while the relay origin is refused, are skipped (`Ok(None)`).
     fn target(
         &mut self,
         signer: &Signer<'_>,
@@ -581,62 +826,48 @@ impl Trigger {
         subscription: &Subscription,
         policy: PushPolicy,
     ) -> anyhow::Result<Option<Target>> {
-        let Channel::WebPush {
-            endpoint,
-            p256dh,
-            auth,
-        } = &subscription.channel
-        else {
-            tracing::debug!(
-                %device_id,
-                kind = subscription.channel.kind(),
-                "push: the device's subscription is not Web Push; nothing is sent to it yet"
-            );
+        let channel = &subscription.channel;
+        let route = match channel {
+            Channel::WebPush { endpoint, .. } => {
+                web_push_route(signer, device_id, endpoint, policy)?
+            }
+            Channel::Apns { .. } | Channel::Fcm { .. } => relay_route(signer, device_id, channel),
+        };
+        let Some(route) = route else {
             return Ok(None);
         };
-        let url = send::check_endpoint(endpoint, policy)?;
-        let audience = url.origin().ascii_serialization();
+        let (p256dh, auth) = channel_keys(channel);
         let subscriber = Subscriber::from_b64url(p256dh, auth)?;
         let jwt = self.jwt.token(
             signer.key,
             signer.public_key,
-            &audience,
-            signer.origin,
+            &route.audience,
+            route.subject,
             signer.now,
         )?;
         Ok(Some(Target {
             device_id: device_id.to_owned(),
-            address: endpoint.clone(),
-            url,
-            audience,
+            address: channel.address().to_owned(),
+            url: route.url,
+            audience: route.audience,
+            backoff_key: route.backoff_key,
+            plaintext: route.plaintext,
             subscriber,
             jwt,
         }))
     }
 
-    /// Encrypt every target whose push service is not backed off, then post
-    /// them: at most [`SENDS_AT_ONCE`] pushes are in flight at once, and each
-    /// push service's back-off is noted once, after every answer is in.
-    /// Holds no lock; returns the answers in target order.
+    /// Encrypt every target that is not backed off with the plaintext it
+    /// takes, then post them: at most [`SENDS_AT_ONCE`] pushes are in flight
+    /// at once, and each back-off key is noted once, after every answer is
+    /// in. Holds no lock; returns the answers in target order.
     async fn send_all(
         &mut self,
         round: Round,
-        plaintext: &[u8],
+        plaintexts: &Plaintexts,
         topic: &str,
     ) -> Vec<(Target, Outcome)> {
-        let mut prepared = Vec::new();
-        for target in round.targets {
-            if self.backed_off(&target.audience) {
-                tracing::debug!(device_id = %target.device_id, push_service = %target.audience, "push: the push service is backed off; skipped");
-                continue;
-            }
-            match push_crypto::encrypt(&target.subscriber, plaintext) {
-                Ok(body) => prepared.push((target, body)),
-                Err(err) => {
-                    tracing::warn!(device_id = %target.device_id, err = format!("{err:#}"), "push: the payload did not encrypt");
-                }
-            }
-        }
+        let prepared = self.prepare(round.targets, plaintexts);
         let client = &self.client;
         let public_key = &round.public_key;
         let answers: Vec<(Target, anyhow::Result<Outcome>)> = futures::stream::iter(prepared)
@@ -661,30 +892,60 @@ impl Trigger {
         delivered
     }
 
-    /// Note each push service's answers once for the round: a service with a
-    /// throttled, failed or unreachable answer is backed off once, at the
-    /// longest `Retry-After` it asked for; a service whose answers all
-    /// arrived and none asked to retry has its back-off cleared.
-    fn note_round(&mut self, answers: &[(Target, anyhow::Result<Outcome>)]) {
-        let mut audiences: Vec<&str> = Vec::new();
-        for (target, _) in answers {
-            if !audiences.contains(&target.audience.as_str()) {
-                audiences.push(target.audience.as_str());
+    /// The targets to post, each with its body: a target whose back-off key
+    /// is backed off is skipped, and so is one whose plaintext the round has
+    /// not got.
+    fn prepare(&self, targets: Vec<Target>, plaintexts: &Plaintexts) -> Vec<(Target, Vec<u8>)> {
+        let mut prepared = Vec::new();
+        for target in targets {
+            if self.backed_off(&target.backoff_key) {
+                tracing::debug!(device_id = %target.device_id, push_service = %target.audience, "push: the push service is backed off; skipped");
+                continue;
+            }
+            let Some(plaintext) = plaintexts.get(target.plaintext) else {
+                tracing::debug!(device_id = %target.device_id, plaintext = ?target.plaintext, "push: no plaintext for the target; skipped");
+                continue;
+            };
+            match push_crypto::encrypt(&target.subscriber, plaintext) {
+                Ok(body) => prepared.push((target, body)),
+                Err(err) => {
+                    tracing::warn!(device_id = %target.device_id, err = format!("{err:#}"), "push: the payload did not encrypt");
+                }
             }
         }
-        for audience in audiences {
-            self.note_audience(audience, answers);
+        prepared
+    }
+
+    /// Note each back-off key's answers once for the round: a key with a
+    /// throttled, failed or unreachable answer is backed off once, at the
+    /// longest `Retry-After` it asked for; a key whose answers all arrived
+    /// and none asked to retry has its back-off cleared.
+    fn note_round(&mut self, answers: &[(Target, anyhow::Result<Outcome>)]) {
+        let mut keys: Vec<(&str, &str)> = Vec::new();
+        for (target, _) in answers {
+            if !keys.iter().any(|(key, _)| *key == target.backoff_key) {
+                keys.push((target.backoff_key.as_str(), target.audience.as_str()));
+            }
+        }
+        for (key, service) in keys {
+            self.note_key(key, service, answers);
         }
     }
 
-    /// One push service's answers, noted once for the round.
-    fn note_audience(&mut self, audience: &str, answers: &[(Target, anyhow::Result<Outcome>)]) {
+    /// One back-off key's answers, noted once for the round; `service` is
+    /// its audience, the origin the log names.
+    fn note_key(
+        &mut self,
+        key: &str,
+        service: &str,
+        answers: &[(Target, anyhow::Result<Outcome>)],
+    ) {
         let mut back_off = false;
         let mut longest: Option<(Option<Duration>, &Outcome)> = None;
         let mut first_ok: Option<&Outcome> = None;
         for (_, answer) in answers
             .iter()
-            .filter(|(target, _)| target.audience == audience)
+            .filter(|(target, _)| target.backoff_key == key)
         {
             match answer {
                 Err(_) => back_off = true,
@@ -701,45 +962,45 @@ impl Trigger {
             }
         }
         if back_off {
-            self.note_push_service(audience, longest.map(|(_, outcome)| outcome));
+            self.note_push_service(key, service, longest.map(|(_, outcome)| outcome));
         } else if let Some(outcome) = first_ok {
-            self.note_push_service(audience, Some(outcome));
+            self.note_push_service(key, service, Some(outcome));
         }
     }
 
-    /// Whether `audience`'s back-off is still running.
-    fn backed_off(&self, audience: &str) -> bool {
+    /// Whether `key`'s back-off is still running.
+    fn backed_off(&self, key: &str) -> bool {
         self.backoff
-            .get(audience)
+            .get(key)
             .is_some_and(|backoff| Instant::now() < backoff.until)
     }
 
-    /// Back `audience` off when it throttled, failed (`Retry`) or could not
-    /// be reached (`None`), for at most [`BACKOFF_MOST`]; any other answer
-    /// ends its back-off.
-    fn note_push_service(&mut self, audience: &str, outcome: Option<&Outcome>) {
+    /// Back `key` off when it throttled, failed (`Retry`) or could not be
+    /// reached (`None`), for at most [`BACKOFF_MOST`]; any other answer ends
+    /// its back-off. The log names `service`, the key's origin, never the key.
+    fn note_push_service(&mut self, key: &str, service: &str, outcome: Option<&Outcome>) {
         let retry_after = match outcome {
             Some(Outcome::Retry { retry_after, .. }) => *retry_after,
             None => None,
             Some(_) => {
-                self.backoff.remove(audience);
+                self.backoff.remove(key);
                 return;
             }
         };
-        let delay = self.backoff.get(audience).map_or(BACKOFF_FIRST, |backoff| {
+        let delay = self.backoff.get(key).map_or(BACKOFF_FIRST, |backoff| {
             (backoff.delay * 2).min(BACKOFF_MOST)
         });
         let wait = retry_after
             .map_or(delay, |asked| asked.max(delay))
             .min(BACKOFF_MOST);
-        tracing::info!(push_service = %audience, wait_secs = wait.as_secs(), "push: backing the push service off");
+        tracing::info!(push_service = %service, wait_secs = wait.as_secs(), "push: backing the push service off");
         let now = Instant::now();
         let until = now
             .checked_add(wait)
             .or_else(|| now.checked_add(BACKOFF_MOST))
             .unwrap_or(now);
         self.backoff
-            .insert(audience.to_owned(), Backoff { until, delay });
+            .insert(key.to_owned(), Backoff { until, delay });
     }
 
     /// Act on the answers: count failures and delete each subscription that
@@ -1074,20 +1335,25 @@ mod tests {
     use tokio::sync::broadcast::error::RecvError;
     use tokio::time::Instant;
 
+    use protocol::{PUSH_NOTICE_VERSION, PushNotice, PushNoticeKind};
+
     use super::{
-        Alert, BACKOFF_FIRST, BACKOFF_MOST, Delivery, FINISHED_GRACE, FinishedHolds, PushKind,
-        Sources, Step, Stores, Tracker, Trigger, deliver_finished, deliver_held, label, lock_push,
-        needs_you_count, origin, payload, run, spawn,
+        Alert, BACKOFF_FIRST, BACKOFF_MOST, Backoff, Delivery, FINISHED_GRACE, FinishedHolds,
+        PushKind, Sources, Step, Stores, Tracker, Trigger, deliver_finished, deliver_held, label,
+        lock_push, needs_you_count, notice, origin, payload, run, spawn,
     };
     use crate::devices::DeviceStore;
     use crate::paths::Dirs;
     use crate::presence::Presence;
+    use crate::push::relay;
     use crate::push::send::{Outcome, client, topic};
     use crate::push::state::{PushState, unrevoked_ids};
-    use crate::push::store::{Channel, SUBSCRIPTIONS_FILE, Subscription, SubscriptionStore};
+    use crate::push::store::{
+        ApnsEnvironment, Channel, SUBSCRIPTIONS_FILE, Subscription, SubscriptionStore,
+    };
     use crate::push::test_fake::{
         Fake, Server, TESTS, fake_push_service, fake_push_service_by_path, fake_push_service_gated,
-        fake_push_service_hooked, fake_push_service_with,
+        fake_push_service_hooked, fake_push_service_with, origin_of,
     };
     use crate::server::test_support::idle_record;
     use crate::session::{SessionEvent, SessionRegistry};
@@ -1303,13 +1569,21 @@ mod tests {
         }
     }
 
+    /// [`relay_setup`] with a relay origin nothing listens on: a test that
+    /// never stores a relay subscription posts nothing to it.
     fn setup(tag: &str) -> Setup {
+        relay_setup(tag, &Url::parse("http://127.0.0.1:9").expect("a URL"))
+    }
+
+    /// A [`Setup`] whose push state posts relay pushes under `relay`, a fake
+    /// relay's loopback origin.
+    fn relay_setup(tag: &str, relay: &Url) -> Setup {
         let dir =
             std::env::temp_dir().join(format!("rt-push-trigger-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         let devices = DeviceStore::load(&dir.join("devices.json"));
-        let push = PushState::new(Some(dir.join("push")), TESTS);
+        let push = PushState::new(Some(dir.join("push")), TESTS, relay.clone());
         Setup {
             dir,
             devices: Arc::new(Mutex::new(devices)),
@@ -1360,6 +1634,66 @@ mod tests {
                 finished,
                 hold_at_desk,
             );
+        }
+
+        /// Store an `apns` subscription for `device_id` (both switches on,
+        /// held at the desk); returns the phone's keys.
+        fn put_apns(&self, device_id: &str, token: &str) -> PhoneKeys {
+            let keys = phone_keys();
+            self.store(
+                device_id,
+                Channel::Apns {
+                    token: token.to_owned(),
+                    environment: ApnsEnvironment::Production,
+                    p256dh: keys.p256dh.clone(),
+                    auth: keys.auth_b64.clone(),
+                },
+            );
+            keys
+        }
+
+        /// Store an `fcm` subscription for `device_id`; returns the phone's
+        /// keys.
+        fn put_fcm(&self, device_id: &str, token: &str) -> PhoneKeys {
+            let keys = phone_keys();
+            self.store(
+                device_id,
+                Channel::Fcm {
+                    token: token.to_owned(),
+                    p256dh: keys.p256dh.clone(),
+                    auth: keys.auth_b64.clone(),
+                },
+            );
+            keys
+        }
+
+        fn store(&self, device_id: &str, channel: Channel) {
+            let devices = lock(&self.devices);
+            let mut push = lock(&self.push);
+            push.load(unrevoked_ids(&devices).as_ref())
+                .expect("load the push state")
+                .subs
+                .put(
+                    device_id,
+                    Subscription {
+                        channel,
+                        needs_you: true,
+                        finished: true,
+                        hold_at_desk: true,
+                        created_at: "2026-11-07T00:00:00Z".to_owned(),
+                    },
+                )
+                .expect("store the subscription");
+        }
+
+        /// The daemon's VAPID public key, base64url.
+        fn public_key(&self) -> String {
+            let devices = lock(&self.devices);
+            let mut push = lock(&self.push);
+            push.load(unrevoked_ids(&devices).as_ref())
+                .expect("load the push state")
+                .key
+                .public_b64url()
         }
 
         fn endpoint_of(&self, device_id: &str) -> Option<String> {
@@ -1428,6 +1762,59 @@ mod tests {
                 },
             )
             .expect("store the subscription");
+    }
+
+    /// A phone's key pair and auth secret, the private halves kept so a
+    /// test can decrypt what it was sent.
+    struct PhoneKeys {
+        secret: [u8; 32],
+        auth: [u8; 16],
+        p256dh: String,
+        auth_b64: String,
+    }
+
+    fn phone_keys() -> PhoneKeys {
+        let secret = p256::SecretKey::try_generate().expect("a P-256 key");
+        let auth = <[u8; 16]>::try_generate().expect("16 random bytes");
+        PhoneKeys {
+            p256dh: URL_SAFE_NO_PAD.encode(secret.public_key().to_sec1_point(false).as_bytes()),
+            auth_b64: URL_SAFE_NO_PAD.encode(auth),
+            secret: secret.to_bytes().into(),
+            auth,
+        }
+    }
+
+    /// The notice a relay POST's `body` decrypts to with `keys`.
+    fn opened(body: &[u8], keys: &PhoneKeys) -> PushNotice {
+        let plaintext =
+            push_crypto::decrypt(body, &keys.secret, &keys.auth).expect("the body decrypts");
+        serde_json::from_slice(&plaintext).expect("a push notice")
+    }
+
+    /// The `t=` JWT's claims and the `k=` key of a POST's `Authorization`.
+    fn vapid(headers: &axum::http::HeaderMap) -> (serde_json::Value, String) {
+        let authorization = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .expect("an Authorization header");
+        let rest = authorization.strip_prefix("vapid t=").expect("vapid t=");
+        let (jwt, key) = rest.split_once(", k=").expect(", k=");
+        let claims = jwt.split('.').nth(1).expect("a claims part");
+        let claims = URL_SAFE_NO_PAD.decode(claims).expect("base64url claims");
+        (
+            serde_json::from_slice(&claims).expect("JSON claims"),
+            key.to_owned(),
+        )
+    }
+
+    /// A paired device with an `apns` subscription for `token` on a fake
+    /// relay answering `code`.
+    async fn one_phone(tag: &str, token: &str, code: u16) -> (Setup, String, Arc<Fake>, Server) {
+        let (url, fake, server) = fake_push_service(code, "").await;
+        let setup = relay_setup(tag, &origin_of(&url));
+        let device = setup.pair(1);
+        setup.put_apns(&device, token);
+        (setup, device, fake, server)
     }
 
     fn serving() -> RemoteState {
@@ -2028,6 +2415,297 @@ mod tests {
 
     fn audience(url: &Url) -> String {
         url.origin().ascii_serialization()
+    }
+
+    // ---- relay pushes against a fake relay ----
+
+    const TOKEN_A: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
+    const TOKEN_B: &str = "f9e8d7c6b5a4938271605f4e3d2c1b0af9e8d7c6b5a4938271605f4e3d2c1b0a";
+
+    #[tokio::test]
+    async fn an_apns_subscription_posts_the_notice_to_the_relay() {
+        let (url, fake, _server) = fake_push_service(201, "").await;
+        let relay_origin = origin_of(&url);
+        let setup = relay_setup("relay-apns", &relay_origin);
+        let device = setup.pair(1);
+        let keys = setup.put_apns(&device, TOKEN_A);
+
+        let delivered = round(&mut trigger(), &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(
+            delivered,
+            vec![Delivery {
+                device_id: device,
+                outcome: Outcome::Sent
+            }]
+        );
+        assert_eq!(fake.paths(), [format!("/v1/apns/production/{TOKEN_A}")]);
+        let seen = fake.seen.lock().expect("unpoisoned");
+        let (headers, body) = &seen[0];
+        let (claims, key) = vapid(headers);
+        assert_eq!(key, setup.public_key());
+        assert_eq!(claims["aud"], relay_origin.origin().ascii_serialization());
+        assert_eq!(claims["sub"], relay::SUBJECT);
+        assert_eq!(
+            opened(body, &keys),
+            PushNotice {
+                v: PUSH_NOTICE_VERSION,
+                kind: PushNoticeKind::NeedsYou,
+                title: "Needs you".to_owned(),
+                body: "parser".to_owned(),
+                session_id: "s1".to_owned(),
+                host: Some("host.tail1234.ts.net".to_owned()),
+                badge: 1,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_fcm_subscription_is_not_pushed_until_the_relay_sends_fcm() {
+        let (url, fake, _server) = fake_push_service(404, "").await;
+        let setup = relay_setup("relay-fcm", &origin_of(&url));
+        let device = setup.pair(1);
+        setup.put_fcm(&device, "cZ1:APA91bHPRgkF");
+
+        let delivered = round(&mut trigger(), &setup, &serving(), PushKind::Finished).await;
+
+        assert_eq!(delivered, Vec::new());
+        assert_eq!(
+            fake.posts(),
+            0,
+            "nothing is posted to the relay's fcm route"
+        );
+        assert_eq!(
+            setup.endpoint_of(&device).as_deref(),
+            Some("cZ1:APA91bHPRgkF"),
+            "the subscription is kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_back_off_survives_a_round_that_skips_its_subscription() {
+        let setup = setup("backoff-skipped");
+        let device = setup.pair(1);
+        let (url, fake, _server) = fake_push_service(429, "").await;
+        setup.subscribe(&device, url.as_str(), true, false);
+        let mut trigger = trigger();
+        let service = audience(&url);
+        round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+        trigger.backoff.get_mut(&service).expect("backed off").until = Instant::now();
+
+        let finished = round(&mut trigger, &setup, &serving(), PushKind::Finished).await;
+
+        assert_eq!(finished, Vec::new(), "the finished switch is off");
+        assert_eq!(
+            trigger.backoff.get(&service).map(|backoff| backoff.delay),
+            Some(BACKOFF_FIRST),
+            "the run-out back-off of a stored subscription is kept"
+        );
+        round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+        assert_eq!(fake.posts(), 2);
+        assert_eq!(
+            trigger.backoff.get(&service).map(|backoff| backoff.delay),
+            Some(BACKOFF_FIRST * 2),
+            "the next throttle doubles the kept delay"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_count_survives_a_round_without_a_serving_listener() {
+        let setup = setup("failures-not-serving");
+        let first = setup.pair(1);
+        let second = setup.pair(2);
+        let (url, fake, _server) =
+            fake_push_service_by_path(&[("one", 201, &[]), ("two", 400, &[])]).await;
+        let two = url.join("two").expect("a URL");
+        setup.subscribe(&first, url.join("one").expect("a URL").as_str(), true, true);
+        setup.subscribe(&second, two.as_str(), true, true);
+        let mut trigger = trigger();
+        round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+        let key = (second.clone(), two.as_str().to_owned());
+        assert_eq!(trigger.failures.get(&key), Some(&1), "a counted failure");
+
+        let delivered = round(
+            &mut trigger,
+            &setup,
+            &RemoteState::Unknown,
+            PushKind::NeedsYou,
+        )
+        .await;
+
+        assert_eq!(delivered, Vec::new());
+        assert_eq!(fake.posts(), 2);
+        assert_eq!(
+            trigger.failures.get(&key),
+            Some(&1),
+            "the count is unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relay_gone_answer_deletes_the_subscription() {
+        let (setup, device, fake, _server) = one_phone("relay-gone", TOKEN_A, 410).await;
+
+        let delivered = round(&mut trigger(), &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].outcome, Outcome::Gone);
+        assert_eq!(fake.posts(), 1);
+        assert_eq!(
+            setup.endpoint_of(&device),
+            None,
+            "the subscription is deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_throttled_relay_token_backs_off_only_that_phone() {
+        let (url, fake, _server) =
+            fake_push_service_by_path(&[(TOKEN_A, 429, &[]), (TOKEN_B, 201, &[])]).await;
+        let setup = relay_setup("relay-throttled", &origin_of(&url));
+        let throttled = setup.pair(1);
+        let other = setup.pair(2);
+        setup.put_apns(&throttled, TOKEN_A);
+        setup.put_apns(&other, TOKEN_B);
+        let mut trigger = trigger();
+
+        let first = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert_eq!(fake.posts(), 2);
+
+        let second = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(
+            second,
+            vec![Delivery {
+                device_id: other,
+                outcome: Outcome::Sent
+            }],
+            "the throttled phone is backed off, the other is not"
+        );
+        assert_eq!(fake.posts(), 3);
+        assert_eq!(
+            fake.paths().last().map(String::as_str),
+            Some(format!("/v1/apns/production/{TOKEN_B}").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relay_503_leaves_web_push_targets_alone() {
+        let (relay_url, relay_fake, _relay_server) = fake_push_service(503, "").await;
+        let (url, fake, _server) = fake_push_service(201, "").await;
+        let setup = relay_setup("relay-503", &origin_of(&relay_url));
+        let phone = setup.pair(1);
+        let browser = setup.pair(2);
+        setup.put_apns(&phone, TOKEN_A);
+        setup.subscribe(&browser, url.as_str(), true, true);
+        let mut trigger = trigger();
+
+        let first = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+        assert_eq!(first.len(), 2, "{first:?}");
+
+        let second = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(
+            second,
+            vec![Delivery {
+                device_id: browser,
+                outcome: Outcome::Sent
+            }]
+        );
+        assert_eq!(relay_fake.posts(), 1, "the relay token is backed off");
+        assert_eq!(fake.posts(), 2, "the Web Push target is still posted");
+    }
+
+    #[tokio::test]
+    async fn with_the_listener_not_serving_only_relay_targets_are_pushed() {
+        let (relay_url, relay_fake, _relay_server) = fake_push_service(201, "").await;
+        let (url, fake, _server) = fake_push_service(201, "").await;
+        let setup = relay_setup("relay-not-serving", &origin_of(&relay_url));
+        let phone = setup.pair(1);
+        let browser = setup.pair(2);
+        let keys = setup.put_apns(&phone, TOKEN_A);
+        setup.subscribe(&browser, url.as_str(), true, true);
+
+        let delivered = round(
+            &mut trigger(),
+            &setup,
+            &RemoteState::Unknown,
+            PushKind::NeedsYou,
+        )
+        .await;
+
+        assert_eq!(
+            delivered,
+            vec![Delivery {
+                device_id: phone,
+                outcome: Outcome::Sent
+            }]
+        );
+        assert_eq!(
+            fake.posts(),
+            0,
+            "no Web Push without the phone app's origin"
+        );
+        assert_eq!(relay_fake.posts(), 1);
+        let seen = relay_fake.seen.lock().expect("unpoisoned");
+        assert_eq!(opened(&seen[0].1, &keys).host, None);
+    }
+
+    #[tokio::test]
+    async fn an_expired_back_off_for_a_gone_token_is_pruned() {
+        let (url, _fake, _server) =
+            fake_push_service_by_path(&[(TOKEN_A, 503, &[]), (TOKEN_B, 201, &[])]).await;
+        let setup = relay_setup("relay-pruned", &origin_of(&url));
+        let device = setup.pair(1);
+        setup.put_apns(&device, TOKEN_A);
+        let mut trigger = trigger();
+        round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+        let keys: Vec<String> = trigger.backoff.keys().cloned().collect();
+        assert_eq!(keys.len(), 1, "{keys:?}");
+        let gone = keys[0].clone();
+        assert!(!gone.contains(TOKEN_A), "the key never carries the token");
+        trigger.backoff.get_mut(&gone).expect("backed off").until = Instant::now();
+        let running = "https://gone.example#000000000000".to_owned();
+        trigger.backoff.insert(
+            running.clone(),
+            Backoff {
+                until: Instant::now() + Duration::from_secs(60),
+                delay: BACKOFF_FIRST,
+            },
+        );
+
+        setup.put_apns(&device, TOKEN_B);
+        round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert!(
+            !trigger.backoff.contains_key(&gone),
+            "the run-out back-off of the replaced token is pruned"
+        );
+        assert!(
+            trigger.backoff.contains_key(&running),
+            "a back-off still running is kept"
+        );
+    }
+
+    #[test]
+    fn the_notice_carries_the_alert() {
+        let session = session();
+
+        let built = notice(PushKind::Finished, &session, None, 3);
+
+        assert_eq!(
+            built,
+            PushNotice {
+                v: PUSH_NOTICE_VERSION,
+                kind: PushNoticeKind::Finished,
+                title: "Finished".to_owned(),
+                body: "parser".to_owned(),
+                session_id: "s1".to_owned(),
+                host: None,
+                badge: 3,
+            }
+        );
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::routing::post;
 use reqwest::Url;
 use tokio::sync::Notify;
@@ -53,12 +53,20 @@ pub(crate) struct Fake {
     by_path: ByPath,
     /// Every POST's headers and body, in arrival order.
     pub seen: Mutex<Vec<(HeaderMap, Bytes)>>,
+    /// Every POST's path as it arrived (percent-encoded), in the order of
+    /// [`Fake::seen`].
+    paths: Mutex<Vec<String>>,
 }
 
 impl Fake {
     /// How many POSTs arrived.
     pub(crate) fn posts(&self) -> usize {
         self.seen.lock().expect("unpoisoned").len()
+    }
+
+    /// Every POST's path, in arrival order.
+    pub(crate) fn paths(&self) -> Vec<String> {
+        self.paths.lock().expect("unpoisoned").clone()
     }
 
     /// Answer every later POST with `status`.
@@ -69,10 +77,16 @@ impl Fake {
 
 async fn answer(
     State(fake): State<Arc<Fake>>,
-    Path(id): Path<String>,
+    Path(params): Path<HashMap<String, String>>,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> (StatusCode, HeaderMap, String) {
+    let id = params.get("id").cloned().unwrap_or_default();
+    fake.paths
+        .lock()
+        .expect("unpoisoned")
+        .push(uri.path().to_owned());
     fake.seen.lock().expect("unpoisoned").push((headers, body));
     let hook = fake.before_answer.lock().expect("unpoisoned").take();
     if let Some(hook) = hook {
@@ -162,6 +176,7 @@ pub(crate) async fn fake_push_service_by_path(
         gate: None,
         by_path,
         seen: Mutex::new(Vec::new()),
+        paths: Mutex::new(Vec::new()),
     });
     serve_fake(fake).await
 }
@@ -184,14 +199,24 @@ async fn serve(
         gate,
         by_path: HashMap::new(),
         seen: Mutex::new(Vec::new()),
+        paths: Mutex::new(Vec::new()),
     });
     serve_fake(fake).await
+}
+
+/// The origin of a fake's `url`, `http://127.0.0.1:{port}`: a fake push
+/// relay's origin, under which it also answers the relay's
+/// `/v1/apns/{environment}/{token}` and `/v1/fcm/{token}`, by the token.
+pub(crate) fn origin_of(url: &Url) -> Url {
+    Url::parse(&url.origin().ascii_serialization()).expect("an origin is a URL")
 }
 
 /// Serve `fake` on a loopback port.
 async fn serve_fake(fake: Arc<Fake>) -> (Url, Arc<Fake>, Server) {
     let router = Router::new()
         .route("/push/{id}", post(answer))
+        .route("/v1/apns/{environment}/{id}", post(answer))
+        .route("/v1/fcm/{id}", post(answer))
         .with_state(Arc::clone(&fake));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

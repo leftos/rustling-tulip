@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::anyhow;
+use reqwest::Url;
 
 use super::send::PushPolicy;
 use super::store::{SUBSCRIPTIONS_FILE, SubscriptionStore};
@@ -29,17 +30,22 @@ pub(crate) struct PushState {
     dir: Option<PathBuf>,
     /// Which endpoints a subscription may name.
     policy: PushPolicy,
+    /// The push relay's origin, which `apns` and `fcm` pushes go to:
+    /// [`super::relay::RELAY_ORIGIN`] in the daemon, a fake relay in tests.
+    relay_origin: Url,
     /// The key and the store, once loaded.
     loaded: Option<Loaded>,
 }
 
 impl PushState {
-    /// A state over `dir`, loaded on the first push request.
+    /// A state over `dir`, loaded on the first push request, posting relay
+    /// pushes under `relay_origin`.
     #[must_use]
-    pub(crate) fn new(dir: Option<PathBuf>, policy: PushPolicy) -> Self {
+    pub(crate) fn new(dir: Option<PathBuf>, policy: PushPolicy, relay_origin: Url) -> Self {
         Self {
             dir,
             policy,
+            relay_origin,
             loaded: None,
         }
     }
@@ -48,6 +54,12 @@ impl PushState {
     #[must_use]
     pub(crate) fn policy(&self) -> PushPolicy {
         self.policy
+    }
+
+    /// The push relay's origin.
+    #[must_use]
+    pub(crate) fn relay_origin(&self) -> &Url {
+        &self.relay_origin
     }
 
     /// The key and the store, loading them on first use and then sweeping
