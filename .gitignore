@@ -28,3 +28,5 @@ __pycache__/
 # Claude
 .claude/settings.local.json
 .claude/worktrees/
+# Playwright MCP snapshots, console logs and download copies
+.playwright-mcp/
