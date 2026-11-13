@@ -119,6 +119,8 @@ mod pane_close_view;
 mod pane_header_fit;
 mod pane_menu;
 mod paste_upload;
+pub mod perf_pills;
+mod perf_pills_view;
 mod popout_view;
 mod popouts;
 mod presence;
@@ -1015,6 +1017,11 @@ pub struct RootView {
     /// disconnect until the next push. Only This PC's daemon runs a gate, so
     /// another host's push is ignored.
     gate_state: Option<protocol::GateState>,
+    /// The latest CPU and RAM sample of each tracked host, from its
+    /// `Welcome` or the window's untrack or close until its next push.
+    perf: perf_pills::PerfSamples,
+    /// Where the CPU and RAM pills' right-click menu opened, while it shows.
+    perf_menu: Option<Point<Pixels>>,
     /// The last copy, while its "copied" chip is up.
     copy_chip: Copied,
     /// Wakes the view when the chip's time is up.
@@ -1695,6 +1702,8 @@ impl RootView {
             accounts_open: false,
             accounts: accounts::AccountsState::default(),
             gate_state: None,
+            perf: perf_pills::PerfSamples::default(),
+            perf_menu: None,
             copy_chip: Copied::default(),
             chip_timer: None,
             paths,
@@ -5083,6 +5092,7 @@ impl RootView {
         self.on_summarizer_message(host, &msg, cx);
         self.on_accounts_message(host, &msg, cx);
         self.on_gates_message(host, &msg, cx);
+        self.on_perf_message(host, &msg, cx);
         self.on_host_update_message(host, &msg, cx);
         self.on_client_update_message(host, &msg, cx);
         self.on_remote_update_message(host, &msg, cx);
@@ -5444,6 +5454,7 @@ impl RootView {
         self.forget_uploads_of(host);
         self.reset_host(host, window, cx);
         self.ask_accounts_if_listed(host);
+        self.watch_perf_if_tracked(host);
         // A new connection knows nothing yet: it hears the current answer
         // whether or not it changed.
         let active = Self::presence_now(window, cx);
@@ -6176,6 +6187,8 @@ impl RootView {
             self.close_dispatch_menu(window, cx);
         } else if self.version_menu_open() && ks.key == "escape" {
             self.close_version_menu(cx);
+        } else if self.perf_menu_open() && ks.key == "escape" {
+            self.close_perf_menu(cx);
         } else if self.sidebar_more_open() && ks.key == "escape" {
             self.close_more_menu(window, cx);
         } else if self.shell_menu.is_some()
@@ -6719,6 +6732,7 @@ impl RootView {
             .child(pill)
             .children(self.hosts_online().map(|text| hosts_online_item(text, cx)))
             .children(self.gates_strip(cx))
+            .children(self.perf_pills_view(cx))
             .children(
                 counts
                     .spans()

@@ -594,6 +594,13 @@ pub struct UiState {
     /// client would then announce an update that never happened.
     #[serde(default)]
     pub last_installed_version: Option<String>,
+    /// The machines whose CPU and RAM the status bar shows, by host key
+    /// ([`LOCAL_HOST_KEY`] for This PC, else
+    /// [`crate::target::Target::host_key`]), in the order they were picked.
+    /// `None`, as in every file written before it, is This PC alone; an
+    /// empty list is none.
+    #[serde(default)]
+    pub perf_tracked: Option<Vec<String>>,
 }
 
 impl Serialize for ChatMode {
@@ -1376,6 +1383,7 @@ impl Default for UiState {
             chat_max_width: DEFAULT_CHAT_MAX_WIDTH,
             dashboard: DashboardSettings::default(),
             last_installed_version: None,
+            perf_tracked: None,
         }
     }
 }
@@ -2280,6 +2288,28 @@ impl SidebarModel {
         }
         self.ui.sidebar_view = view;
         true
+    }
+
+    /// Records the machines whose CPU and RAM the status bar shows, by host
+    /// key; returns whether that changed.
+    pub fn set_perf_tracked(&mut self, keys: Vec<String>) -> bool {
+        if self.ui.perf_tracked.as_ref() == Some(&keys) {
+            return false;
+        }
+        self.ui.perf_tracked = Some(keys);
+        true
+    }
+
+    /// Stops tracking host `key`'s CPU and RAM, as when the host is
+    /// forgotten; returns whether that changed. No saved choice (This PC
+    /// alone) stays no saved choice.
+    pub fn forget_perf_tracked(&mut self, key: &str) -> bool {
+        let Some(keys) = &mut self.ui.perf_tracked else {
+            return false;
+        };
+        let before = keys.len();
+        keys.retain(|kept| kept != key);
+        keys.len() != before
     }
 
     /// Which repo and workspace rows the repos view shows.
@@ -6625,6 +6655,7 @@ pub(crate) mod tests {
             chat_mode: ChatMode::Comfortable,
             chat_max_width: 720,
             last_installed_version: Some("0.8.1-alpha".to_owned()),
+            perf_tracked: Some(vec!["box.tail1234.ts.net".to_owned()]),
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
@@ -7518,6 +7549,34 @@ pub(crate) mod tests {
             [] as [SavedHost; 0],
             "absent is no saved host"
         );
+    }
+
+    #[test]
+    fn ui_state_without_perf_tracked_loads_as_default() {
+        let dir = TestDir::new("perf-tracked-v0-5-1-alpha");
+        let file = v0_5_1_alpha_ui_file();
+        assert!(file.get("perf_tracked").is_none(), "a released shape");
+        let ui = load_released(&dir, &file);
+        assert_eq!(ui.perf_tracked, None, "absent is This PC alone");
+    }
+
+    #[test]
+    fn perf_tracked_round_trips() {
+        for (name, tracked) in [
+            (
+                "perf-tracked-two",
+                vec!["local".to_owned(), "box".to_owned()],
+            ),
+            ("perf-tracked-none", Vec::new()),
+        ] {
+            let dir = TestDir::new(name);
+            let state = UiState {
+                perf_tracked: Some(tracked.clone()),
+                ..UiState::default()
+            };
+            save_ui_state(&dir.0, &state).expect("save");
+            assert_eq!(load_ui_state(&dir.0).perf_tracked, Some(tracked));
+        }
     }
 
     #[test]

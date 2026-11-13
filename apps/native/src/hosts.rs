@@ -16,9 +16,11 @@ use crate::RootView;
 use crate::connection::{Connection, State};
 use crate::connection_picker::SavedHost;
 use crate::net::{HandshakeInfo, NetCommand};
+use crate::perf_pills::PerfHostState;
 use crate::remote_access::RemoteStatusView;
 use crate::remote_mode::Capabilities;
 use crate::settings_view::{KeepAwake, SettingApply, UserHooksEntry, UserHooksPending};
+use crate::sidebar::{LOCAL_HOST_KEY, session_view_key};
 use crate::tabs::{PaneBinding, SessionRef};
 use crate::target::{HostKey, Target};
 
@@ -322,6 +324,7 @@ impl RootView {
     ) {
         self.lists_since_welcome.remove(host);
         self.drop_host_toasts(host, cx);
+        self.perf.clear(&session_view_key(host));
         // This PC's next tab list is its next connection's: until then its
         // layout is the old one's.
         if *host == HostKey::Local {
@@ -1327,6 +1330,113 @@ impl RootView {
         missing.sort();
         missing.dedup();
         missing
+    }
+}
+
+/// The status bar's CPU and RAM pills: which hosts are tracked, their
+/// `WatchPerf` subscriptions and the samples they push.
+impl RootView {
+    /// One pill per tracked host whose daemon reports CPU and RAM, or
+    /// whose connection is not open, by host key: This PC first, then the
+    /// rest in the order they were tracked.
+    #[must_use]
+    pub fn perf_pills(&self) -> Vec<(String, crate::perf_pills::Pill)> {
+        let mut keys = self.perf_tracked_keys();
+        if let Some(at) = keys.iter().position(|key| key == LOCAL_HOST_KEY) {
+            let local = keys.remove(at);
+            keys.insert(0, local);
+        }
+        keys.into_iter()
+            .filter_map(|key| {
+                let host = if key == LOCAL_HOST_KEY {
+                    HostKey::Local
+                } else {
+                    HostKey::Remote(key.clone())
+                };
+                let name = match host {
+                    HostKey::Local => "This PC".to_owned(),
+                    HostKey::Remote(_) => self.host_name(&host),
+                };
+                crate::perf_pills::pill(&name, &self.perf_state(&host, &key))
+                    .map(|pill| (key, pill))
+            })
+            .collect()
+    }
+
+    /// Tracks `host`'s CPU and RAM, or stops tracking them, and saves the
+    /// choice; an open connection whose daemon reports them is subscribed
+    /// or unsubscribed now.
+    pub fn toggle_perf_tracked(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        let key = session_view_key(host);
+        let keys = crate::perf_pills::toggled(&self.perf_tracked_keys(), &key);
+        let on = keys.contains(&key);
+        if self.sidebar.set_perf_tracked(keys) {
+            self.save_ui();
+        }
+        if !on {
+            self.perf.clear(&key);
+        }
+        if self.reports_perf(host) {
+            self.send_to(host, ClientMessage::WatchPerf { on });
+        }
+        cx.notify();
+    }
+
+    /// Keeps a tracked host's `Perf` sample; another host's is ignored.
+    pub(crate) fn on_perf_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
+        let DaemonMessage::Perf { sample } = msg else {
+            return;
+        };
+        let key = session_view_key(host);
+        if !self.perf_tracked_keys().contains(&key) {
+            return;
+        }
+        self.perf.set(&key, sample.machine.clone());
+        cx.notify();
+    }
+
+    /// On `host`'s `Welcome`: its old sample goes, and a tracked host whose
+    /// daemon reports CPU and RAM is subscribed, since a subscription ends
+    /// with its connection.
+    pub(crate) fn watch_perf_if_tracked(&mut self, host: &HostKey) {
+        let key = session_view_key(host);
+        self.perf.clear(&key);
+        if self.perf_tracked_keys().contains(&key) && self.reports_perf(host) {
+            self.send_to(host, ClientMessage::WatchPerf { on: true });
+        }
+    }
+
+    /// The tracked hosts' keys, as saved, else This PC alone.
+    fn perf_tracked_keys(&self) -> Vec<String> {
+        crate::perf_pills::tracked_keys(self.sidebar.ui_state().perf_tracked.as_deref())
+    }
+
+    /// Whether `host`'s connection is open to a daemon that reports CPU and
+    /// RAM.
+    fn reports_perf(&self, host: &HostKey) -> bool {
+        self.conn_of(host)
+            .is_some_and(|conn| conn.supports(protocol::FEATURE_PERF_MONITOR))
+    }
+
+    /// Where tracked host `host`, keyed `key`, stands for its pill.
+    fn perf_state(&self, host: &HostKey, key: &str) -> PerfHostState {
+        match self.conn_of(host) {
+            Some(conn) if conn.is_open() => {
+                if !conn.supports(protocol::FEATURE_PERF_MONITOR) {
+                    PerfHostState::Unsupported
+                } else if let Some(sample) = self.perf.get(key) {
+                    PerfHostState::Live(sample.clone())
+                } else {
+                    PerfHostState::Waiting
+                }
+            }
+            _ => PerfHostState::Offline,
+        }
     }
 }
 

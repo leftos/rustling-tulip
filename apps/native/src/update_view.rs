@@ -430,10 +430,11 @@ impl RootView {
     }
 
     /// The menus the footer opens, each over its own closing layer: the
-    /// Gates row menu, then the version's.
+    /// Gates row menu, the CPU and RAM pills' menu, then the version's.
     pub(crate) fn footer_menu_layers(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let gates = self.gates_menu_layer(cx).into_iter().flatten();
         gates
+            .chain(self.perf_menu_layer(cx).into_iter().flatten())
             .chain(self.version_menu_layer(cx).into_iter().flatten())
             .collect()
     }

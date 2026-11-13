@@ -1105,6 +1105,22 @@ pub fn gate_state_msg(state: Option<protocol::GateState>) -> DaemonMessage {
     }
 }
 
+/// The `Perf` push of a machine at `cpu` percent with `used` of `total`
+/// bytes of memory in use.
+pub fn perf_msg(cpu: Option<f32>, used: u64, total: u64) -> DaemonMessage {
+    DaemonMessage::Perf {
+        sample: protocol::PerfSample {
+            at: Utc::now(),
+            interval_ms: 2000,
+            machine: protocol::MachineSample {
+                cpu_percent: cpu,
+                mem_used_bytes: used,
+                mem_total_bytes: total,
+            },
+        },
+    }
+}
+
 /// A finished gate run of `pid`: `command` in `repo` on heavy slot
 /// `slot`, in `state`, which held its slot 108 s and ended `ago` minutes
 /// before now.

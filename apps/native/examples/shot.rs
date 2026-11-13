@@ -79,17 +79,18 @@ use rustling_tulip_native::chat::{ChatMode, PaneView, RowShape};
 use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
+use rustling_tulip_native::perf_pills::PillLevel;
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
 use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::ui_theme::theme;
 use rustling_tulip_native::update::{Breaks, BreaksOffer, LastResult, Ready, Updater};
 use rustling_tulip_native::{
     Activity, AppToast, AppToastKind, AskBlock, AskBox, AskChoice, Assets, CardText, Clock,
-    Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS,
-    NetCommand, NetEvent, Notifier, NotifyKind, NotifyState, OpenFailure, Opener, RAIL_ITEM_HEIGHT,
-    RAIL_WIDTH, RootDeps, RootView, SavePicker, SystemToastPlacer, TOAST_CARD_WIDTH, TextInput,
-    ToastKind, ToastPresses, ToastSpec, Transport, TypedRow, ViewerLoad, bind_keys, card_height,
-    key_of, remote_access::Autostart, toast_card,
+    Connection, FOOTER_HEIGHT, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
+    NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyKind, NotifyState, OpenFailure,
+    Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, SavePicker, SystemToastPlacer,
+    TOAST_CARD_WIDTH, TextInput, ToastKind, ToastPresses, ToastSpec, Transport, TypedRow,
+    ViewerLoad, bind_keys, card_height, key_of, remote_access::Autostart, toast_card,
 };
 use serde_json::{Value, json};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -247,10 +248,11 @@ enum View {
     UpdateHostBreaks,
     Dispatch,
     Subagents,
+    Perf,
 }
 
 impl View {
-    const ALL: [Self; 42] = [
+    const ALL: [Self; 43] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -293,6 +295,7 @@ impl View {
         Self::UpdateHostBreaks,
         Self::Dispatch,
         Self::Subagents,
+        Self::Perf,
     ];
 
     fn name(self) -> &'static str {
@@ -339,6 +342,7 @@ impl View {
             Self::Toast => "toast",
             Self::Dispatch => "dispatch",
             Self::Subagents => "subagents",
+            Self::Perf => "perf",
         }
     }
 
@@ -406,6 +410,7 @@ impl View {
                 | Self::SettingsHosts
                 | Self::UpdateHost
                 | Self::UpdateHostBreaks
+                | Self::Perf
         )
     }
 
@@ -440,6 +445,13 @@ impl View {
                         .any(|leaf| leaf.id == SHOT_RUN)
             }
             Self::Subagents => subagents_reached(root),
+            // This PC's and box's pills, each with its sample, under the open menu.
+            Self::Perf => {
+                let pills = root.perf_pills();
+                root.perf_menu_open()
+                    && pills.len() == 2
+                    && pills.iter().all(|(_, pill)| pill.level != PillLevel::Muted)
+            }
             // The Update host confirm over "box", listing its two sessions.
             Self::UpdateHost => root
                 .host_update_dialog()
@@ -647,6 +659,7 @@ impl Shot {
             | View::UpdateHostBreaks
             | View::Dispatch
             | View::Subagents
+            | View::Perf
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -673,6 +686,7 @@ impl Shot {
             | View::SettingsHosts
             | View::UpdateHost
             | View::UpdateHostBreaks => multi_host_ui_state(),
+            View::Perf => perf_ui_state(),
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -753,6 +767,33 @@ fn multi_host_ui_state() -> Value {
             { "name": SHOT_LAB_HOST, "port": 8787 },
         ],
     })
+}
+
+/// The layout the `perf` shot starts from: the `multi-host` shot's, with
+/// This PC and "box" tracked.
+fn perf_ui_state() -> Value {
+    let mut state = multi_host_ui_state();
+    state["perf_tracked"] = json!(["local", SHOT_TAILNET_HOST]);
+    state
+}
+
+/// Bytes in the GiB the `perf` shot's samples count in.
+const SHOT_GIB: u64 = 1_073_741_824;
+
+/// A `Perf` push of a machine at `cpu` percent with `used` of `total` bytes
+/// of memory in use.
+fn shot_perf(now: DateTime<Utc>, cpu: f32, used: u64, total: u64) -> DaemonMessage {
+    DaemonMessage::Perf {
+        sample: protocol::PerfSample {
+            at: now,
+            interval_ms: 2000,
+            machine: protocol::MachineSample {
+                cpu_percent: Some(cpu),
+                mem_used_bytes: used,
+                mem_total_bytes: total,
+            },
+        },
+    }
 }
 
 /// The owner's tailnet as the `connections` shots see it: this PC and one
@@ -1377,6 +1418,7 @@ fn drive(
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
+        View::Perf => open_perf_menu(window, cx),
         View::OpenShell => open_shell(window, cx),
         View::SourceControl => {
             let y = (SOURCE_CONTROL_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
@@ -2557,6 +2599,10 @@ impl FakeDaemon {
         if matches!(self.view, View::Dispatch | View::Subagents) {
             features.push(protocol::FEATURE_DISPATCH_RUNS.to_owned());
         }
+        // Only the perf shot's This PC reports CPU and RAM.
+        if self.view == View::Perf {
+            features.push(protocol::FEATURE_PERF_MONITOR.to_owned());
+        }
         conn.on_welcome(version, features.clone(), None);
         conn.set_build_version(Some(env!("CARGO_PKG_VERSION").to_owned()));
         self.event(NetEvent::State(conn))?;
@@ -2574,6 +2620,9 @@ impl FakeDaemon {
             origin: None,
             build_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         })?;
+        if self.view == View::Perf {
+            self.send(shot_perf(self.now, 31.0, SHOT_GIB / 10 * 92, 32 * SHOT_GIB))?;
+        }
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),
         })?;
@@ -2630,11 +2679,14 @@ impl FakeDaemon {
         let mut conn = Connection::for_target(target.clone());
         conn.on_connecting();
         conn.on_socket_open(8787);
-        // Only the update-host shot's "box" can update on request.
-        let features = if matches!(self.view, View::UpdateHost | View::UpdateHostBreaks) {
-            vec![protocol::FEATURE_REMOTE_UPDATE.to_owned()]
-        } else {
-            Vec::new()
+        // Only the update-host shot's "box" can update on request, and only
+        // the perf shot's reports CPU and RAM.
+        let features = match self.view {
+            View::UpdateHost | View::UpdateHostBreaks => {
+                vec![protocol::FEATURE_REMOTE_UPDATE.to_owned()]
+            }
+            View::Perf => vec![protocol::FEATURE_PERF_MONITOR.to_owned()],
+            _ => Vec::new(),
         };
         conn.on_welcome(version, features.clone(), None);
         conn.set_build_version(Some(REMOTE_BUILD_VERSION.to_owned()));
@@ -2647,6 +2699,9 @@ impl FakeDaemon {
             origin: None,
             build_version: Some(REMOTE_BUILD_VERSION.to_owned()),
         })?;
+        if self.view == View::Perf {
+            self.send(shot_perf(self.now, 87.4, 20 * SHOT_GIB, 64 * SHOT_GIB))?;
+        }
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),
         })?;
@@ -3208,6 +3263,27 @@ fn show_gates(window: &mut Window, cx: &mut App) -> Result<()> {
     root.update(cx, |root, cx| root.show_gates(window, cx));
     Ok(())
 }
+
+/// Opens the CPU and RAM pills' menu, as a right-click on This PC's pill
+/// does, but just above the footer so the shot shows the pills under it.
+fn open_perf_menu(window: &mut Window, cx: &mut App) -> Result<()> {
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    let at = gpui::point(
+        px(PERF_MENU_X),
+        window.viewport_size().height - px(FOOTER_HEIGHT + PERF_MENU_HEIGHT),
+    );
+    root.update(cx, |root, cx| root.open_perf_menu(at, cx));
+    Ok(())
+}
+
+/// How far from the window's left edge the `perf` shot opens its menu.
+const PERF_MENU_X: f32 = 420.0;
+/// Room for the `perf` shot's menu above the footer: its header and three
+/// machine rows.
+const PERF_MENU_HEIGHT: f32 = 130.0;
 
 /// Opens the Open a shell dialog on This PC with [`SHOT_SHELL_FOLDER`] in
 /// its folder field, the caret at its end.

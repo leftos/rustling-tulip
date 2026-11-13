@@ -135,6 +135,7 @@ The views:
 - `safe-start`: the prompt a start after a crashed one raises, "The last start crashed" with Open tabs and Start without tabs, over the window with no tab drawn.
 - `dispatch`: the tulip tab split with a pane following a working dispatch run (header with its `DS` chip and Stop, stats line, the run's transcript: answers, a tool call with its output and one still running), its `DS` leaf under the tulip repo, one run nested under the "Petal footer polish" session and one unnested run, "Trim the dispatch log".
 - `subagents`: the "Petal footer polish" session nested with three subagent rows (`SA`), oldest first: a killed reviewer, the running Explore one, and a finished child of it at depth 2, then its dispatch run's `DS` row; beside it a pane following the running subagent, its header and transcript (an answer, a read, a search and a test run still going).
+- `perf`: the status bar with two CPU and RAM pills, one amber, and the open "Track CPU and RAM on" menu.
 - `panes-accent`: four panes in a 2x2 grid, the Theme pane focused, beside the Rose, Periwinkle and Lilac panes a chosen colour stores an accent and a frame for.
 - `panes-accent-chosen`: the same grid with the Periwinkle pane focused.
 - `settings-hosts`: Settings on the Claude page with the host selector showing This PC and a remote host on 0.9.0 wearing the Behind tag.

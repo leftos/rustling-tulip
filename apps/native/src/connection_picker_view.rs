@@ -1113,6 +1113,7 @@ impl RootView {
         self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
         if let Some(key) = row.target.host_key() {
             self.sidebar.forget_host_session_count(&key);
+            self.sidebar.forget_perf_tracked(&key);
         }
         let host = HostKey::of(&row.target);
         if host != HostKey::Local {

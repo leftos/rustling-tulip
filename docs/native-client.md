@@ -296,6 +296,16 @@ The footer's accounts chip (`footer-accounts`) and its popover (`accounts-popove
 
   A reply is applied only when no `AccountsUpdated` arrived since it was asked, so a stale answer never overwrites a newer push; a write whose reply was dropped asks for the list again.
 
+## Status bar CPU and RAM pills
+
+The footer shows the CPU and RAM of the machines the user tracks, one pill per machine after the Gates pill (`perf_pills.rs` model, `perf_pills_view.rs` pills and menu, the perf block in `hosts.rs`, the pills in `footer_bar` in `lib.rs`, the menu layer in `footer_menu_layers` in `update_view.rs`). Design: [plans/perf-monitor.md](./plans/perf-monitor.md).
+
+- **Pill**: `{name} CPU 23% · RAM 25%` (`footer-perf-{key}`, key `local` for This PC, else the remote host key); `CPU –` until the second reading (CPU is a delta of two samples); `{name} CPU – · RAM –` while waiting for the first sample; `{name} offline` when the host's connection is closed. A pill turns amber and bold above 80% CPU or 90% RAM, compared on the raw values and strictly above, and is muted while waiting or offline. The tooltip gives the host, the CPU to one decimal and the RAM in GB of the total. A left click does nothing.
+- **No daemon source**: a tracked host whose `Welcome.features` lacks `perf_monitor` draws no pill. With nothing tracked a muted placeholder pill `CPU · RAM` (`footer-perf-none`) shows, tooltip "Right-click to choose machines to track".
+- **Menu**: a right-click on any of the pills opens "Track CPU and RAM on" (`perf-menu`, rows `perf-menu-{key}`, backdrop `perf-menu-backdrop`): This PC, the saved hosts in saved order (switched on or off), the other connected hosts, then any other tracked key, so every tracked key can be untracked. A tracked row has a `✓ ` prefix; a click toggles it and keeps the menu open. An untracked connected host whose daemon cannot report is a greyed row with the tip "This host's daemon does not report CPU and RAM"; a tracked one stays pressable, with that tooltip. Esc or an outside click closes it.
+- **Wire**: on every `Welcome` the client sends `WatchPerf { on: true }` for each tracked host that lists `perf_monitor`, and `WatchPerf { on: false }` when a host is untracked. A host's sample is dropped when its connection reconnects or closes, so a pill never shows a stale reading.
+- **Saved**: the tracked keys are `native-ui.json`'s `perf_tracked` (`docs/on-disk.md`). A file without it tracks This PC alone; forgetting a host in the host picker removes its key.
+
 ## Settings › Accounts
 
 The Accounts tab (`accounts_settings.rs` draws it, `accounts.rs` holds its texts and row actions; the tab rows are in `settings_view.rs`, its search entries in `settings_search.rs`) shows the saved accounts and the auto-switch rules of the host the Settings selector shows (`settings_host`), This PC or a remote host. It is listed while that host lists `accounts` in `Welcome.features`, and moving the selector to another host drops the alias fields and any unsent edit in them, and, while the tab shows, asks the new host for its list.
