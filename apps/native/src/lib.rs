@@ -795,11 +795,30 @@ fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx
     }
 }
 
-/// Closes `key`'s pop-out window; one already gone is logged.
+/// Closes `key`'s pop-out window once the current update is over; one already
+/// gone is logged.
 fn close_popout_window(key: &PopoutKey, handle: WindowHandle<PopoutView>, cx: &mut App) {
-    if let Err(err) = handle.update(cx, |_, window, _| window.remove_window()) {
-        tracing::debug!(?key, "the pop-out window was already closed: {err:#}");
-    }
+    let key = key.clone();
+    cx.defer(move |cx| {
+        if let Err(err) = handle.update(cx, |_, window, _| window.remove_window()) {
+            tracing::debug!(?key, "the pop-out window was already closed: {err:#}");
+        }
+    });
+}
+
+/// Points `handle`'s pop-out view at `key` once the current update is over; a
+/// window gone by then is logged.
+fn follow_popout_window(key: PopoutKey, handle: WindowHandle<PopoutView>, cx: &mut App) {
+    cx.defer(move |cx| {
+        let shown = key.clone();
+        let followed = handle.update(cx, |view, _, cx| {
+            view.follow(shown);
+            cx.notify();
+        });
+        if let Err(err) = followed {
+            tracing::debug!(?key, "a pop-out window to follow has gone: {err:#}");
+        }
+    });
 }
 
 /// Text size of the footer, flyout and overlay.
@@ -2195,22 +2214,26 @@ impl RootView {
     /// its pane's terminal or its diff; a cloaked client never activates a
     /// window.
     fn activate_popout(&self, key: &PopoutKey, cx: &mut Context<Self>) {
-        let Some(PopoutWindow { handle, .. }) = self.popout_windows.get(key) else {
+        let Some(popout) = self.popout_windows.get(key) else {
             return;
         };
+        let handle = popout.handle;
         let focus = self.popout_focus(key, cx);
         let activate = !offscreen::requested();
-        let raised = handle.update(cx, |_, window, cx| {
-            if activate {
-                window.activate_window();
-            }
-            if let Some(focus) = &focus {
-                focus.focus(window, cx);
+        let key = key.clone();
+        cx.defer(move |cx| {
+            let raised = handle.update(cx, |_, window, cx| {
+                if activate {
+                    window.activate_window();
+                }
+                if let Some(focus) = &focus {
+                    focus.focus(window, cx);
+                }
+            });
+            if let Err(err) = raised {
+                tracing::warn!(?key, "activating a pop-out window: {err:#}");
             }
         });
-        if let Err(err) = raised {
-            tracing::warn!(?key, "activating a pop-out window: {err:#}");
-        }
     }
 
     /// Docks `key` back: its content returns to the main window, and its
@@ -2312,14 +2335,7 @@ impl RootView {
             let Some(popout) = self.popout_windows.remove(&old) else {
                 continue;
             };
-            let key = new.clone();
-            let followed = popout.handle.update(cx, |view, _, cx| {
-                view.follow(key);
-                cx.notify();
-            });
-            if let Err(err) = followed {
-                tracing::debug!(?new, "the moved pane's pop-out window has gone: {err:#}");
-            }
+            follow_popout_window(new.clone(), popout.handle, cx);
             self.popout_windows.insert(new, popout);
         }
     }
@@ -2355,14 +2371,7 @@ impl RootView {
             self.schedule_ui_save(cx);
         }
         if let Some(popout) = self.popout_windows.remove(&old_key) {
-            let key = new_key.clone();
-            let followed = popout.handle.update(cx, |view, _, cx| {
-                view.follow(key);
-                cx.notify();
-            });
-            if let Err(err) = followed {
-                tracing::debug!(?new, "the session's pop-out window has gone: {err:#}");
-            }
+            follow_popout_window(new_key.clone(), popout.handle, cx);
             self.popout_windows.insert(new_key.clone(), popout);
         }
         self.rekey_session_slot(old, new, cx);
@@ -2439,13 +2448,15 @@ impl RootView {
             if title == popout.title {
                 continue;
             }
-            let set = popout
-                .handle
-                .update(cx, |_, window, _| window.set_window_title(&title));
-            match set {
-                Ok(()) => popout.title = title,
-                Err(err) => tracing::debug!(?key, "retitling a pop-out window: {err:#}"),
-            }
+            let handle = popout.handle;
+            popout.title.clone_from(&title);
+            let shown = key.clone();
+            cx.defer(move |cx| {
+                let set = handle.update(cx, |_, window, _| window.set_window_title(&title));
+                if let Err(err) = set {
+                    tracing::debug!(?shown, "retitling a pop-out window: {err:#}");
+                }
+            });
         }
     }
 
