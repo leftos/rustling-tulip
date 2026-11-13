@@ -159,8 +159,8 @@ Each step is one brief. Daemon steps that touch `crates/protocol/src/lib.rs` run
   - Files: `crates/protocol/src/lib.rs`, `apps/pwa/src/protocol.ts`, `docs/wire-protocol.md`.
   - Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/pr2-wire.log --timeout 1800 --slot heavy -- cargo nextest run -p protocol --cargo-profile test-release push` (round trips, an unknown environment and an unknown notice kind decode as `Unknown`, a `PushStatus` without `device_token` decodes), then `-p protocol-ts --cargo-profile test-release generated_protocol_ts_is_current`.
   - Waits on: nothing. Needs the owner: no.
-- [ ] **PR.3 Store a subscription as switches plus a `kind`-tagged channel.** `Subscription` becomes the switches and a flattened `Channel`; `remove_if_endpoint` becomes `remove_if_address`; the callers in `state.rs`, `trigger.rs` and `server/push.rs` follow.
-  - Files: `crates/daemon/src/push/store.rs`, `crates/daemon/src/push/state.rs`, `crates/daemon/src/push/trigger.rs`, `crates/daemon/src/server/push.rs`, `docs/on-disk.md`.
+- [x] **PR.3 Store a subscription as switches plus a `kind`-tagged channel.** `Subscription` becomes the switches and a flattened `Channel`; `remove_if_endpoint` becomes `remove_if_address`; the callers in `state.rs`, `trigger.rs` and `server/push.rs` follow.
+  - Files: `crates/daemon/src/push/store.rs`, `crates/daemon/src/push/state.rs`, `crates/daemon/src/push/trigger.rs`, `crates/daemon/src/server/push.rs`, `crates/daemon/src/server/pairing.rs`, `docs/on-disk.md`.
   - Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/pr3-store.log --timeout 1800 --slot heavy -- cargo nextest run -p daemon --cargo-profile test-release push::` (a `subscriptions.json` in the `v0.12` shape loads and saves back in the same shape, an `apns` subscription round trips, a late gone for an old token never deletes a new one, `Debug` redacts the token).
   - Waits on: PR.2. Needs the owner: no.
 - [ ] **PR.4 Accept `apns` and `fcm` registrations from a paired phone.** The handler checks the token and environment, stores the channel, and fills `PushStatus.device_token`.

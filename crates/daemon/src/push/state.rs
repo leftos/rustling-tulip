@@ -153,16 +153,16 @@ impl PushState {
     }
 
     /// Delete `device_id`'s subscription when the state is loaded and its
-    /// endpoint is still `endpoint` (see
-    /// [`SubscriptionStore::remove_if_endpoint`]). An unloaded state does
+    /// address is still `address` (see
+    /// [`SubscriptionStore::remove_if_address`]). An unloaded state does
     /// nothing, so the push trigger loads it first, holding `Hub::devices`
     /// then this lock. A save failure is logged and unloads the state, as
     /// [`Self::remove_device`] does.
-    pub(crate) fn remove_if_endpoint(&mut self, device_id: &str, endpoint: &str) {
+    pub(crate) fn remove_if_address(&mut self, device_id: &str, address: &str) {
         let Some(loaded) = self.loaded.as_mut() else {
             return;
         };
-        match loaded.subs.remove_if_endpoint(device_id, endpoint) {
+        match loaded.subs.remove_if_address(device_id, address) {
             Ok(true) => {
                 tracing::info!(%device_id, "push: the push service dropped the device's subscription; it was deleted");
             }

@@ -22,7 +22,7 @@ use tokio::time::{Instant, sleep_until};
 
 use super::send::{self, Outcome, PushPolicy};
 use super::state::PushState;
-use super::store::Subscription;
+use super::store::{Channel, Subscription};
 use super::vapid::{JwtCache, VapidKey};
 use crate::devices::DeviceStore;
 use crate::presence::Presence;
@@ -339,7 +339,9 @@ pub(crate) struct Delivery {
 /// locks are released.
 struct Target {
     device_id: String,
-    endpoint: String,
+    /// The endpoint or token the subscription is reached at: the key its
+    /// failures and a late "gone" are recorded under.
+    address: String,
     url: Url,
     /// The push service's origin: the JWT's audience and the back-off key.
     audience: String,
@@ -380,8 +382,8 @@ pub(crate) struct Trigger {
     client: reqwest::Client,
     jwt: JwtCache,
     backoff: HashMap<String, Backoff>,
-    /// Failures in a row by (device id, endpoint), so a new endpoint starts
-    /// at zero.
+    /// Failures in a row by (device id, address), so a new address starts at
+    /// zero.
     failures: HashMap<(String, String), u32>,
     /// The sessions whose Needs you push was held at the desk; it is
     /// delivered to the held subscriptions when the owner leaves, if the
@@ -442,10 +444,10 @@ impl Trigger {
         let live: HashSet<(&str, &str)> = round
             .targets
             .iter()
-            .map(|target| (target.device_id.as_str(), target.endpoint.as_str()))
+            .map(|target| (target.device_id.as_str(), target.address.as_str()))
             .collect();
-        self.failures.retain(|(device_id, endpoint), _| {
-            live.contains(&(device_id.as_str(), endpoint.as_str()))
+        self.failures.retain(|(device_id, address), _| {
+            live.contains(&(device_id.as_str(), address.as_str()))
         });
         let session = alert.session;
         let body = payload(
@@ -515,7 +517,8 @@ impl Trigger {
                 continue;
             }
             match self.target(&signer, device_id, subscription, policy) {
-                Ok(target) => targets.push(target),
+                Ok(Some(target)) => targets.push(target),
+                Ok(None) => {}
                 Err(err) => tracing::warn!(
                     %device_id,
                     err = format!("{err:#}"),
@@ -549,17 +552,32 @@ impl Trigger {
     }
 
     /// One subscription as a target: its endpoint checked, its keys read
-    /// and the JWT for its push service.
+    /// and the JWT for its push service. A channel that is not Web Push has
+    /// no target yet, so it is skipped with a debug line rather than warned
+    /// about every round.
     fn target(
         &mut self,
         signer: &Signer<'_>,
         device_id: &str,
         subscription: &Subscription,
         policy: PushPolicy,
-    ) -> anyhow::Result<Target> {
-        let url = send::check_endpoint(&subscription.endpoint, policy)?;
+    ) -> anyhow::Result<Option<Target>> {
+        let Channel::WebPush {
+            endpoint,
+            p256dh,
+            auth,
+        } = &subscription.channel
+        else {
+            tracing::debug!(
+                %device_id,
+                kind = subscription.channel.kind(),
+                "push: the device's subscription is not Web Push; nothing is sent to it yet"
+            );
+            return Ok(None);
+        };
+        let url = send::check_endpoint(endpoint, policy)?;
         let audience = url.origin().ascii_serialization();
-        let subscriber = Subscriber::from_b64url(&subscription.p256dh, &subscription.auth)?;
+        let subscriber = Subscriber::from_b64url(p256dh, auth)?;
         let jwt = self.jwt.token(
             signer.key,
             signer.public_key,
@@ -567,14 +585,14 @@ impl Trigger {
             signer.origin,
             signer.now,
         )?;
-        Ok(Target {
+        Ok(Some(Target {
             device_id: device_id.to_owned(),
-            endpoint: subscription.endpoint.clone(),
+            address: endpoint.clone(),
             url,
             audience,
             subscriber,
             jwt,
-        })
+        }))
     }
 
     /// Encrypt every target whose push service is not backed off, then post
@@ -725,7 +743,7 @@ impl Trigger {
             match push.load(&devices).map(|_| ()) {
                 Ok(()) => {
                     for target in doomed {
-                        push.remove_if_endpoint(&target.device_id, &target.endpoint);
+                        push.remove_if_address(&target.device_id, &target.address);
                     }
                 }
                 Err(err) => tracing::warn!(
@@ -746,7 +764,7 @@ impl Trigger {
     /// Whether `target`'s subscription is to be deleted after `outcome`;
     /// `accepted` holds the push services that took a push this round.
     fn judge(&mut self, target: &Target, outcome: &Outcome, accepted: &HashSet<String>) -> bool {
-        let key = (target.device_id.clone(), target.endpoint.clone());
+        let key = (target.device_id.clone(), target.address.clone());
         match outcome {
             Outcome::Sent => {
                 self.failures.remove(&key);
@@ -1047,7 +1065,7 @@ mod tests {
     use crate::presence::Presence;
     use crate::push::send::{Outcome, client, topic};
     use crate::push::state::PushState;
-    use crate::push::store::Subscription;
+    use crate::push::store::{Channel, Subscription};
     use crate::push::test_fake::{
         Fake, Server, TESTS, fake_push_service, fake_push_service_by_path, fake_push_service_gated,
         fake_push_service_hooked, fake_push_service_with,
@@ -1330,7 +1348,10 @@ mod tests {
             let devices = lock(&self.devices);
             let mut push = lock(&self.push);
             let loaded = push.load(&devices).expect("load the push state");
-            loaded.subs.get(device_id).map(|sub| sub.endpoint.clone())
+            loaded
+                .subs
+                .get(device_id)
+                .map(|sub| sub.channel.address().to_owned())
         }
     }
 
@@ -1354,10 +1375,11 @@ mod tests {
             .put(
                 device_id,
                 Subscription {
-                    kind: "web_push".to_owned(),
-                    endpoint: endpoint.to_owned(),
-                    p256dh,
-                    auth,
+                    channel: Channel::WebPush {
+                        endpoint: endpoint.to_owned(),
+                        p256dh,
+                        auth,
+                    },
                     needs_you,
                     finished,
                     hold_at_desk,

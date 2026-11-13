@@ -4,7 +4,7 @@
 use super::Hub;
 use super::connection::{AuthKind, ConnCtx};
 use crate::push::state::Loaded;
-use crate::push::store::Subscription;
+use crate::push::store::{Channel, Subscription};
 use protocol::{ClientMessage, DaemonMessage, PushRegistration, Secret, error_codes};
 use tracing::{info, warn};
 
@@ -144,10 +144,11 @@ fn store(
 ) -> anyhow::Result<bool> {
     match (msg, new_subscription) {
         (ClientMessage::RegisterPush { .. }, Some(mut new)) => {
-            // The same endpoint is the same subscription with new switches:
-            // it keeps when it was first stored.
+            // The same address is the same subscription with new switches:
+            // it keeps when it was first stored. A replacement token or
+            // endpoint is a new subscription.
             if let Some(stored) = loaded.subs.get(device_id)
-                && stored.endpoint == new.endpoint
+                && stored.channel.address() == new.channel.address()
             {
                 new.created_at.clone_from(&stored.created_at);
             }
@@ -221,10 +222,11 @@ fn subscription(
     push_crypto::Subscriber::from_b64url(p256dh, &auth.0)
         .map_err(|err| Refusal::invalid(err.to_string()))?;
     Ok(Subscription {
-        kind: "web_push".to_owned(),
-        endpoint: endpoint.0.clone(),
-        p256dh: p256dh.clone(),
-        auth: auth.0.clone(),
+        channel: Channel::WebPush {
+            endpoint: endpoint.0.clone(),
+            p256dh: p256dh.clone(),
+            auth: auth.0.clone(),
+        },
         needs_you,
         finished,
         hold_at_desk,
@@ -233,12 +235,16 @@ fn subscription(
 }
 
 /// `device_id`'s push status: the daemon's key and the device's
-/// subscription, or no endpoint and both switches off without one.
+/// subscription, or no endpoint and both switches off without one. Only a
+/// Web Push subscription has an endpoint; a relay channel has none yet.
 fn push_status(loaded: &Loaded, device_id: &str, request_id: &str) -> DaemonMessage {
     let stored = loaded.subs.get(device_id);
     DaemonMessage::PushStatus {
         vapid_public_key: loaded.key.public_b64url(),
-        endpoint: stored.map(|sub| Secret(sub.endpoint.clone())),
+        endpoint: stored.and_then(|sub| match &sub.channel {
+            Channel::WebPush { endpoint, .. } => Some(Secret(endpoint.clone())),
+            Channel::Apns { .. } | Channel::Fcm { .. } => None,
+        }),
         device_token: None,
         needs_you: stored.is_some_and(|sub| sub.needs_you),
         finished: stored.is_some_and(|sub| sub.finished),
@@ -255,7 +261,7 @@ fn push_status(loaded: &Loaded, device_id: &str, request_id: &str) -> DaemonMess
 )]
 mod tests {
     use super::*;
-    use crate::push::store::{SUBSCRIPTIONS_FILE, Subscription, SubscriptionStore};
+    use crate::push::store::{Channel, SUBSCRIPTIONS_FILE, Subscription, SubscriptionStore};
     use crate::server::test_support::{dispatch_one, dispatch_one_as, test_hub, test_peer};
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -673,10 +679,11 @@ mod tests {
                 .put(
                     id,
                     Subscription {
-                        kind: "web_push".to_owned(),
-                        endpoint: APPLE.to_owned(),
-                        p256dh: p256dh.clone(),
-                        auth: auth.clone(),
+                        channel: Channel::WebPush {
+                            endpoint: APPLE.to_owned(),
+                            p256dh: p256dh.clone(),
+                            auth: auth.clone(),
+                        },
                         needs_you: true,
                         finished: true,
                         hold_at_desk: true,

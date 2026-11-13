@@ -1846,10 +1846,11 @@ mod tests {
                 .put(
                     &old_id,
                     crate::push::store::Subscription {
-                        kind: "web_push".to_owned(),
-                        endpoint: "https://web.push.apple.com/send/abc".to_owned(),
-                        p256dh: "p256dh".to_owned(),
-                        auth: "auth".to_owned(),
+                        channel: crate::push::store::Channel::WebPush {
+                            endpoint: "https://web.push.apple.com/send/abc".to_owned(),
+                            p256dh: "p256dh".to_owned(),
+                            auth: "auth".to_owned(),
+                        },
                         needs_you: true,
                         finished: false,
                         hold_at_desk: true,
