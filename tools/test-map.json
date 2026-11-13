@@ -1831,6 +1831,50 @@
     },
     {
       "paths": [
+        "apps/native/src/host_update.rs",
+        "apps/native/src/host_update_dialog.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^host_update::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_connections|ui_update)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/link_menu.rs",
+        "apps/native/src/link_menu_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^link_menu::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_links)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/remote_update.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^remote_update::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_connections)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/session_end.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^session_end::/)"
+    },
+    {
+      "paths": [
+        "apps/native/src/subagents.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^subagents::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_subagents)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/tab_name.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^tab_name::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_tabs|ui_viewer_tabs)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_finished_badge.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_finished_badge)::/)"
+    },
+    {
+      "paths": [
         "apps/native/src/driver/**",
         "apps/native/tests/ui/ui_driver_registry.rs",
         "apps/native/tests/ui/ui_driver.rs"
