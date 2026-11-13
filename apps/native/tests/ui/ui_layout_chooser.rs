@@ -271,3 +271,150 @@ fn shortcuts_work_after_start_empty_closes_the_chooser(cx: &mut TestAppContext) 
         "a shortcut works again once the chooser closes with no tab to give the keyboard to"
     );
 }
+
+/// The `claim` flags of the `Resize`s in `sent` for session `id`, in order.
+fn resize_claims(sent: &[ClientMessage], id: &str) -> Vec<bool> {
+    sent.iter()
+        .filter_map(|m| match m {
+            ClientMessage::Resize {
+                session_id, claim, ..
+            } if session_id == id => Some(*claim),
+            _ => None,
+        })
+        .collect()
+}
+
+/// No claimed `Resize` for `id` in `sent`, and at least one sent.
+fn assert_sized_unclaimed(sent: &[ClientMessage], id: &str, why: &str) {
+    let claims = resize_claims(sent, id);
+    assert!(
+        !claims.is_empty() && claims.iter().all(|claim| !claim),
+        "{why}: {claims:?}"
+    );
+}
+
+#[gpui::test]
+fn open_all_claims_each_new_panes_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.send(init_required(2, Vec::new()));
+    h.sent();
+    h.click_on("layout-choose-all");
+    h.click_on("chooser-confirm-all");
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::InitLayout {
+                kind: InitLayoutKind::AllSessions
+            }]
+        ),
+        "sent {sent:?}"
+    );
+
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", Some("s2")),
+            ),
+        )],
+    });
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    let sent = h.sent();
+    for id in ["s1", "s2"] {
+        assert_eq!(
+            resize_claims(&sent, id).first(),
+            Some(&true),
+            "the pane the chooser opened {id} in claims its size: {sent:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn open_all_with_a_max_claims_only_the_panes_the_first_tab_keeps(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.send(init_required(2, Vec::new()));
+    h.sent();
+    h.click_on("layout-choose-all");
+    h.click_on("chooser-max-up");
+    h.click_on("chooser-confirm-all");
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::InitLayout {
+                kind: InitLayoutKind::AllSessions
+            }]
+        ),
+        "sent {sent:?}"
+    );
+
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", Some("s2")),
+            ),
+        )],
+    });
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    let sent = h.sent();
+    assert_eq!(
+        resize_claims(&sent, "s1").first(),
+        Some(&true),
+        "the pane the first tab keeps claims its size: {sent:?}"
+    );
+    let moved = resize_claims(&sent, "s2");
+    assert!(
+        !moved.is_empty() && moved.iter().all(|claim| !claim),
+        "the pane the arrangement moves to another tab claims nothing here: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn start_empty_then_a_later_tab_list_does_not_claim(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.send(init_required(2, Vec::new()));
+    h.sent();
+    h.click_on("layout-choose-empty");
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::InitLayout {
+                kind: InitLayoutKind::Empty
+            }]
+        ),
+        "sent {sent:?}"
+    );
+
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+    });
+    h.answer_scrollback("s1", b"");
+    assert_sized_unclaimed(&h.sent(), "s1", "Start empty claims nothing");
+}

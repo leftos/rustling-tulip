@@ -311,6 +311,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> BTreeSet<SessionRef> {
+        let init_claim = self.tabs.take_init_claim();
         let mut shown = BTreeSet::new();
         for binding in bindings {
             if !self.panes.contains_key(&binding.pane_id) {
@@ -319,15 +320,17 @@ impl RootView {
             }
             let sender = self.hosts.sender(&binding.host);
             // A pane that newly shows a session claims its size when this
-            // client's user bound it there; the bind is taken once.
+            // client's user bound it there — by a bind taken once, or by
+            // every pane the first-connect chooser's tab list newly binds.
             let newly_bound = self.panes.get(&binding.pane_id).is_some_and(|slot| {
                 slot.session != binding.session_id || slot.host != binding.host
             });
             let bound = newly_bound
-                && binding.session_id.as_ref().is_some_and(|id| {
-                    let session = SessionRef::new(binding.host.clone(), id.clone());
-                    self.tabs.take_bind(&session, &binding.pane_id)
-                });
+                && (init_claim
+                    || binding.session_id.as_ref().is_some_and(|id| {
+                        let session = SessionRef::new(binding.host.clone(), id.clone());
+                        self.tabs.take_bind(&session, &binding.pane_id)
+                    }));
             let Some(slot) = self.panes.get_mut(&binding.pane_id) else {
                 continue;
             };

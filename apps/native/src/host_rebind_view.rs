@@ -18,6 +18,7 @@ use crate::layout_chooser_view::{
 use crate::layout_picker::Mode;
 use crate::notice_view::modal_panel;
 use crate::session_menu::backdrop;
+use crate::tabs::{BindTarget, SessionRef};
 use crate::target::HostKey;
 use crate::ui_theme::theme;
 
@@ -482,7 +483,8 @@ impl RootView {
     }
 
     /// Rebind: This PC unbinds the host's sessions, then binds its active
-    /// ones again as chosen. The new tabs take no focus.
+    /// ones again as chosen, each claiming its size in its new pane. The
+    /// new tabs take no focus.
     fn confirm_host_rebind(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let aspect = self.pane_area_aspect();
         let Some(dialog) = self.host_rebind.take() else {
@@ -502,6 +504,15 @@ impl RootView {
             sessions = dialog.model.session_ids().len(),
             "host rebind: unbinding and binding again"
         );
+        // The bind the user made claims each rebound session's size, as any
+        // bind this client makes does; the unbind's id carries none.
+        let bind_id = ids.1.clone();
+        for id in dialog.model.session_ids() {
+            self.tabs.arm_bind(
+                &SessionRef::new(dialog.model.host().clone(), id.clone()),
+                BindTarget::Request(bind_id.clone()),
+            );
+        }
         for msg in dialog.model.rebind_messages(aspect, ids) {
             self.send_to(&HostKey::Local, msg);
         }

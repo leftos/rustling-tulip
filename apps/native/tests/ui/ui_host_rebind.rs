@@ -17,13 +17,15 @@ use chrono::{DateTime, Utc};
 use gpui::{Modifiers, TestAppContext};
 use protocol::{
     ClientMessage, DaemonMessage, HostArrangement, HostLayout, RearrangeLayout, SessionSnapshot,
+    SplitDirection, TabEntry,
 };
 use rustling_tulip_native::Connection;
 use rustling_tulip_native::NetEvent;
 use rustling_tulip_native::connection_picker::PeerSource;
 use serde_json::json;
 use support::{
-    Fixture, Harness, PROTOCOL, REMOTE, TestDir, pane, repo, saved_remote, seed_ui, session, tab,
+    Fixture, Harness, PROTOCOL, REMOTE, TestDir, pane, remote_pane, repo, saved_remote, seed_ui,
+    session, split, tab,
 };
 use tailnet::{Status, TailnetError};
 
@@ -473,4 +475,175 @@ fn escape_closes_the_dialog_and_sends_nothing(cx: &mut TestAppContext) {
         h.host(&saved_remote()).sent().is_empty(),
         "the host is sent nothing"
     );
+}
+
+/// The `claim` flags of the `Resize`s in `sent` for session `id`, in order.
+fn resize_claims(sent: &[ClientMessage], id: &str) -> Vec<bool> {
+    sent.iter()
+        .filter_map(|m| match m {
+            ClientMessage::Resize {
+                session_id, claim, ..
+            } if session_id == id => Some(*claim),
+            _ => None,
+        })
+        .collect()
+}
+
+/// No claimed `Resize` for `id` in `sent`, and at least one sent.
+fn assert_sized_unclaimed(sent: &[ClientMessage], id: &str, why: &str) {
+    let claims = resize_claims(sent, id);
+    assert!(
+        !claims.is_empty() && claims.iter().all(|claim| !claim),
+        "{why}: {claims:?}"
+    );
+}
+
+/// The request id of the `BindHostSessions` among `sent`.
+fn bind_request(sent: &[ClientMessage]) -> String {
+    sent.iter()
+        .find_map(|msg| match msg {
+            ClientMessage::BindHostSessions { request_id, .. } => request_id.clone(),
+            _ => None,
+        })
+        .expect("the confirm binds the host's sessions with a request id")
+}
+
+/// The tab a rebind of This PC's sessions adds, `a1` beside `a2`.
+fn rebound_tab() -> TabEntry {
+    tab(
+        "t7",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("a1")),
+            pane("p2", Some("a2")),
+        ),
+    )
+}
+
+/// The tab a rebind of [`REMOTE`]'s sessions adds, `b2` beside `b1`.
+fn rebound_remote_tab() -> TabEntry {
+    tab(
+        "t7",
+        &split(
+            SplitDirection::Horizontal,
+            remote_pane("p1", "b2"),
+            remote_pane("p2", "b1"),
+        ),
+    )
+}
+
+/// This PC's rebind dialog open over the Connections view, over `fixture`.
+fn this_pc_rebind<'a>(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, fixture);
+    h.sent();
+    open_connections(&mut h);
+    h.click_on("connections-row-This PC-rebind");
+    assert!(dialog_open(&mut h), "Rebind… opens the dialog");
+    h
+}
+
+/// This PC running `a1` and `a2` with no tabs.
+fn two_sessions() -> Fixture {
+    Fixture {
+        sessions: vec![session("a1").build(), session("a2").build()],
+        ..Fixture::default()
+    }
+}
+
+#[gpui::test]
+fn rebind_claims_each_rebound_sessions_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_listing(cx, &dir, remote_sessions(), &[]);
+    open_rebind(&mut h, REMOTE);
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    h.click_on("host-rebind-confirm");
+    let bind_id = bind_request(&h.sent());
+    assert!(!bind_id.is_empty(), "the bind carries a request id");
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: rebound_remote_tab(),
+    });
+    // The new tab takes no focus: the panes size the PTY once it has it.
+    h.click_on("tab-t7");
+    let mut remote = h.host(&saved_remote());
+    remote.answer_scrollback("b2", b"");
+    remote.answer_scrollback("b1", b"");
+    let sent = remote.sent();
+    for id in ["b2", "b1"] {
+        assert_eq!(
+            resize_claims(&sent, id).first(),
+            Some(&true),
+            "the pane rebound to {id} claims its size: {sent:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_refused_rebind_does_not_claim_a_later_bind(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_listing(cx, &dir, remote_sessions(), &[]);
+    open_rebind(&mut h, REMOTE);
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    h.click_on("host-rebind-confirm");
+    let bind_id = bind_request(&h.sent());
+    h.send(DaemonMessage::Error {
+        message: "refused".to_owned(),
+        request_id: Some(bind_id),
+        code: None,
+    });
+    h.send(DaemonMessage::TabUpdated {
+        tab: rebound_remote_tab(),
+    });
+    h.click_on("tab-t7");
+    let mut remote = h.host(&saved_remote());
+    remote.answer_scrollback("b2", b"");
+    remote.answer_scrollback("b1", b"");
+    let sent = remote.sent();
+    assert_sized_unclaimed(&sent, "b2", "a refused rebind claims nothing");
+    assert_sized_unclaimed(&sent, "b1", "a refused rebind claims nothing");
+}
+
+#[gpui::test]
+fn a_rebind_before_a_reconnect_does_not_claim(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = two_sessions();
+    let mut h = this_pc_rebind(cx, &dir, &fixture);
+    h.sent();
+    h.click_on("host-rebind-confirm");
+    h.sent();
+
+    h.send_welcome(1);
+    h.sent();
+    h.load(&fixture);
+    h.send(DaemonMessage::TabUpdated { tab: rebound_tab() });
+    h.answer_scrollback("a1", b"");
+    h.answer_scrollback("a2", b"");
+    let sent = h.sent();
+    assert_sized_unclaimed(&sent, "a1", "a reconnect drops the rebind's claim");
+    assert_sized_unclaimed(&sent, "a2", "a reconnect drops the rebind's claim");
+}
+
+#[gpui::test]
+fn rebinding_this_pcs_sessions_claims_their_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = two_sessions();
+    let mut h = this_pc_rebind(cx, &dir, &fixture);
+    h.sent();
+
+    h.click_on("host-rebind-confirm");
+    h.send(DaemonMessage::TabUpdated { tab: rebound_tab() });
+    h.answer_scrollback("a1", b"");
+    h.answer_scrollback("a2", b"");
+    let sent = h.sent();
+    for id in ["a1", "a2"] {
+        assert_eq!(
+            resize_claims(&sent, id).first(),
+            Some(&true),
+            "the pane rebound to {id} claims its size: {sent:?}"
+        );
+    }
 }

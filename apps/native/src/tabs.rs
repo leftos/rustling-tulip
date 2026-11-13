@@ -296,6 +296,11 @@ pub struct TabsModel {
     /// A refused request drops its entry; a pane-replacing bind is decided
     /// by the first layout update after it is armed.
     pending_binds: Vec<(SessionRef, BindTarget)>,
+    /// The layout the user picked in the first-connect chooser, and whether
+    /// This PC's whole tab list has answered it yet: every session that
+    /// list newly shows claims its size. A tab update that is not a whole
+    /// list leaves it waiting.
+    init_claim: InitClaim,
     /// The reorders this client sent that no echo has settled, oldest
     /// first: the request's id, the strip's order before it applied and the
     /// order it sent. A refusal hands the order it found to the entry after
@@ -1222,6 +1227,19 @@ pub enum BindTarget {
     Pane(String),
 }
 
+/// Where the first-connect chooser's choice stands: no choice, one waiting
+/// for This PC's whole tab list, or one that list has just answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InitClaim {
+    #[default]
+    None,
+    /// The choice is sent; its tab list has not arrived.
+    Armed,
+    /// The tab list that answers the choice is applied: every pane it
+    /// newly binds claims its size.
+    Applied,
+}
+
 /// The id of the layout request a placement's message carries, when it
 /// carries one: a message that replaces a pane's session names none.
 #[must_use]
@@ -1407,6 +1425,11 @@ impl TabsModel {
     fn replace_all(&mut self, tabs: &[TabEntry]) {
         tabs.clone_into(&mut self.tabs);
         self.loaded = true;
+        // This whole list answers the first-connect chooser's choice, if
+        // one is waiting.
+        if self.init_claim == InitClaim::Armed {
+            self.init_claim = InitClaim::Applied;
+        }
         let live: HashSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
         self.pending_restore
             .retain(|id, _| live.contains(id.as_str()));
@@ -1927,6 +1950,7 @@ impl TabsModel {
         self.pending_follow = None;
         self.pending_reorders.clear();
         self.pending_binds.clear();
+        self.init_claim = InitClaim::None;
     }
 
     /// The user bound `session` to a pane in this client, waiting for
@@ -1935,6 +1959,31 @@ impl TabsModel {
     /// claims the pane's size.
     pub fn arm_bind(&mut self, session: &SessionRef, target: BindTarget) {
         self.pending_binds.push((session.clone(), target));
+    }
+
+    /// The user picked a layout in the first-connect chooser: the next whole
+    /// tab list This PC applies replaces it, and every session that list
+    /// newly shows claims its size.
+    pub fn arm_init_claim(&mut self) {
+        self.init_claim = InitClaim::Armed;
+    }
+
+    /// Takes whether the whole tab list just applied answers the
+    /// first-connect chooser's choice: true once, for every pane that list
+    /// newly binds; a list the choice still waits for takes nothing.
+    pub fn take_init_claim(&mut self) -> bool {
+        if self.init_claim != InitClaim::Applied {
+            return false;
+        }
+        self.init_claim = InitClaim::None;
+        true
+    }
+
+    /// The whole tab list that answers the chooser's choice lays its
+    /// sessions out itself: the blanket claim goes, and only the panes it
+    /// keeps claim their size.
+    pub fn clear_init_claim(&mut self) {
+        self.init_claim = InitClaim::None;
     }
 
     /// Takes whether the user bound `session` to a pane in this client and
@@ -4838,5 +4887,42 @@ pub(crate) mod tests {
         model.arm_bind(&s1(), BindTarget::Pane("p1".to_owned()));
         model.clear_layout_requests();
         assert!(!model.take_bind(&s1(), "p1"));
+    }
+
+    #[test]
+    fn init_claim_is_taken_by_the_next_tab_list_only() {
+        let mut model = TabsModel::new(None);
+        model.arm_init_claim();
+        model.apply(&tabs_msg(&[tab("t1", &pane("p1", Some("s1")))]));
+        assert!(model.take_init_claim(), "the tab list claims");
+        assert!(!model.take_init_claim(), "a claim is taken once");
+    }
+
+    #[test]
+    fn init_claim_survives_a_tab_update_before_the_tab_list() {
+        let mut model = TabsModel::new(None);
+        model.arm_init_claim();
+        assert!(model.apply(&updated(&tab("t1", &pane("p1", Some("s1"))))));
+        assert!(!model.take_init_claim(), "a tab update takes nothing");
+        model.apply(&tabs_msg(&[tab("t1", &pane("p1", Some("s1")))]));
+        assert!(model.take_init_claim(), "the list that answers it claims");
+    }
+
+    #[test]
+    fn clearing_the_init_claim_leaves_the_next_tab_list_unclaimed() {
+        let mut model = TabsModel::new(None);
+        model.arm_init_claim();
+        model.clear_init_claim();
+        model.apply(&tabs_msg(&[tab("t1", &pane("p1", Some("s1")))]));
+        assert!(!model.take_init_claim(), "the list claims nothing");
+    }
+
+    #[test]
+    fn clearing_layout_requests_drops_the_init_claim() {
+        let mut model = TabsModel::new(None);
+        model.arm_init_claim();
+        model.clear_layout_requests();
+        model.apply(&tabs_msg(&[tab("t1", &pane("p1", Some("s1")))]));
+        assert!(!model.take_init_claim(), "a reconnect drops the claim");
     }
 }

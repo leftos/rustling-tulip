@@ -2,6 +2,8 @@
 //! arrangement it chose laid over the daemon's answer. The model is in
 //! [`crate::layout_chooser`].
 
+use std::collections::HashSet;
+
 use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke, SharedString, Stateful,
     Window, div, prelude::*, px,
@@ -14,7 +16,7 @@ use crate::layout_chooser::{Control, LayoutChooser, arrangement_messages};
 use crate::layout_picker::{FALLBACK_ASPECT, Mode};
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
-use crate::tabs::collect_panes;
+use crate::tabs::{BindTarget, Pane, SessionRef, collect_panes};
 use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 
@@ -140,7 +142,9 @@ impl RootView {
     }
 
     /// Presses `control`; a choice goes to the daemon and closes the
-    /// chooser, keeping This PC's arrangement for its daemon's answer.
+    /// chooser, keeping This PC's arrangement for its daemon's answer, and
+    /// one that binds sessions marks that answer to claim each new pane's
+    /// size.
     fn press_layout_control(
         &mut self,
         control: &Control,
@@ -154,6 +158,9 @@ impl RootView {
         if let Some((kind, arrangement)) = chooser.press(control, aspect) {
             let host = HostKey::Local;
             tracing::info!(?host, ?kind, ?arrangement, "layout chooser: chosen");
+            if !matches!(kind, InitLayoutKind::Empty) {
+                self.tabs.arm_init_claim();
+            }
             self.send_to(&host, ClientMessage::InitLayout { kind });
             self.pending_arrangement = arrangement;
             self.close_layout_chooser(window, cx);
@@ -180,12 +187,39 @@ impl RootView {
             tracing::info!("layout chooser: no grid tab to arrange");
             return;
         };
-        let pane_ids: Vec<String> = collect_panes(grid)
-            .iter()
-            .map(|pane| pane.id.to_owned())
-            .collect();
-        for msg in arrangement_messages(&tab.id, &pane_ids, arrangement) {
+        let panes = collect_panes(grid);
+        let pane_ids: Vec<String> = panes.iter().map(|pane| pane.id.to_owned()).collect();
+        let messages = arrangement_messages(&tab.id, &pane_ids, arrangement);
+        self.claim_first_tabs_panes(&panes, &messages);
+        for msg in messages {
             self.send_to(&HostKey::Local, msg);
+        }
+    }
+
+    /// An arrangement that moves panes out of the first tab claims only the
+    /// panes it keeps there: the blanket claim the chooser armed is dropped,
+    /// and each kept pane is armed to claim as the fold's `bind_panes` binds
+    /// it, which runs right after this. The panes it moves claim nothing
+    /// here, at a size no visible pane has.
+    fn claim_first_tabs_panes(&mut self, panes: &[Pane<'_>], messages: &[ClientMessage]) {
+        let mut moved: HashSet<&str> = HashSet::new();
+        for msg in messages {
+            if let ClientMessage::ExtractToNewTab { pane_ids, .. } = msg {
+                moved.extend(pane_ids.iter().map(String::as_str));
+            }
+        }
+        if moved.is_empty() {
+            return;
+        }
+        self.tabs.clear_init_claim();
+        for pane in panes.iter().filter(|pane| !moved.contains(pane.id)) {
+            let Some(session_id) = pane.session else {
+                continue;
+            };
+            self.tabs.arm_bind(
+                &SessionRef::new(pane.host.clone(), session_id.to_owned()),
+                BindTarget::Pane(pane.id.to_owned()),
+            );
         }
     }
 

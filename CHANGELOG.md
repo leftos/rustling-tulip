@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- Rebinding a machine's sessions, or opening them from the first-connect layout chooser, now fits each session to its new pane at once.
+
 ## v0.14.0-alpha
 
 ### Highlights
