@@ -113,6 +113,14 @@ export const FEATURE_ACCOUNT_EVENTS = "account_events";
 export const FEATURE_GATE_STATE = "gate_state";
 
 /**
+ * `Welcome.features` entry: the daemon answers [`ClientMessage::WatchPerf`]
+ * and sends a subscribed connection one [`DaemonMessage::Perf`] sample per
+ * interval. A client shows the performance monitor only when the connected
+ * daemon lists it.
+ */
+export const FEATURE_PERF_MONITOR = "perf_monitor";
+
+/**
  * `Welcome.features` entry: the daemon watches the dispatch tool's live-run
  * folder and sends [`DaemonMessage::DispatchRuns`],
  * [`DaemonMessage::DispatchRunUpdated`] and
@@ -2935,6 +2943,28 @@ export type AccountLoginState =
   | "cancelled";
 
 /**
+ * One performance sample ([`DaemonMessage::Perf`]). CPU is a percent of
+ * the whole machine (every core together is 100); memory is in bytes. A
+ * CPU figure is `None` when the daemon has no earlier reading to measure
+ * against, as in the first sample after a subscribe.
+ */
+export interface PerfSample {
+  /** When the sample was read. */
+  at: string;
+  /** The daemon's sampling interval, so a client sizes its history. */
+  interval_ms?: number;
+  /** The machine as a whole. */
+  machine?: MachineSample;
+}
+
+/** The machine's CPU and memory in a [`PerfSample`]. */
+export interface MachineSample {
+  cpu_percent?: number | null;
+  mem_used_bytes?: number;
+  mem_total_bytes?: number;
+}
+
+/**
  * The host's gate slots as the Gates view shows them
  * ([`DaemonMessage::GateState`]): the daemon's own types, converted from
  * the gate's dashboard state.
@@ -3857,6 +3887,12 @@ export type ClientMessage =
    * and [`DaemonMessage::ActivityTracks`].
    */
   | { type: "watch_dashboard"; on: boolean }
+  /**
+   * Start (`on: true`) or stop receiving [`DaemonMessage::Perf`] on this
+   * connection. A second `on: true` is the same one subscription. Sent
+   * only to a daemon that lists [`FEATURE_PERF_MONITOR`].
+   */
+  | { type: "watch_perf"; on: boolean }
   /**
    * Ask for one session's summary ring, first prompt and recent work,
    * answered with [`DaemonMessage::SessionDetail`].
@@ -5029,6 +5065,13 @@ export type DaemonMessage =
    * daemon that lists [`FEATURE_GATE_STATE`]. `None` means no gate state.
    */
   | { type: "gate_state"; state?: GateState | null }
+  /**
+   * One performance sample of the host machine's CPU and memory, sent
+   * each interval to a connection that sent
+   * [`ClientMessage::WatchPerf`] `on: true`, by a daemon that lists
+   * [`FEATURE_PERF_MONITOR`].
+   */
+  | { type: "perf"; sample: PerfSample }
   /**
    * Every live dispatch run, sent after `Welcome` beside `Sessions` and
    * again to a connection whose stream lagged, by a daemon that lists

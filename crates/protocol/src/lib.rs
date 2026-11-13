@@ -98,6 +98,12 @@ pub const FEATURE_ACCOUNT_EVENTS: &str = "account_events";
 /// the connected daemon lists it.
 pub const FEATURE_GATE_STATE: &str = "gate_state";
 
+/// `Welcome.features` entry: the daemon answers [`ClientMessage::WatchPerf`]
+/// and sends a subscribed connection one [`DaemonMessage::Perf`] sample per
+/// interval. A client shows the performance monitor only when the connected
+/// daemon lists it.
+pub const FEATURE_PERF_MONITOR: &str = "perf_monitor";
+
 /// `Welcome.features` entry: the daemon watches the dispatch tool's live-run
 /// folder and sends [`DaemonMessage::DispatchRuns`],
 /// [`DaemonMessage::DispatchRunUpdated`] and
@@ -3882,6 +3888,33 @@ pub enum AccountLoginState {
     Unknown,
 }
 
+/// One performance sample ([`DaemonMessage::Perf`]). CPU is a percent of
+/// the whole machine (every core together is 100); memory is in bytes. A
+/// CPU figure is `None` when the daemon has no earlier reading to measure
+/// against, as in the first sample after a subscribe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerfSample {
+    /// When the sample was read.
+    pub at: DateTime<Utc>,
+    /// The daemon's sampling interval, so a client sizes its history.
+    #[serde(default)]
+    pub interval_ms: u32,
+    /// The machine as a whole.
+    #[serde(default)]
+    pub machine: MachineSample,
+}
+
+/// The machine's CPU and memory in a [`PerfSample`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MachineSample {
+    #[serde(default)]
+    pub cpu_percent: Option<f32>,
+    #[serde(default)]
+    pub mem_used_bytes: u64,
+    #[serde(default)]
+    pub mem_total_bytes: u64,
+}
+
 /// The host's gate slots as the Gates view shows them
 /// ([`DaemonMessage::GateState`]): the daemon's own types, converted from
 /// the gate's dashboard state.
@@ -5018,6 +5051,12 @@ pub enum ClientMessage {
     /// Start (`on: true`) or stop receiving [`DaemonMessage::DashboardFacts`]
     /// and [`DaemonMessage::ActivityTracks`].
     WatchDashboard {
+        on: bool,
+    },
+    /// Start (`on: true`) or stop receiving [`DaemonMessage::Perf`] on this
+    /// connection. A second `on: true` is the same one subscription. Sent
+    /// only to a daemon that lists [`FEATURE_PERF_MONITOR`].
+    WatchPerf {
         on: bool,
     },
     /// Ask for one session's summary ring, first prompt and recent work,
@@ -6355,6 +6394,13 @@ pub enum DaemonMessage {
     GateState {
         #[serde(default)]
         state: Option<Box<GateState>>,
+    },
+    /// One performance sample of the host machine's CPU and memory, sent
+    /// each interval to a connection that sent
+    /// [`ClientMessage::WatchPerf`] `on: true`, by a daemon that lists
+    /// [`FEATURE_PERF_MONITOR`].
+    Perf {
+        sample: PerfSample,
     },
     /// Every live dispatch run, sent after `Welcome` beside `Sessions` and
     /// again to a connection whose stream lagged, by a daemon that lists
@@ -10263,6 +10309,59 @@ mod tests {
             last_activity_at: Some(dashboard_time(3)),
             issue: Some("RT-482".to_string()),
             model: Some("model-x".to_string()),
+        }
+    }
+
+    fn full_perf_sample() -> PerfSample {
+        PerfSample {
+            at: dashboard_time(4),
+            interval_ms: 2000,
+            machine: MachineSample {
+                cpu_percent: Some(37.5),
+                mem_used_bytes: 8_000_000_000,
+                mem_total_bytes: 16_000_000_000,
+            },
+        }
+    }
+
+    #[test]
+    fn perf_messages_round_trip() {
+        assert_eq!(FEATURE_PERF_MONITOR, "perf_monitor");
+        for on in [true, false] {
+            let watch = ClientMessage::WatchPerf { on };
+            let json = serde_json::to_string(&watch).expect("serialize");
+            assert!(json.contains(r#""type":"watch_perf""#), "{json}");
+            let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+            assert!(
+                matches!(back, ClientMessage::WatchPerf { on: back_on } if back_on == on),
+                "{json}"
+            );
+        }
+
+        let perf = DaemonMessage::Perf {
+            sample: full_perf_sample(),
+        };
+        let json = serde_json::to_string(&perf).expect("serialize");
+        assert!(json.starts_with(r#"{"type":"perf""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(&back, DaemonMessage::Perf { sample } if *sample == full_perf_sample()),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn a_perf_sample_without_optional_fields_decodes() {
+        for json in [
+            r#"{"type":"perf","sample":{"at":"2026-11-12T10:00:00Z"}}"#,
+            r#"{"type":"perf","sample":{"at":"2026-11-12T10:00:00Z","machine":{}}}"#,
+        ] {
+            let back: DaemonMessage = serde_json::from_str(json).expect("a bare sample decodes");
+            let DaemonMessage::Perf { sample } = back else {
+                panic!("not a perf message: {back:?}");
+            };
+            assert_eq!(sample.interval_ms, 0, "{json}");
+            assert_eq!(sample.machine, MachineSample::default(), "{json}");
         }
     }
 

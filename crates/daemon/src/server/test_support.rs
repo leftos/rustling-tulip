@@ -218,6 +218,7 @@ pub(super) fn build_test_hub(
         gate_state: None,
         dispatch_runs: None,
         subagent_tails,
+        perf: crate::perf::Perf::new(None),
         host_update: Arc::new(super::HostUpdate::nothing_installed()),
     };
     (hub, scratch, attention_rx)

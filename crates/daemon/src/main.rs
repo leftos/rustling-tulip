@@ -54,6 +54,7 @@ mod login_path;
 mod orphan;
 mod osc_title;
 mod paths;
+mod perf;
 mod presence;
 mod presets;
 mod pty;

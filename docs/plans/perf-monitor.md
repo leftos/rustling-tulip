@@ -11,9 +11,10 @@ A Task Manager-like view of how much CPU and memory each pane uses, with its who
 
 ## Steps
 
-- [ ] Daemon: sample the machine (CPU, memory used and total) and each live session's process tree on a fixed interval while at least one client is subscribed, and nothing while none is; send it as one additive `DaemonMessage`, with a `ClientMessage` to subscribe and unsubscribe. The tracer's process-tree code (`crates/tracer/src/proc_tree.rs`, `job_object.rs`) is where a session's processes are already found.
+- [ ] Daemon, step 1 (owner ruling: only the overall machine CPU and RAM usage): sample the machine (CPU, memory used and total) on a fixed interval while at least one client is subscribed, and nothing while none is; send it as one additive `DaemonMessage`, with a `ClientMessage` to subscribe and unsubscribe (`WatchPerf`, `Perf`). The wire and the sampling service are in; the OS source is not.
+- [ ] Daemon, a later step: each live session's process tree, sampled only while the performance dashboard's pane is visible (owner ruling on RT-1089 and RT-1597). Nothing finds a session's processes yet: the tracer's `proc_tree.rs` only kills a tree on Unix and `job_object.rs` is a Windows kill-on-close job, so this step writes the tree walk.
 - [ ] Client: the rail view (lane A): meters for CPU and memory with this app's share, the tree sorted by CPU with Name, CPU and Memory, rows expand and collapse, a pane row selects its pane, PID and command line on hover.
-- [ ] Client: the footer pill (lane C) showing the focused host's CPU and memory, amber above 80 % CPU or 90 % memory, its hover listing the busiest panes, its click opening the rail view.
+- [ ] Client: the footer pill (lane C) showing the CPU and memory of the machines the user chooses (chosen by a right-click on the pills), amber above 80 % CPU or 90 % memory, its hover listing the busiest panes, its click opening the rail view.
 - [ ] Client: the full tab (lane B): PID, a last-minute sparkline, threads, command line, a filter, By pane / By tab / Flat, Go to pane, and End process tree behind a confirmation.
 
 ## Open questions

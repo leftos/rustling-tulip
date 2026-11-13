@@ -37,6 +37,7 @@ mod tabs;
 mod hooks;
 pub(crate) mod live_devices;
 mod pairing;
+mod perf;
 mod push;
 mod pwa_static;
 mod recovery;
@@ -256,6 +257,9 @@ pub struct Hub {
     pub(crate) dispatch_runs: Option<crate::dispatch_runs::DispatchRunsHub>,
     /// The subagent transcripts the connections follow read-only.
     pub(crate) subagent_tails: crate::subagents::tail::SubagentTails,
+    /// The machine's CPU and memory samples and the connections subscribed
+    /// to them.
+    pub(crate) perf: crate::perf::Perf,
     /// What a [`ClientMessage::RemoteUpdate`] checks the host against: where
     /// the install is, what runs from it, and whether an update is already
     /// running in this daemon.
@@ -670,6 +674,8 @@ pub async fn run(
         }),
         dispatch_runs,
         subagent_tails,
+        // No source yet: subscribing is accepted and nothing is sent.
+        perf: crate::perf::Perf::new(None),
         host_update: Arc::new(HostUpdate::for_this_daemon()?),
     };
     start_hub_tasks(&hub, client_count_rx);
@@ -1225,6 +1231,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             dashboard::handle(hub, m, ctx).await;
         }
         m @ ClientMessage::DumpScreen { .. } => screen::handle(hub, m, ctx),
+        m @ ClientMessage::WatchPerf { .. } => perf::handle(hub, &m, ctx),
         m @ (ClientMessage::SetSummarizerSettings { .. }
         | ClientMessage::SetSummarizerKey { .. }
         | ClientMessage::TestSummary { .. }) => summarizer::handle(hub, m, ctx).await?,
@@ -1343,6 +1350,9 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
     tokio::spawn(async move { summarizer.startup_key_check().await });
     // The Dashboard's 2 s facts tick; it parks while no connection watches.
     hub.dashboard.spawn_ticker();
+    // The 2 s performance sample tick; it parks while no connection
+    // subscribes, and starts only where the host has a source.
+    hub.perf.spawn_ticker();
     // The 2 s subagent list tick; it parks while no client is connected.
     crate::subagents::SubagentList::new(Arc::clone(&hub.sessions)).spawn(client_count_rx.clone());
     // Keep an agent's user-settings hooks install pointing at a current shim.

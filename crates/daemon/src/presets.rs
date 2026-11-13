@@ -3277,6 +3277,7 @@ mod tests {
             gate_state: None,
             dispatch_runs: None,
             subagent_tails,
+            perf: crate::perf::Perf::new(None),
             host_update: Arc::new(crate::server::HostUpdate::nothing_installed()),
         };
         (hub, preset_rx, scratch)
