@@ -242,6 +242,18 @@ pub struct TabSelection {
     anchor_active: Option<String>,
 }
 
+/// A pane move this client sent that takes the active tab's last pane to
+/// another tab: once the daemon answers, the destination shows and the
+/// moved pane takes the keyboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowMove {
+    pub src_tab: String,
+    pub dst_tab: String,
+    /// The pane the moved session lands in.
+    pub pane: String,
+    pub request_id: Option<String>,
+}
+
 /// The tab list, the active tab and each tab's focused pane.
 #[derive(Debug, Default)]
 pub struct TabsModel {
@@ -259,6 +271,9 @@ pub struct TabsModel {
     /// arrives. Unlike [`TabsModel::pending_create`], which any new tab's
     /// arrival consumes, only the tab with the named id consumes one.
     pending_restore: HashMap<String, Option<String>>,
+    /// The move that empties the active tab, armed until the destination's
+    /// update shows its pane; a later move replaces it.
+    pending_follow: Option<FollowMove>,
     /// A pane the view should give the keyboard to.
     focus_request: Option<String>,
     pub close_confirm: CloseConfirm,
@@ -1380,6 +1395,7 @@ impl TabsModel {
         self.layout_in_flight
             .retain(|(tab_id, _)| live.contains(tab_id.as_str()));
         self.pending_reorders.clear();
+        self.pending_follow = None;
         let active = self
             .active
             .take()
@@ -1404,6 +1420,7 @@ impl TabsModel {
             let old = std::mem::replace(slot, tab.clone());
             self.focus_after_update(&old, tab);
             self.settle_restore(tab);
+            self.follow_into(tab);
             return;
         }
         self.tabs.push(tab.clone());
@@ -1451,8 +1468,9 @@ impl TabsModel {
         }
     }
 
-    /// A closed tab; when it was active, the first tab takes over. It
-    /// answers every layout request in flight for the tab.
+    /// A closed tab; when it was active, the destination of a follow armed
+    /// for a move out of it takes over, else the first tab. It answers
+    /// every layout request in flight for the tab.
     fn remove(&mut self, tab_id: &str) {
         self.tabs.retain(|t| t.id != tab_id);
         self.focused.remove(tab_id);
@@ -1464,8 +1482,10 @@ impl TabsModel {
             self.close_confirm.disarm();
         }
         if self.active.as_deref() == Some(tab_id) {
-            let first = self.tabs.first().map(|t| t.id.clone());
-            self.activate_id(first);
+            let next = self
+                .follow_target(tab_id)
+                .or_else(|| self.tabs.first().map(|t| t.id.clone()));
+            self.activate_id(next);
         }
     }
 
@@ -1617,16 +1637,20 @@ impl TabsModel {
         self.focused.insert(tab_id.to_owned(), pane_id.to_owned());
     }
 
-    /// Shows `tab_id` and asks for its focused pane to take the keyboard.
+    /// Shows `tab_id` and asks for its focused pane to take the keyboard. A
+    /// follow armed for a move to another tab is dropped.
     pub fn activate(&mut self, tab_id: &str) {
         if self.tab(tab_id).is_some() {
+            self.drop_follow_unless_to(tab_id);
             self.activate_id(Some(tab_id.to_owned()));
         }
     }
 
-    /// Shows `tab_id` with `pane_id` focused.
+    /// Shows `tab_id` with `pane_id` focused. A follow armed for a move to
+    /// another tab is dropped.
     pub fn focus_pane(&mut self, tab_id: &str, pane_id: &str) {
         if self.tab(tab_id).is_some() {
+            self.drop_follow_unless_to(tab_id);
             self.set_focused(tab_id, pane_id);
             self.activate_id(Some(tab_id.to_owned()));
         }
@@ -1654,6 +1678,60 @@ impl TabsModel {
     /// the old one's requests.
     pub fn clear_armed_creates(&mut self) {
         self.pending_create.clear();
+    }
+
+    /// Arms `mv` when it takes the last pane of the active tab: the
+    /// destination then shows with the moved pane focused, whichever of
+    /// its update and the source's removal arrives first. Any other move
+    /// arms nothing.
+    pub fn follow_move_if_emptied(&mut self, mv: FollowMove) {
+        let empties_active = self.active.as_deref() == Some(mv.src_tab.as_str())
+            && self
+                .tab(&mv.src_tab)
+                .and_then(TabEntry::grid)
+                .is_some_and(|grid| collect_panes(grid).len() == 1);
+        if empties_active {
+            self.pending_follow = Some(mv);
+        }
+    }
+
+    /// The armed follow's destination arrived holding the moved pane: it
+    /// shows, and that pane takes the keyboard. An update of it without
+    /// the pane leaves the follow armed.
+    fn follow_into(&mut self, tab: &TabEntry) {
+        let holds = |follow: &mut FollowMove| {
+            follow.dst_tab == tab.id
+                && tab
+                    .grid()
+                    .is_some_and(|grid| collect_panes(grid).iter().any(|p| p.id == follow.pane))
+        };
+        let Some(follow) = self.pending_follow.take_if(holds) else {
+            return;
+        };
+        self.set_focused(&tab.id, &follow.pane);
+        self.activate_id(Some(tab.id.clone()));
+    }
+
+    /// The tab to show when `removed` goes while active: the destination of
+    /// a follow armed for a move out of it, while that tab is listed. The
+    /// follow stays armed for the destination's update.
+    fn follow_target(&self, removed: &str) -> Option<String> {
+        self.pending_follow
+            .as_ref()
+            .filter(|follow| follow.src_tab == removed && self.tab(&follow.dst_tab).is_some())
+            .map(|follow| follow.dst_tab.clone())
+    }
+
+    /// A switch to `tab_id` the user made: a follow to another tab is
+    /// dropped.
+    fn drop_follow_unless_to(&mut self, tab_id: &str) {
+        if self
+            .pending_follow
+            .as_ref()
+            .is_some_and(|follow| follow.dst_tab != tab_id)
+        {
+            self.pending_follow = None;
+        }
     }
 
     /// The next arrival of `tab_id` shows it and gives `pane_id` the
@@ -1794,10 +1872,18 @@ impl TabsModel {
     }
 
     /// The daemon refused the request `request_id`: it is no longer in
-    /// flight, and a tab its send marked closing is not closing after all.
+    /// flight, a tab its send marked closing is not closing after all, and
+    /// a follow it armed is dropped.
     pub fn fail_layout_request(&mut self, request_id: &str) {
         self.layout_in_flight
             .retain(|(_, id)| id.as_deref() != Some(request_id));
+        if self
+            .pending_follow
+            .as_ref()
+            .is_some_and(|follow| follow.request_id.as_deref() == Some(request_id))
+        {
+            self.pending_follow = None;
+        }
         self.drop_binds(request_id);
         let closing = &mut self.closing;
         self.closing_requests.retain(|tab_id, id| {
@@ -1809,10 +1895,12 @@ impl TabsModel {
         });
     }
 
-    /// Forgets every layout request in flight and every pending bind: a
-    /// fresh connection answers none of the old one's requests.
+    /// Forgets every layout request in flight, every pending bind and an
+    /// armed follow: a fresh connection answers none of the old one's
+    /// requests.
     pub fn clear_layout_requests(&mut self) {
         self.layout_in_flight.clear();
+        self.pending_follow = None;
         self.pending_reorders.clear();
         self.pending_binds.clear();
     }
@@ -2953,6 +3041,147 @@ pub(crate) mod tests {
             !model.closing().contains("t2"),
             "gone from the list: nothing waits"
         );
+    }
+
+    /// `t1` (active, `p1` alone), `t3` (`p5` alone) and `t2` (`p2` beside
+    /// `p3`), in that order, so the first tab left after `t1` goes is not
+    /// the destination `t2`.
+    fn follow_tabs() -> TabsModel {
+        let mut model = model_with(&[
+            tab("t1", &pane("p1", None)),
+            tab("t3", &pane("p5", None)),
+            tab("t2", &split(H, 0.5, pane("p2", None), pane("p3", None))),
+        ]);
+        assert_eq!(model.active_id(), Some("t1"));
+        model.take_focus_request();
+        model
+    }
+
+    /// The move of `pane`'s session from `src` to `dst`, under request `r1`.
+    fn follow(src: &str, dst: &str, pane: &str) -> FollowMove {
+        FollowMove {
+            src_tab: src.to_owned(),
+            dst_tab: dst.to_owned(),
+            pane: pane.to_owned(),
+            request_id: Some("r1".to_owned()),
+        }
+    }
+
+    /// `t2` once `p1` landed on the right of `p2`.
+    fn t2_with_p1() -> TabEntry {
+        tab(
+            "t2",
+            &split(
+                H,
+                0.5,
+                split(H, 0.5, pane("p2", None), pane("p1", None)),
+                pane("p3", None),
+            ),
+        )
+    }
+
+    fn removed(tab_id: &str) -> DaemonMessage {
+        DaemonMessage::TabRemoved {
+            tab_id: tab_id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_move_that_empties_the_active_tab_follows_the_pane_destination_first() {
+        let mut model = follow_tabs();
+        model.follow_move_if_emptied(follow("t1", "t2", "p1"));
+        model.apply(&updated(&t2_with_p1()));
+        model.apply(&removed("t1"));
+        assert_eq!(model.active_id(), Some("t2"));
+        assert_eq!(model.focused_pane("t2").as_deref(), Some("p1"));
+        assert_eq!(model.take_focus_request().as_deref(), Some("p1"));
+    }
+
+    #[test]
+    fn a_move_that_empties_the_active_tab_follows_the_pane_source_first() {
+        let mut model = follow_tabs();
+        model.follow_move_if_emptied(follow("t1", "t2", "p1"));
+        model.apply(&removed("t1"));
+        assert_eq!(
+            model.active_id(),
+            Some("t2"),
+            "the destination shows, not the first tab"
+        );
+        model.apply(&updated(&t2_with_p1()));
+        assert_eq!(model.active_id(), Some("t2"));
+        assert_eq!(model.focused_pane("t2").as_deref(), Some("p1"));
+        assert_eq!(model.take_focus_request().as_deref(), Some("p1"));
+    }
+
+    #[test]
+    fn a_replace_move_focuses_the_destination_pane() {
+        let mut model = follow_tabs();
+        model.follow_move_if_emptied(follow("t1", "t2", "p2"));
+        model.apply(&updated(&tab(
+            "t2",
+            &split(H, 0.5, pane("p2", Some("s1")), pane("p3", None)),
+        )));
+        model.apply(&removed("t1"));
+        assert_eq!(model.active_id(), Some("t2"));
+        assert_eq!(model.focused_pane("t2").as_deref(), Some("p2"));
+    }
+
+    #[test]
+    fn a_move_from_a_tab_with_other_panes_does_not_follow() {
+        let mut model = model_with(&[
+            tab("t1", &split(H, 0.5, pane("p1", None), pane("p4", None))),
+            tab("t3", &pane("p5", None)),
+            tab("t2", &split(H, 0.5, pane("p2", None), pane("p3", None))),
+        ]);
+        model.follow_move_if_emptied(follow("t1", "t2", "p1"));
+        model.apply(&updated(&t2_with_p1()));
+        model.apply(&updated(&tab("t1", &pane("p4", None))));
+        assert_eq!(model.active_id(), Some("t1"));
+    }
+
+    #[test]
+    fn a_move_from_an_inactive_tab_does_not_follow() {
+        let mut model = follow_tabs();
+        model.activate("t2");
+        model.follow_move_if_emptied(follow("t1", "t3", "p1"));
+        model.apply(&updated(&tab(
+            "t3",
+            &split(H, 0.5, pane("p5", None), pane("p1", None)),
+        )));
+        model.apply(&removed("t1"));
+        assert_eq!(model.active_id(), Some("t2"));
+    }
+
+    #[test]
+    fn a_refused_move_drops_the_follow() {
+        let mut model = follow_tabs();
+        model.follow_move_if_emptied(follow("t1", "t2", "p1"));
+        model.fail_layout_request("r1");
+        model.apply(&removed("t1"));
+        assert_eq!(
+            model.active_id(),
+            Some("t3"),
+            "the first tab left takes over, as for any closed tab"
+        );
+    }
+
+    #[test]
+    fn a_tab_switch_drops_the_follow() {
+        let mut model = follow_tabs();
+        model.follow_move_if_emptied(follow("t1", "t2", "p1"));
+        model.activate("t3");
+        model.apply(&updated(&t2_with_p1()));
+        model.apply(&removed("t1"));
+        assert_eq!(model.active_id(), Some("t3"));
+    }
+
+    #[test]
+    fn a_reconnect_drops_the_follow() {
+        let mut model = follow_tabs();
+        model.follow_move_if_emptied(follow("t1", "t2", "p1"));
+        model.clear_layout_requests();
+        model.apply(&updated(&t2_with_p1()));
+        assert_eq!(model.active_id(), Some("t1"));
     }
 
     #[test]

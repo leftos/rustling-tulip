@@ -1263,6 +1263,128 @@ fn empty_pane_menu_move_to_tab_sends_move_pane_to_drop_target(cx: &mut TestAppCo
     assert!(!h.in_model("empty-pane-menu"), "the menu closes");
 }
 
+/// Tabs `t1` (the empty pane `p1` alone), `t3` (`p5` showing `s3`) and `t2`
+/// (`p3` showing `s2` beside `p4` showing `s4`), in that order, so the first
+/// tab left after `t1` goes is not `t2`. The pane menu has moved `p1` to
+/// `t2`, which has no free pane, so `p1` keeps its id there.
+fn move_last_pane_to_t2<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let fixture = Fixture {
+        sessions: vec![
+            session("s2").build(),
+            session("s3").build(),
+            session("s4").build(),
+        ],
+        tabs: vec![
+            tab("t1", &pane("p1", None)),
+            tab("t3", &pane("p5", Some("s3"))),
+            tab(
+                "t2",
+                &split(
+                    SplitDirection::Vertical,
+                    pane("p3", Some("s2")),
+                    pane("p4", Some("s4")),
+                ),
+            ),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.sent();
+    assert_eq!(active(&mut h).as_deref(), Some("t1"));
+    h.right_click_on("pane-header-p1");
+    h.click_on("empty-pane-menu-move");
+    h.click_on("empty-pane-move-t2");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::MovePane { src_pane_id, dst_tab_id, edge, .. }]
+            if src_pane_id == "p1" && dst_tab_id == "t2" && *edge != PaneDropEdge::Replace),
+        "sent {sent:?}"
+    );
+    h
+}
+
+/// `t2` once `p1` landed in it.
+fn t2_with_p1() -> TabEntry {
+    tab(
+        "t2",
+        &split(
+            SplitDirection::Vertical,
+            split(
+                SplitDirection::Horizontal,
+                pane("p3", Some("s2")),
+                pane("p1", None),
+            ),
+            pane("p4", Some("s4")),
+        ),
+    )
+}
+
+#[gpui::test]
+fn moving_the_active_tabs_last_pane_to_another_tab_follows_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = move_last_pane_to_t2(cx, &dir);
+    h.send(DaemonMessage::TabUpdated { tab: t2_with_p1() });
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "t1".to_owned(),
+    });
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("t2"),
+        "the destination shows"
+    );
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p1"),
+        "the moved pane takes the keyboard"
+    );
+}
+
+#[gpui::test]
+fn moving_the_active_tabs_last_pane_to_another_tab_follows_it_when_the_source_removal_comes_first(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = move_last_pane_to_t2(cx, &dir);
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "t1".to_owned(),
+    });
+    h.send(DaemonMessage::TabUpdated { tab: t2_with_p1() });
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("t2"),
+        "the destination shows"
+    );
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p1"),
+        "the moved pane takes the keyboard"
+    );
+}
+
+#[gpui::test]
+fn extracting_the_active_tabs_last_pane_shows_the_new_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.click_on("pane-move-new-tab-p1");
+    assert_eq!(kinds(&h.sent()), ["extract_to_new_tab"]);
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t9", &pane("p1", Some("s1"))),
+    });
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "t1".to_owned(),
+    });
+    assert_eq!(active(&mut h).as_deref(), Some("t9"), "the new tab shows");
+}
+
 #[gpui::test]
 fn empty_pane_menu_new_tab_sends_extract(cx: &mut TestAppContext) {
     let dir = TestDir::new();

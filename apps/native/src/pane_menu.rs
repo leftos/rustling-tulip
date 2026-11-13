@@ -696,6 +696,19 @@ impl RootView {
         if across_tabs && !drop.swap {
             self.tabs
                 .mark_closing_if_last_pane(&drop.src_tab_id, drop.request_id.as_deref());
+            // A replace swaps the session into the destination pane; an
+            // edge insert keeps the moved pane's id.
+            let pane = if drop.edge == protocol::PaneDropEdge::Replace {
+                &drop.dst_pane_id
+            } else {
+                &drop.src_pane_id
+            };
+            self.tabs.follow_move_if_emptied(crate::tabs::FollowMove {
+                src_tab: drop.src_tab_id.clone(),
+                dst_tab: drop.dst_tab_id.clone(),
+                pane: pane.clone(),
+                request_id: drop.request_id.clone(),
+            });
         }
         let message = drop.message();
         self.tabs.note_layout_request(&message);

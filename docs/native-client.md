@@ -453,6 +453,8 @@ A swap focuses the destination pane, never marks its source tab closing, and is 
 
 A pane drag starts from the header's drag area: the title, the glyph and the empty stretch, not the buttons, chips, Stop or exit code, whose press goes to `press_on_header_control`. `drag::pane_target` finds the pane under the pointer and its edge from the pane rects, so the shown tab's grid carries one drop layer over it (`grid_view.rs`): it does not occlude the panes, and it stops mouse propagation only while a drag runs, so terminals get no mouse reports then.
 
+A cross-tab move that takes the active tab's last pane (`send_pane_move` arms `TabsModel.pending_follow`, a `FollowMove`) shows the destination tab and gives the moved pane the keyboard, whichever of the daemon's destination update and source `TabRemoved` arrives first: the removal activates the destination instead of the first tab, and the update focuses the pane. An edge insert keeps the moved pane's id; a `Replace` drop focuses the destination pane that receives the session. A refused move, a tab switch the user makes before the answer (to any other tab) or a reconnect drops the follow, and a later move replaces it.
+
 A refused drop (what `pane_drop` sends nothing for) shows no overlay and sends nothing; an accepted one goes out through `send_pane_move`, the path the pane menu's Move to ▸ shares.
 
 The overlay (`drag::drop_overlay`) is the accent at 22% over the half with a 1 px border, a strip 14% deep at 40% with a 2 px border for an outer edge, or the centre inset 12% on every side with a `Swap panes` badge. The ghost is a pill of the header's label (`Empty pane` for a pane with no session) on `GROUND` at 78% with the pane's accent border.
