@@ -148,7 +148,7 @@ Every decision here is an orchestrator decision (not an owner ruling), settled f
 
 ### Scope
 
-- **A dispatch run's own subagents are not listed.** A run is not a session the daemon's registry holds, and its transcript view already shows each `Agent` call and its result. Listing them would need a reader keyed by the run's conversation and worktree, which is a separate item if wanted.
+- **A dispatch run's own subagents** are listed under its DS row and followed like a session's, by the RS steps below (RT-1586, "Dispatch runs' subagents").
 - **Agent seam.** Protocol, daemon and client name no agent: `SubagentSnapshot`, `SA`, `subagents` and `subagent_transcript_path` name none, and every path, field and file name stays in `crates/agents/claude/`.
 
 ## Notes for the later steps
@@ -253,4 +253,32 @@ Each step lands on `main` on its own and keeps the suite green. Hotspot files ar
   - the list service and the tails to `docs/session-runtime.md`, the wire to `docs/wire-protocol.md`, the rows and the pane to `docs/native-client.md` ("Sessions under repos"), a task-index row to `docs/architecture.md`;
   - `SA` and "typed prompt" to the glossary in `docs/README.md`, the `subagents` shot view to `docs/testing.md` and CLAUDE.md's view list.
 
-  Depends on: every step above.
+  Depends on: every step above. This file stays until the RS steps below land too; RS.8 then deletes it.
+
+## Dispatch runs' subagents (RT-1586)
+
+A dispatch run that starts its own subagents lists them under its DS row, followed read-only like a session's (ruling 1). Every decision here is an orchestrator decision (not an owner ruling), settled from the code.
+
+### Decisions
+
+- **Where the files are.** The run's subagents are `<claude home>/projects/<encoded worktree>/<agent_session_id>/subagents/`: the dispatch tool runs `claude -p` in the run's worktree, and `DispatchRunSnapshot.agent_session_id` is the run's own conversation. The live-run file records no Claude home, so the rows are the host session's `spawn_config.extra_env` (the dispatch tool inherits its caller's environment) when a listed session's conversation is the run's `session_id`, else empty rows (the daemon's own home).
+- **Wire.** `DispatchRunSnapshot.subagents: Vec<SubagentSnapshot>`, `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, riding `DispatchRuns`, `DispatchRunUpdated` and the resync. `TranscriptSource::RunSubagent { run_id, agent_id }` and `PaneFollow::RunSubagent { run_id, agent_id }` are new variants; both enums carry `#[serde(other)] Unknown`, so a released build draws its muted placeholder. Additive, no bump, no `Welcome.features` entry: a client follows a run's subagent only when the run's snapshot lists it. Reusing `Subagent { session_id }` with a run id is rejected: it mixes two id spaces and an older daemon would answer `NOT_FOUND`.
+- **Saved data.** A `RunSubagent` follow is new, so nothing migrates; like a run follow it does not survive a daemon restart (`tabs::prune_follows_not_in` clears it when its run is gone).
+- **The list.** The SS.5 service reads runs too, through `DispatchRuns`, with readers keyed by run id (`ReaderKey { agent_session_id, worktree, started_at }`). A run with no `agent_session_id` yet, or `Ended`, reads nothing. `listed()` applies unchanged with the run's `started_at` as the process start: running subtrees always; finished first-layer ones kept, newest five. A changed `agent_session_id` (a resumed run) makes a fresh reader.
+- **Writes.** `DispatchRuns::set_subagents(run_id, generation, list)` compares and stores under the runs lock and sends `DispatchRunUpdated` only on a change; a stale generation is dropped. No file is read under the runs lock.
+- **Tails.** `SubagentTails` keys by an owner (`Session` or `Run`) plus the agent id. A run follow resolves the path from the run entry (worktree, `agent_session_id`, the rows above) through the plugin's `subagent_transcript_path`; only the agent id comes from the client. The run's removal sends `TranscriptAppend { ended: true }` to its subagents' followers and stops their tails.
+- **Rows.** A run's subagents are `LeafKind::Subagent` leaves with a new `Leaf.run_id: Some(run id)`, spliced right after their run's leaf at the run's depth plus the subagent's depth, clamped to 3. Under a host session `host_session` stays the host's id, so the host's chevron folds them with the run, and `nested` and `nested_subagents` count them.
+
+  A run with no listed host session (depth 0 under its repo) still lists its subagents under it at depth 1 and up, shown whenever the run's row shows, with no fold of their own: ruling 1 makes every dispatch's subagents followable.
+- **Open, drag, pane.** A click focuses the pane following that run's subagent, else `CreateTab` to This PC with the `RunSubagent` follow; the leaf drags as `DragPayload::RunSubagent`, dropped as `subagent_drop` drops. The pane is the SS.12 view keyed by the run (`TranscriptKey::RunSubagent`, the kept snapshot from the run's list); `ended: true` reads "Its run has ended".
+
+### Steps
+
+- [ ] **RS.1 Protocol.** The `subagents` field and the two variants; the exhaustive `PaneFollow` and `TranscriptSource` matches get a placeholder arm (the daemon router answers `UNSUPPORTED_MESSAGE` until RS.3). Files: `crates/protocol/src/lib.rs` (hotspot), `apps/pwa/src/protocol.ts` (regenerated), `apps/native/src/grid_view.rs`, `apps/native/src/dispatch_view.rs`, `crates/daemon/src/dispatch_runs/mod.rs`, `crates/daemon/src/server/transcripts.rs`. Tests: round trips; a run snapshot without `subagents` decodes empty and an empty list is left out; `generated_protocol_ts_is_current`.
+- [ ] **RS.2 Daemon: the run list.** `DispatchRuns` read and `set_subagents`, `RunEntry.subagents`, the list service's run readers. Files: `crates/daemon/src/dispatch_runs/mod.rs`, `crates/daemon/src/subagents/mod.rs`, `crates/daemon/src/subagents/tests.rs`, `crates/daemon/src/server.rs` (hotspot: construction). Tests with the scripted reader factory: a running subagent reaches the run's `DispatchRunUpdated`; an unchanged pass sends none; no `agent_session_id` reads nothing; a removed run drops its reader; a new generation gets a fresh one; at 0 clients nothing reads; the rows come from the host's `extra_env`. Depends on RS.1.
+- [ ] **RS.3 Daemon: run tails.** The owner key, the run resolve, ending on run removal, the router arms. Files: `crates/daemon/src/subagents/tail.rs`, its tests, `crates/daemon/src/server/transcripts.rs`, `crates/daemon/src/server.rs` (hotspot). Tests on a temp `CLAUDE_CONFIG_DIR`: backfill with `request_id`; appends once; `NOT_FOUND` for an unknown run, a refused id, a run with no `agent_session_id`; run removal sends `ended: true`. Depends on RS.1.
+- [ ] **RS.4 Daemon: layout prune.** `prune_follows_not_in` clears a `RunSubagent` follow whose run is gone; `rebind_session` and `rehost_panes` leave it. Files: `crates/daemon/src/tabs.rs`, `crates/daemon/src/server/tabs.rs`. Depends on RS.1.
+- [ ] **RS.5 Client: rows.** `Leaf.run_id`, `subagents::run_subagent_leaf`, the splice in `nest_after` for hosted and unhosted runs, the counts. Files: `apps/native/src/sidebar.rs`, `apps/native/src/subagents.rs`, `apps/native/src/dispatch_runs.rs`, `apps/native/src/sidebar_view.rs`. Tests: depth 2 and 3 rows under a hosted DS row in the repos and tabs views; the host's fold hides them; an unhosted run's subagents at depth 1; an unbound host's in no container. Depends on RS.1.
+- [ ] **RS.6 Client: open and drag.** `open_run_subagent`, `find_tab_following_run_subagent`, `DragPayload::RunSubagent`. Files: `apps/native/src/lib.rs` (hotspot), `apps/native/src/tabs.rs`, `apps/native/src/drag.rs`, `apps/native/src/sidebar_view.rs`, `apps/native/src/grid_view.rs`, `apps/native/src/tab_bar.rs`, `apps/native/tests/ui/ui_sidebar.rs`, `apps/native/tests/ui/ui_sidebar_drag.rs`. Depends on RS.5.
+- [ ] **RS.7 Client: the pane.** `TranscriptKey::RunSubagent`, the header and kept snapshot from the run's list, "Its run has ended", re-follow after `Welcome`. Files: `apps/native/src/transcript_view.rs`, `apps/native/src/subagent_view.rs`, `apps/native/src/dispatch_view.rs`, `apps/native/src/lib.rs`, `apps/native/tests/ui/ui_subagents.rs`. Depends on RS.3 and RS.6.
+- [ ] **RS.8 Docs.** With SS.14: the run list and tails in `docs/session-runtime.md`, the wire in `docs/wire-protocol.md`, the rows in `docs/native-client.md`, the inferred Claude home in `docs/plans/dispatch-follow.md`; then delete this file. Depends on every step above.
