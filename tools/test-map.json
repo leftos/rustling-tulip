@@ -356,7 +356,7 @@
       "paths": [
         "apps/native/src/connection_picker_view.rs"
       ],
-      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_connections|ui_perf)::/)"
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_connections|ui_host_rebind|ui_perf)::/)"
     },
     {
       "paths": [
@@ -705,7 +705,13 @@
       "paths": [
         "apps/native/src/host_rebind.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^host_rebind::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^host_rebind::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_host_rebind)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/host_rebind_view.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_host_rebind)::/)"
     },
     {
       "paths": [
@@ -884,7 +890,7 @@
       "paths": [
         "apps/native/src/quick_jump.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^quick_jump::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_quick_jump)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^quick_jump::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_host_rebind|ui_quick_jump)::/))"
     },
     {
       "paths": [
@@ -1036,7 +1042,7 @@
       "paths": [
         "apps/native/src/sidebar_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^sidebar_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_fetch_dialog|ui_keys|ui_launch_last|ui_paint|ui_preset_wizard|ui_remote|ui_repos|ui_sidebar|ui_sidebar_drag)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_host_routing::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^sidebar_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_fetch_dialog|ui_host_rebind|ui_keys|ui_launch_last|ui_paint|ui_preset_wizard|ui_remote|ui_repos|ui_sidebar|ui_sidebar_drag)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_host_routing::/))"
     },
     {
       "paths": [
@@ -1426,6 +1432,12 @@
         "apps/native/tests/ui/ui_host_groups.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_host_groups)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_host_rebind.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_host_rebind)::/))"
     },
     {
       "paths": [

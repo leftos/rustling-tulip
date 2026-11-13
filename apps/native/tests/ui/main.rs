@@ -43,6 +43,7 @@ mod ui_gates;
 mod ui_history;
 mod ui_host_chips;
 mod ui_host_groups;
+mod ui_host_rebind;
 mod ui_host_routing;
 mod ui_keys;
 mod ui_launch_last;

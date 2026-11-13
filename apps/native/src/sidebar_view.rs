@@ -719,6 +719,113 @@ impl RootView {
         );
     }
 
+    /// Whether a host header's menu is open.
+    #[must_use]
+    pub fn host_menu_open(&self) -> bool {
+        self.host_menu.is_some()
+    }
+
+    /// Opens `host`'s header menu, named `name`, at `at`: Unbind and
+    /// Rebind… of its sessions. Any other menu gives way.
+    pub(crate) fn open_host_menu(
+        &mut self,
+        host: &HostKey,
+        name: String,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_more_menu(window, cx);
+        self.close_session_menu(window, cx);
+        self.close_shell_menu(window, cx);
+        self.close_tab_menu(window, cx);
+        self.close_container_menu(window, cx);
+        self.host_menu = Some(HostMenu {
+            host: host.clone(),
+            name,
+            online: self.rebind_host_online(host),
+            at,
+            max_height: window.viewport_size().height * MENU_MAX_SHARE,
+        });
+        self.menu_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Closes the host header menu, handing the keyboard back to the pane.
+    pub(crate) fn close_host_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host_menu.take().is_some() {
+            self.focus_active_pane(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The open host header menu over a layer that keeps a click outside it
+    /// from reaching what lies beneath.
+    pub(crate) fn host_menu_layer(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+        let menu = self.host_menu.as_ref()?;
+        let t = theme(cx);
+        let backdrop = div().absolute().top_0().left_0().size_full().occlude();
+        let row = |selector: &'static str, label: String, rebind: bool, cx: &mut Context<Self>| {
+            if !menu.online {
+                return disabled_row(selector, label, format!("{} is offline", menu.name), &t)
+                    .into_any_element();
+            }
+            let host = menu.host.clone();
+            menu_item(selector, label, false, &t)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.close_host_menu(window, cx);
+                        if rebind {
+                            this.open_host_rebind(&host, window, cx);
+                        } else {
+                            this.unbind_host(&host);
+                        }
+                    }),
+                )
+                .into_any_element()
+        };
+        let unbind = row(
+            "host-menu-unbind",
+            format!("Unbind {}'s sessions", menu.name),
+            false,
+            cx,
+        );
+        let rebind = row(
+            "host-menu-rebind",
+            format!("Rebind {}'s sessions…", menu.name),
+            true,
+            cx,
+        );
+        let panel = menu_frame(
+            crate::fonts::ui_text_size(cx),
+            "host-menu",
+            &self.menu_focus,
+            menu.max_height,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.close_host_menu(window, cx);
+                cx.stop_propagation();
+            }),
+            &t,
+        )
+        .child(unbind)
+        .child(rebind);
+        let panel = anchored().position(menu.at).snap_to_window().child(panel);
+        Some([
+            backdrop.into_any_element(),
+            deferred(panel).with_priority(1).into_any_element(),
+        ])
+    }
+
+    /// The layers of the sidebar's own menus: the ⋯ menu's and a host
+    /// header's.
+    pub(crate) fn sidebar_toolbar_menu_layers(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut layers: Vec<AnyElement> = self.more_menu_layer().into_iter().collect();
+        layers.extend(self.host_menu_layer(cx).into_iter().flatten());
+        layers
+    }
+
     /// The layer under the open ⋯ menu that keeps a click outside it from
     /// reaching what lies beneath.
     pub(crate) fn more_menu_layer(&self) -> Option<AnyElement> {
@@ -757,6 +864,17 @@ impl AddRepoGate {
         };
         Self { enabled: true, tip }
     }
+}
+
+/// The open right-click menu of a host header: its host, the name its header
+/// draws, whether the host was online when it opened, where it opened, and
+/// the most height its frame may take.
+pub(crate) struct HostMenu {
+    host: HostKey,
+    name: String,
+    online: bool,
+    at: Point<Pixels>,
+    max_height: Pixels,
 }
 
 /// Whether the toolbar's ⋯ menu is open.
@@ -928,7 +1046,7 @@ const HOST_NAME_SHRINK: f32 = 1000.0;
 /// `group`'s header: its fold (chevron, state dot, name and, unless online,
 /// its state), then `+ Repo` and `+ Shell`, or `Pair` on a host that has not approved
 /// this device. Every header but the `first` has a rule above it. It is not
-/// a keyboard stop, has no menu and takes no drop.
+/// a keyboard stop and takes no drop; a right-click opens its host's menu.
 fn host_header(
     group: &HostGroup,
     state: HostHeaderState,
@@ -1007,11 +1125,19 @@ fn host_header(
             .child(host_shell(key, &group.host, &group.label, online, cx))
             .into_any_element()
     };
+    let (menu_host, menu_name) = (group.host.clone(), group.label.clone());
     div()
         .driver_id({
             let selector = format!("host-header-{key}");
             move || selector
         })
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.open_host_menu(&menu_host, menu_name.clone(), event.position, window, cx);
+                cx.stop_propagation();
+            }),
+        )
         .flex()
         .flex_none()
         .items_center()

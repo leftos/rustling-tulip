@@ -267,15 +267,15 @@ fn option_row(
 
 /// How an option row is marked: outlined while focused, filled while
 /// selected.
-struct RowMarks {
-    focused: bool,
-    selected: bool,
+pub(crate) struct RowMarks {
+    pub(crate) focused: bool,
+    pub(crate) selected: bool,
 }
 
 /// An option row tagged `selector`: `label` over its muted `detail`,
 /// filled while `selected` and outlined while `focused`; the caller adds
 /// the click.
-fn option_row_element(
+pub(crate) fn option_row_element(
     shift: i8,
     selector: String,
     label: String,
@@ -313,26 +313,42 @@ fn picker_button(
     aspect: f32,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
-    let t = theme(cx);
     let pressed = control.clone();
-    dialog_button(
+    picker_button_look(
         &control.selector(),
         chooser.label(control, aspect),
+        focused == Some(control),
+        chooser.is_selected(control),
+        cx,
+    )
+    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+        this.press_layout_control(&pressed, window, cx);
+    }))
+}
+
+/// A picker button tagged `selector` reading `label`: filled while
+/// `selected`, ringed while `focused`; the caller adds the click.
+pub(crate) fn picker_button_look(
+    selector: &str,
+    label: String,
+    focused: bool,
+    selected: bool,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let t = theme(cx);
+    dialog_button(
+        selector,
+        label,
         dialog_look(
             crate::fonts::ui_text_size(cx),
             crate::fonts::ui_weight_shift(cx),
             false,
             true,
-            &theme(cx),
+            &t,
         ),
-        focused == Some(control),
+        focused,
     )
-    .when(chooser.is_selected(control), |button| {
-        button.bg(gpui::rgb(t.selected_bg))
-    })
-    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-        this.press_layout_control(&pressed, window, cx);
-    }))
+    .when(selected, |button| button.bg(gpui::rgb(t.selected_bg)))
 }
 
 /// The "Open all active sessions" picker: the layout modes with the grid
@@ -352,11 +368,47 @@ fn picker(
         .filter(|control| matches!(control, Control::Shape(_)))
         .map(&mut button)
         .collect();
-    let side = button(&Control::Mode(Mode::SideBySide));
-    let stacked = button(&Control::Mode(Mode::Stacked));
-    let down = button(&Control::MaxDown);
-    let up = button(&Control::MaxUp);
+    let buttons = PickerButtons {
+        grid,
+        shapes,
+        side: button(&Control::Mode(Mode::SideBySide)),
+        stacked: button(&Control::Mode(Mode::Stacked)),
+        down: button(&Control::MaxDown),
+        up: button(&Control::MaxUp),
+    };
     let confirm = button(&Control::Confirm);
+    picker_body(buttons, "chooser-max-value", chooser.max_label(), &t)
+        .child(div().flex().justify_end().child(confirm))
+}
+
+/// The buttons of a layout picker, before they are laid out.
+pub(crate) struct PickerButtons {
+    pub(crate) grid: Stateful<Div>,
+    /// The grid shapes, shown under Grid; none while another mode is on.
+    pub(crate) shapes: Vec<Stateful<Div>>,
+    pub(crate) side: Stateful<Div>,
+    pub(crate) stacked: Stateful<Div>,
+    pub(crate) down: Stateful<Div>,
+    pub(crate) up: Stateful<Div>,
+}
+
+/// A layout picker's body: the modes with the grid shapes under Grid, then
+/// the max-per-tab stepper reading `max_label`, its value tagged
+/// `max_selector`.
+pub(crate) fn picker_body(
+    buttons: PickerButtons,
+    max_selector: &'static str,
+    max_label: String,
+    t: &UiTheme,
+) -> Div {
+    let PickerButtons {
+        grid,
+        shapes,
+        side,
+        stacked,
+        down,
+        up,
+    } = buttons;
     let modes = div()
         .flex()
         .flex_col()
@@ -384,8 +436,8 @@ fn picker(
         .child(down)
         .child(
             div()
-                .driver_id(|| "chooser-max-value".to_owned())
-                .child(chooser.max_label()),
+                .driver_id(move || max_selector.to_owned())
+                .child(max_label),
         )
         .child(up);
     div()
@@ -395,5 +447,4 @@ fn picker(
         .pl(px(12.0))
         .child(modes)
         .child(max)
-        .child(div().flex().justify_end().child(confirm))
 }

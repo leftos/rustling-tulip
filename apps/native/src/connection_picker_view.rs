@@ -81,6 +81,10 @@ enum PickerControl {
     UpdateClients(usize),
     /// The Open shell button of the row at this index.
     OpenShell(usize),
+    /// The Unbind button of the row at this index.
+    Unbind(usize),
+    /// The Rebind… button of the row at this index.
+    Rebind(usize),
     /// `+ Add host`: opens the add form.
     AddHost,
     ModeTailnet,
@@ -114,6 +118,8 @@ impl PickerControl {
                 format!("connections-row-{}-update-clients", key(index))
             }
             Self::OpenShell(index) => format!("connections-row-{}-shell", key(index)),
+            Self::Unbind(index) => format!("connections-row-{}-unbind", key(index)),
+            Self::Rebind(index) => format!("connections-row-{}-rebind", key(index)),
             Self::AddHost => "connections-add-host".to_owned(),
             Self::ModeTailnet => "connections-add-mode-tailnet".to_owned(),
             Self::ModeSsh => "connections-add-mode-ssh".to_owned(),
@@ -157,7 +163,8 @@ impl PickerControl {
 /// The controls a row draws beside itself, each after the row in Tab
 /// order: a saved host's switch, Pair, Reconnect now and Update host while
 /// they apply, Update connected clients on This PC while its daemon can,
-/// Open shell while its host is online, and a saved host's Forget.
+/// Open shell while its host is online, Unbind and Rebind… on every held
+/// host's row (disabled while it is offline), and a saved host's Forget.
 #[derive(Debug, Clone, Copy, Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -174,6 +181,12 @@ struct RowControls {
     client_update: bool,
     /// The host's connection is open, so a shell can open on it.
     open_shell: bool,
+    /// The row is This PC's or a saved host's, whose sessions can be
+    /// unbound and rebound.
+    rebind: bool,
+    /// The row's host is online: This PC, or a host whose connection is
+    /// open.
+    online: bool,
 }
 
 impl RowControls {
@@ -187,6 +200,8 @@ impl RowControls {
             update: offers_update(facts) && !update_pending,
             client_update: offers_client_update(facts),
             open_shell: offers_open_shell(facts),
+            rebind: row.kind != RowKind::Peer,
+            online: rebind_online(row, facts),
         }
     }
 
@@ -199,6 +214,8 @@ impl RowControls {
             (self.update, PickerControl::UpdateHost(index)),
             (self.client_update, PickerControl::UpdateClients(index)),
             (self.open_shell, PickerControl::OpenShell(index)),
+            (self.rebind, PickerControl::Unbind(index)),
+            (self.rebind, PickerControl::Rebind(index)),
             (self.saved, PickerControl::Forget(index)),
         ]
         .into_iter()
@@ -210,6 +227,12 @@ impl RowControls {
 /// is open.
 fn offers_open_shell(facts: &RowFacts) -> bool {
     facts.live == Some(LiveState::Open)
+}
+
+/// Whether the row's Unbind and Rebind… take a press: This PC always, a
+/// saved host while the window's connection to it is open.
+fn rebind_online(row: &Row, facts: &RowFacts) -> bool {
+    row.kind == RowKind::Local || offers_open_shell(facts)
 }
 
 /// Every control of a picker whose rows draw `rows`, in Tab order: each
@@ -712,6 +735,8 @@ impl RootView {
             PickerControl::OpenShell(index) => {
                 self.open_shell_connection_row(index, window, cx);
             }
+            PickerControl::Unbind(index) => self.unbind_connection_row(index),
+            PickerControl::Rebind(index) => self.rebind_connection_row(index, window, cx),
             PickerControl::AddHost => self.open_add_form(window, cx),
             PickerControl::ModeTailnet => self.set_add_mode(AddMode::Tailnet, window, cx),
             PickerControl::ModeSsh => self.set_add_mode(AddMode::Ssh, window, cx),
@@ -1070,6 +1095,28 @@ impl RootView {
         let host = HostKey::of(&row.target);
         self.close_connection_picker(window, cx);
         self.quick_shell_on(&host, cx);
+    }
+
+    /// Unbind on the row at `index`: every pane of its host's sessions is
+    /// unbound at once, and the picker stays open. An offline host's sends
+    /// nothing.
+    fn unbind_connection_row(&mut self, index: usize) {
+        if let Some(host) = self.picker_row(index).as_ref().and_then(row_host) {
+            self.unbind_host(&host);
+        }
+    }
+
+    /// Rebind… on the row at `index`: the picker closes and the rebind
+    /// dialog opens over its host. An offline host's does nothing.
+    fn rebind_connection_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(host) = self.picker_row(index).as_ref().and_then(row_host) else {
+            return;
+        };
+        if !self.rebind_host_online(&host) {
+            return;
+        }
+        self.close_connection_picker(window, cx);
+        self.open_host_rebind(&host, window, cx);
     }
 
     /// Add and connect, or a pick of a peer: saves `target`'s host switched
@@ -1509,6 +1556,7 @@ fn row_actions(
         && !controls.update
         && !controls.client_update
         && !controls.open_shell
+        && !controls.rebind
     {
         return None;
     }
@@ -1567,6 +1615,9 @@ fn row_actions(
         .tooltip(tooltip(format!("Open a shell on {name}")))
         .child("Open shell")
     });
+    let rebind = controls
+        .rebind
+        .then(|| rebind_buttons(index, controls.online, draw, cx));
     Some(
         div()
             .flex()
@@ -1577,8 +1628,66 @@ fn row_actions(
             .children(reconnect)
             .children(update)
             .children(update_clients)
-            .children(open_shell),
+            .children(open_shell)
+            .children(rebind.into_iter().flatten()),
     )
+}
+
+/// The row at `index`'s Unbind and Rebind… buttons; dimmed and inert, with
+/// "{name} is offline" as their tip, unless its host is `online`.
+fn rebind_buttons(
+    index: usize,
+    online: bool,
+    draw: &Draw<'_>,
+    cx: &mut Context<RootView>,
+) -> [Stateful<Div>; 2] {
+    let name = draw
+        .rows
+        .get(index)
+        .map_or_else(String::new, |row| row.label.clone());
+    let make = |control: PickerControl, label: &'static str, tip: String| {
+        let tip = if online {
+            tip
+        } else {
+            format!("{name} is offline")
+        };
+        let size = ButtonSize::Compact;
+        let t = theme(cx);
+        button(
+            &control.selector(draw.rows),
+            button_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                ButtonKind::Outlined,
+                size,
+                online,
+                Layer::Floating,
+                &t,
+            ),
+        )
+        .relative()
+        .when(draw.focus == control, |button| {
+            button.child(focus_ring(size.radius(), &t))
+        })
+        .tooltip(tooltip(tip))
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            this.press_connection_control(control, window, cx);
+        }))
+        .child(label)
+    };
+    [
+        make(
+            PickerControl::Unbind(index),
+            "Unbind",
+            format!("Unbind {name}'s sessions"),
+        ),
+        make(
+            PickerControl::Rebind(index),
+            "Rebind…",
+            format!("Rebind {name}'s sessions"),
+        ),
+    ]
 }
 
 /// A saved host's On switch, ticked while it is `enabled`.

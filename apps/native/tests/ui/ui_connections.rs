@@ -2368,9 +2368,11 @@ fn tabbing_to_forget_reveals_it(cx: &mut TestAppContext) {
     open_picker(&mut h, tailnet_with(&[]));
 
     assert_eq!(
-        tab_walk(&mut h, 3),
+        tab_walk(&mut h, 5),
         [
             "connections-row-This PC-shell".to_owned(),
+            "connections-row-This PC-unbind".to_owned(),
+            "connections-row-This PC-rebind".to_owned(),
             row(HOST),
             switch(HOST),
         ]
@@ -2380,7 +2382,7 @@ fn tabbing_to_forget_reveals_it(cx: &mut TestAppContext) {
         "the row's or its switch's focus keeps it hidden"
     );
 
-    h.keys("tab");
+    h.keys("tab tab tab");
     assert_eq!(focus(&mut h), Some(format!("connections-forget-{HOST}")));
     assert!(forget_shown(&mut h, HOST), "Forget's own focus shows it");
 }
@@ -2611,11 +2613,15 @@ fn tab_ring_order_with_the_form_closed(cx: &mut TestAppContext) {
     assert_eq!(focus(&mut h), Some(row("This PC")));
 
     assert_eq!(
-        tab_walk(&mut h, 8),
+        tab_walk(&mut h, 12),
         [
             "connections-row-This PC-shell".to_owned(),
+            "connections-row-This PC-unbind".to_owned(),
+            "connections-row-This PC-rebind".to_owned(),
             row(HOST),
             switch(HOST),
+            format!("connections-row-{HOST}-unbind"),
+            format!("connections-row-{HOST}-rebind"),
             format!("connections-forget-{HOST}"),
             row(PEER),
             "connections-add-host".to_owned(),
@@ -2638,13 +2644,17 @@ fn tab_ring_walks_a_held_hosts_pair_and_reconnect_after_its_row(cx: &mut TestApp
     open_picker(&mut h, tailnet_with(&[]));
 
     assert_eq!(
-        tab_walk(&mut h, 6),
+        tab_walk(&mut h, 10),
         [
             "connections-row-This PC-shell".to_owned(),
+            "connections-row-This PC-unbind".to_owned(),
+            "connections-row-This PC-rebind".to_owned(),
             row(HOST),
             switch(HOST),
             format!("connections-row-{HOST}-pair"),
             format!("connections-row-{HOST}-reconnect"),
+            format!("connections-row-{HOST}-unbind"),
+            format!("connections-row-{HOST}-rebind"),
             format!("connections-forget-{HOST}"),
         ]
     );
@@ -2663,7 +2673,7 @@ fn tab_ring_order_with_the_form_open(cx: &mut TestAppContext) {
     assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
 
     assert_eq!(
-        tab_walk(&mut h, 12),
+        tab_walk(&mut h, 16),
         [
             "connections-port".to_owned(),
             "connections-add-cancel".to_owned(),
@@ -2671,8 +2681,12 @@ fn tab_ring_order_with_the_form_open(cx: &mut TestAppContext) {
             "connections-close".to_owned(),
             row("This PC"),
             "connections-row-This PC-shell".to_owned(),
+            "connections-row-This PC-unbind".to_owned(),
+            "connections-row-This PC-rebind".to_owned(),
             row(HOST),
             switch(HOST),
+            format!("connections-row-{HOST}-unbind"),
+            format!("connections-row-{HOST}-rebind"),
             format!("connections-forget-{HOST}"),
             "connections-add-mode-tailnet".to_owned(),
             "connections-add-mode-ssh".to_owned(),

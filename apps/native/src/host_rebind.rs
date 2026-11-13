@@ -1,7 +1,6 @@
 //! The host rebind dialog as plain data: the host's active sessions in their
 //! order, the layout picked for them (an automatic one, or one of the host's
 //! own layouts to follow), and the unbind and bind messages it sends.
-#![expect(dead_code, reason = "no view opens the rebind dialog yet")]
 
 use protocol::{
     ClientMessage, HostArrangement, HostLayout, SessionRole, SessionSnapshot, SessionStatus,
@@ -82,6 +81,20 @@ impl HostRebind {
 
     pub(crate) fn choice(&self) -> &RebindChoice {
         &self.choice
+    }
+
+    /// Rebuilds the session list from the host's `sessions`, keeping the
+    /// picker's mode, its grid shape while still offered (else Auto), its max
+    /// per tab, and the choice.
+    pub(crate) fn refresh(&mut self, sessions: &[SessionSnapshot]) {
+        self.session_ids = active_session_ids(sessions);
+        let old = &self.picker;
+        let mut picker = LayoutPicker::new(self.session_ids.len(), old.max_per_tab());
+        picker.set_mode(old.mode());
+        if picker.shape_cols().any(|cols| cols == old.cols()) {
+            picker.set_shape(old.cols());
+        }
+        self.picker = picker;
     }
 
     /// Keeps the host's answer: its own name and its clients' layouts. The
@@ -439,6 +452,52 @@ mod tests {
         assert!(
             matches!(bound_arrangement(&sent), Some(HostArrangement::Auto { .. })),
             "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_takes_a_new_session_and_drops_a_stopped_one() {
+        let mut sessions = running(3);
+        let mut rebind = HostRebind::new(remote(), None, &sessions);
+        if let Some(stopped) = sessions.get_mut(1) {
+            stopped.status = SessionStatus::Stopped;
+        }
+        sessions.push(session("s9", 30));
+        rebind.refresh(&sessions);
+        assert_eq!(rebind.session_ids(), ["s0", "s2", "s9"]);
+        assert_eq!(rebind.picker().count(), 3, "the picker counts the new list");
+    }
+
+    #[test]
+    fn refresh_keeps_the_mode_max_and_follow_choice() {
+        let mut rebind = HostRebind::new(remote(), None, &running(5));
+        rebind.set_layouts(Some("box".to_owned()), vec![layout("c1", Some("box"))]);
+        rebind.picker_mut().set_mode(Mode::Stacked);
+        rebind.picker_mut().max_up();
+        rebind.choose_follow("c1".to_owned());
+        rebind.refresh(&running(6));
+        assert_eq!(rebind.session_ids().len(), 6);
+        assert_eq!(rebind.picker().mode(), Mode::Stacked);
+        assert_eq!(rebind.picker().max_per_tab(), Some(5));
+        assert_eq!(*rebind.choice(), RebindChoice::Follow("c1".to_owned()));
+        assert_eq!(
+            rebind.follow_options(),
+            vec![("c1".to_owned(), "box".to_owned())],
+            "the host's layouts stay"
+        );
+    }
+
+    #[test]
+    fn refresh_falls_back_to_auto_when_the_shape_is_no_longer_offered() {
+        let mut rebind = HostRebind::new(remote(), None, &running(5));
+        rebind.picker_mut().set_shape(4);
+        rebind.refresh(&running(5));
+        assert_eq!(rebind.picker().cols(), 4, "a shape still offered stays");
+        rebind.refresh(&running(3));
+        assert_eq!(
+            rebind.picker().cols(),
+            0,
+            "three sessions offer no 4-column grid"
         );
     }
 

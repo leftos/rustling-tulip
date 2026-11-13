@@ -86,6 +86,7 @@ mod history_view;
 mod host_path_prompt;
 mod host_path_prompt_view;
 mod host_rebind;
+mod host_rebind_view;
 mod host_update;
 mod host_update_dialog;
 mod hosts;
@@ -1044,6 +1045,8 @@ pub struct RootView {
     dispatch_menu: Option<crate::dispatch_menu::DispatchMenu>,
     /// The sessions toolbar's ⋯ menu.
     more_menu: sidebar_view::MoreMenu,
+    /// A sidebar host header's right-click menu, while open.
+    host_menu: Option<sidebar_view::HostMenu>,
     /// The appearance editor, or the Settings modal holding it at the app
     /// level, while open.
     appearance_editor: Option<AppearanceEditor>,
@@ -1261,6 +1264,10 @@ pub struct RootView {
     layout_chooser: Option<layout_chooser::LayoutChooser>,
     /// The layout chooser's keyboard focus.
     chooser_focus: FocusHandle,
+    /// The host rebind dialog, while open.
+    host_rebind: Option<host_rebind_view::HostRebindDialog>,
+    /// The host rebind dialog's keyboard focus.
+    host_rebind_focus: FocusHandle,
     /// The arrangement the chooser picked, applied to the daemon's next tab
     /// list.
     pending_arrangement: Option<layout_chooser::Arrangement>,
@@ -1716,6 +1723,7 @@ impl RootView {
             container_menu: None,
             dispatch_menu: None,
             more_menu: sidebar_view::MoreMenu::Closed,
+            host_menu: None,
             appearance_editor: None,
             appearance_focus: cx.focus_handle(),
             settings_tab: settings_view::SettingsTab::default(),
@@ -1802,6 +1810,8 @@ impl RootView {
             quit_focus: cx.focus_handle(),
             layout_chooser: None,
             chooser_focus: cx.focus_handle(),
+            host_rebind: None,
+            host_rebind_focus: cx.focus_handle(),
             pending_arrangement: None,
             cleanup_failed: cleanup_failed::CleanupQueue::default(),
             cleanup_focus: cx.focus_handle(),
@@ -2852,6 +2862,7 @@ impl RootView {
             || self.run_confirm.is_some()
             || self.notices.has_modal()
             || self.layout_chooser.is_some()
+            || self.host_rebind.is_some()
             || !self.cleanup_failed.is_empty()
             || self.start_notice.is_some()
             || self.exit.is_some()
@@ -3728,6 +3739,8 @@ impl RootView {
                 self.jump_to_container(&host, &key, kind, &id, window, cx);
             }
             quick_jump::JumpAction::OpenShell { host } => self.quick_shell_on(&host, cx),
+            quick_jump::JumpAction::UnbindHost { host } => self.unbind_host(&host),
+            quick_jump::JumpAction::RebindHost { host } => self.open_host_rebind(&host, window, cx),
         }
     }
 
@@ -4954,6 +4967,7 @@ impl RootView {
                 | DaemonMessage::SessionRemoved { .. }
         ) {
             self.refresh_popout_titles(cx);
+            self.refresh_host_rebind(host, cx);
         }
     }
 
@@ -5100,6 +5114,7 @@ impl RootView {
         self.on_remote_update_message(host, &msg, cx);
         self.on_shell_message(host, &msg, window, cx);
         self.on_transcript_message(host, &msg, cx);
+        self.on_host_rebind_message(host, &msg, cx);
         if self.on_panel_message(host, &msg, window, cx) {
             return;
         }
@@ -5757,6 +5772,7 @@ impl RootView {
         self.tabs.clear_layout_requests();
         self.pending_arrangement = None;
         self.close_layout_chooser_of(&HostKey::Local, window, cx);
+        self.close_host_rebind_of(&HostKey::Local, window, cx);
         // Last but one, after every close above has handed the keyboard
         // down: a remote host's failure still on screen takes it back.
         self.reset_cleanup_failed(&HostKey::Local, window, cx);
@@ -5977,6 +5993,10 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
+        if self.on_host_rebind_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.on_run_confirm_key(ks, window, cx) {
             cx.stop_propagation();
             return;
@@ -6193,6 +6213,8 @@ impl RootView {
             self.close_perf_menu(cx);
         } else if self.sidebar_more_open() && ks.key == "escape" {
             self.close_more_menu(window, cx);
+        } else if self.host_menu.is_some() && ks.key == "escape" {
+            self.close_host_menu(window, cx);
         } else if self.shell_menu.is_some()
             && self.overlays.shows(Overlay::ShellMenu, here)
             && ks.key == "escape"
@@ -6585,7 +6607,7 @@ impl Render for RootView {
             .children(self.tab_menu_layer(cx).into_iter().flatten())
             .children(self.pane_menu_layers(here, cx))
             .children(self.sidebar_menu_layers(cx))
-            .children(self.more_menu_layer())
+            .children(self.sidebar_toolbar_menu_layers(cx))
             .children(self.footer_menu_layers(cx))
             .children(self.sc_picker_layer())
             .children(self.sc_file_menu_layer(cx).into_iter().flatten())
@@ -6622,7 +6644,7 @@ impl Render for RootView {
             .children(self.toast_layer(here, cx))
             .children(self.undo_layer(window, cx))
             .children(self.run_confirm_layer(cx))
-            .children(self.layout_chooser_layer(cx))
+            .children(self.layout_dialog_layers(cx))
             .children(self.exit_layer(cx))
             .children(delete_over)
             .children(self.cleanup_failed_layer(window, cx))

@@ -78,6 +78,10 @@ pub enum JumpAction {
     },
     /// Opens a plain shell on `host`.
     OpenShell { host: HostKey },
+    /// Unbinds every pane of `host`'s sessions; the sessions keep running.
+    UnbindHost { host: HostKey },
+    /// Opens the rebind dialog over `host`'s active sessions.
+    RebindHost { host: HostKey },
 }
 
 /// One palette row.
@@ -238,21 +242,35 @@ pub fn build_entries(inputs: &JumpInputs, history: &FocusHistory) -> Vec<Entry> 
             .hosts
             .iter()
             .filter(|host| host.online)
-            .map(host_entry),
+            .flat_map(host_entries),
     );
     entries
 }
 
-/// The `[SHELL]` entry of an online host: a plain shell on it.
-fn host_entry(host: &HostInput) -> Entry {
-    Entry {
+/// The `[SHELL]` entries of an online host: a plain shell on it, then the
+/// unbind and the rebind of its sessions.
+fn host_entries(host: &HostInput) -> [Entry; 3] {
+    let entry = |primary: String, action: JumpAction| Entry {
         kind: EntryKind::Shell,
-        primary: format!("Open shell on {}", host.name),
+        primary,
         secondary: host.name.clone(),
-        action: JumpAction::OpenShell {
-            host: host.host.clone(),
-        },
-    }
+        action,
+    };
+    let key = || host.host.clone();
+    [
+        entry(
+            format!("Open shell on {}", host.name),
+            JumpAction::OpenShell { host: key() },
+        ),
+        entry(
+            format!("Unbind {}'s sessions", host.name),
+            JumpAction::UnbindHost { host: key() },
+        ),
+        entry(
+            format!("Rebind {}'s sessions…", host.name),
+            JumpAction::RebindHost { host: key() },
+        ),
+    ]
 }
 
 fn pane_entry(pane: &PaneInput) -> Entry {
@@ -615,12 +633,16 @@ mod tests {
             [
                 "[REPO] yaat",
                 "[SHELL] Open shell on This PC",
+                "[SHELL] Unbind This PC's sessions",
+                "[SHELL] Rebind This PC's sessions…",
                 "[SHELL] Open shell on box",
+                "[SHELL] Unbind box's sessions",
+                "[SHELL] Rebind box's sessions…",
             ],
             "the shell entries rank after the others, and an offline host is offered none"
         );
         assert_eq!(
-            entries[2].action,
+            entries[4].action,
             JumpAction::OpenShell {
                 host: remote("box")
             }
@@ -659,7 +681,14 @@ mod tests {
     fn a_shell_entry_matches_its_host_name() {
         let mut jump = QuickJump::new(build_entries(&two_hosts(), &FocusHistory::default()));
         jump.set_query("box");
-        assert_eq!(filtered_names(&jump), ["[SHELL] Open shell on box"]);
+        assert_eq!(
+            filtered_names(&jump),
+            [
+                "[SHELL] Open shell on box",
+                "[SHELL] Unbind box's sessions",
+                "[SHELL] Rebind box's sessions…",
+            ]
+        );
         jump.set_query("SHELL");
         assert_eq!(
             filtered_names(&jump),

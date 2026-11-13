@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- Unbind every session of one machine, or rebind them into new tabs by a grid, side by side or stacked, or following that machine's own layout.
 - A session's dispatch runs and subagents sit indented under it in the sidebar, a run's own subagents under the run, finished subagents until your next prompt, and a chevron on its row folds them away.
 - Right-click the version in the status bar to check for updates at once; it says when you're up to date or why it couldn't check.
 - A setting in Settings › General decides whether the first click on a pane that isn't focused also acts in it (on by default) or only focuses it.
