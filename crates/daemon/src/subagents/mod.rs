@@ -13,9 +13,11 @@
 //!
 //! A first-layer subagent is listed with its whole subtree while any of it
 //! runs. One that ended stays listed while it ended after both the host's
-//! newest typed prompt and the start of its agent process, the newest
-//! [`FINISHED_CAP`] of them at most. With no typed prompt read, only the
-//! process start and the cap apply.
+//! newest typed prompt and the start of its agent process, up to the host's
+//! [`SubagentListing::finished_cap`] most recently finished; with a
+//! [`SubagentListing::keep_minutes`] window it stays that many minutes past its
+//! finish instead of until the next typed prompt. With no typed prompt read,
+//! only the process start and the cap apply.
 
 pub(crate) mod tail;
 #[cfg(test)]
@@ -27,21 +29,21 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_api::{ActivityReader, ActivitySnapshot, ActivitySource, SubagentNode};
-use chrono::{DateTime, Utc};
-use protocol::{AgentId, AgentState, SessionSnapshot, SessionStatus, SubagentSnapshot};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use protocol::{
+    AgentId, AgentState, SessionSnapshot, SessionStatus, SubagentListing, SubagentSnapshot,
+};
 use tokio::sync::watch;
 use tracing::warn;
 
 use crate::dashboard::ReaderFactory;
 use crate::dispatch_runs::{DispatchRuns, RunSource};
 use crate::session::{SessionRecord, SessionRegistry};
+use crate::state::AppState;
 use crate::sync::lock;
 
 /// How often the lists are read while a client is connected.
 pub(crate) const TICK: Duration = Duration::from_secs(2);
-
-/// How many ended first-layer subagents a session lists at most.
-const FINISHED_CAP: usize = 5;
 
 /// The subagent list service, shared by the hub and its tick task.
 #[derive(Clone)]
@@ -53,6 +55,8 @@ struct Inner {
     sessions: Arc<SessionRegistry>,
     /// The listed dispatch runs, whose own subagents are read too.
     runs: Option<Arc<DispatchRuns>>,
+    /// The host settings the rule reads: its finished-subagent listing.
+    state: Arc<AppState>,
     factory: ReaderFactory,
     /// Each live owner's reader between passes.
     readers: Mutex<HashMap<Owner, Cached>>,
@@ -103,23 +107,29 @@ struct Window {
 }
 
 impl SubagentList {
-    /// The service over `sessions` and the dispatch runs `runs` lists,
-    /// reading with each agent plugin's reader.
-    pub(crate) fn new(sessions: Arc<SessionRegistry>, runs: Option<Arc<DispatchRuns>>) -> Self {
-        Self::with_reader_factory(sessions, runs, Arc::new(plugin_reader))
+    /// The service over `sessions`, the dispatch runs `runs` lists, and the
+    /// host settings `state` holds, reading with each agent plugin's reader.
+    pub(crate) fn new(
+        sessions: Arc<SessionRegistry>,
+        runs: Option<Arc<DispatchRuns>>,
+        state: Arc<AppState>,
+    ) -> Self {
+        Self::with_reader_factory(sessions, runs, state, Arc::new(plugin_reader))
     }
 
-    /// The service over `sessions` and `runs`, reading with `factory`'s
-    /// readers.
+    /// The service over `sessions`, `runs` and `state`, reading with
+    /// `factory`'s readers.
     pub(crate) fn with_reader_factory(
         sessions: Arc<SessionRegistry>,
         runs: Option<Arc<DispatchRuns>>,
+        state: Arc<AppState>,
         factory: ReaderFactory,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 sessions,
                 runs,
+                state,
                 factory,
                 readers: Mutex::new(HashMap::new()),
             }),
@@ -186,8 +196,12 @@ impl SubagentList {
                 Owner::Run { .. } => None,
             })
             .collect();
+        // One listing and one clock for every owner in this pass, so a session
+        // and a run never expire against two different reads of the setting.
+        let listing = self.inner.state.subagent_listing();
+        let now = Utc::now();
         for job in done {
-            self.apply(job);
+            self.apply(job, listing, now);
         }
         for snapshot in snapshots {
             if !snapshot.subagents.is_empty() && !live.contains(&snapshot.id) {
@@ -249,8 +263,9 @@ impl SubagentList {
             .collect()
     }
 
-    /// Keep a job's reader for the next pass and write its owner's list.
-    fn apply(&self, job: Job) {
+    /// Keep a job's reader for the next pass and write its owner's list, read
+    /// under this pass's `listing` and `now`.
+    fn apply(&self, job: Job, listing: SubagentListing, now: DateTime<Utc>) {
         let Job {
             live,
             reader,
@@ -258,7 +273,7 @@ impl SubagentList {
         } = job;
         let list = snapshot
             .as_ref()
-            .map(|snapshot| listed(snapshot, live.key.process_started_at))
+            .map(|snapshot| listed(snapshot, live.key.process_started_at, listing, now))
             .unwrap_or_default();
         match &live.owner {
             Owner::Session(id) => write_list(&self.inner.sessions, id, &live.key, list),
@@ -439,13 +454,19 @@ fn clear_list(sessions: &SessionRegistry, id: &str) {
 }
 
 /// A session's list from its reading, in tree order: each listed first-layer
-/// subagent, oldest first, followed by its subtree.
-fn listed(snapshot: &ActivitySnapshot, process_started_at: DateTime<Utc>) -> Vec<SubagentSnapshot> {
+/// subagent, oldest first, followed by its subtree, under `listing` read at
+/// `now`.
+fn listed(
+    snapshot: &ActivitySnapshot,
+    process_started_at: DateTime<Utc>,
+    listing: SubagentListing,
+    now: DateTime<Utc>,
+) -> Vec<SubagentSnapshot> {
     let window = Window {
         process_started_at,
         last_typed_prompt_at: snapshot.last_typed_prompt_at,
     };
-    let kept = kept_ended(&snapshot.subagents, &window);
+    let kept = kept_ended(&snapshot.subagents, &window, listing, now);
     let mut list = Vec::new();
     for node in &snapshot.subagents {
         if runs(node) || kept.contains(node.agent_id.as_str()) {
@@ -460,29 +481,44 @@ fn runs(node: &SubagentNode) -> bool {
     matches!(node.state, AgentState::Running | AgentState::Queued) || node.children.iter().any(runs)
 }
 
-/// Whether `node` ended after both times of `window`.
-fn ended_in(node: &SubagentNode, window: &Window) -> bool {
+/// Whether `node` ended after `window`'s process start and, with no
+/// `keep_minutes` window, after its newest typed prompt too; a window replaces
+/// the prompt rule with how long ago it finished at `now`.
+fn ended_in(
+    node: &SubagentNode,
+    window: &Window,
+    listing: SubagentListing,
+    now: DateTime<Utc>,
+) -> bool {
     node.finished_at.is_some_and(|ended| {
         ended > window.process_started_at
-            && window
-                .last_typed_prompt_at
-                .is_none_or(|prompt| ended > prompt)
+            && match listing.keep_minutes {
+                None => window
+                    .last_typed_prompt_at
+                    .is_none_or(|prompt| ended > prompt),
+                Some(minutes) => ended + ChronoDuration::minutes(i64::from(minutes)) > now,
+            }
     })
 }
 
 /// The ids of the ended first-layer subagents that stay listed: the newest
-/// [`FINISHED_CAP`] that ended inside `window`.
-fn kept_ended<'a>(nodes: &'a [SubagentNode], window: &Window) -> HashSet<&'a str> {
+/// [`SubagentListing::finished_cap`] of those that ended inside `window`.
+fn kept_ended<'a>(
+    nodes: &'a [SubagentNode],
+    window: &Window,
+    listing: SubagentListing,
+    now: DateTime<Utc>,
+) -> HashSet<&'a str> {
     let mut ended: Vec<&SubagentNode> = nodes
         .iter()
-        .filter(|node| !runs(node) && ended_in(node, window))
+        .filter(|node| !runs(node) && ended_in(node, window, listing, now))
         .collect();
     ended.sort_by(|left, right| {
         (right.finished_at, &right.agent_id).cmp(&(left.finished_at, &left.agent_id))
     });
     ended
         .into_iter()
-        .take(FINISHED_CAP)
+        .take(listing.finished_cap as usize)
         .map(|node| node.agent_id.as_str())
         .collect()
 }

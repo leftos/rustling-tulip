@@ -286,6 +286,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_SESSION_FOLDERS,
     protocol::FEATURE_DETAILED_LOGGING,
     protocol::FEATURE_DEFAULT_SHELL,
+    protocol::FEATURE_SUBAGENT_LISTING,
     protocol::FEATURE_AGENT_USER_HOOKS,
     protocol::FEATURE_WEB_PUSH,
     protocol::FEATURE_UPLOAD_FILE,
@@ -463,6 +464,7 @@ pub(super) fn push_initial_state(
     // Sent to every client: Hello carries no client features, and an older
     // client's Unknown wrapper absorbs it.
     let _ = out_tx.send(super::settings::default_shell_message(&hub.state));
+    let _ = out_tx.send(super::settings::subagent_listing_message(&hub.state));
     hub.summarizer.send_status(out_tx);
     // Held across the send: every RemoteStatus broadcast is published under
     // the watch's write lock, so none can reach the state forwarder between
@@ -736,6 +738,42 @@ mod tests {
             }
         }
         assert_eq!(seen, Some(false), "a fresh daemon sends the switch as off");
+    }
+
+    #[test]
+    fn welcome_lists_subagent_listing_and_the_initial_state_carries_it() {
+        let (hub, _scratch) = test_hub("subagent-listing-initial");
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
+        );
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_SUBAGENT_LISTING)
+            ),
+            "{welcome:?}"
+        );
+
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        push_initial_state(&hub, &out_tx, "c1", false, true);
+        let mut seen = None;
+        while let Ok(message) = out_rx.try_recv() {
+            if let DaemonMessage::SubagentListing { listing } = message {
+                seen = Some(listing);
+            }
+        }
+        assert_eq!(
+            seen,
+            Some(protocol::SubagentListing::default()),
+            "a fresh daemon sends five and no window"
+        );
     }
 
     #[test]

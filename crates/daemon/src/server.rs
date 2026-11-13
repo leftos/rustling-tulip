@@ -372,6 +372,10 @@ pub enum StateEvent {
         id: String,
         command: Option<String>,
     },
+    /// Broadcast after every [`ClientMessage::SetSubagentListing`] that is
+    /// saved: the clamped rule as stored. Mirrors
+    /// [`protocol::DaemonMessage::SubagentListing`].
+    SubagentListing(protocol::SubagentListing),
     /// Broadcast after every [`ClientMessage::SetAgentSettings`] that is
     /// saved: every agent's stored settings. Mirrors
     /// [`protocol::DaemonMessage::AgentSettings`].
@@ -990,6 +994,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::SetDetailedLogging { .. }
         | ClientMessage::SetAgentCommand { .. }
         | ClientMessage::SetDefaultShell { .. }
+        | ClientMessage::SetSubagentListing { .. }
         | ClientMessage::ListShellChoices
         | ClientMessage::SetAgentSettings { .. }
         | ClientMessage::InspectWorktreesRoot
@@ -1361,7 +1366,7 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
         .dispatch_runs
         .as_ref()
         .map(|dispatch| Arc::clone(&dispatch.runs));
-    crate::subagents::SubagentList::new(Arc::clone(&hub.sessions), runs)
+    crate::subagents::SubagentList::new(Arc::clone(&hub.sessions), runs, Arc::clone(&hub.state))
         .spawn(client_count_rx.clone());
     // Keep an agent's user-settings hooks install pointing at a current shim.
     agent_hooks::spawn_startup_refresh(hub);

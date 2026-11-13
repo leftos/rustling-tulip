@@ -11,7 +11,7 @@ use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use protocol::{
-    AgentId, ContainerRef, DefaultShell, KeepAwakeMode, OptionValues, RepoEntry,
+    AgentId, ContainerRef, DefaultShell, KeepAwakeMode, OptionValues, RepoEntry, SubagentListing,
     SummarizerSettings, TabEntry, WorkspaceEntry,
 };
 use serde::de::DeserializeOwned;
@@ -108,6 +108,12 @@ pub struct PersistedState {
     /// Restart and Resume use the current choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_shell: Option<DefaultShell>,
+    /// Host setting: how many finished subagents a session lists at most and
+    /// how long each stays. A fresh install and a state.json without the field
+    /// get five and no window, today's rule. Read by the subagent list's every
+    /// pass through [`AppState::subagent_listing`].
+    #[serde(default)]
+    pub subagent_listing: SubagentListing,
 }
 
 /// One agent's stored launch command, both fields as the user typed them.
@@ -345,6 +351,27 @@ impl AppState {
     pub fn set_default_shell(&self, shell: Option<DefaultShell>) -> anyhow::Result<()> {
         self.mutate(|s| {
             s.default_shell = shell;
+        })
+    }
+
+    /// The stored finished-subagent listing rule; the defaults of
+    /// [`SubagentListing`] when `state.json` holds none. The subagent list
+    /// reads it on every pass.
+    pub fn subagent_listing(&self) -> SubagentListing {
+        self.with_persisted(|s| s.subagent_listing)
+    }
+
+    /// Persist the finished-subagent listing rule, clamped to what the daemon
+    /// honours: a cap of at most 50, and a window of 1 to 1440 minutes. A save
+    /// that cannot be written leaves the live rule exactly as it was.
+    pub fn set_subagent_listing(&self, listing: SubagentListing) -> anyhow::Result<()> {
+        let stored = SubagentListing {
+            finished_cap: listing.finished_cap.min(50),
+            keep_minutes: listing.keep_minutes.map(|minutes| minutes.clamp(1, 1440)),
+        };
+        self.try_mutate(|s| {
+            s.subagent_listing = stored;
+            Ok(())
         })
     }
 
@@ -1565,6 +1592,111 @@ mod tests {
         assert!(
             stored.get("default_shell").is_none(),
             "Automatic removes the key: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn subagent_listing_defaults_in_an_old_state_json() {
+        let old: PersistedState =
+            serde_json::from_str(r#"{"repos": [], "workspaces": []}"#).expect("parse old state");
+        assert_eq!(
+            old.subagent_listing,
+            SubagentListing {
+                finished_cap: 5,
+                keep_minutes: None,
+            },
+            "a state.json without the setting keeps five and no window"
+        );
+        let released: PersistedState =
+            serde_json::from_str(V0_5_1_STATE_JSON).expect("parse the v0.5.1 state.json");
+        assert_eq!(
+            released.subagent_listing,
+            SubagentListing::default(),
+            "the oldest release's state.json keeps today's rule"
+        );
+    }
+
+    #[test]
+    fn subagent_listing_round_trips_clamped() {
+        let dirs = scratch_dirs("subagent-listing");
+        assert!(!dirs.state_file.exists(), "scratch dir starts empty");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        assert_eq!(
+            state.subagent_listing(),
+            SubagentListing::default(),
+            "a fresh install keeps five and no window"
+        );
+        let kept = SubagentListing {
+            finished_cap: 12,
+            keep_minutes: Some(30),
+        };
+        state
+            .set_subagent_listing(kept)
+            .expect("persist the listing");
+        assert_eq!(state.subagent_listing(), kept);
+
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert_eq!(
+            reloaded.subagent_listing(),
+            kept,
+            "the rule survives a reload"
+        );
+
+        reloaded
+            .set_subagent_listing(SubagentListing {
+                finished_cap: 500,
+                keep_minutes: Some(0),
+            })
+            .expect("persist a clamp");
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("parse state.json");
+        assert_eq!(
+            stored["subagent_listing"],
+            serde_json::json!({"finished_cap": 50, "keep_minutes": 1}),
+            "the cap and the window are clamped"
+        );
+        assert_eq!(
+            reloaded.subagent_listing(),
+            SubagentListing {
+                finished_cap: 50,
+                keep_minutes: Some(1),
+            },
+            "the running state holds the clamped rule"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_failed_subagent_listing_save_changes_nothing() {
+        let dirs = scratch_dirs("subagent-listing-failed");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        let kept = SubagentListing {
+            finished_cap: 2,
+            keep_minutes: Some(30),
+        };
+        state.set_subagent_listing(kept).expect("persist the rule");
+        // A folder where state.json goes: the atomic write cannot replace it,
+        // the failing write the daemon_id and dispatch-run tests also use.
+        std::fs::remove_file(&dirs.state_file).expect("remove the written state.json");
+        std::fs::create_dir(&dirs.state_file).expect("a folder where state.json goes");
+
+        let err = state
+            .set_subagent_listing(SubagentListing {
+                finished_cap: 9,
+                keep_minutes: None,
+            })
+            .expect_err("a save that cannot be written fails");
+        assert!(
+            format!("{err:#}").contains("writing state.json"),
+            "the error names the write: {err:#}"
+        );
+        assert_eq!(
+            state.subagent_listing(),
+            kept,
+            "a refused save leaves the live rule as it was"
         );
 
         let _ = std::fs::remove_dir_all(&dirs.config);

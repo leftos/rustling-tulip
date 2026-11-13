@@ -75,6 +75,13 @@ pub const FEATURE_SESSION_FOLDERS: &str = "session_folders";
 /// only when the connected daemon lists it.
 pub const FEATURE_DEFAULT_SHELL: &str = "default_shell";
 
+/// `Welcome.features` entry: the daemon keeps a host setting for how a
+/// session's finished subagents are listed
+/// ([`ClientMessage::SetSubagentListing`], [`DaemonMessage::SubagentListing`]).
+/// A client offers the Finished subagents rows only when the connected daemon
+/// lists it.
+pub const FEATURE_SUBAGENT_LISTING: &str = "subagent_listing";
+
 /// `Welcome.features` entry: the daemon reads, installs and removes its hooks
 /// in an agent's user settings file ([`ClientMessage::GetAgentUserHooks`],
 /// [`ClientMessage::SetAgentUserHooks`], [`DaemonMessage::AgentUserHooks`]),
@@ -452,6 +459,33 @@ pub struct DefaultShell {
     /// other than `custom`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+}
+
+/// How a session's finished subagents are listed, as `state.json` stores it:
+/// how many are kept at most, and how long each stays. The daemon clamps both
+/// on every save: a cap of at most 50, and a window of 1 to 1440 minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentListing {
+    /// How many finished subagents one session lists at most, the most
+    /// recently finished first, 0 to 50. Running subagents always show. 5
+    /// when unset.
+    pub finished_cap: u32,
+    /// How many minutes a finished subagent stays listed past its finish, 1 to
+    /// 1440. `None` (the default) lists it while it ended after the host's
+    /// newest typed prompt and after its agent process's start; a number
+    /// replaces the typed-prompt rule with `finished_at` plus its minutes, and
+    /// still drops one that finished before the process started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_minutes: Option<u32>,
+}
+
+impl Default for SubagentListing {
+    fn default() -> Self {
+        Self {
+            finished_cap: 5,
+            keep_minutes: None,
+        }
+    }
 }
 
 /// How far an agent's user settings file holds the daemon's hooks, as
@@ -5453,6 +5487,18 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Set the host's finished-subagent listing: how many a session lists at
+    /// most and how long each stays. The daemon clamps both (a cap of at most
+    /// 50; a window of 1 to 1440 minutes), persists them in `state.json`, then
+    /// broadcasts [`DaemonMessage::SubagentListing`]. A failed save is refused
+    /// with an `Error` and changes nothing.
+    SetSubagentListing {
+        listing: SubagentListing,
+        /// Echoed only on the [`DaemonMessage::Error`] that refuses the
+        /// command; the broadcast that answers a stored one carries none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Ask for the host's default-shell choices; the daemon detects them and
     /// answers this client alone with [`DaemonMessage::ShellChoices`].
     ListShellChoices,
@@ -6737,6 +6783,12 @@ pub enum DaemonMessage {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
+    },
+    /// The host's finished-subagent listing rule, as stored. Sent once at
+    /// initial state and broadcast after every
+    /// [`ClientMessage::SetSubagentListing`].
+    SubagentListing {
+        listing: SubagentListing,
     },
     /// The host's default-shell choices, in the order the Settings row lists
     /// them, Automatic first and Custom last. Sent only to the client that
@@ -14074,6 +14126,116 @@ mod tests {
 
         assert_shell_choices_round_trip();
         assert_eq!(FEATURE_DEFAULT_SHELL, "default_shell");
+    }
+
+    #[test]
+    fn set_subagent_listing_round_trips() {
+        let set = ClientMessage::SetSubagentListing {
+            listing: SubagentListing {
+                finished_cap: 5,
+                keep_minutes: None,
+            },
+            request_id: None,
+        };
+        let json = serde_json::to_value(&set).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "set_subagent_listing", "listing": {"finished_cap": 5}}),
+            "keep_minutes and request_id are omitted when None"
+        );
+        let back: ClientMessage = serde_json::from_value(json).expect("deserialize");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::SetSubagentListing {
+                    listing: SubagentListing {
+                        finished_cap: 5,
+                        keep_minutes: None,
+                    },
+                    request_id: None,
+                }
+            ),
+            "{back:?}"
+        );
+
+        let set = ClientMessage::SetSubagentListing {
+            listing: SubagentListing {
+                finished_cap: 12,
+                keep_minutes: Some(30),
+            },
+            request_id: Some("r1".to_owned()),
+        };
+        let json = serde_json::to_value(&set).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "set_subagent_listing",
+                "listing": {"finished_cap": 12, "keep_minutes": 30},
+                "request_id": "r1",
+            })
+        );
+        let back: ClientMessage = serde_json::from_value(json).expect("deserialize");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::SetSubagentListing {
+                    listing: SubagentListing {
+                        finished_cap: 12,
+                        keep_minutes: Some(30),
+                    },
+                    request_id: Some(r),
+                } if r == "r1"
+            ),
+            "{back:?}"
+        );
+
+        let echo = DaemonMessage::SubagentListing {
+            listing: SubagentListing {
+                finished_cap: 2,
+                keep_minutes: Some(90),
+            },
+        };
+        let json = serde_json::to_value(&echo).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "subagent_listing",
+                "listing": {"finished_cap": 2, "keep_minutes": 90},
+            })
+        );
+        let back: DaemonMessage = serde_json::from_value(json).expect("deserialize");
+        assert!(
+            matches!(
+                back,
+                DaemonMessage::SubagentListing {
+                    listing: SubagentListing {
+                        finished_cap: 2,
+                        keep_minutes: Some(90),
+                    },
+                }
+            ),
+            "{back:?}"
+        );
+        assert_eq!(FEATURE_SUBAGENT_LISTING, "subagent_listing");
+    }
+
+    #[test]
+    fn subagent_listing_without_keep_minutes_decodes() {
+        let listing: SubagentListing =
+            serde_json::from_str(r#"{"finished_cap": 3}"#).expect("decode a listing");
+        assert_eq!(listing.finished_cap, 3);
+        assert_eq!(
+            listing.keep_minutes, None,
+            "no window keeps the typed-prompt rule"
+        );
+        assert_eq!(
+            SubagentListing::default(),
+            SubagentListing {
+                finished_cap: 5,
+                keep_minutes: None,
+            },
+            "a host with nothing stored keeps five and no window"
+        );
     }
 
     #[test]

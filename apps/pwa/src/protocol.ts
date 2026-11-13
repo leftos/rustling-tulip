@@ -81,6 +81,15 @@ export const FEATURE_SESSION_FOLDERS = "session_folders";
 export const FEATURE_DEFAULT_SHELL = "default_shell";
 
 /**
+ * `Welcome.features` entry: the daemon keeps a host setting for how a
+ * session's finished subagents are listed
+ * ([`ClientMessage::SetSubagentListing`], [`DaemonMessage::SubagentListing`]).
+ * A client offers the Finished subagents rows only when the connected daemon
+ * lists it.
+ */
+export const FEATURE_SUBAGENT_LISTING = "subagent_listing";
+
+/**
  * `Welcome.features` entry: the daemon reads, installs and removes its hooks
  * in an agent's user settings file ([`ClientMessage::GetAgentUserHooks`],
  * [`ClientMessage::SetAgentUserHooks`], [`DaemonMessage::AgentUserHooks`]),
@@ -383,6 +392,28 @@ export interface DefaultShell {
    * other than `custom`.
    */
   command?: string | null;
+}
+
+/**
+ * How a session's finished subagents are listed, as `state.json` stores it:
+ * how many are kept at most, and how long each stays. The daemon clamps both
+ * on every save: a cap of at most 50, and a window of 1 to 1440 minutes.
+ */
+export interface SubagentListing {
+  /**
+   * How many finished subagents one session lists at most, the most
+   * recently finished first, 0 to 50. Running subagents always show. 5
+   * when unset.
+   */
+  finished_cap: number;
+  /**
+   * How many minutes a finished subagent stays listed past its finish, 1 to
+   * 1440. `None` (the default) lists it while it ended after the host's
+   * newest typed prompt and after its agent process's start; a number
+   * replaces the typed-prompt rule with `finished_at` plus its minutes, and
+   * still drops one that finished before the process started.
+   */
+  keep_minutes?: number | null;
 }
 
 /**
@@ -4238,6 +4269,17 @@ export type ClientMessage =
    */
   | { type: "set_default_shell"; id: string; command?: string | null; request_id?: string | null }
   /**
+   * Set the host's finished-subagent listing: how many a session lists at
+   * most and how long each stays. The daemon clamps both (a cap of at most
+   * 50; a window of 1 to 1440 minutes), persists them in `state.json`, then
+   * broadcasts [`DaemonMessage::SubagentListing`]. A failed save is refused
+   * with an `Error` and changes nothing.
+   *
+   * `request_id`: Echoed only on the [`DaemonMessage::Error`] that refuses the
+   * command; the broadcast that answers a stored one carries none.
+   */
+  | { type: "set_subagent_listing"; listing: SubagentListing; request_id?: string | null }
+  /**
    * Ask for the host's default-shell choices; the daemon detects them and
    * answers this client alone with [`DaemonMessage::ShellChoices`].
    */
@@ -5346,6 +5388,12 @@ export type DaemonMessage =
    * state and broadcast after every [`ClientMessage::SetDefaultShell`].
    */
   | { type: "default_shell"; id: string; command?: string | null }
+  /**
+   * The host's finished-subagent listing rule, as stored. Sent once at
+   * initial state and broadcast after every
+   * [`ClientMessage::SetSubagentListing`].
+   */
+  | { type: "subagent_listing"; listing: SubagentListing }
   /**
    * The host's default-shell choices, in the order the Settings row lists
    * them, Automatic first and Custom last. Sent only to the client that

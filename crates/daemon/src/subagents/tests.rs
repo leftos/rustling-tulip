@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use agent_api::{ActivitySnapshot, ActivitySource, SubagentNode};
 use chrono::{DateTime, Duration, TimeZone as _, Utc};
-use protocol::{AgentState, SessionMember, SessionMode, SessionStatus};
+use protocol::{AgentState, SessionMember, SessionMode, SessionStatus, SubagentListing};
 use tokio::sync::{broadcast, watch};
 
 use super::{Job, SubagentList, TICK, live_sessions};
@@ -14,6 +14,7 @@ use crate::dashboard::test_support::Script;
 use crate::dispatch_runs::{DispatchRunEvent, DispatchRuns};
 use crate::server::test_support::{ScratchDir, idle_record, scratch_dirs};
 use crate::session::{SessionEvent, SessionRegistry};
+use crate::state::AppState;
 use crate::sync::lock;
 
 /// The host session's conversation, which the script reads by.
@@ -56,6 +57,14 @@ fn finished(id: &str, minute: i64) -> SubagentNode {
     node(id, AgentState::Finished, Some(minute))
 }
 
+/// A subagent `id` that finished at `at`, for the tests that pin a keep window
+/// against this machine's clock.
+fn finished_at(id: &str, at: DateTime<Utc>) -> SubagentNode {
+    let mut node = finished(id, 0);
+    node.finished_at = Some(at);
+    node
+}
+
 /// A reading holding `subagents`, its newest typed prompt at `prompt` (a
 /// minute) when that is given.
 fn reading(subagents: Vec<SubagentNode>, prompt: Option<i64>) -> ActivitySnapshot {
@@ -72,6 +81,8 @@ fn reading(subagents: Vec<SubagentNode>, prompt: Option<i64>) -> ActivitySnapsho
 struct Fixture {
     _scratch: ScratchDir,
     sessions: Arc<SessionRegistry>,
+    /// The host settings the list's rule reads.
+    state: Arc<AppState>,
     script: Script,
     list: SubagentList,
     events: broadcast::Receiver<SessionEvent>,
@@ -89,7 +100,9 @@ fn fixture_with(
     factory: impl FnOnce(&Script) -> ReaderFactory,
 ) -> Fixture {
     let scratch = ScratchDir::new(tag);
-    let sessions = SessionRegistry::new(scratch_dirs(scratch.path(), None));
+    let dirs = scratch_dirs(scratch.path(), None);
+    let sessions = SessionRegistry::new(dirs.clone());
+    let state = Arc::new(AppState::load_or_default(&dirs).expect("load the scratch state"));
     let mut record = idle_record("s1");
     record.conversation_id = Some(CONVERSATION.to_owned());
     record.started_at = at(0);
@@ -101,11 +114,17 @@ fn fixture_with(
     }];
     sessions.insert(record);
     let script = Script::default();
-    let list = SubagentList::with_reader_factory(Arc::clone(&sessions), runs, factory(&script));
+    let list = SubagentList::with_reader_factory(
+        Arc::clone(&sessions),
+        runs,
+        Arc::clone(&state),
+        factory(&script),
+    );
     let events = sessions.subscribe();
     Fixture {
         _scratch: scratch,
         sessions,
+        state,
         script,
         list,
         events,
@@ -140,6 +159,20 @@ impl Fixture {
 
     fn ids(&self) -> Vec<String> {
         self.listed().into_iter().map(|(id, _, _)| id).collect()
+    }
+
+    /// Store `listing` as the host's finished-subagent rule, as a Settings
+    /// Apply does.
+    fn set_listing(&self, listing: SubagentListing) {
+        self.state
+            .set_subagent_listing(listing)
+            .expect("persist the listing");
+    }
+
+    /// Apply `job`'s write as a pass would, under the host's current rule.
+    fn apply(&self, job: Job) {
+        self.list
+            .apply(job, self.state.subagent_listing(), Utc::now());
     }
 }
 
@@ -343,7 +376,7 @@ async fn a_reading_for_a_stopped_session_is_not_written() {
         .update("s1", |record| record.status = SessionStatus::Stopped);
     fx.updates();
 
-    fx.list.apply(job);
+    fx.apply(job);
 
     assert_eq!(fx.updates(), Vec::<Vec<_>>::new(), "no update is sent");
     assert_eq!(fx.ids(), vec!["a1"], "the last live reading stays");
@@ -363,7 +396,7 @@ async fn a_reading_for_an_old_conversation_is_not_written() {
     });
     fx.updates();
 
-    fx.list.apply(job);
+    fx.apply(job);
 
     assert_eq!(fx.updates(), Vec::<Vec<_>>::new(), "no update is sent");
     assert_eq!(fx.ids(), vec!["a1"], "the old conversation's list stays");
@@ -441,6 +474,140 @@ async fn no_typed_prompt_keeps_finished_subagents_listed_up_to_five() {
     fx.list.pass().await;
 
     assert_eq!(fx.ids(), vec!["a2", "a3", "a4", "a5", "a6"]);
+}
+
+#[tokio::test]
+async fn a_cap_of_two_keeps_the_two_newest() {
+    let fx = fixture("subagents-cap-two");
+    fx.set_listing(SubagentListing {
+        finished_cap: 2,
+        keep_minutes: None,
+    });
+    let five: Vec<SubagentNode> = (1..=5)
+        .map(|minute| finished(&format!("a{minute}"), minute))
+        .collect();
+    fx.script.set(CONVERSATION, reading(five, Some(0)));
+
+    fx.list.pass().await;
+
+    assert_eq!(
+        fx.ids(),
+        vec!["a4", "a5"],
+        "the two most recent finishes stay, oldest first"
+    );
+}
+
+#[tokio::test]
+async fn a_cap_of_zero_lists_no_finished_subagent_but_keeps_running_ones() {
+    let fx = fixture("subagents-cap-zero");
+    fx.set_listing(SubagentListing {
+        finished_cap: 0,
+        keep_minutes: None,
+    });
+    fx.script.set(
+        CONVERSATION,
+        reading(vec![running("a1"), finished("a2", 3)], None),
+    );
+
+    fx.list.pass().await;
+
+    assert_eq!(
+        fx.listed(),
+        vec![row("a1", 1, AgentState::Running)],
+        "a cap of zero hides every finish and no running subagent"
+    );
+}
+
+#[tokio::test]
+async fn a_cap_above_five_keeps_more() {
+    let fx = fixture("subagents-cap-above-five");
+    fx.set_listing(SubagentListing {
+        finished_cap: 8,
+        keep_minutes: None,
+    });
+    let eight: Vec<SubagentNode> = (1..=8)
+        .map(|minute| finished(&format!("a{minute}"), minute))
+        .collect();
+    fx.script.set(CONVERSATION, reading(eight, None));
+
+    fx.list.pass().await;
+
+    let all: Vec<String> = (1..=8).map(|minute| format!("a{minute}")).collect();
+    assert_eq!(fx.ids(), all, "a cap above five keeps every one that ended");
+}
+
+#[tokio::test]
+async fn keep_minutes_keeps_a_finished_subagent_past_a_newer_typed_prompt() {
+    let fx = fixture("subagents-keep-prompt");
+    fx.set_listing(SubagentListing {
+        finished_cap: 5,
+        keep_minutes: Some(30),
+    });
+    let mut snapshot = reading(
+        vec![finished_at("a1", Utc::now() - Duration::minutes(1))],
+        None,
+    );
+    snapshot.last_typed_prompt_at = Some(Utc::now());
+    fx.script.set(CONVERSATION, snapshot);
+
+    fx.list.pass().await;
+
+    assert_eq!(
+        fx.listed(),
+        vec![row("a1", 1, AgentState::Finished)],
+        "a window outlasts a typed prompt newer than the finish"
+    );
+}
+
+#[tokio::test]
+async fn keep_minutes_drops_a_finished_subagent_once_its_minutes_pass() {
+    let fx = fixture("subagents-keep-expired");
+    fx.set_listing(SubagentListing {
+        finished_cap: 5,
+        keep_minutes: Some(30),
+    });
+    fx.script.set(
+        CONVERSATION,
+        reading(
+            vec![finished_at("a1", Utc::now() - Duration::minutes(31))],
+            None,
+        ),
+    );
+
+    fx.list.pass().await;
+
+    assert_eq!(
+        fx.ids(),
+        Vec::<String>::new(),
+        "a finish past its window has left the list"
+    );
+}
+
+#[tokio::test]
+async fn keep_minutes_still_drops_one_finished_before_the_process_start() {
+    let fx = fixture("subagents-keep-before-start");
+    fx.set_listing(SubagentListing {
+        finished_cap: 5,
+        keep_minutes: Some(1440),
+    });
+    let started = Utc::now() - Duration::hours(1);
+    fx.sessions
+        .update("s1", |record| record.started_at = started);
+    fx.script.set(
+        CONVERSATION,
+        reading(
+            vec![finished_at("old", started - Duration::minutes(30))],
+            None,
+        ),
+    );
+
+    fx.list.pass().await;
+
+    assert_eq!(
+        fx.ids(),
+        Vec::<String>::new(),
+        "a restart drops its list however wide the window"
+    );
 }
 
 #[tokio::test]
@@ -589,6 +756,35 @@ async fn a_running_subagent_of_a_run_reaches_its_dispatch_run_updated() {
         .cloned()
         .expect("a reader was built for the run");
     assert_eq!(built.folder, PathBuf::from("C:/work/run"));
+}
+
+#[tokio::test]
+async fn a_run_subagent_follows_the_hosts_cap() {
+    let mut rx = run_fixture("subagents-run-cap");
+    rx.fx.set_listing(SubagentListing {
+        finished_cap: 1,
+        keep_minutes: None,
+    });
+    rx.list_run(Some(RUN_CONVERSATION));
+    let started = Utc::now();
+    rx.fx.script.set(
+        RUN_CONVERSATION,
+        reading(
+            vec![
+                finished_at("r1", started + Duration::minutes(1)),
+                finished_at("r2", started + Duration::minutes(2)),
+            ],
+            None,
+        ),
+    );
+
+    rx.fx.list.pass().await;
+
+    assert_eq!(
+        rx.run_listed(),
+        vec![row("r2", 1, AgentState::Finished)],
+        "the host's cap keeps only the newest finish of a dispatch run too"
+    );
 }
 
 #[tokio::test]

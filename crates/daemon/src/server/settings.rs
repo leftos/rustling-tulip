@@ -13,7 +13,7 @@ use crate::{user_env, vscode};
 use anyhow::anyhow;
 use protocol::{
     AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, DefaultShell, KeepAwakeMode,
-    OptionValues, VscodeWorkspaceSuggestion, error_codes,
+    OptionValues, SubagentListing, VscodeWorkspaceSuggestion, error_codes,
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -179,6 +179,12 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             command,
             request_id,
         } => answer_refusal(out_tx, set_default_shell(hub, &id, command), request_id)?,
+        ClientMessage::SetSubagentListing {
+            listing,
+            request_id,
+        } => {
+            answer_refusal(out_tx, set_subagent_listing(hub, listing), request_id)?;
+        }
         ClientMessage::ListShellChoices => {
             // Detection searches PATH and probes files, so it runs off the
             // async workers; the reply goes to this requester alone.
@@ -364,6 +370,20 @@ fn set_default_shell(hub: &Hub, id: &str, command: Option<String>) -> anyhow::Re
     Ok(())
 }
 
+/// Persist the host's finished-subagent listing rule, clamped to what the
+/// daemon honours, and broadcast the stored value.
+fn set_subagent_listing(hub: &Hub, listing: SubagentListing) -> anyhow::Result<()> {
+    hub.state.set_subagent_listing(listing)?;
+    let listing = hub.state.subagent_listing();
+    info!(
+        finished_cap = listing.finished_cap,
+        keep_minutes = ?listing.keep_minutes,
+        "subagent listing changed"
+    );
+    let _ = hub.state_events.send(StateEvent::SubagentListing(listing));
+    Ok(())
+}
+
 /// Refuse a custom shell command that holds a control character or does not
 /// split into shell words (an unclosed quote).
 fn check_shell_command(command: &str) -> Result<(), LaunchRefusal> {
@@ -401,6 +421,13 @@ fn effective_default_shell(state: &AppState) -> (String, Option<String>) {
 pub(super) fn default_shell_message(state: &AppState) -> DaemonMessage {
     let (id, command) = effective_default_shell(state);
     DaemonMessage::DefaultShell { id, command }
+}
+
+/// The [`DaemonMessage::SubagentListing`] echo of the stored rule.
+pub(super) fn subagent_listing_message(state: &AppState) -> DaemonMessage {
+    DaemonMessage::SubagentListing {
+        listing: state.subagent_listing(),
+    }
 }
 
 /// Validate `options` against `agent`'s option schema, persist them as the
@@ -1497,6 +1524,79 @@ mod tests {
             next_default_shell(&mut events).await,
             ("auto".to_owned(), None)
         );
+    }
+
+    /// The next subagent-listing broadcast on the state stream.
+    async fn next_subagent_listing(rx: &mut broadcast::Receiver<StateEvent>) -> SubagentListing {
+        let next = async {
+            loop {
+                let evt = rx.recv().await.expect("the state broadcast stays open");
+                if let StateEvent::SubagentListing(listing) = evt {
+                    return listing;
+                }
+            }
+        };
+        tokio::time::timeout(HANG_GUARD, next)
+            .await
+            .expect("hung: the change was never broadcast")
+    }
+
+    #[tokio::test]
+    async fn set_subagent_listing_clamps_persists_and_broadcasts() {
+        let (hub, _scratch) = test_hub("subagent-listing-save");
+        let mut events = hub.state_events.subscribe();
+        assert_eq!(
+            hub.state.subagent_listing(),
+            SubagentListing::default(),
+            "a fresh host keeps five and no window"
+        );
+
+        let kept = SubagentListing {
+            finished_cap: 2,
+            keep_minutes: Some(30),
+        };
+        let sent = dispatch_err(
+            &hub,
+            ClientMessage::SetSubagentListing {
+                listing: kept,
+                request_id: None,
+            },
+        )
+        .await;
+        assert_eq!(sent, None, "the rule is accepted");
+        assert_eq!(
+            hub.state.subagent_listing(),
+            kept,
+            "a rule within range is stored as sent"
+        );
+        let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+        assert_eq!(
+            reloaded.subagent_listing(),
+            kept,
+            "the rule reached state.json"
+        );
+        assert_eq!(next_subagent_listing(&mut events).await, kept);
+
+        let sent = dispatch_err(
+            &hub,
+            ClientMessage::SetSubagentListing {
+                listing: SubagentListing {
+                    finished_cap: 90,
+                    keep_minutes: Some(5000),
+                },
+                request_id: None,
+            },
+        )
+        .await;
+        assert_eq!(sent, None, "an out-of-range rule is clamped, not refused");
+        let clamped = SubagentListing {
+            finished_cap: 50,
+            keep_minutes: Some(1440),
+        };
+        assert_eq!(hub.state.subagent_listing(), clamped);
+        let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+        assert_eq!(reloaded.subagent_listing(), clamped);
+        assert_eq!(next_subagent_listing(&mut events).await, clamped);
     }
 
     #[tokio::test]
