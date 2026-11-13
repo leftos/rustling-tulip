@@ -4,7 +4,7 @@
 use super::Hub;
 use super::connection::{AuthKind, ConnCtx};
 use crate::push::state::Loaded;
-use crate::push::store::{Channel, Subscription};
+use crate::push::store::{ApnsEnvironment, Channel, Subscription};
 use protocol::{ClientMessage, DaemonMessage, PushRegistration, Secret, error_codes};
 use tracing::{info, warn};
 
@@ -196,8 +196,13 @@ fn confirm(
     Ok(())
 }
 
-/// The subscription a `RegisterPush` asks for, checked: the endpoint is
-/// `https` to a known push service and the keys decode.
+/// The longest relay token a registration may carry.
+const MAX_RELAY_TOKEN: usize = 512;
+
+/// The subscription a `RegisterPush` asks for, checked: a Web Push
+/// subscription's endpoint is `https` to a known push service, a relay
+/// channel's token and environment are as the relay addresses them, and
+/// every kind's keys decode.
 fn subscription(
     registration: &PushRegistration,
     needs_you: bool,
@@ -205,28 +210,31 @@ fn subscription(
     hold_at_desk: bool,
     policy: crate::push::send::PushPolicy,
 ) -> Result<Subscription, Refusal> {
-    let PushRegistration::WebPush {
-        endpoint,
-        p256dh,
-        auth,
-    } = registration
-    else {
-        return Err(Refusal::invalid(
-            "this daemon does not know that kind of push registration",
-        ));
+    let channel = match registration {
+        PushRegistration::WebPush {
+            endpoint,
+            p256dh,
+            auth,
+        } => web_push_channel(endpoint, p256dh, auth, policy)?,
+        PushRegistration::Apns {
+            token,
+            environment,
+            p256dh,
+            auth,
+        } => apns_channel(token, *environment, p256dh, auth)?,
+        PushRegistration::Fcm {
+            token,
+            p256dh,
+            auth,
+        } => fcm_channel(token, p256dh, auth)?,
+        PushRegistration::Unknown => {
+            return Err(Refusal::invalid(
+                "this daemon does not know that kind of push registration",
+            ));
+        }
     };
-    // The top-level messages only: they name the host or the key at fault,
-    // never the endpoint or the secret itself.
-    crate::push::send::check_endpoint(&endpoint.0, policy)
-        .map_err(|err| Refusal::invalid(err.to_string()))?;
-    push_crypto::Subscriber::from_b64url(p256dh, &auth.0)
-        .map_err(|err| Refusal::invalid(err.to_string()))?;
     Ok(Subscription {
-        channel: Channel::WebPush {
-            endpoint: endpoint.0.clone(),
-            p256dh: p256dh.clone(),
-            auth: auth.0.clone(),
-        },
+        channel,
         needs_you,
         finished,
         hold_at_desk,
@@ -234,9 +242,87 @@ fn subscription(
     })
 }
 
+/// A Web Push subscription's channel: the endpoint is `https` to a known
+/// push service and the keys decode. The refusals name the host or the key at
+/// fault, never the endpoint or the secret itself.
+fn web_push_channel(
+    endpoint: &Secret,
+    p256dh: &str,
+    auth: &Secret,
+    policy: crate::push::send::PushPolicy,
+) -> Result<Channel, Refusal> {
+    crate::push::send::check_endpoint(&endpoint.0, policy)
+        .map_err(|err| Refusal::invalid(err.to_string()))?;
+    push_crypto::Subscriber::from_b64url(p256dh, &auth.0)
+        .map_err(|err| Refusal::invalid(err.to_string()))?;
+    Ok(Channel::WebPush {
+        endpoint: endpoint.0.clone(),
+        p256dh: p256dh.to_owned(),
+        auth: auth.0.clone(),
+    })
+}
+
+/// An APNs channel: the token is hexadecimal and its environment is one APNs
+/// has, and the keys decode.
+fn apns_channel(
+    token: &Secret,
+    environment: protocol::ApnsEnvironment,
+    p256dh: &str,
+    auth: &Secret,
+) -> Result<Channel, Refusal> {
+    check_relay_token(&token.0)?;
+    if !token.0.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Refusal::invalid("the APNs push token is not hexadecimal"));
+    }
+    let environment = match environment {
+        protocol::ApnsEnvironment::Production => ApnsEnvironment::Production,
+        protocol::ApnsEnvironment::Sandbox => ApnsEnvironment::Sandbox,
+        protocol::ApnsEnvironment::Unknown => {
+            return Err(Refusal::invalid(
+                "this daemon does not know that APNs environment",
+            ));
+        }
+    };
+    push_crypto::Subscriber::from_b64url(p256dh, &auth.0)
+        .map_err(|err| Refusal::invalid(err.to_string()))?;
+    Ok(Channel::Apns {
+        token: token.0.clone(),
+        environment,
+        p256dh: p256dh.to_owned(),
+        auth: auth.0.clone(),
+    })
+}
+
+/// An FCM channel: the token is any non-empty one within the length bound,
+/// and the keys decode.
+fn fcm_channel(token: &Secret, p256dh: &str, auth: &Secret) -> Result<Channel, Refusal> {
+    check_relay_token(&token.0)?;
+    push_crypto::Subscriber::from_b64url(p256dh, &auth.0)
+        .map_err(|err| Refusal::invalid(err.to_string()))?;
+    Ok(Channel::Fcm {
+        token: token.0.clone(),
+        p256dh: p256dh.to_owned(),
+        auth: auth.0.clone(),
+    })
+}
+
+/// A relay token is checked before it is stored: never empty and never over
+/// [`MAX_RELAY_TOKEN`] characters. The refusals name the fault, never the
+/// token.
+fn check_relay_token(token: &str) -> Result<(), Refusal> {
+    if token.is_empty() {
+        return Err(Refusal::invalid("the push token is empty"));
+    }
+    if token.chars().count() > MAX_RELAY_TOKEN {
+        return Err(Refusal::invalid("the push token is over 512 characters"));
+    }
+    Ok(())
+}
+
 /// `device_id`'s push status: the daemon's key and the device's
 /// subscription, or no endpoint and both switches off without one. Only a
-/// Web Push subscription has an endpoint; a relay channel has none yet.
+/// Web Push subscription has an endpoint; a relay channel answers its
+/// `device_token` instead, which the phone app compares with its own token.
 fn push_status(loaded: &Loaded, device_id: &str, request_id: &str) -> DaemonMessage {
     let stored = loaded.subs.get(device_id);
     DaemonMessage::PushStatus {
@@ -245,7 +331,10 @@ fn push_status(loaded: &Loaded, device_id: &str, request_id: &str) -> DaemonMess
             Channel::WebPush { endpoint, .. } => Some(Secret(endpoint.clone())),
             Channel::Apns { .. } | Channel::Fcm { .. } => None,
         }),
-        device_token: None,
+        device_token: stored.and_then(|sub| match &sub.channel {
+            Channel::Apns { token, .. } | Channel::Fcm { token, .. } => Some(Secret(token.clone())),
+            Channel::WebPush { .. } => None,
+        }),
         needs_you: stored.is_some_and(|sub| sub.needs_you),
         finished: stored.is_some_and(|sub| sub.finished),
         hold_at_desk: stored.is_none_or(|sub| sub.hold_at_desk),
@@ -313,6 +402,76 @@ mod tests {
     fn register(endpoint: &str) -> ClientMessage {
         let (p256dh, auth) = keys();
         register_with(endpoint, p256dh, auth)
+    }
+
+    fn register_apns(
+        token: &str,
+        environment: protocol::ApnsEnvironment,
+        p256dh: String,
+        auth: String,
+    ) -> ClientMessage {
+        ClientMessage::RegisterPush {
+            registration: protocol::PushRegistration::Apns {
+                token: protocol::Secret(token.to_owned()),
+                environment,
+                p256dh,
+                auth: protocol::Secret(auth),
+            },
+            needs_you: true,
+            finished: false,
+            hold_at_desk: true,
+            request_id: "p2".to_owned(),
+        }
+    }
+
+    /// An APNs registration for `token` in the production environment, with a
+    /// fresh key pair.
+    fn apns_with(token: &str) -> ClientMessage {
+        let (p256dh, auth) = keys();
+        register_apns(token, protocol::ApnsEnvironment::Production, p256dh, auth)
+    }
+
+    /// An FCM registration for `token`, with a fresh key pair.
+    fn fcm_with(token: &str) -> ClientMessage {
+        let (p256dh, auth) = keys();
+        ClientMessage::RegisterPush {
+            registration: protocol::PushRegistration::Fcm {
+                token: protocol::Secret(token.to_owned()),
+                p256dh,
+                auth: protocol::Secret(auth),
+            },
+            needs_you: true,
+            finished: false,
+            hold_at_desk: true,
+            request_id: "p2".to_owned(),
+        }
+    }
+
+    /// The reply's `device_token`, failing on anything but `PushStatus`.
+    fn token_of(reply: &DaemonMessage, want_id: &str) -> Option<String> {
+        match reply {
+            DaemonMessage::PushStatus {
+                device_token,
+                request_id,
+                ..
+            } => {
+                assert_eq!(request_id.as_deref(), Some(want_id), "{reply:?}");
+                device_token.as_ref().map(|token| token.0.clone())
+            }
+            other => panic!("want PushStatus, got {other:?}"),
+        }
+    }
+
+    /// The channel stored for `device_id`, failing when none is stored.
+    fn stored_channel(
+        scratch: &crate::server::test_support::ScratchDir,
+        device_id: &str,
+    ) -> Channel {
+        SubscriptionStore::load(&push_dir(scratch).join(SUBSCRIPTIONS_FILE))
+            .get(device_id)
+            .expect("the device's subscription is stored")
+            .channel
+            .clone()
     }
 
     /// The reply's `PushStatus` fields, failing on anything else.
@@ -532,6 +691,134 @@ mod tests {
         );
         assert!(!message.contains(&auth), "{message}");
         assert!(!message.contains("send/abc"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn an_apns_registration_is_stored_and_answered_with_its_token() {
+        let (hub, scratch) = test_hub("push-apns");
+        let device_id = pair(&hub);
+        // The longest token the check accepts: 512 hexadecimal characters.
+        let token = "a0".repeat(256);
+
+        let reply = dispatch_one_as(&hub, apns_with(&token), &tailnet()).await;
+
+        assert_eq!(token_of(&reply, "p2").as_deref(), Some(token.as_str()));
+        let echoed = status(&reply, "p2");
+        assert_eq!(echoed.1, None, "an APNs channel has no endpoint");
+        assert_eq!((echoed.2, echoed.3), (true, false), "the switches echo");
+        assert!(
+            matches!(
+                stored_channel(&scratch, &device_id),
+                Channel::Apns {
+                    token: stored,
+                    environment: ApnsEnvironment::Production,
+                    ..
+                } if stored == token
+            ),
+            "the channel is stored as it came"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_fcm_registration_is_stored_and_answered_with_its_token() {
+        let (hub, scratch) = test_hub("push-fcm");
+        let device_id = pair(&hub);
+        let token = "fcm-token-1".to_owned();
+
+        let reply = dispatch_one_as(&hub, fcm_with(&token), &tailnet()).await;
+
+        assert_eq!(token_of(&reply, "p2").as_deref(), Some(token.as_str()));
+        assert_eq!(
+            status(&reply, "p2").1,
+            None,
+            "an FCM channel has no endpoint"
+        );
+        assert!(matches!(
+            stored_channel(&scratch, &device_id),
+            Channel::Fcm { token: stored, .. } if stored == token
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_replacement_apns_token_replaces_the_subscription() {
+        let (hub, scratch) = test_hub("push-apns-replace");
+        let device_id = pair(&hub);
+        let first = "a1b2c3d4";
+        let second = "d4c3b2a1";
+        status(
+            &dispatch_one_as(&hub, apns_with(first), &tailnet()).await,
+            "p2",
+        );
+
+        let reply = dispatch_one_as(&hub, apns_with(second), &tailnet()).await;
+
+        assert_eq!(token_of(&reply, "p2").as_deref(), Some(second));
+        assert_eq!(
+            stored_ids(&scratch),
+            vec![device_id.clone()],
+            "one entry per device"
+        );
+        assert!(
+            matches!(
+                stored_channel(&scratch, &device_id),
+                Channel::Apns { token: stored, .. } if stored == second
+            ),
+            "the new token is the one stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_apns_token_is_refused_without_naming_it() {
+        let (hub, scratch) = test_hub("push-apns-bad-token");
+        pair(&hub);
+        for (token, want) in [
+            (String::new(), "the push token is empty"),
+            ("a".repeat(513), "the push token is over 512 characters"),
+            ("zz12".to_owned(), "the APNs push token is not hexadecimal"),
+        ] {
+            let message = refused(
+                &dispatch_one_as(&hub, apns_with(&token), &tailnet()).await,
+                error_codes::INVALID_REQUEST,
+                "p2",
+            );
+            assert_eq!(message, want);
+            if !token.is_empty() {
+                assert!(!message.contains(&token), "{message}");
+            }
+        }
+        assert!(stored_ids(&scratch).is_empty(), "nothing is stored");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_apns_environment_is_refused() {
+        let (hub, scratch) = test_hub("push-apns-unknown-environment");
+        pair(&hub);
+        let (p256dh, auth) = keys();
+        let msg = register_apns("a1b2c3", protocol::ApnsEnvironment::Unknown, p256dh, auth);
+
+        let message = refused(
+            &dispatch_one_as(&hub, msg, &tailnet()).await,
+            error_codes::INVALID_REQUEST,
+            "p2",
+        );
+
+        assert_eq!(message, "this daemon does not know that APNs environment");
+        assert!(stored_ids(&scratch).is_empty(), "nothing is stored");
+    }
+
+    #[tokio::test]
+    async fn an_fcm_token_need_not_be_hex() {
+        let (hub, scratch) = test_hub("push-fcm-non-hex");
+        let device_id = pair(&hub);
+        let token = "fcm:token-with-dashes_1".to_owned();
+
+        let reply = dispatch_one_as(&hub, fcm_with(&token), &tailnet()).await;
+
+        assert_eq!(token_of(&reply, "p2").as_deref(), Some(token.as_str()));
+        assert!(matches!(
+            stored_channel(&scratch, &device_id),
+            Channel::Fcm { token: stored, .. } if stored == token
+        ));
     }
 
     #[tokio::test]

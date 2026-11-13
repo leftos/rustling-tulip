@@ -163,7 +163,7 @@ Each step is one brief. Daemon steps that touch `crates/protocol/src/lib.rs` run
   - Files: `crates/daemon/src/push/store.rs`, `crates/daemon/src/push/state.rs`, `crates/daemon/src/push/trigger.rs`, `crates/daemon/src/server/push.rs`, `crates/daemon/src/server/pairing.rs`, `docs/on-disk.md`.
   - Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/pr3-store.log --timeout 1800 --slot heavy -- cargo nextest run -p daemon --cargo-profile test-release push::` (a `subscriptions.json` in the `v0.12` shape loads and saves back in the same shape, an `apns` subscription round trips, a late gone for an old token never deletes a new one, `Debug` redacts the token).
   - Waits on: PR.2. Needs the owner: no.
-- [ ] **PR.4 Accept `apns` and `fcm` registrations from a paired phone.** The handler checks the token and environment, stores the channel, and fills `PushStatus.device_token`.
+- [x] **PR.4 Accept `apns` and `fcm` registrations from a paired phone.** The handler checks the token and environment, stores the channel, and fills `PushStatus.device_token`.
   - Files: `crates/daemon/src/server/push.rs`, `crates/daemon/src/push/store.rs`.
   - Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/pr4-handler.log --timeout 1800 --slot heavy -- cargo nextest run -p daemon --cargo-profile test-release server::push` (stored and answered, a replacement token replaces, an empty, overlong or non-hex APNs token and an `Unknown` environment are `invalid_request` with no token in the message, a loopback connection is still refused).
   - Waits on: PR.3. Needs the owner: no.
