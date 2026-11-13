@@ -137,6 +137,10 @@ The views:
 - `spawn-hosts`: the spawn dialog over those two hosts with its closed Target field.
 - `open-shell`: the Open a shell dialog with a folder path too long for its field, scrolled to the caret at its end.
 - `safe-start`: the prompt a start after a crashed one raises, "The last start crashed" with Open tabs and Start without tabs, over the window with no tab drawn.
+- `exited`: the main view's tab with a stopped session's overlay over its bottom pane's terminal, "Session exited (code 3)" with Restart, New session… and Remove pane.
+- `abandoned`: the same pane over a session a daemon restart left behind, "Session abandoned during daemon restart." with "Last prompt: fix the flaky update test", Resume and Dismiss, and its abandoned tag in the sidebar.
+- `empty-main`: no tab open: the main area's empty state over the usual sidebar, offering Spawn a session and Open shell.
+- `first-connect`: the layout chooser a first connect over active sessions raises, over the bare "No tab open" area a client awaiting its layout shows (with no tab list, no Spawn a session or Open shell button draws behind it, and the sidebar leaves carry no tab pill).
 - `dispatch`: the tulip tab split with a pane following a working dispatch run (header with its `DS` chip and Stop, stats line, the run's transcript: answers, a tool call with its output and one still running), its `DS` leaf under the tulip repo, one run nested under the "Petal footer polish" session and one unnested run, "Trim the dispatch log".
 - `subagents`: the "Petal footer polish" session nested with three subagent rows (`SA`), oldest first: a killed reviewer, the running Explore one, and a finished child of it at depth 2, then its dispatch run's `DS` row; beside it a pane following the running subagent, its header and transcript (an answer, a read, a search and a test run still going).
 - `host-rebind`: the rebind dialog for the remote `box` over the two-host window, with 3 active sessions, Auto layout and its picker, Follow box's layout above Follow laptop's layout, and Cancel and Rebind.
@@ -153,6 +157,14 @@ The views:
 The `support` builders for account specs (`apps/native/tests/support/mod.rs`) are `account`, `auto_switch`, `accounts_reply` and `accounts_updated`; `Harness::reconnect_with_features` redoes the handshake with extra `Welcome.features` (`tests/ui/ui_accounts.rs` uses it to list `accounts`).
 
 An OS toast press is tested through the `NotifyRecorder` notifier: `Harness::notified_launches` lists the launch argument each notification carried, `Harness::activate_os_toast(index)` presses the notification at `index`, and `activate_toast_arg(arg)` presses with a raw argument, both delivering it through the window's activation sink as the toast activator does. `h.cx.deactivate_window()` simulates an inactive main window.
+
+### Show a change in a live client
+
+`native-shot` draws one fixed view over a fake daemon; to show what a click, a key or a real session does, drive the real client through the `rt-driver` MCP server (`tools/rt-driver-mcp`, `docs/native-client.md` "Driver MCP server"). `launch` starts an isolated daemon and a cloaked, driven native client from a driver build under `<repo root>/.tmp/driver/`, and returns the session name every other tool takes; `batch` runs its `steps` in order and stops at the first error, so a `screenshot` step saves a PNG after each click or key; `call` runs one endpoint method; `screenshot` captures the window on its own and returns the PNG inline beside its path, width and height; `stop` kills the client and the daemon and removes their scratch folder. The steps are the driver endpoint's methods (`click`, `key`, `type_text`, `find`, `wait_for`, `state`, `screenshot` and the rest of the table in `docs/native-client.md` "Driver endpoint").
+
+A run is `launch` with `{"session": "shot"}`, then `batch` with `{"session": "shot", "steps": [{"method": "click", "params": {…}}, {"method": "screenshot"}, {"method": "type_text", "params": {…}}, {"method": "screenshot"}]}`, then `stop` with `{"session": "shot"}`; the reply lists each step's result, and a failed step names its index in `failedAt`.
+
+Each `screenshot` writes `<the run's config dir>/driver-shots/<pid>-<n>.png`, that is `.tmp/driver/<session>-<server pid>/config/driver-shots/` under the checkout, outside the `.tmp/shots/` that `native-shot` writes, and its result carries the path, width and height. `stop` removes that scratch folder with them, so Read each PNG, or copy it to `.tmp/shots/`, before stopping; the `screenshot` tool avoids the question by returning the image inline.
 
 ## iPhone Simulator on the Mac mini
 

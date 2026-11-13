@@ -39,6 +39,15 @@
 //! dialog with a folder path longer than its field, the caret at its end.
 //! `safe-start` shows the prompt a start after a crashed one raises, asking
 //! whether to open the two tabs it holds or start without them.
+//! `exited` shows the card a stopped session's pane draws over its
+//! terminal, "Session exited (code 3)" with Restart, New session… and Remove
+//! pane, and `abandoned` the card over a session a daemon restart left
+//! behind, "Session abandoned during daemon restart." with a last prompt,
+//! Resume and Dismiss, each in the bottom pane of the main view's tab.
+//! `empty-main` shows the main area with no tab open, offering Spawn a
+//! session and Open shell over the sidebar, and `first-connect` the layout
+//! chooser a first connect over active sessions raises, drawn over the bare
+//! "No tab open" area a client with no tab list yet shows.
 //! `panes-accent` shows a 2x2 grid of four panes with the Theme pane
 //! focused, and `panes-accent-chosen` the same grid with the Periwinkle
 //! pane focused.
@@ -250,10 +259,14 @@ enum View {
     Subagents,
     HostRebind,
     Perf,
+    Exited,
+    Abandoned,
+    EmptyMain,
+    FirstConnect,
 }
 
 impl View {
-    const ALL: [Self; 44] = [
+    const ALL: [Self; 48] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -298,6 +311,10 @@ impl View {
         Self::Subagents,
         Self::HostRebind,
         Self::Perf,
+        Self::Exited,
+        Self::Abandoned,
+        Self::EmptyMain,
+        Self::FirstConnect,
     ];
 
     fn name(self) -> &'static str {
@@ -346,6 +363,10 @@ impl View {
             Self::Subagents => "subagents",
             Self::HostRebind => "host-rebind",
             Self::Perf => "perf",
+            Self::Exited => "exited",
+            Self::Abandoned => "abandoned",
+            Self::EmptyMain => "empty-main",
+            Self::FirstConnect => "first-connect",
         }
     }
 
@@ -582,6 +603,19 @@ impl View {
                         .flat_map(|container| &container.leaves)
                         .any(|leaf| leaf.id == BOX_SESSION)
             }
+            // The exited card over the tulip tab's bottom pane.
+            Self::Exited => !root.exited_overlay_selectors().is_empty(),
+            // The abandoned card over that pane, its session counted once.
+            Self::Abandoned => {
+                root.sidebar_abandoned_count() == 1
+                    && root
+                        .pane_notice_selectors()
+                        .contains(&format!("abandoned-card-{SHOT_STOPPED_PANE}"))
+            }
+            // No tab open, the chooser's choices drawn over it.
+            Self::EmptyMain => root.no_tab_choices_shown(),
+            // The first-connect chooser over that empty main area.
+            Self::FirstConnect => root.layout_chooser_open(),
         }
     }
 }
@@ -676,6 +710,10 @@ impl Shot {
             | View::Subagents
             | View::HostRebind
             | View::Perf
+            | View::Exited
+            | View::Abandoned
+            | View::EmptyMain
+            | View::FirstConnect
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -1433,6 +1471,10 @@ fn drive(
         | View::UpdateCountdown
         | View::Dispatch
         | View::Subagents
+        | View::Exited
+        | View::Abandoned
+        | View::EmptyMain
+        | View::FirstConnect
         | View::Toast => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
@@ -1970,6 +2012,7 @@ impl Fixture {
         if view == View::Subagents {
             subagent_rows(&mut rows, now);
         }
+        rows.extend(stopped_rows(view));
         let sessions = rows
             .into_iter()
             .map(|row| row.snapshot(now))
@@ -1990,6 +2033,11 @@ impl Fixture {
                 },
                 "created_at": "2026-01-01T00:00:00Z",
             }));
+        }
+        // The empty-main and first-connect shots open no tab: the first draws
+        // the main area's empty state, and the second the chooser over it.
+        if matches!(view, View::EmptyMain | View::FirstConnect) {
+            tabs.clear();
         }
         check_reply_shapes(now)?;
         if matches!(view, View::Dashboard | View::DashboardCompact) {
@@ -2043,10 +2091,22 @@ fn pane(id: &str, session: &str) -> GridNode {
     }
 }
 
+/// The `exited` shot's session: stopped with its child's exit code, in the
+/// tulip tab's bottom pane.
+const SHOT_EXITED: &str = "s-exited";
+
+/// The `abandoned` shot's session: stopped and abandoned by a daemon
+/// restart, with the prompt it was running, in that same pane.
+const SHOT_ABANDONED: &str = "s-abandoned";
+
+/// The tulip tab's bottom pane, which both stopped sessions take.
+const SHOT_STOPPED_PANE: &str = "p2";
+
 /// The Petal session above its shell; the `multi-host` shot shows "box"'s
-/// session in the shell's place, and the `main-narrow` shot sets the
-/// Petal session, its shell and an empty pane side by side, each too
-/// narrow for its header's buttons.
+/// session in the shell's place, the `exited` and `abandoned` shots their
+/// stopped session's, and the `main-narrow` shot sets the Petal session,
+/// its shell and an empty pane side by side, each too narrow for its
+/// header's buttons.
 fn tulip_grid(view: View) -> GridNode {
     if matches!(view, View::PanesAccent | View::PanesAccentChosen) {
         return GridNode::Split {
@@ -2115,15 +2175,16 @@ fn tulip_grid(view: View) -> GridNode {
             }),
         };
     }
-    let second = if view.on_hosts() {
-        GridNode::Pane {
+    let second = match view {
+        View::Exited => pane(SHOT_STOPPED_PANE, SHOT_EXITED),
+        View::Abandoned => pane(SHOT_STOPPED_PANE, SHOT_ABANDONED),
+        _ if view.on_hosts() => GridNode::Pane {
             pane_id: "p2".to_owned(),
             session_id: Some(BOX_SESSION.to_owned()),
             host: Some(SHOT_TAILNET_HOST.to_owned()),
             follow: None,
-        }
-    } else {
-        pane("p2", "s-shell")
+        },
+        _ => pane("p2", "s-shell"),
     };
     GridNode::Split {
         direction: SplitDirection::Vertical,
@@ -2519,6 +2580,35 @@ fn session_rows() -> Vec<Row> {
     ]
 }
 
+/// The session the `exited` and `abandoned` shots put in the tulip tab's
+/// bottom pane in place of its shell: stopped with its child's exit code,
+/// or left behind by a daemon restart with the prompt it was running.
+fn stopped_rows(view: View) -> Vec<Row> {
+    let row = |id: &'static str, label: &'static str, minutes: i64, extra: Value| Row {
+        id,
+        label,
+        status: "stopped",
+        members: json!([member(TULIP, "main", TULIP_PATH)]),
+        minutes,
+        extra,
+    };
+    match view {
+        View::Exited => vec![row(
+            SHOT_EXITED,
+            "Footer pill spacing",
+            9,
+            json!({ "exit_code": 3 }),
+        )],
+        View::Abandoned => vec![row(
+            SHOT_ABANDONED,
+            "Flaky update test",
+            7,
+            json!({ "is_abandoned": true, "last_prompt": "fix the flaky update test" }),
+        )],
+        _ => Vec::new(),
+    }
+}
+
 /// The three chosen accents the `panes-accent` and `panes-accent-chosen`
 /// shots draw beside the Theme shell, each with the frame band the accent
 /// picker stores with it.
@@ -2687,7 +2777,14 @@ impl FakeDaemon {
         self.send(DaemonMessage::Sessions {
             sessions: fixture.sessions.clone(),
         })?;
-        self.send(fixture.tabs.clone())?;
+        // A first connect is asked how to lay out its window in place of a
+        // tab list, as `push_initial_state` sends it; a tab list would mark
+        // the layout loaded under the chooser.
+        if self.view == View::FirstConnect {
+            self.send_layout_chooser(fixture)?;
+        } else {
+            self.send(fixture.tabs.clone())?;
+        }
         if matches!(self.view, View::Dispatch | View::Subagents) {
             self.send(shot_dispatch_runs()?)?;
         }
@@ -2722,6 +2819,17 @@ impl FakeDaemon {
         })?;
         self.finish_review_turn(fixture)?;
         self.send(fixture.attention.clone())
+    }
+
+    /// The first-connect shot's chooser: a client with no layout yet is
+    /// asked how to lay out the sessions the daemon already runs, and one
+    /// with sessions on offer is never answered with Start empty alone.
+    fn send_layout_chooser(&self, fixture: &Fixture) -> Result<()> {
+        self.send(DaemonMessage::LayoutInitRequired {
+            has_legacy: false,
+            active_session_count: u32::try_from(fixture.sessions.len()).unwrap_or(u32::MAX),
+            clonable: Vec::new(),
+        })
     }
 
     /// What a remote host on `target` sends first: its open connection,
