@@ -8,6 +8,7 @@
 //! measured between two reads. The previous read is forgotten when the last
 //! watcher leaves, so no figure spans an idle gap.
 
+pub(crate) mod os;
 pub(crate) mod sample;
 #[cfg(test)]
 mod tests;
@@ -73,6 +74,12 @@ impl Perf {
         }
     }
 
+    /// Whether the service was made with a source: a host without one lists
+    /// no `perf_monitor`.
+    pub(crate) fn has_source(&self) -> bool {
+        self.inner.source.is_some()
+    }
+
     /// Make `connection` a watcher sending on `outbox`; a connection that
     /// already is keeps one subscription, on the newer outbox.
     pub(crate) fn subscribe(&self, connection: u64, outbox: Outbox) {
@@ -128,6 +135,12 @@ impl Perf {
                             }
                             if *count.borrow_and_update() == 0 {
                                 break;
+                            }
+                            // The last watcher left and a new one came before
+                            // this ran (1, 0, 1 coalesced): read for it now,
+                            // not at the old interval's next tick.
+                            if lock(&perf.inner.state).prev.is_none() {
+                                interval.reset_immediately();
                             }
                         }
                         _ = interval.tick() => perf.tick(&source).await,

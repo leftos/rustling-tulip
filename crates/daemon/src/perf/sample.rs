@@ -4,7 +4,9 @@
 use chrono::{DateTime, Utc};
 use protocol::{MachineSample, PerfSample};
 
-/// The machine's cumulative CPU times, all cores together, in 100 ns units.
+/// The machine's cumulative CPU times, all cores together, in the source's
+/// own unit (100 ns on Windows, clock ticks on macOS); only the ratio of two
+/// deltas is used.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CpuTimes {
     /// Time spent running anything but the idle process.

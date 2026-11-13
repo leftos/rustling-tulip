@@ -232,11 +232,20 @@ async fn a_resubscribe_after_zero_watchers_starts_without_cpu() {
     let second = next_sample(&mut rx).await;
     assert!(second.machine.cpu_percent.is_some());
 
+    // No await between the two calls: the ticker sees 1, 0, 1 coalesced.
+    let reads_before = rig.reads();
     rig.perf.unsubscribe(id);
     let (id, tx, mut rx) = watcher(1);
     rig.perf.subscribe(id, tx);
+    let before = tokio::time::Instant::now();
     let again = next_sample(&mut rx).await;
 
+    assert!(rig.reads() > reads_before, "the new watcher got a read");
+    assert_eq!(
+        tokio::time::Instant::now(),
+        before,
+        "the new watcher's read waited for no tick"
+    );
     assert_eq!(
         again.machine.cpu_percent, None,
         "no delta spans the idle gap"

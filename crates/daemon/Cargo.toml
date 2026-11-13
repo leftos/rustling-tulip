@@ -172,7 +172,9 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 # subcommand the parent's console, plus the IP Helper TCP table
 # (`GetExtendedTcpTable`) and the token
 # and SDDL calls (Security, Security_Authorization) behind an elevated
-# daemon's integrity check and its labelled handshake file. 0.61 matches the
+# daemon's integrity check and its labelled handshake file, plus
+# `GlobalMemoryStatusEx` (System_SystemInformation) and `GetSystemTimes` for
+# the machine's memory and CPU sample. 0.61 matches the
 # version already pulled transitively by the existing dep graph.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
@@ -185,6 +187,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_RestartManager",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }

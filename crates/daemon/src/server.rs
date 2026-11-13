@@ -674,8 +674,7 @@ pub async fn run(
         }),
         dispatch_runs,
         subagent_tails,
-        // No source yet: subscribing is accepted and nothing is sent.
-        perf: crate::perf::Perf::new(None),
+        perf: crate::perf::Perf::new(crate::perf::os::machine_source()),
         host_update: Arc::new(HostUpdate::for_this_daemon()?),
     };
     start_hub_tasks(&hub, client_count_rx);

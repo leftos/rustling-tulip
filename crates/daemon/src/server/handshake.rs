@@ -176,9 +176,12 @@ async fn read_hello<R: Inbound>(
         negotiated,
         &hub.daemon_id,
         origin_of(auth),
-        hub.accounts.is_some(),
-        hub.gate_state.is_some(),
-        hub.dispatch_runs.is_some(),
+        HeldServices {
+            accounts: hub.accounts.is_some(),
+            gate_state: hub.gate_state.is_some(),
+            dispatch_runs: hub.dispatch_runs.is_some(),
+            perf_monitor: hub.perf.has_source(),
+        },
     ));
     Ok(Handshake {
         negotiated_version: negotiated,
@@ -268,10 +271,10 @@ const FEATURE_SCREEN_DUMP: &str = "screen_dump";
 /// sees it listed offers the capability to the user.
 ///
 /// These are the features every daemon lists, whatever its state. The account,
-/// gate state and dispatch-run features are not here: they join in
-/// [`welcome_message`] only when the hub holds an accounts service, a gate
-/// state or a live-run folder's runs, since a daemon without one cannot
-/// honour them.
+/// gate state, dispatch-run and performance monitor features are not here:
+/// they join in [`welcome_message`] only when the hub holds an accounts
+/// service, a gate state, a live-run folder's runs or a sample service with a
+/// source, since a daemon without one cannot honour them.
 const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_AGENT_COMMANDS,
     protocol::FEATURE_DEVICE_PAIRING,
@@ -297,6 +300,19 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_CLIENT_UPDATE,
 ];
 
+/// The features a daemon lists only when it holds the service behind them.
+#[derive(Debug, Clone, Copy, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is one independent service the hub holds or not"
+)]
+struct HeldServices {
+    accounts: bool,
+    gate_state: bool,
+    dispatch_runs: bool,
+    perf_monitor: bool,
+}
+
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
 /// version this daemon speaks, [`DAEMON_FEATURES`], this daemon's stable id
 /// and the connection's `origin`, which only the accepting listener decides.
@@ -307,28 +323,31 @@ const DAEMON_FEATURES: &[&str] = &[
 /// `protocol::FEATURE_GATE_STATE`: the hub holds a gate state only where the
 /// gate's live inputs are read (64-bit Windows). `dispatch_runs` then appends
 /// `protocol::FEATURE_DISPATCH_RUNS`: the hub holds dispatch runs only where
-/// the daemon watches a live-run folder.
+/// the daemon watches a live-run folder. `perf_monitor` then appends
+/// `protocol::FEATURE_PERF_MONITOR`: the hub's sample service has a source
+/// only on Windows and macOS.
 fn welcome_message(
     negotiated: u32,
     daemon_id: &str,
     origin: ConnectionOrigin,
-    accounts: bool,
-    gate_state: bool,
-    dispatch_runs: bool,
+    held: HeldServices,
 ) -> DaemonMessage {
     let mut features: Vec<String> = DAEMON_FEATURES
         .iter()
         .map(|feature| (*feature).to_owned())
         .collect();
-    if accounts {
+    if held.accounts {
         features.push(protocol::FEATURE_ACCOUNTS.to_owned());
         features.push(protocol::FEATURE_ACCOUNT_EVENTS.to_owned());
     }
-    if gate_state {
+    if held.gate_state {
         features.push(protocol::FEATURE_GATE_STATE.to_owned());
     }
-    if dispatch_runs {
+    if held.dispatch_runs {
         features.push(protocol::FEATURE_DISPATCH_RUNS.to_owned());
+    }
+    if held.perf_monitor {
+        features.push(protocol::FEATURE_PERF_MONITOR.to_owned());
     }
     DaemonMessage::Welcome {
         protocol_version: negotiated,
@@ -693,9 +712,10 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            false,
-            false,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
         );
         assert!(
             matches!(
@@ -736,9 +756,10 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            false,
-            false,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
         );
         let mut expected: Vec<String> = DAEMON_FEATURES
             .iter()
@@ -771,9 +792,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -791,9 +810,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -811,9 +828,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -831,9 +846,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -851,9 +864,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -871,9 +882,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -891,9 +900,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -911,9 +918,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -931,9 +936,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -951,9 +954,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -1103,9 +1104,10 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            false,
-            false,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
         );
         assert!(
             matches!(
@@ -1123,9 +1125,10 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            false,
-            false,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
         );
         assert!(
             matches!(
@@ -1359,9 +1362,10 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            false,
-            false,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
         );
         assert!(
             matches!(
@@ -1379,9 +1383,10 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            false,
-            false,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
         );
         assert!(
             matches!(
@@ -1401,9 +1406,10 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            false,
-            false,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
         );
         assert!(
             matches!(
@@ -1420,9 +1426,10 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            false,
-            false,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
         );
         assert!(
             matches!(
@@ -1440,9 +1447,10 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            false,
-            false,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
         );
         assert!(
             matches!(
@@ -1461,9 +1469,7 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            false,
-            false,
-            false,
+            HeldServices::default(),
         );
         assert!(
             matches!(
@@ -1491,9 +1497,11 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            true,
-            false,
+            HeldServices {
+                accounts: true,
+                gate_state: true,
+                ..HeldServices::default()
+            },
         ));
         assert_eq!(
             enabled.last().map(String::as_str),
@@ -1505,9 +1513,10 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            false,
-            false,
+            HeldServices {
+                accounts: true,
+                ..HeldServices::default()
+            },
         ));
         assert!(
             !disabled.iter().any(|f| f == protocol::FEATURE_GATE_STATE),
@@ -1525,9 +1534,12 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            true,
-            true,
+            HeldServices {
+                accounts: true,
+                gate_state: true,
+                dispatch_runs: true,
+                ..HeldServices::default()
+            },
         ));
         assert_eq!(
             with.last().map(String::as_str),
@@ -1541,9 +1553,11 @@ mod tests {
             22,
             TEST_DAEMON_ID,
             ConnectionOrigin::Local,
-            true,
-            true,
-            false,
+            HeldServices {
+                accounts: true,
+                gate_state: true,
+                ..HeldServices::default()
+            },
         ));
         assert!(
             !without.iter().any(|f| f == protocol::FEATURE_DISPATCH_RUNS),
@@ -1552,6 +1566,40 @@ mod tests {
         assert!(
             !DAEMON_FEATURES.contains(&protocol::FEATURE_DISPATCH_RUNS),
             "the dispatch-run feature joins only where a live-run folder is watched"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_perf_monitor_only_with_a_source() {
+        let with = features_of(&welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            HeldServices {
+                perf_monitor: true,
+                ..HeldServices::default()
+            },
+        ));
+        let expected: Vec<&str> = DAEMON_FEATURES
+            .iter()
+            .copied()
+            .chain([protocol::FEATURE_PERF_MONITOR])
+            .collect();
+        assert_eq!(with, expected, "the perf feature follows DAEMON_FEATURES");
+
+        let without = features_of(&welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            HeldServices::default(),
+        ));
+        assert!(
+            !without.iter().any(|f| f == protocol::FEATURE_PERF_MONITOR),
+            "{without:?}"
+        );
+        assert!(
+            !DAEMON_FEATURES.contains(&protocol::FEATURE_PERF_MONITOR),
+            "the perf feature joins only where the sample service has a source"
         );
     }
 
