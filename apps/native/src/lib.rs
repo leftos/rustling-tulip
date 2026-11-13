@@ -1959,6 +1959,26 @@ impl RootView {
         cx.update(|window, cx| root.update(cx, |root, cx| update(root, window, cx)))
     }
 
+    /// Runs `update` on the root view in the main window, wherever the task was spawned. An open's
+    /// follow-up acts there (its confirm, viewer tab and toasts are the main window's), even when a
+    /// pop-out started it and has since closed. Fails only when the view or the main window is gone.
+    pub(crate) fn update_in_main_window<R>(
+        this: &WeakEntity<Self>,
+        cx: &mut AsyncWindowContext,
+        update: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> R,
+    ) -> anyhow::Result<R> {
+        let root = this.upgrade().context("the root view is gone")?;
+        let (main, windows) =
+            cx.read_entity(&root, |root, app| (root.layouts.main(), app.windows()));
+        let window = windows
+            .into_iter()
+            .find(|window| window.window_id() == main)
+            .context("the main window is gone")?;
+        cx.update_window(window, |_, window, cx| {
+            root.update(cx, |root, cx| update(root, window, cx))
+        })
+    }
+
     /// Handles every event `host`'s `events` delivers, each tagged with
     /// `generation`, the connection it came on, until the view is gone.
     fn forward_net_events(

@@ -262,9 +262,9 @@ impl RootView {
         });
         cx.spawn_in(window, async move |this, cx| {
             let resolution = resolve.await;
-            // Fails only when the view is gone or this task's window has closed,
+            // Fails only when the view or the main window is gone,
             // leaving nowhere to report.
-            RootView::update_in_task_window(&this, cx, |root, window, cx| {
+            RootView::update_in_main_window(&this, cx, |root, window, cx| {
                 root.after_resolve(resolution, &first, opening, window, cx);
             })
             .ok();
@@ -364,9 +364,9 @@ impl RootView {
             .spawn(async move { viewer_verdict(&probed) });
         cx.spawn_in(window, async move |this, cx| {
             let verdict = verdict.await;
-            // Fails only when the view is gone or this task's window has closed,
+            // Fails only when the view or the main window is gone,
             // leaving nowhere to open.
-            RootView::update_in_task_window(&this, cx, |root, window, cx| {
+            RootView::update_in_main_window(&this, cx, |root, window, cx| {
                 root.after_probe(action, origin, verdict, window, cx);
             })
             .ok();
@@ -575,9 +575,9 @@ impl RootView {
         };
         cx.spawn_in(window, async move |this, cx| {
             let result = run.await;
-            // Fails only when the view is gone or this task's window has closed,
+            // Fails only when the view or the main window is gone,
             // leaving nowhere to report.
-            RootView::update_in_task_window(&this, cx, |root, window, cx| {
+            RootView::update_in_main_window(&this, cx, |root, window, cx| {
                 root.after_open(job, route, result, window, cx);
             })
             .ok();
@@ -632,9 +632,9 @@ impl RootView {
                     .spawn(async move { paths.into_iter().find(|path| opener.path_exists(path)) });
                 cx.spawn_in(window, async move |this, cx| {
                     let present = probe.await;
-                    // Fails only when the view is gone or this task's window has closed,
+                    // Fails only when the view or the main window is gone,
                     // leaving nowhere to report.
-                    RootView::update_in_task_window(&this, cx, |root, window, cx| {
+                    RootView::update_in_main_window(&this, cx, |root, window, cx| {
                         if let Some(path) = present {
                             tracing::warn!(path = %path.display(), "VS Code not found; opening the folder in the file manager");
                             root.open_in_default_app(path, fallback, window, cx);

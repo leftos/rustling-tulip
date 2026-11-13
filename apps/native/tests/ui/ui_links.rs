@@ -13,7 +13,7 @@ use crate::support;
 
 use std::path::{Path, PathBuf};
 
-use gpui::{Modifiers, TestAppContext, point, px};
+use gpui::{AppContext as _, Modifiers, MouseButton, TestAppContext, point, px};
 use protocol::{ClientMessage, SessionSnapshot, SplitDirection};
 use rustling_tulip_native::{OpenOutcome, PopoutKey, ToastKind};
 use serde_json::{Value, json};
@@ -1042,6 +1042,47 @@ fn ctrl_shift_click_in_the_main_window_opens_the_menu_there_beside_a_popout(
     assert!(
         popout.debug_bounds("link-menu").is_none(),
         "the pop-out draws no copy of it"
+    );
+}
+
+#[gpui::test]
+fn an_open_from_a_popout_finishes_in_the_main_window_after_the_popout_closes(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "tools/run.bat");
+    let mut h = pane_popped(cx, &dir);
+    h.pty("s2", b"run tools/run.bat");
+    h.cx.run_until_parked();
+
+    let root = h.root.clone();
+    let mut popout = h.popout_window();
+    let at = popout
+        .update(|_, cx| root.read(cx).pane_cell_center("p2", 8, 0, cx))
+        .expect("p2 is laid out in the pop-out");
+
+    // The pop-out closes in the same breath as the click it takes, while the
+    // open's background work is still out: this task was queued first, and
+    // the follow-up's task waits behind it in the same queue.
+    let main = h.cx.update(|window, _| window.window_handle());
+    let popout_handle =
+        h.cx.windows()
+            .into_iter()
+            .find(|window| *window != main)
+            .expect("a pop-out window is open");
+    h.cx.spawn(|mut app: gpui::AsyncApp| async move {
+        app.update_window(popout_handle, |_, window, _| window.remove_window())
+            .ok();
+    })
+    .detach();
+
+    popout.simulate_mouse_down(at, MouseButton::Left, ctrl());
+
+    assert_eq!(h.window_count(), 1, "the pop-out is gone");
+    assert_eq!(
+        h.run_confirm(),
+        Some(("Run run.bat?".to_owned(), file.display().to_string())),
+        "the click's run confirm opens in the main window"
     );
 }
 
