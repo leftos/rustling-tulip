@@ -81,7 +81,7 @@
       native-shot
                  Write a PNG of the native client's window showing one view
                  (`main`, `main-compact`, `main-narrow`, `source-control`, `diff`, `settings`,
-                 `settings-claude`, `spawn`, `viewer`, `viewer-md`, `dashboard`, `dashboard-compact`, `connections`, `connections-ssh`, `connections-scan-error`, `menu`, `safe-start`, `panes-accent`, `panes-accent-chosen`, `update`, `update-countdown`, `chat`, `chat-compact`, `summary`, `themes`, `themes-edit`, `multi-host`, `spawn-hosts` or `settings-hosts`, `settings-accounts`, `settings-sounds`, `accounts`, `dispatch`, `subagents`, `perf`; default `main`) over a fake daemon with fixed
+                 `settings-claude`, `spawn`, `viewer`, `viewer-md`, `dashboard`, `dashboard-compact`, `connections`, `connections-ssh`, `connections-scan-error`, `menu`, `safe-start`, `panes-accent`, `panes-accent-chosen`, `update`, `update-countdown`, `chat`, `chat-compact`, `summary`, `themes`, `themes-edit`, `multi-host`, `spawn-hosts` or `settings-hosts`, `settings-accounts`, `settings-sounds`, `accounts`, `dispatch`, `subagents`, `host-rebind`, `perf`; default `main`) over a fake daemon with fixed
                  content, via
                  `cargo run --example shot`. No daemon starts; the window
                  stays cloaked and never takes focus. Writes
@@ -1532,7 +1532,7 @@ Commands:
              chat, chat-compact, summary,
              themes, themes-edit, multi-host, spawn-hosts, settings-hosts, settings-accounts,
              settings-sounds,
-             accounts, dispatch, subagents, perf;
+             accounts, dispatch, subagents, host-rebind, perf;
              default main)
              over a fake daemon with fixed content, then print its path.
              <out.png> is the PNG to write; -Out says the same thing.

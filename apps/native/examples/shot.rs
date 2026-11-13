@@ -248,11 +248,12 @@ enum View {
     UpdateHostBreaks,
     Dispatch,
     Subagents,
+    HostRebind,
     Perf,
 }
 
 impl View {
-    const ALL: [Self; 43] = [
+    const ALL: [Self; 44] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -295,6 +296,7 @@ impl View {
         Self::UpdateHostBreaks,
         Self::Dispatch,
         Self::Subagents,
+        Self::HostRebind,
         Self::Perf,
     ];
 
@@ -342,6 +344,7 @@ impl View {
             Self::Toast => "toast",
             Self::Dispatch => "dispatch",
             Self::Subagents => "subagents",
+            Self::HostRebind => "host-rebind",
             Self::Perf => "perf",
         }
     }
@@ -360,14 +363,16 @@ impl View {
     /// stretch, Bash card and Tail box, then scrolls up to the box once drawn;
     /// Claude's page opens, then the wheel takes it down to its Hooks
     /// section; the accounts page opens at its top, then wheels down to the
-    /// auto-switch block that ends it.
+    /// auto-switch block that ends it; the host-rebind shot opens the jump
+    /// palette, then runs its `Rebind box's sessions…` row.
     fn steps(self) -> usize {
         match self {
             Self::ConnectionsSsh => 4,
             Self::Themes | Self::Chat | Self::SettingsDashboard => 3,
             Self::ThemesEdit => 5,
             // The jump palette opens, then takes its query and Enter.
-            Self::PanesAccentChosen
+            Self::HostRebind
+            | Self::PanesAccentChosen
             | Self::Update
             | Self::UpdateNotes
             | Self::Summary
@@ -406,6 +411,7 @@ impl View {
         matches!(
             self,
             Self::MultiHost
+                | Self::HostRebind
                 | Self::SpawnHosts
                 | Self::SettingsHosts
                 | Self::UpdateHost
@@ -445,6 +451,15 @@ impl View {
                         .any(|leaf| leaf.id == SHOT_RUN)
             }
             Self::Subagents => subagents_reached(root),
+            // The rebind dialog over "box", its own layout and the laptop's
+            // to follow.
+            Self::HostRebind => {
+                root.host_rebind_open()
+                    && root
+                        .host_rebind_controls()
+                        .iter()
+                        .any(|(selector, _)| selector == "host-rebind-follow-client-box")
+            }
             // This PC's and box's pills, each with its sample, under the open menu.
             Self::Perf => {
                 let pills = root.perf_pills();
@@ -659,6 +674,7 @@ impl Shot {
             | View::UpdateHostBreaks
             | View::Dispatch
             | View::Subagents
+            | View::HostRebind
             | View::Perf
             | View::Toast => None,
         };
@@ -682,6 +698,7 @@ impl Shot {
                 connections_ui_state()
             }
             View::MultiHost
+            | View::HostRebind
             | View::SpawnHosts
             | View::SettingsHosts
             | View::UpdateHost
@@ -757,6 +774,8 @@ const SHOT_LAB_HOST: &str = "lab.tail1234.ts.net";
 const BOX_REPO: &str = "relay";
 const BOX_REPO_PATH: &str = r"D:\src\relay";
 const BOX_SESSION: &str = "b-relay";
+/// The jump palette query the `host-rebind` shot runs: its row for "box".
+const SHOT_REBIND_QUERY: &str = "rebind box";
 
 /// The layout the `multi-host` shot starts from: "box" and "lab" saved and
 /// switched on, so launch connects both.
@@ -1419,6 +1438,7 @@ fn drive(
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
         View::Perf => open_perf_menu(window, cx),
+        View::HostRebind => drive_host_rebind(step, window, cx),
         View::OpenShell => open_shell(window, cx),
         View::SourceControl => {
             let y = (SOURCE_CONTROL_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
@@ -1529,6 +1549,22 @@ fn drive_panes_accent_chosen(step: usize, window: &mut Window, cx: &mut App) -> 
     for c in "periwinkle".chars() {
         press(&c.to_string(), window, cx)?;
     }
+    press("enter", window, cx)
+}
+
+/// Step `step` of the `host-rebind` shot: opens the jump palette, then runs
+/// its `Rebind box's sessions…` row, which opens the dialog over "box".
+fn drive_host_rebind(step: usize, window: &mut Window, cx: &mut App) -> Result<()> {
+    if step == 0 {
+        return press("ctrl-shift-p", window, cx);
+    }
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    root.update(cx, |root, cx| {
+        root.quick_jump_set_query(SHOT_REBIND_QUERY, window, cx);
+    });
     press("enter", window, cx)
 }
 
@@ -2287,8 +2323,9 @@ fn subagents_reached(root: &RootView) -> bool {
 /// client's, so its rows show their version and the "Behind" tag.
 const REMOTE_BUILD_VERSION: &str = "0.9.0";
 
-/// What the `multi-host` shot's "box" lists: one repo and its session, and
-/// in the `update-host` shot a second, idle one.
+/// What the `multi-host` shot's "box" lists: one repo and its session, in
+/// the `update-host` shot a second, idle one, and in the `host-rebind` shot
+/// two more, so its dialog counts three active sessions.
 struct RemoteFixture {
     repos: DaemonMessage,
     sessions: Vec<SessionSnapshot>,
@@ -2313,7 +2350,10 @@ impl RemoteFixture {
         }
         .snapshot(now)?;
         let mut sessions = vec![session];
-        if matches!(view, View::UpdateHost | View::UpdateHostBreaks) {
+        if matches!(
+            view,
+            View::UpdateHost | View::UpdateHostBreaks | View::HostRebind
+        ) {
             sessions.push(
                 Row {
                     id: "b-docs",
@@ -2321,6 +2361,19 @@ impl RemoteFixture {
                     status: "idle",
                     members: json!([member(BOX_REPO, "main", BOX_REPO_PATH)]),
                     minutes: 12,
+                    extra: json!({}),
+                }
+                .snapshot(now)?,
+            );
+        }
+        if view == View::HostRebind {
+            sessions.push(
+                Row {
+                    id: "b-tests",
+                    label: "Test sweep",
+                    status: "working",
+                    members: json!([member(BOX_REPO, "main", BOX_REPO_PATH)]),
+                    minutes: 7,
                     extra: json!({}),
                 }
                 .snapshot(now)?,
@@ -2679,13 +2732,15 @@ impl FakeDaemon {
         let mut conn = Connection::for_target(target.clone());
         conn.on_connecting();
         conn.on_socket_open(8787);
-        // Only the update-host shot's "box" can update on request, and only
-        // the perf shot's reports CPU and RAM.
+        // Only the update-host shot's "box" can update on request, only the
+        // perf shot's reports CPU and RAM, and only the host-rebind shot's
+        // lists its layouts.
         let features = match self.view {
             View::UpdateHost | View::UpdateHostBreaks => {
                 vec![protocol::FEATURE_REMOTE_UPDATE.to_owned()]
             }
             View::Perf => vec![protocol::FEATURE_PERF_MONITOR.to_owned()],
+            View::HostRebind => vec![protocol::FEATURE_HOST_LAYOUTS.to_owned()],
             _ => Vec::new(),
         };
         conn.on_welcome(version, features.clone(), None);
@@ -2834,7 +2889,7 @@ impl FakeDaemon {
                     request_id: request_id.clone(),
                 }
             }
-            _ => return Ok(follow_reply(msg).into_iter().collect()),
+            _ => return shot_reply(msg),
         };
         Ok(vec![reply])
     }
@@ -2863,6 +2918,44 @@ fn follow_reply(msg: &ClientMessage) -> Option<DaemonMessage> {
         hidden: 0,
         request_id: request_id.clone(),
     })
+}
+
+/// The replies to the messages no other arm of [`FakeDaemon::answer`] takes:
+/// a transcript to follow, and the rebind dialog's host layouts.
+fn shot_reply(msg: &ClientMessage) -> Result<Vec<DaemonMessage>> {
+    if let ClientMessage::ListHostLayouts { request_id } = msg {
+        return Ok(vec![shot_host_layouts(request_id.as_deref())?]);
+    }
+    Ok(follow_reply(msg).into_iter().collect())
+}
+
+/// "box"'s answer to the rebind dialog's `ListHostLayouts`: the layout it
+/// made itself, over two of its sessions, and the laptop's.
+fn shot_host_layouts(request_id: Option<&str>) -> Result<DaemonMessage> {
+    let own = GridNode::Split {
+        direction: SplitDirection::Horizontal,
+        ratio: 0.5,
+        first: Box::new(pane("p-box1", BOX_SESSION)),
+        second: Box::new(pane("p-box2", "b-tests")),
+    };
+    parse_message(json!({
+        "type": "host_layouts",
+        "host_name": "box",
+        "layouts": [
+            {
+                "client_id": "client-box",
+                "name": "box",
+                "tabs": [grid_tab("box-main", "Relay", &own)],
+            },
+            {
+                "client_id": "client-laptop",
+                "name": "laptop",
+                "tabs": [grid_tab("laptop-main", "Review", &pane("p-lap1", BOX_SESSION))],
+            },
+        ],
+        "request_id": request_id,
+    }))
+    .context("the rebind dialog's host layouts")
 }
 
 /// The fake daemon's accounts at `now`, the mock's five: main in use, ops
