@@ -1147,7 +1147,7 @@ fn with_click_through_off_a_click_on_an_inactive_pane_disarms_an_armed_stop(
 }
 
 #[gpui::test]
-fn with_click_through_off_a_click_on_an_inactive_pane_closes_the_jump_palette(
+fn with_click_through_off_a_click_on_an_inactive_pane_clear_of_the_palette_closes_it(
     cx: &mut TestAppContext,
 ) {
     let dir = TestDir::new();
@@ -1159,11 +1159,24 @@ fn with_click_through_off_a_click_on_an_inactive_pane_closes_the_jump_palette(
         "the palette is open"
     );
 
-    let at = h.cell_center("p2", 2, 3);
+    // The bottom row of p2, well below the top-centred palette: a press on
+    // the palette's own rows would run a jump and close it for that reason.
+    let row = h.grid_text("p2").len() - 1;
+    let at = h.cell_center("p2", 2, row);
+    assert!(
+        !h.bounds("quick-jump").contains(&at),
+        "the press is outside the palette"
+    );
+
     h.click(at, Modifiers::none());
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "the press focuses the inactive pane"
+    );
     assert!(
         !h.root(|root, _| root.quick_jump_open()),
-        "the press into the inactive pane closes it, as a press anywhere does"
+        "and closes the palette, as a press anywhere outside it does"
     );
 }
 

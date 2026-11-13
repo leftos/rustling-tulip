@@ -1760,9 +1760,11 @@ impl RootView {
     }
 
     /// Tells the pressed pane whether it is the tab's focused one, then, with
-    /// the General setting off, drops what any press drops and gives the pane
-    /// its tab's focus and keyboard, stopping the press ahead of any pane
-    /// body's own handler: one click's focus, nothing else.
+    /// the General setting off, drops what any press drops, closes an open
+    /// jump palette (its own outside-click listener never hears a press
+    /// stopped here) and gives the pane its tab's focus and keyboard,
+    /// stopping the press ahead of any pane body's own handler: one click's
+    /// focus and a closed palette, nothing else.
     fn focus_inactive_pane(
         &mut self,
         pane_id: &str,
@@ -1782,6 +1784,7 @@ impl RootView {
             return;
         }
         self.on_any_mouse_down(event, window, cx);
+        self.close_quick_jump(window, cx);
         self.focus_pane_in(&tab_id, pane_id, window, cx);
         cx.stop_propagation();
     }

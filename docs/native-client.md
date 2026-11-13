@@ -622,6 +622,8 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
 
   The listener is a capture-phase mouse-down on the pane body built in `render_pane` (`focus_inactive_pane` in `grid_view.rs`), and `TerminalPane` makes its own first-press check in the capture phase too, since the palette's close hands focus back before the press arrives; both read the setting from the `mouse::ClickThrough` global.
 
+  Since that listener stops the press in the capture phase, the jump palette's own outside-click listener, painted after the panes, never hears it, so `focus_inactive_pane` closes the palette itself.
+
   When the press is held, its release and drag send nothing, and the next press is reported. A selection, a Ctrl+click on a link and a right-click paste act on that first press as usual.
 
   The press that brings the window forward is held the same way in a mouse-mode terminal whichever way the setting is, even on the pane that still holds the keyboard, and an activating right-click pastes nothing.

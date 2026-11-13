@@ -18,6 +18,10 @@ The native client has three test tiers, and the driver MCP server has a live spe
 
   The harness (`apps/native/tests/support/mod.rs`) resolves a remote leaf's `leaf-<host key>::<id>` selectors per host (the `leaf_tab_pill_on` and `leaf_buttons_on` hooks). Its `in_model` returns true for any selector without a model hook, such as the pane header buttons (`pane-popout-*`), so a positive check on one needs a click plus an outcome. A click updates `focused_pane` only after `window.activate_window()`, since the test window starts inactive.
 
+  A spec that clicks into a pane while the jump palette is open aims clear of it and asserts so (`!h.bounds("quick-jump").contains(&at)`): the palette sits near the top of the test window over a right-hand pane's top rows, so a press there runs a palette row and closes it for that reason. It also asserts which pane the press focused, so a wrong path cannot pass.
+
+  A routed `--test ui` run brings back `rustling-tulip-native.exe` built without the `driver` feature, over the driver build the `rt-driver` server and smoke tier launch, so rebuild with `--features rustling-tulip-native/driver` before the next driven run.
+
   GPUI's `Frame::clear()` does not clear `debug_bounds` (gpui 0.2.2, `src/window.rs`), so within one window a selector drawn once keeps its bounds and stays "painted" in later frames: a UI spec cannot prove an element disappeared after it was drawn. Probe absence on a window that never drew it, or assert the model or state (the focus ring, the request) instead.
 
   gpui's test platform uses `NoopTextSystem`, which never slices text by its runs, so a UI spec cannot catch a run-boundary fault in text shaping. `apps/native/tests/ellipsis_real_text.rs` can: it runs a `compute_layout` chain in a real window on the real text system, and `.\rt.ps1 native-smoke` runs it beside the smoke specs.
