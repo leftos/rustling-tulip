@@ -20,7 +20,7 @@ It is alpha software.
 - Turn on session summaries in Settings › Dashboard and each finished turn of a Claude session gets a one-line summary, kept across restarts, with a daily cap on what they spend.
 - The Dashboard tab, opened from the activity rail, opens on a Compact view of every running agent by repo, with its state, work and subagents (each with its model and effort level) and no scrolling. Its By status view adds context, recent work, cost, a two-hour activity bar and the Linear issue named in each session's branch, with a drawer per session.
 - Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane; the header counts today's cost, tokens and commits across every session.
-- Dispatch runs show in the sidebar tagged DS. Click one, or drag it onto a pane, to follow it with its cost, tokens, recent actions and a Stop button; the Dashboard lists each under the session that started it.
+- A session's dispatch runs (DS) and subagents (SA) nest under it in the sidebar, a run's own subagents under the run, and a chevron folds them away. Click one, or drag it onto a pane, to follow its transcript: replies, tool calls and their output, which a click expands. A run's pane adds its cost, tokens and a Stop button, and the Dashboard lists each run under the session that started it.
 - `rustling-tulipd` drives sessions from a shell or a script: `sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch`, each with `--json`.
 - Ctrl+Shift+P opens a jump palette: type to find any open pane, tab, session, repo or workspace, and Enter goes straight there. It also opens a shell on any connected computer.
 - Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
@@ -73,6 +73,8 @@ It is alpha software.
 - The sidebar groups sessions by host, each with its own + Shell; remote panes and tabs carry their host's name, one tab can mix panes from several hosts, and an offline host dims until it reconnects.
 - Spawning, shells, Add repo, presets and Settings work on any connected host: the spawn picker groups repos by host, and Settings has a host selector.
 - Connections and Settings show the release each host runs and mark an older one Behind. Update it from Connections, over Tailscale or SSH, and a notice follows it until it is back; a release that ends sessions or breaks the connection is named before you confirm.
+- Unbind every session of one host from Connections, the jump palette or its header: they keep running there. Rebind them into new tabs by grid, side by side, stacked, or following that host's own layout.
+- The status bar shows CPU and RAM for This PC and any hosts you pick by right-clicking its pills, and a busy machine turns amber.
 - From This PC's row in Connections, tell every connected client to update: each counts down 10 seconds with Cancel, and phones reload. When another device updates this PC, the app counts down the same way and reopens after the update.
 
 ![This PC's group in the sidebar with its + Repo and + Shell, a remote session's pane marked with its host "box" beside a local one, and the footer counting 2/3 hosts online](docs/images/multi-host.png)
@@ -129,12 +131,13 @@ It is alpha software.
 
 - A page per agent: Claude's permission mode, its provider (Anthropic, or DeepSeek with your own `DEEPSEEK_API_KEY`), its default effort level, and its launch command, so you can run another program, an alias or extra arguments.
 - Which notifications to show and when to skip them, and whether to keep the PC awake (off, while a session is busy, or always).
+- Whether the first click on a pane that isn't focused also acts in it (the default) or only focuses it.
 - Start the daemon at login, the folder worktrees go in, and Manage worktrees to clean up old ones.
 - Appearance: themes for the whole window and its terminals (built-in ones, Nord by default, or your own), session accent colours, terminal and interface fonts (Inter, Geist, Schibsted Grotesk or any installed font), the interface's text size and weight, the terminal's weight and frame width per app, repo, workspace or session, font sizes per session or per tab, and the window title.
 - The Themes window previews every theme with its contrast check, edits any colour of your own copy, and exports or imports theme files.
 - A search box finds any setting on any page (Ctrl+F), and changes wait for OK or Apply; Cancel or Esc discards them. Appearance and the Themes picker preview a change at once.
 - The Chat section sets Compact or Comfortable and the chat's maximum width, and Diagnostics has a Detailed logging switch and Open logs folder.
-- Update notices have a What's new button with the release notes for every version since the one you had.
+- Update notices have a What's new button with the release notes for every version since the one you had, and a right-click on the version in the status bar checks for updates at once.
 
 ![The Settings window on its General page](docs/images/settings.png)
 
@@ -156,6 +159,14 @@ On a Mac with Apple silicon (there is no build for Intel Macs):
 4. Secret environment rows need Windows Credential Manager, so on a Mac a session with a secret row will not start; give it the secret through an `${env:NAME}` row instead.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.14.0-alpha
+
+- Dispatch runs and subagents nest under their session in the sidebar, and a pane following one shows its full transcript.
+- Unbind every session of one machine, or rebind them into new tabs by a layout.
+- The status bar shows CPU and RAM for this PC and the remote hosts you pick.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.14.0-alpha).
 
 ## What's new in v0.13.0-alpha
 
