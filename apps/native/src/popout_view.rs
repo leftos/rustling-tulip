@@ -7,9 +7,9 @@
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Subscription, WeakEntity, Window,
-    WindowId, div, prelude::*,
+    AnyElement, AnyWindowHandle, App, Context, Entity, EventEmitter, FocusHandle, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Subscription,
+    WeakEntity, Window, WindowId, div, prelude::*,
 };
 
 use crate::overlay_owner::Overlay;
@@ -442,29 +442,21 @@ impl RootView {
         }
     }
 
-    /// A terminal's event acts for the window that draws the terminal now: its
-    /// pop-out's, or the main window. The pinned gpui runs the subscription in
-    /// whichever window last drew the root view, which can be a pop-out, so an
-    /// event for another window runs there once this update is over.
+    /// A terminal's event acts for the window that draws the terminal when it arrives: its pop-out's, or the main window, once this update is over.
     pub(crate) fn route_pane_event(
         &mut self,
         slot_id: &str,
         event: &PaneEvent,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let drawn_in = self
+        let target = self
             .slot_window(slot_id)
             .unwrap_or_else(|| self.layouts.main());
-        if drawn_in == window.window_handle().window_id() {
-            self.on_pane_event(slot_id, event, window, cx);
-        } else {
-            let event = event.clone();
-            let slot_id = slot_id.to_owned();
-            Self::in_window(drawn_in, cx, move |root, window, cx| {
-                root.on_pane_event(&slot_id, &event, window, cx);
-            });
-        }
+        let event = event.clone();
+        let slot_id = slot_id.to_owned();
+        Self::in_window(target, cx, move |root, window, cx| {
+            root.on_pane_event(&slot_id, &event, window, cx);
+        });
     }
 
     /// The pop-out window that draws terminal `slot_id`, if one does: its
@@ -520,5 +512,28 @@ impl RootView {
                 tracing::debug!(?window_id, "acting for a window: {err:#}");
             }
         });
+    }
+
+    /// Subscribes to `emitter`'s events, each handled on the root view in `window`, the window
+    /// subscribed in, as long as that window is open. The pinned gpui's `subscribe_in` handles
+    /// them in whichever window last drew the root view, which can be a pop-out.
+    pub(crate) fn subscribe_in_window<E, Evt>(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        emitter: &Entity<E>,
+        mut on_event: impl FnMut(&mut Self, &Entity<E>, &Evt, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Subscription
+    where
+        E: EventEmitter<Evt>,
+        Evt: 'static,
+    {
+        let root = cx.weak_entity();
+        window.subscribe(emitter, cx, move |emitter, event, window, cx| {
+            if let Err(err) =
+                root.update(cx, |root, cx| on_event(root, &emitter, event, window, cx))
+            {
+                tracing::debug!("a subscription's root view has gone: {err:#}");
+            }
+        })
     }
 }

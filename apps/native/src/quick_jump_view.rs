@@ -212,22 +212,24 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => this.enter_quick_jump(window, cx),
                 TextInputEvent::Cancel => this.close_quick_jump(window, cx),
             },
         );
-        let edits = cx.subscribe_in(input, window, |this, input, _: &TextChanged, _, cx| {
-            let text = input.read(cx).text().to_owned();
-            if let Some(state) = &mut this.quick_jump {
-                state.core.set_query(&text);
-                state.reveal();
-            }
-            cx.notify();
-        });
+        let edits =
+            Self::subscribe_in_window(window, cx, input, |this, input, _: &TextChanged, _, cx| {
+                let text = input.read(cx).text().to_owned();
+                if let Some(state) = &mut this.quick_jump {
+                    state.core.set_query(&text);
+                    state.reveal();
+                }
+                cx.notify();
+            });
         vec![keys, edits]
     }
 

@@ -725,18 +725,24 @@ impl RootView {
         }
         let (pane, handle) = (pane_id.to_owned(), scroll.handle.clone());
         column.track_scroll(&scroll.handle).on_scroll(cx.listener(
-            move |_, _: &ScrollEvent, window, cx| {
+            move |_, _: &ScrollEvent, _, cx| {
                 cx.stop_propagation();
                 let (pane, handle) = (pane.clone(), handle.clone());
                 // Read once the wheel has moved the log.
-                cx.defer_in(window, move |this, _, cx| {
+                let root = cx.weak_entity();
+                cx.defer(move |cx| {
                     let scrolled = -handle.offset().y / px(1.0);
                     let max_scroll = handle.max_offset().y / px(1.0);
-                    if let Some(scroll) = this.run_scrolls.get_mut(&pane) {
-                        scroll.following =
-                            crate::chat::follows_bottom(Some((scrolled, max_scroll)));
+                    let read = root.update(cx, |this, cx| {
+                        if let Some(scroll) = this.run_scrolls.get_mut(&pane) {
+                            scroll.following =
+                                crate::chat::follows_bottom(Some((scrolled, max_scroll)));
+                        }
+                        cx.notify();
+                    });
+                    if let Err(err) = read {
+                        tracing::debug!("a run log scroll's root view has gone: {err:#}");
                     }
-                    cx.notify();
                 });
             },
         ))

@@ -105,9 +105,10 @@ impl RootView {
             .unwrap_or_default();
         let model = MovePanes::new(tab_id, &self.sidebar.tab_display_name(tab), panes);
         let name = cx.new(|cx| TextInput::new("", NAME_PLACEHOLDER, cx));
-        let events = cx.subscribe_in(
-            &name,
+        let events = Self::subscribe_in_window(
             window,
+            cx,
+            &name,
             |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => this.confirm_move_panes(window, cx),
                 TextInputEvent::Cancel => this.close_move_panes(window, cx),

@@ -2572,9 +2572,10 @@ impl RootView {
             .unwrap_or_else(|| session.label.clone());
         let input = cx.new(|cx| TextInput::new(name, "Session name", cx));
         let session_id = session.id.clone();
-        let events = cx.subscribe_in(
-            &input,
+        let events = Self::subscribe_in_window(
             window,
+            cx,
+            &input,
             move |this, input, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => {
                     let text = input.read(cx).text().to_owned();

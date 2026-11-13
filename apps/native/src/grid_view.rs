@@ -385,17 +385,11 @@ impl RootView {
         let font = self.sidebar.ui_state().terminal_font.clone();
         let view = cx.new(|cx| TerminalPane::new(pane_id.to_owned(), tx, remote, now, font, cx));
         let focus_in = Self::follow_focus_in(pane_id, &view, window, cx);
-        // The callback runs in whichever window last drew the root view, not
-        // the one the slot was made in; route_pane_event acts for the window
-        // that draws the terminal.
-        let events = cx.subscribe_in(
-            &view,
-            window,
-            |this, pane, event: &PaneEvent, window, cx| {
-                let slot_id = pane.read(cx).pane_id().to_owned();
-                this.route_pane_event(&slot_id, event, window, cx);
-            },
-        );
+        // Window-free: route_pane_event finds the window that draws the terminal when an event arrives.
+        let events = cx.subscribe(&view, |this, pane, event: &PaneEvent, cx| {
+            let slot_id = pane.read(cx).pane_id().to_owned();
+            this.route_pane_event(&slot_id, event, cx);
+        });
         PaneSlot {
             view,
             tab_id: String::new(),

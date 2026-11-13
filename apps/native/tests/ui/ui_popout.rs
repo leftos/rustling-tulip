@@ -4690,3 +4690,208 @@ fn presence_reads_the_main_window_while_a_popout_drew_last(cx: &mut TestAppConte
         "the presence recheck reads the main window's activity, not the pop-out's"
     );
 }
+
+/// `p1`, `p2` and `p3` in `t1` (sessions `s1` to `s3`), `p2` popped out with
+/// its window's keyboard, `p1` holding the main window's, and everything
+/// sent so far drained.
+fn p2_popped_of_three<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let grid = split(
+        SplitDirection::Horizontal,
+        split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            pane("p2", Some("s2")),
+        ),
+        pane("p3", Some("s3")),
+    );
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").build(),
+            session("s2").build(),
+            session("s3").build(),
+        ],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    for id in ["s1", "s2", "s3"] {
+        h.answer_scrollback(id, b"");
+    }
+    focus_p1_in_main(&mut h);
+    assert_eq!(pop_out(&mut h, "t1", "p2"), OpenOutcome::Opened);
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p2"),
+        "p2 has the pop-out's keyboard"
+    );
+    h.sent();
+    h
+}
+
+/// Makes the pop-out the last window to draw the root view, as its own
+/// terminal's output does.
+fn popout_draws_last(h: &mut Harness<'_>) {
+    let popout = h.popout_window();
+    popout.simulate_resize(size(px(1000.0), px(700.0)));
+    popout.run_until_parked();
+}
+
+#[gpui::test]
+fn a_tab_rename_hands_the_main_windows_keyboard_back_there_beside_a_popout(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = p2_popped_of_three(cx, &dir);
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-rename");
+    h.cx.simulate_input("Work");
+    popout_draws_last(&mut h);
+
+    h.keys("enter");
+    assert_eq!(
+        h.root(|root, _| root.renaming_tab().map(str::to_owned)),
+        None,
+        "Enter ends the rename"
+    );
+    assert!(
+        focused_in_main(&mut h, "p1"),
+        "the main window's pane takes its keyboard back"
+    );
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p2"),
+        "the pop-out keeps its terminal's keyboard"
+    );
+}
+
+#[gpui::test]
+fn esc_in_the_move_panes_name_hands_the_main_windows_keyboard_back_there(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = p2_popped_of_three(cx, &dir);
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-move-panes");
+    h.click_on("move-panes-name");
+    h.cx.simulate_input("Work");
+    popout_draws_last(&mut h);
+
+    h.keys("escape");
+    assert!(!h.in_model("move-panes"), "Esc closes the dialog");
+    assert!(
+        focused_in_main(&mut h, "p1"),
+        "the main window's pane takes its keyboard back"
+    );
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p2"),
+        "the pop-out keeps its terminal's keyboard"
+    );
+}
+
+#[gpui::test]
+fn esc_in_a_main_window_session_rename_leaves_the_popouts_keyboard_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = p2_popped_of_three(cx, &dir);
+    h.right_click_on("leaf-s1");
+    h.click_on("menu-rename");
+    h.cx.simulate_input("work");
+    popout_draws_last(&mut h);
+
+    h.keys("escape");
+    assert_eq!(
+        h.root(|root, _| root.session_menu().map(str::to_owned))
+            .as_deref(),
+        Some("s1"),
+        "Esc goes back to the menu's rows"
+    );
+    assert!(
+        h.cx.update(|window, cx| window.focused(cx).is_some()),
+        "the main window's menu holds its keyboard"
+    );
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p2"),
+        "the pop-out keeps its terminal's keyboard"
+    );
+}
+
+#[gpui::test]
+fn esc_in_a_popout_session_rename_leaves_the_main_windows_keyboard_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    focus_p1_in_main(&mut h);
+    let key = PopoutKey::Tab {
+        tab_id: "t2".to_owned(),
+    };
+    assert_eq!(
+        h.root_update(move |root, window, cx| root.open_popout(key, window, cx)),
+        OpenOutcome::Opened
+    );
+    let mut popout = h.popout_window();
+    let header = popout
+        .debug_bounds("pane-header-p2")
+        .expect("p2's header is drawn in the pop-out")
+        .center();
+    popout.simulate_mouse_down(header, MouseButton::Right, Modifiers::none());
+    popout.simulate_mouse_up(header, MouseButton::Right, Modifiers::none());
+    popout.run_until_parked();
+    let rename = popout
+        .debug_bounds("menu-rename")
+        .expect("the pop-out draws the menu")
+        .center();
+    popout.simulate_click(rename, Modifiers::none());
+    popout.simulate_input("work");
+    // The main window draws last.
+    h.cx.update(|window, _| window.refresh());
+    h.cx.run_until_parked();
+
+    popout.simulate_keystrokes("escape");
+    popout.run_until_parked();
+    assert_eq!(
+        h.root(|root, _| root.session_menu().map(str::to_owned))
+            .as_deref(),
+        Some("s2"),
+        "Esc goes back to the menu's rows"
+    );
+    assert!(
+        focused_in_main(&mut h, "p1"),
+        "the main window's pane keeps its keyboard"
+    );
+    assert!(
+        popout.update(|window, cx| window.focused(cx).is_some()),
+        "the pop-out's menu holds its keyboard"
+    );
+}
+
+#[gpui::test]
+fn esc_in_the_jump_palette_hands_the_main_windows_keyboard_back_there(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = p2_popped_of_three(cx, &dir);
+    h.keys("ctrl-shift-p");
+    assert!(
+        h.root(|root, _| root.quick_jump_open()),
+        "the palette opens"
+    );
+    popout_draws_last(&mut h);
+
+    h.keys("escape");
+    assert!(!h.root(|root, _| root.quick_jump_open()), "Esc closes it");
+    assert!(
+        focused_in_main(&mut h, "p1"),
+        "the main window's pane takes its keyboard back"
+    );
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p2"),
+        "the pop-out keeps its terminal's keyboard"
+    );
+}

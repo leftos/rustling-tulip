@@ -1223,9 +1223,10 @@ impl RootView {
         };
         let seed = name.clone();
         let input = cx.new(|cx| TextInput::new(name, "Tab name", cx));
-        let events = cx.subscribe_in(
-            &input,
+        let events = Self::subscribe_in_window(
             window,
+            cx,
+            &input,
             |this, _, event: &TextInputEvent, window, cx| {
                 let end = match event {
                     TextInputEvent::Submit => RenameEnd::Submit,

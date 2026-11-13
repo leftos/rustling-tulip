@@ -709,7 +709,7 @@ impl RootView {
 
     /// Gives every diff tab a view, which fetches its snapshot, and drops
     /// the views of tabs that are gone. A hidden tab keeps its view.
-    pub(crate) fn reconcile_diff_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn reconcile_diff_tabs(&mut self, cx: &mut Context<Self>) {
         let targets: Vec<(String, DiffTarget)> = self
             .tabs
             .tabs()
@@ -750,7 +750,7 @@ impl RootView {
                 ui.diff_highlight,
             );
             let view = cx.new(|cx| DiffTabView::new(target, font, include, highlight, cx));
-            let events = cx.subscribe_in(&view, window, |this, _, event, _, cx| match event {
+            let events = cx.subscribe(&view, |this, _, event, cx| match event {
                 DiffTabEvent::ToggleWhitespace => this.toggle_diff_whitespace(cx),
                 DiffTabEvent::ToggleHighlight => this.toggle_diff_highlight(cx),
             });

@@ -4378,7 +4378,7 @@ impl RootView {
         self.activate_pending_viewer_tab();
         self.activate_pending_dashboard_tab();
         self.reconcile_panes(window, cx);
-        self.reconcile_diff_tabs(window, cx);
+        self.reconcile_diff_tabs(cx);
         self.prune_tab_font_sizes();
         self.prune_kept_runs();
         self.prune_kept_subagents();

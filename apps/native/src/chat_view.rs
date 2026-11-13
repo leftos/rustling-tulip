@@ -2814,18 +2814,24 @@ fn tail_box(
     }
     column
         .track_scroll(&handle)
-        .on_scroll(cx.listener(move |_, _: &ScrollEvent, window, cx| {
+        .on_scroll(cx.listener(move |_, _: &ScrollEvent, _, cx| {
             // The box has scrolled by now; the chat around it stays put.
             cx.stop_propagation();
             let (key, handle) = (key.clone(), handle.clone());
             // Read once the wheel has moved the box.
-            cx.defer_in(window, move |this, _, cx| {
+            let root = cx.weak_entity();
+            cx.defer(move |cx| {
                 let scrolled = -handle.offset().y / px(1.0);
                 let max_scroll = handle.max_offset().y / px(1.0);
-                this.chat
-                    .tails
-                    .on_scrolled(&key.0, &key.1, scrolled, max_scroll);
-                cx.notify();
+                let read = root.update(cx, |this, cx| {
+                    this.chat
+                        .tails
+                        .on_scrolled(&key.0, &key.1, scrolled, max_scroll);
+                    cx.notify();
+                });
+                if let Err(err) = read {
+                    tracing::debug!("a chat scroll's root view has gone: {err:#}");
+                }
             });
         }))
         .into_any_element()
