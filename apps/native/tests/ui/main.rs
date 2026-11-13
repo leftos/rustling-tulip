@@ -88,6 +88,7 @@ mod ui_spawn_hosts;
 mod ui_spawn_preview;
 mod ui_spawn_submenu;
 mod ui_stashes;
+mod ui_subagents;
 mod ui_summary;
 mod ui_tab_drag;
 mod ui_tabs;

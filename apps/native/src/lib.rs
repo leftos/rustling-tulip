@@ -171,6 +171,7 @@ mod stash_view;
 mod stashes;
 mod status_glyph;
 mod stretchtext;
+mod subagent_view;
 mod subagents;
 mod summarizer_settings;
 mod summary;
@@ -1128,13 +1129,20 @@ pub struct RootView {
     /// The dispatch run, by host and run id, whose pane header Stop waits
     /// for its second click.
     run_stop_armed: Option<(HostKey, String)>,
-    /// The log scroll of each pane that follows a dispatch run, by pane id.
+    /// The log scroll of each pane that follows a dispatch run or a
+    /// subagent, by pane id.
     run_scrolls: HashMap<String, dispatch_view::RunScroll>,
-    /// The transcript held of each followed dispatch run, by host and run id.
-    transcripts: HashMap<(HostKey, String), transcript_view::Transcript>,
-    /// Each dispatch run, by host and run id, whose transcript its host was
-    /// asked to follow, with the request id of a follow not yet answered.
-    transcript_follows: HashMap<(HostKey, String), Option<String>>,
+    /// The transcript held of each followed dispatch run or subagent, by
+    /// host and key.
+    transcripts: HashMap<(HostKey, transcript_view::TranscriptKey), transcript_view::Transcript>,
+    /// Each transcript, by host and key, its host was asked to follow, with
+    /// the request id of a follow not yet answered.
+    transcript_follows: HashMap<(HostKey, transcript_view::TranscriptKey), Option<String>>,
+    /// Each followed subagent whose follow its host refused while nothing
+    /// was held of it, until a transcript of it comes or no pane follows it.
+    transcripts_unavailable: HashSet<(HostKey, transcript_view::TranscriptKey)>,
+    /// The last snapshot of each subagent a pane follows.
+    kept_subagents: subagent_view::KeptSubagents,
     /// The Detached banner's Stop all waiting for its second click.
     detached_stop_all: sidebar_view::DetachedStopAll,
     /// Restarts and resumes waiting for their duplicate.
@@ -1736,6 +1744,8 @@ impl RootView {
             run_scrolls: HashMap::new(),
             transcripts: HashMap::new(),
             transcript_follows: HashMap::new(),
+            transcripts_unavailable: HashSet::new(),
+            kept_subagents: subagent_view::KeptSubagents::default(),
             detached_stop_all: sidebar_view::DetachedStopAll::default(),
             duplicates: Duplicates::default(),
             prefills: Prefills::default(),
@@ -4304,6 +4314,7 @@ impl RootView {
         self.reconcile_diff_tabs(window, cx);
         self.prune_tab_font_sizes();
         self.prune_kept_runs();
+        self.prune_kept_subagents();
         self.follow_transcripts();
         self.apply_pane_fonts(false, cx);
         self.refresh_spawn_tabs();
@@ -4903,6 +4914,7 @@ impl RootView {
         let focused = self.shown_session().filter(|_| main_active);
         self.sidebar.set_focused_session(focused.as_deref());
         self.keep_followed_runs(host, msg);
+        self.keep_followed_subagents(host, msg);
         if matches!(
             msg,
             DaemonMessage::DispatchRuns { .. }
@@ -5447,40 +5459,22 @@ impl RootView {
         self.ask_devices();
     }
 
-    /// Follows the transcript of each dispatch run a pane follows, on a host
-    /// that lists dispatch runs, with a fresh request id, and unfollows each
-    /// one no pane follows any more, dropping what was held of it.
+    /// Follows the transcript of each dispatch run or subagent a pane
+    /// follows, with a fresh request id, and unfollows each one no pane
+    /// follows any more, dropping what was held of it. A run is followed on
+    /// a host that lists dispatch runs, a subagent on any connected host.
     fn follow_transcripts(&mut self) {
-        let wanted = self.followed_run_keys();
-        let gone: Vec<(HostKey, String)> = self
-            .transcript_follows
-            .keys()
-            .filter(|key| !wanted.contains(*key))
-            .cloned()
-            .collect();
-        for (host, run_id) in gone {
-            self.transcript_follows
-                .remove(&(host.clone(), run_id.clone()));
-            let source = protocol::TranscriptSource::DispatchRun { run_id };
-            self.send_to(&host, ClientMessage::UnfollowTranscript { source });
-        }
-        self.transcripts.retain(|key, _| wanted.contains(key));
-        for (host, run_id) in wanted {
-            let lists_runs = self
-                .conn_of(&host)
-                .is_some_and(|conn| conn.supports(protocol::FEATURE_DISPATCH_RUNS));
-            let key = (host, run_id);
-            if !lists_runs || self.transcript_follows.contains_key(&key) {
+        let wanted = self.followed_transcript_keys();
+        self.unfollow_transcripts_not_in(&wanted);
+        for key in wanted {
+            if self.transcript_follows.contains_key(&key) || !self.serves_transcript(&key) {
                 continue;
             }
             let request_id = new_request_id();
-            let source = protocol::TranscriptSource::DispatchRun {
-                run_id: key.1.clone(),
-            };
             self.send_to(
                 &key.0,
                 ClientMessage::FollowTranscript {
-                    source,
+                    source: key.1.to_source(),
                     request_id: Some(request_id.clone()),
                 },
             );
@@ -5488,9 +5482,46 @@ impl RootView {
         }
     }
 
-    /// Folds a followed run's transcript or append from `host`. A reply to
-    /// another follow than the one waiting is stale and dropped; a transcript
-    /// sent unasked replaces the one held.
+    /// Unfollows each followed transcript not in `wanted`, dropping what is
+    /// held of every one not in it.
+    fn unfollow_transcripts_not_in(
+        &mut self,
+        wanted: &HashSet<(HostKey, transcript_view::TranscriptKey)>,
+    ) {
+        let gone: Vec<(HostKey, transcript_view::TranscriptKey)> = self
+            .transcript_follows
+            .keys()
+            .filter(|key| !wanted.contains(*key))
+            .cloned()
+            .collect();
+        for key in gone {
+            self.transcript_follows.remove(&key);
+            let source = key.1.to_source();
+            self.send_to(&key.0, ClientMessage::UnfollowTranscript { source });
+        }
+        self.transcripts.retain(|key, _| wanted.contains(key));
+        self.transcripts_unavailable
+            .retain(|key| wanted.contains(key));
+    }
+
+    /// Whether the host of `key` can be asked to follow it now: a run's
+    /// host when it lists dispatch runs, a subagent's when it is connected.
+    fn serves_transcript(&self, (host, key): &(HostKey, transcript_view::TranscriptKey)) -> bool {
+        let Some(conn) = self.conn_of(host) else {
+            return false;
+        };
+        match key {
+            transcript_view::TranscriptKey::Run(_) => {
+                conn.supports(protocol::FEATURE_DISPATCH_RUNS)
+            }
+            transcript_view::TranscriptKey::Subagent { .. } => conn.is_open(),
+        }
+    }
+
+    /// Folds a followed run's or subagent's transcript or append from
+    /// `host`. A reply to another follow than the one waiting is stale and
+    /// dropped; a transcript sent unasked replaces the one held; an append
+    /// with nothing held is dropped.
     fn on_transcript_message(
         &mut self,
         host: &HostKey,
@@ -5499,32 +5530,28 @@ impl RootView {
     ) {
         match msg {
             DaemonMessage::Transcript {
-                source: protocol::TranscriptSource::DispatchRun { run_id },
+                source,
                 entries,
                 hidden,
                 request_id,
             } => {
-                let key = (host.clone(), run_id.clone());
-                let Some(pending) = self.transcript_follows.get_mut(&key) else {
+                let Some(key) = transcript_view::TranscriptKey::from_source(source) else {
                     return;
                 };
-                if let Some(id) = request_id {
-                    if pending.as_deref() != Some(id.as_str()) {
-                        return;
-                    }
-                    *pending = None;
+                let reply = (entries.clone(), *hidden);
+                if self.fold_transcript_reply((host.clone(), key), reply, request_id.as_deref()) {
+                    cx.notify();
                 }
-                let transcript = self.transcripts.entry(key).or_default();
-                transcript.replace(entries.clone(), *hidden);
-                cx.notify();
             }
             DaemonMessage::TranscriptAppend {
-                source: protocol::TranscriptSource::DispatchRun { run_id },
+                source,
                 entries,
                 ended,
             } => {
-                if let Some(transcript) = self.transcripts.get_mut(&(host.clone(), run_id.clone()))
-                {
+                let Some(key) = transcript_view::TranscriptKey::from_source(source) else {
+                    return;
+                };
+                if let Some(transcript) = self.transcripts.get_mut(&(host.clone(), key)) {
                     transcript.append(entries.clone(), *ended);
                     cx.notify();
                 }
@@ -5533,10 +5560,39 @@ impl RootView {
         }
     }
 
+    /// Takes `reply`'s entries and hidden count as `key`'s transcript when
+    /// a follow of `key` waits for it, or it came unasked (`request_id`
+    /// `None`) while `key` is followed; returns whether it was taken.
+    fn fold_transcript_reply(
+        &mut self,
+        key: (HostKey, transcript_view::TranscriptKey),
+        reply: (Vec<protocol::ChatEntry>, u32),
+        request_id: Option<&str>,
+    ) -> bool {
+        let Some(pending) = self.transcript_follows.get_mut(&key) else {
+            return false;
+        };
+        if let Some(id) = request_id {
+            if pending.as_deref() != Some(id) {
+                return false;
+            }
+            *pending = None;
+        }
+        self.transcripts_unavailable.remove(&key);
+        let (entries, hidden) = reply;
+        self.transcripts
+            .entry(key)
+            .or_default()
+            .replace(entries, hidden);
+        true
+    }
+
     /// A refusal of `host`'s follow `request_id`: the follow waits no more.
-    /// A run gone (`not_found`) keeps the transcript held; any other refusal,
-    /// such as an older host's `unsupported_message`, drops it so the pane
-    /// shows the run's recent actions. Returns whether it was one.
+    /// A run gone (`not_found`) keeps the transcript held; any other refusal
+    /// of a run, such as an older host's `unsupported_message`, drops it so
+    /// the pane shows the run's recent actions. A subagent's refusal keeps
+    /// what is held of it, and marks it unavailable when nothing is.
+    /// Returns whether it was one.
     fn transcript_refused(&mut self, host: &HostKey, request_id: &str, code: Option<&str>) -> bool {
         let pending = self
             .transcript_follows
@@ -5547,8 +5603,13 @@ impl RootView {
         };
         *pending = None;
         let key = key.clone();
-        if code != Some(protocol::error_codes::NOT_FOUND) {
-            self.transcripts.remove(&key);
+        match key.1 {
+            transcript_view::TranscriptKey::Run(_) => {
+                if code != Some(protocol::error_codes::NOT_FOUND) {
+                    self.transcripts.remove(&key);
+                }
+            }
+            transcript_view::TranscriptKey::Subagent { .. } => self.subagent_refused(key),
         }
         true
     }

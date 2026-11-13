@@ -20,7 +20,7 @@ use crate::grid_view::{TipAt, header_tipped};
 use crate::session_menu::{header_text_button, on_press};
 use crate::spawn_view::DISABLED_OPACITY;
 use crate::target::HostKey;
-use crate::transcript_view::{LineKind, Transcript, transcript_lines};
+use crate::transcript_view::{LineKind, Transcript, TranscriptKey, transcript_lines};
 use crate::ui_theme::theme;
 use crate::{RootView, UI_TEXT_SIZE, tabs};
 
@@ -239,20 +239,20 @@ pub(crate) fn shown<'a>(
     }
 }
 
-/// A followed run's log scroll: the run it scrolls, the handle and whether
-/// it stays at the end.
+/// A followed run's or subagent's log scroll: the transcript it scrolls,
+/// the handle and whether it stays at the end.
 #[derive(Debug, Clone)]
 pub(crate) struct RunScroll {
-    run: (HostKey, String),
+    key: (HostKey, TranscriptKey),
     following: bool,
     handle: ScrollHandle,
 }
 
 impl RunScroll {
-    /// A scroll of `run`'s log, at its end.
-    fn of(run: (HostKey, String)) -> Self {
+    /// A scroll of `key`'s log, at its end.
+    fn of(key: (HostKey, TranscriptKey)) -> Self {
         Self {
-            run,
+            key,
             following: true,
             handle: ScrollHandle::new(),
         }
@@ -266,7 +266,56 @@ struct FollowedRun {
     run_id: String,
 }
 
+/// A pane that follows a transcript, with its host and key.
+pub(crate) struct FollowedTranscript {
+    pub pane_id: String,
+    pub host: HostKey,
+    pub key: TranscriptKey,
+}
+
+/// The transcript a pane `follow` follows; `None` for a follow this build
+/// does not know.
+fn follow_key(follow: &PaneFollow) -> Option<TranscriptKey> {
+    match follow {
+        PaneFollow::DispatchRun { run_id } => Some(TranscriptKey::Run(run_id.clone())),
+        PaneFollow::Subagent {
+            session_id,
+            agent_id,
+        } => Some(TranscriptKey::Subagent {
+            session_id: session_id.clone(),
+            agent_id: agent_id.clone(),
+        }),
+        PaneFollow::Unknown => None,
+    }
+}
+
 impl RootView {
+    /// Every pane of every tab that follows a dispatch run or a subagent.
+    pub(crate) fn followed_transcripts(&self) -> Vec<FollowedTranscript> {
+        self.tabs
+            .tabs()
+            .iter()
+            .filter_map(|tab| tab.grid())
+            .flat_map(tabs::collect_panes)
+            .filter_map(|pane| {
+                let key = follow_key(pane.follow?)?;
+                Some(FollowedTranscript {
+                    pane_id: pane.id.to_owned(),
+                    host: pane.host.clone(),
+                    key,
+                })
+            })
+            .collect()
+    }
+
+    /// The host and key of every transcript some pane follows.
+    pub(crate) fn followed_transcript_keys(&self) -> HashSet<(HostKey, TranscriptKey)> {
+        self.followed_transcripts()
+            .into_iter()
+            .map(|followed| (followed.host, followed.key))
+            .collect()
+    }
+
     /// Every pane of every tab that follows a dispatch run.
     fn followed_runs(&self) -> Vec<FollowedRun> {
         self.tabs
@@ -282,14 +331,6 @@ impl RootView {
                 }),
                 _ => None,
             })
-            .collect()
-    }
-
-    /// The host and run id of every dispatch run some pane follows.
-    pub(crate) fn followed_run_keys(&self) -> HashSet<(HostKey, String)> {
-        self.followed_runs()
-            .into_iter()
-            .map(|followed| (followed.host, followed.run_id))
             .collect()
     }
 
@@ -380,8 +421,9 @@ impl RootView {
         }
     }
 
-    /// Keeps only the kept runs and log scrolls of panes that still follow
-    /// a run, and gives each such pane a log scroll.
+    /// Keeps only the kept runs of panes that still follow a run and the
+    /// log scrolls of panes that still follow a transcript, and gives each
+    /// such pane a log scroll.
     pub(crate) fn prune_kept_runs(&mut self) {
         let followed = self.followed_runs();
         self.kept_runs.retain_followed(|host, run_id| {
@@ -389,17 +431,18 @@ impl RootView {
                 .iter()
                 .any(|f| f.host == *host && f.run_id == run_id)
         });
+        let followed = self.followed_transcripts();
         self.run_scrolls
             .retain(|pane_id, _| followed.iter().any(|f| f.pane_id == *pane_id));
         for f in followed {
-            let run = (f.host, f.run_id);
+            let key = (f.host, f.key);
             let scroll = self
                 .run_scrolls
                 .entry(f.pane_id)
-                .or_insert_with(|| RunScroll::of(run.clone()));
-            // A pane that now follows another run starts at its end.
-            if scroll.run != run {
-                *scroll = RunScroll::of(run);
+                .or_insert_with(|| RunScroll::of(key.clone()));
+            // A pane that now follows another transcript starts at its end.
+            if scroll.key != key {
+                *scroll = RunScroll::of(key);
             }
         }
     }
@@ -630,19 +673,34 @@ impl RootView {
         run: &DispatchRunSnapshot,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let key = (host.clone(), run.run_id.clone());
+        let key = (host.clone(), TranscriptKey::Run(run.run_id.clone()));
         let rows: Vec<AnyElement> = match self.transcripts.get(&key) {
-            Some(transcript) => Self::transcript_rows(pane_id, &key, transcript, cx),
+            Some(transcript) => {
+                let line_ids = format!("dispatch-line-{pane_id}");
+                Self::transcript_rows(&line_ids, &key, transcript, cx)
+            }
             None => run
                 .recent_actions
                 .iter()
                 .map(|action| div().child(action.clone()).into_any_element())
                 .collect(),
         };
+        self.log_column(pane_id, format!("dispatch-log-{pane_id}"), rows, cx)
+    }
+
+    /// Pane `pane_id`'s log column, tagged `name`, of `rows` in the
+    /// terminal's font, scrolled to the end while the user has not scrolled
+    /// up.
+    pub(crate) fn log_column(
+        &self,
+        pane_id: &str,
+        name: String,
+        rows: Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let t = theme(cx);
         let family = self.sidebar.ui_state().terminal_font.family.as_deref();
         let family = SharedString::from(family.unwrap_or(DEFAULT_FAMILY).to_owned());
-        let name = format!("dispatch-log-{pane_id}");
         let column = div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .driver_id(|| name)
@@ -682,11 +740,12 @@ impl RootView {
             }))
     }
 
-    /// The rows of `transcript`, held for run `run` of pane `pane_id`; a row
-    /// of a tool call expands or collapses the call's output on a press.
-    fn transcript_rows(
-        pane_id: &str,
-        run: &(HostKey, String),
+    /// The rows of `transcript`, held for `key`, each tagged
+    /// `{line_ids}-{n}`; a row of a tool call expands or collapses the
+    /// call's output on a press.
+    pub(crate) fn transcript_rows(
+        line_ids: &str,
+        key: &(HostKey, TranscriptKey),
         transcript: &Transcript,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
@@ -698,7 +757,7 @@ impl RootView {
                 LineKind::Output | LineKind::Muted => t.muted,
                 LineKind::Error => t.danger,
             };
-            let name = format!("dispatch-line-{pane_id}-{at}");
+            let name = format!("{line_ids}-{at}");
             let row = div()
                 .id(ElementId::Name(SharedString::from(name.clone())))
                 .driver_id(|| name)
@@ -708,19 +767,19 @@ impl RootView {
                 rows.push(row.into_any_element());
                 continue;
             };
-            let run = run.clone();
+            let key = key.clone();
             let row = on_press(row.cursor_pointer(), cx, move |this, _, _| {
-                this.toggle_transcript_entry(&run, &entry);
+                this.toggle_transcript_entry(&key, &entry);
             });
             rows.push(row.into_any_element());
         }
         rows
     }
 
-    /// Expands the output of tool call `id` in run `run`'s transcript, or
+    /// Expands the output of tool call `id` in `key`'s transcript, or
     /// collapses it again.
-    fn toggle_transcript_entry(&mut self, run: &(HostKey, String), id: &str) {
-        if let Some(transcript) = self.transcripts.get_mut(run) {
+    fn toggle_transcript_entry(&mut self, key: &(HostKey, TranscriptKey), id: &str) {
+        if let Some(transcript) = self.transcripts.get_mut(key) {
             transcript.toggle(id);
         }
     }
@@ -743,7 +802,9 @@ impl RootView {
         let Some((host, run_id)) = self.pane_run(pane_id) else {
             return Vec::new();
         };
-        let held = self.transcripts.get(&(host.clone(), run_id.clone()));
+        let held = self
+            .transcripts
+            .get(&(host.clone(), TranscriptKey::Run(run_id.clone())));
         match (self.run_shown(&host, &run_id), held) {
             (RunShown::Gone, _) => Vec::new(),
             (_, Some(transcript)) => transcript_lines(transcript)

@@ -1,17 +1,64 @@
-//! A followed dispatch run's transcript, drawn the way the agent draws a
-//! session in a terminal: each answer and tool call under a `●`, a tool's
-//! output under it after `⎿`, cut to its first lines until clicked. The
-//! model is plain Rust, so every rule is unit-tested; `RootView` keeps one
-//! per followed run and draws its lines.
+//! A followed dispatch run's or subagent's transcript, drawn the way the
+//! agent draws a session in a terminal: each answer and tool call under a
+//! `●`, a tool's output under it after `⎿`, cut to its first lines until
+//! clicked. The model is plain Rust, so every rule is unit-tested;
+//! `RootView` keeps one per followed run or subagent and draws its lines.
 
 use std::collections::HashSet;
 
-use protocol::ChatEntry;
+use protocol::{ChatEntry, TranscriptSource};
 
-/// The entries a client holds of one run, as the daemon's log keeps them.
+/// What a followed transcript is of, as a client keys what it holds: the
+/// native twin of [`TranscriptSource`], without its `Unknown`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum TranscriptKey {
+    /// Dispatch run `0`.
+    Run(String),
+    /// Subagent `agent_id` of session `session_id`.
+    Subagent {
+        session_id: String,
+        agent_id: String,
+    },
+}
+
+impl TranscriptKey {
+    /// The key of `source`; `None` for a source this build does not know.
+    pub(crate) fn from_source(source: &TranscriptSource) -> Option<Self> {
+        match source {
+            TranscriptSource::DispatchRun { run_id } => Some(Self::Run(run_id.clone())),
+            TranscriptSource::Subagent {
+                session_id,
+                agent_id,
+            } => Some(Self::Subagent {
+                session_id: session_id.clone(),
+                agent_id: agent_id.clone(),
+            }),
+            TranscriptSource::Unknown => None,
+        }
+    }
+
+    /// The source a follow of this key names on the wire.
+    pub(crate) fn to_source(&self) -> TranscriptSource {
+        match self {
+            Self::Run(run_id) => TranscriptSource::DispatchRun {
+                run_id: run_id.clone(),
+            },
+            Self::Subagent {
+                session_id,
+                agent_id,
+            } => TranscriptSource::Subagent {
+                session_id: session_id.clone(),
+                agent_id: agent_id.clone(),
+            },
+        }
+    }
+}
+
+/// The entries a client holds of one transcript, as the daemon's log keeps
+/// them.
 pub(crate) const TRANSCRIPT_CAP: usize = 500;
 
-/// The transcript a client holds of one followed run.
+/// The transcript a client holds of one followed run or subagent.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Transcript {
     pub entries: Vec<ChatEntry>,
@@ -416,6 +463,37 @@ mod tests {
                 line("● hi", LineKind::Answer, None),
             ]
         );
+    }
+
+    #[test]
+    fn transcript_key_round_trips_each_source() {
+        let run = TranscriptSource::DispatchRun {
+            run_id: "r1".to_owned(),
+        };
+        let sub = TranscriptSource::Subagent {
+            session_id: "s1".to_owned(),
+            agent_id: "a1".to_owned(),
+        };
+        assert_eq!(
+            TranscriptKey::from_source(&run),
+            Some(TranscriptKey::Run("r1".to_owned()))
+        );
+        assert_eq!(
+            TranscriptKey::from_source(&sub),
+            Some(TranscriptKey::Subagent {
+                session_id: "s1".to_owned(),
+                agent_id: "a1".to_owned(),
+            })
+        );
+        for source in [run, sub] {
+            let key = TranscriptKey::from_source(&source);
+            assert_eq!(key.map(|key| key.to_source()), Some(source));
+        }
+    }
+
+    #[test]
+    fn an_unknown_source_has_no_key() {
+        assert_eq!(TranscriptKey::from_source(&TranscriptSource::Unknown), None);
     }
 
     #[test]

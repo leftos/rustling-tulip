@@ -239,7 +239,7 @@ Each step lands on `main` on its own and keeps the suite green. Hotspot files ar
 - [x] **SS.11 Client: drag.** `DragPayload::Subagent` and `drag::subagent_drop`, the twin of `run_drop`.
 
   Files: `apps/native/src/drag.rs`, `apps/native/src/sidebar_view.rs`, `apps/native/tests/ui/ui_sidebar_drag.rs`. Spec: a drop on a pane's half edge sends `SplitPane` with the follow, on its centre `ReplacePaneSession` with the follow; a tab pill refuses it; it never reorders. Depends on: SS.10.
-- [ ] **SS.12 Client: the pane.** `subagent_view.rs` (the header over the TV.4 transcript body), `grid_view.rs` routing, the follow source derived from any pane follow, the kept last snapshot and the gone notes.
+- [x] **SS.12 Client: the pane.** `subagent_view.rs` (the header over the TV.4 transcript body), `grid_view.rs` routing, the follow source derived from any pane follow, the kept last snapshot and the gone notes.
 
   Files: `apps/native/src/subagent_view.rs` (new), `apps/native/src/grid_view.rs`, `apps/native/src/lib.rs` (hotspot), `apps/native/tests/ui/ui_subagents.rs` (new, with its `mod` line in `tests/ui/main.rs`).
 

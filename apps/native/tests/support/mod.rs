@@ -1518,6 +1518,21 @@ pub fn subagent(agent_id: &str) -> Value {
     })
 }
 
+/// A subagent fixture for [`SessionBuilder::subagents`], as [`subagent`]
+/// with its agent type, model and state (`running`, `finished`, …); an
+/// empty `agent_type` or `model` is left out.
+pub fn subagent_with(agent_id: &str, agent_type: &str, model: &str, state: &str) -> Value {
+    let mut value = subagent(agent_id);
+    value["state"] = json!(state);
+    if !agent_type.is_empty() {
+        value["agent_type"] = json!(agent_type);
+    }
+    if !model.is_empty() {
+        value["model"] = json!(model);
+    }
+    value
+}
+
 pub fn pane(id: &str, session: Option<&str>) -> GridNode {
     GridNode::Pane {
         pane_id: id.to_owned(),

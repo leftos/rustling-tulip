@@ -373,6 +373,14 @@ A click on any line of a tool call expands or collapses its output (the expanded
 
 The snapshot's recent actions (the last 200 the daemon keeps) show until the host answers the follow, on a host that refuses it with anything but `not_found` (an older host's `unsupported_message`), and on a host that does not list `dispatch_runs`; a `not_found` refusal keeps the transcript held. The run folder the sidebar menu copies holds the full stream. A follow kind this client does not know draws a muted note, "This pane needs a newer app.".
 
+A subagent follow draws the same transcript column under its own header (`subagent_view.rs`, `RootView::subagent_body`): the label (description, else agent type, else "Subagent"), `SA · {agent type} · {model}` with the missing parts left out (just `SA` when both are), and the state word `running`, `queued`, `finished`, `failed` or `unknown`, followed by ` · {end status}` when one is set. The pane title stays "Subagent", and it has no input box and no stats line.
+
+Two notes show under that header: "Its session has ended" after a `TranscriptAppend` with `ended: true`, and "This subagent is no longer available" for a refused follow with nothing held.
+
+While a pane follows a subagent the client keeps its last `SubagentSnapshot`, refreshed from each session message and kept when the subagent leaves the list or its session is removed, so the header outlives the row. A Resume that moves the pane's follow to the new session unfollows the old key and follows the new one with no ended note.
+
+The client sends `FollowTranscript` and `UnfollowTranscript` with `TranscriptSource::Subagent` to the pane's host with no feature gate, only while that host connection is open, and follows again after `Welcome`.
+
 Either takes focus on a click.
 
 A followed run's pane header (`dispatch_view::run_title`, `run_stop_controls`) reads the run's title, a `DS · {backend} · tier {n}` chip that truncates down to the session-chip floor, and the status word, with a fixed Stop beside the buttons: Stop arms (`RootView.run_stop_armed`, keyed by host and run id), Confirm stop re-reads the status and sends `StopDispatchRun` with a `request_id` to the run's host, and Stop is disabled with the sidebar menu's tips while the run is stopping or has ended.
@@ -787,7 +795,7 @@ After Launch command, an agent whose descriptor has `user_hooks` gets a "Hooks" 
 
   Its label and subline come from `subagents::label` and `subagents::subline` (the agent type and model joined with " · "), and its hover (`subagents::hover_text`) lists "Subagent", "Type: …", "Model: …", "Effort: …", "Started: YYYY-MM-DD HH:MM", then "Finished" or "Failed" when it has ended, leaving out each line the subagent lacks.
 
-  A click (`RootView::open_subagent`) focuses the pane already following the subagent, a popped-out tab included (`tabs::find_tab_following_subagent`), else asks This PC's daemon for a new tab whose pane follows it (`CreateTab` with a `PaneFollow::Subagent`). A right-click on a subagent row opens no menu.
+  A click (`RootView::open_subagent`) focuses the pane already following the subagent, a popped-out tab included (`tabs::find_tab_following_subagent`), else asks This PC's daemon for a new tab whose pane follows it (`CreateTab` with a `PaneFollow::Subagent`), which draws the subagent pane described under the dispatch-run follow. A right-click on a subagent row opens no menu.
 
   A run leaf drags as `DragPayload::Run` (not while its host is dimmed); `drag::run_drop`, the twin of `unbound_drop`, makes the same split-or-replace choice: a half edge of a pane that shows a session or follows a run splits it with a new pane following the run (`SplitPane` with the follow), and the centre, or any edge of an empty pane, makes that pane follow the run (`ReplacePaneSession` with the follow). A tab pill refuses a run, and a run is never in a reorder.
 
