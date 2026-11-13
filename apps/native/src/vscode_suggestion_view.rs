@@ -75,7 +75,7 @@ impl RootView {
         let was_open = !self.vscode_suggestions.is_empty();
         self.vscode_suggestions.push(repo_id, suggestion);
         if !was_open {
-            self.vscode_prompt_focus.focus(window);
+            self.vscode_prompt_focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -133,7 +133,7 @@ impl RootView {
     /// active pane.
     fn after_vscode_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.vscode_suggestions.is_empty() {
-            self.vscode_prompt_focus.focus(window);
+            self.vscode_prompt_focus.focus(window, cx);
         } else if self.workspace_creator.is_some() {
             self.apply_workspace_creator_focus(window, cx);
         } else {

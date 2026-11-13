@@ -363,7 +363,7 @@ impl RootView {
             self.pairing.button = None;
             self.pairing.approving = false;
             if self.pairing_dialog().is_some() && !self.device_block_confirm_open() {
-                self.pairing.focus.focus(window);
+                self.pairing.focus.focus(window, cx);
             }
         }
         self.sync_pairing(window, cx);
@@ -371,10 +371,10 @@ impl RootView {
 
     /// Hands the keyboard to the approval dialog, if it shows; returns
     /// whether it does.
-    pub(crate) fn focus_pairing_dialog(&self, window: &mut Window) -> bool {
+    pub(crate) fn focus_pairing_dialog(&self, window: &mut Window, cx: &mut gpui::App) -> bool {
         let open = self.pairing_dialog().is_some();
         if open {
-            self.pairing.focus.focus(window);
+            self.pairing.focus.focus(window, cx);
         }
         open
     }
@@ -478,7 +478,7 @@ impl RootView {
         self.pairing.approving = false;
         // A block confirm open above keeps the keyboard until it closes.
         if !self.device_block_confirm_open() {
-            self.pairing.focus.focus(window);
+            self.pairing.focus.focus(window, cx);
         }
         self.sync_pairing(window, cx);
     }
@@ -542,7 +542,7 @@ impl RootView {
         if !open {
             self.pairing.approving = false;
         }
-        if closed && !self.focus_device_block_confirm(window) {
+        if closed && !self.focus_device_block_confirm(window, cx) {
             self.after_notice_closed(window, cx);
         }
         self.arm_pairing_tick(window, cx);

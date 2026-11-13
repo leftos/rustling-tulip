@@ -46,10 +46,9 @@ use crate::target::Target;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{Drag, RootView, UI_TEXT_SIZE, drag_handle, tagged_text, tooltip};
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, Corner, Corners, Div, DragMoveEvent, Entity,
-    FontWeight, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, SharedString, Stateful,
-    StyledText, Svg, TextRun, Window, anchored, canvas, deferred, div, font, point, prelude::*, px,
-    svg,
+    AnyElement, App, Bounds, ClickEvent, Context, Corners, Div, DragMoveEvent, Entity, FontWeight,
+    MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, SharedString, Stateful, StyledText,
+    Svg, TextRun, Window, anchored, canvas, deferred, div, font, point, prelude::*, px, svg,
 };
 use protocol::{ClientMessage, ContainerRef, SessionStatus};
 
@@ -490,7 +489,7 @@ impl RootView {
                 frame
             };
             let panel = anchored()
-                .anchor(Corner::TopRight)
+                .anchor(gpui::Anchor::TopRight)
                 .offset(point(px(MORE_BUTTON_SIZE), px(MORE_BUTTON_SIZE + 2.0)))
                 .snap_to_window()
                 .child(frame);
@@ -562,7 +561,7 @@ impl RootView {
         self.close_sc_file_menu(window, cx);
         self.close_pane_overflow_menu(window, cx);
         self.more_menu = MoreMenu::Open;
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -749,7 +748,7 @@ impl RootView {
             at,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -1393,7 +1392,7 @@ fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> 
             ellipsized_box()
                 .driver_id(|| "sidebar-title".to_owned())
                 .flex_basis(px(0.0))
-                .flex_grow()
+                .flex_grow(1.0)
                 .min_w(ui_px(cx, 48.0))
                 .text_size(ui_px(cx, 13.0))
                 .font_weight(crate::fonts::ui_weight(cx, FontWeight::BOLD))

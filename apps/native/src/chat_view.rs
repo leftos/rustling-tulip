@@ -953,7 +953,7 @@ impl RootView {
     /// Takes `window`'s keyboard from pane `pane_id`'s terminal if it has
     /// it: the main window keeps the keyboard to itself, a pop-out focuses
     /// nothing.
-    fn blur_pane(&self, pane_id: &str, window: &mut Window, cx: &App) {
+    fn blur_pane(&self, pane_id: &str, window: &mut Window, cx: &mut App) {
         let focused = self
             .panes
             .get(pane_id)
@@ -962,9 +962,9 @@ impl RootView {
             return;
         }
         if self.is_main_window(window) {
-            self.root_focus.focus(window);
+            self.root_focus.focus(window, cx);
         } else {
-            window.blur();
+            window.blur(cx);
         }
     }
 
@@ -1514,9 +1514,9 @@ impl RootView {
         let to = composer.input.read(cx).focus_handle(cx);
         cx.defer(move |cx| {
             for handle in cx.windows() {
-                let moved = handle.update(cx, |_, window, _| {
+                let moved = handle.update(cx, |_, window, cx| {
                     if from.is_focused(window) {
-                        to.focus(window);
+                        to.focus(window, cx);
                     }
                 });
                 if let Err(err) = moved {
@@ -1683,7 +1683,7 @@ impl RootView {
         let text = chat.card_box_text(cx);
         let Some(resolved) = answer.resolve(prompt, &text) else {
             if let Some(card_box) = chat.card_box.as_ref().filter(|_| answer.takes_text()) {
-                card_box.input.read(cx).focus_handle(cx).focus(window);
+                card_box.input.read(cx).focus_handle(cx).focus(window, cx);
             }
             return;
         };
@@ -2304,7 +2304,7 @@ pub(crate) fn follow_bottom(handle: &ScrollHandle) {
     let laid_out = (viewport > 0.0).then(|| {
         (
             -handle.offset().y / px(1.0),
-            handle.max_offset().height / px(1.0),
+            handle.max_offset().y / px(1.0),
         )
     });
     if chat::follows_bottom(laid_out) {
@@ -2821,7 +2821,7 @@ fn tail_box(
             // Read once the wheel has moved the box.
             cx.defer_in(window, move |this, _, cx| {
                 let scrolled = -handle.offset().y / px(1.0);
-                let max_scroll = handle.max_offset().height / px(1.0);
+                let max_scroll = handle.max_offset().y / px(1.0);
                 this.chat
                     .tails
                     .on_scrolled(&key.0, &key.1, scrolled, max_scroll);

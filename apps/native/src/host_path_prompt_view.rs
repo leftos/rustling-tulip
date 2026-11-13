@@ -267,8 +267,12 @@ impl RootView {
             return;
         };
         match dialog.prompt.focus() {
-            PromptControl::Path => dialog.path_input.read(cx).focus_handle(cx).focus(window),
-            PromptControl::Cancel | PromptControl::Add => self.host_path_focus.focus(window),
+            PromptControl::Path => dialog
+                .path_input
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx),
+            PromptControl::Cancel | PromptControl::Add => self.host_path_focus.focus(window, cx),
         }
         cx.notify();
     }

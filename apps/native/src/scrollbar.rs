@@ -165,7 +165,7 @@ fn track(handle: &ScrollHandle) -> Track {
     let viewport = handle.bounds().size.height / px(1.0);
     Track {
         viewport,
-        content: viewport + handle.max_offset().height / px(1.0),
+        content: viewport + handle.max_offset().y / px(1.0),
         scrolled: -handle.offset().y / px(1.0),
     }
 }

@@ -376,8 +376,12 @@ impl RootView {
             return;
         };
         match dialog.form.focused(fetch_path(dialog, cx)) {
-            FetchControl::Path => dialog.path_input.read(cx).focus_handle(cx).focus(window),
-            _ => self.fetch_focus.focus(window),
+            FetchControl::Path => dialog
+                .path_input
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx),
+            _ => self.fetch_focus.focus(window, cx),
         }
         cx.notify();
     }

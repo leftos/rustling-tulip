@@ -309,7 +309,7 @@ impl RootView {
             focus: RebindControl::Auto,
         });
         if self.exit.is_none() {
-            self.host_rebind_focus.focus(window);
+            self.host_rebind_focus.focus(window, cx);
         }
         cx.notify();
     }

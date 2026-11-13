@@ -53,7 +53,7 @@ impl RootView {
         self.overlays
             .opened(Overlay::LinkMenu, window.window_handle().window_id());
         self.link_menu = Some(menu);
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 

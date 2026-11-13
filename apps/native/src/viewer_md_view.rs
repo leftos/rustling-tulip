@@ -139,7 +139,11 @@ impl LinkRoute {
 /// Ctrl+click opens it in the external app, and a plain click or
 /// Ctrl+Shift+click views it.
 fn prefers_viewer(modifiers: Modifiers) -> bool {
-    !modifiers.secondary() || modifiers.shift
+    !(if cfg!(target_os = "macos") {
+        modifiers.platform
+    } else {
+        modifiers.control
+    }) || modifiers.shift
 }
 
 /// Each span `route` follows a link from: its byte range in

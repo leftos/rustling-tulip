@@ -61,6 +61,21 @@ actions!(
     ]
 );
 
+/// The platform's own modifier for a `secondary-` binding: gpui's keystroke parser rejects `secondary-`.
+fn secondary_key(key: &'static str) -> &'static str {
+    let apple = cfg!(any(target_os = "macos", target_os = "ios"));
+    match (apple, key) {
+        (true, "a") => "cmd-a",
+        (true, "v") => "cmd-v",
+        (true, "c") => "cmd-c",
+        (true, _) => "cmd-x",
+        (false, "a") => "ctrl-a",
+        (false, "v") => "ctrl-v",
+        (false, "c") => "ctrl-c",
+        (false, _) => "ctrl-x",
+    }
+}
+
 /// Binds the input's keys, active only while an input has the keyboard.
 pub fn bind_keys(cx: &mut App) {
     for context in [CONTEXT, MULTI_LINE_CONTEXT] {
@@ -72,10 +87,10 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("right", Right, context),
             KeyBinding::new("shift-left", SelectLeft, context),
             KeyBinding::new("shift-right", SelectRight, context),
-            KeyBinding::new("secondary-a", SelectAll, context),
-            KeyBinding::new("secondary-v", Paste, context),
-            KeyBinding::new("secondary-c", Copy, context),
-            KeyBinding::new("secondary-x", Cut, context),
+            KeyBinding::new(secondary_key("a"), SelectAll, context),
+            KeyBinding::new(secondary_key("v"), Paste, context),
+            KeyBinding::new(secondary_key("c"), Copy, context),
+            KeyBinding::new(secondary_key("x"), Cut, context),
             KeyBinding::new("home", Home, context),
             KeyBinding::new("end", End, context),
             KeyBinding::new("escape", Escape, context),
@@ -476,7 +491,7 @@ impl TextInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         self.is_selecting = true;
         let index = self.index_for_mouse_position(event.position);
         if event.modifiers.shift {
@@ -969,6 +984,11 @@ impl TextLayout {
 }
 
 impl EntityInputHandler for TextInput {
+    // The iOS text-input bridge treats a handler with no document length as ineligible for the keyboard.
+    fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        Some(self.content.encode_utf16().count())
+    }
+
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,

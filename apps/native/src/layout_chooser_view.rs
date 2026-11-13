@@ -86,7 +86,7 @@ impl RootView {
         }
         self.layout_chooser = Some(LayoutChooser::new(remote, has_legacy, count, clonable));
         if self.exit.is_none() {
-            self.chooser_focus.focus(window);
+            self.chooser_focus.focus(window, cx);
         }
         cx.notify();
     }

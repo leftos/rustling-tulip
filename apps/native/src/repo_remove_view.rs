@@ -69,7 +69,7 @@ impl RootView {
         self.close_container_menu(window, cx);
         self.repo_remove
             .open_dialog(host, level.clone(), name, sessions);
-        self.repo_remove_focus.focus(window);
+        self.repo_remove_focus.focus(window, cx);
         cx.notify();
     }
 

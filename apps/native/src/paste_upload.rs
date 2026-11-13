@@ -90,6 +90,8 @@ pub(crate) fn extension_of(format: ImageFormat) -> &'static str {
         ImageFormat::Svg => "svg",
         ImageFormat::Bmp => "bmp",
         ImageFormat::Tiff => "tiff",
+        ImageFormat::Ico => "ico",
+        ImageFormat::Pnm => "pnm",
     }
 }
 

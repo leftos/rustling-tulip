@@ -473,7 +473,7 @@ impl RootView {
                     return;
                 }
                 self.stash.drop = Some(DropConfirm::new(key.clone(), stash));
-                self.stash.drop_focus.focus(window);
+                self.stash.drop_focus.focus(window, cx);
             }
         }
         cx.notify();

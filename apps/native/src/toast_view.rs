@@ -194,7 +194,11 @@ impl TextMeasure for CardText<'_> {
         text.split('\n')
             .map(|line| {
                 wrapper
-                    .wrap_line(&[gpui::LineFragment::text(line)], px(width))
+                    .wrap_line(
+                        &[gpui::LineFragment::text(line)],
+                        px(width),
+                        gpui::IndentAdjustment::default(),
+                    )
                     .count()
                     + 1
             })
@@ -855,7 +859,7 @@ impl ToastView {
     /// window's own input handling, which the activation it brings re-enters.
     fn take_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(input) = &self.typed {
-            input.read(cx).focus_handle(cx).focus(window);
+            input.read(cx).focus_handle(cx).focus(window, cx);
         }
         #[cfg(windows)]
         {

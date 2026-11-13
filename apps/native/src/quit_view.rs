@@ -175,7 +175,7 @@ impl RootView {
             model: ExitDialog::new(),
             timer: None,
         });
-        self.quit_focus.focus(window);
+        self.quit_focus.focus(window, cx);
         cx.notify();
         false
     }
@@ -341,7 +341,7 @@ impl RootView {
         };
         self.delete_dialog = None;
         self.begin_shutdown(ExitButton::StopRemove, false, messages, cx);
-        self.quit_focus.focus(window);
+        self.quit_focus.focus(window, cx);
     }
 
     /// The walk's confirm answered `branch` for `session_id`: record it and
@@ -371,7 +371,7 @@ impl RootView {
         };
         tracing::info!("exit dialog: branch-fate walk cancelled; nothing sent");
         exit.model.cancel_walk();
-        self.quit_focus.focus(window);
+        self.quit_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -404,9 +404,9 @@ impl RootView {
             self.skip_vanished_in_walk(window, cx);
         }
         if self.exit_walk_confirm_open() {
-            self.dialog_focus.focus(window);
+            self.dialog_focus.focus(window, cx);
         } else {
-            self.quit_focus.focus(window);
+            self.quit_focus.focus(window, cx);
         }
     }
 
@@ -443,7 +443,7 @@ impl RootView {
         tracing::warn!("exit dialog: the connection dropped before the shutdown went out");
         exit.model.fail_shutdown();
         exit.timer = None;
-        self.quit_focus.focus(window);
+        self.quit_focus.focus(window, cx);
         cx.notify();
     }
 

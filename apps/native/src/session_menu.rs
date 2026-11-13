@@ -1181,7 +1181,7 @@ impl RootView {
         });
         self.confirm.disarm();
         self.disarm_run_stop();
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -1540,7 +1540,7 @@ impl RootView {
                 menu.highlight = first;
             }
         }
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -1936,7 +1936,7 @@ impl RootView {
             );
         }
         self.check_container_targets(window, cx);
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -2262,7 +2262,7 @@ impl RootView {
         menu.submenu = Submenu::None;
         self.confirm.disarm();
         self.disarm_run_stop();
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -2275,7 +2275,7 @@ impl RootView {
         menu.submenu = submenu;
         self.confirm.disarm();
         self.disarm_run_stop();
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -2583,7 +2583,7 @@ impl RootView {
                 TextInputEvent::Cancel => this.set_menu_mode(MenuMode::Actions, window, cx),
             },
         );
-        input.read(cx).focus_handle(cx).focus(window);
+        input.read(cx).focus_handle(cx).focus(window, cx);
         if let Some(menu) = &mut self.menu {
             menu.rename = Some((input, events));
         }
@@ -3685,7 +3685,7 @@ impl RootView {
             timer: None,
         });
         self.schedule_delete_dialog_tick(cx);
-        self.dialog_focus.focus(window);
+        self.dialog_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -4295,7 +4295,7 @@ impl RootView {
             at,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 

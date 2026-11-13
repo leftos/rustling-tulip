@@ -921,7 +921,7 @@ impl RootView {
     /// Closes the confirm and hands the keyboard back to the Settings frame.
     fn close_remove_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_pending.remove_confirm = None;
-        self.settings_tabs_focus.focus(window);
+        self.settings_tabs_focus.focus(window, cx);
         cx.notify();
     }
 

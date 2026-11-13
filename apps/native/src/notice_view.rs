@@ -461,7 +461,7 @@ impl RootView {
             hint,
         } = notice;
         self.notices.show_action_failed(title, detail, hint);
-        self.notice_focus.focus(window);
+        self.notice_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -505,7 +505,7 @@ impl RootView {
             }
         }
         if shown {
-            self.notice_focus.focus(window);
+            self.notice_focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -645,7 +645,7 @@ impl RootView {
     /// the active pane.
     pub(crate) fn after_notice_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.notices.has_modal() {
-            self.notice_focus.focus(window);
+            self.notice_focus.focus(window, cx);
         } else if self.spawn_dialog.is_some() {
             self.apply_spawn_focus(window, cx);
         } else if self.shell_dialog.is_some() {
@@ -653,15 +653,15 @@ impl RootView {
         } else if self.fetch_dialog.is_some() {
             self.apply_fetch_focus(window, cx);
         } else if self.preset_wizard.is_some() {
-            self.preset_wizard_focus.focus(window);
+            self.preset_wizard_focus.focus(window, cx);
         } else if self.themes_modal.is_some() {
-            self.themes_focus.focus(window);
+            self.themes_focus.focus(window, cx);
         } else if self.appearance_editor.is_some() {
-            self.appearance_focus.focus(window);
+            self.appearance_focus.focus(window, cx);
         } else if self.delete_dialog.is_some() {
-            self.dialog_focus.focus(window);
+            self.dialog_focus.focus(window, cx);
         } else if self.layout_chooser.is_some() {
-            self.chooser_focus.focus(window);
+            self.chooser_focus.focus(window, cx);
         } else {
             self.focus_active_pane(window, cx);
         }
@@ -973,6 +973,7 @@ pub(crate) fn drop_shadow(color: u32, drop: f32, blur: f32) -> BoxShadow {
         offset: point(px(0.0), px(drop)),
         blur_radius: px(blur),
         spread_radius: px(0.0),
+        inset: false,
     }
 }
 

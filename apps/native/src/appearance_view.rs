@@ -440,7 +440,7 @@ impl RootView {
             stop: None,
             _subscriptions: subscriptions,
         });
-        self.appearance_focus.focus(window);
+        self.appearance_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -1442,7 +1442,7 @@ impl RootView {
 
     /// Gives the editor's keyboard to `stop`; arriving at a stop puts its
     /// cursor or highlight back on the chosen value.
-    fn move_editor_focus(&mut self, stop: AppearanceStop, window: &mut Window, cx: &App) {
+    fn move_editor_focus(&mut self, stop: AppearanceStop, window: &mut Window, cx: &mut App) {
         let Some(editor) = self.appearance_editor.as_ref() else {
             return;
         };
@@ -1550,11 +1550,11 @@ impl RootView {
         &self,
         stop: AppearanceStop,
         window: &mut Window,
-        cx: &App,
+        cx: &mut App,
     ) {
         match self.stop_field(stop) {
-            Some(input) => input.read(cx).focus_handle(cx).focus(window),
-            None => self.appearance_focus.focus(window),
+            Some(input) => input.read(cx).focus_handle(cx).focus(window, cx),
+            None => self.appearance_focus.focus(window, cx),
         }
     }
 

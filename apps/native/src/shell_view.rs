@@ -450,8 +450,12 @@ impl RootView {
             .form
             .focused(shell_folder(dialog, cx), self.shell_browse_offered());
         match focus {
-            ShellControl::Folder => dialog.folder_input.read(cx).focus_handle(cx).focus(window),
-            _ => self.shell_focus.focus(window),
+            ShellControl::Folder => dialog
+                .folder_input
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx),
+            _ => self.shell_focus.focus(window, cx),
         }
         cx.notify();
     }

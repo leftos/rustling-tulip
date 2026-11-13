@@ -478,7 +478,15 @@ impl KeyParams {
                 });
             }
         };
-        match Keystroke::parse(source) {
+        // `parse_with_os` reads a request's text and resolves `secondary-`
+        // to the platform's modifier, as `parse` did before it took only
+        // static strings.
+        let os = if cfg!(target_os = "macos") {
+            gpui::OperatingSystem::Mac
+        } else {
+            gpui::OperatingSystem::Windows
+        };
+        match Keystroke::parse_with_os(source, os) {
             Ok(stroke) if !stroke.key.is_empty() => Ok(stroke),
             _ => Err(ParamError {
                 message: format!(r#"not a keystroke: "{source}""#),

@@ -1190,15 +1190,20 @@ impl RootView {
     /// is popped out: its terminal draws in the pop-out, so the main window
     /// focuses nothing for it. A pane showing its chat gives its hidden
     /// terminal no keys: the window keeps the keyboard.
-    pub(crate) fn focus_pane_view(&self, pane_id: &str, window: &mut Window, cx: &Context<Self>) {
+    pub(crate) fn focus_pane_view(
+        &self,
+        pane_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(slot) = self.panes.get(pane_id)
             && !self.is_pane_popped(pane_id)
             && !(self.is_tab_popped(&slot.tab_id) && self.is_main_window(window))
         {
             if self.pane_view(pane_id).hides_terminal() {
-                self.root_focus.focus(window);
+                self.root_focus.focus(window, cx);
             } else {
-                slot.view.read(cx).focus(window);
+                slot.view.read(cx).focus_handle().focus(window, cx);
             }
         }
     }
@@ -1208,21 +1213,21 @@ impl RootView {
     /// card holds no focus, so the main window keeps the keyboard to itself.
     /// With no tab or no pane to take it, the window's own focus does, so the
     /// app's shortcuts keep working.
-    pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &Context<Self>) {
-        if self.focus_active_diff_tab(window, cx) || self.focus_active_viewer_tab(window) {
+    pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_active_diff_tab(window, cx) || self.focus_active_viewer_tab(window, cx) {
             return;
         }
         let Some(tab_id) = self.tabs.active_id() else {
-            self.root_focus.focus(window);
+            self.root_focus.focus(window, cx);
             return;
         };
         if self.is_tab_popped(tab_id) && self.is_main_window(window) {
-            self.root_focus.focus(window);
+            self.root_focus.focus(window, cx);
             return;
         }
         match self.tabs.focused_pane(tab_id) {
             Some(pane_id) => self.focus_pane_view(&pane_id, window, cx),
-            None => self.root_focus.focus(window),
+            None => self.root_focus.focus(window, cx),
         }
     }
 
@@ -1536,8 +1541,8 @@ impl RootView {
         match focus {
             Some(handle) => body
                 .track_focus(&handle)
-                .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                    handle.focus(window);
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    handle.focus(window, cx);
                 })
                 .into_any_element(),
             None => body.into_any_element(),
@@ -1834,8 +1839,8 @@ impl RootView {
                 Some(slot) => {
                     let handle = slot.view.read(cx).focus_handle();
                     note.track_focus(&handle)
-                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                            handle.focus(window);
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            handle.focus(window, cx);
                         })
                         .into_any_element()
                 }
@@ -3049,7 +3054,7 @@ impl RootView {
         pane_id: &str,
         session_id: &str,
         slot: Option<&PaneSlot>,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
         let session = self.sidebar.session(session_id);
@@ -3060,8 +3065,8 @@ impl RootView {
             Some(slot) => {
                 let handle = slot.view.read(cx).focus_handle();
                 note.track_focus(&handle)
-                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                        handle.focus(window);
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        handle.focus(window, cx);
                     })
                     .into_any_element()
             }

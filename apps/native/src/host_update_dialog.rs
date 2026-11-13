@@ -192,7 +192,7 @@ impl RootView {
             .collect();
         let (check, check_task) = self.start_breaks_check(&host, cx);
         let focus = cx.focus_handle();
-        focus.focus(window);
+        focus.focus(window, cx);
         self.host_update_dialog = Some(HostUpdateDialog {
             host,
             name,

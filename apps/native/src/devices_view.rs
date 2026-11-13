@@ -129,7 +129,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         if self.devices.model.open_confirm(device_id) {
-            self.devices.focus.focus(window);
+            self.devices.focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -176,10 +176,14 @@ impl RootView {
 
     /// Hands the keyboard to the block confirm, if it shows; returns
     /// whether it does.
-    pub(crate) fn focus_device_block_confirm(&self, window: &mut Window) -> bool {
+    pub(crate) fn focus_device_block_confirm(
+        &self,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> bool {
         let open = self.device_block_confirm_open();
         if open {
-            self.devices.focus.focus(window);
+            self.devices.focus.focus(window, cx);
         }
         open
     }
@@ -187,7 +191,7 @@ impl RootView {
     /// The confirm closed: the keyboard goes to the approval dialog if one
     /// is open beneath it, else wherever a closed modal hands it.
     fn after_block_confirm_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_pairing_dialog(window) {
+        if !self.focus_pairing_dialog(window, cx) {
             self.after_notice_closed(window, cx);
         }
         cx.notify();

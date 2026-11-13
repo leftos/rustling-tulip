@@ -311,7 +311,7 @@ impl RootView {
             close_others_armed: false,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
-        self.tab_menu_focus.focus(window);
+        self.tab_menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -459,7 +459,7 @@ impl RootView {
     fn show_grid_menu(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(menu) = &mut self.tab_menu {
             menu.grid_open = open;
-            self.tab_menu_focus.focus(window);
+            self.tab_menu_focus.focus(window, cx);
             cx.notify();
         }
     }
@@ -1238,7 +1238,7 @@ impl RootView {
         let blur = cx.on_blur(&handle, window, |this, window, cx| {
             this.finish_rename(RenameEnd::Blur, window, cx);
         });
-        handle.focus(window);
+        handle.focus(window, cx);
         self.renaming = Some(Rename {
             tab_id: tab_id.to_owned(),
             input,

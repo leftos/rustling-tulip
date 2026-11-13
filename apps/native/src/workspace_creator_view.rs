@@ -391,7 +391,7 @@ impl RootView {
         self.send_to(&host, message);
         // A submit from the name field takes the keyboard off the field, so
         // the open creator still answers Esc while it waits.
-        self.workspace_creator_focus.focus(window);
+        self.workspace_creator_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -480,9 +480,15 @@ impl RootView {
         };
         let file_input = dialog.file_field.as_ref().map(|field| &field.input);
         match (dialog.creator.focus(), file_input) {
-            (CreatorControl::Name, _) => dialog.name_input.read(cx).focus_handle(cx).focus(window),
-            (CreatorControl::File, Some(input)) => input.read(cx).focus_handle(cx).focus(window),
-            _ => self.workspace_creator_focus.focus(window),
+            (CreatorControl::Name, _) => dialog
+                .name_input
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx),
+            (CreatorControl::File, Some(input)) => {
+                input.read(cx).focus_handle(cx).focus(window, cx)
+            }
+            _ => self.workspace_creator_focus.focus(window, cx),
         }
         cx.notify();
     }

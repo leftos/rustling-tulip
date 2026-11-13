@@ -727,7 +727,7 @@ fn still_stale_as_seen(dir: &DirHandle, seen: DirIdentity, staleness: Duration) 
 
 /// A fixed description of the lock directory at `path` for the log, so no path under the user's profile is ever
 /// logged.
-#[cfg(accounts_locks)]
+#[cfg(any(accounts_locks, target_os = "ios"))]
 fn lock_description(path: &Path) -> &'static str {
     match path.file_name().and_then(|name| name.to_str()) {
         Some(".oauth_refresh.lock") => "Claude Code's OAuth refresh lock",

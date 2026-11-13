@@ -1582,9 +1582,7 @@ impl RootView {
                 crate::toast_window::give_back_foreground(address, before, false);
                 #[cfg(not(windows))]
                 let _ = (address, before);
-                if let Err(err) = cx.update(|cx| remove_toast_window(open.handle, cx)) {
-                    tracing::debug!("the app quit before the toast window closed: {err:#}");
-                }
+                cx.update(|cx| remove_toast_window(open.handle, cx));
             })
             .detach();
         });

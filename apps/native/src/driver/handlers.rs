@@ -30,7 +30,13 @@ const TYPE_TEXT_HINT: &str = "type_text takes printable text; press Enter, Tab o
 
 /// The keystroke `paste` dispatches: the one a user presses to paste, Ctrl+V
 /// (Cmd+V on macOS).
-const PASTE_KEYSTROKE: &str = "secondary-v";
+/// gpui's keystroke parser rejects `secondary-`, so the modifier is the
+/// platform's own.
+const PASTE_KEYSTROKE: &str = if cfg!(any(target_os = "macos", target_os = "ios")) {
+    "cmd-v"
+} else {
+    "ctrl-v"
+};
 
 /// The actions `action` knows, as an unknown one's hint lists them.
 const ACTIONS_HINT: &str = "actions: open_settings, new_shell, open_spawn, toggle_sidebar, \

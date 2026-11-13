@@ -118,7 +118,7 @@ impl RootView {
             name,
             _events: events,
         });
-        self.pane_ui.dialog_focus.focus(window);
+        self.pane_ui.dialog_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -204,9 +204,9 @@ impl RootView {
             return;
         };
         if dialog.model.focused() == Control::Name {
-            dialog.name.read(cx).focus_handle(cx).focus(window);
+            dialog.name.read(cx).focus_handle(cx).focus(window, cx);
         } else {
-            self.pane_ui.dialog_focus.focus(window);
+            self.pane_ui.dialog_focus.focus(window, cx);
         }
         cx.notify();
     }

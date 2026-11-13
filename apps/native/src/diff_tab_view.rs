@@ -983,7 +983,7 @@ impl RootView {
     /// Gives the keyboard to the active tab when it is a diff tab; returns
     /// whether it was. A popped diff tab draws in its pop-out, so the main
     /// window keeps the keyboard to itself, as for a popped grid tab.
-    pub(crate) fn focus_active_diff_tab(&self, window: &mut Window, cx: &App) -> bool {
+    pub(crate) fn focus_active_diff_tab(&self, window: &mut Window, cx: &mut App) -> bool {
         let Some(tab_id) = self.tabs.active_id() else {
             return false;
         };
@@ -991,10 +991,10 @@ impl RootView {
             return false;
         };
         if self.is_tab_popped(tab_id) && self.is_main_window(window) {
-            self.root_focus.focus(window);
+            self.root_focus.focus(window, cx);
             return true;
         }
-        slot.view.read(cx).focus.focus(window);
+        slot.view.read(cx).focus.clone().focus(window, cx);
         true
     }
 

@@ -79,7 +79,7 @@ impl RootView {
         self.pane_ui.close = Some(PaneClose::new(&host, tab_id, pane_id, session, label));
         self.overlays
             .opened(Overlay::PaneClose, window.window_handle().window_id());
-        self.pane_ui.dialog_focus.focus(window);
+        self.pane_ui.dialog_focus.focus(window, cx);
         cx.notify();
     }
 

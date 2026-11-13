@@ -397,7 +397,7 @@ impl RootView {
             token_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         });
-        self.themes_focus.focus(window);
+        self.themes_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -1120,12 +1120,12 @@ impl RootView {
             _ => None,
         };
         if let Some(input) = input {
-            input.read(cx).focus_handle(cx).focus(window);
+            input.read(cx).focus_handle(cx).focus(window, cx);
             if select {
                 window.dispatch_action(Box::new(SelectAll), cx);
             }
         } else {
-            self.themes_focus.focus(window);
+            self.themes_focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -1228,7 +1228,7 @@ impl RootView {
         if let Some(modal) = self.themes_modal.as_mut() {
             modal.ask = Some(ask);
             modal.ask_go = false;
-            self.themes_focus.focus(window);
+            self.themes_focus.focus(window, cx);
             cx.notify();
         }
     }

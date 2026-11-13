@@ -545,7 +545,7 @@ impl RootView {
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
         self.sc_picker_open = true;
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 

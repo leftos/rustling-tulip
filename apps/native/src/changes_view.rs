@@ -727,7 +727,7 @@ impl RootView {
         self.close_sc_picker(window, cx);
         self.close_more_menu(window, cx);
         self.changes.file_menu = Some(menu);
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -781,7 +781,7 @@ impl RootView {
             return;
         }
         self.changes.discard = Some(DiscardConfirm::new(key, paths));
-        self.changes.discard_focus.focus(window);
+        self.changes.discard_focus.focus(window, cx);
         cx.notify();
     }
 

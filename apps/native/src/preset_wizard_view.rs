@@ -185,7 +185,7 @@ impl RootView {
             path_inputs,
             _subscriptions: subscriptions,
         });
-        self.preset_wizard_focus.focus(window);
+        self.preset_wizard_focus.focus(window, cx);
         cx.notify();
     }
 

@@ -817,7 +817,7 @@ impl Render for DiffView {
                 this.render_rows(range, window.viewport_size().width / px(1.0))
             }),
         )
-        .track_scroll(self.scroll.clone())
+        .track_scroll(&self.scroll)
         .size_full();
         let gutter = self.gutter_width(&metrics);
         let column_width = self.column_width.clone();

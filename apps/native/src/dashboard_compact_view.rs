@@ -592,7 +592,7 @@ fn chip_element(
     };
     let mono = chip.kind != ChipKind::Agent;
     let label = cell_text(&format!("{name}-name"), &chip.name)
-        .flex_shrink()
+        .flex_shrink(1.0)
         .text_color(gpui::rgb(name_colour))
         .when(mono, |text| {
             text.font_family(DEFAULT_FAMILY)
@@ -639,7 +639,7 @@ fn chip_element(
         .child(label)
         .child(
             cell_text(&format!("{name}-what"), &chip.what)
-                .flex_shrink()
+                .flex_shrink(1.0)
                 .text_color(gpui::rgb(what_colour)),
         )
         .into_any_element()

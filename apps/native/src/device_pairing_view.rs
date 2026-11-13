@@ -616,9 +616,13 @@ impl RootView {
             return;
         };
         match dialog.control {
-            Some(DeviceControl::Field) => dialog.code_input.read(cx).focus_handle(cx).focus(window),
+            Some(DeviceControl::Field) => dialog
+                .code_input
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx),
             Some(DeviceControl::CodeLink | DeviceControl::Button(_)) | None => {
-                self.device_pairing.focus.focus(window);
+                self.device_pairing.focus.focus(window, cx);
             }
         }
         cx.notify();

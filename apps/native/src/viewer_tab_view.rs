@@ -283,7 +283,7 @@ impl Rows {
     fn on_press(&self, index: usize) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
         let (root, focus, tab_id) = (self.root.clone(), self.focus.clone(), self.tab_id.clone());
         move |event, window, cx| {
-            focus.focus(window);
+            focus.focus(window, cx);
             // Fails only when the view is gone, and the tab with it.
             root.update(cx, |root, cx| {
                 root.press_viewer_line(&tab_id, index, event.modifiers.shift, cx);
@@ -577,13 +577,13 @@ impl RootView {
 
     /// Gives the keyboard to the active tab when it is a viewer tab; returns
     /// whether it was.
-    pub(crate) fn focus_active_viewer_tab(&self, window: &mut Window) -> bool {
+    pub(crate) fn focus_active_viewer_tab(&self, window: &mut Window, cx: &mut gpui::App) -> bool {
         let active_viewer = self
             .tabs
             .active_id()
             .is_some_and(|id| self.viewer_tabs.contains_key(id));
         if active_viewer {
-            self.viewer_focus.focus(window);
+            self.viewer_focus.focus(window, cx);
         }
         active_viewer
     }
@@ -613,7 +613,12 @@ impl RootView {
 
     /// Gives the keyboard back to tab `tab_id` when its find field holds it
     /// but the bar no longer shows.
-    pub(crate) fn return_stranded_find_focus(&self, tab_id: &str, window: &mut Window, cx: &App) {
+    pub(crate) fn return_stranded_find_focus(
+        &self,
+        tab_id: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let stranded = self.viewer_tabs.get(tab_id).is_some_and(|tab| {
             !tab.find_shows()
                 && tab
@@ -621,7 +626,7 @@ impl RootView {
                     .is_some_and(|bar| bar.input.read(cx).focus_handle(cx).is_focused(window))
         });
         if stranded {
-            self.viewer_focus.focus(window);
+            self.viewer_focus.focus(window, cx);
         }
     }
 
@@ -641,7 +646,7 @@ impl RootView {
             tab.set_find_bar(FindBar::new(input, subscriptions));
         }
         if let Some(bar) = tab.find_bar() {
-            bar.input.read(cx).focus_handle(cx).focus(window);
+            bar.input.read(cx).focus_handle(cx).focus(window, cx);
         }
         cx.notify();
     }
@@ -713,7 +718,7 @@ impl RootView {
             .get_mut(tab_id)
             .is_some_and(ViewerTab::close_find)
         {
-            self.viewer_focus.focus(window);
+            self.viewer_focus.focus(window, cx);
             cx.notify();
         }
     }
@@ -1024,7 +1029,7 @@ impl RootView {
             text.line_count(),
             move |range, _, _| rows.render(range),
         )
-        .track_scroll(tab.scroll().clone())
+        .track_scroll(&tab.scroll())
         .size_full();
         div()
             .flex_1()

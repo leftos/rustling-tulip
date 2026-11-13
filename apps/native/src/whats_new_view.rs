@@ -109,7 +109,7 @@ impl RootView {
             _fetch: None,
         });
         self.whats_new_scroll = Scrollbar::default();
-        self.whats_new_focus.focus(window);
+        self.whats_new_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -134,7 +134,7 @@ impl RootView {
             _fetch: Some(task),
         });
         self.whats_new_scroll = Scrollbar::default();
-        self.whats_new_focus.focus(window);
+        self.whats_new_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -160,7 +160,7 @@ impl RootView {
             return;
         }
         if self.settings_open() {
-            self.settings_tabs_focus.focus(window);
+            self.settings_tabs_focus.focus(window, cx);
             cx.notify();
         } else {
             self.after_notice_closed(window, cx);

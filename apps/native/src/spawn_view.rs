@@ -1116,7 +1116,7 @@ impl RootView {
             .focus_handle(cx)
             .is_focused(window)
         {
-            self.spawn_focus.focus(window);
+            self.spawn_focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -1329,7 +1329,7 @@ impl RootView {
             }
             Outcome::Close => self.close_spawn_dialog(window, cx),
             Outcome::ConfirmShare => {
-                self.spawn_focus.focus(window);
+                self.spawn_focus.focus(window, cx);
                 cx.notify();
             }
             Outcome::Spawn(submission) => {
@@ -1440,7 +1440,7 @@ impl RootView {
     pub(crate) fn apply_spawn_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             if self.spawn_dialog.is_some() {
-                self.spawn_focus.focus(window);
+                self.spawn_focus.focus(window, cx);
                 cx.notify();
             }
             return;
@@ -1454,8 +1454,8 @@ impl RootView {
             dialog.input(&dialog.form.focused())
         };
         match input {
-            Some(input) => input.read(cx).focus_handle(cx).focus(window),
-            None => self.spawn_focus.focus(window),
+            Some(input) => input.read(cx).focus_handle(cx).focus(window, cx),
+            None => self.spawn_focus.focus(window, cx),
         }
         cx.notify();
     }
@@ -2171,7 +2171,7 @@ pub(crate) fn choice_button(
         .id(ElementId::Name(SharedString::from(name.clone())))
         .driver_id(move || name)
         .flex()
-        .flex_grow()
+        .flex_grow(1.0)
         .items_center()
         .justify_center()
         .gap(px(6.0))
@@ -2597,7 +2597,7 @@ fn target_list(dialog: &SpawnDialog, cx: &mut Context<RootView>) -> AnyElement {
         .track_scroll(&dialog.target_scroll)
         .flex()
         .flex_col()
-        .flex_shrink()
+        .flex_shrink(1.0)
         .min_h(px(0.0))
         .overflow_y_scroll()
         .children(items);

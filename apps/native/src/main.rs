@@ -20,7 +20,7 @@
 
 use anyhow::Context as _;
 use daemon_client::capped_log::{self, CappedLog};
-use gpui::{App, Application};
+use gpui::App;
 use rustling_tulip_native::driver_gate::{self, GateDecision};
 use rustling_tulip_native::start_guard::{self, NextStart, StartMode};
 use rustling_tulip_native::{Assets, LOG_FILE, offscreen, toast_activation, update};
@@ -249,7 +249,7 @@ fn main() {
     // activator's class object.
     toast_activation::register();
     let wanted_session = launch.session;
-    Application::new()
+    gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             if let Some(dir) = guard_dir.clone() {

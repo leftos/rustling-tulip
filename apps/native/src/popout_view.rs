@@ -433,12 +433,12 @@ impl RootView {
 
     /// Gives `window`'s keyboard to its terminal: the active pane in the
     /// main window, the popped terminal or diff in a pop-out.
-    fn focus_window_terminal(&self, window: &mut Window, cx: &Context<Self>) {
+    fn focus_window_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
         let here = window.window_handle().window_id();
         if here == self.layouts.main() {
             self.focus_active_pane(window, cx);
         } else if let Some(focus) = self.popout_focus_in(here, cx) {
-            focus.focus(window);
+            focus.focus(window, cx);
         }
     }
 

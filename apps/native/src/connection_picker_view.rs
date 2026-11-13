@@ -1199,8 +1199,8 @@ impl RootView {
             .as_ref()
             .and_then(|form| form.input(dialog.focus));
         match input {
-            Some(input) => input.read(cx).focus_handle(cx).focus(window),
-            None => self.connection_picker_focus.focus(window),
+            Some(input) => input.read(cx).focus_handle(cx).focus(window, cx),
+            None => self.connection_picker_focus.focus(window, cx),
         }
         cx.notify();
     }
@@ -1407,7 +1407,7 @@ fn section_header(
                 note.driver_id(|| "connections-scan".to_owned())
             })
             .when(failed, |note| note.w_full().text_left())
-            .when(!failed, |note| note.min_w_0().flex_shrink().text_right())
+            .when(!failed, |note| note.min_w_0().flex_shrink(1.0).text_right())
             .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::NORMAL))
             .text_size(crate::fonts::ui_px_at(offset, 11.0))
             .text_color(gpui::rgb(color))

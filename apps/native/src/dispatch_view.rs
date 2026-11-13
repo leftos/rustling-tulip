@@ -734,7 +734,7 @@ impl RootView {
                 // Read once the wheel has moved the log.
                 cx.defer_in(window, move |this, _, cx| {
                     let scrolled = -handle.offset().y / px(1.0);
-                    let max_scroll = handle.max_offset().height / px(1.0);
+                    let max_scroll = handle.max_offset().y / px(1.0);
                     if let Some(scroll) = this.run_scrolls.get_mut(&pane) {
                         scroll.following =
                             crate::chat::follows_bottom(Some((scrolled, max_scroll)));

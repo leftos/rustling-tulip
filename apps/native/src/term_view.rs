@@ -889,7 +889,7 @@ impl TerminalPane {
             self.note_input();
             self.send_input(&bytes);
         }
-        self.focus(window);
+        self.focus(window, cx);
         cx.notify();
     }
 
@@ -909,8 +909,8 @@ impl TerminalPane {
         self.focus.clone()
     }
 
-    pub fn focus(&self, window: &mut Window) {
-        self.focus.focus(window);
+    pub fn focus(&self, window: &mut Window, cx: &mut gpui::App) {
+        self.focus.focus(window, cx);
     }
 
     pub fn is_focused(&self, window: &Window) -> bool {
@@ -1657,7 +1657,7 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus.focus(window);
+        self.focus.focus(window, cx);
         self.note_input();
         let inactive_pane = std::mem::take(&mut self.inactive_pane_at_press);
         // The gutter is the dots' own: a press there starts no selection
@@ -1671,7 +1671,7 @@ impl TerminalPane {
         // report; its release then finds no gesture to end. Only the first
         // press of a multi-click acts; the later ones do nothing.
         if event.button == MouseButton::Left
-            && event.modifiers.secondary()
+            && event.modifiers.secondary(cx)
             && let Some(link) = self
                 .cell_within(event.position)
                 .and_then(|cell| self.link_at(cell.row, cell.col))
@@ -1815,7 +1815,7 @@ impl TerminalPane {
             .then(|| self.cell_within(event.position))
             .flatten()
             .map(|cell| (cell.row, cell.col));
-        let active = event.modifiers.secondary();
+        let active = event.modifiers.secondary(cx);
         let changed = (active, cell) != (self.links.active, self.links.cell);
         let shown = active || self.links.active;
         self.links.active = active;
@@ -2045,7 +2045,13 @@ static PASTES: AtomicU64 = AtomicU64::new(0);
 fn pasted_image(item: Option<&ClipboardItem>, cx: &App) -> Option<(String, Vec<u8>)> {
     let image = item.and_then(|item| {
         item.entries().iter().find_map(|entry| match entry {
-            ClipboardEntry::Image(image) if !image.bytes.is_empty() => Some(image),
+            // A bitmap goes to the app's own reader below, which sends it
+            // as a PNG and keeps a `CF_DIBV5` alpha channel.
+            ClipboardEntry::Image(image)
+                if !image.bytes.is_empty() && image.format != gpui::ImageFormat::Bmp =>
+            {
+                Some(image)
+            }
             _ => None,
         })
     });
@@ -2791,7 +2797,7 @@ fn paint_preedit(
         Bounds::new(at, size(width, m.line_height)),
         to_rgba(snap.background),
     ));
-    if let Err(err) = line.paint(at, m.line_height, window, cx) {
+    if let Err(err) = line.paint(at, m.line_height, gpui::TextAlign::Left, None, window, cx) {
         tracing::error!("painting the IME composition: {err:#}");
     }
 }
@@ -2812,7 +2818,7 @@ fn paint_span(
         force_width,
     );
     let at = cell_origin(origin, m, span.row, span.col);
-    if let Err(err) = line.paint(at, m.line_height, window, cx) {
+    if let Err(err) = line.paint(at, m.line_height, gpui::TextAlign::Left, None, window, cx) {
         tracing::error!("painting row {}: {err:#}", span.row);
     }
 }

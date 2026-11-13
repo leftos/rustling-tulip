@@ -51,7 +51,13 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 
-gpui = "0.2.2"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "d2a4fb6ded7c470be25d1541281da3882495b65b" }
+# gpui 0.2.2 turned these on by default; without `font-kit` macOS draws no text.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "d2a4fb6ded7c470be25d1541281da3882495b65b", features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
 alacritty_terminal = "0.26.0"
 # `rustls-tls-native-roots`: a tailnet host is dialled over TLS through
 # `Connector::Rustls`, with the client config net.rs builds from the OS
@@ -162,6 +168,7 @@ windows = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Notifications",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
     "UI_Notifications",
@@ -183,7 +190,7 @@ agent-api = { workspace = true, features = ["test-support"] }
 agent-registry = { workspace = true, features = ["test-support"] }
 # The live tier's isolated daemon, which `tests/support/live.rs` wraps.
 dev-daemon = { workspace = true }
-gpui = { version = "0.2.2", features = ["test-support"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "d2a4fb6ded7c470be25d1541281da3882495b65b", features = ["test-support"] }
 png = "0.18"
 # `test-util` enables the paused clock net.rs's tests run its deadlines on.
 tokio = { workspace = true, features = ["test-util"] }

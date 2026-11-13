@@ -183,7 +183,7 @@ impl RootView {
             if ks.key != "tab" || field_has_focus {
                 return false;
             }
-            self.dashboard_toggle_focus.focus(window);
+            self.dashboard_toggle_focus.focus(window, cx);
             cx.notify();
             return true;
         }
@@ -197,12 +197,12 @@ impl RootView {
             "enter" | "space" if held => {}
             "enter" | "space" => self.set_dashboard_view(flipped, cx),
             "tab" => {
-                self.root_focus.focus(window);
+                self.root_focus.focus(window, cx);
                 cx.notify();
             }
             "escape" => {
                 self.disarm_escape_arms();
-                self.root_focus.focus(window);
+                self.root_focus.focus(window, cx);
                 cx.notify();
             }
             _ => return false,
@@ -1080,7 +1080,7 @@ pub(crate) fn stuck_flag(offset: i8, shift: i8, id: &str, text: &str, t: &UiThem
     let selector = id.to_owned();
     truncating(id, StyledText::new(text.to_owned()))
         .driver_id(move || selector.clone())
-        .flex_shrink()
+        .flex_shrink(1.0)
         .min_w(px(0.0))
         .px(px(5.0))
         .rounded(px(3.0))
@@ -1604,7 +1604,7 @@ fn figures_view(offset: i8, shift: i8, figures: HeaderFigures, t: &UiTheme) -> D
     });
     div()
         .flex()
-        .flex_shrink()
+        .flex_shrink(1.0)
         .min_w(px(0.0))
         .overflow_hidden()
         .items_center()
@@ -1673,7 +1673,7 @@ fn queue_strip(
             .id(SharedString::from(name.clone()))
             .driver_id(move || selector)
             .flex()
-            .flex_shrink()
+            .flex_shrink(1.0)
             .items_center()
             .gap(px(7.0))
             .min_w(px(0.0))

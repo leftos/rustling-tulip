@@ -1500,7 +1500,7 @@ impl RootView {
             // The keyboard may have been in one of the closed host's inputs,
             // which went with its pages.
             if self.settings_open() {
-                self.settings_tabs_focus.focus(window);
+                self.settings_tabs_focus.focus(window, cx);
             }
         }
     }
@@ -1766,7 +1766,7 @@ impl RootView {
             return;
         };
         self.settings_control = None;
-        search.focus.focus(window);
+        search.focus.focus(window, cx);
         if select {
             window.dispatch_action(Box::new(crate::text_input::SelectAll), cx);
         }
@@ -1869,7 +1869,7 @@ impl RootView {
             viewport.top()..viewport.bottom(),
             row.top()..row.bottom(),
             offset.y,
-            handle.max_offset().height,
+            handle.max_offset().y,
         );
         if y != offset.y {
             handle.set_offset(point(offset.x, y));
@@ -3465,17 +3465,22 @@ impl RootView {
                 self.settings_control = Some(control);
                 self.focus_appearance_stop(stop, window, cx);
             }
-            _ => self.focus_settings_control(control, window),
+            _ => self.focus_settings_control(control, window, cx),
         }
     }
 
     /// Gives the keyboard to `control`: a text field takes it itself, every
     /// other control through the modal's focus.
-    pub(crate) fn focus_settings_control(&mut self, control: SettingsControl, window: &mut Window) {
+    pub(crate) fn focus_settings_control(
+        &mut self,
+        control: SettingsControl,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
         self.settings_control = Some(control);
         match self.settings_field_focus(control) {
-            Some(focus) => focus.focus(window),
-            None => self.appearance_focus.focus(window),
+            Some(focus) => focus.focus(window, cx),
+            None => self.appearance_focus.focus(window, cx),
         }
     }
 
@@ -3680,7 +3685,7 @@ impl RootView {
             SEARCH => self.focus_settings_search(false, window, cx),
             LIST => {
                 self.settings_control = None;
-                self.settings_tabs_focus.focus(window);
+                self.settings_tabs_focus.focus(window, cx);
             }
             _ => self.move_settings_focus(controls[next - 2], window, cx),
         }
@@ -4457,7 +4462,7 @@ impl RootView {
             self.settings_scroll = Scrollbar::default();
             self.settings_control = None;
             self.notifications.sound_list = None;
-            self.settings_tabs_focus.focus(window);
+            self.settings_tabs_focus.focus(window, cx);
             self.arm_pairing_tick(window, cx);
             self.hold_chat_width_field(window, cx);
             self.show_shell_row(window, cx);
@@ -4507,7 +4512,7 @@ impl RootView {
         if let Some(agent) = tab.agent() {
             self.hold_agent_tab(agent, window, cx);
         }
-        self.settings_tabs_focus.focus(window);
+        self.settings_tabs_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -5473,7 +5478,7 @@ impl RootView {
                             .w_full()
                             .max_w(px(CONTENT_WIDTH + 2.0 * CONTENT_PAD_X))
                             .min_w(px(0.0))
-                            .flex_shrink()
+                            .flex_shrink(1.0)
                             .px(px(CONTENT_PAD_X))
                             .py(px(CONTENT_PAD_Y))
                             .children(self.settings_content(window, cx)),

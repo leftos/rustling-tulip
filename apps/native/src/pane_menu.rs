@@ -4,8 +4,8 @@
 //! move-to-a-new-tab button and the keys of the pane dialogs.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Corner, Div, FocusHandle, Keystroke, MouseDownEvent,
-    Pixels, Point, Stateful, Window, WindowId, anchored, deferred, div, prelude::*,
+    AnyElement, App, ClickEvent, Context, Div, FocusHandle, Keystroke, MouseDownEvent, Pixels,
+    Point, Stateful, Window, WindowId, anchored, deferred, div, prelude::*,
 };
 use protocol::{ClientMessage, SplitDirection, TabContent};
 
@@ -347,7 +347,7 @@ impl RootView {
             move_open: false,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
-        self.pane_ui.menu_focus.focus(window);
+        self.pane_ui.menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -496,7 +496,7 @@ impl RootView {
             at,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
-        self.pane_ui.menu_focus.focus(window);
+        self.pane_ui.menu_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -605,7 +605,7 @@ impl RootView {
         .children(rows);
         let backdrop = div().absolute().top_0().left_0().size_full().occlude();
         let panel = anchored()
-            .anchor(Corner::TopRight)
+            .anchor(gpui::Anchor::TopRight)
             .position(menu.at)
             .snap_to_window()
             .child(frame);
@@ -732,7 +732,7 @@ impl RootView {
         match action {
             MenuAction::OpenMove | MenuAction::CloseMove => {
                 menu.move_open = *action == MenuAction::OpenMove;
-                self.pane_ui.menu_focus.focus(window);
+                self.pane_ui.menu_focus.focus(window, cx);
                 cx.notify();
                 return;
             }

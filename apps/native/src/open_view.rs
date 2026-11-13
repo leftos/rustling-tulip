@@ -503,7 +503,7 @@ impl RootView {
         tracing::info!(path = %path.display(), "terminal link runs code; asking first");
         self.run_confirm = Some(RunConfirm::new(path));
         self.run_confirm_origin = origin;
-        self.run_focus.focus(window);
+        self.run_focus.focus(window, cx);
         cx.notify();
     }
 

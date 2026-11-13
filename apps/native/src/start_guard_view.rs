@@ -177,7 +177,7 @@ impl RootView {
             prompt: StartPrompt::new(mode),
             tabs,
         });
-        self.start_notice_focus.focus(window);
+        self.start_notice_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -300,9 +300,9 @@ impl RootView {
     /// After the prompt closed: the keyboard goes back to what it covered.
     fn after_start_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.cleanup_failed.is_empty() {
-            self.cleanup_focus.focus(window);
+            self.cleanup_focus.focus(window, cx);
         } else if self.layout_chooser.is_some() {
-            self.chooser_focus.focus(window);
+            self.chooser_focus.focus(window, cx);
         } else {
             self.after_notice_closed(window, cx);
         }

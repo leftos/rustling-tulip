@@ -1,9 +1,9 @@
 //! Reading a copied bitmap off the Windows clipboard as a PNG.
 //!
-//! GPUI's Windows clipboard reads PNG, GIF, JFIF, SVG, text and file lists
-//! only, so a bitmap copied as `CF_DIB` or `CF_DIBV5` — what Snipping Tool and
-//! many other apps leave on the clipboard — reads as nothing. This module
-//! turns such a bitmap into the PNG the remote paste sends.
+//! GPUI's Windows clipboard reports a bitmap copied as `CF_DIB` or `CF_DIBV5`
+//! — what Snipping Tool and many other apps leave on the clipboard — as a BMP
+//! image entry. The remote paste skips that entry in favour of this module,
+//! which turns the bitmap into the PNG the paste sends, its alpha included.
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -47,7 +47,8 @@ pub(crate) fn bitmap_reader(cx: &gpui::App) -> BitmapReader {
         .map_or(DEFAULT_READER, |reader| reader.0)
 }
 
-/// Windows' clipboard holds bitmaps GPUI does not read.
+/// Windows' clipboard holds bitmaps GPUI reports only as a BMP entry, which
+/// the paste skips for this reader's PNG.
 #[cfg(windows)]
 const DEFAULT_READER: BitmapReader = read_clipboard_bitmap;
 /// Elsewhere GPUI's clipboard reads every image there is.

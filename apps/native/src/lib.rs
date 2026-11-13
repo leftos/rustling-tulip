@@ -770,7 +770,7 @@ fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx
             }
             window.set_window_title(&title);
             if let Some(focus) = &focus {
-                focus.focus(window);
+                focus.focus(window, cx);
             }
             cx.new(|cx| PopoutView::new(view_root, view_key, window, cx))
         },
@@ -1903,7 +1903,7 @@ impl RootView {
         // A window nothing has clicked in has no focused element, and the
         // app's shortcuts are capture listeners under the root: the root
         // takes the keyboard so they run until a pane or a dialog does.
-        view.root_focus.focus(window);
+        view.root_focus.focus(window, cx);
         view
     }
 
@@ -2028,7 +2028,7 @@ impl RootView {
     /// as they pop out: a terminal or diff that had the keyboard there hands
     /// it to the main window's own focus, so the app's shortcuts work there
     /// again.
-    fn unfocus_popped_pane(&self, key: &PopoutKey, window: &mut Window, cx: &Context<Self>) {
+    fn unfocus_popped_pane(&self, key: &PopoutKey, window: &mut Window, cx: &mut Context<Self>) {
         let pane_ids = match key {
             PopoutKey::Pane { pane_id, .. } => vec![pane_id.clone()],
             PopoutKey::Tab { tab_id } => self
@@ -2049,7 +2049,7 @@ impl RootView {
                     .is_some_and(|slot| slot.view().read(cx).is_focused(window))
             });
         if focused {
-            self.root_focus.focus(window);
+            self.root_focus.focus(window, cx);
         }
     }
 
@@ -2200,12 +2200,12 @@ impl RootView {
         };
         let focus = self.popout_focus(key, cx);
         let activate = !offscreen::requested();
-        let raised = handle.update(cx, |_, window, _| {
+        let raised = handle.update(cx, |_, window, cx| {
             if activate {
                 window.activate_window();
             }
             if let Some(focus) = &focus {
-                focus.focus(window);
+                focus.focus(window, cx);
             }
         });
         if let Err(err) = raised {
@@ -3168,7 +3168,7 @@ impl RootView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_link_mode(event.modifiers.secondary(), cx);
+        self.set_link_mode(event.modifiers.secondary(cx), cx);
     }
 
     fn set_link_mode(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -3402,7 +3402,7 @@ impl RootView {
             self.preselected_target = None;
         }
         self.row_focus = Some(key.to_owned());
-        self.sidebar_focus.focus(window);
+        self.sidebar_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -4371,7 +4371,7 @@ impl RootView {
         if active != self.last_active_tab {
             self.last_active_tab = active;
             if keyboard_free && !self.focus_active_diff_tab(window, cx) {
-                self.focus_active_viewer_tab(window);
+                self.focus_active_viewer_tab(window, cx);
             }
             self.reload_active_viewer(cx);
         }
@@ -5801,7 +5801,7 @@ impl RootView {
         // down: a remote host's failure still on screen takes it back.
         self.reset_cleanup_failed(&HostKey::Local, window, cx);
         if !self.cleanup_failed.is_empty() {
-            self.cleanup_focus.focus(window);
+            self.cleanup_focus.focus(window, cx);
         }
         self.reset_worktrees(window, cx);
     }

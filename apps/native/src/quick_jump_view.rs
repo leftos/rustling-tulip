@@ -116,7 +116,7 @@ impl RootView {
         }
         let query = cx.new(|cx| TextInput::new("", QUERY_PLACEHOLDER, cx));
         let subscriptions = Self::watch_quick_jump_query(&query, window, cx);
-        query.read(cx).focus_handle(cx).focus(window);
+        query.read(cx).focus_handle(cx).focus(window, cx);
         self.quick_jump = Some(QuickJumpState {
             core: QuickJump::new(self.quick_jump_entries()),
             query,

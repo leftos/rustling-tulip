@@ -151,7 +151,7 @@ impl RootView {
         tracing::info!("worktrees manager: scanning the worktrees root");
         self.send_to(&HostKey::Local, msg);
         self.worktrees_manager = Some(manager);
-        self.worktrees_focus.focus(window);
+        self.worktrees_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -162,7 +162,7 @@ impl RootView {
             return;
         }
         if self.settings_open() {
-            self.focus_settings_control(SettingsControl::WorktreesManage, window);
+            self.focus_settings_control(SettingsControl::WorktreesManage, window, cx);
         } else {
             self.focus_active_pane(window, cx);
         }

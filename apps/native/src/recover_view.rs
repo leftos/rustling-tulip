@@ -275,7 +275,7 @@ impl RootView {
                 }
             }
         }
-        self.recover_focus.focus(window);
+        self.recover_focus.focus(window, cx);
         cx.notify();
     }
 

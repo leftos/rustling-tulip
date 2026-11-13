@@ -107,7 +107,7 @@ impl RootView {
             session_label.clone(),
             failures.clone(),
         );
-        self.cleanup_focus.focus(window);
+        self.cleanup_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -229,14 +229,14 @@ impl RootView {
     fn after_cleanup_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.exit.is_some() {
             if self.exit_walk_confirm_open() {
-                self.dialog_focus.focus(window);
+                self.dialog_focus.focus(window, cx);
             } else {
-                self.quit_focus.focus(window);
+                self.quit_focus.focus(window, cx);
             }
         } else if self.layout_chooser.is_some() {
-            self.chooser_focus.focus(window);
+            self.chooser_focus.focus(window, cx);
         } else if self.run_confirm.is_some() {
-            self.run_focus.focus(window);
+            self.run_focus.focus(window, cx);
         } else {
             self.after_notice_closed(window, cx);
         }

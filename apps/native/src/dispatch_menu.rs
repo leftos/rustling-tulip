@@ -122,7 +122,7 @@ impl RootView {
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
             stop_armed: false,
         });
-        self.menu_focus.focus(window);
+        self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
