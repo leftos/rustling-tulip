@@ -966,8 +966,9 @@ pub struct HostRebind {
     pub new_id: String,
 }
 
-/// One subagent a session's agent started, as its host session's
-/// [`SessionSnapshot::subagents`] lists it.
+/// One subagent a session's agent or a dispatch run started, as its host
+/// session's [`SessionSnapshot::subagents`] or its run's
+/// [`DispatchRunSnapshot::subagents`] lists it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentSnapshot {
     /// The id the agent's own transcript file is named by: `a` and hex digits.
@@ -2456,6 +2457,9 @@ pub enum PaneFollow {
         session_id: String,
         agent_id: String,
     },
+    /// The read-only view of one subagent of the dispatch run `run_id`: the
+    /// agent `agent_id` the run started.
+    RunSubagent { run_id: String, agent_id: String },
     /// A follow kind this build does not know (a newer client's). It is written back as `{"kind":"unknown"}`, so the newer follow's fields are lost.
     #[serde(other)]
     Unknown,
@@ -2474,6 +2478,9 @@ pub enum TranscriptSource {
         session_id: String,
         agent_id: String,
     },
+    /// The transcript of one subagent of the dispatch run `run_id`, by the
+    /// agent `agent_id` it started.
+    RunSubagent { run_id: String, agent_id: String },
     /// A source this build does not know (a newer peer's).
     #[serde(other)]
     Unknown,
@@ -4428,6 +4435,10 @@ pub struct DispatchRunSnapshot {
     /// True for a run the dispatch tool resumed on its own.
     #[serde(default)]
     pub auto_resume: bool,
+    /// The run's own subagents in tree order, as the daemon lists them: each
+    /// first-layer subagent, oldest first, followed by its subtree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagents: Vec<SubagentSnapshot>,
 }
 
 /// A dispatch run's status, decided from its stream.
@@ -8579,6 +8590,21 @@ mod tests {
     }
 
     #[test]
+    fn run_subagent_pane_follow_round_trips() {
+        let follow = PaneFollow::RunSubagent {
+            run_id: "r1".to_owned(),
+            agent_id: "a1".to_owned(),
+        };
+        let json = serde_json::to_string(&follow).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"kind":"run_subagent","run_id":"r1","agent_id":"a1"}"#
+        );
+        let back: PaneFollow = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, follow);
+    }
+
+    #[test]
     fn pane_follow_subagent_round_trips() {
         let follow = PaneFollow::Subagent {
             session_id: "s1".to_owned(),
@@ -12414,6 +12440,7 @@ mod tests {
             session_id: Some("sess-b".to_owned()),
             resumed_from: Some("conv-c".to_owned()),
             auto_resume: true,
+            subagents: Vec::new(),
         }
     }
 
@@ -12479,8 +12506,49 @@ mod tests {
         assert_eq!(run.session_id, None);
         assert_eq!(run.resumed_from, None);
         assert!(!run.auto_resume);
+        assert_eq!(run.subagents, Vec::<SubagentSnapshot>::new());
         assert_eq!(run.status, DispatchRunStatus::Working);
         assert_eq!(run.started_at, gate_time("2026-11-11T09:00:00Z"));
+    }
+
+    #[test]
+    fn dispatch_run_snapshot_carries_its_subagents() {
+        let run = DispatchRunSnapshot {
+            run_id: "9f2c1e".to_owned(),
+            title: "T".to_owned(),
+            backend: "native".to_owned(),
+            tier: None,
+            worktree: "X:/dev/repo".to_owned(),
+            main_checkout: None,
+            run_dir: "X:/dev/repo/.tmp/dispatch/9f2c1e".to_owned(),
+            started_at: gate_time("2026-11-11T09:00:00Z"),
+            status: DispatchRunStatus::Working,
+            metrics: SessionMetrics::default(),
+            recent_actions: Vec::new(),
+            agent_session_id: None,
+            session_id: None,
+            resumed_from: None,
+            auto_resume: false,
+            subagents: vec![SubagentSnapshot {
+                agent_id: "a1".to_owned(),
+                depth: 1,
+                state: AgentState::Running,
+                ..SubagentSnapshot::default()
+            }],
+        };
+        let json = serde_json::to_string(&run).expect("serializes");
+        let back: DispatchRunSnapshot = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, run);
+
+        let bare = DispatchRunSnapshot {
+            subagents: Vec::new(),
+            ..run
+        };
+        let json = serde_json::to_string(&bare).expect("serializes");
+        assert!(
+            !json.contains("subagents"),
+            "an empty list is omitted: {json}"
+        );
     }
 
     #[test]
@@ -16663,6 +16731,21 @@ mod tests {
         assert_eq!(
             json,
             r#"{"kind":"subagent","session_id":"s1","agent_id":"a1b2"}"#
+        );
+        let back: TranscriptSource = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, source);
+    }
+
+    #[test]
+    fn run_subagent_transcript_source_round_trips() {
+        let source = TranscriptSource::RunSubagent {
+            run_id: "r1".to_string(),
+            agent_id: "a1".to_string(),
+        };
+        let json = serde_json::to_string(&source).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"kind":"run_subagent","run_id":"r1","agent_id":"a1"}"#
         );
         let back: TranscriptSource = serde_json::from_str(&json).expect("round-trips");
         assert_eq!(back, source);

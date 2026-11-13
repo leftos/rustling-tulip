@@ -1251,6 +1251,7 @@ mod tests {
             session_id: Some("conv1".to_owned()),
             resumed_from: None,
             auto_resume: false,
+            subagents: Vec::new(),
         }
     }
 

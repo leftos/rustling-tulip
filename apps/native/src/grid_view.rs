@@ -1814,7 +1814,9 @@ impl RootView {
                     };
                     self.subagent_body(pane_id, &host, &key, cx)
                 }
-                PaneFollow::Unknown => follow_placeholder(pane_id, cx),
+                PaneFollow::Unknown | PaneFollow::RunSubagent { .. } => {
+                    follow_placeholder(pane_id, cx)
+                }
             };
             return match self.panes.get(pane_id) {
                 Some(slot) => {
@@ -4061,7 +4063,7 @@ fn pane_title<'a>(
 fn follow_label(follow: &PaneFollow) -> &'static str {
     match follow {
         PaneFollow::DispatchRun { .. } => "Dispatch run",
-        PaneFollow::Subagent { .. } => "Subagent",
+        PaneFollow::Subagent { .. } | PaneFollow::RunSubagent { .. } => "Subagent",
         PaneFollow::Unknown => "Unknown pane",
     }
 }

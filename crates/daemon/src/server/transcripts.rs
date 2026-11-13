@@ -49,7 +49,7 @@ fn follow(hub: &Hub, source: TranscriptSource, request_id: Option<String>, ctx: 
                 ctx.out_tx,
             );
         }
-        TranscriptSource::Unknown => {
+        TranscriptSource::Unknown | TranscriptSource::RunSubagent { .. } => {
             let _ = ctx.out_tx.send(error(
                 error_codes::UNSUPPORTED_MESSAGE,
                 "This daemon cannot follow that transcript source.".to_owned(),
@@ -73,7 +73,7 @@ fn unfollow(hub: &Hub, source: TranscriptSource, ctx: &ConnCtx<'_>) {
         } => hub
             .subagent_tails
             .unfollow(&(session_id, agent_id), ctx.connection),
-        TranscriptSource::Unknown => {}
+        TranscriptSource::Unknown | TranscriptSource::RunSubagent { .. } => {}
     }
 }
 

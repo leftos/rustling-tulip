@@ -33,7 +33,7 @@ impl TranscriptKey {
                 session_id: session_id.clone(),
                 agent_id: agent_id.clone(),
             }),
-            TranscriptSource::Unknown => None,
+            TranscriptSource::Unknown | TranscriptSource::RunSubagent { .. } => None,
         }
     }
 

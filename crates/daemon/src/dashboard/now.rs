@@ -261,6 +261,7 @@ mod tests {
             session_id: None,
             resumed_from: None,
             auto_resume: false,
+            subagents: Vec::new(),
         }
     }
 

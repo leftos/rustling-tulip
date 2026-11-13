@@ -195,6 +195,7 @@ impl RunEntry {
             session_id: file.session_id.clone(),
             resumed_from: file.resumed_from.clone(),
             auto_resume: file.auto_resume,
+            subagents: Vec::new(),
         }
     }
 }

@@ -722,8 +722,9 @@ export interface HostRebind {
 }
 
 /**
- * One subagent a session's agent started, as its host session's
- * [`SessionSnapshot::subagents`] lists it.
+ * One subagent a session's agent or a dispatch run started, as its host
+ * session's [`SessionSnapshot::subagents`] or its run's
+ * [`DispatchRunSnapshot::subagents`] lists it.
  */
 export interface SubagentSnapshot {
   /** The id the agent's own transcript file is named by: `a` and hex digits. */
@@ -1790,7 +1791,12 @@ export type PaneFollow =
    * The read-only view of one subagent of the session `session_id`: the
    * agent `agent_id` it started.
    */
-  | { kind: "subagent"; session_id: string; agent_id: string };
+  | { kind: "subagent"; session_id: string; agent_id: string }
+  /**
+   * The read-only view of one subagent of the dispatch run `run_id`: the
+   * agent `agent_id` the run started.
+   */
+  | { kind: "run_subagent"; run_id: string; agent_id: string };
 
 /**
  * What a transcript follow reads: the source whose [`ChatEntry`] log a
@@ -1803,7 +1809,12 @@ export type TranscriptSource =
    * The transcript of one subagent of the session `session_id`, by the
    * agent `agent_id` it started.
    */
-  | { kind: "subagent"; session_id: string; agent_id: string };
+  | { kind: "subagent"; session_id: string; agent_id: string }
+  /**
+   * The transcript of one subagent of the dispatch run `run_id`, by the
+   * agent `agent_id` it started.
+   */
+  | { kind: "run_subagent"; run_id: string; agent_id: string };
 
 /**
  * Which side of a [`SplitPane`](ClientMessage::SplitPane) the newly created
@@ -3391,6 +3402,11 @@ export interface DispatchRunSnapshot {
   resumed_from?: string | null;
   /** True for a run the dispatch tool resumed on its own. */
   auto_resume?: boolean;
+  /**
+   * The run's own subagents in tree order, as the daemon lists them: each
+   * first-layer subagent, oldest first, followed by its subtree.
+   */
+  subagents?: SubagentSnapshot[];
 }
 
 /** A dispatch run's status, decided from its stream. */
