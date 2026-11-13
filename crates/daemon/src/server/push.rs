@@ -239,6 +239,7 @@ fn push_status(loaded: &Loaded, device_id: &str, request_id: &str) -> DaemonMess
     DaemonMessage::PushStatus {
         vapid_public_key: loaded.key.public_b64url(),
         endpoint: stored.map(|sub| Secret(sub.endpoint.clone())),
+        device_token: None,
         needs_you: stored.is_some_and(|sub| sub.needs_you),
         finished: stored.is_some_and(|sub| sub.finished),
         hold_at_desk: stored.is_none_or(|sub| sub.hold_at_desk),
@@ -314,6 +315,7 @@ mod tests {
             DaemonMessage::PushStatus {
                 vapid_public_key,
                 endpoint,
+                device_token: _,
                 needs_you,
                 finished,
                 hold_at_desk,

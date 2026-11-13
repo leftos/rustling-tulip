@@ -122,6 +122,10 @@ pub const FEATURE_DISPATCH_RUNS: &str = "dispatch_runs";
 /// [`ClientMessage::UnregisterPush`]).
 pub const FEATURE_WEB_PUSH: &str = "web_push";
 
+/// `Welcome.features` entry: the daemon sends relay pushes to `apns` and
+/// `fcm` subscriptions ([`PushRegistration`]). No daemon lists it yet.
+pub const FEATURE_RELAY_PUSH: &str = "relay_push";
+
 /// `Welcome.features` entry: the daemon saves a file a client sends into a
 /// session's folder ([`ClientMessage::UploadFile`]).
 pub const FEATURE_UPLOAD_FILE: &str = "upload_file";
@@ -3263,9 +3267,78 @@ pub enum PushRegistration {
         p256dh: String,
         auth: Secret,
     },
+    /// An APNs registration from the native phone app: its device token, the
+    /// APNs environment the token came from, and the `p256dh` and `auth` keys
+    /// of the key pair the relay push is encrypted to. `token` and `auth`
+    /// never print in `{:?}`.
+    Apns {
+        token: Secret,
+        environment: ApnsEnvironment,
+        p256dh: String,
+        auth: Secret,
+    },
+    /// An FCM registration from the native phone app: its device token and
+    /// the `p256dh` and `auth` keys of the key pair the relay push is
+    /// encrypted to. `token` and `auth` never print in `{:?}`.
+    Fcm {
+        token: Secret,
+        p256dh: String,
+        auth: Secret,
+    },
     #[serde(other)]
     Unknown,
 }
+
+/// Which APNs environment a device token came from. Serialized as a
+/// `snake_case` string with a catch-all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApnsEnvironment {
+    /// A `TestFlight` or store build's token.
+    Production,
+    /// An Xcode debug build's token.
+    Sandbox,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The plaintext of a relay push, end-to-end encrypted from the daemon to
+/// the phone: serde JSON, so both sides share one definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushNotice {
+    /// The format version, 1.
+    pub v: u32,
+    /// What the push tells the phone.
+    pub kind: PushNoticeKind,
+    /// The alert's title.
+    pub title: String,
+    /// The session's label.
+    pub body: String,
+    /// The session the push is about.
+    pub session_id: String,
+    /// The tailnet name the app paired with; absent when the daemon's
+    /// tailnet listener is not serving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The Needs you count.
+    pub badge: u32,
+}
+
+/// What a relay push tells the phone. Serialized as a `snake_case` string
+/// with a catch-all, so a newer daemon's notice keeps decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushNoticeKind {
+    /// The session needs the user.
+    NeedsYou,
+    /// The session's turn finished.
+    Finished,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The `PushNotice` format version this build writes.
+pub const PUSH_NOTICE_VERSION: u32 = 1;
 
 /// How a device's pairing request ended, carried by
 /// [`DaemonMessage::DevicePairDecided`]. Serialized as a `snake_case` string
@@ -7448,6 +7521,11 @@ pub enum DaemonMessage {
         vapid_public_key: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<Secret>,
+        /// The registered APNs or FCM device token (`None` for a Web Push
+        /// subscription or none; never printed in `{:?}`), which the native
+        /// app compares with its current token to re-register.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_token: Option<Secret>,
         needs_you: bool,
         finished: bool,
         /// Whether this subscription is held while the owner is at the desk:
@@ -8086,7 +8164,7 @@ mod tests {
 
     #[test]
     fn an_unknown_push_kind_decodes_as_unknown() {
-        let json = r#"{"type":"register_push","registration":{"kind":"apns","token":"x"},"needs_you":true,"finished":false,"request_id":"r"}"#;
+        let json = r#"{"type":"register_push","registration":{"kind":"carrier_pigeon","token":"x"},"needs_you":true,"finished":false,"request_id":"r"}"#;
         let decoded = InboundClientMessage::from_json_str(json).expect("decodes");
         let InboundClientMessage::Known(ClientMessage::RegisterPush {
             registration,
@@ -8110,6 +8188,7 @@ mod tests {
         let msg = DaemonMessage::PushStatus {
             vapid_public_key: "BKey".to_owned(),
             endpoint: None,
+            device_token: None,
             needs_you: true,
             finished: true,
             hold_at_desk: true,
@@ -8155,6 +8234,7 @@ mod tests {
         let msg = DaemonMessage::PushStatus {
             vapid_public_key: "BKey".to_owned(),
             endpoint: None,
+            device_token: None,
             needs_you: true,
             finished: false,
             hold_at_desk: false,
@@ -8181,6 +8261,144 @@ mod tests {
             ),
             "{without:?}"
         );
+    }
+
+    #[test]
+    fn apns_push_registration_round_trips() {
+        let msg = ClientMessage::RegisterPush {
+            registration: PushRegistration::Apns {
+                token: Secret("a1b2c3d4e5f6".to_owned()),
+                environment: ApnsEnvironment::Sandbox,
+                p256dh: "BPubKey".to_owned(),
+                auth: Secret("authsecret".to_owned()),
+            },
+            needs_you: true,
+            finished: false,
+            hold_at_desk: true,
+            request_id: "r1".to_owned(),
+        };
+        let wire: serde_json::Value = serde_json::to_value(&msg).expect("serializes");
+        assert_eq!(wire["registration"]["kind"], "apns");
+        assert_eq!(wire["registration"]["environment"], "sandbox");
+        assert_eq!(wire["registration"]["token"], "a1b2c3d4e5f6");
+        assert_eq!(wire["registration"]["auth"], "authsecret");
+        let json = serde_json::to_string(&msg).expect("serializes");
+        let decoded = InboundClientMessage::from_json_str(&json).expect("decodes");
+        let InboundClientMessage::Known(back) = decoded else {
+            panic!("{json} decodes as a known message");
+        };
+        assert_eq!(
+            serde_json::to_value(&back).expect("serializes"),
+            serde_json::to_value(&msg).expect("serializes"),
+        );
+        let printed = format!("{msg:?}");
+        assert!(!printed.contains("a1b2c3d4e5f6"), "{printed}");
+        assert!(!printed.contains("authsecret"), "{printed}");
+    }
+
+    #[test]
+    fn fcm_push_registration_round_trips() {
+        let msg = ClientMessage::RegisterPush {
+            registration: PushRegistration::Fcm {
+                token: Secret("fcmtok123".to_owned()),
+                p256dh: "BPubKey".to_owned(),
+                auth: Secret("authsecret".to_owned()),
+            },
+            needs_you: true,
+            finished: false,
+            hold_at_desk: true,
+            request_id: "r1".to_owned(),
+        };
+        let wire: serde_json::Value = serde_json::to_value(&msg).expect("serializes");
+        assert_eq!(wire["registration"]["kind"], "fcm");
+        assert_eq!(wire["registration"]["token"], "fcmtok123");
+        assert_eq!(wire["registration"]["auth"], "authsecret");
+        let json = serde_json::to_string(&msg).expect("serializes");
+        let decoded = InboundClientMessage::from_json_str(&json).expect("decodes");
+        let InboundClientMessage::Known(back) = decoded else {
+            panic!("{json} decodes as a known message");
+        };
+        assert_eq!(
+            serde_json::to_value(&back).expect("serializes"),
+            serde_json::to_value(&msg).expect("serializes"),
+        );
+        let printed = format!("{msg:?}");
+        assert!(!printed.contains("fcmtok123"), "{printed}");
+        assert!(!printed.contains("authsecret"), "{printed}");
+    }
+
+    #[test]
+    fn an_unknown_apns_environment_decodes_as_unknown_push() {
+        let json = r#"{"type":"register_push","registration":{"kind":"apns","token":"a1b2c3d4e5f6","environment":"staging","p256dh":"BPubKey","auth":"authsecret"},"needs_you":true,"finished":false,"request_id":"r"}"#;
+        let decoded = InboundClientMessage::from_json_str(json).expect("decodes");
+        let InboundClientMessage::Known(ClientMessage::RegisterPush {
+            registration: PushRegistration::Apns { environment, .. },
+            ..
+        }) = decoded
+        else {
+            panic!("{json} decodes as an apns registration");
+        };
+        assert_eq!(environment, ApnsEnvironment::Unknown);
+    }
+
+    #[test]
+    fn push_notice_round_trips() {
+        let notice = PushNotice {
+            v: PUSH_NOTICE_VERSION,
+            kind: PushNoticeKind::NeedsYou,
+            title: "rustling-tulip".to_owned(),
+            body: "fix the push wire".to_owned(),
+            session_id: "s1".to_owned(),
+            host: Some("host.tailnet.ts.net".to_owned()),
+            badge: 3,
+        };
+        let json = serde_json::to_string(&notice).expect("serializes");
+        assert!(json.contains(r#""kind":"needs_you""#), "{json}");
+        let back: PushNotice = serde_json::from_str(&json).expect("decodes");
+        assert_eq!(back, notice);
+        let value = serde_json::to_value(&notice).expect("serializes");
+        assert_eq!(value["host"], "host.tailnet.ts.net");
+        let no_host = PushNotice {
+            host: None,
+            ..notice.clone()
+        };
+        let value = serde_json::to_value(&no_host).expect("serializes");
+        assert!(value.get("host").is_none(), "{value}");
+        let back: PushNotice = serde_json::from_value(value).expect("decodes");
+        assert_eq!(back, no_host);
+    }
+
+    #[test]
+    fn an_unknown_push_notice_kind_decodes_as_unknown() {
+        let json = r#"{"v":1,"kind":"stopped","title":"t","body":"b","session_id":"s1","badge":0}"#;
+        let notice: PushNotice = serde_json::from_str(json).expect("decodes");
+        assert_eq!(notice.kind, PushNoticeKind::Unknown);
+        assert_eq!(notice.host, None, "a notice without a host has none");
+    }
+
+    #[test]
+    fn push_status_without_device_token_decodes() {
+        let without: DaemonMessage = serde_json::from_str(
+            r#"{"type":"push_status","vapid_public_key":"BKey","needs_you":true,"finished":false}"#,
+        )
+        .expect("a status without a device token decodes");
+        let DaemonMessage::PushStatus { device_token, .. } = without else {
+            panic!("want PushStatus");
+        };
+        assert_eq!(device_token, None);
+        let msg = DaemonMessage::PushStatus {
+            vapid_public_key: "BKey".to_owned(),
+            endpoint: None,
+            device_token: Some(Secret("tok123".to_owned())),
+            needs_you: true,
+            finished: false,
+            hold_at_desk: true,
+            request_id: None,
+        };
+        let value = serde_json::to_value(&msg).expect("serializes");
+        assert_eq!(value["device_token"], "tok123");
+        let printed = format!("{msg:?}");
+        assert!(!printed.contains("tok123"), "{printed}");
     }
 
     #[test]

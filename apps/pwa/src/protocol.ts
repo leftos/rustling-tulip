@@ -145,6 +145,12 @@ export const FEATURE_DISPATCH_RUNS = "dispatch_runs";
 export const FEATURE_WEB_PUSH = "web_push";
 
 /**
+ * `Welcome.features` entry: the daemon sends relay pushes to `apns` and
+ * `fcm` subscriptions ([`PushRegistration`]). No daemon lists it yet.
+ */
+export const FEATURE_RELAY_PUSH = "relay_push";
+
+/**
  * `Welcome.features` entry: the daemon saves a file a client sends into a
  * session's folder ([`ClientMessage::UploadFile`]).
  */
@@ -2447,7 +2453,64 @@ export type PushRegistration =
    * `p256dh` and `auth` keys, base64url as `PushSubscription.toJSON()`
    * gives them. `endpoint` and `auth` never print in `{:?}`.
    */
-  | { kind: "web_push"; endpoint: Secret; p256dh: string; auth: Secret };
+  | { kind: "web_push"; endpoint: Secret; p256dh: string; auth: Secret }
+  /**
+   * An APNs registration from the native phone app: its device token, the
+   * APNs environment the token came from, and the `p256dh` and `auth` keys
+   * of the key pair the relay push is encrypted to. `token` and `auth`
+   * never print in `{:?}`.
+   */
+  | { kind: "apns"; token: Secret; environment: ApnsEnvironment; p256dh: string; auth: Secret }
+  /**
+   * An FCM registration from the native phone app: its device token and
+   * the `p256dh` and `auth` keys of the key pair the relay push is
+   * encrypted to. `token` and `auth` never print in `{:?}`.
+   */
+  | { kind: "fcm"; token: Secret; p256dh: string; auth: Secret };
+
+/**
+ * Which APNs environment a device token came from. Serialized as a
+ * `snake_case` string with a catch-all.
+ */
+export type ApnsEnvironment =
+  /** A `TestFlight` or store build's token. */
+  | "production"
+  /** An Xcode debug build's token. */
+  | "sandbox";
+
+/**
+ * The plaintext of a relay push, end-to-end encrypted from the daemon to
+ * the phone: serde JSON, so both sides share one definition.
+ */
+export interface PushNotice {
+  /** The format version, 1. */
+  v: number;
+  /** What the push tells the phone. */
+  kind: PushNoticeKind;
+  /** The alert's title. */
+  title: string;
+  /** The session's label. */
+  body: string;
+  /** The session the push is about. */
+  session_id: string;
+  /**
+   * The tailnet name the app paired with; absent when the daemon's
+   * tailnet listener is not serving.
+   */
+  host?: string | null;
+  /** The Needs you count. */
+  badge: number;
+}
+
+/**
+ * What a relay push tells the phone. Serialized as a `snake_case` string
+ * with a catch-all, so a newer daemon's notice keeps decoding.
+ */
+export type PushNoticeKind =
+  /** The session needs the user. */
+  | "needs_you"
+  /** The session's turn finished. */
+  | "finished";
 
 /**
  * How a device's pairing request ended, carried by
@@ -5856,12 +5919,16 @@ export type DaemonMessage =
    * the page's `applicationServerKey`), the registered endpoint (`None`
    * when none; never printed in `{:?}`), and the two switches.
    *
+   * `device_token`: The registered APNs or FCM device token (`None` for a Web Push
+   * subscription or none; never printed in `{:?}`), which the native
+   * app compares with its current token to re-register.
+   *
    * `hold_at_desk`: Whether this subscription is held while the owner is at the desk:
    * its Needs you push arrives when the owner leaves, if the session
    * still needs the user, and its Finished push is dropped then. True
    * when nothing is registered.
    */
-  | { type: "push_status"; vapid_public_key: string; endpoint?: Secret | null; needs_you: boolean; finished: boolean; hold_at_desk?: boolean; request_id?: string | null }
+  | { type: "push_status"; vapid_public_key: string; endpoint?: Secret | null; device_token?: Secret | null; needs_you: boolean; finished: boolean; hold_at_desk?: boolean; request_id?: string | null }
   /**
    * The answer to [`ClientMessage::LoadChat`], sent to the requester with
    * its `request_id`: the session's chat as it stands. `hidden` counts the
