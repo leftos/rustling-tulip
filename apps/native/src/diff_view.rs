@@ -12,8 +12,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    Context, DispatchPhase, Div, FocusHandle, HighlightStyle, Hsla, KeyDownEvent, ScrollStrategy,
-    ScrollWheelEvent, SharedString, StyledText, UniformListScrollHandle, Window, canvas,
+    Context, DispatchPhase, Div, FocusHandle, HighlightStyle, Hsla, KeyDownEvent, ScrollEvent,
+    ScrollStrategy, SharedString, StyledText, UniformListScrollHandle, Window, canvas,
     combine_highlights, div, font, prelude::*, px, rgb, uniform_list,
 };
 
@@ -495,7 +495,7 @@ impl DiffView {
     /// Shift+wheel, and a wheel's sideways part, scroll the lines sideways.
     /// A sideways-only or Shift event stops here, so the list does not turn
     /// it into a vertical scroll.
-    fn on_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    fn on_wheel(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
         let line_height = px(self.metrics.as_ref().map_or(16.0, |m| m.line_height));
         let delta = event.delta.pixel_delta(line_height);
         let sideways_only = delta.y == px(0.0);
@@ -844,7 +844,7 @@ impl Render for DiffView {
                     let redraw = view.clone();
                     cx.defer(move |cx| redraw.update(cx, |_, cx| cx.notify()));
                 }
-                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                window.on_mouse_event(move |event: &ScrollEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture && bounds.contains(&event.position) {
                         view.update(cx, |this, cx| this.on_wheel(event, cx));
                     }

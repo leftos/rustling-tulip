@@ -24,7 +24,7 @@ exclude = ["vendor/gpui"]
 [workspace.package]
 version = "0.14.0-alpha"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 license = "MIT"
 authors = ["leftos <leftos@gmail.com>"]
 repository = "https://github.com/leftos/rustling-tulip"

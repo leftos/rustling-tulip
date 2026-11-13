@@ -20,7 +20,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, TimeDelta, Utc};
-use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point, px};
+use gpui::{Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, point, px};
 use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST};
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
@@ -478,7 +478,7 @@ fn a_long_paste_leaves_the_rows_after_it_in_reach(cx: &mut TestAppContext) {
         "the pane is wider than the column's cap: {pane:?}"
     );
     // The chat follows its bottom; a long wheel down makes sure of it.
-    h.cx.simulate_event(ScrollWheelEvent {
+    h.cx.simulate_event(ScrollEvent {
         position: point(pane.center().x, pane.origin.y + px(120.0)),
         delta: ScrollDelta::Pixels(point(px(0.0), px(-1_000_000.0))),
         modifiers: Modifiers::none(),
@@ -3418,7 +3418,7 @@ fn a_wheel_over_a_tail_box_leaves_the_chat_still(cx: &mut TestAppContext) {
         Some(true)
     );
     let at = h.bounds(TAIL_BOX).center();
-    h.cx.simulate_event(ScrollWheelEvent {
+    h.cx.simulate_event(ScrollEvent {
         position: at,
         delta: ScrollDelta::Pixels(point(px(0.0), px(60.0))),
         modifiers: Modifiers::none(),

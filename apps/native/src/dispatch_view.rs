@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    AnyElement, Context, Div, ElementId, Pixels, ScrollHandle, ScrollWheelEvent, SharedString,
-    Stateful, StyledText, div, prelude::*, px,
+    AnyElement, Context, Div, ElementId, Pixels, ScrollEvent, ScrollHandle, SharedString, Stateful,
+    StyledText, div, prelude::*, px,
 };
 use protocol::{ClientMessage, DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, PaneFollow};
 
@@ -724,9 +724,8 @@ impl RootView {
             scroll.handle.scroll_to_bottom();
         }
         let (pane, handle) = (pane_id.to_owned(), scroll.handle.clone());
-        column
-            .track_scroll(&scroll.handle)
-            .on_scroll_wheel(cx.listener(move |_, _: &ScrollWheelEvent, window, cx| {
+        column.track_scroll(&scroll.handle).on_scroll(cx.listener(
+            move |_, _: &ScrollEvent, window, cx| {
                 cx.stop_propagation();
                 let (pane, handle) = (pane.clone(), handle.clone());
                 // Read once the wheel has moved the log.
@@ -739,7 +738,8 @@ impl RootView {
                     }
                     cx.notify();
                 });
-            }))
+            },
+        ))
     }
 
     /// The rows of `transcript`, held for `key`, each tagged

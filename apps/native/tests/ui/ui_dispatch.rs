@@ -4,7 +4,7 @@
 
 use crate::support;
 
-use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point, px};
+use gpui::{Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, point, px};
 use protocol::{
     ChatScreen, ClientMessage, ComposerState, DaemonMessage, DispatchRunStatus, GridNode,
     PaneFollow, SplitDirection,
@@ -125,7 +125,7 @@ fn the_log_stops_following_once_scrolled_up(cx: &mut TestAppContext) {
     );
 
     let at = h.bounds("dispatch-log-f2").center();
-    h.cx.simulate_event(ScrollWheelEvent {
+    h.cx.simulate_event(ScrollEvent {
         position: at,
         delta: ScrollDelta::Pixels(point(px(0.0), px(60.0))),
         modifiers: Modifiers::none(),
@@ -202,7 +202,7 @@ fn a_new_run_on_the_same_pane_follows_from_the_bottom(cx: &mut TestAppContext) {
         runs: vec![r1().actions(&many).build()],
     });
     let at = h.bounds("dispatch-log-f2").center();
-    h.cx.simulate_event(ScrollWheelEvent {
+    h.cx.simulate_event(ScrollEvent {
         position: at,
         delta: ScrollDelta::Pixels(point(px(0.0), px(60.0))),
         modifiers: Modifiers::none(),

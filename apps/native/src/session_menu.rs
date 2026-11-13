@@ -9,9 +9,9 @@ use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
-    Focusable as _, FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point,
-    ScrollWheelEvent, SharedString, Stateful, StyledText, Subscription, Task, Window, WindowId,
-    anchored, deferred, div, prelude::*, px,
+    Focusable as _, FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, ScrollEvent,
+    SharedString, Stateful, StyledText, Subscription, Task, Window, WindowId, anchored, deferred,
+    div, prelude::*, px,
 };
 use protocol::{
     AgentId, ClientMessage, DaemonMessage, MemberBranchFate, PresetEntry, PresetTarget,
@@ -4360,7 +4360,7 @@ impl RootView {
             .left_0()
             .size_full()
             .occlude()
-            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, window, cx| {
+            .on_scroll(cx.listener(|this, _: &ScrollEvent, window, cx| {
                 this.close_shell_menu(window, cx);
             }));
         let panel = anchored()

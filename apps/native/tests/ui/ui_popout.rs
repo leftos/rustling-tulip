@@ -510,7 +510,7 @@ fn blur_in_the_popout_drops_marked_text(cx: &mut TestAppContext) {
     });
     assert_eq!(popout_marked_text(&h, &mut popout).as_deref(), Some("´"));
 
-    popout.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
     popout.run_until_parked();
 
     assert_eq!(
@@ -635,8 +635,8 @@ fn focus_window_after_a_cross_tab_move_focuses_no_hidden_terminal(cx: &mut TestA
     pop_out(&mut h, "t1", "p1");
     move_p1_into_t2(&mut h);
     let mut popout = h.popout_window();
-    popout.update(|window, cx| window.blur(cx));
-    h.cx.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
+    h.cx.update(Window::blur);
 
     let key = pane_key("t1", "p1");
     let outcome = h.root_update(move |root, window, cx| root.open_popout(key, window, cx));
@@ -746,7 +746,7 @@ fn a_pane_jump_to_a_popped_pane_brings_its_window_forward(cx: &mut TestAppContex
     let mut h = Harness::with(cx, &dir, &fixture);
     pop_out(&mut h, "t2", "p2");
     let mut popout = h.popout_window();
-    popout.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
     h.cx.update(|window, _| window.activate_window());
     assert!(!is_active(&mut popout), "the main window is in front");
     let before = h.root(|root, _| (root.active_tab_id().map(str::to_owned), root.focused_pane()));
@@ -775,7 +775,7 @@ fn focus_window_raises_the_open_popout(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
     pop_out(&mut h, "t1", "p1");
     let mut popout = h.popout_window();
-    popout.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
     h.cx.update(|window, _| window.activate_window());
     assert!(!is_active(&mut popout), "the main window is in front");
 
@@ -1579,7 +1579,7 @@ fn leaf_click_raises_a_popped_pane(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
     pop_out(&mut h, "t1", "p1");
     let mut popout = h.popout_window();
-    popout.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
     h.cx.update(|window, _| window.activate_window());
     assert!(!is_active(&mut popout), "the main window is in front");
 
@@ -1960,7 +1960,7 @@ fn leaf_click_on_a_popped_session(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &s2_without_a_pane());
     pop_out_session(&mut h, "s2");
     let mut popout = h.popout_window();
-    popout.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
     h.cx.update(|window, _| window.activate_window());
     assert!(!is_active(&mut popout), "the main window is in front");
     h.sent();
@@ -2858,7 +2858,7 @@ fn focus_window_on_the_tab_card_raises_the_popout(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &split_tabs());
     pop_out_tab(&mut h, "t1");
     let mut popout = h.popout_window();
-    popout.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
     h.cx.update(|window, _| window.activate_window());
     assert!(!is_active(&mut popout), "the main window is in front");
 
@@ -3036,7 +3036,7 @@ fn clicking_a_pane_in_a_tab_popout_focuses_it(cx: &mut TestAppContext) {
     assert_eq!(header_fill(&mut h, "p2"), lit, "the focus ring moved to p2");
     assert_eq!(header_fill(&mut h, "p1"), unlit);
 
-    popout.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
     h.cx.update(|window, _| window.activate_window());
     h.click_on("popped-tab-focus-t1");
     assert!(is_active(&mut popout), "the pop-out window is raised");
@@ -3079,7 +3079,7 @@ fn showing_a_session_in_a_popped_tab_raises_the_popout(cx: &mut TestAppContext) 
     let mut h = t1_popped(cx, &dir, &split_tabs());
     let mut popout = h.popout_window();
     h.click_on("tab-t2");
-    popout.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
     h.cx.update(|window, _| window.activate_window());
     assert!(!is_active(&mut popout), "the main window is in front");
 
@@ -3460,7 +3460,7 @@ fn main_window_shows_a_card_for_a_popped_diff_tab(cx: &mut TestAppContext) {
     assert!(!diff_focused_in_main(&mut h), "the card holds no focus");
 
     let mut popout = h.popout_window();
-    popout.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
     h.click_on("popped-tab-focus-d1");
     assert!(is_active(&mut popout), "Focus window raises the pop-out");
     assert!(diff_focused_in(&h, &mut popout));
@@ -3596,7 +3596,7 @@ fn reopening_a_popped_diff_tab_raises_its_popout(cx: &mut TestAppContext) {
     h.send(c_rs_changed());
     pop_out_tab(&mut h, "d1");
     let mut popout = h.popout_window();
-    popout.update(|window, cx| window.blur(cx));
+    popout.update(Window::blur);
     h.cx.update(|window, _| window.activate_window());
     assert!(!is_active(&mut popout), "the main window is in front");
     let active = |h: &mut Harness<'_>| h.root(|root, _| root.active_tab_id().map(str::to_owned));

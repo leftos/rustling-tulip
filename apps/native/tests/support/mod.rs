@@ -16,7 +16,7 @@ use daemon_client::device_tokens::MemoryTokens;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     App, Bounds, Entity, InputHandler, KeyDownEvent, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, TestAppContext,
+    MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext,
     TouchPhase, VisualTestContext, Window, WindowId, point, px,
 };
 use protocol::{
@@ -4024,7 +4024,7 @@ impl<'a> Harness<'a> {
             } else {
                 return;
             };
-            self.cx.simulate_event(ScrollWheelEvent {
+            self.cx.simulate_event(ScrollEvent {
                 position: at,
                 delta: ScrollDelta::Pixels(point(px(0.0), dy)),
                 modifiers: Modifiers::none(),

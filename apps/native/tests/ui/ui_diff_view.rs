@@ -9,8 +9,8 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Entity, Modifiers, Pixels, Point, ScrollDelta, ScrollStrategy, ScrollWheelEvent,
-    TestAppContext, VisualTestContext, point,
+    Entity, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, ScrollStrategy, TestAppContext,
+    VisualTestContext, point,
 };
 use rustling_tulip_native::diff_model::{DiffModel, DiffOptions};
 use rustling_tulip_native::diff_view::{DiffView, Nav};
@@ -50,14 +50,14 @@ fn window_center(cx: &mut VisualTestContext) -> Point<Pixels> {
 }
 
 fn wheel(cx: &mut VisualTestContext, at: Point<Pixels>, lines: f32, shift: bool) {
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: at,
         delta: ScrollDelta::Lines(point(0.0, lines)),
         modifiers: Modifiers {
             shift,
             ..Modifiers::none()
         },
-        ..ScrollWheelEvent::default()
+        ..ScrollEvent::default()
     });
     cx.run_until_parked();
 }
@@ -65,14 +65,14 @@ fn wheel(cx: &mut VisualTestContext, at: Point<Pixels>, lines: f32, shift: bool)
 /// A wheel turned sideways by `columns`, the way Windows delivers Shift+wheel
 /// (gpui turns it into a horizontal-only delta).
 fn wheel_sideways(cx: &mut VisualTestContext, at: Point<Pixels>, columns: f32, shift: bool) {
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: at,
         delta: ScrollDelta::Lines(point(columns, 0.0)),
         modifiers: Modifiers {
             shift,
             ..Modifiers::none()
         },
-        ..ScrollWheelEvent::default()
+        ..ScrollEvent::default()
     });
     cx.run_until_parked();
 }

@@ -11,7 +11,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use gpui::{Modifiers, Pixels, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, point, px};
+use gpui::{Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection};
 use rustling_tulip_native::fonts::FontSettings;
 use rustling_tulip_native::{RootView, ShellDot, ShellStatus};
@@ -58,10 +58,10 @@ fn rows(h: &mut Harness<'_>, pane: &str) -> Vec<usize> {
 /// Scrolls the wheel over `at` by `lines` (positive is back through the
 /// history).
 fn wheel(h: &mut Harness<'_>, at: Point<Pixels>, lines: f32) {
-    h.cx.simulate_event(ScrollWheelEvent {
+    h.cx.simulate_event(ScrollEvent {
         position: at,
         delta: ScrollDelta::Lines(point(0.0, lines)),
-        ..ScrollWheelEvent::default()
+        ..ScrollEvent::default()
     });
     h.cx.run_until_parked();
 }

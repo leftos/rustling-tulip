@@ -10,7 +10,7 @@
 use crate::support;
 
 use chrono::Utc;
-use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point, px};
+use gpui::{Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, point, px};
 use protocol::{ClientMessage, DaemonMessage, GitCommit, GitCommitDetail, GitFileChange, TabEntry};
 use rustling_tulip_native::ellipsis::{drawn_text, enable_probe};
 use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
@@ -260,7 +260,7 @@ fn history_view_more_row_ends_in_an_ellipsis(cx: &mut TestAppContext) {
     let page = (0..50).map(|n| commit(n, "change", "Ada")).collect();
     h.send(commits(0, page));
     let at = h.center(&format!("sc-history-list-{BROWSED}"));
-    h.cx.simulate_event(ScrollWheelEvent {
+    h.cx.simulate_event(ScrollEvent {
         position: at,
         delta: ScrollDelta::Pixels(point(px(0.0), px(-100_000.0))),
         modifiers: Modifiers::none(),

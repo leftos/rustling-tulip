@@ -17,9 +17,9 @@ use gpui::{
     DispatchPhase, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle, Font,
     FontFeatures, FontStyle, FontWeight, HitboxBehavior, Hsla, KeyDownEvent, Keystroke, Modifiers,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba,
-    ScrollWheelEvent, SharedString, StrikethroughStyle, Subscription, Task, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WindowId, anchored, canvas, deferred, div, fill, font,
-    outline, point, prelude::*, px, size,
+    ScrollEvent, SharedString, StrikethroughStyle, Subscription, Task, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WindowId, anchored, canvas, deferred, div, fill, font, outline, point,
+    prelude::*, px, size,
 };
 use protocol::{AgentDescriptor, ClientMessage, ImagePaste, SessionMode, SessionSnapshot};
 
@@ -1553,7 +1553,7 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.note_input();
         let line_height = self
             .layout
@@ -2344,7 +2344,7 @@ impl Render for TerminalPane {
             .p(px(crate::PADDING - band))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
-            .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .on_scroll(cx.listener(Self::on_scroll))
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, _| {
                 this.focused_at_press = this.focus.is_focused(window);
             }))

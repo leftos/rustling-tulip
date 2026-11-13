@@ -1029,7 +1029,7 @@ impl RootView {
             text.line_count(),
             move |range, _, _| rows.render(range),
         )
-        .track_scroll(&tab.scroll())
+        .track_scroll(tab.scroll())
         .size_full();
         div()
             .flex_1()

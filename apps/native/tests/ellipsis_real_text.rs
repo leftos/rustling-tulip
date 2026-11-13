@@ -159,7 +159,7 @@ fn lay_out_three_times(text: &'static str) {
                     .timer(std::time::Duration::from_millis(20))
                     .await;
             }
-            let _ = cx.update(|cx| cx.quit());
+            cx.update(|cx| cx.quit());
         })
         .detach();
     });

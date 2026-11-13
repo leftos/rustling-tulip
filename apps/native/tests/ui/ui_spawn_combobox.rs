@@ -12,7 +12,7 @@
 
 use crate::support;
 
-use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point, px};
+use gpui::{Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, point, px};
 use protocol::{ClientMessage, DaemonMessage, SpawnRequest, SpawnTarget};
 use rustling_tulip_native::RootView;
 use rustling_tulip_native::target::Target;
@@ -532,7 +532,7 @@ fn click_outside_target_list_does_not_scroll_dialog(cx: &mut TestAppContext) {
     );
     let body = h.bounds("spawn-body");
     // In the body's left padding, beside the list hanging under the field.
-    h.cx.simulate_event(ScrollWheelEvent {
+    h.cx.simulate_event(ScrollEvent {
         position: point(body.left() + px(6.0), body.bottom() - px(10.0)),
         delta: ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
         modifiers: Modifiers::none(),

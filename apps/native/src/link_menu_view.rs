@@ -3,7 +3,7 @@
 //! folder, and Up, Down, Enter, Esc and a click outside drive it.
 
 use gpui::{
-    AnyElement, Context, Div, Keystroke, MouseButton, MouseDownEvent, ScrollWheelEvent, Stateful,
+    AnyElement, Context, Div, Keystroke, MouseButton, MouseDownEvent, ScrollEvent, Stateful,
     Window, WindowId, anchored, deferred, div, prelude::*,
 };
 
@@ -151,7 +151,7 @@ impl RootView {
             .left_0()
             .size_full()
             .occlude()
-            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, window, cx| {
+            .on_scroll(cx.listener(|this, _: &ScrollEvent, window, cx| {
                 this.close_link_menu(window, cx);
             }));
         let panel = anchored()

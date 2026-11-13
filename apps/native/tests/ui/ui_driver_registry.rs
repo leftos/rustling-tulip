@@ -5,7 +5,7 @@
 
 use crate::support;
 
-use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point, px};
+use gpui::{Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, point, px};
 use rustling_tulip_native::driver::registry::{self, Entry};
 use support::{Fixture, Harness, TestDir, repo, session};
 
@@ -135,7 +135,7 @@ fn a_menu_does_not_scroll_in_a_driver_build(cx: &mut TestAppContext) {
     let before = registered(&mut h, "container-menu-spawn").bounds;
 
     let over = h.bounds("container-menu").center();
-    h.cx.simulate_event(ScrollWheelEvent {
+    h.cx.simulate_event(ScrollEvent {
         position: over,
         delta: ScrollDelta::Pixels(point(px(0.0), px(-40.0))),
         modifiers: Modifiers::none(),

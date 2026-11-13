@@ -486,7 +486,7 @@ impl RootView {
                 .focus_handle(cx)
                 .focus(window, cx),
             (CreatorControl::File, Some(input)) => {
-                input.read(cx).focus_handle(cx).focus(window, cx)
+                input.read(cx).focus_handle(cx).focus(window, cx);
             }
             _ => self.workspace_creator_focus.focus(window, cx),
         }

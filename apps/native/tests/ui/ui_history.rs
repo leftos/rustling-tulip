@@ -10,7 +10,7 @@
 
 use crate::support;
 
-use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point, px};
+use gpui::{Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, point, px};
 use protocol::{
     ClientMessage, DaemonMessage, GitCommit, GitCommitDetail, GitFileChange, GitRemoteUrl,
 };
@@ -171,7 +171,7 @@ fn toast_count(h: &mut Harness<'_>) -> usize {
 /// under the pointer.
 fn scroll_list_to_end(h: &mut Harness<'_>, id: &str) {
     let at = h.center(&format!("sc-history-list-{id}"));
-    h.cx.simulate_event(ScrollWheelEvent {
+    h.cx.simulate_event(ScrollEvent {
         position: at,
         delta: ScrollDelta::Pixels(point(px(0.0), px(-100_000.0))),
         modifiers: Modifiers::none(),

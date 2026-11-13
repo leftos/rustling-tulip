@@ -19,8 +19,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable, KeyDownEvent,
-    Keystroke, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window, WindowId,
-    div, prelude::*, px, relative,
+    Keystroke, ScrollEvent, ScrollHandle, SharedString, Subscription, Task, Window, WindowId, div,
+    prelude::*, px, relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
@@ -2814,7 +2814,7 @@ fn tail_box(
     }
     column
         .track_scroll(&handle)
-        .on_scroll_wheel(cx.listener(move |_, _: &ScrollWheelEvent, window, cx| {
+        .on_scroll(cx.listener(move |_, _: &ScrollEvent, window, cx| {
             // The box has scrolled by now; the chat around it stays put.
             cx.stop_propagation();
             let (key, handle) = (key.clone(), handle.clone());
