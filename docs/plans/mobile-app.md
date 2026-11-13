@@ -82,7 +82,7 @@ Item ids are MA.1, MA.2, … (the native mobile app), distinct from the web app'
 
 Risks the spike left open: compile-clean is not behaviour-clean for the desktop (the `secondary-` keystroke panic shows it); line breaking (UAX #14), Taffy 0.15, pixel snapping, subpixel text and the frame limit on unfocused windows change what the desktop draws with no compile error; the pinned revision is experimental upstream with no changelog; and the lock is regenerated whole, moving other crates' versions.
 
-- [ ] **MA.1 Take the spike's GPUI upgrade onto `feat/gpui-upgrade`.** Cut `feat/gpui-upgrade` from `main` and cherry-pick the spike's WIP commit `a4376cf3` (local branch `rt-1152-gpui-ios`), leaving out what only the phone example needs: `apps/native/examples/phone_sessions.rs` and its plist, the `gpui_ios` target dependency, `RootView::phone_session_list` and `phone_list_scroll_y`, and the `RT-1152` source comments.
+- [x] **MA.1 Take the spike's GPUI upgrade onto `feat/gpui-upgrade`.** Cut `feat/gpui-upgrade` from `main` and cherry-pick the spike's WIP commit `a4376cf3` (local branch `rt-1152-gpui-ios`), leaving out what only the phone example needs: `apps/native/examples/phone_sessions.rs` and its plist, the `gpui_ios` target dependency, `RootView::phone_session_list` and `phone_list_scroll_y`, and the `RT-1152` source comments.
 
   Resolve it against what `main` gained since the spike's base, migrating every new call site by the spike note's List 2 patterns (`focus(window, cx)`, `flex_grow(1.)`, `Modifiers::secondary(cx)`, `gpui::Anchor`, `gpui_platform::application()`, the `windows` features). The `[patch.crates-io]` `gpui` entry is left for MA.4.
 
@@ -91,21 +91,21 @@ Risks the spike left open: compile-clean is not behaviour-clean for the desktop 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma1-check.log --timeout 3600 --slot heavy -- cargo check --workspace --lib --bins --all-features`
 
   Waits on: nothing. Owner's iPhone: not needed.
-- [ ] **MA.2 Fix the upgrade's test and example targets.** The spike left 50 errors in tests and examples (its List 2, "Left"): `ScrollEvent` needs `source`, `KeyDownEvent` needs `prefer_character_input`, `gpui_platform::application()` in the examples, added arguments and borrows that escape. Fix those and any `main` added since; a spec that now fails is fixed when the failure is the test's, and booked as an **add** when it is the product's.
+- [x] **MA.2 Fix the upgrade's test and example targets.** The spike left 50 errors in tests and examples (its List 2, "Left"): `ScrollEvent` needs `source`, `KeyDownEvent` needs `prefer_character_input`, `gpui_platform::application()` in the examples, added arguments and borrows that escape. Fix those and any `main` added since; a spec that now fails is fixed when the failure is the test's, and booked as an **add** when it is the product's.
 
   Files: `apps/native/tests/support/mod.rs`, the `apps/native/tests/ui/` specs List 2 names, `apps/native/examples/shot.rs`, `apps/native/examples/diff_bench.rs`, and the test modules of `viewer_md_view.rs`, `quick_jump_view.rs`, `session_menu.rs`, `folder_picker.rs` and `text_input.rs`: a mechanical sweep.
 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma2-native.log --timeout 3600 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release`
 
   Waits on: MA.1. Owner's iPhone: not needed.
-- [ ] **MA.3 Clear the upgrade's warnings and runtime traps.** Move `ScrollWheelEvent` and `on_scroll_wheel` to `ScrollEvent` and `on_scroll` (`chat_view.rs`, `diff_view.rs`, `link_menu_view.rs`, `session_menu.rs`, `term_view.rs`), and replace the driver's `secondary-v` keystroke (`driver/handlers.rs`), which `Keystroke::parse` now refuses.
+- [x] **MA.3 Clear the upgrade's warnings and runtime traps.** Move `ScrollWheelEvent` and `on_scroll_wheel` to `ScrollEvent` and `on_scroll` (`chat_view.rs`, `diff_view.rs`, `link_menu_view.rs`, `session_menu.rs`, `term_view.rs`), and replace the driver's `secondary-v` keystroke (`driver/handlers.rs`), which `Keystroke::parse` now refuses.
 
   Raise `rust-version` in `Cargo.toml` and `.gate/toolchain.toml` to the floor the pinned GPUI needs (it uses `cfg_select!`), found by building with that floor, and keep `cargo deny check` green on the regenerated lock (`deny.toml`). The UI specs build `RootView`, which registers every key binding the app binds at launch, so a refused keystroke fails a spec rather than a launch.
 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma3-clippy.log --timeout 3600 --slot heavy -- cargo clippy --workspace --all-targets --all-features -- -D warnings`
 
   Waits on: MA.2. Owner's iPhone: not needed.
-- [ ] **MA.4 Carry the first-mouse fix on the pinned revision and drop `vendor/gpui`.** Before the brief, the orchestrator confirms with the owner the creation of the fork `leftos/zed` (a GitHub write).
+- [x] **MA.4 Carry the first-mouse fix on the pinned revision and drop `vendor/gpui`.** Before the brief, the orchestrator confirms with the owner the creation of the fork `leftos/zed` (a GitHub write).
 
   Re-apply the first-mouse part of commit `1d1b92cb9` to `gpui_windows` (mark the press after an `HTCLIENT` `WM_MOUSEACTIVATE`) and `gpui_macos` (mark and clear on the next press of any button) as one commit on the fork at the pin, and take `gpui`, `gpui_platform` and later `gpui_ios` from the fork's revision.
 

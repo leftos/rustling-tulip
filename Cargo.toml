@@ -19,7 +19,6 @@ members = [
     "tools/folder-bench",
     "tools/protocol-ts",
 ]
-exclude = ["vendor/gpui"]
 
 [workspace.package]
 version = "0.14.0-alpha"
@@ -103,7 +102,6 @@ debug-assertions = true
 debug-assertions = true
 
 [patch.crates-io]
-gpui = { path = "vendor/gpui" }
 # Zed's own [patch.crates-io] does not reach a dependent, and gpui's scheduler needs these forks.
 async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
