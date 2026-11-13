@@ -442,9 +442,10 @@ impl RootView {
         }
     }
 
-    /// A terminal's event, made in the window its slot was created in, acts
-    /// for the window that draws the terminal now: a popped terminal's
-    /// gutter menu opens in its pop-out.
+    /// A terminal's event acts for the window that draws the terminal now: its
+    /// pop-out's, or the main window. The pinned gpui runs the subscription in
+    /// whichever window last drew the root view, which can be a pop-out, so an
+    /// event for another window runs there once this update is over.
     pub(crate) fn route_pane_event(
         &mut self,
         slot_id: &str,
@@ -452,15 +453,17 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.slot_window(slot_id) {
-            Some(drawn_in) if drawn_in != window.window_handle().window_id() => {
-                let event = event.clone();
-                let slot_id = slot_id.to_owned();
-                Self::in_window(drawn_in, cx, move |root, window, cx| {
-                    root.on_pane_event(&slot_id, &event, window, cx);
-                });
-            }
-            _ => self.on_pane_event(slot_id, event, window, cx),
+        let drawn_in = self
+            .slot_window(slot_id)
+            .unwrap_or_else(|| self.layouts.main());
+        if drawn_in == window.window_handle().window_id() {
+            self.on_pane_event(slot_id, event, window, cx);
+        } else {
+            let event = event.clone();
+            let slot_id = slot_id.to_owned();
+            Self::in_window(drawn_in, cx, move |root, window, cx| {
+                root.on_pane_event(&slot_id, &event, window, cx);
+            });
         }
     }
 

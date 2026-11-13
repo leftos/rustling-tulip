@@ -1016,6 +1016,36 @@ fn link_menu_keys_act_only_in_its_window(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn ctrl_shift_click_in_the_main_window_opens_the_menu_there_beside_a_popout(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    write_file(dir.path(), "docs/notes.md");
+    let mut h = pane_popped(cx, &dir);
+    h.pty("s1", b"wrote docs/notes.md");
+    // The pop-out draws last, as it does after its own terminal's output.
+    h.pty("s2", b"wrote docs/notes.md");
+    h.cx.run_until_parked();
+
+    let in_main = h.cell_center("p1", 9, 0);
+    h.click(in_main, ctrl_shift());
+    assert!(
+        h.in_model("link-menu"),
+        "the Ctrl+Shift+click opens the menu"
+    );
+    assert!(
+        drawn(&mut h, "link-menu"),
+        "the main window, where the click was, draws it"
+    );
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    assert!(
+        popout.debug_bounds("link-menu").is_none(),
+        "the pop-out draws no copy of it"
+    );
+}
+
+#[gpui::test]
 fn a_ui_save_keeps_hand_added_unc_hosts(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir, session("s1").build());
