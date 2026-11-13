@@ -1,0 +1,82 @@
+            below the header; each tile is a button named "Open <name>'s panel". Under them are Notes, Theme and "⋯ More", the same `#open-notes`, `#theme-toggle` and `#page-more` restyled as small, neatly labelled buttons. `div.side-pane` wraps the panel's content and moves by itself on a
+            tiny window; outside the range it is `display: contents`.
+      150  - **The drawer**: a tile opens the real `#panel` as a modal beside the strip (`openDrawer`; `role="dialog"`, `aria-modal`, labelled "<name>'s panel"; `<html data-open="panel">`; a `.shade` dims the rest). The page, the right panel and the strip's other content are `inert`, and T
+           ab stays inside. Escape, a click on the dimmed area, a save from a panel, or the window leaving the range closes it, and focus returns to the tile, else to `#text`. With the full panel overlay open over it, Escape closes only the overlay. A panel save that fails reopens the draw
+           er on that panel, but only when focus is still on its tile, or nowhere, and no dialog is open.
+      151  - **The page**: in the range, its side margins are 24 px, the footer's padding is `10px 24px 18px`, and the body grid's rows stay `minmax(0, 1fr)`.
+      152 -- **Left out of the strip for now**: the sizes row, the footer notes and "Add a new widget" are hidden in the range.
+      152 +- **Hidden in the range**: the sizes row, the footer notes and "Add a new widget" are hidden in the range.
+      153  - **The "⋯" menu and the exit confirm** open to the right of "⋯" in the range, with a tip on their left (`placeMoreMenu` in `static/more-menu.js`).
+      154  - `tests/test_page_compact_browser.py` runs the strip and the drawer.
+      155
+
+✎ ✓ ● Write(X:\dev\app.wt\mobile-1\.tmp\msg-mobile-1a.txt)
+  ⎿  Wrote 8 lines to X:\dev\app.wt\mobile-1\.tmp\msg-mobile-1a.txt
+      1 feat: fold the side panel into a strip with a pane drawer
+      2
+      3 From 760 to 1119 px the side pane becomes a strip of widget tiles with
+      4 their counts, Notes, Theme and a More button; a tile opens its panel as
+      5 a modal drawer over the app. Page margins shrink to 24 px in there, and
+      6 the page is 100dvh tall at every width.
+      7
+      8 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+[$ 3 ran]
+
+● Background command "Run the full suite on the rebased save-lock tree" completed (exit code 0)
+[$ 1 ran]
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                                                                                                                                                                       │
+│  Part 1a is on feat/mobile-layout (3f1c2ab). The save-lock full suite passed, so that lands next.                                                                                                                                                                                                     │
+│                                                                                                                                                                                                                                                                                                       │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[$ 3 ran]
+
+• ✓
+[$ 2 ran]
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                                                                                                                                                                       │
+│  Save-lock fix landed on main (a41b7e2); now its cleanup, then rebasing the toolbar polish onto it.                                                                                                                                                                                                   │
+│                                                                                                                                                                                                                                                                                                       │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[$ 3 ran]
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                                                                                                                                                                       │
+│  While the toolbar suite runs, I'm recording what part 1a's reviews booked, plus the line-length tidy, in the main                                                                                                                                                                                    │
+│  plan.                                                                                                                                                                                                                                                                                                │
+│                                                                                                                                                                                                                                                                                                       │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[$ 1 ran] [◧ 1 read]
+
+● Agent "Map: export button moves to the toolbar" finished · 2m 0s
+
+● The export-button map is done, and most of its open choices follow the existing toolbar behaviour. I need you to decide where it should land, since it shares toolbar code that the layout work just changed on its own branch first. · summary
+
+• …
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──
+   ☐ Pick a branch
+
+  │ "The export button moves to the toolbar" touches the same file as the open layout branch. Where should it land?
+
+  ❯ 1. Land on main now (Recommended)
+       Ships to main as soon as it's done, at every width; the layout branch rebases over it later and resolves the few shared lines, in the toolbar code then. Worst case: one small conflict to resolve at the layout branch merge.
+    2. Build it on the layout branch
+       Stacked on top of the layout branch, so there is no conflict; it reaches main only when the whole layout work merges. Worst case: you wait for the layout's parts 1b, 2 and 3 before you can use it.
+    3. Its own feature branch
+       feat/export-in-toolbar, merged when done; the same toolbar conflicts as landing on main, plus a branch to manage. Worst case: extra bookkeeping for a four-step item.
+    4. Type something.
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──
+    5. Chat about this
+
+  Enter to select · ↑/↓ to navigate · Esc to cancel
+
+  5 tasks (2 done, 3 open)
+  ✔ Land small-fixes (CSS lint + ids)
+  ✔ Date formats via the shared helper
+  ◻ Mobile layout on feat/mobile-layout
+  ◻ Land toolbar polish, and the export lock fix
+  ◻ The export button moves to the toolbar

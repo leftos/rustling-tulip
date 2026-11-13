@@ -1983,6 +1983,38 @@ mod tests {
             }
         }
 
+        /// A question Claude Code drew 2 columns in, whose full-width rules
+        /// each wrap a `──` row under themselves.
+        const WRAPPED_RULE_QUESTION: &str =
+            include_str!("../screen/fixtures/v2-ask-wrapped-rule-w297.txt");
+
+        #[tokio::test]
+        async fn answer_prompt_answers_a_question_whose_rule_wraps() {
+            let pending = PendingInput::Question {
+                questions: vec![PendingQuestion {
+                    question: "\"The export button moves to the toolbar\" touches the same \
+                        file as the open layout branch. Where should it land?"
+                        .to_owned(),
+                    header: "Pick a branch".to_owned(),
+                    options: vec![
+                        "Land on main now (Recommended)".to_owned(),
+                        "Build it on the layout branch".to_owned(),
+                        "Its own feature branch".to_owned(),
+                    ],
+                    option_descriptions: Vec::new(),
+                    multi_select: false,
+                    preview: false,
+                }],
+            };
+            let mut w = waiting("dash-answer-wrapped-rule", WRAPPED_RULE_QUESTION, pending);
+            w.answer(PromptChoice::Option { index: 0 }).await;
+            assert_eq!(
+                first_step(&mut w).await,
+                Ok(b"1".to_vec()),
+                "the first option's digit"
+            );
+        }
+
         #[tokio::test]
         async fn answer_prompt_answers_a_question_taller_than_its_grid() {
             let mut w = waiting(
