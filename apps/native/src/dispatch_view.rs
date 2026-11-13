@@ -285,7 +285,11 @@ fn follow_key(follow: &PaneFollow) -> Option<TranscriptKey> {
             session_id: session_id.clone(),
             agent_id: agent_id.clone(),
         }),
-        PaneFollow::Unknown | PaneFollow::RunSubagent { .. } => None,
+        PaneFollow::RunSubagent { run_id, agent_id } => Some(TranscriptKey::RunSubagent {
+            run_id: run_id.clone(),
+            agent_id: agent_id.clone(),
+        }),
+        PaneFollow::Unknown => None,
     }
 }
 

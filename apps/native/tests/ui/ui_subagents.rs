@@ -1,22 +1,22 @@
-//! A pane that follows a subagent draws the subagent's transcript read-only:
-//! it follows the transcript on the pane's host, draws a header row of the
-//! subagent's last snapshot over the transcript, keeps both once the
-//! subagent is no longer listed, notes an ended session or a subagent no
-//! longer available, unfollows once no pane shows it, and follows again
-//! after a reconnect.
+//! A pane that follows a session's or a dispatch run's subagent draws the
+//! subagent's transcript read-only: it follows the transcript on the pane's
+//! host, draws a header row of the subagent's last snapshot over the
+//! transcript, keeps both once the subagent is no longer listed, notes an
+//! ended session or run or a subagent no longer available, unfollows once no
+//! pane shows it, and follows again after a reconnect.
 
 use crate::support;
 
 use gpui::{TestAppContext, px};
 use protocol::{
-    ChatEntry, ClientMessage, DaemonMessage, GridNode, PaneFollow, SplitDirection, ToolKind,
-    ToolOutcome, TranscriptSource,
+    ChatEntry, ClientMessage, DaemonMessage, DispatchRunSnapshot, GridNode, PaneFollow,
+    SplitDirection, ToolKind, ToolOutcome, TranscriptSource,
 };
 use rustling_tulip_native::target::Target;
 use serde_json::Value;
 use support::{
-    Fixture, Harness, REMOTE, TestDir, dispatch_run, follow_pane, follow_subagent_pane, pane, repo,
-    session, split, subagent_with, tab,
+    Fixture, Harness, REMOTE, TestDir, dispatch_run, follow_pane, follow_run_subagent_pane,
+    follow_subagent_pane, pane, repo, session, split, subagent_with, tab,
 };
 
 /// Subagent `a1` of `s1`: `task a1`, an `explore` agent on `model-x`.
@@ -53,6 +53,103 @@ fn connected<'a>(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -
     h.sent();
     h.reconnect_with_features(&[]);
     h
+}
+
+/// Subagent `r1a` of dispatch run `d1`: `task r1a`, an `explore` agent on
+/// `model-x`.
+fn r1a(state: &str) -> Value {
+    subagent_with("r1a", "explore", "model-x", state)
+}
+
+/// Dispatch run `d1` listing `subagents`.
+fn run_listing(subagents: Vec<Value>) -> DispatchRunSnapshot {
+    let mut run = dispatch_run("d1").build();
+    run.subagents = subagents
+        .into_iter()
+        .map(|value| serde_json::from_value(value).expect("subagent fixture"))
+        .collect();
+    run
+}
+
+/// Repo `r1`; session `s1`; tab `t1`: `s1` in `p1` and a pane `p2`
+/// following subagent `r1a` of dispatch run `d1` on This PC.
+fn run_fixture() -> Fixture {
+    Fixture {
+        repos: vec![repo("r1", "C:/r1")],
+        sessions: vec![session("s1").in_repo("r1").build()],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                follow_run_subagent_pane("p2", "d1", "r1a"),
+            ),
+        )],
+        ..Fixture::default()
+    }
+}
+
+/// `run_fixture` on a fresh connection, This PC listing run `d1` with
+/// `subagents`, nothing sent left unread but the follow.
+fn connected_run<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    subagents: Vec<Value>,
+) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &run_fixture());
+    h.sent();
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(DaemonMessage::DispatchRuns {
+        runs: vec![run_listing(subagents)],
+    });
+    h
+}
+
+fn run_source() -> TranscriptSource {
+    TranscriptSource::RunSubagent {
+        run_id: "d1".to_owned(),
+        agent_id: "r1a".to_owned(),
+    }
+}
+
+/// The request id of the one follow of `r1a` sent since the last read.
+fn run_follow_id(h: &mut Harness<'_>) -> String {
+    let sent = follows_of(&h.sent(), &run_source());
+    assert!(
+        matches!(sent.as_slice(), [Some(_)]),
+        "one follow with a request id was sent: {sent:?}"
+    );
+    sent.into_iter().flatten().next().unwrap_or_default()
+}
+
+fn run_reply(entries: Vec<ChatEntry>, request_id: Option<String>) -> DaemonMessage {
+    DaemonMessage::Transcript {
+        source: run_source(),
+        entries,
+        hidden: 0,
+        request_id,
+    }
+}
+
+fn run_lines(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| root.subagent_view_lines("p2"))
+}
+
+fn run_header(h: &mut Harness<'_>) -> Option<(String, String, String)> {
+    h.root(|root, _| root.subagent_view_header("p2"))
+}
+
+fn run_note(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.subagent_view_note("p2"))
+}
+
+/// The header `r1a` draws in `state`.
+fn r1a_header(state: &str) -> (String, String, String) {
+    (
+        "task r1a".to_owned(),
+        "SA · explore · model-x".to_owned(),
+        state.to_owned(),
+    )
 }
 
 fn source_of(session_id: &str, agent_id: &str) -> TranscriptSource {
@@ -600,5 +697,133 @@ fn a_run_pane_beside_it_still_follows_its_run(cx: &mut TestAppContext) {
     assert!(
         drawn(&mut h, "subagent-log-f2"),
         "the subagent's log has its own"
+    );
+}
+
+#[gpui::test]
+fn a_run_subagent_pane_follows_its_transcript_on_the_panes_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = connected_run(cx, &dir, vec![r1a("running")]);
+    let id = run_follow_id(&mut h);
+
+    h.send(run_reply(vec![answer("x1", "Looking.")], Some(id)));
+
+    assert_eq!(run_lines(&mut h), ["● Looking."]);
+    assert!(drawn(&mut h, "subagent-log-p2"), "the log is drawn");
+    assert!(drawn(&mut h, "subagent-header-p2"), "the header is drawn");
+}
+
+#[gpui::test]
+fn a_run_subagent_pane_header_follows_the_runs_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = connected_run(cx, &dir, vec![r1a("running")]);
+    assert_eq!(run_header(&mut h), Some(r1a_header("running")));
+
+    h.send(DaemonMessage::DispatchRunUpdated {
+        run: run_listing(vec![r1a("finished")]),
+    });
+    assert_eq!(run_header(&mut h), Some(r1a_header("finished")));
+    assert!(drawn(&mut h, "subagent-header-p2"), "the header is drawn");
+}
+
+#[gpui::test]
+fn a_run_dropping_its_subagent_keeps_the_transcript_and_last_header(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = connected_run(cx, &dir, vec![r1a("running")]);
+    let id = run_follow_id(&mut h);
+    h.send(run_reply(vec![answer("x1", "Found it.")], Some(id)));
+    h.send(DaemonMessage::DispatchRunUpdated {
+        run: run_listing(vec![r1a("finished")]),
+    });
+
+    h.send(DaemonMessage::DispatchRunUpdated {
+        run: run_listing(Vec::new()),
+    });
+    assert_eq!(
+        run_header(&mut h),
+        Some(r1a_header("finished")),
+        "the last header stays"
+    );
+    assert_eq!(run_lines(&mut h), ["● Found it."], "the transcript stays");
+
+    h.send(DaemonMessage::DispatchRunRemoved {
+        run_id: "d1".to_owned(),
+    });
+    assert_eq!(
+        run_header(&mut h),
+        Some(r1a_header("finished")),
+        "a removed run keeps the header"
+    );
+    assert_eq!(run_lines(&mut h), ["● Found it."]);
+    assert_eq!(run_note(&mut h), None, "no note without an ended append");
+}
+
+#[gpui::test]
+fn an_ended_run_shows_its_run_has_ended(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = connected_run(cx, &dir, vec![r1a("running")]);
+    let id = run_follow_id(&mut h);
+    h.send(run_reply(vec![answer("x1", "Working.")], Some(id)));
+    assert_eq!(run_note(&mut h), None, "precondition: no note");
+    h.send(append(run_source(), vec![answer("x2", "More.")], false));
+    assert_eq!(
+        run_note(&mut h),
+        None,
+        "an append that does not end adds none"
+    );
+
+    h.send(append(run_source(), Vec::new(), true));
+
+    assert_eq!(run_note(&mut h).as_deref(), Some("Its run has ended"));
+    assert!(drawn(&mut h, "subagent-note-p2"), "the note is drawn");
+    assert_eq!(
+        run_lines(&mut h),
+        ["● Working.", "● More."],
+        "the transcript stays"
+    );
+}
+
+#[gpui::test]
+fn closing_a_run_subagent_pane_unfollows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = connected_run(cx, &dir, vec![r1a("running")]);
+    run_follow_id(&mut h);
+
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+    });
+
+    let sent = h.sent();
+    assert_eq!(unfollows_of(&sent, &run_source()), 1, "no pane shows r1a");
+    assert!(
+        follows_of(&sent, &run_source()).is_empty(),
+        "nothing re-follows"
+    );
+}
+
+#[gpui::test]
+fn a_welcome_refollows_a_run_subagent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = connected_run(cx, &dir, vec![r1a("running")]);
+    let first = run_follow_id(&mut h);
+    h.send(run_reply(vec![answer("x1", "One.")], Some(first.clone())));
+
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    let second = run_follow_id(&mut h);
+    assert_ne!(
+        second, first,
+        "the follow goes again with a fresh request id"
+    );
+    assert_eq!(
+        run_lines(&mut h),
+        ["● One."],
+        "the held transcript draws until the reply"
+    );
+
+    h.send(run_reply(vec![answer("x1", "Stale.")], Some(first)));
+    assert_eq!(
+        run_lines(&mut h),
+        ["● One."],
+        "the old follow's reply is stale"
     );
 }

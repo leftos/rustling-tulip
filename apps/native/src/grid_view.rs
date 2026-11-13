@@ -1814,9 +1814,15 @@ impl RootView {
                     };
                     self.subagent_body(pane_id, &host, &key, cx)
                 }
-                PaneFollow::Unknown | PaneFollow::RunSubagent { .. } => {
-                    follow_placeholder(pane_id, cx)
+                PaneFollow::RunSubagent { run_id, agent_id } => {
+                    let host = self.tabs.pane_host(tab_id, pane_id);
+                    let key = crate::transcript_view::TranscriptKey::RunSubagent {
+                        run_id: run_id.clone(),
+                        agent_id: agent_id.clone(),
+                    };
+                    self.subagent_body(pane_id, &host, &key, cx)
                 }
+                PaneFollow::Unknown => follow_placeholder(pane_id, cx),
             };
             return match self.panes.get(pane_id) {
                 Some(slot) => {

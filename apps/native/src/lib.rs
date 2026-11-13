@@ -5563,7 +5563,8 @@ impl RootView {
             transcript_view::TranscriptKey::Run(_) => {
                 conn.supports(protocol::FEATURE_DISPATCH_RUNS)
             }
-            transcript_view::TranscriptKey::Subagent { .. } => conn.is_open(),
+            transcript_view::TranscriptKey::Subagent { .. }
+            | transcript_view::TranscriptKey::RunSubagent { .. } => conn.is_open(),
         }
     }
 
@@ -5658,7 +5659,8 @@ impl RootView {
                     self.transcripts.remove(&key);
                 }
             }
-            transcript_view::TranscriptKey::Subagent { .. } => self.subagent_refused(key),
+            transcript_view::TranscriptKey::Subagent { .. }
+            | transcript_view::TranscriptKey::RunSubagent { .. } => self.subagent_refused(key),
         }
         true
     }

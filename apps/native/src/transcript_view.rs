@@ -19,6 +19,8 @@ pub(crate) enum TranscriptKey {
         session_id: String,
         agent_id: String,
     },
+    /// Subagent `agent_id` of dispatch run `run_id`.
+    RunSubagent { run_id: String, agent_id: String },
 }
 
 impl TranscriptKey {
@@ -33,7 +35,11 @@ impl TranscriptKey {
                 session_id: session_id.clone(),
                 agent_id: agent_id.clone(),
             }),
-            TranscriptSource::Unknown | TranscriptSource::RunSubagent { .. } => None,
+            TranscriptSource::RunSubagent { run_id, agent_id } => Some(Self::RunSubagent {
+                run_id: run_id.clone(),
+                agent_id: agent_id.clone(),
+            }),
+            TranscriptSource::Unknown => None,
         }
     }
 
@@ -48,6 +54,10 @@ impl TranscriptKey {
                 agent_id,
             } => TranscriptSource::Subagent {
                 session_id: session_id.clone(),
+                agent_id: agent_id.clone(),
+            },
+            Self::RunSubagent { run_id, agent_id } => TranscriptSource::RunSubagent {
+                run_id: run_id.clone(),
                 agent_id: agent_id.clone(),
             },
         }
@@ -489,6 +499,23 @@ mod tests {
             let key = TranscriptKey::from_source(&source);
             assert_eq!(key.map(|key| key.to_source()), Some(source));
         }
+    }
+
+    #[test]
+    fn a_run_subagent_key_round_trips_its_source() {
+        let source = TranscriptSource::RunSubagent {
+            run_id: "d1".to_owned(),
+            agent_id: "r1a".to_owned(),
+        };
+        let key = TranscriptKey::from_source(&source);
+        assert_eq!(
+            key,
+            Some(TranscriptKey::RunSubagent {
+                run_id: "d1".to_owned(),
+                agent_id: "r1a".to_owned(),
+            })
+        );
+        assert_eq!(key.map(|key| key.to_source()), Some(source));
     }
 
     #[test]

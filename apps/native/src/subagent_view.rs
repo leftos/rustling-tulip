@@ -1,13 +1,14 @@
-//! A pane that follows a subagent, read-only: a header row of the
-//! subagent's last snapshot (its label, `SA · type · model` and its state),
-//! a note once its session has ended or it is no longer available, over the
-//! transcript body a dispatch run's pane draws. The rules are plain Rust,
-//! so each is unit-tested; `RootView` keeps the state and draws it.
+//! A pane that follows a session's or a dispatch run's subagent, read-only:
+//! a header row of the subagent's last snapshot (its label, `SA · type ·
+//! model` and its state), a note once its session or run has ended or it is
+//! no longer available, over the transcript body a dispatch run's pane draws.
+//! The rules are plain Rust, so each is unit-tested; `RootView` keeps the
+//! state and draws it.
 
 use std::collections::{HashMap, HashSet};
 
 use gpui::{Context, Div, Pixels, div, prelude::*, px};
-use protocol::{AgentState, DaemonMessage, SessionSnapshot, SubagentSnapshot};
+use protocol::{AgentState, DaemonMessage, DispatchRunSnapshot, SessionSnapshot, SubagentSnapshot};
 
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px_at, ui_text_size};
@@ -20,6 +21,8 @@ use crate::{RootView, UI_TEXT_SIZE};
 
 /// The note of a subagent whose host session has ended.
 pub(crate) const ENDED_NOTE: &str = "Its session has ended";
+/// The note of a subagent whose dispatch run has ended.
+pub(crate) const RUN_ENDED_NOTE: &str = "Its run has ended";
 /// The note of a subagent whose follow was refused with nothing held of it.
 pub(crate) const UNAVAILABLE_NOTE: &str = "This subagent is no longer available";
 
@@ -76,8 +79,24 @@ fn subagent_of<'a>(
         .find(|sub| sub.agent_id == agent_id)
 }
 
+/// The note an ended transcript of `key` reads.
+pub(crate) fn ended_note(key: &TranscriptKey) -> &'static str {
+    match key {
+        TranscriptKey::RunSubagent { .. } => RUN_ENDED_NOTE,
+        TranscriptKey::Run(_) | TranscriptKey::Subagent { .. } => ENDED_NOTE,
+    }
+}
+
+/// Subagent `agent_id` of `run`, when the run lists it.
+fn subagent_in_run<'a>(
+    run: &'a DispatchRunSnapshot,
+    agent_id: &str,
+) -> Option<&'a SubagentSnapshot> {
+    run.subagents.iter().find(|sub| sub.agent_id == agent_id)
+}
+
 /// Subagent `agent_id` of session `session_id` as `msg` lists it.
-fn listed_in<'a>(
+fn listed_in_session<'a>(
     msg: &'a DaemonMessage,
     session_id: &str,
     agent_id: &str,
@@ -91,20 +110,54 @@ fn listed_in<'a>(
     }
 }
 
-/// Subagent `agent_id` of session `session_id` as `host` lists it now.
+/// Subagent `agent_id` of dispatch run `run_id` as `msg` lists it.
+fn listed_in_run<'a>(
+    msg: &'a DaemonMessage,
+    run_id: &str,
+    agent_id: &str,
+) -> Option<&'a SubagentSnapshot> {
+    let run = match msg {
+        DaemonMessage::DispatchRuns { runs } => runs.iter().find(|run| run.run_id == run_id),
+        DaemonMessage::DispatchRunUpdated { run } if run.run_id == run_id => Some(run),
+        _ => None,
+    };
+    run.and_then(|run| subagent_in_run(run, agent_id))
+}
+
+/// Subagent `key` as `msg` lists it.
+fn listed_in<'a>(msg: &'a DaemonMessage, key: &TranscriptKey) -> Option<&'a SubagentSnapshot> {
+    match key {
+        TranscriptKey::Run(_) => None,
+        TranscriptKey::Subagent {
+            session_id,
+            agent_id,
+        } => listed_in_session(msg, session_id, agent_id),
+        TranscriptKey::RunSubagent { run_id, agent_id } => listed_in_run(msg, run_id, agent_id),
+    }
+}
+
+/// Subagent `key` of `host` as `sidebar` lists it now.
 fn live_subagent<'a>(
     sidebar: &'a SidebarModel,
     host: &HostKey,
-    session_id: &str,
-    agent_id: &str,
+    key: &TranscriptKey,
 ) -> Option<&'a SubagentSnapshot> {
-    subagent_of(sidebar.session_on(host, session_id)?, session_id, agent_id)
+    match key {
+        TranscriptKey::Run(_) => None,
+        TranscriptKey::Subagent {
+            session_id,
+            agent_id,
+        } => subagent_of(sidebar.session_on(host, session_id)?, session_id, agent_id),
+        TranscriptKey::RunSubagent { run_id, agent_id } => {
+            subagent_in_run(sidebar.run_on(host, run_id)?, agent_id)
+        }
+    }
 }
 
-/// The kept last snapshots of followed subagents, by host, session id and
-/// agent id.
+/// The kept last snapshots of followed subagents, by host and transcript
+/// key: a session's subagent or a dispatch run's.
 #[derive(Debug, Default)]
-pub(crate) struct KeptSubagents(HashMap<(HostKey, String, String), SubagentSnapshot>);
+pub(crate) struct KeptSubagents(HashMap<SubagentKey, SubagentSnapshot>);
 
 impl KeptSubagents {
     /// Before `msg` from `host` folds: keeps each `followed` subagent's
@@ -113,39 +166,33 @@ impl KeptSubagents {
     pub(crate) fn keep_from(
         &mut self,
         host: &HostKey,
-        followed: &[(String, String)],
+        followed: &[TranscriptKey],
         msg: &DaemonMessage,
-        current: impl Fn(&str, &str) -> Option<SubagentSnapshot>,
+        current: impl Fn(&TranscriptKey) -> Option<SubagentSnapshot>,
     ) {
-        for (session_id, agent_id) in followed {
-            let key = (host.clone(), session_id.clone(), agent_id.clone());
-            if let Some(sub) = listed_in(msg, session_id, agent_id) {
-                self.0.insert(key, sub.clone());
-            } else if !self.0.contains_key(&key)
-                && let Some(sub) = current(session_id, agent_id)
+        for key in followed {
+            let kept = (host.clone(), key.clone());
+            if let Some(sub) = listed_in(msg, key) {
+                self.0.insert(kept, sub.clone());
+            } else if !self.0.contains_key(&kept)
+                && let Some(sub) = current(key)
             {
-                self.0.insert(key, sub);
+                self.0.insert(kept, sub);
             }
         }
     }
 
-    /// The kept snapshot of subagent `agent_id` of session `session_id`
-    /// of `host`.
-    pub(crate) fn get(
-        &self,
-        host: &HostKey,
-        session_id: &str,
-        agent_id: &str,
-    ) -> Option<&SubagentSnapshot> {
-        self.0
-            .get(&(host.clone(), session_id.to_owned(), agent_id.to_owned()))
+    /// The kept snapshot of `key` of `host`.
+    pub(crate) fn get(&self, host: &HostKey, key: &TranscriptKey) -> Option<&SubagentSnapshot> {
+        self.0.get(&(host.clone(), key.clone()))
     }
 
-    /// Keeps only the subagents a pane still follows, by host, session id
-    /// and agent id in `followed`. A kept subagent no pane follows moves
-    /// first to a followed key of the same host and agent id that has no
-    /// snapshot of its own, as when a Resume moves a pane to the host's new
-    /// session; what is left unfollowed is dropped.
+    /// Keeps only the subagents a pane still follows, by host and key in
+    /// `followed`. A kept session subagent no pane follows moves first to a
+    /// followed key of the same host and agent id that has no snapshot of
+    /// its own, as when a Resume moves a pane to the host's new session; a
+    /// dispatch run's subagent never moves. What is left unfollowed is
+    /// dropped.
     pub(crate) fn prune(&mut self, followed: &HashSet<SubagentKey>) {
         let unfollowed: Vec<SubagentKey> = self
             .0
@@ -163,26 +210,35 @@ impl KeptSubagents {
         self.0.retain(|key, _| followed.contains(key));
     }
 
-    /// The followed key `old` moved to: one of the same host and agent id,
-    /// in another session, with no snapshot kept of its own.
+    /// The followed key `old` moved to: a session subagent's, of the same
+    /// host and agent id, in another session, with no snapshot kept of its
+    /// own.
     fn moved_to(&self, old: &SubagentKey, followed: &HashSet<SubagentKey>) -> Option<SubagentKey> {
-        let (host, session_id, agent_id) = old;
+        let (host, old_key) = old;
+        let TranscriptKey::Subagent {
+            session_id,
+            agent_id,
+        } = old_key
+        else {
+            return None;
+        };
         followed
             .iter()
-            .find(|(on, session, agent)| {
+            .find(|(on, key)| {
                 on == host
-                    && agent == agent_id
-                    && session != session_id
-                    && !self
-                        .0
-                        .contains_key(&(on.clone(), session.clone(), agent.clone()))
+                    && matches!(
+                        key,
+                        TranscriptKey::Subagent { session_id: session, agent_id: agent }
+                            if agent == agent_id && session != session_id
+                    )
+                    && !self.0.contains_key(&(on.clone(), key.clone()))
             })
             .cloned()
     }
 }
 
-/// A kept subagent's host, session id and agent id.
-type SubagentKey = (HostKey, String, String);
+/// A kept subagent's host and transcript key.
+type SubagentKey = (HostKey, TranscriptKey);
 
 /// The header row of pane `pane_id`, its text `size`.
 fn header_row(pane_id: &str, header: SubagentHeader, size: Pixels, t: &UiTheme) -> Div {
@@ -214,17 +270,15 @@ fn header_row(pane_id: &str, header: SubagentHeader, size: Pixels, t: &UiTheme) 
 }
 
 impl RootView {
-    /// The session and agent id of each subagent of `host` a pane follows.
-    fn followed_subagents_on(&self, host: &HostKey) -> Vec<(String, String)> {
+    /// The transcript key of each subagent of `host` a pane follows, a
+    /// session's or a dispatch run's.
+    fn followed_subagents_on(&self, host: &HostKey) -> Vec<TranscriptKey> {
         self.followed_transcripts()
             .into_iter()
             .filter(|f| f.host == *host)
             .filter_map(|f| match f.key {
-                TranscriptKey::Subagent {
-                    session_id,
-                    agent_id,
-                } => Some((session_id, agent_id)),
                 TranscriptKey::Run(_) => None,
+                key => Some(key),
             })
             .collect()
     }
@@ -238,6 +292,9 @@ impl RootView {
             DaemonMessage::Sessions { .. }
                 | DaemonMessage::SessionUpdated { .. }
                 | DaemonMessage::SessionRemoved { .. }
+                | DaemonMessage::DispatchRuns { .. }
+                | DaemonMessage::DispatchRunUpdated { .. }
+                | DaemonMessage::DispatchRunRemoved { .. }
         ) {
             return;
         }
@@ -246,10 +303,9 @@ impl RootView {
             return;
         }
         let sidebar = &self.sidebar;
-        self.kept_subagents
-            .keep_from(host, &followed, msg, |session_id, agent_id| {
-                live_subagent(sidebar, host, session_id, agent_id).cloned()
-            });
+        self.kept_subagents.keep_from(host, &followed, msg, |key| {
+            live_subagent(sidebar, host, key).cloned()
+        });
     }
 
     /// Keeps only the kept snapshots of subagents a pane still follows.
@@ -258,11 +314,8 @@ impl RootView {
             .followed_transcripts()
             .into_iter()
             .filter_map(|f| match f.key {
-                TranscriptKey::Subagent {
-                    session_id,
-                    agent_id,
-                } => Some((f.host, session_id, agent_id)),
                 TranscriptKey::Run(_) => None,
+                key => Some((f.host, key)),
             })
             .collect();
         self.kept_subagents.prune(&followed);
@@ -271,15 +324,7 @@ impl RootView {
     /// The snapshot subagent `key` of `host` draws its header from: the
     /// live one, else the kept one.
     fn subagent_snapshot(&self, host: &HostKey, key: &TranscriptKey) -> Option<&SubagentSnapshot> {
-        let TranscriptKey::Subagent {
-            session_id,
-            agent_id,
-        } = key
-        else {
-            return None;
-        };
-        live_subagent(&self.sidebar, host, session_id, agent_id)
-            .or_else(|| self.kept_subagents.get(host, session_id, agent_id))
+        live_subagent(&self.sidebar, host, key).or_else(|| self.kept_subagents.get(host, key))
     }
 
     /// A refused follow of subagent `key`: unavailable when nothing is held
@@ -295,7 +340,7 @@ impl RootView {
     /// The note subagent `key`'s pane draws under its header, if any.
     fn subagent_note(&self, key: &(HostKey, TranscriptKey)) -> Option<&'static str> {
         if self.transcripts.get(key).is_some_and(|held| held.ended) {
-            Some(ENDED_NOTE)
+            Some(ended_note(&key.1))
         } else if self.transcripts_unavailable.contains(key) {
             Some(UNAVAILABLE_NOTE)
         } else {
@@ -347,11 +392,12 @@ impl RootView {
             .child(log)
     }
 
-    /// The host and subagent pane `pane_id` follows.
+    /// The host and subagent pane `pane_id` follows, a session's or a
+    /// dispatch run's.
     fn pane_subagent(&self, pane_id: &str) -> Option<(HostKey, TranscriptKey)> {
         self.followed_transcripts()
             .into_iter()
-            .find(|f| f.pane_id == pane_id && matches!(f.key, TranscriptKey::Subagent { .. }))
+            .find(|f| f.pane_id == pane_id && !matches!(f.key, TranscriptKey::Run(_)))
             .map(|f| (f.host, f.key))
     }
 
@@ -469,10 +515,40 @@ mod tests {
         }
     }
 
+    fn subagent_key(session_id: &str, agent_id: &str) -> TranscriptKey {
+        TranscriptKey::Subagent {
+            session_id: session_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+        }
+    }
+
+    fn run_key(run_id: &str, agent_id: &str) -> TranscriptKey {
+        TranscriptKey::RunSubagent {
+            run_id: run_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+        }
+    }
+
+    /// Dispatch run `run_id` listing `subagents`.
+    fn run_with(run_id: &str, subagents: &[SubagentSnapshot]) -> DispatchRunSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "run_id": run_id,
+            "title": format!("title {run_id}"),
+            "backend": "backend-x",
+            "worktree": "C:\\wt",
+            "run_dir": "C:\\runs",
+            "started_at": "2026-01-01T00:00:00Z",
+            "status": "working",
+            "subagents": subagents,
+        }))
+        .expect("run fixture")
+    }
+
     #[test]
     fn kept_snapshot_refreshes_from_the_message_and_survives_a_drop() {
         let host = HostKey::Local;
-        let followed = vec![("s1".to_owned(), "a1".to_owned())];
+        let a1 = subagent_key("s1", "a1");
+        let followed = vec![a1.clone()];
         let running = sub("a1", AgentState::Running);
         let finished = sub("a1", AgentState::Finished);
         let mut kept = KeptSubagents::default();
@@ -484,38 +560,35 @@ mod tests {
             &DaemonMessage::SessionRemoved {
                 session_id: "other".to_owned(),
             },
-            |_, _| Some(running.clone()),
+            |_| Some(running.clone()),
         );
-        assert_eq!(kept.get(&host, "s1", "a1"), Some(&running));
+        assert_eq!(kept.get(&host, &a1), Some(&running));
 
         // In the message: refreshed from it.
         let updated = DaemonMessage::SessionUpdated {
             session: session_with("s1", vec![finished.clone()]),
             request_id: None,
         };
-        kept.keep_from(&host, &followed, &updated, |_, _| Some(running.clone()));
-        assert_eq!(kept.get(&host, "s1", "a1"), Some(&finished));
+        kept.keep_from(&host, &followed, &updated, |_| Some(running.clone()));
+        assert_eq!(kept.get(&host, &a1), Some(&finished));
 
         // Dropped from the list, then the session removed: the copy stays.
         let dropped = DaemonMessage::Sessions {
             sessions: vec![session_with("s1", Vec::new())],
         };
-        kept.keep_from(&host, &followed, &dropped, |_, _| None);
+        kept.keep_from(&host, &followed, &dropped, |_| None);
         let removed = DaemonMessage::SessionRemoved {
             session_id: "s1".to_owned(),
         };
-        kept.keep_from(&host, &followed, &removed, |_, _| None);
-        assert_eq!(kept.get(&host, "s1", "a1"), Some(&finished));
+        kept.keep_from(&host, &followed, &removed, |_| None);
+        assert_eq!(kept.get(&host, &a1), Some(&finished));
 
         // Another host's copy is its own.
-        assert_eq!(
-            kept.get(&HostKey::Remote("box".to_owned()), "s1", "a1"),
-            None
-        );
+        assert_eq!(kept.get(&HostKey::Remote("box".to_owned()), &a1), None);
 
         // No pane follows it: dropped.
         kept.prune(&HashSet::new());
-        assert_eq!(kept.get(&host, "s1", "a1"), None);
+        assert_eq!(kept.get(&host, &a1), None);
     }
 
     #[test]
@@ -525,34 +598,165 @@ mod tests {
         let a1 = sub("a1", AgentState::Finished);
         let own = sub("a1", AgentState::Running);
         let mut kept = KeptSubagents::default();
-        let followed = vec![("s1".to_owned(), "a1".to_owned())];
+        let followed = vec![subagent_key("s1", "a1")];
         let none = DaemonMessage::SessionRemoved {
             session_id: "other".to_owned(),
         };
-        kept.keep_from(&host, &followed, &none, |_, _| Some(a1.clone()));
-        kept.keep_from(&remote, &followed, &none, |_, _| Some(a1.clone()));
-        let s3 = vec![("s3".to_owned(), "a1".to_owned())];
-        kept.keep_from(&remote, &s3, &none, |_, _| Some(own.clone()));
+        kept.keep_from(&host, &followed, &none, |_| Some(a1.clone()));
+        kept.keep_from(&remote, &followed, &none, |_| Some(a1.clone()));
+        let s3 = vec![subagent_key("s3", "a1")];
+        kept.keep_from(&remote, &s3, &none, |_| Some(own.clone()));
 
-        let key =
-            |host: &HostKey, session: &str| (host.clone(), session.to_owned(), "a1".to_owned());
+        let key = |host: &HostKey, session: &str| (host.clone(), subagent_key(session, "a1"));
         kept.prune(&HashSet::from([key(&host, "s2"), key(&remote, "s3")]));
 
         assert_eq!(
-            kept.get(&host, "s2", "a1"),
+            kept.get(&host, &subagent_key("s2", "a1")),
             Some(&a1),
             "moved to the new session"
         );
-        assert_eq!(kept.get(&host, "s1", "a1"), None, "the old key is gone");
         assert_eq!(
-            kept.get(&remote, "s3", "a1"),
+            kept.get(&host, &subagent_key("s1", "a1")),
+            None,
+            "the old key is gone"
+        );
+        assert_eq!(
+            kept.get(&remote, &subagent_key("s3", "a1")),
             Some(&own),
             "a followed key's own snapshot is never replaced"
         );
         assert_eq!(
-            kept.get(&remote, "s1", "a1"),
+            kept.get(&remote, &subagent_key("s1", "a1")),
             None,
             "left unfollowed, dropped"
         );
+    }
+
+    #[test]
+    fn kept_run_subagent_snapshot_comes_from_its_runs_update() {
+        let host = HostKey::Local;
+        let r1a = run_key("d1", "r1a");
+        let followed = vec![r1a.clone()];
+        let running = sub("r1a", AgentState::Running);
+        let finished = sub("r1a", AgentState::Finished);
+        let mut kept = KeptSubagents::default();
+
+        // Not in the message: the sidebar's current copy is taken.
+        kept.keep_from(
+            &host,
+            &followed,
+            &DaemonMessage::DispatchRunRemoved {
+                run_id: "other".to_owned(),
+            },
+            |_| Some(running.clone()),
+        );
+        assert_eq!(kept.get(&host, &r1a), Some(&running));
+
+        // The run's update lists it: refreshed from it.
+        kept.keep_from(
+            &host,
+            &followed,
+            &DaemonMessage::DispatchRunUpdated {
+                run: run_with("d1", std::slice::from_ref(&finished)),
+            },
+            |_| Some(running.clone()),
+        );
+        assert_eq!(kept.get(&host, &r1a), Some(&finished));
+
+        // Another run's update is not this run's.
+        kept.keep_from(
+            &host,
+            &followed,
+            &DaemonMessage::DispatchRunUpdated {
+                run: run_with("d2", &[sub("r1a", AgentState::Failed)]),
+            },
+            |_| None,
+        );
+        assert_eq!(kept.get(&host, &r1a), Some(&finished));
+
+        // The whole list lists it: refreshed from it, too.
+        kept.keep_from(
+            &host,
+            &followed,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run_with("d1", &[sub("r1a", AgentState::Queued)])],
+            },
+            |_| None,
+        );
+        assert_eq!(
+            kept.get(&host, &r1a).map(|sub| sub.state),
+            Some(AgentState::Queued)
+        );
+    }
+
+    #[test]
+    fn a_run_removal_keeps_the_kept_run_subagent() {
+        let host = HostKey::Local;
+        let r1a = run_key("d1", "r1a");
+        let followed = vec![r1a.clone()];
+        let finished = sub("r1a", AgentState::Finished);
+        let mut kept = KeptSubagents::default();
+        kept.keep_from(
+            &host,
+            &followed,
+            &DaemonMessage::DispatchRunUpdated {
+                run: run_with("d1", std::slice::from_ref(&finished)),
+            },
+            |_| None,
+        );
+
+        kept.keep_from(
+            &host,
+            &followed,
+            &DaemonMessage::DispatchRunRemoved {
+                run_id: "d1".to_owned(),
+            },
+            |_| None,
+        );
+
+        assert_eq!(
+            kept.get(&host, &r1a),
+            Some(&finished),
+            "a removed run keeps its subagent's last snapshot"
+        );
+    }
+
+    #[test]
+    fn a_run_subagent_key_never_moves_on_prune() {
+        let host = HostKey::Local;
+        let a1 = sub("a1", AgentState::Finished);
+        let mut kept = KeptSubagents::default();
+        let none = DaemonMessage::SessionRemoved {
+            session_id: "other".to_owned(),
+        };
+        kept.keep_from(&host, &[run_key("d1", "a1")], &none, |_| Some(a1.clone()));
+
+        kept.prune(&HashSet::from([(host.clone(), subagent_key("s2", "a1"))]));
+
+        assert_eq!(
+            kept.get(&host, &run_key("d1", "a1")),
+            None,
+            "left unfollowed, dropped rather than moved onto a session's key"
+        );
+        assert_eq!(
+            kept.get(&host, &subagent_key("s2", "a1")),
+            None,
+            "the session key gains nothing from a run's subagent"
+        );
+
+        kept.keep_from(&host, &[run_key("d1", "a1")], &none, |_| Some(a1.clone()));
+        kept.prune(&HashSet::from([(host.clone(), run_key("d1", "a1"))]));
+        assert_eq!(
+            kept.get(&host, &run_key("d1", "a1")),
+            Some(&a1),
+            "a followed run key keeps its own snapshot"
+        );
+    }
+
+    #[test]
+    fn an_ended_run_reads_its_run_has_ended() {
+        assert_eq!(RUN_ENDED_NOTE, "Its run has ended");
+        assert_eq!(ended_note(&run_key("d1", "r1a")), RUN_ENDED_NOTE);
+        assert_eq!(ended_note(&subagent_key("s1", "a1")), ENDED_NOTE);
     }
 }
