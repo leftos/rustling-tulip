@@ -6174,6 +6174,8 @@ impl RootView {
             self.close_container_menu(window, cx);
         } else if self.dispatch_menu.is_some() && ks.key == "escape" {
             self.close_dispatch_menu(window, cx);
+        } else if self.version_menu_open() && ks.key == "escape" {
+            self.close_version_menu(cx);
         } else if self.sidebar_more_open() && ks.key == "escape" {
             self.close_more_menu(window, cx);
         } else if self.shell_menu.is_some()
@@ -6569,7 +6571,7 @@ impl Render for RootView {
             .children(self.pane_menu_layers(here, cx))
             .children(self.sidebar_menu_layers(cx))
             .children(self.more_menu_layer())
-            .children(self.gates_menu_layer(cx).into_iter().flatten())
+            .children(self.footer_menu_layers(cx))
             .children(self.sc_picker_layer())
             .children(self.sc_file_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
@@ -6734,7 +6736,7 @@ impl RootView {
             })
             .children(self.accounts_chip(cx))
             .children(self.update_footer(cx))
-            .children(self.version_footer())
+            .children(self.version_footer(cx))
     }
 
     /// The open footer flyout over its backdrop: the daemon flyout or the

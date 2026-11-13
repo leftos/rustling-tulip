@@ -1008,6 +1008,12 @@ It checks at launch and every hour, skipped while an update is ready, and downlo
 
 When a verified installer is ready, the footer shows the notice `Update {version} ready` (`footer-update-text`) with an outlined `What's new` button (`footer-whats-new`, which opens the What's new window on the ready update's notes) and a `Restart to update` button (`footer-update`). Nothing installs until the press of `Restart to update`.
 
+A right-click on the footer's version label (`footer-version`, hidden while an update is ready) opens a menu (`version-menu`, over `version-menu-backdrop`) with one row, `Check for updates` (`version-menu-check-for-updates`); a click outside or Esc closes it. The row runs the same check as Settings' `Check now` (`check_for_updates_now`) whatever the automatic-check setting says, marked manual.
+
+Only a manual check reports its outcome, as one toast updated in place by repeat clicks (key `update-check-result`): Info `You're up to date` when nothing is newer, Warning `Couldn't check for updates` with the error text as detail when it fails (a dev build without `RUSTLING_TULIP_UPDATE_FEED` shows the updater's own message).
+
+A newer release shows only the footer notice. Automatic checks and Settings' `Check now` stay silent, and a click while a check runs marks that check manual, so its result is reported when it ends. This menu and the gates row menu mount through `update_view::footer_menu_layers`.
+
 The press starts the installer detached and quits through the Keep-sessions-running path, so sessions keep running in their tracers and the new client comes back on the new version. A second update while one runs is refused with the toast `An update is already running`; an installer that cannot be started gives the toast `Couldn't start the update`.
 
 On macOS the press unpacks the zip beside the installed app and starts the staged daemon's `apply-update`, which swaps the whole bundle once the client has quit (`docs/auto-update.md` decision 6). The unpack runs on the UI thread, so the window pauses for a few seconds, and a bundle the update cannot replace (translocated, or in a folder the client cannot write) is refused with the same `Couldn't start the update` toast and nothing changed. There is no update lock off Windows.

@@ -788,6 +788,170 @@ fn the_status_text_yields_before_the_version(cx: &mut TestAppContext) {
     );
 }
 
+const UP_TO_DATE: &str = "You're up to date";
+const CHECK_FAILED: &str = "Couldn't check for updates";
+const MENU_CHECK: &str = "version-menu-check-for-updates";
+
+fn version_menu_open(h: &mut Harness<'_>) -> bool {
+    h.root(|root, _| root.version_menu_open())
+}
+
+/// Right-clicks the footer's version and presses Check for updates.
+fn check_from_menu(h: &mut Harness<'_>) {
+    h.right_click_on(&version_tag());
+    assert!(version_menu_open(h), "the version's menu opens");
+    h.click_on(MENU_CHECK);
+    assert!(!version_menu_open(h), "pressing the row closes the menu");
+}
+
+fn toast_kinds(h: &mut Harness<'_>) -> Vec<ToastKind> {
+    h.root(|root, _| root.toasts().iter().map(|toast| toast.kind).collect())
+}
+
+#[gpui::test]
+fn right_clicking_the_version_opens_check_for_updates(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    assert!(!version_menu_open(&mut h), "no menu before the right-click");
+
+    h.right_click_on(&version_tag());
+    assert!(version_menu_open(&mut h), "the right-click opens the menu");
+    assert!(drawn(&mut h, MENU_CHECK), "Check for updates is drawn");
+
+    h.click_on("version-menu-backdrop");
+    assert!(!version_menu_open(&mut h), "a click outside closes it");
+
+    h.right_click_on(&version_tag());
+    assert!(version_menu_open(&mut h), "it opens again");
+    h.keys("escape");
+    assert!(!version_menu_open(&mut h), "Esc closes it");
+    assert_eq!(updater.checks(), 1, "only the launch check ran");
+}
+
+#[gpui::test]
+fn check_for_updates_from_the_menu_runs_a_check_with_the_setting_off(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    turned_off(&dir);
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    assert_eq!(updater.checks(), 0, "no check at launch while turned off");
+
+    check_from_menu(&mut h);
+    h.cx.run_until_parked();
+
+    assert_eq!(updater.checks(), 1, "the menu ran a check");
+}
+
+#[gpui::test]
+fn a_manual_check_with_no_update_says_up_to_date(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+
+    check_from_menu(&mut h);
+    h.cx.run_until_parked();
+    assert_eq!(updater.checks(), 2, "the launch check, then the menu's");
+    assert_eq!(toasts(&mut h), [(UP_TO_DATE.to_owned(), None)]);
+    assert_eq!(toast_kinds(&mut h), [ToastKind::Info]);
+
+    check_from_menu(&mut h);
+    h.cx.run_until_parked();
+    assert_eq!(updater.checks(), 3);
+    assert_eq!(
+        toasts(&mut h),
+        [(UP_TO_DATE.to_owned(), None)],
+        "a second check updates the one toast in place"
+    );
+}
+
+#[gpui::test]
+fn a_manual_check_that_fails_says_why(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.fail_checks("the feed is down");
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    assert!(
+        toasts(&mut h).is_empty(),
+        "the failed launch check is silent"
+    );
+
+    check_from_menu(&mut h);
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        toasts(&mut h),
+        [(CHECK_FAILED.to_owned(), Some("the feed is down".to_owned()))]
+    );
+    assert_eq!(toast_kinds(&mut h), [ToastKind::Warning]);
+}
+
+#[gpui::test]
+fn a_manual_check_that_finds_an_update_shows_the_offer_and_no_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    assert_eq!(footer(&mut h), None, "the launch check found nothing");
+
+    updater.offer("0.99.0", &installer(&dir));
+    check_from_menu(&mut h);
+    h.cx.run_until_parked();
+
+    assert_eq!(footer(&mut h).as_deref(), Some("Update 0.99.0 ready"));
+    assert!(
+        toasts(&mut h).is_empty(),
+        "the footer's notice is the offer"
+    );
+}
+
+/// The launch check is silent, and so is the hourly one after a manual
+/// check: the manual mark goes with the check it was set on.
+#[gpui::test]
+fn an_automatic_check_shows_no_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    assert_eq!(updater.checks(), 1, "the check at launch");
+    assert!(toasts(&mut h).is_empty(), "the launch check says nothing");
+
+    check_from_menu(&mut h);
+    h.cx.run_until_parked();
+    assert_eq!(toasts(&mut h), [(UP_TO_DATE.to_owned(), None)]);
+
+    h.advance(CHECK_EVERY);
+    assert_eq!(updater.checks(), 3, "the hourly check ran");
+    assert!(
+        toasts(&mut h).is_empty(),
+        "the manual toast expired and the hourly check said nothing"
+    );
+}
+
+#[gpui::test]
+fn a_click_during_a_check_in_flight_toasts_its_outcome(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.hold_checks();
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    assert_eq!(updater.checks(), 1, "the launch check is in flight");
+
+    check_from_menu(&mut h);
+    h.cx.run_until_parked();
+    assert_eq!(updater.checks(), 1, "the click joins the check in flight");
+    assert!(toasts(&mut h).is_empty(), "nothing until the check ends");
+
+    updater.release_checks();
+    h.cx.run_until_parked();
+
+    assert_eq!(toasts(&mut h), [(UP_TO_DATE.to_owned(), None)]);
+}
+
 #[gpui::test]
 fn settings_shows_the_version_and_last_check(cx: &mut TestAppContext) {
     let dir = TestDir::new();

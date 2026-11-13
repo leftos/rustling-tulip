@@ -11,16 +11,21 @@ use std::time::Duration;
 
 use futures::FutureExt as _;
 use futures::future::Shared;
-use gpui::{AnyElement, ClickEvent, Context, Task, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, ClickEvent, Context, MouseButton, MouseDownEvent, Pixels, Point, Task, Window,
+    anchored, deferred, div, prelude::*, px,
+};
 
 use protocol::{ClientMessage, DaemonMessage};
 
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
+use crate::driver_id::DriverId as _;
 use crate::host_update::{
     CLIENT_UPDATE_CANCEL, ClientUpdateCountdown, HOST_UPDATE_CANCEL, HostUpdateCountdown,
     client_update_toast_key, toast_key,
 };
 use crate::notices::{ToastAction, ToastKind, ToastSpec};
+use crate::session_menu::{menu_item, popover_frame};
 use crate::target::HostKey;
 use crate::ui_theme::theme;
 use crate::update::{AlreadyRunning, LastResult, Ready, Updater};
@@ -58,6 +63,15 @@ const ALREADY_NEWEST_TITLE: &str = "This app is already on the newest release.";
 const CANNOT_UPDATE_TITLE: &str = "This build can't update itself.";
 /// What the toast says when a host's request reached no other client.
 const NO_OTHER_CLIENTS_TITLE: &str = "No other clients are connected.";
+/// What the toast says when a manual check found nothing newer.
+const UP_TO_DATE_TITLE: &str = "You're up to date";
+/// What the toast says when a manual check failed; the error is its detail.
+const CHECK_FAILED_TITLE: &str = "Couldn't check for updates";
+/// The key of a manual check's outcome toast, so repeated checks update
+/// one toast in place.
+const CHECK_TOAST_KEY: &str = "update-check-result";
+/// The width of the version label's menu.
+const VERSION_MENU_WIDTH: f32 = 200.0;
 
 /// What the last check found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +98,11 @@ pub(crate) struct UpdateUi {
     /// The changelog range the installed toast's What's new shows: after
     /// the version replaced, when known, through the one installed.
     installed_range: Option<(Option<semver::Version>, semver::Version)>,
+    /// Where the footer version's right-click menu opened, while it shows.
+    version_menu: Option<Point<Pixels>>,
+    /// The check under way (or the next one) was asked for from the version
+    /// menu: its outcome shows as a toast. Cleared when that check ends.
+    manual_check: bool,
 }
 
 impl UpdateUi {
@@ -95,6 +114,8 @@ impl UpdateUi {
             checking: None,
             schedule: None,
             installed_range: None,
+            version_menu: None,
+            manual_check: false,
         }
     }
 }
@@ -353,8 +374,122 @@ impl RootView {
                 LastCheck::Failed(format!("{err:#}"))
             }
         };
+        self.announce_manual_check(cx);
         self.client_update_checked(cx);
         cx.notify();
+    }
+
+    /// The version menu's Check for updates: a check whether automatic
+    /// checks are on or off, whose outcome shows as a toast. A check already
+    /// under way is marked instead, so its outcome shows when it ends.
+    fn check_for_updates_from_menu(&mut self, cx: &mut Context<Self>) {
+        self.update.manual_check = true;
+        self.run_update_check(cx);
+    }
+
+    /// A manual check's outcome as a toast: up to date, or why it failed. An
+    /// update found shows only as the footer's notice. Clears the mark, so
+    /// the next automatic check stays silent.
+    fn announce_manual_check(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.update.manual_check) {
+            return;
+        }
+        let (kind, title, detail) = match &self.update.last {
+            LastCheck::UpToDate => (ToastKind::Info, UP_TO_DATE_TITLE, None),
+            LastCheck::Failed(err) => (ToastKind::Warning, CHECK_FAILED_TITLE, Some(err.clone())),
+            LastCheck::Ready(_) | LastCheck::NotChecked => return,
+        };
+        self.push_toast_spec(
+            ToastSpec {
+                kind,
+                title: title.to_owned(),
+                detail,
+                key: Some(CHECK_TOAST_KEY.to_owned()),
+                sticky: false,
+                actions: Vec::new(),
+            },
+            cx,
+        );
+    }
+
+    /// Whether the footer version's right-click menu shows.
+    #[must_use]
+    pub fn version_menu_open(&self) -> bool {
+        self.update.version_menu.is_some()
+    }
+
+    fn open_version_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        self.update.version_menu = Some(at);
+        cx.notify();
+    }
+
+    pub(crate) fn close_version_menu(&mut self, cx: &mut Context<Self>) {
+        if self.update.version_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The menus the footer opens, each over its own closing layer: the
+    /// Gates row menu, then the version's.
+    pub(crate) fn footer_menu_layers(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let gates = self.gates_menu_layer(cx).into_iter().flatten();
+        gates
+            .chain(self.version_menu_layer(cx).into_iter().flatten())
+            .collect()
+    }
+
+    /// The footer version's menu, Check for updates, over a layer that
+    /// closes it on a press outside.
+    fn version_menu_layer(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+        let at = self.update.version_menu?;
+        let t = theme(cx);
+        let backdrop = div()
+            .id("version-menu-backdrop")
+            .driver_id(|| "version-menu-backdrop".to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.close_version_menu(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.close_version_menu(cx);
+                    cx.stop_propagation();
+                }),
+            );
+        let row = menu_item(
+            "version-menu-check-for-updates",
+            "Check for updates",
+            false,
+            &t,
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.close_version_menu(cx);
+                this.check_for_updates_from_menu(cx);
+            }),
+        );
+        let panel = popover_frame(crate::fonts::ui_text_size(cx), "version-menu", &t)
+            .flex()
+            .flex_col()
+            .w(px(VERSION_MENU_WIDTH))
+            .p(px(4.0))
+            .child(row);
+        let anchored = anchored().position(at).snap_to_window().child(panel);
+        Some([
+            backdrop.into_any_element(),
+            deferred(anchored).with_priority(1).into_any_element(),
+        ])
     }
 
     /// Restart to update: the installer starts, then the client quits as
@@ -788,8 +923,9 @@ impl RootView {
 
     /// The footer's right end: `v{version}` of this client, its tooltip
     /// naming This PC's daemon version too once the handshake carries one.
-    /// It gives way to the update notice while that shows.
-    pub(crate) fn version_footer(&self) -> Option<AnyElement> {
+    /// It gives way to the update notice while that shows. A right-click
+    /// opens its menu, Check for updates.
+    pub(crate) fn version_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.update.ready.is_some() {
             return None;
         }
@@ -800,11 +936,19 @@ impl RootView {
         Some(
             div()
                 .id("footer-version")
+                .driver_id(|| "footer-version".to_owned())
                 .flex_none()
                 // One line: the version is short fixed text, in the footer.
                 .whitespace_nowrap()
                 .child(tagged_text("footer-version", format!("v{CLIENT_VERSION}")))
                 .tooltip(crate::tooltip(tip))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        this.open_version_menu(event.position, cx);
+                        cx.stop_propagation();
+                    }),
+                )
                 .into_any_element(),
         )
     }

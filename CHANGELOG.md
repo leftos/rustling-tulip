@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - A session's dispatch runs and subagents sit indented under it in the sidebar, finished subagents until your next prompt, and a chevron on its row folds them away.
+- Right-click the version in the status bar to check for updates at once; it says when you're up to date or why it couldn't check.
 - A setting in Settings › General decides whether the first click on a pane that isn't focused also acts in it (on by default) or only focuses it.
 - A pane following a dispatch run or a subagent shows its transcript the way Claude Code's terminal does: its replies, each tool call and the tool's output, which a click expands.
 

@@ -2281,6 +2281,10 @@ pub struct UpdaterRecorder {
     breaks_waiting:
         Mutex<Vec<futures::channel::oneshot::Sender<anyhow::Result<Option<BreaksOffer>>>>>,
     checks: AtomicUsize,
+    /// While set, update checks wait for [`UpdaterRecorder::release_checks`].
+    checks_held: AtomicBool,
+    /// The update checks waiting while held.
+    checks_waiting: Mutex<Vec<futures::channel::oneshot::Sender<anyhow::Result<Option<Ready>>>>>,
     installs: Mutex<Vec<PathBuf>>,
     last_result_reads: AtomicUsize,
     /// Whether the updater checks for updates and records the version: on
@@ -2303,6 +2307,8 @@ impl Default for UpdaterRecorder {
             breaks_held: AtomicBool::new(false),
             breaks_waiting: Mutex::new(Vec::new()),
             checks: AtomicUsize::new(0),
+            checks_held: AtomicBool::new(false),
+            checks_waiting: Mutex::new(Vec::new()),
             installs: Mutex::new(Vec::new()),
             last_result_reads: AtomicUsize::new(0),
             inactive: AtomicBool::new(false),
@@ -2401,6 +2407,19 @@ impl UpdaterRecorder {
             .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
+    /// Update checks wait until [`Self::release_checks`].
+    pub fn hold_checks(&self) {
+        self.checks_held.store(true, Ordering::SeqCst);
+    }
+
+    /// Every waiting update check answers, and later ones answer at once.
+    pub fn release_checks(&self) {
+        self.checks_held.store(false, Ordering::SeqCst);
+        for waiting in std::mem::take(&mut *locked(&self.checks_waiting)) {
+            let _ = waiting.send(self.answer_check());
+        }
+    }
+
     /// How many checks ran.
     pub fn checks(&self) -> usize {
         self.checks.load(Ordering::SeqCst)
@@ -2454,7 +2473,16 @@ impl Updater for UpdaterRecorder {
     ) -> futures::future::BoxFuture<'static, anyhow::Result<Option<Ready>>> {
         use futures::FutureExt as _;
         self.checks.fetch_add(1, Ordering::SeqCst);
-        futures::future::ready(self.answer_check()).boxed()
+        if !self.checks_held.load(Ordering::SeqCst) {
+            return futures::future::ready(self.answer_check()).boxed();
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        locked(&self.checks_waiting).push(tx);
+        async move {
+            rx.await
+                .map_err(|_| anyhow::anyhow!("the held update check was dropped"))?
+        }
+        .boxed()
     }
 
     fn changelog(
