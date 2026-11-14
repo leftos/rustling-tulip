@@ -28,6 +28,8 @@ pub struct PhoneRoot {
     pub(super) platform: Arc<dyn PushPlatform>,
     /// The session shown in place of Home: its host and id.
     pub(super) shown: Option<(HostKey, String)>,
+    /// Home's Needs you tray: the card it shows and the swipe in progress.
+    pub(super) tray: super::tray::Tray,
     /// The insets drawn around the content in place of the window's, when
     /// set: a window with none of its own (a shot) draws a phone's.
     insets_override: Option<WindowInsets>,
@@ -87,6 +89,7 @@ impl PhoneRoot {
             root,
             platform,
             shown: None,
+            tray: super::tray::Tray::default(),
             insets_override: None,
             logged_ready: false,
             in_front: window.visibility() == WindowVisibility::Visible,

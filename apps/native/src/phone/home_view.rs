@@ -2,14 +2,22 @@
 //! opens: rows and targets at least 44 pt tall, no shortcut hints and
 //! nothing that shows only on hover. It only renders and forwards taps.
 
-use gpui::{ClickEvent, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px};
+use chrono::{DateTime, Utc};
+use gpui::{
+    App, ClickEvent, Context, Div, FontWeight, ScrollEvent, SharedString, Stateful, StyledText,
+    TouchPhase, Window, div, prelude::*, px,
+};
 
 use super::PhoneRoot;
 use super::home::{HomeGroup, HomeHost, HomeRow, Tone};
 use super::hosts_view::phone_button;
+use super::tray::{self, Arranged, Buttons, TrayCard};
 use crate::buttons::ButtonKind;
+use crate::connection::Connection;
 use crate::driver_id::DriverId as _;
+use crate::ellipsis::truncating;
 use crate::fonts::ui_px;
+use crate::needs_you;
 use crate::sidebar::DETACHED_BANNER;
 use crate::sidebar_view::{HostHeaderState, leaf_key};
 use crate::target::HostKey;
@@ -29,6 +37,101 @@ const BACK_LABEL: &str = "Back";
 const PAIR_LABEL: &str = "Pair";
 /// What Home says with no session to list.
 const EMPTY_TEXT: &str = "No sessions yet";
+/// The Needs you card's height, whatever it holds, so the rows under the
+/// tray keep their place while cards come, go and change.
+const TRAY_CARD_HEIGHT: f32 = 232.0;
+/// The button of a card whose prompt is answered on the session's page.
+const OPEN_LABEL: &str = "Open";
+
+/// What a card says about its prompt, read before the card is drawn.
+struct CardFacts {
+    card: TrayCard,
+    now: DateTime<Utc>,
+    refusal: Option<String>,
+}
+
+/// One line of `text`, cut with an ellipsis, tagged `id`.
+fn line(id: &str, text: String) -> Div {
+    let tag = id.to_owned();
+    truncating(id, StyledText::new(text)).driver_id(move || tag)
+}
+
+/// The card's text: the session, the prompt, its command, how long it has
+/// waited and, after a refused answer, why.
+fn card_text(facts: &CardFacts, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
+    let card = &facts.card;
+    let small = ui_px(cx, STATUS_TEXT_SIZE);
+    let session = div()
+        .flex()
+        .gap(px(6.0))
+        .child(
+            line("phone-tray-label", card.label.clone())
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD)),
+        )
+        .child(
+            line("phone-tray-container", card.container_name.clone())
+                .flex_1()
+                .text_color(gpui::rgb(t.muted)),
+        );
+    let command = card.command.clone().map(|command| {
+        line("phone-tray-command", command)
+            .text_size(small)
+            .text_color(gpui::rgb(t.text_2))
+    });
+    let age = card.since.map(|since| {
+        line("phone-tray-age", needs_you::waited(facts.now, since))
+            .text_size(small)
+            .text_color(gpui::rgb(t.muted))
+    });
+    let refusal = facts.refusal.clone().map(|message| {
+        div()
+            .driver_id(|| "phone-tray-error".to_owned())
+            .child(line("phone-tray-error-text", message))
+            .text_size(small)
+            .text_color(gpui::rgb(t.danger_text))
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .min_w_0()
+        .child(session)
+        .child(
+            div()
+                .driver_id(|| "phone-tray-text".to_owned())
+                .line_clamp(2)
+                .overflow_hidden()
+                .child(card.text.clone()),
+        )
+        .children(command)
+        .children(age)
+        .children(refusal)
+}
+
+/// The header: `Needs you · {i} of {n}`, and a dot per card while there
+/// are several, the shown one lit.
+fn tray_header(arranged: &Arranged, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
+    let text = arranged.header().unwrap_or_default();
+    let many = arranged.cards.len() > 1;
+    let dots = (0..arranged.cards.len()).filter(|_| many).map(|at| {
+        dot(if at == arranged.index {
+            t.asking
+        } else {
+            t.muted
+        })
+        .size(px(6.0))
+    });
+    div()
+        .driver_id(|| "phone-tray-header".to_owned())
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+        .text_color(gpui::rgb(t.asking))
+        .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+        .child(line("phone-tray-header-text", text).flex_1())
+        .children(dots)
+}
 
 /// A dot of `color`.
 fn dot(color: u32) -> Div {
@@ -118,7 +221,7 @@ impl PhoneRoot {
     pub(super) fn home_list(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let home = self.home(cx);
         let t = theme(cx);
-        let mut children: Vec<Div> = Vec::new();
+        let mut children: Vec<Div> = self.needs_you_tray(cx).into_iter().collect();
         for host in &home.hosts {
             if home.host_headers {
                 let state = self.root.read(cx).host_header_state(&host.host);
@@ -140,7 +243,129 @@ impl PhoneRoot {
             .flex()
             .flex_col()
             .overflow_y_scroll()
+            // A sideways swipe on the tray's card must not scroll the list.
+            .restrict_scroll_to_axis()
             .children(children)
+    }
+
+    /// The Needs you tray: the card the tray shows, drawn off its place by
+    /// the swipe in progress; `None` while no session needs the owner.
+    fn needs_you_tray(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let (arranged, facts) = self.tray_now(cx)?;
+        let t = theme(cx);
+        let card = div()
+            .driver_id(|| "phone-tray-card".to_owned())
+            .relative()
+            .left(px(self.tray.offset()))
+            .h(px(TRAY_CARD_HEIGHT))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .p(px(12.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(gpui::rgb(t.asking))
+            .bg(gpui::rgba(t.ask_wash))
+            .child(tray_header(&arranged, &t, cx))
+            .child(card_text(&facts, &t, cx))
+            .child(div().flex_1())
+            .child(Self::tray_buttons(&facts.card, cx));
+        Some(
+            div()
+                .driver_id(|| "phone-tray".to_owned())
+                .flex_none()
+                .px(px(SIDE_PADDING))
+                .py(px(8.0))
+                .on_scroll(cx.listener(Self::tray_scrolled))
+                .child(card),
+        )
+    }
+
+    /// The Needs you tray's header as Home draws it now, `Needs you · 1 of
+    /// 2`; `None` while the tray is hidden.
+    #[must_use]
+    pub fn tray_header(&self, cx: &App) -> Option<String> {
+        self.tray_now(cx)?.0.header()
+    }
+
+    /// Why the daemon refused the last answer to the card the tray shows,
+    /// while that card's wait holds.
+    #[must_use]
+    pub fn tray_refusal(&self, cx: &App) -> Option<String> {
+        self.tray_now(cx)?.1.refusal
+    }
+
+    /// The tray's cards as drawn now and the shown card's facts; `None`
+    /// while no session needs the owner.
+    fn tray_now(&self, cx: &App) -> Option<(Arranged, CardFacts)> {
+        let root = self.root.read(cx);
+        let open = |host: &HostKey| root.conn_of(host).is_some_and(Connection::is_open);
+        let cards = tray::cards(&root.sidebar, open, |host, id| root.phone_ask(host, id));
+        let arranged = self.tray.arrange(cards);
+        let card = arranged.shown()?.clone();
+        let refusal = card.since.and_then(|since| {
+            root.answer_refusal(&card.key.host, &card.key.session_id, since)
+                .map(str::to_owned)
+        });
+        let now = root.wall_now();
+        Some((arranged, CardFacts { card, now, refusal }))
+    }
+
+    /// The card's row of buttons: one per answer, or `Open`.
+    fn tray_buttons(card: &TrayCard, cx: &mut Context<Self>) -> Div {
+        let row = div().flex().gap(px(8.0)).min_h(px(TOUCH_TARGET));
+        let Buttons::Answer { since, buttons } = &card.buttons else {
+            let host = card.key.host.clone();
+            let session_id = card.key.session_id.clone();
+            return row.child(
+                phone_button("phone-tray-open", ButtonKind::Primary, cx)
+                    .flex_1()
+                    .min_h(px(TOUCH_TARGET))
+                    .child(OPEN_LABEL)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_session(host.clone(), &session_id, cx);
+                    })),
+            );
+        };
+        let since = *since;
+        row.children(buttons.iter().enumerate().map(|(at, button)| {
+            let kind = if at == 0 {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Outlined
+            };
+            let session_id = card.key.session_id.clone();
+            let choice = button.choice.clone();
+            let id = format!("phone-tray-choice-{}", at + 1);
+            phone_button(&id, kind, cx)
+                .flex_1()
+                .min_w_0()
+                .min_h(px(TOUCH_TARGET))
+                .child(line(&format!("{id}-text"), button.label.clone()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.root.update(cx, |root, cx| {
+                        root.answer_from_dashboard(&session_id, since, choice.clone(), cx);
+                    });
+                }))
+        }))
+    }
+
+    /// A pan over the tray: its sideways travel feeds the swipe; a vertical
+    /// pan travels nothing sideways and scrolls the list as before.
+    fn tray_scrolled(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let dx = f32::from(event.delta.pixel_delta(window.line_height()).x);
+        let at = cx.background_executor().now();
+        match event.touch_phase {
+            TouchPhase::Started => self.tray.touch_started(dx, at),
+            TouchPhase::Moved => self.tray.touch_moved(dx, at),
+            TouchPhase::Ended => {
+                let width = f32::from(window.viewport_size().width) - 2.0 * SIDE_PADDING;
+                self.tray.touch_ended(dx, at, width);
+            }
+            TouchPhase::Cancelled => self.tray.touch_cancelled(),
+        }
+        cx.notify();
     }
 
     /// `host`'s header, drawn only while more than one host is listed: its

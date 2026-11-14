@@ -98,12 +98,22 @@ impl DashboardOpens {
 /// The `AnswerPrompt`s the Dashboard's ask blocks sent and the daemon has
 /// not refused, by the host each went to, the newest [`ANSWERS_CAP`] of
 /// them; and per session the wait its last answer was sent for, whose
-/// buttons stay disabled while that wait holds.
+/// buttons stay disabled while that wait holds; and per host and session
+/// the last refusal, with the wait it was for, which the phone's Needs you
+/// tray shows on the session's card while that wait holds.
 #[derive(Debug, Default)]
 pub(crate) struct DashboardAnswers {
     next_answer: u64,
     sent: VecDeque<(HostKey, String)>,
     out: HashMap<String, AnswerOut>,
+    refusals: HashMap<(HostKey, String), Refusal>,
+}
+
+/// A refused answer: the wait it was sent for and the daemon's message.
+#[derive(Debug)]
+struct Refusal {
+    since: DateTime<Utc>,
+    message: String,
 }
 
 /// The wait an answer was sent for: the snapshot's stamp and prompt then.
@@ -129,8 +139,9 @@ impl DashboardAnswers {
     }
 
     /// Whether `id` is an answer this client sent `host`, which is
-    /// forgotten and its session's buttons freed.
-    fn refused(&mut self, host: &HostKey, id: &str) -> bool {
+    /// forgotten and its session's buttons freed, `message` kept as the
+    /// session's refusal for the wait the answer was sent for.
+    fn refused(&mut self, host: &HostKey, id: &str, message: &str) -> bool {
         let Some(at) = self
             .sent
             .iter()
@@ -139,9 +150,30 @@ impl DashboardAnswers {
             return false;
         };
         self.sent.remove(at);
-        self.out
-            .retain(|_, out| !(out.host == *host && out.request_id == id));
+        let refusals = &mut self.refusals;
+        self.out.retain(|session_id, out| {
+            let ours = out.host == *host && out.request_id == id;
+            if ours {
+                refusals.insert(
+                    (host.clone(), session_id.clone()),
+                    Refusal {
+                        since: out.since,
+                        message: message.to_owned(),
+                    },
+                );
+            }
+            !ours
+        });
         true
+    }
+
+    /// The refusal of the last answer sent for `host`'s session
+    /// `session_id`, while its wait is still the one stamped `since`.
+    fn refusal(&self, host: &HostKey, session_id: &str, since: DateTime<Utc>) -> Option<&str> {
+        self.refusals
+            .get(&(host.clone(), session_id.to_owned()))
+            .filter(|refusal| refusal.since == since)
+            .map(|refusal| refusal.message.as_str())
     }
 
     /// Whether an answer is out for `session`'s wait as its snapshot reads
@@ -156,6 +188,8 @@ impl DashboardAnswers {
     fn reset(&mut self, host: &HostKey) {
         self.sent.retain(|(sent_to, _)| sent_to != host);
         self.out.retain(|_, out| out.host != *host);
+        self.refusals
+            .retain(|(refused_on, _), _| refused_on != host);
     }
 }
 
@@ -473,6 +507,9 @@ impl RootView {
         };
         let host = self.host_of_session(session_id);
         let request_id = self.dashboard_answers.answer_id(&host);
+        self.dashboard_answers
+            .refusals
+            .remove(&(host.clone(), session_id.to_owned()));
         self.dashboard_answers.out.insert(
             session_id.to_owned(),
             AnswerOut {
@@ -493,6 +530,18 @@ impl RootView {
         );
         self.refresh_app_toasts(cx);
         cx.notify();
+    }
+
+    /// Why the daemon refused the last answer sent for `host`'s session
+    /// `session_id`, while the session still waits on the wait stamped
+    /// `since` that answer was for; a new wait, or a new answer, clears it.
+    pub(crate) fn answer_refusal(
+        &self,
+        host: &HostKey,
+        session_id: &str,
+        since: DateTime<Utc>,
+    ) -> Option<&str> {
+        self.dashboard_answers.refusal(host, session_id, since)
     }
 
     /// The listed Dashboard tab's id, if there is one this client has not
@@ -627,7 +676,7 @@ impl RootView {
                 message,
                 request_id: Some(id),
                 ..
-            } if self.dashboard_answers.refused(host, id) => {
+            } if self.dashboard_answers.refused(host, id, message) => {
                 tracing::warn!("the daemon refused a Dashboard answer: {message}");
                 self.refresh_app_toasts(cx);
                 self.push_toast(
@@ -726,10 +775,10 @@ mod tests {
             .map(|_| answers.answer_id(&HostKey::Local))
             .collect();
         assert!(
-            !answers.refused(&HostKey::Local, &ids[0]),
+            !answers.refused(&HostKey::Local, &ids[0], "refused"),
             "the oldest is forgotten once {ANSWERS_CAP} newer ones were sent"
         );
-        assert!(answers.refused(&HostKey::Local, &ids[1]));
-        assert!(answers.refused(&HostKey::Local, &ids[ANSWERS_CAP]));
+        assert!(answers.refused(&HostKey::Local, &ids[1], "refused"));
+        assert!(answers.refused(&HostKey::Local, &ids[ANSWERS_CAP], "refused"));
     }
 }

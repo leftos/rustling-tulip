@@ -1364,16 +1364,7 @@ impl RootView {
     /// daemon refuses a typed answer.
     fn toast_ask(&self, key: &SessionKey) -> Option<AskBlock> {
         let (host, id) = (&key.0, key.1.as_str());
-        let session = self.sidebar.session(id)?;
-        let row = row_of(&self.sidebar, session);
-        let mut ask = ask_block(&RowInput {
-            row: &row,
-            session,
-            facts: self.dashboard_facts.facts_for(id),
-            agents: self.sidebar.session_label_agents(id),
-            unseen: self.sidebar.is_unseen(id),
-            prompt: self.chat.held_prompt(id),
-        })?;
+        let mut ask = self.ask_of(self.sidebar.session(id)?)?;
         if ask.choices.len() > MAX_TOAST_CHOICES {
             ask.choices.clear();
         }
@@ -1384,6 +1375,28 @@ impl RootView {
             ask.typed = None;
         }
         Some(ask)
+    }
+
+    /// The ask block of `host`'s session `id`, read as the toast reads it,
+    /// with every choice and typed answer `ask_block` offers: the phone's
+    /// Needs you tray picks the ones a card shows.
+    pub(crate) fn phone_ask(&self, host: &HostKey, id: &str) -> Option<AskBlock> {
+        self.ask_of(self.sidebar.session_on(host, id)?)
+    }
+
+    /// `session`'s ask block, read as the Dashboard reads its row, with the
+    /// prompt card its loaded chat holds.
+    fn ask_of(&self, session: &SessionSnapshot) -> Option<AskBlock> {
+        let id = session.id.as_str();
+        let row = row_of(&self.sidebar, session);
+        ask_block(&RowInput {
+            row: &row,
+            session,
+            facts: self.dashboard_facts.facts_for(id),
+            agents: self.sidebar.session_label_agents(id),
+            unseen: self.sidebar.is_unseen(id),
+            prompt: self.chat.held_prompt(id),
+        })
     }
 
     /// `toast`'s title line, naming the session's repo or workspace when it

@@ -57,8 +57,9 @@
 //! What's new window the footer's button opens over that ready update.
 //! `phone-home` shows the phone app's Home in a 390x844 window inside a
 //! phone's 62 pt top and 34 pt bottom insets, over one saved host listing
-//! two repos: one with a session waiting on a question, the other with a
-//! working session and an idle one.
+//! two repos: one with a session waiting on a three-option question, which
+//! the Needs you tray above the list shows as its one card, the other with
+//! a working session and an idle one.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -1478,6 +1479,10 @@ async fn capture_phone_home(
     if rows != PHONE_HOME_ROWS {
         bail!("the phone-home view lists {rows} rows, not {PHONE_HOME_ROWS}");
     }
+    let header = handle.update(cx, |phone, _, cx| phone.tray_header(cx))?;
+    if header.as_deref() != Some("Needs you · 1 of 1") {
+        bail!("the phone-home view's tray reads {header:?}, not one card");
+    }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
 }
@@ -2607,7 +2612,7 @@ impl RemoteFixture {
                 "questions": [{
                     "question": "Keep the newest copy or merge both?",
                     "header": "Migration",
-                    "options": [],
+                    "options": ["Keep newest", "Merge both", "Stop"],
                     "multi_select": false,
                 }],
             },

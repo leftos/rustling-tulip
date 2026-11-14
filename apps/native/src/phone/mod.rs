@@ -11,6 +11,7 @@ pub mod push;
 mod push_ios;
 mod root_view;
 mod sweep;
+mod tray;
 
 use std::rc::Rc;
 use std::sync::Arc;
