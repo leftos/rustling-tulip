@@ -181,7 +181,7 @@ Risks the spike left open: the iOS backend is experimental, from a single upstre
 
 ### Phase 3: the first real iPhone and daemon
 
-- [ ] **MA.12 First run on the owner's iPhone against the PC's daemon.** Hand check for the owner, with the TestFlight build and the Tailscale app on: add the PC by its MagicDNS name, pair with the code from the host's approval (or `rustling-tulipd pair`), see the session list, scroll and tap; type into the host field with the soft keyboard, Return included; lock and unlock the phone and switch apps, the list reconnecting; quit and relaunch, the token surviving in the Keychain.
+- [x] **MA.12 First run on the owner's iPhone against the PC's daemon.** Hand check for the owner, with the TestFlight build and the Tailscale app on: add the PC by its MagicDNS name, pair with the code from the host's approval (or `rustling-tulipd pair`), see the session list, scroll and tap; type into the host field with the soft keyboard, Return included; lock and unlock the phone and switch apps, the list reconnecting; quit and relaunch, the token surviving in the Keychain.
 
   Then leave the list open for an hour with sessions working and note the battery drop, the phone's warmth and the app's render rate from its log. The orchestrator records the results under "Measured on a real iPhone" and books each failure as an **add**.
 
@@ -285,7 +285,12 @@ The web app's open features wait for the native app and are built there once its
 
 ## Measured on a real iPhone
 
-Nothing yet: MA.12 and MA.16 fill this section.
+MA.12, on the owner's iPhone with the TestFlight build and the Tailscale app, against the PC's daemon over the tailnet:
+
+- Adding the PC by its MagicDNS name with the soft keyboard (Return included), pairing, the session list, scrolling, locking and unlocking, switching apps with the list reconnecting, and a quit and relaunch keeping the pairing all work.
+- A tap on a session opens nothing, as expected before MA.13 builds the tap.
+- The chevron that folds a session's subagent rows is hard to hit: its hit area is the 13 px icon alone, so a tap has to land at the screen's edge (RT-1695).
+- The hour on an open list (battery, warmth, render rate) was not run; MA.16's hour on a working session's chat measures battery and warmth on the device.
 
 ## How it connects
 
