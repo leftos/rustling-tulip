@@ -909,6 +909,43 @@ mod tests {
         Uuid::parse_str(text).is_ok_and(|id| id.get_version_num() == 4)
     }
 
+    /// The Apple config dir is `Library/Application Support/<bundle id>` under
+    /// the home directory, which iOS points at the app's container: the phone
+    /// app keeps its identity and settings there with no path of its own.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn config_dir_is_under_application_support_on_apple() {
+        /// Restores `RUSTLING_TULIP_CONFIG_DIR` however the test ends.
+        struct Restore(Option<OsString>);
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: the test holds ENV_LOCK until after this guard drops.
+                unsafe {
+                    match self.0.take() {
+                        Some(value) => std::env::set_var(CONFIG_DIR_VAR, value),
+                        None => std::env::remove_var(CONFIG_DIR_VAR),
+                    }
+                }
+            }
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let prior = std::env::var_os(CONFIG_DIR_VAR);
+        // SAFETY: ENV_LOCK is held for the rest of the test, and no other test
+        // in this crate reads the environment without it.
+        unsafe { std::env::remove_var(CONFIG_DIR_VAR) };
+        let _restore = Restore(prior);
+
+        let dir = super::config_dir().expect("a config dir without the override");
+
+        assert!(
+            dir.ends_with("Library/Application Support/dev.leftos.rustling-tulip"),
+            "not under Application Support: {}",
+            dir.display()
+        );
+    }
+
     #[test]
     fn client_identity_creates_then_reuses_id_file() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);

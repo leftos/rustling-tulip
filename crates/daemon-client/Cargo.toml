@@ -34,15 +34,21 @@ uuid = { workspace = true }
 sha2 = "0.10"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 # Cross-platform credential-store API. `src/device_tokens.rs` files the device
-# tokens remote hosts issue under Windows Credential Manager or the macOS login
-# Keychain; the platform stores themselves are `windows-native-keyring-store`
-# and `apple-native-keyring-store` below.
+# tokens remote hosts issue under Windows Credential Manager, the macOS login
+# Keychain or the iOS Keychain; the platform stores themselves are
+# `windows-native-keyring-store` and `apple-native-keyring-store` below.
 keyring-core = "1.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS's login Keychain as the `keyring-core` store; the `keychain` feature is
 # the legacy (login) keychain store.
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# iOS's Keychain as the `keyring-core` store. iOS has one store, the protected
+# one: `keychain` is ignored there, and the crate refuses to compile on iOS
+# without `protected`.
+apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["protected"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

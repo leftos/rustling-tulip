@@ -2,41 +2,42 @@
 //!
 //! A tailnet host's daemon serves this device only when its `Hello` carries
 //! the token that host issued it at pairing. [`KeyringTokens`] keeps them in
-//! the platform's credential store, Windows Credential Manager on Windows and
-//! the login Keychain on macOS (a generic password), one item per host, under
+//! the platform's credential store: Windows Credential Manager on Windows,
+//! the login Keychain on macOS and the iOS Keychain on iOS (a generic
+//! password), one item per host, under
 //! the service the daemon files its env secrets under: `rustling-tulip`, or
 //! `rustling-tulip:<first 8 hex of the SHA-256 of the config dir>` while
 //! `RUSTLING_TULIP_CONFIG_DIR` is set, so an isolated client never shares
 //! entries with the user's own. The item's user (the Keychain's account) is
 //! `device/<lower-cased host name>`, with no port: one device identity per
-//! host name. Both platforms use the same service and user names.
+//! host name. All three platforms use the same service and user names.
 //! [`MemoryTokens`] holds them in memory, for tests.
 //!
 //! A token never appears in a log line, an error or a `Debug` string.
 
 use anyhow::{Context as _, Result};
 use keyring_core::{Entry, Error as KeyringError};
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", target_os = "ios", test))]
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::fmt;
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", target_os = "ios", test))]
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// The credential store service tokens are filed under, unless the config
 /// dir is overridden.
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", target_os = "ios", test))]
 const SERVICE: &str = "rustling-tulip";
 
 /// Setting this to a non-empty value switches the service to its
 /// per-config-dir variant.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "ios"))]
 const CONFIG_DIR_VAR: &str = "RUSTLING_TULIP_CONFIG_DIR";
 
 /// How many hex characters of the config dir's hash the isolated service name
 /// carries.
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", target_os = "ios", test))]
 const SERVICE_HASH_LEN: usize = 8;
 
 /// What every device token's credential user starts with.
@@ -81,7 +82,7 @@ pub fn user_for(host: &str) -> String {
 /// its per-config-dir variant when `overridden` (the config dir comes from
 /// `RUSTLING_TULIP_CONFIG_DIR`). The daemon's env secrets use the same rule
 /// (`crates/daemon/src/env_secrets.rs`).
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", target_os = "ios", test))]
 fn service_for(config_dir: &Path, overridden: bool) -> String {
     if !overridden {
         return SERVICE.to_owned();
@@ -96,7 +97,7 @@ fn service_for(config_dir: &Path, overridden: bool) -> String {
 }
 
 /// The service for this process's config dir.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "ios"))]
 fn service() -> Result<String> {
     let overridden = std::env::var(CONFIG_DIR_VAR).is_ok_and(|value| !value.is_empty());
     Ok(service_for(&crate::config_dir()?, overridden))
@@ -121,8 +122,19 @@ fn install_store() -> Result<()> {
     Ok(())
 }
 
+/// Install the iOS Keychain as the process's credential store: the protected
+/// store, iOS's one Keychain store, one generic password per (service, user)
+/// pair.
+#[cfg(target_os = "ios")]
+fn install_store() -> Result<()> {
+    let store = apple_native_keyring_store::protected::Store::new()
+        .context("creating the iOS Keychain credential store")?;
+    keyring_core::set_default_store(store);
+    Ok(())
+}
+
 /// Device tokens in the platform's credential store: Windows Credential
-/// Manager on Windows, the login Keychain on macOS.
+/// Manager on Windows, the login Keychain on macOS, the iOS Keychain on iOS.
 #[derive(Debug)]
 pub struct KeyringTokens {
     service: String,
@@ -138,14 +150,14 @@ impl KeyringTokens {
     }
 
     /// Install the platform's credential store (Windows Credential Manager,
-    /// or the macOS login Keychain) as the process's credential store and
-    /// file tokens under this config dir's service.
+    /// the macOS login Keychain or the iOS Keychain) as the process's
+    /// credential store and file tokens under this config dir's service.
     ///
     /// # Errors
     ///
     /// Fails when the platform store cannot be created or the config dir
     /// cannot be resolved.
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "ios"))]
     pub fn open() -> Result<Self> {
         install_store()?;
         Ok(Self {
@@ -155,11 +167,12 @@ impl KeyringTokens {
 
     /// # Errors
     ///
-    /// Always: the store is Windows Credential Manager or the macOS Keychain.
-    #[cfg(not(any(windows, target_os = "macos")))]
+    /// Always: the store is Windows Credential Manager, the macOS Keychain or
+    /// the iOS Keychain.
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
     pub fn open() -> Result<Self> {
         anyhow::bail!(
-            "device tokens live in Windows Credential Manager or the macOS Keychain; there is no store on this system"
+            "no credential store on this platform: device tokens need Windows Credential Manager, the macOS Keychain or the iOS Keychain"
         )
     }
 

@@ -18,8 +18,11 @@ use futures::{Sink, SinkExt as _, Stream, StreamExt as _};
 use protocol::{
     ClientMessage, DaemonHandshake, DaemonMessage, DevicePairOutcome, InboundDaemonMessage,
 };
+use rustls::ClientConfig;
+#[cfg(any(not(target_os = "ios"), test))]
+use rustls::RootCertStore;
+#[cfg(any(not(target_os = "ios"), test))]
 use rustls::pki_types::CertificateDer;
-use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::{self, Message};
@@ -91,6 +94,7 @@ pub struct NetDeps {
 
 /// A client config trusting the OS certificate store's roots, on the `ring`
 /// provider. An empty store fails: there is no fallback.
+#[cfg(not(target_os = "ios"))]
 fn os_tls_config() -> Result<Arc<ClientConfig>> {
     let loaded = rustls_native_certs::load_native_certs();
     if !loaded.errors.is_empty() {
@@ -99,7 +103,25 @@ fn os_tls_config() -> Result<Arc<ClientConfig>> {
     tls_config_trusting(loaded.certs)
 }
 
+/// A client config trusting the system's roots through Security.framework, on
+/// the `ring` provider. iOS keeps no certificate files, so its trust comes
+/// from the platform verifier.
+#[cfg(target_os = "ios")]
+fn os_tls_config() -> Result<Arc<ClientConfig>> {
+    use rustls_platform_verifier::BuilderVerifierExt as _;
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("choosing the TLS protocol versions")?
+        .with_platform_verifier()
+        .context("building the iOS TLS config from the platform verifier")?
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
 /// A client config whose only roots are the parsable ones among `certs`.
+#[cfg(any(not(target_os = "ios"), test))]
 fn tls_config_trusting(certs: Vec<CertificateDer<'static>>) -> Result<Arc<ClientConfig>> {
     let mut roots = RootCertStore::empty();
     let (added, ignored) = roots.add_parsable_certificates(certs);

@@ -71,7 +71,6 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
     "logging",
 ] }
-rustls-native-certs = "0.8"
 futures = "0.3"
 base64 = "0.22"
 unicode-segmentation = "1.13.2"
@@ -106,6 +105,15 @@ rodio = { version = "0.23.0", default-features = false, features = [
 interprocess = { version = "2", features = ["tokio"], optional = true }
 # Pasting a copied bitmap into a remote session sends it as a PNG.
 png = "0.18"
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+# The desktop's roots, read out of the OS certificate store's files.
+rustls-native-certs = "0.8"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# iOS has no certificate files to read: its roots come from Security.framework
+# through the platform verifier, on the same `ring` provider as the desktop.
+rustls-platform-verifier = "0.7.1"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 # The app's own toasts reach their window through its native handle.
