@@ -10,6 +10,10 @@ The relay is the `rustling-tulip-push-relay` Worker on the owner's Cloudflare ac
 
 A daemon posts a push to `/v1/apns/<production|sandbox>/<device token>`, signed with VAPID and encrypted `aes128gcm`; `TTL` sets `apns-expiration`, `Urgency: high` sets priority 10 and `Topic` sets `apns-collapse-id`. A push with no `X-RT-Push-Type` header, or an empty one, is the mutable-content alert. `X-RT-Push-Type: background` (any case, spaces trimmed) sends it as an APNs background push instead: `apns-push-type: background`, always priority 5, and a body of only `{"aps":{"content-available":1},"e":"<ciphertext>"}`, which wakes the app without showing anything. Any other value is answered `400 push type is not background` before the push counts against the rate limits or the daily cap. Deploy the relay before any daemon that sends the header: an older relay ignores it and delivers the push as an alert with nothing to show.
 
+## Rate limits
+
+Each device token gets two budgets, one for alerts and one for background pushes, so a background push never spends an alert's. Each kind has its own per-device bucket of 20 a minute (`TOKEN_LIMITER`, keyed by the token's hash for an alert and `bg:` plus the hash for a background push; over it, `429` with `Retry-After: 60`) and its own daily cap of 300 per UTC day (the `RELAY_STATE` counters `day:<hash>:<YYYY-MM-DD>` and `daybg:<hash>:<YYYY-MM-DD>`; over it, `429 daily cap for this device reached` with `Retry-After` the seconds to the next UTC midnight). The per-IP and per-sender limits (`IP_LIMITER`, `SENDER_LIMITER`) are shared by both kinds.
+
 ## Deploy
 
 From this folder:

@@ -393,6 +393,48 @@ describe("push relay", () => {
     expect(w.apns.requests).toHaveLength(1);
   });
 
+  it("a_background_push_passes_a_spent_alert_daily_cap_and_counts_its_own", async () => {
+    const w = await world();
+    const day = new Date(w.nowMs).toISOString().slice(0, 10);
+    const alertKey = `day:${await hashOf(TOKEN)}:${day}`;
+    const backgroundKey = `daybg:${await hashOf(TOKEN)}:${day}`;
+    w.env.RELAY_STATE.values.set(alertKey, "300");
+    expect((await send(w, { headers: { "X-RT-Push-Type": "background" } })).status).toBe(201);
+    expect(w.apns.requests).toHaveLength(1);
+    expect(w.env.RELAY_STATE.values.get(alertKey)).toBe("300");
+    expect(w.env.RELAY_STATE.puts.find((put) => put.key === backgroundKey)).toEqual({
+      key: backgroundKey,
+      value: "1",
+      ttl: 2 * 24 * 3600,
+    });
+  });
+
+  it("a_spent_background_daily_cap_refuses_background_pushes_but_not_alerts", async () => {
+    const w = await world();
+    const day = new Date(w.nowMs).toISOString().slice(0, 10);
+    w.env.RELAY_STATE.values.set(`daybg:${await hashOf(TOKEN)}:${day}`, "300");
+    const response = await send(w, { headers: { "X-RT-Push-Type": "background" } });
+    expect(response.status).toBe(429);
+    expect(await response.text()).toBe("daily cap for this device reached");
+    const midnight = Date.UTC(
+      new Date(w.nowMs).getUTCFullYear(),
+      new Date(w.nowMs).getUTCMonth(),
+      new Date(w.nowMs).getUTCDate() + 1,
+    );
+    expect(response.headers.get("Retry-After")).toBe(String(Math.ceil((midnight - w.nowMs) / 1000)));
+    expect(w.apns.requests).toHaveLength(0);
+    expect((await send(w)).status).toBe(201);
+    expect(w.apns.requests).toHaveLength(1);
+  });
+
+  it("a_background_push_has_its_own_per_token_minute_bucket", async () => {
+    const w = await world();
+    const hash = await hashOf(TOKEN);
+    expect((await send(w, { headers: { "X-RT-Push-Type": "background" } })).status).toBe(201);
+    expect((await send(w)).status).toBe(201);
+    expect(w.limiters.token.keys).toEqual([`bg:${hash}`, hash]);
+  });
+
   it("answers 503 with Retry-After while the kill switch is on", async () => {
     const w = await world();
     w.env.RELAY_ENABLED = "false";

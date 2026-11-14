@@ -30,6 +30,7 @@ export interface Deps {
 const MAX_BODY_BYTES = 3072;
 const MAX_TOKEN_CHARS = 512;
 const DAILY_CAP = 300;
+const BACKGROUND_DAILY_CAP = 300;
 const DAY_COUNTER_TTL_SECONDS = 2 * 24 * 3600;
 const PLATFORM = "apns";
 
@@ -40,7 +41,7 @@ type PushKind = "alert" | "background";
 interface LogContext {
   sender: string | null;
   relayFault?: string;
-  /** What KV writes failed while the push went on: `day`, `apns-jwt`. */
+  /** What KV writes failed while the push went on: `day`, `daybg`, `apns-jwt`. */
   kvErrors: string[];
 }
 
@@ -85,12 +86,17 @@ async function readBody(request: Request): Promise<Uint8Array | Response> {
   return body;
 }
 
-async function limited(request: Request, env: Env, senderHash: string, tokenHash: string): Promise<boolean> {
+/**
+ * The IP, sender and per-token minute limits. The IP and sender buckets are shared by both push
+ * kinds; a background push has its own per-token bucket (`bg:{tokenHash}`), so clears never spend
+ * an alert's.
+ */
+async function limited(request: Request, env: Env, senderHash: string, tokenHash: string, kind: PushKind): Promise<boolean> {
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
   const checks: [Limiter, string][] = [
     [env.IP_LIMITER, ip],
     [env.SENDER_LIMITER, senderHash],
-    [env.TOKEN_LIMITER, tokenHash],
+    [env.TOKEN_LIMITER, kind === "background" ? `bg:${tokenHash}` : tokenHash],
   ];
   for (const [limiter, key] of checks) {
     if (!(await limiter.limit({ key })).success) return true;
@@ -99,21 +105,24 @@ async function limited(request: Request, env: Env, senderHash: string, tokenHash
 }
 
 /**
- * Counts the push against the token's UTC-day cap; a 429 once the day's 300 are spent. A failed
- * counter write (KV takes one write per key a second) is noted in `ctx` and lets the push through.
+ * Counts the push against the token's UTC-day cap for its kind (`day:` for alerts, `daybg:` for
+ * background pushes, 300 each); a 429 once the day's are spent. A failed counter write (KV takes
+ * one write per key a second) is noted in `ctx` and lets the push through.
  */
-async function dailyCap(env: Env, tokenHash: string, nowMs: number, ctx: LogContext): Promise<Response | null> {
+async function dailyCap(env: Env, tokenHash: string, nowMs: number, ctx: LogContext, kind: PushKind): Promise<Response | null> {
   const now = new Date(nowMs);
-  const key = `day:${tokenHash}:${now.toISOString().slice(0, 10)}`;
+  const prefix = kind === "background" ? "daybg" : "day";
+  const cap = kind === "background" ? BACKGROUND_DAILY_CAP : DAILY_CAP;
+  const key = `${prefix}:${tokenHash}:${now.toISOString().slice(0, 10)}`;
   const count = Number.parseInt((await env.RELAY_STATE.get(key)) ?? "0", 10) || 0;
-  if (count >= DAILY_CAP) {
+  if (count >= cap) {
     const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
     return answer(429, "daily cap for this device reached", String(Math.ceil((midnight - nowMs) / 1000)));
   }
   try {
     await env.RELAY_STATE.put(key, String(count + 1), { expirationTtl: DAY_COUNTER_TTL_SECONDS });
   } catch {
-    ctx.kvErrors.push("day");
+    ctx.kvErrors.push(prefix);
   }
   return null;
 }
@@ -127,8 +136,8 @@ async function admit(request: Request, env: Env, deps: Deps, push: Route & { kin
   // Hashed lowercased, so case variants of one hex token share its deny entry, limit and counter.
   const tokenHash = await sha256Hex(new TextEncoder().encode(push.token.toLowerCase()));
   if (await denied(env, `token:${tokenHash}`)) return answer(410, "device token is denied");
-  if (await limited(request, env, ctx.sender ?? "", tokenHash)) return answer(429, "rate limited", "60");
-  const capped = await dailyCap(env, tokenHash, deps.now(), ctx);
+  if (await limited(request, env, ctx.sender ?? "", tokenHash, kind)) return answer(429, "rate limited", "60");
+  const capped = await dailyCap(env, tokenHash, deps.now(), ctx, kind);
   if (capped !== null) return capped;
   const result = await sendApns(
     env,
