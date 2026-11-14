@@ -262,6 +262,36 @@ fn a_copied_bitmap_reported_as_bmp_pastes_a_png(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_bmp_the_reader_cannot_read_pastes_as_a_bmp(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let bmp = vec![b'B', b'M', 1, 2, 3];
+    h.set_clipboard_image(ImageFormat::Bmp, bmp.clone());
+    h.keys("secondary-v");
+    let upload = the_upload(&mut h);
+    assert_eq!(upload.name, "paste.bmp");
+    assert_eq!(upload.bytes, bmp);
+}
+
+/// A bitmap reader that fails, as it does on a bitmap it cannot convert.
+fn fails_to_read() -> anyhow::Result<Option<Vec<u8>>> {
+    Err(anyhow::anyhow!("an 8-bit bitmap"))
+}
+
+#[gpui::test]
+fn a_bmp_whose_reader_fails_pastes_as_a_bmp(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    h.cx.update(|_, cx| rustling_tulip_native::set_bitmap_reader(cx, fails_to_read));
+    let bmp = vec![b'B', b'M', 1, 2, 3];
+    h.set_clipboard_image(ImageFormat::Bmp, bmp.clone());
+    h.keys("secondary-v");
+    let upload = the_upload(&mut h);
+    assert_eq!(upload.name, "paste.bmp");
+    assert_eq!(upload.bytes, bmp);
+}
+
+#[gpui::test]
 fn a_host_without_upload_file_toasts_that_it_cannot_receive_images(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = remote_agent(cx, &dir, &[]);

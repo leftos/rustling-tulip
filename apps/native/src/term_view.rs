@@ -2096,34 +2096,45 @@ impl TerminalPane {
 static PASTES: AtomicU64 = AtomicU64::new(0);
 
 /// The image a paste on the clipboard `item` uploads, with the name it goes
-/// under: GPUI's first non-empty image entry, else the bitmap the system
-/// clipboard holds as a PNG (Windows), else `None`. A failed bitmap read is
-/// logged and counts as no image.
+/// under: GPUI's first non-empty image entry that is not a BMP, else the
+/// bitmap the system clipboard holds as a PNG (Windows), else that BMP entry
+/// as it is, else `None`. A failed bitmap read is logged and the BMP still
+/// goes up.
 fn pasted_image(item: Option<&ClipboardItem>, cx: &App) -> Option<(String, Vec<u8>)> {
-    let image = item.and_then(|item| {
-        item.entries().iter().find_map(|entry| match entry {
-            // A bitmap goes to the app's own reader below, which sends it
-            // as a PNG and keeps a `CF_DIBV5` alpha channel.
-            ClipboardEntry::Image(image)
-                if !image.bytes.is_empty() && image.format != gpui::ImageFormat::Bmp =>
-            {
-                Some(image)
-            }
-            _ => None,
-        })
-    });
-    if let Some(image) = image {
-        let name = format!("paste.{}", paste_upload::extension_of(image.format));
-        return Some((name, image.bytes.clone()));
+    // A bitmap goes to the app's own reader below, which sends it as a PNG
+    // and keeps a `CF_DIBV5` alpha channel.
+    if let Some(image) = first_image(item, |format| format != gpui::ImageFormat::Bmp) {
+        return Some(named_paste(image));
     }
     match clipboard_image::bitmap_reader(cx)() {
-        Ok(Some(png)) => Some(("paste.png".to_owned(), png)),
-        Ok(None) => None,
-        Err(err) => {
-            tracing::warn!("reading the clipboard's bitmap failed: {err:#}");
-            None
-        }
+        Ok(Some(png)) => return Some(("paste.png".to_owned(), png)),
+        Ok(None) => {}
+        Err(err) => tracing::warn!("reading the clipboard's bitmap failed: {err:#}"),
     }
+    // What the reader cannot turn into a PNG goes up as the BMP it is.
+    first_image(item, |format| format == gpui::ImageFormat::Bmp).map(named_paste)
+}
+
+/// The first of `item`'s entries that is a non-empty image `wanted` accepts.
+fn first_image(
+    item: Option<&ClipboardItem>,
+    wanted: impl Fn(gpui::ImageFormat) -> bool,
+) -> Option<&gpui::Image> {
+    item?.entries().iter().find_map(|entry| match entry {
+        ClipboardEntry::Image(image) if !image.bytes.is_empty() && wanted(image.format) => {
+            Some(image)
+        }
+        _ => None,
+    })
+}
+
+/// `image` as the upload it goes up as: its bytes under a name from its
+/// format.
+fn named_paste(image: &gpui::Image) -> (String, Vec<u8>) {
+    (
+        format!("paste.{}", paste_upload::extension_of(image.format)),
+        image.bytes.clone(),
+    )
 }
 
 /// The next paste's number, counted from one for the process.
