@@ -1896,6 +1896,13 @@
         "apps/ios/**"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^phone::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_phone_root::/))"
+    },
+    {
+      "paths": [
+        "apps/ios-notify/**",
+        "crates/push-crypto/**"
+      ],
+      "filter": "package(rustling-tulip-ios-notify) | package(push-crypto) | (package(daemon) & (test(/^push::/) | test(/^server::push::/)))"
     }
   ]
 }

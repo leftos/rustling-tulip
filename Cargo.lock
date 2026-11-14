@@ -6869,6 +6869,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustling-tulip-ios-notify"
+version = "0.14.0-alpha"
+dependencies = [
+ "base64 0.22.1",
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
+ "protocol",
+ "push-crypto",
+ "security-framework",
+ "serde_json",
+]
+
+[[package]]
 name = "rustling-tulip-native"
 version = "0.14.0-alpha"
 dependencies = [

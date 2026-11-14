@@ -19,6 +19,10 @@ use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::{PublicKey, SecretKey};
 use sha2::Sha256;
 
+mod install_keys;
+
+pub use install_keys::{InstallKeys, KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE};
+
 /// The record size written into the header: the one record a push message
 /// carries (RFC 8291 §4).
 const RECORD_SIZE: u32 = 4096;

@@ -230,7 +230,9 @@ The native app's side of [push-relay.md](./push-relay.md)'s contract; the relay'
 
   It sets the title, body and badge, and puts `host` and `session_id` in the notification's user info; on any failure it leaves the fallback alert as it came. The decrypt-and-build step is a plain function tested on Windows; `tools/ios/build.ps1` embeds the `.appex` in the app's `PlugIns`.
 
-  Files: `Cargo.toml`, `apps/ios-notify/Cargo.toml`, `apps/ios-notify/src/main.rs`, `apps/ios-notify/src/notice.rs`, `apps/ios-notify/Info.plist`, `tools/ios/build.ps1`.
+  MA.17 is split: MA.17a builds the extension and runs it in the simulator; MA.17b (RT-1698) signs it for the App Store, with its entitlements and the shared Keychain access group. MA.17a delivered the `rustling-tulip-ios-notify` package (a library with `notice::shown`, `Shown` and `Fallback`, and a binary that is the extension on iOS and an empty `main` elsewhere), the `InstallKeys` Keychain contract in `push-crypto` (see push-relay.md), `tools/ios/build.ps1` embedding `PlugIns/RustlingTulipNotify.appex` in simulator and unsigned device bundles (`-Sign` removes `PlugIns` until MA.17b), and `tools/ios/sim-notify.ps1`, which installs the app, checks `pluginkit` lists the extension and sends a test push with `simctl push`. Today the simulator refuses that push ("Source is not authorized") because the app does not yet ask for notification permission (MA.18).
+
+  Files: `Cargo.toml`, `apps/ios-notify/Cargo.toml`, `apps/ios-notify/build.rs`, `apps/ios-notify/src/lib.rs`, `apps/ios-notify/src/main.rs`, `apps/ios-notify/src/notice.rs`, `apps/ios-notify/src/appex.rs`, `apps/ios-notify/Info.plist`, `crates/push-crypto/src/lib.rs`, `crates/push-crypto/src/install_keys.rs`, `tools/ios/build.ps1`, `tools/ios/sim-notify.ps1`, `tools/test-map.json`.
 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma17-notify.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-ios-notify --cargo-profile test-release`
 

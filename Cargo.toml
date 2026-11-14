@@ -16,6 +16,7 @@ members = [
     "crates/dev-daemon",
     "apps/native",
     "apps/ios",
+    "apps/ios-notify",
     "tools/rt-driver-mcp",
     "tools/folder-bench",
     "tools/protocol-ts",

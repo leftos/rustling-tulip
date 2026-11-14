@@ -3,8 +3,11 @@
 # assemble it into a flat app bundle under target/ios/<target>/.
 #
 # Runs on the Mac (pwsh). The bundle holds the binary and apps/ios/Info.plist,
-# its version keys set from the workspace version. A simulator bundle is signed
-# ad hoc; a device bundle is left unsigned unless -Sign is given.
+# its version keys set from the workspace version, and the notification service
+# extension (apps/ios-notify) as PlugIns/RustlingTulipNotify.appex with the same
+# version keys. A simulator bundle is signed ad hoc, the extension first; a
+# device bundle is left unsigned unless -Sign is given, which removes the
+# extension before it signs, since the extension has no App Store signing yet.
 #
 #   pwsh -NoProfile -File tools/ios/build.ps1 [-Target sim|device] [-Release]
 #   pwsh -NoProfile -File tools/ios/build.ps1 -Target device -Sign -BuildNumber <n>
@@ -36,6 +39,8 @@ $ErrorActionPreference = 'Stop'
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $BinaryName = 'rustling-tulip-ios'
+$NotifyBinaryName = 'rustling-tulip-ios-notify'
+$NotifyBundle = 'PlugIns/RustlingTulipNotify.appex'
 $PlistBuddy = '/usr/libexec/PlistBuddy'
 $AppId = 'dev.leftos.rustling-tulip.phone'
 $SigningNames = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PHONE_PROFILE_BASE64', 'IOS_TEAM_ID'
@@ -58,7 +63,7 @@ function Get-WorkspaceVersion {
 function Invoke-CargoBuild([string] $Triple) {
     & rustup target add $Triple
     Assert-LastExit "rustup target add $Triple"
-    $cargoArgs = @('build', '-p', $BinaryName, '--target', $Triple)
+    $cargoArgs = @('build', '-p', $BinaryName, '-p', $NotifyBinaryName, '--target', $Triple)
     if ($Release) { $cargoArgs += '--release' }
     $env:IPHONEOS_DEPLOYMENT_TARGET = '15.0'
     & cargo @cargoArgs
@@ -83,7 +88,21 @@ function Build-AppBundle([string] $Triple) {
     $numeric = ((Get-WorkspaceVersion) -split '-')[0]
     Write-PlistValue $plist 'CFBundleShortVersionString' $numeric
     Write-PlistValue $plist 'CFBundleVersion' $numeric
+    Build-NotifyExtension $app (Join-Path $RepoRoot "target/$Triple/$profileDir/$NotifyBinaryName") $numeric
     return $app
+}
+
+# The notification service extension, PlugIns/RustlingTulipNotify.appex: its binary and
+# apps/ios-notify/Info.plist, carrying the app's version keys.
+function Build-NotifyExtension([string] $App, [string] $Binary, [string] $Version) {
+    if (-not (Test-Path $Binary)) { throw "no extension binary at $Binary after the build" }
+    $appex = Join-Path $App $NotifyBundle
+    New-Item -ItemType Directory -Force -Path $appex | Out-Null
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $appex $NotifyBinaryName)
+    $plist = Join-Path $appex 'Info.plist'
+    Copy-Item -LiteralPath (Join-Path $RepoRoot 'apps/ios-notify/Info.plist') -Destination $plist
+    Write-PlistValue $plist 'CFBundleShortVersionString' $Version
+    Write-PlistValue $plist 'CFBundleVersion' $Version
 }
 
 # Sets a top-level string key, adding it when the plist lacks it.
@@ -259,6 +278,9 @@ function Get-SigningIdentity([string] $Keychain) {
 }
 
 function Invoke-AppStoreSigning([string] $App) {
+    # The extension is not signed for the App Store yet: a signed build ships without it.
+    $plugIns = Join-Path $App 'PlugIns'
+    if (Test-Path -LiteralPath $plugIns) { Remove-Item -LiteralPath $plugIns -Recurse -Force }
     $plist = Join-Path $App 'Info.plist'
     Write-PlistValue $plist 'CFBundleVersion' "$BuildNumber"
     Write-BuildMachineKey $plist
@@ -323,6 +345,9 @@ $triple = if ($Target -eq 'sim') { 'aarch64-apple-ios-sim' } else { 'aarch64-app
 Invoke-CargoBuild $triple
 $app = Build-AppBundle $triple
 if ($Target -eq 'sim') {
+    # Inside out: the extension first, then the app that holds it.
+    & codesign --force --sign - (Join-Path $app $NotifyBundle)
+    Assert-LastExit 'codesign RustlingTulipNotify.appex'
     & codesign --force --sign - $app
     Assert-LastExit 'codesign'
 }

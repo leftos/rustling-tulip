@@ -44,12 +44,13 @@ crates/
 apps/
   native/       - native desktop client (GPUI + alacritty_terminal)
   ios/          - the native phone app for the iOS simulator and device (binary `rustling-tulip-ios`); its screens live in `apps/native/src/phone/`
+  ios-notify/   - the phone app's notification service extension (package `rustling-tulip-ios-notify`; embedded in the app by `tools/ios/build.ps1`)
   pwa/          - the iPhone PWA shell (Vite + TypeScript, pnpm) that the daemon's tailnet listener serves; see its README.md
 tools/
   e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
   folder-bench/ - the dev-only harness that generates folder fixtures and times folder-transfer candidates to the builder; never shipped
-  ios/          - `build.ps1` (the phone app's `.app`, on a Mac) and `sim-run.ps1` (the gated simulator run from this PC)
+  ios/          - `build.ps1` (the phone app's `.app`, on a Mac) `sim-run.ps1` (the gated simulator run from this PC) and `sim-notify.ps1` (the same for the notification extension)
   installer/    - the NSIS installer script, and `pack-macos.ps1`, which builds the macOS app bundle and disk image on a Mac
   protocol-ts/  - the generator that writes the wire types as TypeScript into `apps/pwa/src/protocol.ts`, with its staleness test; never shipped
   rt-driver-mcp/ - the `rt-driver` MCP server that launches and drives an isolated native client; never shipped
@@ -231,6 +232,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Hysteresis (status)**: holding a status change until several checks agree, so a half-drawn screen does not flip a session's status and back; a screen-derived leave of `AwaitingInput` or `Working` to `Idle` publishes after 3 agreeing checks at least 150 ms apart, or the first agreeing check 700 ms after the first (`pty_state.rs`, `CONFIRM_*`).
 - **Import revision**: the version of an agent plugin's tracer-log import rules (`Agent::import_rev`; Claude's is 2), stamped on each imported history entry so a later rule change re-imports or upgrades (`Agent::upgrade_import`) the entries made under older rules.
 - **In-process SSH**: the phone's SSH transport, `apps/native/src/ssh_inproc.rs`, which connects to `user@host[:port]` with russh (ring backend) instead of spawning `ssh`, signs in with the phone's own ed25519 key, and trusts a host key only once it is saved; it compiles on every platform, and on iOS `NetDeps::production`'s `open_ssh` calls it with no saved host key yet, so an unknown key stops the connection (`docs/plans/mobile-app.md` MA.20, MA.21).
+- **Install keys**: the phone's per-install P-256 private key and 16-byte auth secret for Web Push decryption (`InstallKeys`, `crates/push-crypto/src/install_keys.rs`), kept as one 48-byte Keychain item in the access group the app and its notification extension share; the app writes it and the extension reads it (`docs/on-disk.md`, `docs/plans/push-relay.md`).
 - **Insertion line**: the 2 px accent line a sidebar drag draws at the top or bottom of the group it would drop before or after, chosen by the pointer's half of the group; see `docs/native-client.md` ("Drag model").
 - **Jump palette**: the main-window overlay Ctrl+Shift+P opens (`quick_jump.rs` the core, `quick_jump_view.rs` the view): a query field over ranked pane, tab, session, sidebar-container and per-host shell rows, where Enter focuses or reveals the one chosen (a shell row opens a shell on its host); see `docs/native-client.md` ("Jump palette").
 - **Keep-list**: the variables every spawned child gets from the daemon's environment whatever its agent (`PATH`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `TERM`, `LANG`, `LC_ALL`, with `TERM` set to `xterm-256color`), composed in `crates/daemon/src/child_env.rs`; only a headless child starts from it alone.
