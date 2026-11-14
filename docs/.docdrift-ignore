@@ -62,3 +62,5 @@ vapid.json
 subscriptions.json
 push/vapid.json
 push/subscriptions.json
+# A file in the pinned gpui git dependency (the leftos/zed fork), not in this repo
+crates/gpui/src/window.rs
