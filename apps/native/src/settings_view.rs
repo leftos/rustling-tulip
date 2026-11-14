@@ -9064,6 +9064,7 @@ fn toast_spot(anchor: ToastAnchor, on: bool, cx: &mut Context<RootView>) -> Stat
             offset: point(px(0.0), px(0.0)),
             blur_radius: px(0.0),
             spread_radius: px(SPOT_HALO),
+            inset: false,
         };
         spot.bg(gpui::rgb(t.accent)).shadow(vec![halo])
     } else {
