@@ -29,13 +29,26 @@ fn snapshot_status_maps_the_stream_status() {
 /// the list. It ends once `done` is set and nothing is left to forward.
 fn forward_until_done(
     runs: &DispatchRuns,
+    rx: broadcast::Receiver<DispatchRunEvent>,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    done: &std::sync::atomic::AtomicBool,
+) {
+    forward_until_done_with(runs, rx, out_tx, done, &|| {});
+}
+
+/// [`forward_until_done`], calling `on_empty` each time the forwarder finds
+/// its queue empty, before it decides whether to end.
+fn forward_until_done_with(
+    runs: &DispatchRuns,
     mut rx: broadcast::Receiver<DispatchRunEvent>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     done: &std::sync::atomic::AtomicBool,
+    on_empty: &dyn Fn(),
 ) {
     use std::sync::atomic::Ordering;
     use tokio::sync::broadcast::error::TryRecvError;
     loop {
+        let finished = done.load(Ordering::Acquire);
         let message = match rx.try_recv() {
             Ok(DispatchRunEvent::Updated(run)) => DaemonMessage::DispatchRunUpdated { run },
             Ok(DispatchRunEvent::Removed(run_id)) => DaemonMessage::DispatchRunRemoved { run_id },
@@ -44,8 +57,11 @@ fn forward_until_done(
                 runs.send_list(out_tx);
                 continue;
             }
-            Err(TryRecvError::Empty) if done.load(Ordering::Acquire) => return,
             Err(TryRecvError::Empty) => {
+                on_empty();
+                if finished {
+                    return;
+                }
                 std::thread::yield_now();
                 continue;
             }
@@ -735,6 +751,27 @@ fn initial_dispatch_runs_list_is_sent_under_the_runs_lock() {
         forwarder.join().expect("the forwarder ends");
         assert_eq!(client_view(&mut out_rx), ["run-last"]);
     }
+}
+
+/// A change sent, and `done` set, while the forwarder finds its queue empty
+/// is still forwarded: the forwarder ends only on an empty queue it found
+/// after reading `done`.
+#[test]
+fn forwarder_forwards_a_change_sent_as_it_finds_its_queue_empty() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let runs = DispatchRuns::new();
+    let done = AtomicBool::new(false);
+    let fired = AtomicBool::new(false);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let rx = runs.subscribe();
+    runs.send_list(&out_tx);
+    forward_until_done_with(&runs, rx, &out_tx, &done, &|| {
+        if !fired.swap(true, Ordering::AcqRel) {
+            runs.list_for_test("run-last", 4242, Some(7), Utc::now());
+            done.store(true, Ordering::Release);
+        }
+    });
+    assert_eq!(client_view(&mut out_rx), ["run-last"]);
 }
 
 /// The list follows the child alone; the files go only once the runner is
