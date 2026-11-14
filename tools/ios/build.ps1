@@ -43,6 +43,8 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $BinaryName = 'rustling-tulip-ios'
 $NotifyBinaryName = 'rustling-tulip-ios-notify'
 $NotifyBundle = 'PlugIns/RustlingTulipNotify.appex'
+# App Store Connect refuses an extension whose executable is not named after its bundle folder.
+$NotifyExecutable = 'RustlingTulipNotify'
 $PlistBuddy = '/usr/libexec/PlistBuddy'
 $AppId = 'dev.leftos.rustling-tulip.phone'
 $SigningNames = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PHONE_PROFILE_GZ_BASE64', 'IOS_NOTIFY_PROFILE_GZ_BASE64', 'IOS_TEAM_ID'
@@ -108,7 +110,7 @@ function Build-NotifyExtension([string] $App, [string] $Binary, [string] $Versio
     if (-not (Test-Path $Binary)) { throw "no extension binary at $Binary after the build" }
     $appex = Join-Path $App $NotifyBundle
     New-Item -ItemType Directory -Force -Path $appex | Out-Null
-    Copy-Item -LiteralPath $Binary -Destination (Join-Path $appex $NotifyBinaryName)
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $appex $NotifyExecutable)
     $plist = Join-Path $appex 'Info.plist'
     Copy-Item -LiteralPath (Join-Path $RepoRoot 'apps/ios-notify/Info.plist') -Destination $plist
     Write-PlistValue $plist 'CFBundleShortVersionString' $Version
