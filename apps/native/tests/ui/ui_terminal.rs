@@ -2567,3 +2567,119 @@ fn a_session_background_override_still_wins_over_the_theme(cx: &mut TestAppConte
     );
     assert_ne!(red, 0xaa1122, "the theme's red is not drawn");
 }
+
+/// A session's history that arrives while its pane has never been laid
+/// out (here, in a tab not shown yet) lands in the terminal's 80x24
+/// placeholder; the pane's first layout must still show it as a terminal
+/// of the pane's own size would: wrapped at the pane's width and running
+/// to its bottom row, not reflowed from 80 columns with the rows below
+/// the placeholder's cursor left blank.
+#[gpui::test]
+fn history_written_before_the_first_layout_fills_the_pane_to_its_bottom(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab(
+                "t2",
+                &split(
+                    SplitDirection::Horizontal,
+                    pane("p2", Some("s2")),
+                    pane("p3", None),
+                ),
+            ),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.cx.simulate_resize(size(px(984.0), px(601.0)));
+    h.answer_scrollback("s1", b"");
+    // Twenty lines of 79 columns: each fits the placeholder's 80 and
+    // wraps at the shown pane's width.
+    let lines: Vec<String> = (1..=20)
+        .map(|n| {
+            format!("{n:02} {}", "abcdefghijklmnopqrstuvwxyz".repeat(3))
+                .chars()
+                .take(79)
+                .collect()
+        })
+        .collect();
+    h.answer_scrollback("s2", lines.join("\r\n").as_bytes());
+    h.click_on("tab-t2");
+
+    let grid = h.grid_text("p2");
+    let cols = grid
+        .iter()
+        .map(|row| row.chars().count())
+        .max()
+        .expect("the shown pane has rows");
+    assert!(
+        cols < 79,
+        "the pane is narrower than a line ({cols} columns)"
+    );
+    let wrapped: Vec<String> = lines
+        .iter()
+        .flat_map(|line| {
+            let chars: Vec<char> = line.chars().collect();
+            chars
+                .chunks(cols)
+                .map(|chunk| chunk.iter().collect::<String>())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(wrapped.len() > grid.len(), "the history overflows the pane");
+    assert_eq!(
+        grid,
+        wrapped[wrapped.len() - grid.len()..],
+        "the pane shows the history's last {} rows at its own width",
+        grid.len()
+    );
+}
+
+/// A pane in a tab not shown yet is its session's query answerer: what its
+/// program asks while the tab is hidden must be answered then, not queued
+/// until the tab is first laid out, and the layout must not answer twice.
+#[gpui::test]
+fn a_hidden_pane_answers_its_program_before_it_is_first_shown(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab(
+                "t2",
+                &split(
+                    SplitDirection::Horizontal,
+                    pane("p2", Some("s2")),
+                    pane("p3", None),
+                ),
+            ),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.cx.simulate_resize(size(px(984.0), px(601.0)));
+    h.answer_scrollback("s1", b"");
+    let lines: Vec<String> = (1..=20)
+        .map(|n| {
+            format!("{n:02} {}", "abcdefghijklmnopqrstuvwxyz".repeat(3))
+                .chars()
+                .take(79)
+                .collect()
+        })
+        .collect();
+    h.answer_scrollback("s2", lines.join("\r\n").as_bytes());
+
+    // A device-attributes query, answered while the tab is not shown.
+    h.pty("s2", b"\x1b[c");
+    assert!(
+        !h.sent_input("s2").is_empty(),
+        "the hidden pane answered its program before the tab was shown"
+    );
+    h.click_on("tab-t2");
+    assert!(
+        h.sent_input("s2").is_empty(),
+        "the first layout's replay sends nothing to the child"
+    );
+}

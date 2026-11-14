@@ -115,7 +115,7 @@ Such a rig's `cargo build` goes through the gate without `--local`: a routed bui
 
 ## Looking at a UI change
 
-To look at a UI change, run `.\rt.ps1 native-shot <view>`: it writes a PNG of the real client window over a scripted fake daemon (`apps/native/examples/shot.rs`) to `.tmp\shots\` and prints its path (it draws Nord, the default theme; the UI specs pin Contrast in the harness). Read the PNG, and show the user before and after shots for any visual choice.
+To look at a UI change, run `.\rt.ps1 native-shot <view>`: it writes a PNG of the real client window over a scripted fake daemon (`apps/native/examples/shot.rs`) to `.tmp\shots\` and prints its path (it draws Nord, the default theme; the UI specs pin Contrast in the harness). Read the PNG, and show the user before and after shots for any visual choice. The fake daemon answers each `LoadScrollback` once and never redraws after a Resize, so a terminal pane in a shot shows the client's own handling of the replay as it is: a pane whose history arrives before its first layout keeps it and replays it at the pane's size on that layout (`TerminalPane::replay_pre_layout`).
 
 The views:
 

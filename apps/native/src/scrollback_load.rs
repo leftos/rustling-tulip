@@ -49,6 +49,54 @@ pub enum Step {
     Resize,
 }
 
+/// Twice the daemon's scrollback ring, so a whole replay and the output
+/// behind it always fit.
+pub const PRE_LAYOUT_CAP_BYTES: usize = 4 * 1024 * 1024;
+
+/// What a terminal pane wrote before its first layout, kept so the first
+/// layout can rebuild the terminal at the pane's own size by replaying it,
+/// rather than show it reflowed from the placeholder's.
+#[derive(Debug, Default)]
+pub struct PreLayoutLog {
+    payloads: Vec<Vec<u8>>,
+    bytes: usize,
+    finished: bool,
+}
+
+impl PreLayoutLog {
+    /// Whether writes are being kept for the replay.
+    pub fn recording(&self) -> bool {
+        !self.finished
+    }
+
+    /// Keeps a copy of `bytes` for the replay. Past [`PRE_LAYOUT_CAP_BYTES`]
+    /// the log drops what it kept and finishes, so the pane keeps what the
+    /// placeholder showed, as it would with no log at all.
+    pub fn record(&mut self, bytes: &[u8]) {
+        if !self.recording() || bytes.is_empty() {
+            return;
+        }
+        let total = self.bytes.saturating_add(bytes.len());
+        if total > PRE_LAYOUT_CAP_BYTES {
+            self.payloads = Vec::new();
+            self.bytes = 0;
+            self.finished = true;
+            return;
+        }
+        self.bytes = total;
+        self.payloads.push(bytes.to_vec());
+    }
+
+    /// The kept payloads, in the order they were written, or `None` when
+    /// nothing was kept. Finishes the log either way.
+    pub fn take(&mut self) -> Option<Vec<Vec<u8>>> {
+        self.finished = true;
+        self.bytes = 0;
+        let payloads = std::mem::take(&mut self.payloads);
+        (!payloads.is_empty()).then_some(payloads)
+    }
+}
+
 /// What became of a scrollback reply.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReplyVerdict {
@@ -223,8 +271,8 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        CLEAR_LINE, FAILED_BANNER, REQUEST_TIMEOUT, RETRY_DELAYS, ReplyVerdict, ScrollbackLoad,
-        State, Step, TRUNCATED_BANNER, retry_line,
+        CLEAR_LINE, FAILED_BANNER, PRE_LAYOUT_CAP_BYTES, PreLayoutLog, REQUEST_TIMEOUT,
+        RETRY_DELAYS, ReplyVerdict, ScrollbackLoad, State, Step, TRUNCATED_BANNER, retry_line,
     };
 
     fn clear() -> Step {
@@ -454,5 +502,42 @@ mod tests {
         let mut load = ScrollbackLoad::start(Instant::now());
         reply(&mut load, b"", None, false);
         assert_eq!(load.on_output(b"x".to_vec()), Some(b"x".to_vec()));
+    }
+
+    #[test]
+    fn a_default_records_and_take_returns_the_payloads_in_order() {
+        let mut log = PreLayoutLog::default();
+        assert!(log.recording(), "a pane records until its first layout");
+        log.record(b"one");
+        log.record(b"two");
+        assert!(log.recording(), "under the cap it keeps recording");
+        assert_eq!(log.take(), Some(vec![b"one".to_vec(), b"two".to_vec()]));
+        assert!(!log.recording(), "a take finishes the log");
+        assert_eq!(log.take(), None, "a finished log has nothing to give");
+    }
+
+    #[test]
+    fn an_empty_write_records_nothing() {
+        let mut log = PreLayoutLog::default();
+        log.record(b"");
+        assert_eq!(log.take(), None, "nothing was written");
+    }
+
+    #[test]
+    fn a_total_exactly_at_the_cap_still_replays() {
+        let mut log = PreLayoutLog::default();
+        let first = vec![b'x'; PRE_LAYOUT_CAP_BYTES - 1];
+        log.record(&first);
+        log.record(b"y");
+        assert_eq!(log.take(), Some(vec![first, b"y".to_vec()]));
+    }
+
+    #[test]
+    fn a_payload_past_the_cap_drops_the_log() {
+        let mut log = PreLayoutLog::default();
+        log.record(&vec![b'x'; PRE_LAYOUT_CAP_BYTES - 1]);
+        log.record(b"yz");
+        assert!(!log.recording(), "the cap finishes the log");
+        assert_eq!(log.take(), None, "nothing kept past the cap is replayed");
     }
 }

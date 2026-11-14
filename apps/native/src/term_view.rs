@@ -33,7 +33,9 @@ use crate::mouse::{self, CellSize, ClickThrough, CopyOnSelect, Gesture, Tracker,
 use crate::net::NetCommand;
 use crate::open::{self, LinkAction};
 use crate::paste_upload;
-use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
+use crate::scrollback_load::{
+    self, PreLayoutLog, ReplyVerdict, ScrollbackLoad, State as LoadState, Step,
+};
 use crate::shell_marks::{ShellDot, ShellStatus};
 use crate::term::prompt_nav::{self, Dir, Jump};
 use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, ShellCommand, Snapshot, Terminal, TextSpan};
@@ -83,6 +85,9 @@ pub struct TerminalPane {
     /// The grid's top-left corner in the window and its cell size, from the
     /// last layout; mouse positions map to cells through it.
     layout: Option<(Point<Pixels>, CellSize)>,
+    /// What the terminal wrote before the first layout, so that layout can
+    /// replay it at the pane's own size.
+    pre_layout: PreLayoutLog,
     /// The mouse gesture in progress (report or select) and its buttons.
     tracker: Tracker,
     /// The last cell a motion report named, so a move inside a cell sends
@@ -626,6 +631,7 @@ impl TerminalPane {
             sync_deadline: None,
             scroll_accum: 0.0,
             layout: None,
+            pre_layout: PreLayoutLog::default(),
             tracker: Tracker::default(),
             last_motion: None,
             focused_at_press: false,
@@ -1051,6 +1057,8 @@ impl TerminalPane {
         self.last_motion = None;
         self.sync_timer = None;
         self.sync_deadline = None;
+        // Nothing logged for the old terminal outlives it.
+        self.pre_layout = PreLayoutLog::default();
     }
 
     /// The terminal's content may read differently now.
@@ -1114,6 +1122,7 @@ impl TerminalPane {
         for step in steps {
             match step {
                 Step::Status(text) => {
+                    self.note_pre_layout(text.as_bytes());
                     self.term.feed(text.as_bytes());
                     self.content_changed();
                     self.service_term(cx);
@@ -1125,6 +1134,14 @@ impl TerminalPane {
             }
         }
         retry
+    }
+
+    /// Records what the terminal writes before the pane's first layout, so
+    /// that layout replays it at the pane's own size.
+    fn note_pre_layout(&mut self, bytes: &[u8]) {
+        if self.layout.is_none() {
+            self.pre_layout.record(bytes);
+        }
     }
 
     fn emit_retry(&self, cx: &mut Context<Self>) {
@@ -1320,10 +1337,12 @@ impl TerminalPane {
         self.content_changed();
         match bytes.strip_suffix(CURSOR_POSITION_QUERY) {
             Some(answered) if !output_follows => {
+                self.note_pre_layout(answered);
                 self.term.feed_history(answered);
                 self.feed_live(CURSOR_POSITION_QUERY, cx);
             }
             _ => {
+                self.note_pre_layout(bytes);
                 self.term.feed_history(bytes);
                 self.service_term(cx);
             }
@@ -1333,6 +1352,7 @@ impl TerminalPane {
     /// Feeds live output and answers what it asks for when this pane
     /// answers for its session.
     fn feed_live(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.note_pre_layout(bytes);
         self.term.feed(bytes);
         self.content_changed();
         self.service_term(cx);
@@ -1481,6 +1501,38 @@ impl TerminalPane {
             self.send_resize(resized);
         }
         changed
+    }
+
+    /// Lays the terminal out at `bounds`: sizes it, replays what it wrote
+    /// before the layout at the pane's own size, and returns whether the
+    /// gutter must be rebuilt.
+    fn lay_out(&mut self, bounds: Bounds<Pixels>, m: &Metrics) -> bool {
+        let resized = self.ensure_size(grid_size(bounds, m));
+        let cell = cell_size(m);
+        let relaid = resized || self.layout.is_none_or(|(_, old)| old != cell);
+        self.layout = Some((bounds.origin, cell));
+        let replayed = self.replay_pre_layout();
+        relaid || replayed
+    }
+
+    /// Rebuilds the terminal at the pane's own size by replaying what it wrote
+    /// before the first layout, at that size; a replay drops the replies and
+    /// copies it would queue, and sends nothing. Returns whether it replayed.
+    fn replay_pre_layout(&mut self) -> bool {
+        let Some(payloads) = self.pre_layout.take() else {
+            return false;
+        };
+        let Some(context) = &self.session else {
+            return false;
+        };
+        let cursor = context.default_cursor_shape();
+        let plain_shell = context.mode == SessionMode::PlainShell;
+        self.fresh_terminal(cursor, plain_shell);
+        for payload in payloads {
+            self.term.feed_history(&payload);
+        }
+        self.content_changed();
+        true
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -2344,10 +2396,7 @@ impl Render for TerminalPane {
             move |bounds, window, cx| {
                 let m = metrics(window, family, &font_settings);
                 let (snap, marked, link, relaid) = view.update(cx, |v, _| {
-                    let resized = v.ensure_size(grid_size(bounds, &m));
-                    let cell = cell_size(&m);
-                    let relaid = resized || v.layout.is_none_or(|(_, old)| old != cell);
-                    v.layout = Some((bounds.origin, cell));
+                    let relaid = v.lay_out(bounds, &m);
                     let snap = v.term.snapshot();
                     (snap, v.marked.clone(), v.hovered_link_cells(), relaid)
                 });
