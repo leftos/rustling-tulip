@@ -562,7 +562,7 @@ fn preset_wizard_folder_row_is_prefilled_and_typed_on_remote(cx: &mut TestAppCon
         "the field starts at the default under the source repo"
     );
     h.click_on("preset-source-folder");
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, "E:/prompts");
     h.click_on("preset-next");
     let ClientMessage::LaunchPreset { source, .. } = launch_remote_from_preview(&mut h) else {
@@ -1224,13 +1224,13 @@ fn max_panes_regroups_the_preview(cx: &mut TestAppContext) {
     assert_eq!(sizes(&mut h), [3, 1], "the preset's cap to start");
 
     h.click_on("preset-max-per-tab");
-    h.keys("ctrl-a backspace 2");
+    h.keys("secondary-a backspace 2");
     assert_eq!(sizes(&mut h), [2, 2]);
     assert_eq!(
         preview_line(&mut h).as_deref(),
         Some("4 prompts ready to spawn. → 2 tabs.")
     );
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     assert_eq!(sizes(&mut h), [3, 1], "blank is the preset default");
 
     h.keys("9");
@@ -1309,7 +1309,7 @@ fn launch_runs_scripts_then_launches_and_closes(cx: &mut TestAppContext) {
         })
     );
     h.click_on("preset-max-per-tab");
-    h.keys("ctrl-a backspace 0");
+    h.keys("secondary-a backspace 0");
     h.send(DaemonMessage::PresetScriptsResolved {
         id,
         values: vec![("ticket".to_owned(), "T-7".to_owned())],

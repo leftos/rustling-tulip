@@ -364,7 +364,7 @@ fn port_apply_sends_the_port_with_the_current_switch(cx: &mut TestAppContext) {
     );
 
     h.click_on(PORT);
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, "9000");
     assert!(h.root(|root, _| root.settings_apply_enabled()));
     h.click_on(APPLY);
@@ -373,7 +373,7 @@ fn port_apply_sends_the_port_with_the_current_switch(cx: &mut TestAppContext) {
     h.send(status(true, 9000, RemoteState::Starting));
     assert!(!h.root(|root, _| root.settings_apply_enabled()), "applied");
     h.click_on(PORT);
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, "9100");
     h.keys("enter");
     assert_eq!(configures(&mut h), [], "Enter applies nothing");
@@ -381,7 +381,7 @@ fn port_apply_sends_the_port_with_the_current_switch(cx: &mut TestAppContext) {
     assert_eq!(configures(&mut h), [(true, Some(9100))], "Apply sends it");
 
     h.click_on(PORT);
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, "0");
     assert!(!h.root(|root, _| root.settings_apply_enabled()));
     assert_eq!(
@@ -513,7 +513,7 @@ fn tab_walks_the_remote_access_controls(cx: &mut TestAppContext) {
         h.root(|root, _| root.remote_port()),
         Some("87871".to_owned())
     );
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, "9000");
     h.keys("tab");
     assert_eq!(
@@ -539,7 +539,7 @@ fn apply_that_the_echo_removes_keeps_the_keyboard(cx: &mut TestAppContext) {
     open_page(&mut h);
     h.keys("tab tab");
     assert_eq!(settings_focus(&mut h), Some(PORT));
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, "9000");
     h.keys("tab tab tab");
     assert_eq!(settings_focus(&mut h), Some(APPLY));
@@ -943,7 +943,7 @@ fn an_invalid_port_disables_apply_and_ok(cx: &mut TestAppContext) {
     h.send(status(true, 8787, RemoteState::Starting));
     open_page(&mut h);
     h.click_on(PORT);
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, "0");
     assert!(
         !h.root(|root, _| root.settings_apply_enabled()),
@@ -966,7 +966,7 @@ fn typed_port<'a>(cx: &'a mut TestAppContext, dir: &TestDir, port: &str) -> Harn
     h.send(status(true, 8787, serving(8787)));
     open_page(&mut h);
     h.click_on(PORT);
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, port);
     h
 }
@@ -1058,7 +1058,7 @@ fn ok_waits_past_a_starting_remote_status_and_stays_open_on_failed(cx: &mut Test
     );
 
     h.click_on(PORT);
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, "9100");
     h.click_on("settings-ok");
     assert_eq!(configures(&mut h), [(true, Some(9100))]);

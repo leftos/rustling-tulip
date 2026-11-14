@@ -761,14 +761,14 @@ fn extra_args_typed_in_advanced_reach_the_spawn_split(cx: &mut TestAppContext) {
     );
     tab_to(&mut h, "tab", "spawn-args", 20);
     h.set_clipboard(r#"--a b "c d"#);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     assert_eq!(
         h.root(|root, _| root.spawn_dialog_args_note()),
         Some("The extra arguments have an unclosed quote.")
     );
     assert!(drawn(&mut h, "spawn-args-note"));
     h.set_clipboard("\"");
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     assert_eq!(h.root(|root, _| root.spawn_dialog_args_note()), None);
     h.click_on("spawn-submit");
     let request = the_spawn(&h.sent());
@@ -911,9 +911,9 @@ fn add_env_row(h: &mut Harness<'_>, key: &str, value: &str) {
     h.click_on("spawn-advanced");
     h.click_on("spawn-env-add");
     h.set_clipboard(key);
-    h.keys("ctrl-v tab");
+    h.keys("secondary-v tab");
     h.set_clipboard(value);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
 }
 
 const SAVED_NOTE: &str = "Saved in Windows Credential Manager; only a reference is kept.";
@@ -1070,7 +1070,7 @@ fn an_env_reference_hides_the_note_and_is_sent_verbatim(cx: &mut TestAppContext)
     assert!(drawn(&mut h, "spawn-env-note-0"));
     h.set_clipboard("${env:EXAMPLE_API_KEY}");
     h.keys(
-        "backspace backspace backspace backspace backspace backspace backspace backspace ctrl-v",
+        "backspace backspace backspace backspace backspace backspace backspace backspace secondary-v",
     );
     // Bounds outlive a line that stops being drawn, so its absence is read
     // from the model.

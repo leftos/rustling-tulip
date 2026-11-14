@@ -586,7 +586,7 @@ fn the_alias_field_sends_nothing_on_enter_and_apply_sends_it(cx: &mut TestAppCon
     h.keys("enter");
     assert!(writes(&mut h).is_empty(), "the alias did not change");
 
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "work");
     h.keys("enter");
     assert!(writes(&mut h).is_empty(), "Enter sends nothing");
@@ -610,7 +610,7 @@ fn the_alias_field_sends_nothing_on_enter_and_apply_sends_it(cx: &mut TestAppCon
 
     h.send(accounts_reply(trio(), None, &request_id(&sent)));
     press(&mut h, "settings-accounts-alias-3");
-    h.keys("ctrl-a backspace enter");
+    h.keys("secondary-a backspace enter");
     assert!(writes(&mut h).is_empty(), "Enter sends nothing");
     h.click_on("settings-apply");
     let sent = one_write(&mut h);
@@ -699,10 +699,10 @@ fn renamed_and_moved() -> Vec<AccountSnapshot> {
 fn three_edits(h: &mut Harness<'_>) {
     page(h, trio(), None);
     press(h, "settings-accounts-alias-2");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(h, "work");
     press(h, "settings-accounts-alias-3");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(h, "home");
     press(h, "settings-accounts-up-3");
     assert!(writes(h).is_empty(), "nothing is sent before Apply");
@@ -773,7 +773,7 @@ fn ok_stays_open_when_an_account_write_is_refused(cx: &mut TestAppContext) {
     let mut h = opened(cx, &dir);
     page(&mut h, trio(), None);
     press(&mut h, "settings-accounts-alias-2");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "work");
     press(&mut h, "settings-accounts-up-3");
     h.click_on("settings-ok");
@@ -1132,7 +1132,7 @@ fn the_admin_controls_are_disabled_for_a_remote_origin(cx: &mut TestAppContext) 
         assert!(writes(&mut h).is_empty(), "{selector} is disabled");
     }
     press(&mut h, "settings-accounts-alias-2");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "work");
     h.keys("enter");
     assert!(writes(&mut h).is_empty(), "the alias field takes no edit");
@@ -1172,7 +1172,7 @@ fn an_alias_field_is_read_only_while_a_write_is_pending(cx: &mut TestAppContext)
     let sent = one_write(&mut h);
 
     press(&mut h, "settings-accounts-alias-3");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "x");
     h.keys("enter");
     assert!(writes(&mut h).is_empty(), "the field waits for the write");
@@ -1200,7 +1200,7 @@ fn closing_settings_with_ok_sends_a_typed_alias(cx: &mut TestAppContext) {
     let mut h = opened(cx, &dir);
     page(&mut h, trio(), None);
     press(&mut h, "settings-accounts-alias-2");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "work");
     h.click_on("settings-ok");
     let sent = one_write(&mut h);
@@ -1251,7 +1251,7 @@ fn leaving_an_untouched_alias_field_does_not_undo_a_rename_from_elsewhere(cx: &m
 fn typed_alias(h: &mut Harness<'_>) {
     page(h, trio(), None);
     press(h, "settings-accounts-alias-2");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(h, "work");
     assert!(writes(h).is_empty(), "typing sends nothing");
 }
@@ -1610,7 +1610,7 @@ fn a_remote_hosts_accounts_lock_administration(cx: &mut TestAppContext) {
         );
     }
     press(&mut h, "settings-accounts-alias-2");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "work");
     h.keys("enter");
     assert!(

@@ -316,7 +316,7 @@ fn a_launch_command_edit_on_the_chosen_host_goes_to_that_host_only(cx: &mut Test
     );
 
     h.click_on("settings-agent-program");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "wrapper");
     h.click_on("settings-apply");
 
@@ -339,7 +339,7 @@ fn a_draft_on_this_pcs_page_survives_choosing_another_host(cx: &mut TestAppConte
     h.keys("ctrl-,");
     h.click_on("settings-tab-claude");
     h.click_on("settings-agent-program");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "mine");
 
     h.click_on(&remote_row());
@@ -540,7 +540,7 @@ fn the_worktrees_page_shows_and_saves_the_chosen_hosts_root(cx: &mut TestAppCont
         "the root in use is box's"
     );
     h.click_on("settings-worktrees-root-input");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "boxroot");
     h.click_on("settings-apply");
 
@@ -577,7 +577,7 @@ fn a_worktrees_draft_on_this_pc_survives_choosing_another_host(cx: &mut TestAppC
     let dir = TestDir::new();
     let mut h = worktrees_page(cx, &dir);
     h.click_on("settings-worktrees-root-input");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "mine");
 
     h.click_on(&remote_row());
@@ -659,7 +659,7 @@ fn the_chosen_host_disconnecting_drops_its_worktrees_draft(cx: &mut TestAppConte
     let mut h = worktrees_page(cx, &dir);
     h.click_on(&remote_row());
     h.click_on("settings-worktrees-root-input");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(&mut h, "draft");
 
     h.host(&remote())
@@ -1125,7 +1125,7 @@ fn cap_draft(h: &mut Harness<'_>) -> Option<String> {
 
 fn type_cap(h: &mut Harness<'_>, cap: &str) {
     h.click_on("settings-dashboard-cap");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_line(h, cap);
 }
 

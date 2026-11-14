@@ -1469,7 +1469,7 @@ fn click_general(h: &mut Harness<'_>, selector: &str) {
 /// Empties the Maximum chat width field and types `text` into it.
 fn type_chat_width(h: &mut Harness<'_>, text: &str) {
     click_general(h, CHAT_WIDTH);
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     if !text.is_empty() {
         type_text(h, text);
     }
@@ -2871,9 +2871,9 @@ fn clearing_both_rows_sends_a_blank_pair(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = claude_page(cx, &dir, agent_commands("wrapper", "verbose", None));
     h.click_on("settings-agent-program");
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     h.click_on("settings-agent-args");
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     h.click_on("settings-apply");
     assert_eq!(
         launch_sets(&h.sent()),
@@ -3055,7 +3055,7 @@ fn a_failed_apply_with_another_error_does_not_count_the_next_broadcast(cx: &mut 
         "a refusal with no launch-row text toasts"
     );
     h.click_on("settings-agent-program");
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     h.send(agent_commands("", "", None));
     assert!(
         !h.root(|root, _| root.launch_saved()),
@@ -3642,7 +3642,7 @@ fn a_refused_setting_shows_unsaved_and_is_not_resent(cx: &mut TestAppContext) {
     refuse(&mut h, last_settings_id(&sent).as_deref(), PROFILE_REFUSAL);
 
     h.click_on("settings-test-profile");
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     h.click_on("settings-test-sandbox");
     h.click_on("settings-apply");
     assert_eq!(
@@ -5023,7 +5023,7 @@ fn a_pending_dashboard_row_opens_the_apply_gate(cx: &mut TestAppContext) {
     let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
     assert_eq!(apply_gate(&mut h), (false, false), "nothing is pending");
     h.click_on("settings-dashboard-cap");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_text(&mut h, "2.5");
     assert_eq!(apply_gate(&mut h), (true, true), "the cap pends");
     h.click_on("settings-apply");
@@ -5414,7 +5414,7 @@ fn cap_field_sends_a_valid_cap_and_refuses_a_bad_one(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
     h.click_on("settings-dashboard-cap");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_text(&mut h, "two");
     h.keys("enter");
     assert_eq!(summarizer_sets(&h.sent()), [], "a bad cap is not sent");
@@ -5423,7 +5423,7 @@ fn cap_field_sends_a_valid_cap_and_refuses_a_bad_one(cx: &mut TestAppContext) {
         "and says why"
     );
 
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_text(&mut h, "2.5");
     h.keys("enter");
     h.click_on("settings-apply");
@@ -5627,7 +5627,7 @@ fn a_toggle_right_after_a_cap_change_keeps_the_new_cap(cx: &mut TestAppContext) 
     let dir = TestDir::new();
     let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
     h.click_on("settings-dashboard-cap");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_text(&mut h, "2.50");
     h.keys("enter");
     h.click_on("settings-apply");
@@ -5696,7 +5696,7 @@ fn the_cap_field_follows_a_cap_set_elsewhere_after_a_local_edit(cx: &mut TestApp
         })
     };
     h.click_on("settings-dashboard-cap");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_text(&mut h, "2.5");
     h.keys("enter");
     h.send(capped(2.5));
@@ -6067,7 +6067,7 @@ fn a_dashboard_draft_survives_a_tab_switch(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
     h.click_on("settings-dashboard-cap");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_text(&mut h, "3");
     h.click_on("settings-tab-general");
     h.click_on("settings-tab-dashboard");

@@ -32,6 +32,8 @@ The native client has three test tiers, and the driver MCP server has a live spe
 
   Which window drew last decides where `RootView`'s subscriptions run, so a spec about window routing stages it explicitly: `h.cx.update(|w, _| w.refresh()); h.cx.run_until_parked();` makes the main window the last to draw, and an action or output in the pop-out followed by `run_until_parked` makes the pop-out the last.
 
+  A key the product binds to the platform's secondary modifier (select all, copy, paste and cut in a text input; copy and paste in a terminal) is pressed as `secondary-<key>` (`h.keys("secondary-a backspace")`), never as `ctrl-<key>`: gpui's test `simulate_keystrokes` parses each keystroke for the host OS, so `secondary-` is Cmd on macOS and Ctrl elsewhere, and the spec holds on both. A chord the product binds to Ctrl everywhere (Ctrl+C as an interrupt, the viewer's shortcuts, `ctrl-tab`) stays `ctrl-`. `pwsh -NoProfile -File tools/rt-mac.ps1 test -p rustling-tulip-native --test ui` runs the specs on the Mac mini.
+
   Every spec file is a module of the one `tests/ui/main.rs` binary (a new spec is `tests/ui/ui_<name>.rs` plus its `mod` line there), since linking and starting a binary per file cost more than the tests themselves; the crate's lib has `doctest = false`.
 - **Live e2e** — `.\rt.ps1 native-e2e`: builds daemon + tracer in test-release and runs `tests/e2e_live.rs`, `tests/e2e_recover.rs`, `tests/e2e_remote.rs`, `tests/e2e_ssh.rs`, `tests/e2e_multi_host.rs`, `tests/e2e_update.rs` and `tests/e2e_dispatch.rs` under `nextest --run-ignored only` against a real daemon isolated under `.tmp/`.
 

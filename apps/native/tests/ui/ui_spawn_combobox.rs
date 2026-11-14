@@ -231,10 +231,10 @@ fn base_field_offers_no_create_row(cx: &mut TestAppContext) {
         ]),
         "remote branches, then local ones"
     );
-    h.keys("ctrl-a z z z");
+    h.keys("secondary-a z z z");
     assert_eq!(base(&mut h).as_deref(), Some("zzz"));
     assert_eq!(base_rows(&mut h), None, "nothing matches: no list at all");
-    h.keys("ctrl-a f o x");
+    h.keys("secondary-a f o x");
     assert_eq!(base_rows(&mut h), Some(vec!["wt/red-fox".to_owned()]));
     h.keys("enter");
     assert_eq!(base(&mut h).as_deref(), Some("wt/red-fox"));

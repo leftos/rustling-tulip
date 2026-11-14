@@ -318,11 +318,16 @@ fn drag_selects_copies_on_release_and_ctrl_c_copies_instead_of_interrupting(
     assert_eq!(h.clipboard().as_deref(), Some("hello"), "copy on select");
 
     h.set_clipboard("other");
-    h.keys("ctrl-c");
+    h.keys("secondary-c");
     assert!(h.sent_input("s1").is_empty(), "no ^C with a selection");
     assert_eq!(h.clipboard().as_deref(), Some("hello"));
-    h.keys("ctrl-c");
-    assert_eq!(h.sent_input("s1"), [0x03], "the selection was cleared");
+    h.keys("secondary-c");
+    let after_clear: &[u8] = if cfg!(target_os = "macos") {
+        &[]
+    } else {
+        &[0x03]
+    };
+    assert_eq!(h.sent_input("s1"), after_clear, "the selection was cleared");
 }
 
 #[gpui::test]
@@ -350,7 +355,7 @@ fn ctrl_c_without_selection_interrupts_and_ctrl_shift_c_sends_nothing(cx: &mut T
     let mut h = attached(cx, &dir, session("s1").build());
     h.keys("ctrl-c");
     assert_eq!(h.sent_input("s1"), [0x03]);
-    h.keys("ctrl-shift-c");
+    h.keys("secondary-shift-c");
     assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
 }
 
@@ -369,12 +374,12 @@ fn ctrl_v_pastes_and_brackets_when_the_child_asks(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir, session("s1").build());
     h.set_clipboard("a\r\nb\nc");
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     assert_eq!(h.sent_input("s1"), b"a\rb\rc");
 
     h.pty("s1", b"\x1b[?2004h");
     h.set_clipboard("x\r\ny\x1b[201~z");
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     assert_eq!(h.sent_input("s1"), b"\x1b[200~x\ryz\x1b[201~");
 }
 
@@ -400,7 +405,7 @@ fn a_paste_with_no_text_sends_the_agents_image_paste_key(cx: &mut TestAppContext
     h.click(at, Modifiers::none());
     h.sent();
     h.set_clipboard("");
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     assert_eq!(
         h.sent_input(&s.id),
         b"\x1bv",
@@ -415,7 +420,7 @@ fn a_paste_with_no_text_or_image_sends_nothing_to_a_remote_agent(cx: &mut TestAp
         let shell = session("b1").shell("D:/x").build();
         let mut h = support::remote_in_pane(cx, &dir, &serde_json::json!({}), &[], shell);
         h.set_clipboard("");
-        h.keys("ctrl-v");
+        h.keys("secondary-v");
         assert_eq!(
             h.host(&support::saved_remote()).sent_input("b1"),
             [0x16],
@@ -446,7 +451,7 @@ fn a_paste_with_no_text_or_image_sends_nothing_to_a_remote_agent(cx: &mut TestAp
     });
     host.sent();
     h.set_clipboard("");
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let sent = h.host(&support::saved_remote()).sent();
     assert!(
         support::input_to(&sent, "b1").is_empty(),
@@ -459,7 +464,7 @@ fn a_paste_with_no_text_or_image_sends_nothing_to_a_remote_agent(cx: &mut TestAp
         "with no image nothing is uploaded: {sent:?}"
     );
     h.set_clipboard("hi");
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     assert_eq!(
         h.host(&support::saved_remote()).sent_input("b1"),
         b"hi",
@@ -660,7 +665,7 @@ fn stopped_session_drops_keys_and_pastes(cx: &mut TestAppContext) {
     });
     h.keys("a enter");
     h.set_clipboard("x");
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
 }
 
@@ -1397,7 +1402,7 @@ fn selection_copy_shows_the_chip(cx: &mut TestAppContext) {
     assert_eq!(h.root(|root, _| root.copied_chip()), Some(5));
 
     h.set_clipboard("other");
-    h.keys("ctrl-shift-c");
+    h.keys("secondary-shift-c");
     assert_eq!(h.clipboard().as_deref(), Some("hello"));
     assert_eq!(h.root(|root, _| root.copied_chip()), Some(5));
     assert_eq!(

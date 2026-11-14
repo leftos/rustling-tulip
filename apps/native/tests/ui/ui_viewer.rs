@@ -725,7 +725,7 @@ fn typing_in_the_find_bar_counts_matches(cx: &mut TestAppContext) {
     assert_eq!(find_label(&mut h).as_deref(), Some("1 of 1"));
     h.cx.simulate_input("x");
     assert_eq!(find_label(&mut h).as_deref(), Some("0 of 0"));
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     assert_eq!(find_label(&mut h).as_deref(), Some(""), "an empty query");
 }
 

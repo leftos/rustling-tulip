@@ -787,7 +787,7 @@ fn export_in_the_editor_takes_the_working_theme_under_the_typed_name(cx: &mut Te
     let mut h = opened(cx, &dir);
     h.click_on("themes-duplicate");
     h.click_on("themes-name");
-    h.keys("ctrl-a m i n e");
+    h.keys("secondary-a m i n e");
     h.set_saved_file(Some(&out));
 
     h.click_on("themes-export");

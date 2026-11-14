@@ -5072,7 +5072,7 @@ fn esc_in_a_settings_field_hands_the_main_windows_keyboard_back_there(cx: &mut T
     assert!(h.root(|root, _| root.settings_open()), "Settings opens");
     h.scroll_into_view("settings-content", "settings-chat-width-input");
     h.click_on("settings-chat-width-input");
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     h.cx.simulate_input("900");
     assert_eq!(
         settings_focus(&mut h),

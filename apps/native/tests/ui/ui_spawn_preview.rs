@@ -294,7 +294,7 @@ fn stale_reply_for_old_base_is_dropped(cx: &mut TestAppContext) {
     type_keys(&mut h, "a");
     assert_eq!(previews(&settle(&mut h)).len(), 1);
     h.click_on("spawn-base-branch");
-    type_keys(&mut h, "ctrl-a m a i n");
+    type_keys(&mut h, "secondary-a m a i n");
     reply(&mut h, "a", behind());
     assert_eq!(
         stale(&mut h),
@@ -318,7 +318,7 @@ fn older_reply_for_same_branch_after_base_change_is_dropped(cx: &mut TestAppCont
     type_keys(&mut h, "a");
     let first = preview_id(&settle(&mut h));
     h.click_on("spawn-base-branch");
-    type_keys(&mut h, "ctrl-a m a i n");
+    type_keys(&mut h, "secondary-a m a i n");
     let sent = settle(&mut h);
     assert_eq!(
         previews(&sent),

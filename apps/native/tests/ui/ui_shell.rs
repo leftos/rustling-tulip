@@ -492,7 +492,7 @@ fn browse_opens_at_the_typed_folder(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &fixture());
     h.open_shell_dialog_from_more();
     h.set_picked_folder(None);
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     assert_eq!(folder(&mut h).as_deref(), Some(""), "the field is empty");
     h.click_on("shell-browse");
     assert_eq!(

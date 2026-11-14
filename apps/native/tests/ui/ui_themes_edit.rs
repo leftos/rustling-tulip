@@ -389,7 +389,7 @@ fn save_refuses_a_taken_name(cx: &mut TestAppContext) {
     let mut h = duplicate(cx, &dir);
 
     h.click_on("themes-name");
-    h.keys("ctrl-a");
+    h.keys("secondary-a");
     type_text(&mut h, "Nord");
     assert_eq!(editor(&mut h).name, "Nord");
     h.click_on("themes-save");
@@ -408,7 +408,7 @@ fn save_refuses_a_blank_name(cx: &mut TestAppContext) {
     let mut h = duplicate(cx, &dir);
 
     h.click_on("themes-name");
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     h.click_on("themes-save");
 
     assert_eq!(name_note(&mut h).as_deref(), Some("Give the theme a name"));

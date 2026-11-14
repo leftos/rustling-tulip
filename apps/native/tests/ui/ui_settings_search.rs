@@ -63,7 +63,7 @@ fn type_text(h: &mut Harness<'_>, text: &str) {
 
 /// Empties the search box, which has the keyboard, and types `text`.
 fn search(h: &mut Harness<'_>, text: &str) {
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(h, text);
 }
 

@@ -127,7 +127,7 @@ fn an_image_paste_into_a_remote_agent_uploads_it_and_pastes_the_returned_path(
     let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
     let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
     h.set_clipboard_image(ImageFormat::Png, png.clone());
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let upload = the_upload(&mut h);
     assert_eq!(upload.session_id, "b1");
     assert_eq!(upload.name, "paste.png");
@@ -141,7 +141,7 @@ fn an_image_paste_into_a_remote_agent_uploads_it_and_pastes_the_returned_path(
     );
 
     h.host(&support::saved_remote()).pty("b1", b"\x1b[?2004h");
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let upload = the_upload(&mut h);
     answer(&mut h, &upload, "/work/.tmp/rt-uploads/paste-2.png");
     assert_eq!(
@@ -156,7 +156,7 @@ fn a_returned_path_with_a_space_is_pasted_in_double_quotes(cx: &mut TestAppConte
     let dir = TestDir::new();
     let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
     h.set_clipboard_image(ImageFormat::Png, vec![1, 2, 3]);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let upload = the_upload(&mut h);
     answer(
         &mut h,
@@ -174,7 +174,7 @@ fn the_path_is_pasted_into_the_pane_that_pasted_the_image(cx: &mut TestAppContex
     let dir = TestDir::new();
     let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
     h.set_clipboard_image(ImageFormat::Png, vec![1, 2, 3]);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let upload = the_upload(&mut h);
     // Focus moves to This PC's pane before the host answers.
     let at = h.cell_center("p1", 0, 0);
@@ -195,7 +195,7 @@ fn the_path_is_pasted_into_the_pane_that_pasted_the_image(cx: &mut TestAppContex
     // the answer comes.
     let at = h.cell_center("p2", 0, 0);
     h.click(at, Modifiers::none());
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let upload = the_upload(&mut h);
     let (b1, _) = agent_session();
     h.host(&support::saved_remote())
@@ -232,7 +232,7 @@ fn a_jpeg_on_the_clipboard_uploads_under_its_own_extension(cx: &mut TestAppConte
     let dir = TestDir::new();
     let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
     h.set_clipboard_image(ImageFormat::Jpeg, vec![0xFF, 0xD8, 0xFF]);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let upload = the_upload(&mut h);
     assert_eq!(upload.name, "paste.jpg");
     assert_eq!(upload.bytes, [0xFF, 0xD8, 0xFF]);
@@ -254,7 +254,7 @@ fn a_copied_bitmap_reported_as_bmp_pastes_a_png(cx: &mut TestAppContext) {
     h.cx.update(|_, cx| rustling_tulip_native::set_bitmap_reader(cx, reads_a_png));
     let bmp = vec![b'B', b'M', 1, 2, 3];
     h.set_clipboard_image(ImageFormat::Bmp, bmp.clone());
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let upload = the_upload(&mut h);
     assert_eq!(upload.name, "paste.png");
     assert_eq!(upload.bytes, READER_PNG, "the reader's PNG goes up");
@@ -296,7 +296,7 @@ fn a_host_without_upload_file_toasts_that_it_cannot_receive_images(cx: &mut Test
     let dir = TestDir::new();
     let mut h = remote_agent(cx, &dir, &[]);
     h.set_clipboard_image(ImageFormat::Png, vec![1, 2, 3]);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let sent = h.host(&support::saved_remote()).sent();
     assert!(
         uploads_in(&sent).is_empty(),
@@ -318,7 +318,7 @@ fn an_image_over_the_upload_cap_is_refused_with_a_toast(cx: &mut TestAppContext)
     let dir = TestDir::new();
     let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
     h.set_clipboard_image(ImageFormat::Png, vec![7; UPLOAD_MAX_BYTES + 1]);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let sent = h.host(&support::saved_remote()).sent();
     assert!(uploads_in(&sent).is_empty(), "nothing is uploaded");
     assert!(!has_input(&sent), "nothing is typed");
@@ -337,7 +337,7 @@ fn an_error_reply_to_an_upload_toasts_its_message_and_pastes_nothing(cx: &mut Te
     let dir = TestDir::new();
     let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
     h.set_clipboard_image(ImageFormat::Png, vec![1, 2, 3]);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let upload = the_upload(&mut h);
     let message = "the file is larger than the host takes";
     h.host(&support::saved_remote()).send(DaemonMessage::Error {
@@ -379,7 +379,7 @@ fn a_remote_shell_with_an_image_still_gets_ctrl_v(cx: &mut TestAppContext) {
         &[FEATURE_UPLOAD_FILE],
     );
     h.set_clipboard_image(ImageFormat::Png, vec![1, 2, 3]);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let sent = h.host(&support::saved_remote()).sent();
     assert!(
         uploads_in(&sent).is_empty(),
@@ -414,7 +414,7 @@ fn a_local_agent_with_an_image_still_gets_the_image_paste_key(cx: &mut TestAppCo
     h.click(at, Modifiers::none());
     h.sent();
     h.set_clipboard_image(ImageFormat::Png, vec![1, 2, 3]);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let sent = h.sent();
     assert!(
         uploads_in(&sent).is_empty(),
@@ -432,7 +432,7 @@ fn an_upload_whose_host_reconnects_is_forgotten(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = remote_agent(cx, &dir, &[FEATURE_UPLOAD_FILE]);
     h.set_clipboard_image(ImageFormat::Png, vec![1, 2, 3]);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     let upload = the_upload(&mut h);
 
     let (s, descriptor) = agent_session();
@@ -462,7 +462,7 @@ fn an_upload_whose_host_reconnects_is_forgotten(cx: &mut TestAppContext) {
         "an answer from before the reconnect pastes nothing"
     );
     h.set_clipboard("hi");
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
     assert_eq!(
         h.host(&support::saved_remote()).sent_input("b1"),
         b"hi",

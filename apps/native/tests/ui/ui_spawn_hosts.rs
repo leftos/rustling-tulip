@@ -502,9 +502,9 @@ const SEALED: &str = "${secret:0123456789abcdef0123456789abcdef}";
 fn add_env_row(h: &mut Harness<'_>, key: &str, value: &str) {
     h.click_on("spawn-env-add");
     h.set_clipboard(key);
-    h.keys("ctrl-v tab");
+    h.keys("secondary-v tab");
     h.set_clipboard(value);
-    h.keys("ctrl-v");
+    h.keys("secondary-v");
 }
 
 #[gpui::test]

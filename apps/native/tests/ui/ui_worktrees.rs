@@ -199,7 +199,7 @@ fn empty_draft_saves_none(cx: &mut TestAppContext) {
     worktrees_tab(&mut h);
     assert_eq!(path(&mut h).as_deref(), Some("D:/wt"));
     h.click_on("settings-worktrees-root-input");
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     assert_eq!(path(&mut h).as_deref(), Some(""));
     h.keys("enter");
     h.click_on("settings-apply");
@@ -320,7 +320,7 @@ fn two_quick_saves_show_saved_only_after_the_last_echo(cx: &mut TestAppContext) 
     h.keys("enter");
     h.click_on("settings-apply");
     h.click_on("settings-worktrees-root-input");
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, "D:/two");
     h.keys("enter");
     h.click_on("settings-apply");
@@ -350,7 +350,7 @@ fn another_clients_root_change_does_not_overwrite_an_edited_field(cx: &mut TestA
         "an untouched field follows the daemon"
     );
     h.click_on("settings-worktrees-root-input");
-    h.keys("ctrl-a backspace");
+    h.keys("secondary-a backspace");
     type_text(&mut h, "D:/mine");
     root_changed(&mut h, "E:/other", true);
     assert_eq!(path(&mut h).as_deref(), Some("D:/mine"), "the edit stands");
