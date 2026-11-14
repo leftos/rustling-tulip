@@ -6920,6 +6920,7 @@ dependencies = [
  "regex",
  "rodio",
  "russh",
+ "rustling-tulip-ios-notify",
  "rustls",
  "rustls-native-certs",
  "rustls-platform-verifier",

@@ -7,11 +7,18 @@
 //! to its class at run time; each logs that `UIKit` called it. Every
 //! completion runs on a thread of the system's choosing and answers through a
 //! oneshot channel.
+//!
+//! A background push wakes the app through
+//! `didReceiveRemoteNotification:fetchCompletionHandler:`, added at launch
+//! ([`add_wake_method`]): a clear notice removes its session's Needs you
+//! notification and sets the badge.
 
+use std::ffi::CStr;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use block2::RcBlock;
+use block2::{DynBlock, RcBlock};
+use dispatch2::{DispatchQueue, MainThreadBound};
 use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
@@ -21,13 +28,14 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
 use objc2::{available, sel};
 use objc2_foundation::{NSArray, NSData, NSDictionary, NSError, NSString};
-use objc2_ui_kit::UIApplication;
+use objc2_ui_kit::{UIApplication, UIApplicationState, UIBackgroundFetchResult};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNNotification, UNNotificationSettings,
     UNUserNotificationCenter,
 };
-use protocol::ApnsEnvironment;
+use protocol::{ApnsEnvironment, PushNotice, PushNoticeKind};
 use push_crypto::{InstallKeys, KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE};
+use rustling_tulip_ios_notify::notice;
 use security_framework::access_control::{ProtectionMode, SecAccessControl};
 use security_framework::passwords::{
     PasswordOptions, delete_generic_password_options, generic_password,
@@ -35,6 +43,7 @@ use security_framework::passwords::{
 };
 
 use super::push::{Authorization, Delivered, PushPlatform, build_environment};
+use super::sweep::{self, Sweep};
 
 /// The launch argument that asks for provisional notification permission at
 /// start, with no prompt, then registers for the device token: the
@@ -98,6 +107,7 @@ impl PushPlatform for IosPushPlatform {
             ))
             .boxed();
         };
+        add_wake_method();
         if let Err(err) = HOOK.get_or_init(add_delegate_methods) {
             return futures::future::ready(Err(err.clone())).boxed();
         }
@@ -194,6 +204,7 @@ fn delivered_of(shown: &UNNotification) -> Delivered {
         host: info_string(&info, "host"),
         session_id: info_string(&info, "session_id"),
         kind: info_string(&info, "kind"),
+        waited_since: info_string(&info, "waited_since"),
     }
 }
 
@@ -359,35 +370,193 @@ fn add_delegate_methods() -> Result<(), String> {
         class,
         sel!(application:didRegisterForRemoteNotificationsWithDeviceToken:),
         registered,
+        c"v@:@@",
     )?;
     add_method(
         class,
         sel!(application:didFailToRegisterForRemoteNotificationsWithError:),
         failed,
+        c"v@:@@",
     )
 }
 
-/// Adds `imp` to `class` as `name`.
+/// Adds `imp` to `class` as `name`, under the Objective-C type string
+/// `types`.
 ///
 /// # Errors
 ///
 /// The class already answers `name`, so its own method would take the call
-/// and no device token request would ever be answered.
-fn add_method(class: &AnyClass, name: Sel, imp: Imp) -> Result<(), String> {
-    // SAFETY: `class` is a registered class, `imp` takes the `v@:@@` signature named, and
-    // the runtime copies the type string.
+/// and ours would never run.
+fn add_method(class: &AnyClass, name: Sel, imp: Imp, types: &CStr) -> Result<(), String> {
+    // SAFETY: `class` is a registered class, every caller passes an `imp` that takes the
+    // signature `types` names, and the runtime copies the type string.
     let added = unsafe {
         objc2::ffi::class_addMethod(
             std::ptr::from_ref(class).cast_mut(),
             name,
             imp,
-            c"v@:@@".as_ptr(),
+            types.as_ptr(),
         )
     };
     if added.as_bool() {
         Ok(())
     } else {
         Err(format!("the app delegate already answers {name:?}"))
+    }
+}
+
+/// The block `application:didReceiveRemoteNotification:fetchCompletionHandler:`
+/// is handed, which must be called once.
+type FetchHandler = DynBlock<dyn Fn(UIBackgroundFetchResult)>;
+
+/// [`FetchHandler`], copied off the stack so it outlives the call.
+type HeldFetchHandler = RcBlock<dyn Fn(UIBackgroundFetchResult)>;
+
+/// The Objective-C signature of [`did_wake`].
+type Woken = extern "C-unwind" fn(
+    *mut AnyObject,
+    Sel,
+    *mut UIApplication,
+    *mut NSDictionary,
+    *mut FetchHandler,
+);
+
+/// Whether the background-push callback was added, tried once.
+static WAKE_HOOK: OnceLock<()> = OnceLock::new();
+
+/// Adds `application:didReceiveRemoteNotification:fetchCompletionHandler:`
+/// to `gpui_ios`'s delegate class, once; called at launch, so a background
+/// push that wakes the app finds it. A failure is logged, and the
+/// foreground sweep still clears.
+pub fn add_wake_method() {
+    WAKE_HOOK.get_or_init(|| {
+        if let Err(err) = add_wake() {
+            tracing::warn!(error = %err, "phone: a background push will not clear notifications");
+        }
+    });
+}
+
+/// [`add_wake_method`]'s one try.
+///
+/// # Errors
+///
+/// The class is not registered, or already answers the selector.
+fn add_wake() -> Result<(), String> {
+    let class = AnyClass::get(DELEGATE_CLASS).ok_or("the app delegate class is not registered")?;
+    // SAFETY: a C-ABI function; the runtime calls it with the `v@:@@@?` signature it is added
+    // under, which is the one it declares.
+    let woken = unsafe { std::mem::transmute::<Woken, Imp>(did_wake as Woken) };
+    add_method(
+        class,
+        sel!(application:didReceiveRemoteNotification:fetchCompletionHandler:),
+        woken,
+        c"v@:@@@?",
+    )
+}
+
+/// `application:didReceiveRemoteNotification:fetchCompletionHandler:`: a
+/// background push woke the app. A clear removes its session's Needs you
+/// notification and sets the badge; anything else does nothing, and so does
+/// any push while the app is in front, where the foreground sweep owns the
+/// drawer and the badge. The completion runs once on every path, with no
+/// network I/O before it.
+extern "C-unwind" fn did_wake(
+    _this: *mut AnyObject,
+    _cmd: Sel,
+    _app: *mut UIApplication,
+    info: *mut NSDictionary,
+    handler: *mut FetchHandler,
+) {
+    // SAFETY: UIKit passes the completion as a live block for the call, or nil.
+    let Some(handler) = (unsafe { handler.as_ref() }) else {
+        tracing::debug!("phone: a background push came with no completion");
+        return;
+    };
+    let handler = handler.copy();
+    // UIKit calls the delegate on the main thread.
+    let Some(mtm) = MainThreadMarker::new() else {
+        tracing::debug!("phone: a background push came off the main thread; nothing done");
+        handler.call((UIBackgroundFetchResult::NoData,));
+        return;
+    };
+    if UIApplication::sharedApplication(mtm).applicationState() == UIApplicationState::Active {
+        tracing::debug!("phone: a background clear while in front; the sweep handles it");
+        handler.call((UIBackgroundFetchResult::NoData,));
+        return;
+    }
+    // SAFETY: UIKit passes the user info as a live dictionary for the call, or nil.
+    let info = unsafe { info.as_ref() };
+    match cleared_notice(info) {
+        Some(notice) => clear_delivered(notice, MainThreadBound::new(handler, mtm)),
+        None => handler.call((UIBackgroundFetchResult::NoData,)),
+    }
+}
+
+/// The clear notice in a background push's user info `info`, decrypted with
+/// the install's push keys as the extension does; `None`, logged, when the
+/// push does not decrypt or is not a clear.
+fn cleared_notice(info: Option<&NSDictionary>) -> Option<PushNotice> {
+    let e = info.and_then(|info| info_string(info, "e"));
+    // Read only: a wake never makes keys, which would orphan this install's subscription.
+    let keys = generic_password(keys_item()).ok();
+    let read = match notice::decrypted(e.as_deref(), keys.as_deref()) {
+        Ok(read) => read,
+        Err(why) => {
+            tracing::debug!(why = ?why, "phone: a background push did not decrypt; nothing cleared");
+            return None;
+        }
+    };
+    if read.notice.kind != PushNoticeKind::Cleared {
+        tracing::debug!("phone: a background push is not a clear; nothing done");
+        return None;
+    }
+    Some(read.notice)
+}
+
+/// Reads the delivered notifications, removes those the clear `notice`
+/// covers and sets the badge on the main queue (iOS 15 sets a badge only
+/// there), then calls `handler` from that same block, once.
+fn clear_delivered(notice: PushNotice, handler: MainThreadBound<HeldFetchHandler>) {
+    let handler = Mutex::new(Some(handler));
+    let block = RcBlock::new(move |shown: NonNull<NSArray<UNNotification>>| {
+        // SAFETY: the system hands the completion a live array for the call.
+        let shown = unsafe { shown.as_ref() };
+        let delivered: Vec<Delivered> = shown.to_vec().iter().map(|n| delivered_of(n)).collect();
+        let cleared = sweep::clear(&notice, &delivered);
+        let held = handler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(held) = held {
+            DispatchQueue::main().exec_async(move || {
+                let result = cleared.map_or(UIBackgroundFetchResult::NoData, apply_clear);
+                held.get_on_main(|handler| handler.call((result,)));
+            });
+        }
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .getDeliveredNotificationsWithCompletionHandler(&block);
+}
+
+/// Does what a clear decided and says what the wake fetched; runs on the
+/// main queue.
+fn apply_clear(cleared: Sweep) -> UIBackgroundFetchResult {
+    tracing::debug!(
+        removed = cleared.remove.len(),
+        "phone: a background clear ran"
+    );
+    let platform = IosPushPlatform;
+    let acted = !cleared.remove.is_empty() || cleared.badge.is_some();
+    if !cleared.remove.is_empty() {
+        platform.remove_delivered(cleared.remove);
+    }
+    if let Some(badge) = cleared.badge {
+        platform.set_badge(badge);
+    }
+    if acted {
+        UIBackgroundFetchResult::NewData
+    } else {
+        UIBackgroundFetchResult::NoData
     }
 }
 

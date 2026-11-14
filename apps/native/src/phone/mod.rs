@@ -59,6 +59,7 @@ pub fn run(on_start: impl FnOnce(&mut App) + 'static) {
 /// permission and the device token at once, else nothing until a switch asks.
 #[cfg(target_os = "ios")]
 fn push_platform(cx: &mut App) -> Arc<dyn PushPlatform> {
+    push_ios::add_wake_method();
     let platform = Arc::new(push_ios::IosPushPlatform);
     if std::env::args().any(|arg| arg == push_ios::PUSH_PROVISIONAL_ARG) {
         push_ios::start_provisional(Arc::clone(&platform), cx);

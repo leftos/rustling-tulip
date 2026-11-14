@@ -1,13 +1,15 @@
 //! What a relay push shows: its base64url ciphertext, from the notification's
 //! `e` key, decrypted with the install's push keys into a [`PushNotice`] and
 //! turned into the alert's title, body and badge. Any failure is a
-//! [`Fallback`], on which the extension shows the alert as it came.
+//! [`Fallback`], on which the extension shows the alert as it came; so is a
+//! clear, which is never shown. The decrypt step, [`decrypted`], is shared
+//! with the app's background clear.
 
 use base64::Engine;
 use base64::alphabet;
 use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
-use protocol::{PUSH_NOTICE_VERSION, PushNotice};
+use protocol::{PUSH_NOTICE_VERSION, PushNotice, PushNoticeKind};
 use push_crypto::InstallKeys;
 
 /// URL-safe base64 read with or without `=` padding.
@@ -54,6 +56,34 @@ pub enum Fallback {
     Parse,
     /// The notice's version is newer than this build reads.
     NewerVersion,
+    /// The notice is a clear, which is never shown: one reaches the
+    /// extension only when a relay delivered it as an alert.
+    Cleared,
+}
+
+/// What the extension shows for a push, and the `waited_since` it adds to
+/// the notification's user info.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alert {
+    /// The alert's text and ids.
+    pub shown: Shown,
+    /// The notice's `waited_since` as the daemon sent it, RFC 3339, when it
+    /// sent one.
+    pub waited_since: Option<String>,
+}
+
+/// A push notice that decrypted under the install's keys and that this
+/// build's version reads: the one step the extension and the app's
+/// background clear share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decrypted {
+    /// The notice.
+    pub notice: PushNotice,
+    /// The notice's wire kind as the daemon sent it, a kind newer than this
+    /// build included.
+    pub kind: String,
+    /// The notice's `waited_since` as the daemon sent it, when it sent one.
+    pub waited_since: Option<String>,
 }
 
 /// Turns a push's `e` ciphertext into what the extension shows, reading the
@@ -64,6 +94,41 @@ pub enum Fallback {
 ///
 /// The [`Fallback`] that says which step failed.
 pub fn shown(e: Option<&str>, keys: Option<&[u8]>) -> Result<Shown, Fallback> {
+    alert(e, keys).map(|alert| alert.shown)
+}
+
+/// [`shown`] with the notice's `waited_since`.
+///
+/// # Errors
+///
+/// The [`Fallback`] that says which step failed, [`Fallback::Cleared`] for a
+/// clear.
+pub fn alert(e: Option<&str>, keys: Option<&[u8]>) -> Result<Alert, Fallback> {
+    let read = decrypted(e, keys)?;
+    if read.notice.kind == PushNoticeKind::Cleared {
+        return Err(Fallback::Cleared);
+    }
+    Ok(Alert {
+        shown: Shown {
+            title: read.notice.title,
+            body: read.notice.body,
+            badge: read.notice.badge,
+            host: read.notice.host,
+            session_id: read.notice.session_id,
+            kind: read.kind,
+        },
+        waited_since: read.waited_since,
+    })
+}
+
+/// Decrypts a push's `e` ciphertext with the install's push keys `keys` (the
+/// Keychain item's raw octets, `None` when it is missing) and reads it as a
+/// [`PushNotice`] whose version this build reads.
+///
+/// # Errors
+///
+/// The [`Fallback`] that says which step failed.
+pub fn decrypted(e: Option<&str>, keys: Option<&[u8]>) -> Result<Decrypted, Fallback> {
     let e = e.ok_or(Fallback::NoCiphertext)?;
     let body = URL_SAFE_ANY_PADDING
         .decode(e)
@@ -85,14 +150,15 @@ pub fn shown(e: Option<&str>, keys: Option<&[u8]>) -> Result<Shown, Fallback> {
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    let waited_since = value
+        .get("waited_since")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let notice: PushNotice = serde_json::from_value(value).map_err(|_| Fallback::Parse)?;
-    Ok(Shown {
-        title: notice.title,
-        body: notice.body,
-        badge: notice.badge,
-        host: notice.host,
-        session_id: notice.session_id,
+    Ok(Decrypted {
+        notice,
         kind,
+        waited_since,
     })
 }
 
@@ -102,7 +168,7 @@ pub fn shown(e: Option<&str>, keys: Option<&[u8]>) -> Result<Shown, Fallback> {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{Fallback, Shown, shown};
+    use super::{Fallback, Shown, alert, decrypted, shown};
     use base64::Engine;
     use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
     use protocol::{PUSH_NOTICE_VERSION, PushNotice, PushNoticeKind};
@@ -278,6 +344,84 @@ mod tests {
         let read = shown(Some(&e), Some(&keys())).expect("a hostless notice shows");
         assert_eq!(read.host, None);
         assert_eq!(read.session_id, "session-1");
+    }
+
+    /// [`notice`] as a clear: its wait ended, so it carries no text.
+    fn cleared() -> PushNotice {
+        PushNotice {
+            kind: PushNoticeKind::Cleared,
+            title: String::new(),
+            body: String::new(),
+            badge: 1,
+            ..notice()
+        }
+    }
+
+    #[test]
+    fn a_cleared_notice_is_never_shown() {
+        let e = sealed_notice(&cleared());
+        assert_eq!(shown(Some(&e), Some(&keys())), Err(Fallback::Cleared));
+        assert_eq!(alert(Some(&e), Some(&keys())), Err(Fallback::Cleared));
+    }
+
+    #[test]
+    fn an_alert_carries_its_waited_since_as_sent() {
+        let json = format!(
+            r#"{{"v":{PUSH_NOTICE_VERSION},"kind":"needs_you","title":"Needs you","body":"fix","session_id":"session-1","badge":1,"waited_since":"2026-11-14T10:00:00Z"}}"#
+        );
+        let read = alert(Some(&sealed(json.as_bytes())), Some(&keys())).expect("it shows");
+        assert_eq!(read.waited_since.as_deref(), Some("2026-11-14T10:00:00Z"));
+        assert_eq!(read.shown.session_id, "session-1");
+        assert_eq!(read.shown.kind, "needs_you");
+    }
+
+    #[test]
+    fn an_alert_without_waited_since_carries_none() {
+        let read = alert(Some(&sealed_notice(&notice())), Some(&keys())).expect("it shows");
+        assert_eq!(read.waited_since, None);
+    }
+
+    #[test]
+    fn decrypted_reads_a_cleared_notice() {
+        let json = format!(
+            r#"{{"v":{PUSH_NOTICE_VERSION},"kind":"cleared","title":"","body":"","session_id":"session-1","host":"desk.tail1234.ts.net","badge":2,"waited_since":"2026-11-14T10:00:00Z"}}"#
+        );
+        let read =
+            decrypted(Some(&sealed(json.as_bytes())), Some(&keys())).expect("a clear decrypts");
+        assert_eq!(read.notice.kind, PushNoticeKind::Cleared);
+        assert_eq!(read.kind, "cleared");
+        assert_eq!(read.notice.session_id, "session-1");
+        assert_eq!(read.notice.host.as_deref(), Some("desk.tail1234.ts.net"));
+        assert_eq!(read.notice.badge, 2);
+        assert!(read.notice.waited_since.is_some());
+        assert_eq!(read.waited_since.as_deref(), Some("2026-11-14T10:00:00Z"));
+    }
+
+    #[test]
+    fn decrypted_falls_back_as_shown_does() {
+        let newer = PushNotice {
+            v: PUSH_NOTICE_VERSION + 1,
+            ..cleared()
+        };
+        let wrong = InstallKeys {
+            auth: [0xab; 16],
+            ..install_keys()
+        };
+        let e = sealed_notice(&cleared());
+        assert_eq!(
+            decrypted(Some(&sealed_notice(&newer)), Some(&keys())),
+            Err(Fallback::NewerVersion)
+        );
+        assert_eq!(decrypted(None, Some(&keys())), Err(Fallback::NoCiphertext));
+        assert_eq!(decrypted(Some(&e), None), Err(Fallback::BadKeys));
+        assert_eq!(
+            decrypted(Some(&e), Some(&wrong.to_bytes())),
+            Err(Fallback::Decrypt)
+        );
+        assert_eq!(
+            decrypted(Some(&sealed(b"not json")), Some(&keys())),
+            Err(Fallback::Parse)
+        );
     }
 
     #[test]

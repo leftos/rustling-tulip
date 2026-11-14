@@ -1,9 +1,13 @@
 //! Which delivered Needs you notifications the phone removes while it is in
 //! front, and what its app badge shows: plain Rust over the drawer's
 //! notifications and each saved host's live Needs you set, so the rule reads
-//! and tests without a window.
+//! and tests without a window. A background clear push ([`clear`]) removes
+//! its own session's notification while the app is not in front.
 
 use std::collections::BTreeSet;
+
+use chrono::{DateTime, Utc};
+use protocol::{PushNotice, PushNoticeKind};
 
 use super::push::{Delivered, NEEDS_YOU_KIND};
 use crate::needs_you::{NeedsYouRow, Reason};
@@ -63,6 +67,56 @@ pub(crate) fn sweep(delivered: &[Delivered], hosts: &[HostNow]) -> Sweep {
     Sweep { remove, badge }
 }
 
+/// What a background push `notice` does to `delivered`, `None` unless it is
+/// a clear: it removes each Needs you notification of the same host and
+/// session whose wait began no later than the cleared one (either side
+/// with no wait start removes by session alone), and sets the badge to the
+/// notice's count. A notification of a newer wait of that session stays.
+#[cfg_attr(
+    all(not(target_os = "ios"), not(test)),
+    expect(dead_code, reason = "only the iOS background wake calls it")
+)]
+pub(crate) fn clear(notice: &PushNotice, delivered: &[Delivered]) -> Option<Sweep> {
+    if notice.kind != PushNoticeKind::Cleared {
+        return None;
+    }
+    let remove = delivered
+        .iter()
+        .filter(|shown| cleared_by(shown, notice))
+        .map(|shown| shown.id.clone())
+        .collect();
+    Some(Sweep {
+        remove,
+        badge: Some(notice.badge),
+    })
+}
+
+/// Whether the clear `notice` removes `shown`.
+#[cfg_attr(
+    all(not(target_os = "ios"), not(test)),
+    expect(dead_code, reason = "only the iOS background wake calls it")
+)]
+fn cleared_by(shown: &Delivered, notice: &PushNotice) -> bool {
+    shown.kind.as_deref() == Some(NEEDS_YOU_KIND)
+        && shown.session_id.as_deref() == Some(notice.session_id.as_str())
+        && shown.host == notice.host
+        && not_newer(shown.waited_since.as_deref(), notice.waited_since)
+}
+
+/// Whether a wait that began at `shown` (RFC 3339) is not newer than the
+/// cleared one that began at `cleared`; true when either is unknown, a
+/// start that does not parse included.
+#[cfg_attr(
+    all(not(target_os = "ios"), not(test)),
+    expect(dead_code, reason = "only the iOS background wake calls it")
+)]
+fn not_newer(shown: Option<&str>, cleared: Option<DateTime<Utc>>) -> bool {
+    let (Some(shown), Some(cleared)) = (shown, cleared) else {
+        return true;
+    };
+    DateTime::parse_from_rfc3339(shown).map_or(true, |shown| shown.with_timezone(&Utc) <= cleared)
+}
+
 /// Whether `shown` is a Needs you notification whose wait has ended: its
 /// host is loaded and no longer lists its session in Needs you.
 fn ended(shown: &Delivered, hosts: &[HostNow]) -> bool {
@@ -79,10 +133,17 @@ fn ended(shown: &Delivered, hosts: &[HostNow]) -> bool {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{HostNow, Sweep, needs_you_ids, sweep};
+    use chrono::{DateTime, Utc};
+    use protocol::{PUSH_NOTICE_VERSION, PushNotice, PushNoticeKind};
+
+    use super::{HostNow, Sweep, clear, needs_you_ids, sweep};
     use crate::needs_you::{NeedsYouRow, Reason};
     use crate::phone::push::Delivered;
     use crate::target::HostKey;
@@ -99,6 +160,7 @@ mod tests {
             host: Some(host.to_owned()),
             session_id: Some(session.to_owned()),
             kind: Some("needs_you".to_owned()),
+            waited_since: None,
         }
     }
 
@@ -196,6 +258,7 @@ mod tests {
             host: None,
             session_id: None,
             kind: None,
+            waited_since: None,
         };
         let no_host = Delivered {
             host: None,
@@ -255,6 +318,102 @@ mod tests {
             &[host(BOX, true, &["s1", "s2"]), host(LAB, false, &["s9"])],
         );
         assert_eq!(result.badge, Some(2));
+    }
+
+    /// A Needs you notification for [`shown`] whose wait began at `since`.
+    fn waited(id: &str, session: &str, host: &str, since: &str) -> Delivered {
+        Delivered {
+            waited_since: Some(since.to_owned()),
+            ..shown(id, session, host)
+        }
+    }
+
+    /// A clear of `session` on `host`, of the wait that began at `since`,
+    /// setting the badge to 4.
+    fn clear_of(session: &str, host: &str, since: Option<&str>) -> PushNotice {
+        PushNotice {
+            v: PUSH_NOTICE_VERSION,
+            kind: PushNoticeKind::Cleared,
+            title: String::new(),
+            body: String::new(),
+            session_id: session.to_owned(),
+            host: Some(host.to_owned()),
+            badge: 4,
+            waited_since: since.map(|since| {
+                DateTime::parse_from_rfc3339(since)
+                    .expect("a valid instant")
+                    .with_timezone(&Utc)
+            }),
+        }
+    }
+
+    /// The identifiers a clear removes, or `None` when it does nothing.
+    fn cleared(notice: &PushNotice, delivered: &[Delivered]) -> Option<Vec<String>> {
+        clear(notice, delivered).map(|result| result.remove)
+    }
+
+    #[test]
+    fn a_clear_removes_its_sessions_needs_you() {
+        let notice = clear_of("s1", BOX, Some("2026-11-14T10:00:00Z"));
+        let result = clear(&notice, &[waited("n1", "s1", BOX, "2026-11-14T10:00:00Z")]);
+        assert_eq!(
+            result,
+            Some(Sweep {
+                remove: vec!["n1".to_owned()],
+                badge: Some(4),
+            })
+        );
+    }
+
+    #[test]
+    fn a_clear_keeps_a_newer_wait_of_the_same_session() {
+        let notice = clear_of("s1", BOX, Some("2026-11-14T10:00:00Z"));
+        let result = clear(&notice, &[waited("n1", "s1", BOX, "2026-11-14T10:05:00Z")]);
+        assert_eq!(
+            result,
+            Some(Sweep {
+                remove: Vec::new(),
+                badge: Some(4),
+            }),
+            "the badge still follows the clear"
+        );
+    }
+
+    #[test]
+    fn a_clear_keeps_other_sessions_and_kinds() {
+        let notice = clear_of("s1", BOX, None);
+        let finished = Delivered {
+            kind: Some("finished".to_owned()),
+            ..shown("n1", "s1", BOX)
+        };
+        let delivered = [
+            finished,
+            shown("n2", "s2", BOX),
+            shown("n3", "s1", LAB),
+            shown("n4", "s1", BOX),
+        ];
+        assert_eq!(cleared(&notice, &delivered), Some(vec!["n4".to_owned()]));
+        let alert = PushNotice {
+            kind: PushNoticeKind::NeedsYou,
+            ..notice
+        };
+        assert_eq!(clear(&alert, &delivered), None, "only a clear acts");
+    }
+
+    #[test]
+    fn a_clear_without_waited_since_removes_by_session() {
+        let since = clear_of("s1", BOX, Some("2026-11-14T10:00:00Z"));
+        let unknown = clear_of("s1", BOX, None);
+        assert_eq!(
+            cleared(&since, &[shown("n1", "s1", BOX)]),
+            Some(vec!["n1".to_owned()]),
+            "a notification with no wait start goes"
+        );
+        assert_eq!(
+            cleared(&unknown, &[waited("n1", "s1", BOX, "2026-11-14T10:05:00Z")]),
+            Some(vec!["n1".to_owned()]),
+            "a clear with no wait start removes by session"
+        );
     }
 
     #[test]

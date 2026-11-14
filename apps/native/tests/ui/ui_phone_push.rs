@@ -149,6 +149,7 @@ fn shown(id: &str, session: &str, host: &str) -> Delivered {
         host: Some(host.to_owned()),
         session_id: Some(session.to_owned()),
         kind: Some(NEEDS_YOU_KIND.to_owned()),
+        waited_since: None,
     }
 }
 

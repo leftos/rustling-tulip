@@ -19,7 +19,7 @@ use objc2_user_notifications::{
     UNNotificationServiceExtension,
 };
 use push_crypto::{KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE};
-use rustling_tulip_ios_notify::notice::{self, Shown};
+use rustling_tulip_ios_notify::notice::{self, Alert};
 use security_framework::passwords::{PasswordOptions, generic_password};
 
 /// The block the system hands `didReceiveNotificationRequest:withContentHandler:`.
@@ -80,8 +80,8 @@ impl RTNotificationService {
         }
         let e = ciphertext(&original);
         let keys = install_keys();
-        match notice::shown(e.as_deref(), keys.as_deref()) {
-            Ok(shown) => self.deliver(&rewritten(&original, &shown)),
+        match notice::alert(e.as_deref(), keys.as_deref()) {
+            Ok(alert) => self.deliver(&rewritten(&original, &alert)),
             Err(_) => self.deliver_original(),
         }
     }
@@ -133,11 +133,13 @@ fn install_keys() -> Option<Vec<u8>> {
     .ok()
 }
 
-/// A copy of `original` showing `shown`, with its ids in the user info.
+/// A copy of `original` showing `alert`, with its ids and wait start in the
+/// user info.
 fn rewritten(
     original: &UNNotificationContent,
-    shown: &Shown,
+    alert: &Alert,
 ) -> Retained<UNMutableNotificationContent> {
+    let shown = &alert.shown;
     let content = original.mutableCopy();
     content.setTitle(&NSString::from_str(&shown.title));
     content.setBody(&NSString::from_str(&shown.body));
@@ -153,6 +155,13 @@ fn rewritten(
         &NSString::from_str(&shown.session_id),
     );
     put(&info, ns_string!("kind"), &NSString::from_str(&shown.kind));
+    if let Some(since) = &alert.waited_since {
+        put(
+            &info,
+            ns_string!("waited_since"),
+            &NSString::from_str(since),
+        );
+    }
     // SAFETY: the dictionary holds only property-list objects: the push's own user info and
     // strings.
     unsafe { content.setUserInfo(&info) };

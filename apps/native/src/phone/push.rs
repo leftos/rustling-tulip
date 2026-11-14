@@ -55,6 +55,9 @@ pub struct Delivered {
     /// The push notice's wire kind (`needs_you`, `finished`, …), when the
     /// user info has it; an older extension build writes none.
     pub kind: Option<String>,
+    /// When the wait the push was about began, RFC 3339, when the user info
+    /// has it; a background clear keeps a notification of a newer wait.
+    pub waited_since: Option<String>,
 }
 
 /// The wire kind of a Needs you push notice, the only kind a sweep removes.

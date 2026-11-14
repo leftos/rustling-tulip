@@ -169,6 +169,7 @@ These need the phone app from TestFlight on an iPhone with Tailscale signed in a
 - [ ] Lock the phone and leave a session waiting on the host. **Expect:** a push on the Lock Screen naming the session, not `A session changed. Open the app to see it.` (the fallback alert, which means the notification extension did not run or could not decrypt), and the app icon's badge equal to the number of sessions in Needs you.
 - [ ] Tap the push. **Expect:** the app opens on that session's screen on that host.
 - [ ] With a TestFlight build that writes the notification's `kind`, leave a session waiting so its Needs you notification shows, then answer it on the desktop. Open the phone app. **Expect:** the notification leaves the drawer and the app icon's badge drops.
+- [ ] With a TestFlight build that handles the `cleared` push, leave a session waiting so its Needs you notification shows. Lock the phone with the app in the background (opened earlier, not force-quit), then answer the Needs you on the desktop. **Expect:** the notification leaves the drawer and the app icon's badge drops, without opening the app.
 - [ ] Turn Tailscale off on the phone and leave another session waiting. **Expect:** the push still arrives. Turn Tailscale back on.
 - [ ] Let a session's turn end. **Expect:** a Finished push arrives.
 - [ ] With the phone locked, run `rustling-tulipd push-fallback` on the host. **Expect:** it prints `sent to <N> of <M> phones` with N at least 1 and the fallback alert arrives, titled `Rustling Tulip` and reading `A session changed. Open the app to see it.`

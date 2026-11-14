@@ -13,7 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
-- A Needs you notification on the iPhone now leaves the notification list once the prompt is answered in any client and the phone app is opened, and the app badge shows what still waits.
+- A Needs you notification on the iPhone now leaves the notification list once the prompt is answered in any client, usually without opening the app, and the app badge shows what still waits.
 - Rebinding a machine's sessions, or opening them from the first-connect layout chooser, now fits each session to its new pane at once.
 - Connecting or pairing from another device no longer waits while the host sends phone alerts and tidies their subscriptions.
 - A window you switch to now fits the sessions it shows to its own panes, even when another computer sized them last.

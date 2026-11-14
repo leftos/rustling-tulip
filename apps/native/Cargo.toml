@@ -152,6 +152,12 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "UNUserNotificationCenter",
 ] }
 security-framework = { version = "3.7", default-features = false }
+# The background clear decrypts a push notice with the extension's own
+# tested step (`notice::decrypted`).
+rustling-tulip-ios-notify = { path = "../ios-notify" }
+# The background clear sets the badge and calls its completion on the main
+# queue, where iOS 15's badge setter must run.
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 # The app's own toasts reach their window through its native handle.
