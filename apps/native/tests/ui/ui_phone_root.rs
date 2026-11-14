@@ -121,7 +121,9 @@ fn a_paired_open_host_offers_no_pair_and_a_refused_token_offers_it(cx: &mut Test
     h.host(&saved_remote()).connect();
 
     let pair = format!("phone-host-pair-{REMOTE}");
-    assert!(drawn(&mut h, &format!("phone-host-row-{REMOTE}")));
+    let key = HostKey::of(&saved_remote());
+    let wire = key.wire().expect("a tailnet host has a wire key");
+    assert!(drawn(&mut h, &format!("host-header-{wire}")));
     assert!(!drawn(&mut h, &pair), "a paired, open host offers no Pair");
 
     let mut revoked = Connection::for_target(saved_remote());
@@ -133,6 +135,81 @@ fn a_paired_open_host_offers_no_pair_and_a_refused_token_offers_it(cx: &mut Test
     assert!(
         drawn(&mut h, &pair),
         "a host that refused the phone's token offers Pair"
+    );
+}
+
+#[gpui::test]
+fn a_saved_host_with_a_token_lists_its_sessions_at_window_width(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, &dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    {
+        let mut host = h.host(&saved_remote());
+        host.connect();
+        host.send(DaemonMessage::Sessions {
+            sessions: vec![session("s1").build()],
+        });
+    }
+    let key = HostKey::of(&saved_remote());
+    let wire = key.wire().expect("a tailnet host has a wire key");
+    let leaf = format!("leaf-{wire}::s1");
+
+    assert!(drawn(&mut h, "sidebar-panel"), "the session list shows");
+    let window_width = h.cx.update(|window, _| window.viewport_size().width);
+    assert_eq!(
+        h.bounds("sidebar-panel").size.width,
+        window_width,
+        "the list spans the window"
+    );
+    assert!(drawn(&mut h, &format!("host-header-{wire}")));
+    assert!(!drawn(&mut h, "host-header-local"), "no This PC group");
+    assert!(drawn(&mut h, &leaf), "the host's session is listed");
+    for chrome in ["sidebar-session-hint", "sidebar-add-shell", "sidebar-more"] {
+        assert!(!drawn(&mut h, chrome), "no {chrome} on the phone");
+    }
+    assert!(
+        !drawn(&mut h, &format!("phone-host-row-{REMOTE}")),
+        "the list's header replaces the host's row"
+    );
+    assert!(drawn(&mut h, "phone-host-add-another"));
+
+    h.host(&saved_remote()).sent();
+    h.click_on(&leaf);
+    assert!(
+        h.host(&saved_remote()).sent().is_empty(),
+        "a tap sends nothing yet"
+    );
+    assert!(
+        h.host(&saved_remote()).commands().is_empty(),
+        "a tap commands nothing yet"
+    );
+}
+
+#[gpui::test]
+fn the_phone_list_draws_no_detached_stop_all(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, &dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    {
+        let mut host = h.host(&saved_remote());
+        host.connect();
+        host.send(DaemonMessage::Sessions {
+            sessions: vec![session("s1").status("working").build()],
+        });
+    }
+
+    assert!(drawn(&mut h, "detached-banner"), "the banner's text shows");
+    assert!(
+        !drawn(&mut h, "detached-stop-all"),
+        "the phone's list offers no Stop all"
     );
 }
 

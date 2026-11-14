@@ -83,6 +83,24 @@ const NO_ACTIVE_REPOS: &str = "No active repos or workspaces";
 /// The widest a `T:<name>` chip grows before its name truncates; its tooltip carries the whole name.
 const PILL_MAX_WIDTH: f32 = 96.0;
 
+/// Which window the sessions panel is drawn for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarChrome {
+    /// The desktop's panel beside the panes: its header, its spawn toolbar,
+    /// and rows that select, launch, drag and open menus.
+    Desktop,
+    /// The phone's full-width list: no header or toolbar, its rows display
+    /// only, with host and container folds and a host's Pair still live.
+    Phone,
+}
+
+/// How wide the sessions panel draws and for which window.
+#[derive(Clone, Copy)]
+struct PanelLayout {
+    width: f32,
+    chrome: SidebarChrome,
+}
+
 impl RootView {
     /// The rail, the panel it picks with its divider, and the terminal pane
     /// side by side; a folded panel leaves the rail alone.
@@ -100,7 +118,7 @@ impl RootView {
             let width = self.sidebar.width(window.viewport_size().width / px(1.0));
             let active = matches!(self.drag, Some(Drag::Sidebar));
             let panel = match self.shown_activity() {
-                Activity::Sessions => self.sidebar_panel(width, window, cx),
+                Activity::Sessions => self.sidebar_panel(width, SidebarChrome::Desktop, window, cx),
                 Activity::SourceControl => self.source_control_view(width, window, cx),
                 Activity::NeedsYou => self.needs_you_view(width, cx),
                 Activity::Gates => self.gates_view(width, cx),
@@ -153,9 +171,10 @@ impl RootView {
     }
 
     /// The repos view's host groups, none in the tabs view or while This PC
-    /// is the only host configured.
-    fn shown_host_groups(&self) -> Vec<HostGroup> {
-        if self.sidebar.sidebar_view() == SidebarView::Repos {
+    /// is the only host configured; the phone's `chrome` groups by host in
+    /// either view.
+    fn shown_host_groups(&self, chrome: SidebarChrome) -> Vec<HostGroup> {
+        if chrome == SidebarChrome::Phone || self.sidebar.sidebar_view() == SidebarView::Repos {
             self.sidebar.host_groups()
         } else {
             Vec::new()
@@ -183,10 +202,19 @@ impl RootView {
         cx.notify();
     }
 
-    fn sidebar_panel(&mut self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {
+    /// The sessions panel `width` wide in `chrome`: the desktop's with its
+    /// header and spawn toolbar, or the phone's list alone.
+    pub(crate) fn sidebar_panel(
+        &mut self,
+        width: f32,
+        chrome: SidebarChrome,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let t = theme(cx);
+        let layout = PanelLayout { width, chrome };
         let containers = self.sidebar_containers();
-        let groups = self.shown_host_groups();
+        let groups = self.shown_host_groups(chrome);
         // The chip is the only way to arm, so an arm cannot outlive it.
         if !detached_stop_all_shown(&containers) {
             self.detached_stop_all.disarm();
@@ -244,41 +272,46 @@ impl RootView {
                 body.child(body_note(None, "No sessions", &t))
             })
         } else {
-            body.children(self.sidebar_rows(&containers, &groups, width, window, cx))
+            body.children(self.sidebar_rows(&containers, &groups, layout, window, cx))
         };
         let shell_in_toolbar = groups.is_empty();
-        self.sidebar_frame(width, body, shell_in_toolbar, window, cx)
+        self.sidebar_frame(layout, body, shell_in_toolbar, window, cx)
     }
 
-    /// The panel `width` wide around `body`: its fill, the header and the
-    /// toolbar above the body.
+    /// The panel `layout.width` wide around `body`: its fill and, in the
+    /// desktop chrome, the header and the toolbar above the body; the
+    /// phone's panel fills the height its column leaves it.
     fn sidebar_frame(
         &self,
-        width: f32,
+        layout: PanelLayout,
         body: Stateful<Div>,
         shell_in_toolbar: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = theme(cx);
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(px(width))
-            .h_full()
+        let frame = div().flex().flex_col().w(px(layout.width));
+        let frame = match layout.chrome {
+            SidebarChrome::Desktop => frame.flex_none().h_full(),
+            SidebarChrome::Phone => frame.flex_1().min_h(px(0.0)),
+        };
+        let frame = frame
             .driver_id(|| "sidebar-panel".to_owned())
             .track_focus(&self.sidebar_focus)
             .bg(gpui::rgb(t.panel_bg))
             .text_size(ui_px(cx, UI_TEXT_SIZE))
-            .text_color(gpui::rgb(t.text))
-            .child(header(
-                self.sidebar.sidebar_view(),
-                self.sidebar.repo_filter(),
-                cx,
-            ))
-            .child(self.toolbar(shell_in_toolbar, window, cx))
-            .child(body)
+            .text_color(gpui::rgb(t.text));
+        let frame = match layout.chrome {
+            SidebarChrome::Desktop => frame
+                .child(header(
+                    self.sidebar.sidebar_view(),
+                    self.sidebar.repo_filter(),
+                    cx,
+                ))
+                .child(self.toolbar(shell_in_toolbar, window, cx)),
+            SidebarChrome::Phone => frame,
+        };
+        frame.child(body)
     }
 
     /// The body's rows: each of `containers` with its leaves, or, while
@@ -288,10 +321,11 @@ impl RootView {
         &self,
         containers: &[Container],
         groups: &[HostGroup],
-        width: f32,
+        layout: PanelLayout,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let PanelLayout { width, chrome } = layout;
         let attached = self.focused_session();
         // The ring and the row keys follow the keyboard: a row the sidebar
         // no longer holds (a menu or a pane took over) draws none.
@@ -336,6 +370,7 @@ impl RootView {
             dragged: self.dragged_sidebar_row(cx),
             drop_mark: self.sidebar_drop_mark(cx),
             subline_room: width - 2.0 * BODY_INSET_X - LEAF_PAD_LEFT - ROW_PADDING - SUBLINE_INDENT,
+            chrome,
         };
         let row_of = |container: &Container, cx: &mut Context<Self>| {
             let add_workspace = container
@@ -352,7 +387,7 @@ impl RootView {
                 BodyChild::Container(container) => Some(row_of(container, cx)),
                 BodyChild::HostHeader(index) => groups.get(index).map(|group| {
                     let state = self.host_header_state(&group.host);
-                    host_header(group, state, index == 0, cx)
+                    host_header(group, state, index == 0, chrome, cx)
                 }),
                 BodyChild::LocalNoRepos => Some(
                     no_repos_note(
@@ -1048,12 +1083,15 @@ const HOST_NAME_SHRINK: f32 = 1000.0;
 /// its state), then `+ Repo` and `+ Shell`, or `Pair` on a host that has not approved
 /// this device. Every header but the `first` has a rule above it. It is not
 /// a keyboard stop and takes no drop; a right-click opens its host's menu.
+/// The phone's `chrome` keeps the fold and `Pair` alone.
 fn host_header(
     group: &HostGroup,
     state: HostHeaderState,
     first: bool,
+    chrome: SidebarChrome,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let desktop = chrome == SidebarChrome::Desktop;
     let t = theme(cx);
     let key = group.host.wire().unwrap_or("local");
     let fold_host = group.host.clone();
@@ -1114,31 +1152,22 @@ fn host_header(
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.toggle_host(&fold_host, cx);
         }));
-    let action = if state == HostHeaderState::NotPaired {
-        host_pair(key, &group.host, &group.label, cx)
-    } else {
-        let online = state == HostHeaderState::Online;
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .child(host_add_repo(key, &group.host, &group.label, online, cx))
-            .child(host_shell(key, &group.host, &group.label, online, cx))
-            .into_any_element()
-    };
+    let action = host_header_action(group, key, state, chrome, cx);
     let (menu_host, menu_name) = (group.host.clone(), group.label.clone());
     div()
         .driver_id({
             let selector = format!("host-header-{key}");
             move || selector
         })
-        .on_mouse_down(
-            MouseButton::Right,
-            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                this.open_host_menu(&menu_host, menu_name.clone(), event.position, window, cx);
-                cx.stop_propagation();
-            }),
-        )
+        .when(desktop, |row| {
+            row.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.open_host_menu(&menu_host, menu_name.clone(), event.position, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+        })
         .flex()
         .flex_none()
         .items_center()
@@ -1150,8 +1179,36 @@ fn host_header(
             row.border_t_1().border_color(gpui::rgb(t.line))
         })
         .child(fold)
-        .child(action)
+        .children(action)
         .into_any_element()
+}
+
+/// What sits right of `group`'s fold (`key` its wire key): `Pair` on a host
+/// that has not approved this device, else `+ Repo` and `+ Shell`, which
+/// the phone's `chrome` leaves out.
+fn host_header_action(
+    group: &HostGroup,
+    key: &str,
+    state: HostHeaderState,
+    chrome: SidebarChrome,
+    cx: &mut Context<RootView>,
+) -> Option<AnyElement> {
+    if state == HostHeaderState::NotPaired {
+        return Some(host_pair(key, &group.host, &group.label, cx));
+    }
+    if chrome == SidebarChrome::Phone {
+        return None;
+    }
+    let online = state == HostHeaderState::Online;
+    Some(
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .child(host_add_repo(key, &group.host, &group.label, online, cx))
+            .child(host_shell(key, &group.host, &group.label, online, cx))
+            .into_any_element(),
+    )
 }
 
 /// A host header's small text button, `selector`, reading `label` after
@@ -1532,10 +1589,12 @@ fn container_rows(
     let focused = ctx.focused_row == Some(container.key.as_str());
     let hovered = ctx.hovered_row == Some(container.key.as_str());
     let header = SidebarRow::Container(container.key.clone());
-    let payload = drag::container_payload(container);
+    // The phone's rows neither drag nor take a drop.
+    let payload =
+        drag::container_payload(container).filter(|_| ctx.chrome == SidebarChrome::Desktop);
     let dragged = payload.is_some() && ctx.dragged == payload;
     let row = draggable_row(
-        container_row(container, focused, hovered, cx),
+        container_row(container, focused, hovered, ctx.chrome, cx),
         payload,
         &header,
         &container.name,
@@ -1544,20 +1603,9 @@ fn container_rows(
     let dim = ctx.dimmed.containers.contains(&container.key);
     let mut rows = vec![dimmed(row, dim).into_any_element()];
     if !container.collapsed {
-        // The account service's login session sits in the daemon's scratch
-        // folder, which offers no Add repo; every other shell keeps its banner.
-        let folder_banner = match container.kind {
-            ContainerKind::Dir => container.path.is_some(),
-            ContainerKind::Shell => {
-                container.path.is_some() && !container.leaves.iter().any(|leaf| leaf.account_login)
-            }
-            ContainerKind::Workspace
-            | ContainerKind::Repo
-            | ContainerKind::Detached
-            | ContainerKind::Tab
-            | ContainerKind::Unbound => false,
-        };
-        if folder_banner && let Some(path) = container.path.as_deref() {
+        if shows_folder_banner(container, ctx.chrome)
+            && let Some(path) = container.path.as_deref()
+        {
             let banner = path_banner(container, path, add_workspace, cx);
             rows.push(dimmed(banner, dim).into_any_element());
         }
@@ -1567,7 +1615,7 @@ fn container_rows(
             );
         }
         if container.kind == ContainerKind::Detached {
-            let banner = detached_banner(container, ctx.detached_stop_all, cx);
+            let banner = detached_banner(container, ctx.detached_stop_all, ctx.chrome, cx);
             rows.push(dimmed(banner, dim).into_any_element());
         }
         for leaf in shown_leaves(&container.leaves, |leaf| ctx.shows(container.kind, leaf)) {
@@ -1588,6 +1636,28 @@ fn container_rows(
         .children(rows)
         .children(line)
         .into_any_element()
+}
+
+/// Whether `container` draws the folder banner with its Add repo and Add
+/// workspace links: a DIR or SH container with a folder, never on the
+/// phone's `chrome`.
+fn shows_folder_banner(container: &Container, chrome: SidebarChrome) -> bool {
+    if chrome == SidebarChrome::Phone {
+        return false;
+    }
+    // The account service's login session sits in the daemon's scratch
+    // folder, which offers no Add repo; every other shell keeps its banner.
+    match container.kind {
+        ContainerKind::Dir => container.path.is_some(),
+        ContainerKind::Shell => {
+            container.path.is_some() && !container.leaves.iter().any(|leaf| leaf.account_login)
+        }
+        ContainerKind::Workspace
+        | ContainerKind::Repo
+        | ContainerKind::Detached
+        | ContainerKind::Tab
+        | ContainerKind::Unbound => false,
+    }
 }
 
 /// The leaves of one container that draw: a row at depth 0 when `shows`
@@ -1664,7 +1734,9 @@ fn leaf_drag_row(
     // and no drop mark shows while the host is away.
     let kind = leaf.kind;
     let dim_host = ctx.dimmed.hosts.contains(&leaf.host);
-    let payload = if ctx.dimmed.containers.contains(&container.key) || dim_host {
+    let desktop = ctx.chrome == SidebarChrome::Desktop;
+    // Nor does a phone's leaf, which is display-only.
+    let payload = if ctx.dimmed.containers.contains(&container.key) || dim_host || !desktop {
         None
     } else {
         match leaf.kind {
@@ -1705,20 +1777,24 @@ fn leaf_drag_row(
     // host lists the same id; a dispatch run's leaf opens the run's menu,
     // and a subagent's opens none: Open, its click, is its only action.
     let menu_session = session.clone();
-    let row = leaf_row(leaf, &session.host, ctx, window, cx).on_mouse_down(
-        MouseButton::Right,
-        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-            let SessionRef { host, id } = &menu_session;
-            match kind {
-                LeafKind::Session => {
-                    this.open_session_menu(host, id, None, event.position, window, cx);
+    let row = leaf_row(leaf, &session.host, ctx, window, cx).when(desktop, |row| {
+        row.on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                let SessionRef { host, id } = &menu_session;
+                match kind {
+                    LeafKind::Session => {
+                        this.open_session_menu(host, id, None, event.position, window, cx);
+                    }
+                    LeafKind::Dispatch => {
+                        this.open_dispatch_menu(host, id, event.position, window, cx);
+                    }
+                    LeafKind::Subagent => {}
                 }
-                LeafKind::Dispatch => this.open_dispatch_menu(host, id, event.position, window, cx),
-                LeafKind::Subagent => {}
-            }
-            cx.stop_propagation();
-        }),
-    );
+                cx.stop_propagation();
+            }),
+        )
+    });
     let dim = match leaf.kind {
         LeafKind::Session => ctx.dimmed.sessions.contains(leaf.id.as_str()),
         LeafKind::Dispatch | LeafKind::Subagent => ctx.dimmed.hosts.contains(&leaf.host),
@@ -2146,12 +2222,19 @@ fn detached_stop_all_shown(containers: &[Container]) -> bool {
 }
 
 /// The text under an expanded Detached container, with its Stop all chip
-/// while one of its leaves still runs.
-fn detached_banner(container: &Container, armed: bool, cx: &mut Context<RootView>) -> Div {
+/// while one of its leaves still runs; the phone's `chrome` draws the text
+/// alone.
+fn detached_banner(
+    container: &Container,
+    armed: bool,
+    chrome: SidebarChrome,
+    cx: &mut Context<RootView>,
+) -> Div {
     let t = theme(cx);
     let live: Vec<String> = container
         .leaves
         .iter()
+        .filter(|_| chrome == SidebarChrome::Desktop)
         .filter(|leaf| leaf.kind == LeafKind::Session && leaf.status != SessionStatus::Stopped)
         .map(|leaf| leaf.id.clone())
         .collect();
@@ -2268,6 +2351,8 @@ struct LeafRows<'a> {
     dragged: Option<DragPayload>,
     /// The row the insertion line stands at, and the side of it.
     drop_mark: Option<(SidebarRow, Side)>,
+    /// The window the rows are drawn for.
+    chrome: SidebarChrome,
 }
 
 impl LeafRows<'_> {
@@ -2718,25 +2803,28 @@ fn row_height(offset: i8, two_line: bool) -> Pixels {
 /// A container row: a click focuses and folds it; a right-click on a repo
 /// or workspace opens its menu; a double-click there replays its last
 /// launch, and its ▶ replays into the current tab. A row with a launch
-/// summary is two lines.
+/// summary is two lines. On the phone's `chrome` the click only folds it.
 fn container_row(
     container: &Container,
     focused: bool,
     hovered: bool,
+    chrome: SidebarChrome,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let t = theme(cx);
+    let desktop = chrome == SidebarChrome::Desktop;
     let key = container.key.clone();
     let hover_key = key.clone();
     let click_key = key.clone();
     let click_id = container.id.clone();
     let click_host = container.host.clone();
     let name = format!("container-{}", container.key);
-    let container_menu = MenuContainer::of(container);
-    let launchable = matches!(
-        container.kind,
-        ContainerKind::Repo | ContainerKind::Workspace
-    );
+    let container_menu = MenuContainer::of(container).filter(|_| desktop);
+    let launchable = desktop
+        && matches!(
+            container.kind,
+            ContainerKind::Repo | ContainerKind::Workspace
+        );
     let workspace = container.kind == ContainerKind::Workspace;
     let summary = container.summary.clone();
     let two_line = summary.is_some();
@@ -2943,7 +3031,19 @@ fn leaf_row(
     let ground = leaf_ground(selected, ctx.highlighted.contains(id), &t);
     let key = leaf_key(host, id);
     let density = crate::subagents::row_density(leaf, ctx.density, ctx.finished_subagent_rows);
-    let row = leaf_frame(leaf, host, &key, ground, accent, density, cx);
+    let row = leaf_click(
+        leaf_frame(leaf, &key, ground, accent, density, cx),
+        leaf,
+        host,
+        ctx.chrome,
+        cx,
+    );
+    // The phone's leaves are display-only: no Resume or Dismiss.
+    let inline = if ctx.chrome == SidebarChrome::Desktop {
+        inline_buttons(leaf, host, &key, cx)
+    } else {
+        Vec::new()
+    };
     // A Tabs-view leaf of a remote host names it, at the end of its name
     // row before the inline buttons.
     let host_tag = ctx.host_chips.get(host).map(|label| {
@@ -2977,7 +3077,7 @@ fn leaf_row(
                 ))
                 .children(fold)
                 .children(host_tag)
-                .children(inline_buttons(leaf, host, &key, cx))
+                .children(inline)
                 .children(chips)
         }
         LeafDensity::Comfortable => {
@@ -2994,7 +3094,7 @@ fn leaf_row(
                 ))
                 .children(fold)
                 .children(host_tag)
-                .children(inline_buttons(leaf, host, &key, cx));
+                .children(inline);
             let lower = comfortable_lower(leaf, host, &key, ctx, window, cx);
             row.flex_col().py(px(6.0)).child(label_line).children(lower)
         }
@@ -3023,12 +3123,9 @@ fn leaf_ground(selected: bool, highlighted: bool, t: &UiTheme) -> Option<u32> {
 }
 
 /// The leaf's box: its fill `ground`, or the hover fill without one, its
-/// hover text, the accent stripe, and the click, which selects `host`'s
-/// session or opens the run or subagent the leaf follows. `key` is the
-/// leaf's [`leaf_key`].
+/// hover text and the accent stripe. `key` is the leaf's [`leaf_key`].
 fn leaf_frame(
     leaf: &Leaf,
-    host: &HostKey,
     key: &str,
     ground: Option<u32>,
     accent: u32,
@@ -3036,13 +3133,7 @@ fn leaf_frame(
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let t = theme(cx);
-    let id = leaf.id.clone();
-    let host = host.clone();
-    let host_session = leaf.host_session.clone();
-    let run_id = leaf.run_id.clone();
     let name = format!("leaf-{key}");
-    // A dispatch run's id names no session: its click opens the run.
-    let kind = leaf.kind;
     div()
         .id(SharedString::from(name.clone()))
         .driver_id(|| name)
@@ -3071,22 +3162,42 @@ fn leaf_frame(
                 .rounded(px(2.0))
                 .bg(gpui::rgb(accent)),
         )
-        .on_click(
-            cx.listener(move |this, _: &ClickEvent, window, cx| match kind {
-                LeafKind::Session => this.select_session_on(&host, &id, window, cx),
-                LeafKind::Dispatch => this.open_dispatch_run(&host, &id, window, cx),
-                // A subagent's id is its agent id: a run's subagent names
-                // its run beside it, and a session's the host session it
-                // runs under, either of which opens what follows it.
-                LeafKind::Subagent => {
-                    if let Some(run_id) = &run_id {
-                        this.open_run_subagent(&host, run_id, &id, window, cx);
-                    } else if let Some(session_id) = &host_session {
-                        this.open_subagent(&host, session_id, &id, window, cx);
-                    }
+}
+
+/// `row` with the leaf's click, which selects `host`'s session or opens the
+/// run or subagent the leaf follows; the phone's `chrome` leaves it inert.
+fn leaf_click(
+    row: Stateful<Div>,
+    leaf: &Leaf,
+    host: &HostKey,
+    chrome: SidebarChrome,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    if chrome == SidebarChrome::Phone {
+        return row;
+    }
+    let id = leaf.id.clone();
+    let host = host.clone();
+    let host_session = leaf.host_session.clone();
+    let run_id = leaf.run_id.clone();
+    // A dispatch run's id names no session: its click opens the run.
+    let kind = leaf.kind;
+    row.on_click(
+        cx.listener(move |this, _: &ClickEvent, window, cx| match kind {
+            LeafKind::Session => this.select_session_on(&host, &id, window, cx),
+            LeafKind::Dispatch => this.open_dispatch_run(&host, &id, window, cx),
+            // A subagent's id is its agent id: a run's subagent names
+            // its run beside it, and a session's the host session it
+            // runs under, either of which opens what follows it.
+            LeafKind::Subagent => {
+                if let Some(run_id) = &run_id {
+                    this.open_run_subagent(&host, run_id, &id, window, cx);
+                } else if let Some(session_id) = &host_session {
+                    this.open_subagent(&host, session_id, &id, window, cx);
                 }
-            }),
-        )
+            }
+        }),
+    )
 }
 
 /// The chevron after the label of a session row with rows nested under it,

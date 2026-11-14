@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use gpui::{
     App, AppContext as _, Context, Edges, Entity, IntoElement, ParentElement as _, Pixels, Render,
-    Styled as _, Subscription, Window, WindowInsets, WindowOptions, div,
+    Styled as _, Subscription, Window, WindowInsets, WindowOptions, div, px,
 };
 
 use crate::{
@@ -89,10 +89,11 @@ pub fn content_padding(insets: &WindowInsets) -> Edges<Pixels> {
     insets.safe_area
 }
 
-/// The phone's root view: the saved hosts or the first-run form, and the
-/// Pair dialog over them, inside the safe area. It reads a phone-shape
-/// [`RootView`] and never draws it, so This PC's dormant slot never shows
-/// as a connection.
+/// The phone's root view: the saved hosts or the first-run form, or while
+/// a saved host is open the sidebar's session list at the window's width,
+/// and the Pair dialog over them, inside the safe area. It draws only that
+/// list of a phone-shape [`RootView`], whose sidebar has no This PC group,
+/// so This PC's dormant slot never shows as a connection.
 pub struct PhoneRoot {
     root: Entity<RootView>,
     /// The add form's fields, its refusal and whether it shows.
@@ -142,7 +143,12 @@ impl Render for PhoneRoot {
         }
         let t = crate::ui_theme::theme(cx);
         let padding = content_padding(&window.insets());
-        let body = self.hosts_body(cx);
+        let body = if hosts_view::any_host_open(self.root.read(cx)) {
+            let width = (window.viewport_size().width - padding.left - padding.right) / px(1.0);
+            self.list_body(width, window, cx)
+        } else {
+            self.hosts_body(cx)
+        };
         let pairing = self
             .root
             .update(cx, |root, cx| root.device_pairing_layer(cx));

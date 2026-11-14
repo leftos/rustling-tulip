@@ -19,6 +19,7 @@ use crate::connection_picker::{
     LiveState, RowFacts, RowHost, SavedHost, offers_pair, typed_target,
 };
 use crate::driver_id::DriverId as _;
+use crate::sidebar_view::SidebarChrome;
 use crate::target::{DEFAULT_TAILNET_PORT, HostKey, TailnetHost, Target};
 use crate::text_input::TextInput;
 use crate::ui_theme::{UiTheme, theme};
@@ -137,6 +138,17 @@ fn seen_states(root: &RootView) -> SeenStates {
         .collect()
 }
 
+/// Whether any saved host's connection is open, when the phone lists the
+/// sessions in place of the hosts' rows.
+pub(super) fn any_host_open(root: &RootView) -> bool {
+    root.sidebar.ui_state().saved_hosts.iter().any(|host| {
+        host.target()
+            .ok()
+            .and_then(|target| root.conn_of(&HostKey::of(&target)))
+            .is_some_and(|conn| matches!(conn.state(), State::Open { .. }))
+    })
+}
+
 /// `host`'s row: Pair shows exactly when the desktop picker's row offers
 /// it, for a held tailnet host that refused this device or that it holds
 /// no token for (`not_paired`).
@@ -227,17 +239,7 @@ impl PhoneRoot {
         let form_shows = rows.is_empty() || self.hosts.form_open;
         let t = theme(cx);
         let row_elements: Vec<Div> = rows.into_iter().map(|row| Self::row(row, &t, cx)).collect();
-        let tail = if form_shows {
-            self.add_form(&t, cx)
-        } else {
-            div().child(
-                phone_button("phone-host-add-another", ButtonKind::Outlined, cx)
-                    .child(ADD_TITLE)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.show_add_form(window, cx);
-                    })),
-            )
-        };
+        let tail = self.hosts_tail(form_shows, &t, cx);
         div()
             .size_full()
             .flex()
@@ -246,6 +248,38 @@ impl PhoneRoot {
             .p(px(16.0))
             .children(row_elements)
             .child(tail)
+    }
+
+    /// The sessions list `width` wide while a saved host is open, filling
+    /// the height over the hosts screen's tail.
+    pub(super) fn list_body(&self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {
+        let panel = self.root.update(cx, |root, cx| {
+            root.sidebar_panel(width, SidebarChrome::Phone, window, cx)
+        });
+        let t = theme(cx);
+        let tail = self.hosts_tail(self.hosts.form_open, &t, cx);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(panel)
+            .child(div().flex_none().p(px(16.0)).child(tail))
+    }
+
+    /// Under the hosts: the add form while `form_shows`, else the button
+    /// that shows it.
+    fn hosts_tail(&self, form_shows: bool, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        if form_shows {
+            self.add_form(t, cx)
+        } else {
+            div().child(
+                phone_button("phone-host-add-another", ButtonKind::Outlined, cx)
+                    .child(ADD_TITLE)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.show_add_form(window, cx);
+                    })),
+            )
+        }
     }
 
     /// One saved host: its name, its state in words and, when it offers

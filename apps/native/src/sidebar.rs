@@ -1766,6 +1766,8 @@ pub struct SidebarModel {
     /// The active theme's accent and terminal background, the bottom of
     /// every session's appearance cascade.
     theme_base: ThemeBase,
+    /// This PC gets no host group: the phone has no This PC.
+    this_pc_hidden: bool,
 }
 
 impl SidebarModel {
@@ -1774,6 +1776,11 @@ impl SidebarModel {
             ui,
             ..Self::default()
         }
+    }
+
+    /// Leaves This PC's group out of [`Self::host_groups`] from now on.
+    pub fn hide_this_pc(&mut self) {
+        self.this_pc_hidden = true;
     }
 
     /// Makes `base` the bottom of every appearance cascade, as a theme
@@ -2486,7 +2493,11 @@ impl SidebarModel {
 
     /// The hosts that get a group, in [`Self::host_groups`]' order.
     fn grouped_hosts(&self) -> Vec<HostKey> {
-        let mut hosts = vec![HostKey::Local];
+        let mut hosts = if self.this_pc_hidden {
+            Vec::new()
+        } else {
+            vec![HostKey::Local]
+        };
         let saved = self
             .ui
             .saved_hosts
@@ -10582,6 +10593,20 @@ pub(crate) mod tests {
         assert!(
             model.host_groups().is_empty(),
             "a connected host that is not saved does not make a second configured host"
+        );
+    }
+
+    #[test]
+    fn host_groups_leave_this_pc_out_once_it_is_hidden() {
+        let mut model = SidebarModel::default();
+        model.set_saved_hosts(vec![saved(BOX)]);
+        model.apply(&remote_host(BOX), &sessions_msg(&["b1"]));
+        model.apply(&HostKey::Local, &repos_msg(&["r1"]));
+        model.hide_this_pc();
+
+        assert_eq!(
+            group_names(&model.host_groups()),
+            [(remote_host(BOX), "box")]
         );
     }
 

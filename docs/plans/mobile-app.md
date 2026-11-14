@@ -151,13 +151,13 @@ Risks the spike left open: the iOS backend is experimental, from a single upstre
   Proof: `pwsh -NoProfile -File tools/rt-mac.ps1 check -p rustling-tulip-ios --target aarch64-apple-ios-sim`
 
   Waits on: MA.6. Owner's iPhone: not needed (MA.12 proves TLS and the Keychain at run time).
-- [ ] **MA.9 Build the phone root over `RootView` with no This PC.** `RootDeps` gains the phone shape: no local host and no `ensure_running`, saved remote hosts connected at start, no tab or layout message sent, no presence report, and no-op notification, sound, badge and toast-window seams.
+- [x] **MA.9 Build the phone root over `RootView` with no This PC.** `RootDeps` gains the phone shape: no local host and no `ensure_running`, saved remote hosts connected at start, no tab or layout message sent, no presence report, and no-op notification, sound, badge and toast-window seams.
 
-  The phone root draws the session list (`sidebar_panel` at the window's width) or, with no saved host, a first-run screen to add a tailnet host by name and port and open the Pair dialog; a tailnet host with no token offers Pair.
+  The phone root draws the session list (`sidebar_panel` with `SidebarChrome::Phone`, at the window's width inside the safe area) while a saved host's connection is open, and otherwise a first-run screen to add a tailnet host by name and port and open the Pair dialog; a tailnet host with no token offers Pair.
 
-  The step is split into MA.9a (the phone shape on `RootDeps`: done), MA.9b (add a host and Pair) and MA.9c (the session list). The real change of Beyond the files listed, the step touches `toast_window.rs`, `connection.rs`, the test support and `examples/shot.rs` (MA.9a) and `sidebar.rs` and `sidebar_view.rs` (MA.9c).
+  The step was split into MA.9a (the phone shape on `RootDeps`), MA.9b (add a host and Pair) and MA.9c (the session list). Beyond the files listed, the step touches `toast_window.rs`, `connection.rs`, the test support and `examples/shot.rs` (MA.9a) and `sidebar.rs` and `sidebar_view.rs` (MA.9c).
 
-  Files: `apps/native/src/lib.rs`, `apps/native/src/hosts.rs`, `apps/native/src/phone/mod.rs`, `apps/native/src/phone/root_view.rs`, `apps/native/src/phone/hosts_view.rs`, `apps/native/tests/ui/ui_phone_root.rs` (with its module line in the `ui` binary).
+  Files: `apps/native/src/lib.rs`, `apps/native/src/hosts.rs`, `apps/native/src/phone/mod.rs`, `apps/native/src/phone/hosts_view.rs`, `apps/native/src/sidebar.rs`, `apps/native/src/sidebar_view.rs`, `apps/native/tests/ui/ui_phone_root.rs` (with its module line in the `ui` binary).
 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma9-phone-root.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_phone_root`
 

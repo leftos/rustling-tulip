@@ -1732,6 +1732,9 @@ impl RootView {
             sidebar: {
                 let mut sidebar = SidebarModel::new(ui);
                 sidebar.set_theme_base(appearance::ThemeBase::of(&theme));
+                if shape == RootShape::Phone {
+                    sidebar.hide_this_pc();
+                }
                 sidebar
             },
             panes: HashMap::new(),
