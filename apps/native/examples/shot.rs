@@ -55,6 +55,10 @@
 //! `update` shows Settings scrolled to its
 //! update rows with a ready update in the footer, and `update-notes` the
 //! What's new window the footer's button opens over that ready update.
+//! `phone-home` shows the phone app's Home in a 390x844 window inside a
+//! phone's 62 pt top and 34 pt bottom insets, over one saved host listing
+//! two repos: one with a session waiting on a question, the other with a
+//! working session and an idle one.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -70,14 +74,14 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, Utc};
-use daemon_client::device_tokens::MemoryTokens;
+use daemon_client::device_tokens::{DeviceTokenStore as _, MemoryTokens};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
-    App, AppContext as _, AsyncApp, Bounds, Context, Entity, IntoElement, Keystroke, Render,
-    Window, WindowBounds, WindowHandle, WindowOptions, div, prelude::*, px, size,
+    App, AppContext as _, AsyncApp, Bounds, Context, Edges, Entity, IntoElement, Keystroke, Render,
+    Window, WindowBounds, WindowHandle, WindowInsets, WindowOptions, div, prelude::*, px, size,
 };
 use protocol::{
     AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab,
@@ -90,6 +94,8 @@ use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTes
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::perf_pills::PillLevel;
+use rustling_tulip_native::phone::PhoneRoot;
+use rustling_tulip_native::phone::push::UnsupportedPlatform;
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
 use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::ui_theme::theme;
@@ -125,6 +131,14 @@ const CHAT_WINDOW_SIZE: (u16, u16) = (1000, 1100);
 /// The `spawn-hosts` shot's window: tall enough for the dialog to show its
 /// grouped picker above the branch field the keyboard opens on.
 const SPAWN_HOSTS_WINDOW_SIZE: (u16, u16) = (1000, 1300);
+/// The `phone-home` shot's window: a phone held upright, in points.
+const PHONE_WINDOW_SIZE: (u16, u16) = (390, 844);
+/// The safe area the `phone-home` shot draws inside: the top and bottom
+/// insets the iPhone simulator reported in the gpui iOS spike.
+const PHONE_INSET_TOP: f32 = 62.0;
+const PHONE_INSET_BOTTOM: f32 = 34.0;
+/// How many session rows the `phone-home` shot's Home lists.
+const PHONE_HOME_ROWS: usize = 3;
 /// How long the window gets to draw the fixture before the view is driven.
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
@@ -265,10 +279,11 @@ enum View {
     Abandoned,
     EmptyMain,
     FirstConnect,
+    PhoneHome,
 }
 
 impl View {
-    const ALL: [Self; 49] = [
+    const ALL: [Self; 50] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -318,6 +333,7 @@ impl View {
         Self::Abandoned,
         Self::EmptyMain,
         Self::FirstConnect,
+        Self::PhoneHome,
     ];
 
     fn name(self) -> &'static str {
@@ -371,6 +387,7 @@ impl View {
             Self::Abandoned => "abandoned",
             Self::EmptyMain => "empty-main",
             Self::FirstConnect => "first-connect",
+            Self::PhoneHome => "phone-home",
         }
     }
 
@@ -416,6 +433,7 @@ impl View {
             Self::Summary => SUMMARY_WINDOW_SIZE,
             Self::Chat | Self::ChatCompact => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
+            Self::PhoneHome => PHONE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -452,8 +470,9 @@ impl View {
     )]
     fn reached(self, root: &RootView) -> bool {
         match self {
-            // Drawn by `start_toast_shot`, in a window with no root view.
-            Self::Toast => true,
+            // Drawn by `start_toast_shot`, in a window with no root view,
+            // and by `start_phone_home_shot`, which checks its own rows.
+            Self::Toast | Self::PhoneHome => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -722,6 +741,7 @@ impl Shot {
             | View::Abandoned
             | View::EmptyMain
             | View::FirstConnect
+            | View::PhoneHome
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -750,6 +770,7 @@ impl Shot {
             | View::UpdateHost
             | View::UpdateHostBreaks => multi_host_ui_state(),
             View::Perf => perf_ui_state(),
+            View::PhoneHome => phone_home_ui_state(),
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -840,6 +861,36 @@ fn perf_ui_state() -> Value {
     let mut state = multi_host_ui_state();
     state["perf_tracked"] = json!(["local", SHOT_TAILNET_HOST]);
     state
+}
+
+/// The layout the `phone-home` shot starts from: "box" alone saved.
+fn phone_home_ui_state() -> Value {
+    json!({ "saved_hosts": [{ "name": SHOT_TAILNET_HOST, "port": 8787 }] })
+}
+
+/// The device tokens the window holds: none, so the `connections` shots'
+/// saved tailnet host reads as not paired, except one for "box" in the
+/// `phone-home` shot, whose phone is paired with it.
+fn shot_tokens(view: View) -> Arc<MemoryTokens> {
+    let tokens = MemoryTokens::default();
+    if view == View::PhoneHome
+        && let Err(err) = tokens.set(SHOT_TAILNET_HOST, "shot-token")
+    {
+        tracing::warn!("the shot's device token was not stored: {err}");
+    }
+    Arc::new(tokens)
+}
+
+/// The insets the `phone-home` shot draws inside, as a phone reports them.
+fn phone_insets() -> WindowInsets {
+    WindowInsets {
+        safe_area: Edges {
+            top: px(PHONE_INSET_TOP),
+            bottom: px(PHONE_INSET_BOTTOM),
+            ..Edges::default()
+        },
+        ..WindowInsets::default()
+    }
 }
 
 /// Bytes in the GiB the `perf` shot's samples count in.
@@ -1032,6 +1083,9 @@ fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Res
     if shot.view == View::Toast {
         return start_toast_shot(shot, slot, cx);
     }
+    if shot.view == View::PhoneHome {
+        return start_phone_home_shot(shot, slot, cx);
+    }
     let (cmd_tx, cmd_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
     let now = Utc::now();
@@ -1176,9 +1230,7 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
         pick_file,
         pick_save,
         autostart: Arc::new(NoAutostart),
-        // No device token, so the `connections` shots' saved tailnet host
-        // reads as not paired.
-        tokens: Arc::new(MemoryTokens::default()),
+        tokens: shot_tokens(view),
         updater: Arc::new(ShotUpdater {
             installer: ui_dir.join(SHOT_INSTALLER),
             offers: matches!(view, View::Update | View::UpdateNotes),
@@ -1190,7 +1242,11 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
                 },
             }),
         }),
-        shape: rustling_tulip_native::RootShape::Desktop,
+        shape: if view == View::PhoneHome {
+            rustling_tulip_native::RootShape::Phone
+        } else {
+            rustling_tulip_native::RootShape::Desktop
+        },
     }
 }
 
@@ -1363,6 +1419,69 @@ fn start_toast_shot(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut 
     Ok(())
 }
 
+/// Opens the phone's root over a phone-shape root view in a cloaked,
+/// phone-sized window, its content inside a phone's insets, with "box"
+/// answering as its one saved host; once Home lists the fixture's rows,
+/// captures it and quits. `slot` receives the outcome.
+fn start_phone_home_shot(
+    shot: Shot,
+    slot: Rc<RefCell<Option<Result<()>>>>,
+    cx: &mut App,
+) -> Result<()> {
+    let now = Utc::now();
+    let failure = Arc::new(Mutex::new(None));
+    // The phone opens no This PC connection: "box" takes the first pair.
+    let remote = start_box_daemon(shot.view, now, &failure)?;
+    let deps = deps(shot.view, remote, None, &shot.ui_dir);
+    let window_size = shot.view.window_size();
+    let (width, height) = window_size;
+    let bounds = Bounds::centered(None, size(px(width.into()), px(height.into())), cx);
+    let handle = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                focus: false,
+                show: false,
+                ..Default::default()
+            },
+            move |window, cx| {
+                show_cloaked(window, window_size);
+                let root = cx.new(|cx| RootView::with_transport(deps, window, cx));
+                cx.new(|cx| {
+                    PhoneRoot::new(root, Arc::new(UnsupportedPlatform), window, cx)
+                        .with_insets_override(Some(phone_insets()))
+                })
+            },
+        )
+        .context("opening the window")?;
+    let address = handle.update(cx, |_, window, _| win32::window_address(window))??;
+    cx.spawn(async move |cx| {
+        let result = capture_phone_home(handle, &shot, address, cx, &failure).await;
+        *slot.borrow_mut() = Some(result);
+        cx.update(|cx| cx.quit());
+    })
+    .detach();
+    Ok(())
+}
+
+/// Waits for the fixture to draw, checks Home lists its rows, then
+/// captures the window.
+async fn capture_phone_home(
+    handle: WindowHandle<PhoneRoot>,
+    shot: &Shot,
+    address: usize,
+    cx: &mut AsyncApp,
+    failure: &Mutex<Option<anyhow::Error>>,
+) -> Result<()> {
+    cx.background_executor().timer(LOAD_WAIT).await;
+    let rows = handle.update(cx, |phone, _, cx| phone.home_row_count(cx))?;
+    if rows != PHONE_HOME_ROWS {
+        bail!("the phone-home view lists {rows} rows, not {PHONE_HOME_ROWS}");
+    }
+    check_daemon(failure)?;
+    capture(shot.out.clone(), address, failure).await
+}
+
 /// Opens the root view in a cloaked window that is never activated.
 fn open_window(
     deps: RootDeps,
@@ -1480,7 +1599,8 @@ fn drive(
         | View::Abandoned
         | View::EmptyMain
         | View::FirstConnect
-        | View::Toast => Ok(()),
+        | View::Toast
+        | View::PhoneHome => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
@@ -2416,6 +2536,9 @@ struct RemoteFixture {
 
 impl RemoteFixture {
     fn build(view: View, now: DateTime<Utc>) -> Result<Self> {
+        if view == View::PhoneHome {
+            return Self::phone_home(now);
+        }
         let repos = parse_message(json!({
             "type": "repos",
             "repos": [
@@ -2464,7 +2587,78 @@ impl RemoteFixture {
         }
         Ok(Self { repos, sessions })
     }
+
+    /// What the `phone-home` shot's "box" lists: two repos, the first with
+    /// a session waiting on a question, the second with a working session
+    /// and an idle one.
+    fn phone_home(now: DateTime<Utc>) -> Result<Self> {
+        let repos = parse_message(json!({
+            "type": "repos",
+            "repos": [
+                { "id": BOX_REPO, "name": BOX_REPO, "path": BOX_REPO_PATH, "default_branch": "main" },
+                { "id": PHONE_REPO, "name": PHONE_REPO, "path": PHONE_REPO_PATH, "default_branch": "main" },
+            ],
+        }))
+        .context("the phone-home fixture's repos")?;
+        let in_repo = |repo: &str, path: &str| json!([member(repo, "main", path)]);
+        let question = json!({
+            "pending_input": {
+                "kind": "question",
+                "questions": [{
+                    "question": "Keep the newest copy or merge both?",
+                    "header": "Migration",
+                    "options": [],
+                    "multi_select": false,
+                }],
+            },
+        });
+        let rows = [
+            (
+                BOX_SESSION,
+                "Relay soak test",
+                "awaiting_input",
+                in_repo(BOX_REPO, BOX_REPO_PATH),
+                2,
+                question,
+            ),
+            (
+                "b-pwa",
+                "Service worker cache",
+                "working",
+                in_repo(PHONE_REPO, PHONE_REPO_PATH),
+                4,
+                json!({}),
+            ),
+            (
+                "b-trim",
+                "Scrollback trim",
+                "idle",
+                in_repo(PHONE_REPO, PHONE_REPO_PATH),
+                40,
+                json!({}),
+            ),
+        ];
+        let sessions = rows
+            .into_iter()
+            .map(|(id, label, status, members, minutes, extra)| {
+                Row {
+                    id,
+                    label,
+                    status,
+                    members,
+                    minutes,
+                    extra,
+                }
+                .snapshot(now)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { repos, sessions })
+    }
 }
+
+/// The second repo the `phone-home` shot's "box" lists.
+const PHONE_REPO: &str = "harbour";
+const PHONE_REPO_PATH: &str = r"D:\src\harbour";
 
 /// The METAR session beside the asking flight plan session.
 fn yaat_grid() -> GridNode {

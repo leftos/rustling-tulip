@@ -153,7 +153,7 @@ Risks the spike left open: the iOS backend is experimental, from a single upstre
   Waits on: MA.6. Owner's iPhone: not needed (MA.12 proves TLS and the Keychain at run time).
 - [x] **MA.9 Build the phone root over `RootView` with no This PC.** `RootDeps` gains the phone shape: no local host and no `ensure_running`, saved remote hosts connected at start, no tab or layout message sent, no presence report, and no-op notification, sound, badge and toast-window seams.
 
-  The phone root draws the session list (`sidebar_panel` with `SidebarChrome::Phone`, at the window's width inside the safe area) while a saved host's connection is open, and otherwise a first-run screen to add a tailnet host by name and port and open the Pair dialog; a tailnet host with no token offers Pair.
+  The phone root draws the session list (the Home list, `phone/home_view.rs`, at the window's width inside the safe area) while a saved host's connection is open, and otherwise a first-run screen to add a tailnet host by name and port and open the Pair dialog; a tailnet host with no token offers Pair.
 
   The step was split into MA.9a (the phone shape on `RootDeps`), MA.9b (add a host and Pair) and MA.9c (the session list). Beyond the files listed, the step touches `toast_window.rs`, `connection.rs`, the test support and `examples/shot.rs` (MA.9a) and `sidebar.rs` and `sidebar_view.rs` (MA.9c).
 
@@ -193,9 +193,11 @@ Risks the spike left open: the iOS backend is experimental, from a single upstre
 
 These wait on MA.12, so no screen is built before the device and the connection are known to work. Risks the spike left open: the render rate the simulator showed while a spinner runs, and its battery cost on a phone; terminal input from a soft keyboard, which has no Esc, Ctrl or arrows; accessibility, since AccessKit is not known to be wired on iOS; marked text, dictation and the emoji keyboard, unmeasured.
 
-- [ ] **MA.13 Build the phone's Home.** The Home ruling: the grouped list whose rows never move, the Needs you tray above it with one compact card at a time and swipe between cards, yes/no and permission answers typed as the option's number from the tray (the desktop's Needs you answer path), a row's long press opening Stop and Resume in a bottom sheet, and a tap opening the session. Touch targets at least 44 pt; no shortcut hints or hover-only affordances.
+- [ ] **MA.13 Build the phone's Home.** The Home ruling: the grouped list whose rows never move, the Needs you tray above it with one compact card at a time and swipe between cards, yes/no and permission answers typed as the option's number from the tray (the Dashboard ask block's answer path: `ask_block`, `answer_from_dashboard`), a row's long press opening Stop and Resume in a bottom sheet, and a tap opening the session. Touch targets at least 44 pt; no shortcut hints or hover-only affordances.
 
-  Files: `apps/native/src/phone/home_view.rs`, `apps/native/src/phone/tray.rs`, `apps/native/src/phone/root_view.rs`, `apps/native/examples/shot.rs` (view `phone-home`, a portrait phone viewport with the spike's measured insets), `apps/native/tests/ui/ui_phone_home.rs`.
+  The step is split into MA.13a (RT-1715, delivered: the grouped list in `phone/home.rs` and `phone/home_view.rs`, `PhoneRoot` in `phone/root_view.rs`, and a tap through `PhoneRoot::open_session` to a minimal session page), MA.13b (RT-1713, the Needs you tray) and MA.13c (RT-1714, the long-press Stop and Resume sheet).
+
+  Files: `apps/native/src/phone/home.rs`, `apps/native/src/phone/home_view.rs`, `apps/native/src/phone/tray.rs`, `apps/native/src/phone/root_view.rs`, `apps/native/examples/shot.rs` (view `phone-home`, a portrait phone viewport with the spike's measured insets), `apps/native/tests/ui/ui_phone_home.rs`.
 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma13-home.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_phone_home`
 

@@ -20,7 +20,6 @@ use crate::connection_picker::{
     LiveState, RowFacts, RowHost, SavedHost, offers_pair, typed_target,
 };
 use crate::driver_id::DriverId as _;
-use crate::sidebar_view::SidebarChrome;
 use crate::target::{DEFAULT_TAILNET_PORT, HostKey, TailnetHost, Target};
 use crate::text_input::TextInput;
 use crate::ui_theme::{UiTheme, theme};
@@ -144,10 +143,14 @@ fn seen_states(root: &RootView) -> SeenStates {
 pub(super) fn any_host_open(root: &RootView) -> bool {
     root.sidebar.ui_state().saved_hosts.iter().any(|host| {
         host.target()
-            .ok()
-            .and_then(|target| root.conn_of(&HostKey::of(&target)))
-            .is_some_and(|conn| matches!(conn.state(), State::Open { .. }))
+            .is_ok_and(|target| host_open(root, &HostKey::of(&target)))
     })
+}
+
+/// Whether the window's connection to `host` is open.
+pub(super) fn host_open(root: &RootView, host: &HostKey) -> bool {
+    root.conn_of(host)
+        .is_some_and(|conn| matches!(conn.state(), State::Open { .. }))
 }
 
 /// The key of `host` when it is a tailnet host whose connection is open and
@@ -222,7 +225,11 @@ fn host_row(root: &RootView, host: &SavedHost, not_paired: &HashSet<String>) -> 
 }
 
 /// A button on the phone's ground, tagged `selector`.
-fn phone_button(selector: &str, kind: ButtonKind, cx: &Context<PhoneRoot>) -> Stateful<Div> {
+pub(super) fn phone_button(
+    selector: &str,
+    kind: ButtonKind,
+    cx: &Context<PhoneRoot>,
+) -> Stateful<Div> {
     button(
         selector,
         button_look(
@@ -287,12 +294,10 @@ impl PhoneRoot {
             .child(tail)
     }
 
-    /// The sessions list `width` wide while a saved host is open, filling
-    /// the height over the hosts screen's tail.
-    pub(super) fn list_body(&self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {
-        let panel = self.root.update(cx, |root, cx| {
-            root.sidebar_panel(width, SidebarChrome::Phone, window, cx)
-        });
+    /// Home while a saved host is open, filling the height over the hosts
+    /// screen's tail.
+    pub(super) fn list_body(&self, cx: &mut Context<Self>) -> Div {
+        let panel = self.home_list(cx);
         let t = theme(cx);
         let lines = self.push_lines(&t, cx);
         let tail = self.hosts_tail(self.hosts.form_open, &t, cx);
@@ -503,7 +508,7 @@ impl PhoneRoot {
     }
 
     /// Pair on `host`'s row: the dialog opens for it.
-    fn pair(&self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn pair(&self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.root
             .update(cx, |root, cx| root.pair_with_host(host, window, cx));
     }

@@ -60,6 +60,7 @@ mod ui_pane_spawn;
 mod ui_panes;
 mod ui_paste_upload;
 mod ui_perf;
+mod ui_phone_home;
 mod ui_phone_push;
 mod ui_phone_root;
 mod ui_popout;

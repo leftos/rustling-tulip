@@ -89,9 +89,6 @@ pub(crate) enum SidebarChrome {
     /// The desktop's panel beside the panes: its header, its spawn toolbar,
     /// and rows that select, launch, drag and open menus.
     Desktop,
-    /// The phone's full-width list: no header or toolbar, its rows display
-    /// only, with host and container folds and a host's Pair still live.
-    Phone,
 }
 
 /// How wide the sessions panel draws and for which window.
@@ -171,10 +168,9 @@ impl RootView {
     }
 
     /// The repos view's host groups, none in the tabs view or while This PC
-    /// is the only host configured; the phone's `chrome` groups by host in
-    /// either view.
-    fn shown_host_groups(&self, chrome: SidebarChrome) -> Vec<HostGroup> {
-        if chrome == SidebarChrome::Phone || self.sidebar.sidebar_view() == SidebarView::Repos {
+    /// is the only host configured.
+    fn shown_host_groups(&self, _chrome: SidebarChrome) -> Vec<HostGroup> {
+        if self.sidebar.sidebar_view() == SidebarView::Repos {
             self.sidebar.host_groups()
         } else {
             Vec::new()
@@ -182,7 +178,7 @@ impl RootView {
     }
 
     /// Where `host`'s header says its connection stands.
-    fn host_header_state(&self, host: &HostKey) -> HostHeaderState {
+    pub(crate) fn host_header_state(&self, host: &HostKey) -> HostHeaderState {
         match self.conn_of(host).map(Connection::state) {
             Some(State::Open { .. }) => HostHeaderState::Online,
             Some(State::Init | State::Connecting) => HostHeaderState::Connecting,
@@ -202,8 +198,8 @@ impl RootView {
         cx.notify();
     }
 
-    /// The sessions panel `width` wide in `chrome`: the desktop's with its
-    /// header and spawn toolbar, or the phone's list alone.
+    /// The sessions panel `width` wide in `chrome`: the desktop.s with its
+    /// header and spawn toolbar.
     pub(crate) fn sidebar_panel(
         &mut self,
         width: f32,
@@ -279,8 +275,7 @@ impl RootView {
     }
 
     /// The panel `layout.width` wide around `body`: its fill and, in the
-    /// desktop chrome, the header and the toolbar above the body; the
-    /// phone's panel fills the height its column leaves it.
+    /// desktop chrome, the header and the toolbar above the body.
     fn sidebar_frame(
         &self,
         layout: PanelLayout,
@@ -290,28 +285,24 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Div {
         let t = theme(cx);
-        let frame = div().flex().flex_col().w(px(layout.width));
-        let frame = match layout.chrome {
-            SidebarChrome::Desktop => frame.flex_none().h_full(),
-            SidebarChrome::Phone => frame.flex_1().min_h(px(0.0)),
-        };
-        let frame = frame
+        div()
+            .flex()
+            .flex_col()
+            .w(px(layout.width))
+            .flex_none()
+            .h_full()
             .driver_id(|| "sidebar-panel".to_owned())
             .track_focus(&self.sidebar_focus)
             .bg(gpui::rgb(t.panel_bg))
             .text_size(ui_px(cx, UI_TEXT_SIZE))
-            .text_color(gpui::rgb(t.text));
-        let frame = match layout.chrome {
-            SidebarChrome::Desktop => frame
-                .child(header(
-                    self.sidebar.sidebar_view(),
-                    self.sidebar.repo_filter(),
-                    cx,
-                ))
-                .child(self.toolbar(shell_in_toolbar, window, cx)),
-            SidebarChrome::Phone => frame,
-        };
-        frame.child(body)
+            .text_color(gpui::rgb(t.text))
+            .child(header(
+                self.sidebar.sidebar_view(),
+                self.sidebar.repo_filter(),
+                cx,
+            ))
+            .child(self.toolbar(shell_in_toolbar, window, cx))
+            .child(body)
     }
 
     /// The body's rows: each of `containers` with its leaves, or, while
@@ -1042,7 +1033,7 @@ fn add_shell(tip: String, cx: &mut Context<RootView>) -> Stateful<Div> {
 
 /// Where a host's header says its connection stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HostHeaderState {
+pub(crate) enum HostHeaderState {
     Online,
     Connecting,
     Offline,
@@ -1052,7 +1043,7 @@ enum HostHeaderState {
 
 impl HostHeaderState {
     /// The text after the host's name; none while online.
-    fn label(self) -> Option<&'static str> {
+    pub(crate) fn label(self) -> Option<&'static str> {
         match self {
             Self::Online => None,
             Self::Connecting => Some("Connecting…"),
@@ -1062,7 +1053,7 @@ impl HostHeaderState {
     }
 
     /// The state dot's colour, as the Connections picker colours its rows.
-    fn dot(self, t: &UiTheme) -> u32 {
+    pub(crate) fn dot(self, t: &UiTheme) -> u32 {
         match self {
             Self::Online => t.status_ok,
             Self::Connecting | Self::Offline => t.status_idle,
@@ -1083,7 +1074,6 @@ const HOST_NAME_SHRINK: f32 = 1000.0;
 /// its state), then `+ Repo` and `+ Shell`, or `Pair` on a host that has not approved
 /// this device. Every header but the `first` has a rule above it. It is not
 /// a keyboard stop and takes no drop; a right-click opens its host's menu.
-/// The phone's `chrome` keeps the fold and `Pair` alone.
 fn host_header(
     group: &HostGroup,
     state: HostHeaderState,
@@ -1179,36 +1169,30 @@ fn host_header(
             row.border_t_1().border_color(gpui::rgb(t.line))
         })
         .child(fold)
-        .children(action)
+        .child(action)
         .into_any_element()
 }
 
 /// What sits right of `group`'s fold (`key` its wire key): `Pair` on a host
-/// that has not approved this device, else `+ Repo` and `+ Shell`, which
-/// the phone's `chrome` leaves out.
+/// that has not approved this device, else `+ Repo` and `+ Shell`.
 fn host_header_action(
     group: &HostGroup,
     key: &str,
     state: HostHeaderState,
-    chrome: SidebarChrome,
+    _chrome: SidebarChrome,
     cx: &mut Context<RootView>,
-) -> Option<AnyElement> {
+) -> AnyElement {
     if state == HostHeaderState::NotPaired {
-        return Some(host_pair(key, &group.host, &group.label, cx));
-    }
-    if chrome == SidebarChrome::Phone {
-        return None;
+        return host_pair(key, &group.host, &group.label, cx);
     }
     let online = state == HostHeaderState::Online;
-    Some(
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .child(host_add_repo(key, &group.host, &group.label, online, cx))
-            .child(host_shell(key, &group.host, &group.label, online, cx))
-            .into_any_element(),
-    )
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .child(host_add_repo(key, &group.host, &group.label, online, cx))
+        .child(host_shell(key, &group.host, &group.label, online, cx))
+        .into_any_element()
 }
 
 /// A host header's small text button, `selector`, reading `label` after
@@ -1589,7 +1573,6 @@ fn container_rows(
     let focused = ctx.focused_row == Some(container.key.as_str());
     let hovered = ctx.hovered_row == Some(container.key.as_str());
     let header = SidebarRow::Container(container.key.clone());
-    // The phone's rows neither drag nor take a drop.
     let payload =
         drag::container_payload(container).filter(|_| ctx.chrome == SidebarChrome::Desktop);
     let dragged = payload.is_some() && ctx.dragged == payload;
@@ -1639,12 +1622,8 @@ fn container_rows(
 }
 
 /// Whether `container` draws the folder banner with its Add repo and Add
-/// workspace links: a DIR or SH container with a folder, never on the
-/// phone's `chrome`.
-fn shows_folder_banner(container: &Container, chrome: SidebarChrome) -> bool {
-    if chrome == SidebarChrome::Phone {
-        return false;
-    }
+/// workspace links: a DIR or SH container with a folder.
+fn shows_folder_banner(container: &Container, _chrome: SidebarChrome) -> bool {
     // The account service's login session sits in the daemon's scratch
     // folder, which offers no Add repo; every other shell keeps its banner.
     match container.kind {
@@ -1735,7 +1714,6 @@ fn leaf_drag_row(
     let kind = leaf.kind;
     let dim_host = ctx.dimmed.hosts.contains(&leaf.host);
     let desktop = ctx.chrome == SidebarChrome::Desktop;
-    // Nor does a phone's leaf, which is display-only.
     let payload = if ctx.dimmed.containers.contains(&container.key) || dim_host || !desktop {
         None
     } else {
@@ -2222,8 +2200,7 @@ fn detached_stop_all_shown(containers: &[Container]) -> bool {
 }
 
 /// The text under an expanded Detached container, with its Stop all chip
-/// while one of its leaves still runs; the phone's `chrome` draws the text
-/// alone.
+/// while one of its leaves still runs.
 fn detached_banner(
     container: &Container,
     armed: bool,
@@ -2803,7 +2780,7 @@ fn row_height(offset: i8, two_line: bool) -> Pixels {
 /// A container row: a click focuses and folds it; a right-click on a repo
 /// or workspace opens its menu; a double-click there replays its last
 /// launch, and its ▶ replays into the current tab. A row with a launch
-/// summary is two lines. On the phone's `chrome` the click only folds it.
+/// summary is two lines.
 fn container_row(
     container: &Container,
     focused: bool,
@@ -3038,7 +3015,6 @@ fn leaf_row(
         ctx.chrome,
         cx,
     );
-    // The phone's leaves are display-only: no Resume or Dismiss.
     let inline = if ctx.chrome == SidebarChrome::Desktop {
         inline_buttons(leaf, host, &key, cx)
     } else {
@@ -3165,17 +3141,14 @@ fn leaf_frame(
 }
 
 /// `row` with the leaf's click, which selects `host`'s session or opens the
-/// run or subagent the leaf follows; the phone's `chrome` leaves it inert.
+/// run or subagent the leaf follows.
 fn leaf_click(
     row: Stateful<Div>,
     leaf: &Leaf,
     host: &HostKey,
-    chrome: SidebarChrome,
+    _chrome: SidebarChrome,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
-    if chrome == SidebarChrome::Phone {
-        return row;
-    }
     let id = leaf.id.clone();
     let host = host.clone();
     let host_session = leaf.host_session.clone();

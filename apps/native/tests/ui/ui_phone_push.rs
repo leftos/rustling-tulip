@@ -322,7 +322,7 @@ fn the_switch_stays_reachable_once_a_host_is_open(cx: &mut TestAppContext) {
         sessions: vec![session("s1").build()],
     });
 
-    assert!(drawn(&mut h, "sidebar-panel"), "the session list shows");
+    assert!(drawn(&mut h, "phone-home"), "the session list shows");
     assert!(
         !drawn(&mut h, &format!("phone-host-row-{REMOTE}")),
         "no host row while the sessions list"

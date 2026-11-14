@@ -121,9 +121,7 @@ fn a_paired_open_host_offers_no_pair_and_a_refused_token_offers_it(cx: &mut Test
     h.host(&saved_remote()).connect();
 
     let pair = format!("phone-host-pair-{REMOTE}");
-    let key = HostKey::of(&saved_remote());
-    let wire = key.wire().expect("a tailnet host has a wire key");
-    assert!(drawn(&mut h, &format!("host-header-{wire}")));
+    assert!(drawn(&mut h, "phone-home"), "an open host shows Home");
     assert!(!drawn(&mut h, &pair), "a paired, open host offers no Pair");
 
     let mut revoked = Connection::for_target(saved_remote());
@@ -154,38 +152,49 @@ fn a_saved_host_with_a_token_lists_its_sessions_at_window_width(cx: &mut TestApp
             sessions: vec![session("s1").build()],
         });
     }
-    let key = HostKey::of(&saved_remote());
-    let wire = key.wire().expect("a tailnet host has a wire key");
-    let leaf = format!("leaf-{wire}::s1");
+    let wire = HostKey::of(&saved_remote())
+        .wire()
+        .expect("a tailnet host has a wire key")
+        .to_owned();
+    let row_id = format!("phone-home-row-{wire}::s1");
+    let row = row_id.as_str();
 
-    assert!(drawn(&mut h, "sidebar-panel"), "the session list shows");
+    assert!(drawn(&mut h, "phone-home"), "Home shows");
     let window_width = h.cx.update(|window, _| window.viewport_size().width);
     assert_eq!(
-        h.bounds("sidebar-panel").size.width,
+        h.bounds("phone-home").size.width,
         window_width,
         "the list spans the window"
     );
-    assert!(drawn(&mut h, &format!("host-header-{wire}")));
-    assert!(!drawn(&mut h, "host-header-local"), "no This PC group");
-    assert!(drawn(&mut h, &leaf), "the host's session is listed");
-    for chrome in ["sidebar-session-hint", "sidebar-add-shell", "sidebar-more"] {
+    assert!(drawn(&mut h, row), "the host's session is listed");
+    assert!(
+        !drawn(&mut h, &format!("phone-home-host-{wire}")),
+        "one open host gets no header"
+    );
+    for chrome in [
+        "sidebar-panel",
+        "sidebar-session-hint",
+        "sidebar-add-shell",
+        "sidebar-more",
+    ] {
         assert!(!drawn(&mut h, chrome), "no {chrome} on the phone");
     }
     assert!(
         !drawn(&mut h, &format!("phone-host-row-{REMOTE}")),
-        "the list's header replaces the host's row"
+        "Home replaces the host's row"
     );
     assert!(drawn(&mut h, "phone-host-add-another"));
 
     h.host(&saved_remote()).sent();
-    h.click_on(&leaf);
+    h.click_on(row);
+    assert!(drawn(&mut h, "phone-session"), "a tap shows the session");
     assert!(
         h.host(&saved_remote()).sent().is_empty(),
-        "a tap sends nothing yet"
+        "a tap sends nothing"
     );
     assert!(
         h.host(&saved_remote()).commands().is_empty(),
-        "a tap commands nothing yet"
+        "a tap commands nothing"
     );
 }
 

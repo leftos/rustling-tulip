@@ -2474,11 +2474,33 @@ impl SidebarModel {
             return Vec::new();
         }
         let active = self.active_keys();
+        self.groups_arranged(|containers| self.arranged(containers, &active))
+    }
+
+    /// [`Self::host_groups`] in the manual order whatever the chosen
+    /// [`RepoSort`] and [`RepoFilter`]: the daemon's container order, then
+    /// the shell, folder and Detached rows, nothing filtered out, so a row
+    /// keeps its place when a session's status changes. The phone's Home
+    /// lists these.
+    #[must_use]
+    pub fn host_groups_in_place(&self) -> Vec<HostGroup> {
+        if self.ui.saved_hosts.is_empty() {
+            return Vec::new();
+        }
+        let active = HashSet::new();
+        self.groups_arranged(|containers| sort_containers(containers, RepoSort::Manual, &active))
+    }
+
+    /// Every host's group, its containers put in order by `arrange`.
+    fn groups_arranged(
+        &self,
+        arrange: impl Fn(Vec<Container>) -> Vec<Container>,
+    ) -> Vec<HostGroup> {
         self.grouped_hosts()
             .into_iter()
             .map(|host| {
                 let containers = match self.slice(&host) {
-                    Some(slice) => self.arranged(self.host_containers(&host, slice), &active),
+                    Some(slice) => arrange(self.host_containers(&host, slice)),
                     None => Vec::new(),
                 };
                 HostGroup {
