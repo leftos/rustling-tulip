@@ -20,6 +20,8 @@ The native client has three test tiers, and the driver MCP server has a live spe
 
   A spec that clicks into a pane while the jump palette is open aims clear of it and asserts so (`!h.bounds("quick-jump").contains(&at)`): the palette sits near the top of the test window over a right-hand pane's top rows, so a press there runs a palette row and closes it for that reason. It also asserts which pane the press focused, so a wrong path cannot pass.
 
+  `cargo clippy` (`.\rt.ps1 clippy`) fails on the window-guessing gpui methods `apps/native/clippy.toml` bans (`subscribe_in`, `observe_in`, `defer_in`, `update_in`); `docs/native-client.md` "Windows and pop-outs" has the rule.
+
   A routed `--test ui` run brings back `rustling-tulip-native.exe` built without the `driver` feature, over the driver build the `rt-driver` server and smoke tier launch, so rebuild with `--features rustling-tulip-native/driver` before the next driven run.
 
   The pinned gpui's `Frame::clear` (`crates/gpui/src/window.rs`) clears the recorded element bounds every frame, so a selector not painted in the latest frame reads as not drawn (bounds -1): a UI spec can prove an element disappeared, and a click on a selector that is no longer painted finds nothing. The harness's model check (`Harness::in_model`) reads a `settings-` or `themes-` selector as shown only while Settings is open, so a click helper refuses a Settings control once Settings has closed.

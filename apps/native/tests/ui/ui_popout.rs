@@ -15,7 +15,8 @@ use protocol::{
 };
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{
-    Connection, NetEvent, OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ToastKind, ToastSpec,
+    Connection, NetEvent, OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ScKey, ToastKind,
+    ToastSpec,
 };
 use serde_json::json;
 use support::{
@@ -5054,5 +5055,194 @@ fn enter_in_the_spawn_dialog_acts_in_the_main_window_beside_a_popout(cx: &mut Te
     assert!(
         focused_in_popout(&h, &mut popout, "p2"),
         "the pop-out keeps its terminal's keyboard"
+    );
+}
+
+/// `t1` split into `p1` (`s1`, r1's worktree `C:/wt/a`) and `p2` (`s2`,
+/// r1's worktree `C:/wt/b`).
+fn tab_on_two_worktrees() -> Fixture {
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    Fixture {
+        sessions: vec![
+            session("s1").members(&[("r1", "feat", "C:/wt/a")]).build(),
+            session("s2").members(&[("r1", "feat", "C:/wt/b")]).build(),
+        ],
+        repos: vec![repo("r1", "D:/src/r1")],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    }
+}
+
+/// r1's status for `worktree`: `a.rs` staged, `b.rs` changed.
+fn worktree_status(worktree: &str) -> DaemonMessage {
+    let modified = |paths: &[&str]| -> Vec<serde_json::Value> {
+        paths
+            .iter()
+            .map(|path| json!({ "path": path, "status": "M", "from_path": null }))
+            .collect()
+    };
+    serde_json::from_value(json!({
+        "type": "repo_status",
+        "repo_id": "r1",
+        "index_changes": modified(&["a.rs"]),
+        "worktree_changes": modified(&["b.rs"]),
+        "worktree_path": worktree,
+    }))
+    .expect("status fixture")
+}
+
+/// The keys the source-control panel shows, in order.
+fn section_keys(h: &mut Harness<'_>) -> Vec<ScKey> {
+    h.root(|root, _| root.source_control_panel())
+        .sections
+        .into_iter()
+        .map(|section| section.key)
+        .collect()
+}
+
+/// The commit box's button of the panel's one section, as `(label, enabled)`.
+fn commit_button(h: &mut Harness<'_>) -> Option<(&'static str, bool)> {
+    h.root(|root, _| root.source_control_panel())
+        .sections
+        .into_iter()
+        .next()
+        .and_then(|section| section.commit)
+        .map(|commit| (commit.label, commit.enabled))
+}
+
+/// The appearance editor's title, when it is open.
+fn appearance_title(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.appearance_editor_title())
+}
+
+#[gpui::test]
+fn a_commit_box_made_while_a_popout_was_focused_keeps_its_draft_after_the_popout_closes(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &tab_on_two_worktrees());
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    focus_p1_in_main(&mut h);
+    let first = ScKey {
+        repo_id: "r1".to_owned(),
+        worktree: Some("C:/wt/a".to_owned()),
+    };
+    assert_eq!(
+        section_keys(&mut h),
+        vec![first],
+        "p1's worktree is the only section at first"
+    );
+
+    let key = PopoutKey::Tab {
+        tab_id: "t1".to_owned(),
+    };
+    assert_eq!(
+        h.root_update(move |root, window, cx| root.open_popout(key, window, cx)),
+        OpenOutcome::Opened
+    );
+    let mut popout = h.popout_window();
+    popout.update(|window, _| window.activate_window());
+    let root = h.root.clone();
+    let at = popout
+        .update(|_, cx| root.read(cx).pane_cell_center("p2", 0, 0, cx))
+        .expect("p2 is laid out in the pop-out");
+    click_in_popout_at(&mut popout, at);
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "the click in the pop-out focuses p2"
+    );
+    let second = ScKey {
+        repo_id: "r1".to_owned(),
+        worktree: Some("C:/wt/b".to_owned()),
+    };
+    assert_eq!(
+        section_keys(&mut h),
+        vec![second.clone()],
+        "p2's worktree gets its section while the pop-out's update makes its fields"
+    );
+
+    press_in_popout(&mut popout, "popout-tab-dock-t1");
+    assert_eq!(h.window_count(), 1, "the pop-out window closed");
+    assert_eq!(
+        section_keys(&mut h),
+        vec![second.clone()],
+        "the section stays after the dock back"
+    );
+
+    h.click_on("activity-source-control");
+    h.send(worktree_status("C:/wt/b"));
+    h.click_on(&format!("sc-commit-input-{}", second.id()));
+    h.keys("fix");
+    let typed = {
+        let key = second.clone();
+        h.root(move |root, cx| root.sc_commit_input(&key, cx))
+    };
+    assert_eq!(
+        typed.as_deref(),
+        Some("fix"),
+        "the typed message in the box"
+    );
+    assert_eq!(
+        commit_button(&mut h),
+        Some(("Commit", true)),
+        "the section's draft holds the typed message, so Commit is enabled"
+    );
+}
+
+#[gpui::test]
+fn the_appearance_editor_opened_from_a_popout_closes_on_esc_after_the_popout_closes(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    focus_p1_in_main(&mut h);
+    let key = PopoutKey::Tab {
+        tab_id: "t2".to_owned(),
+    };
+    assert_eq!(
+        h.root_update(move |root, window, cx| root.open_popout(key, window, cx)),
+        OpenOutcome::Opened
+    );
+    let mut popout = h.popout_window();
+    let header = popout
+        .debug_bounds("pane-header-p2")
+        .expect("p2's header is drawn in the pop-out")
+        .center();
+    popout.simulate_mouse_down(header, MouseButton::Right, Modifiers::none());
+    popout.simulate_mouse_up(header, MouseButton::Right, Modifiers::none());
+    popout.run_until_parked();
+    click_in_popout(&mut popout, "session-menu-appearance");
+    h.cx.run_until_parked();
+    assert_eq!(
+        appearance_title(&mut h).as_deref(),
+        Some("Session appearance"),
+        "Appearance… opens the editor"
+    );
+
+    press_in_popout(&mut popout, "popout-tab-dock-t2");
+    assert_eq!(h.window_count(), 1, "the pop-out window closed");
+
+    h.click_on("appearance-accent-hex");
+    h.keys("escape");
+    assert_eq!(
+        appearance_title(&mut h),
+        None,
+        "Esc in the hex field closes the editor"
     );
 }

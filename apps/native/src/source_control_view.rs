@@ -474,9 +474,23 @@ impl RootView {
             .collect();
         let dropped_changes = self.drop_stale_sc_changes(&wanted);
         let dropped_stash = self.drop_stale_stash_ui(&wanted, window, cx);
-        self.make_stash_inputs(&wanted, window, cx);
+        let main = self.is_main_window(window);
+        if main {
+            self.make_stash_inputs(&wanted, window, cx);
+        }
         let dropped_commit = self.drop_stale_commit_ui(&wanted, window, cx);
-        self.make_commit_inputs(&wanted, window, cx);
+        if main {
+            self.make_commit_inputs(&wanted, window, cx);
+        } else {
+            // The main window draws the boxes, and a field's subscription
+            // dies with the window it was made in: a pop-out's update makes
+            // them in the main window.
+            let keys = wanted.clone();
+            Self::in_window(self.layouts.main(), cx, move |root, window, cx| {
+                root.make_stash_inputs(&keys, window, cx);
+                root.make_commit_inputs(&keys, window, cx);
+            });
+        }
         let dropped = dropped_changes || dropped_stash || dropped_commit;
         self.seed_stashes(&wanted);
         wanted.extend(self.sc_main_keys());

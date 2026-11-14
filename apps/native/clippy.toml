@@ -1,0 +1,10 @@
+# The pinned gpui runs these in an entity's current window: the last window that drew it, or none
+# once that window closed. RootView is drawn by the main window and every pop-out, so a callback
+# names its window itself (docs/native-client.md, "Windows and pop-outs").
+disallowed-methods = [
+    { path = "gpui::Context::subscribe_in", reason = "runs in the last window that drew the subscriber", replacement = "RootView::subscribe_in_window, or cx.subscribe when the callback needs no window" },
+    { path = "gpui::Context::observe_in", reason = "runs in the last window that drew the observer", replacement = "Window::observe, or cx.observe when the callback needs no window" },
+    { path = "gpui::Context::defer_in", reason = "runs in the last window that drew the entity", replacement = "RootView::defer_in_window, or App::defer through a weak entity" },
+    { path = "gpui::WeakEntity::update_in", reason = "runs in the entity's current window, not the task's", replacement = "RootView::update_in_task_window or RootView::update_in_main_window" },
+    { path = "gpui::Entity::update_in", reason = "runs in the entity's current window, not the task's", replacement = "RootView::update_in_task_window or RootView::update_in_main_window" },
+]

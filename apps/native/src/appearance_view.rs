@@ -378,7 +378,8 @@ impl RootView {
     }
 
     /// Opens the editor at `level`, closing any menu, unless another dialog
-    /// or a modal notice is up or the connection is down. The installed
+    /// or a modal notice is up or the connection is down. The main window
+    /// draws it, so a pop-out's request opens it there. The installed
     /// families are read now.
     pub(crate) fn open_appearance_editor(
         &mut self,
@@ -386,6 +387,12 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.is_main_window(window) {
+            self.open_in_main_window(cx, move |root, window, cx| {
+                root.open_appearance_editor(level, window, cx);
+            });
+            return;
+        }
         let blocked = self.appearance_editor.is_some()
             || self.exit.is_some()
             || self.spawn_dialog.is_some()
