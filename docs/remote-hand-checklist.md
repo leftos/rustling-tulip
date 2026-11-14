@@ -160,3 +160,16 @@ These need an iPhone on iOS 16.4 or later with Tailscale signed in as the same T
 - [ ] With a session's screen open, turn Remote access off on the host. **Expect:** a red `Reconnecting…` bar shows under the header. Turn it back on. **Expect:** the bar goes away once the connection is open. Tap `Send` while the connection is down. **Expect:** the bar can read `Offline` after the refused send.
 - [ ] On a host with no sessions, open Home. **Expect:** it says `No sessions`. Start one. **Expect:** the line goes away and the session is listed.
 - [ ] Open the page in a Safari tab, not the Home Screen app. **Expect:** `Open this page from your Home Screen to finish setting up.` shows until Home appears. Open the Home Screen app. **Expect:** that line shows on no screen.
+
+## 14. The native iPhone app's push
+
+These need the phone app from TestFlight on an iPhone with Tailscale signed in as the same Tailscale user, paired with the host, and a host daemon that lists `relay_push` (one built from the release that ships it, or `.\rt.ps1 restart` from a checkout with the installed app's window closed). The phone registers with `Hold while I'm at my computer` on, so each step that waits for a push first focuses another window on the host.
+
+- [ ] Open the app. **Expect:** a `Notifications` switch under the host's session list. Turn it on. **Expect:** iOS asks for permission once; after `Allow` the switch stays on with no text under it, and `daemon.log` logs `push: the device's subscription was stored`.
+- [ ] Lock the phone and leave a session waiting on the host. **Expect:** a push on the Lock Screen naming the session, not `A session changed. Open the app to see it.` (the fallback alert, which means the notification extension did not run or could not decrypt), and the app icon's badge equal to the number of sessions in Needs you.
+- [ ] Tap the push. **Expect:** the app opens on that session's screen on that host.
+- [ ] Turn Tailscale off on the phone and leave another session waiting. **Expect:** the push still arrives. Turn Tailscale back on.
+- [ ] Let a session's turn end. **Expect:** a Finished push arrives.
+- [ ] With a TestFlight build whose extension returns without decrypting, leave a session waiting. **Expect:** the fallback alert arrives, titled `Rustling Tulip` and reading `A session changed. Open the app to see it.`
+- [ ] Delete the app and leave a session waiting. **Expect:** the relay answers the daemon 410 and the daemon deletes the phone's subscription from `subscriptions.json` in its `push` folder (`docs/on-disk.md`).
+- [ ] Run `wrangler tail rustling-tulip-push-relay` while a push goes out. **Expect:** the relay's own log lines carry no device token and no body; the request URL Workers records carries the token, which is the platform's line, not the relay's.

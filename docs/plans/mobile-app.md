@@ -300,6 +300,14 @@ MA.12, on the owner's iPhone with the TestFlight build and the Tailscale app, ag
 - The chevron that folds a session's subagent rows is hard to hit: its hit area is the 13 px icon alone, so a tap has to land at the screen's edge (RT-1695).
 - The hour on an open list (battery, warmth, render rate) was not run; MA.16's hour on a working session's chat measures battery and warmth on the device.
 
+PR.8's first pass, on the owner's iPhone with a TestFlight build, against the PC's daemon built from `main` (the released daemon predates `relay_push`):
+
+- The PC's Notifications switch shows under its session list, and turning it on asks iOS once and stays on with no hint: the app got its device token and made its Keychain keys.
+- A Needs you raised while the phone was locked arrives on the Lock Screen with the session's name, so the notification extension ran and decrypted it; the badge matches the Needs you count.
+- A Needs you with Tailscale off on the phone still arrives, and a Finished push arrives when a turn ends.
+- `daemon.log` logs the stored subscription; a delivered push logs nothing at the default level.
+- Still to run: the tap opening that session (MA.19), the fallback alert with the extension made to fail, a deleted app's token pruned after the relay's 410, and the relay's own log lines carrying no token or body.
+
 ## How it connects
 
 ```text
@@ -317,7 +325,7 @@ The native app needs no new message for its screens: Home reads `SessionSnapshot
 
 ## Push
 
-The daemon's Web Push, which the web app uses. Native push goes through the relay in [push-relay.md](./push-relay.md).
+The daemon's Web Push, which the web app uses. Native push goes through the relay in [push-relay.md](./push-relay.md): the native app registers from a host's Notifications switch (`PushRegistration::Apns`), the daemon posts each Needs you and Finished encrypted to the relay, and the app's notification extension decrypts it on the phone; [remote-hand-checklist.md](../remote-hand-checklist.md) section 14 is its hand check.
 
 - **VAPID keys:** a P-256 key pair the daemon generates the first time push is enabled, kept in a machine-local folder beside the tailnet certificate's (`ProjectDirs::data_local_dir().join("push")`, `%LOCALAPPDATA%\leftos\rustling-tulip\data\push\`, overridable with `RUSTLING_TULIP_PUSH_DIR` for tests), never in `state.json` and never in the roaming config dir. Replacing the keys invalidates every subscription, so nothing rotates them; deleting the folder is the reset.
 
