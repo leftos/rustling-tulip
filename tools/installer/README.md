@@ -147,7 +147,7 @@ From the repo root on this PC:
 pwsh -NoProfile -File tools/installer/pack-macos-signed.ps1
 ```
 
-It reads the signing set into its own process environment, then starts one pinned heavy gate run on `builder@mac-mini` of `pwsh -NoProfile -File tools/installer/pack-macos.ps1 -Sign`, logging to `.tmp/pack-macos.log`; the gate brings the three assets back into `target/installer`. The variables cross to the Mac as bare `--env NAME` gate flags, so no value is on a command line, in a log or in a file in the repo.
+It reads the signing set into its own process environment, then starts one pinned heavy gate run on `builder@mac-mini` of `pwsh -NoProfile -File tools/installer/pack-macos.ps1 -Sign`, logging to `.tmp/pack-macos.log`; the gate brings the three assets back into `target/installer`. The variables cross to the Mac as bare `--env NAME` gate flags, so no value is in a log or in a file in the repo, and none is on a command line except the `.p12` password, which `pack-macos.ps1` passes to `security import -P` on the Mac.
 
 `pack-macos.ps1 -Sign` needs these variables, yaat's names (its `release-macos.yml` secrets), and fails naming the first one missing:
 
@@ -180,6 +180,55 @@ To check a downloaded asset on a Mac:
 spctl --assess -vvv --type open --context context:primary-signature rustling-tulip-<version>-macos-arm64.dmg
 xcrun stapler validate rustling-tulip-<version>-macos-arm64.dmg
 ```
+
+## iOS signing
+
+The phone app (`apps/ios`) goes to TestFlight as an App Store build, signed with the owner's Apple Distribution certificate and uploaded with an App Store Connect API key of the App Manager role. Like macOS signing, it runs on the Mac mini builder and is started from this PC.
+
+What the owner set up once in the Apple Developer account and App Store Connect: the App IDs `dev.leftos.rustling-tulip.phone` (with Push Notifications) and `dev.leftos.rustling-tulip.phone.notify`, an Apple Distribution certificate exported as a `.p12` with a password, the App Store provisioning profiles `Rustling Tulip Phone AppStore` and `Rustling Tulip Notify AppStore`, the App Store Connect API key `Rustling Tulip upload`, the app record, and the TestFlight internal group `Owner`.
+
+From the repo root on this PC:
+
+```powershell
+pwsh -NoProfile -File tools/ios/testflight.ps1             # build, sign and upload
+pwsh -NoProfile -File tools/ios/testflight.ps1 -NoUpload   # build and sign only
+```
+
+It refuses to run inside a gate job or off Windows. It reads the signing set into its own process environment, then starts one pinned heavy gate run on `builder@mac-mini` of `pwsh -NoProfile -File tools/ios/testflight.ps1 -OnMac` (with `-NoUpload` when given), logging to `.tmp/ios-testflight.log`.
+
+The variables cross to the Mac as bare `--env NAME` gate flags, so no value is in a log or in a file in the repo, and none is on a command line except the `.p12` password, which `security import -P` takes as an argument on the Mac, as the macOS signing path does.
+
+On the Mac, the App Store Connect key variables leave the environment before `build.ps1` runs, and `build.ps1 -Sign` moves its four variables out of the environment before `rustup` and `cargo` run.
+
+| Variable | What | Read from |
+|---|---|---|
+| `IOS_DIST_CERT_P12_BASE64` | the Apple Distribution certificate and key, base64 | `apple-distribution.p12` |
+| `IOS_DIST_CERT_PASSWORD_BASE64` | the `.p12` password: the file's bytes, base64; a trailing newline is dropped, nothing else | `p12-password.txt` |
+| `IOS_PHONE_PROFILE_BASE64` | the app's App Store provisioning profile, base64 | `phone-appstore.mobileprovision` |
+| `IOS_ASC_API_KEY_P8_BASE64` | the App Store Connect API key, base64 | `AuthKey_*.p8` (exactly one) |
+| `IOS_TEAM_ID` | the team id | `TEAM_ID` in `ids.env` |
+| `IOS_ASC_API_KEY_ID` | the API key's id | `ASC_API_KEY_ID` in `ids.env` |
+| `IOS_ASC_API_ISSUER_ID` | the API key's issuer id | `ASC_API_ISSUER_ID` in `ids.env` |
+| `IOS_BUILD_NUMBER` | `CFBundleVersion`, the UTC time as `yyyyMMddHHmm`, rising with each upload | computed on this PC |
+
+The files live in the owner's Private Config on Google Drive, `G:\My Drive\Private Config\rustling-tulip\secrets\ios-signing\`; `testflight.ps1` stops naming the folder or the file when one is missing, and names the variable when an `ids.env` entry is empty. It reads only the files in the table: the certificate's loose key, `.pem`, `.cer` and `.csr` and the extension's profile in that folder are never read.
+
+On the Mac, `testflight.ps1 -OnMac` refuses when any variable is unset, then:
+
+1. checks Xcode's tools before any build: it prints `testflight: Xcode <version>, iPhoneOS SDK <version>`, and fails with `testflight: actool is missing from this Xcode` or, unless `-NoUpload`, `testflight: this Xcode's altool cannot upload builds (no --upload-app); the upload needs Transporter`;
+2. runs `pwsh -NoProfile -File tools/ios/build.ps1 -Target device -Sign -BuildNumber <n>`, which builds the release binary for `aarch64-apple-ios` and assembles the bundle, then:
+   - sets `CFBundleVersion` to the build number and adds the build-machine keys Xcode would write (`DTPlatformName`, `DTPlatformVersion`, `DTSDKName`, `DTSDKBuild`, `DTPlatformBuild`, `DTXcode`, `DTXcodeBuild`, `DTCompiler`, `BuildMachineOSBuild`) from the Mac's own `xcrun`, `xcodebuild` and `sw_vers`;
+   - compiles a one-icon asset catalog from `tools/installer/icon/icon-1024.png` (flattened to no alpha when it has one) with `xcrun actool` into `Assets.car`, merging its `CFBundleIcons` keys into `Info.plist`;
+   - decodes the profile into its temporary folder, writes the entitlements from `apps/ios/app.entitlements` with the team id in place of `__TEAM_ID__`, and fails naming the key when the profile's `application-identifier` does not match, its `aps-environment` is not `production` or it does not allow `beta-reports-active`;
+   - imports the `.p12` into a temporary keychain beside the user's keychain search list, adds Apple's public WWDR G3 intermediate (downloaded from `https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer`) to that keychain so the Distribution identity is trusted, copies the profile into the bundle as `embedded.mobileprovision`, and signs with the one valid codesigning identity in the keychain;
+   - checks the signature with `codesign --verify --strict --verbose=2` and zips `Payload/RustlingTulip.app` into `target/ios/aarch64-apple-ios/RustlingTulip.ipa`;
+3. with `-NoUpload`, stops there and prints `testflight: signed build <n> at <ipa>`; otherwise decodes the API key as `AuthKey_<key id>.p8` into a folder of mode 700 in the run's temporary folder (the file created with mode 600), points `altool` at it with `API_PRIVATE_KEYS_DIR`, uploads with `xcrun altool --upload-app --type ios` and the key's id and issuer, and prints `testflight: uploaded build <n>` only when `altool` exits 0 and says `UPLOAD SUCCEEDED`.
+
+   Any other outcome fails the run with `testflight: the upload did not succeed; altool said: <its last lines>`.
+
+Whatever happens, the user's keychain search list is put back, and the temporary keychain, the decoded `.p12` and the API key file are deleted; a key file that cannot be deleted fails the run. The provisioning profile is the one decoded file that stays: it ships inside the signed app as `embedded.mobileprovision`, as Apple requires. `altool` returns once Apple has the build; processing in App Store Connect follows, and the build then reaches the `Owner` group in TestFlight.
+
+The PC's gate `remote.json`, which lives outside the repo, needs the route `pwsh -NoProfile -File tools/ios/testflight.ps1 -OnMac*` in the top-level `repos.rustling-tulip` list beside the `sim-run.ps1` route, never in the Mac builder's own `repos`: a builder entry's own list replaces the top-level one for that builder, even when it is empty.
 
 ## Hand test
 

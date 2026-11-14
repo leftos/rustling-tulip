@@ -169,9 +169,9 @@ Risks the spike left open: the iOS backend is experimental, from a single upstre
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma10-lifecycle.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --lib phone::lifecycle`
 
   Waits on: MA.9. Owner's iPhone: not needed (MA.12 checks it on the device).
-- [ ] **MA.11 Sign the device app and upload it to TestFlight.** This is the relay's "native app's signing step". Once, by the owner: the App ID `dev.leftos.rustling-tulip.phone` with the Push Notifications capability, its App Store Connect app record, an Apple Distribution certificate, an App Store provisioning profile and an App Store Connect API key that may upload builds, saved in Private Config on G:.
+- [x] **MA.11 Sign the device app and upload it to TestFlight.** This is the relay's "native app's signing step". Once, by the owner: the App ID `dev.leftos.rustling-tulip.phone` with the Push Notifications capability, its App Store Connect app record, an Apple Distribution certificate, an App Store provisioning profile and an App Store Connect API key that may upload builds, saved in Private Config on G:.
 
-  Then `tools/ios/build.ps1 -Device -Sign` builds `aarch64-apple-ios` in release, embeds the profile and signs with the `aps-environment` entitlement and a Keychain access group the notification extension will share. `tools/ios/testflight.ps1` reads the signing set into its own process only and runs the build and the upload on the Mac as one pinned heavy gate run, the build number rising each upload.
+  Then `tools/ios/build.ps1 -Target device -Sign -BuildNumber <n>` builds `aarch64-apple-ios` in release, embeds the profile and signs with the `aps-environment` entitlement and a Keychain access group the notification extension will share. `tools/ios/testflight.ps1` reads the signing set into its own process only and runs the build and the upload on the Mac as one pinned heavy gate run, the build number the UTC time `yyyyMMddHHmm`, computed on the PC, so it rises each upload.
 
   Files: `tools/ios/build.ps1`, `tools/ios/testflight.ps1`, `apps/ios/Info.plist`, `apps/ios/app.entitlements`, `tools/installer/README.md` (iOS signing section).
 
