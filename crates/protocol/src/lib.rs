@@ -7983,11 +7983,15 @@ pub enum RemoteState {
     BindFailed { reason: String },
     /// Serving at `https://{name}:{port}`. `cert_expires_at` is the
     /// certificate's `notAfter` in Unix seconds, `None` when it could not be
-    /// read.
+    /// read. `cli_slow` is set while the Tailscale CLI keeps timing out or
+    /// failing transiently and the listener serves on regardless; the next
+    /// good answer clears it. Absent (an older daemon) reads as `false`.
     Serving {
         name: String,
         port: u16,
         cert_expires_at: Option<u64>,
+        #[serde(default)]
+        cli_slow: bool,
     },
     #[serde(other)]
     Unknown,
@@ -13511,11 +13515,13 @@ mod tests {
                 name: "desktop.tail1234.ts.net".to_owned(),
                 port: 8787,
                 cert_expires_at: Some(1_790_000_000),
+                cli_slow: false,
             },
             RemoteState::Serving {
                 name: "desktop.tail1234.ts.net".to_owned(),
                 port: 9000,
                 cert_expires_at: None,
+                cli_slow: true,
             },
         ]
     }
@@ -13575,6 +13581,27 @@ mod tests {
         assert!(
             matches!(absent, ClientMessage::Resize { claim: false, .. }),
             "an absent claim is no claim"
+        );
+    }
+
+    #[test]
+    fn serving_without_cli_slow_decodes_as_not_slow() {
+        let old: DaemonMessage = serde_json::from_str(
+            r#"{"type":"remote_status","enabled":true,"port":8787,"state":{"kind":"serving","name":"x","port":8787,"cert_expires_at":null}}"#,
+        )
+        .expect("a serving state without the field decodes");
+        assert!(
+            matches!(
+                old,
+                DaemonMessage::RemoteStatus {
+                    state: RemoteState::Serving {
+                        cli_slow: false,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "an absent cli_slow is not slow: {old:?}"
         );
     }
 

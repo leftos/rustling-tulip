@@ -545,7 +545,7 @@ OK applies, then closes at once after local-only edits; after daemon sends it wa
 
 It lets the user's other devices on their tailnet connect to this PC's sessions. A switch `Allow remote access over Tailscale` mirrors the daemon's last `RemoteStatus` and sends `ConfigureRemote` on toggle.
 
-Beside it are a status line per `RemoteState`, `Address: https://{name}:{port}` and the certificate's expiry while serving, a Port field (1-65535, inline error; sent by OK or Apply), and hints that changing the port or the PC's Tailscale name changes the iPhone app's address and that the daemon keeps running while remote access is on.
+Beside it are a status line per `RemoteState`, a dim hint under the serving line while `cli_slow` is set (the Tailscale CLI is slow; remote access keeps serving and connected devices stay connected), `Address: https://{name}:{port}` and the certificate's expiry while serving, a Port field (1-65535, inline error; sent by OK or Apply), and hints that changing the port or the PC's Tailscale name changes the iPhone app's address and that the daemon keeps running while remote access is on.
 
 The tab also lists the tailnet devices asking to connect, so the owner approves a new device on the host PC (the device gets its token only then). A `Waiting devices · {n}` section shows one row per request (name, Tailscale login, a `m:ss left` countdown, Approve… and Deny; an approved row reads `Approved · waiting for the device` with only Deny), and the tab carries an amber count badge (`99+` cap, approved requests included).
 

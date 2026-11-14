@@ -6205,9 +6205,11 @@ export type RemoteState =
   /**
    * Serving at `https://{name}:{port}`. `cert_expires_at` is the
    * certificate's `notAfter` in Unix seconds, `None` when it could not be
-   * read.
+   * read. `cli_slow` is set while the Tailscale CLI keeps timing out or
+   * failing transiently and the listener serves on regardless; the next
+   * good answer clears it. Absent (an older daemon) reads as `false`.
    */
-  | { kind: "serving"; name: string; port: number; cert_expires_at: number | null };
+  | { kind: "serving"; name: string; port: number; cert_expires_at: number | null; cli_slow?: boolean };
 
 export interface GitCommit {
   sha: string;

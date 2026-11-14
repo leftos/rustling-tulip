@@ -4245,6 +4245,16 @@ impl RootView {
         )
     }
 
+    /// The hint under the status line while the host serves but its
+    /// Tailscale CLI is slow to answer.
+    #[must_use]
+    pub fn remote_slow_hint(&self) -> Option<&'static str> {
+        self.mirrors()
+            .remote_status
+            .as_ref()
+            .and_then(|status| crate::remote_access::slow_hint(&status.state))
+    }
+
     /// The address other devices reach this PC at, while it serves.
     #[must_use]
     pub fn remote_address(&self) -> Option<String> {
@@ -5982,6 +5992,10 @@ impl RootView {
             .driver_id(|| "settings-remote-status".to_owned())
             .text_color(gpui::rgb(t.text_2))
             .child(self.remote_status_line());
+        let slow = self.remote_slow_hint().map(|line| {
+            hint(crate::fonts::ui_text_size(cx), line, &t)
+                .driver_id(|| "settings-remote-slow".to_owned())
+        });
         let address = self.remote_address().map(|url| {
             div()
                 .driver_id(|| "settings-remote-address".to_owned())
@@ -6003,6 +6017,7 @@ impl RootView {
         .child(hint(crate::fonts::ui_text_size(cx), REMOTE_INTRO, &t))
         .child(switch)
         .child(status)
+        .children(slow)
         .children(address)
         .children(cert)
         .children(self.waiting_devices_section(cx))

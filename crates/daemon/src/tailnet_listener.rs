@@ -77,11 +77,14 @@ pub enum ListenerStatus {
     /// `MagicDNS` name (no trailing dot) of the certificate in service, which
     /// lags a rename until the new name's certificate has loaded.
     /// `cert_expires_at` is that certificate's `notAfter` in Unix seconds,
-    /// `None` when it could not be read.
+    /// `None` when it could not be read. `cli_slow` is set while `whoami`
+    /// keeps failing transiently with an identity known, so the listener
+    /// serves on its last answer; the next good answer clears it.
     Serving {
         name: String,
         addrs: Vec<SocketAddr>,
         cert_expires_at: Option<u64>,
+        cli_slow: bool,
     },
     /// This host's node is tagged, so the owner rule admits nobody: no
     /// server runs and no certificate is asked for.
@@ -172,11 +175,13 @@ pub fn remote_state(status: &ListenerStatus, port: u16) -> protocol::RemoteState
         ListenerStatus::Serving {
             name,
             cert_expires_at,
+            cli_slow,
             ..
         } => RemoteState::Serving {
             name: name.clone(),
             port,
             cert_expires_at: *cert_expires_at,
+            cli_slow: *cli_slow,
         },
         ListenerStatus::HttpsDisabled
         | ListenerStatus::TailscaleDown(TailnetError::HttpsDisabled) => RemoteState::HttpsDisabled,
@@ -1123,6 +1128,7 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
         self.transient_failures += 1;
         if self.last_who.is_some() {
             self.report_transient(&err);
+            self.flag_cli_slow();
             return Retry::Poll;
         }
         if *self.status.borrow() != ListenerStatus::HostTagged {
@@ -1140,6 +1146,26 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
         } else {
             tracing::debug!(%err, failures, "tailnet listener: the tailscale CLI is slow or failing; still serving");
         }
+    }
+
+    /// While serving through a transient spell, publish the `Serving` status
+    /// with `cli_slow` set; any other status stays as it is.
+    fn flag_cli_slow(&self) {
+        let slow = match &*self.status.borrow() {
+            ListenerStatus::Serving {
+                name,
+                addrs,
+                cert_expires_at,
+                ..
+            } => ListenerStatus::Serving {
+                name: name.clone(),
+                addrs: addrs.clone(),
+                cert_expires_at: *cert_expires_at,
+                cli_slow: true,
+            },
+            _ => return,
+        };
+        self.publish(slow);
     }
 
     /// Tailscale is down: forget the identity, stop every server and say why.
@@ -1386,6 +1412,7 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
                 name: cert.name,
                 addrs,
                 cert_expires_at: cert.expires_at,
+                cli_slow: self.transient_failures > 0,
             };
         }
         if outcome.in_use {
@@ -2751,6 +2778,28 @@ mod tests {
         matches!(status, ListenerStatus::Serving { .. })
     }
 
+    fn is_cli_slow(status: &ListenerStatus) -> bool {
+        matches!(status, ListenerStatus::Serving { cli_slow: true, .. })
+    }
+
+    /// `status` with its `cli_slow` flag set to `slow`, when it is `Serving`.
+    fn with_cli_slow(status: &ListenerStatus, slow: bool) -> ListenerStatus {
+        match status.clone() {
+            ListenerStatus::Serving {
+                name,
+                addrs,
+                cert_expires_at,
+                ..
+            } => ListenerStatus::Serving {
+                name,
+                addrs,
+                cert_expires_at,
+                cli_slow: slow,
+            },
+            other => other,
+        }
+    }
+
     #[tokio::test]
     async fn binds_only_the_whoami_addresses() {
         let fake = Arc::new(FakeTailnet::with_addresses(&[
@@ -3035,16 +3084,55 @@ mod tests {
             0,
             "no server stopped"
         );
-        assert_eq!(*listener.status().borrow(), serving, "still serving");
-        assert!(
-            seen.lock().expect("status log lock").is_empty(),
-            "the status never changed"
+        let slow = with_cli_slow(&serving, true);
+        assert_eq!(
+            *listener.status().borrow(),
+            slow,
+            "still serving, flagged slow"
+        );
+        assert_eq!(
+            *seen.lock().expect("status log lock"),
+            [slow],
+            "the status changed once, to slow"
         );
         assert_eq!(
             host_identity(&listener),
             Some(host_key(&whoami_with(&["127.0.0.1/32"]))),
             "the host watch still holds the identity"
         );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn a_slow_cli_while_serving_reports_cli_slow() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
+        let serving = wait_for_status(&listener, is_serving).await;
+        assert!(!is_cli_slow(&serving), "a good answer is not slow");
+
+        fake.set_whoami(Err(TailnetError::Timeout));
+        let slow = wait_for_status(&listener, is_cli_slow).await;
+        assert_eq!(
+            slow,
+            with_cli_slow(&serving, true),
+            "the same name and addresses, flagged slow"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn the_next_good_answer_clears_cli_slow() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
+        let serving = wait_for_status(&listener, is_serving).await;
+        fake.set_whoami(Err(TailnetError::Timeout));
+        wait_for_status(&listener, is_cli_slow).await;
+
+        fake.set_whoami(Ok(whoami_with(&["127.0.0.1/32"])));
+        let cleared = wait_for_status(&listener, |s| is_serving(s) && !is_cli_slow(s)).await;
+        assert_eq!(cleared, serving, "serving as before, no longer slow");
         shutdown.send_replace(true);
     }
 
@@ -5189,6 +5277,26 @@ mod tests {
     }
 
     #[test]
+    fn remote_state_carries_cli_slow() {
+        let addr: SocketAddr = "100.64.0.1:9000".parse().expect("a socket address");
+        let slow = ListenerStatus::Serving {
+            name: "desktop.tail1234.ts.net".to_owned(),
+            addrs: vec![addr],
+            cert_expires_at: None,
+            cli_slow: true,
+        };
+        assert_eq!(
+            remote_state(&slow, 9000),
+            protocol::RemoteState::Serving {
+                name: "desktop.tail1234.ts.net".to_owned(),
+                port: 9000,
+                cert_expires_at: None,
+                cli_slow: true,
+            }
+        );
+    }
+
+    #[test]
     fn remote_state_maps_every_listener_status() {
         use protocol::RemoteState;
         let addr: SocketAddr = "100.64.0.1:9000".parse().expect("a socket address");
@@ -5199,11 +5307,13 @@ mod tests {
                     name: "desktop.tail1234.ts.net".to_owned(),
                     addrs: vec![addr],
                     cert_expires_at: Some(1_893_456_000),
+                    cli_slow: false,
                 },
                 RemoteState::Serving {
                     name: "desktop.tail1234.ts.net".to_owned(),
                     port: 9000,
                     cert_expires_at: Some(1_893_456_000),
+                    cli_slow: false,
                 },
             ),
             (ListenerStatus::HttpsDisabled, RemoteState::HttpsDisabled),

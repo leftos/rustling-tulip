@@ -58,6 +58,19 @@ pub fn state_line(state: &RemoteState, port: u16) -> String {
     }
 }
 
+/// The dim hint under the status line while the host serves but its
+/// Tailscale CLI is slow to answer; `None` in every other state.
+#[must_use]
+pub(crate) fn slow_hint(state: &RemoteState) -> Option<&'static str> {
+    match state {
+        RemoteState::Serving { cli_slow: true, .. } => Some(
+            "The Tailscale CLI is slow to answer. Remote access keeps serving, and connected \
+             devices stay connected.",
+        ),
+        _ => None,
+    }
+}
+
 /// The address other devices reach this PC at, while it serves.
 #[must_use]
 pub fn address(state: &RemoteState) -> Option<String> {
@@ -218,7 +231,8 @@ mod tests {
 
     use super::{
         Autostart, MemoryAutostart, PortError, RemoteStatusView, address, apply_port_message,
-        autostart_for, autostart_is_memory, cert_line, controls_enabled, parse_port, state_line,
+        autostart_for, autostart_is_memory, cert_line, controls_enabled, parse_port, slow_hint,
+        state_line,
     };
 
     const DAY: u64 = 86_400;
@@ -295,6 +309,7 @@ mod tests {
                     name: "box.tail1234.ts.net".to_owned(),
                     port: 9000,
                     cert_expires_at: None,
+                    cli_slow: false,
                 },
                 "Serving on your tailnet.".to_owned(),
             ),
@@ -310,11 +325,48 @@ mod tests {
     }
 
     #[test]
+    fn slow_hint_only_for_a_slow_serving_state() {
+        let serving = |cli_slow| RemoteState::Serving {
+            name: "box.tail1234.ts.net".to_owned(),
+            port: 9000,
+            cert_expires_at: None,
+            cli_slow,
+        };
+        assert_eq!(
+            slow_hint(&serving(true)),
+            Some(
+                "The Tailscale CLI is slow to answer. Remote access keeps serving, and connected \
+                 devices stay connected."
+            )
+        );
+        let reason = || "a reason".to_owned();
+        for state in [
+            RemoteState::Off,
+            RemoteState::Starting,
+            RemoteState::NotInstalled,
+            RemoteState::NotRunning,
+            RemoteState::OtherWindowsUser,
+            RemoteState::NotConnected,
+            RemoteState::TailscaleError { reason: reason() },
+            RemoteState::HttpsDisabled,
+            RemoteState::HostTagged,
+            RemoteState::CertFailed { reason: reason() },
+            RemoteState::PortInUse,
+            RemoteState::BindFailed { reason: reason() },
+            serving(false),
+            RemoteState::Unknown,
+        ] {
+            assert_eq!(slow_hint(&state), None, "{state:?}");
+        }
+    }
+
+    #[test]
     fn serving_names_the_address_and_certificate_age() {
         let serving = RemoteState::Serving {
             name: "box.tail1234.ts.net".to_owned(),
             port: 8787,
             cert_expires_at: Some(NOW + 63 * DAY),
+            cli_slow: false,
         };
         assert_eq!(
             address(&serving).as_deref(),

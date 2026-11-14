@@ -1452,6 +1452,7 @@ mod tests {
             name: "host.tail1234.ts.net".to_owned(),
             addrs: Vec::new(),
             cert_expires_at: None,
+            cli_slow: false,
         };
         assert_eq!(
             serving_name(&serving),

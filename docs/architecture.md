@@ -210,7 +210,7 @@ One native window shows This PC and every saved tailnet and SSH host at once; th
 
   A client turns it on and off live with `ConfigureRemote { enabled, port }` (no restart; a port change while on restarts the listener; a tailnet connection is refused it), which the daemon writes to `remote.json` and answers by broadcasting `RemoteStatus`, also pushed at connect.
 
-  Its `state` (`RemoteState`) is one of off, starting, not installed, not running, other Windows user, not connected, Tailscale error, HTTPS disabled, host tagged (nothing bound, no certificate asked for), certificate failed, port in use, bind failed, or serving with the name, port and the certificate's expiry.
+  Its `state` (`RemoteState`) is one of off, starting, not installed, not running, other Windows user, not connected, Tailscale error, HTTPS disabled, host tagged (nothing bound, no certificate asked for), certificate failed, port in use, bind failed, or serving with the name, port, the certificate's expiry and `cli_slow`, set from the first slow or failed `tailscale whoami` while serving (the listener keeps serving) until the next good answer.
 
   `crates/tailnet` wraps the CLI and the owner rule; a connection presents a device token rather than the `daemon.json` token. A tailnet `Hello` without a valid device token gets `Welcome` and then `DevicePairFailed { reason: "device not approved" }`, and stays open as a pairing connection (`Welcome.features` lists `device_pairing`).
 

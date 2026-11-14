@@ -1515,6 +1515,7 @@ mod tests {
             name: "host.tail1234.ts.net".to_owned(),
             port,
             cert_expires_at: None,
+            cli_slow: false,
         };
         assert_eq!(
             origin(&serving(8787)).as_deref(),
@@ -1822,6 +1823,7 @@ mod tests {
             name: "host.tail1234.ts.net".to_owned(),
             port: 8787,
             cert_expires_at: None,
+            cli_slow: false,
         }
     }
 

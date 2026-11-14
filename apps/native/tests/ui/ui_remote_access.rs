@@ -38,6 +38,7 @@ fn serving(port: u16) -> RemoteState {
         name: HOST.to_owned(),
         port,
         cert_expires_at: None,
+        cli_slow: false,
     }
 }
 
@@ -105,8 +106,8 @@ fn toggle(h: &mut Harness<'_>) -> (bool, bool) {
     h.root(|root, _| root.remote_toggle())
 }
 
-/// Whether `selector` was ever painted; gpui keeps an element's bounds
-/// after it leaves, so a spec asks before the element was first drawn.
+/// Whether `selector` was painted in the last frame; gpui clears its debug
+/// bounds on every frame, so an element that leaves reads as not painted.
 fn painted(h: &mut Harness<'_>, selector: &str) -> bool {
     h.bounds(selector).origin.x >= px(0.0)
 }
@@ -425,6 +426,45 @@ fn status_line_follows_each_remote_state(cx: &mut TestAppContext) {
         h.send(status(true, 9000, state.clone()));
         assert_eq!(status_line(&mut h), state_line(&state, 9000), "{state:?}");
     }
+}
+
+#[gpui::test]
+fn a_slow_cli_shows_its_hint_under_the_status_line(cx: &mut TestAppContext) {
+    const SLOW: &str = "settings-remote-slow";
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
+    let slow = RemoteState::Serving {
+        name: HOST.to_owned(),
+        port: 9000,
+        cert_expires_at: None,
+        cli_slow: true,
+    };
+    h.send(status(true, 9000, slow));
+    assert_eq!(
+        status_line(&mut h),
+        "Serving on your tailnet.",
+        "the line is unchanged"
+    );
+    assert_eq!(
+        h.root(|root, _| root.remote_slow_hint()),
+        Some(
+            "The Tailscale CLI is slow to answer. Remote access keeps serving, and connected \
+             devices stay connected."
+        )
+    );
+    assert!(painted(&mut h, SLOW), "the hint is drawn");
+    let status_y = h.bounds("settings-remote-status").origin.y;
+    let slow_y = h.bounds(SLOW).origin.y;
+    let address_y = h.bounds("settings-remote-address").origin.y;
+    assert!(
+        status_y < slow_y && slow_y < address_y,
+        "under the status line, above the address"
+    );
+
+    h.send(status(true, 9000, serving(9000)));
+    assert_eq!(h.root(|root, _| root.remote_slow_hint()), None);
+    assert!(!painted(&mut h, SLOW), "no hint once the CLI answers");
 }
 
 #[gpui::test]
