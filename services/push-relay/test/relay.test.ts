@@ -445,6 +445,61 @@ describe("push relay", () => {
     expect(String(first.sender)).toMatch(/^[0-9a-f]{8}$/);
   });
 
+  it.each(["background", "Background ", " background "])(
+    "sends X-RT-Push-Type %j as a background push at priority 5 whatever Urgency says",
+    async (pushType) => {
+      const w = await world();
+      const body = bytes(200);
+      const response = await send(w, { body, headers: { "X-RT-Push-Type": pushType, Urgency: "high" } });
+      expect(response.status).toBe(201);
+      expect(w.apns.requests).toHaveLength(1);
+      const sent = w.apns.requests[0]!;
+      expect(sent.headers.get("apns-topic")).toBe(TOPIC);
+      expect(sent.headers.get("apns-push-type")).toBe("background");
+      expect(sent.headers.get("apns-priority")).toBe("5");
+      expect(sent.headers.get("apns-expiration")).toBe(String(SIGNED_AT_MS / 1000 + 3600));
+      expect(sent.headers.get("apns-collapse-id")).toBe("rt-0123abcd");
+      expect(await sent.json()).toEqual({ aps: { "content-available": 1 }, e: b64urlEncode(body) });
+    },
+  );
+
+  it.each(["alert", "bg", "background,alert"])(
+    "refuses X-RT-Push-Type %j with 400 before the limiters or the daily cap count it",
+    async (pushType) => {
+      const w = await world();
+      const response = await send(w, { headers: { "X-RT-Push-Type": pushType } });
+      expect(response.status).toBe(400);
+      expect(await response.text()).toBe("push type is not background");
+      expect(w.apns.requests).toHaveLength(0);
+      expect(w.limiters.ip.keys).toHaveLength(0);
+      expect(w.limiters.token.keys).toHaveLength(0);
+      expect(w.env.RELAY_STATE.puts.filter((put) => put.key.startsWith("day:"))).toHaveLength(0);
+    },
+  );
+
+  it("refuses an unsigned push with 403 before it reads X-RT-Push-Type", async () => {
+    const w = await world();
+    const response = await send(w, { headers: { "X-RT-Push-Type": "alert" }, omit: ["Authorization"] });
+    expect(response.status).toBe(403);
+    expect(w.apns.requests).toHaveLength(0);
+  });
+
+  it("sends an empty X-RT-Push-Type as today's alert", async () => {
+    const w = await world();
+    const body = bytes(200);
+    expect((await send(w, { body, headers: { "X-RT-Push-Type": "" } })).status).toBe(201);
+    const sent = w.apns.requests[0]!;
+    expect(sent.headers.get("apns-push-type")).toBe("alert");
+    expect(sent.headers.get("apns-priority")).toBe("10");
+    expect(await sent.json()).toEqual({
+      aps: {
+        alert: { "title-loc-key": "PUSH_FALLBACK_TITLE", "loc-key": "PUSH_FALLBACK_BODY" },
+        "mutable-content": 1,
+      },
+      e: b64urlEncode(body),
+    });
+  });
+
   it("never posts to a host but APNs, across the whole suite", () => {
     expect(everyRequest.length).toBeGreaterThan(0);
     for (const request of everyRequest) {

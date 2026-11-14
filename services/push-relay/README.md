@@ -1,10 +1,14 @@
 # Push relay
 
-The push relay is the Cloudflare Worker that, to a daemon, is one more RFC 8030 Web Push service: it takes a VAPID-signed, `aes128gcm`-encrypted push for a native phone and forwards it to APNs as a mutable-content alert carrying the ciphertext, so only the relay holds the Apple key. One relay serves every daemon. The design is in [docs/plans/push-relay.md](../../docs/plans/push-relay.md).
+The push relay is the Cloudflare Worker that, to a daemon, is one more RFC 8030 Web Push service: it takes a VAPID-signed, `aes128gcm`-encrypted push for a native phone and forwards it to APNs as a mutable-content alert carrying the ciphertext (or, when the daemon marks it, as a background push that shows nothing), so only the relay holds the Apple key. One relay serves every daemon. The design is in [docs/plans/push-relay.md](../../docs/plans/push-relay.md).
 
 ## Where it runs
 
 The relay is the `rustling-tulip-push-relay` Worker on the owner's Cloudflare account, served at the custom domain `https://rt-push.leftos.dev`, with `workers_dev` off so it has no `workers.dev` name. `GET /health` answers `ok`. Its KV namespaces, rate-limit bindings and variables are in `wrangler.jsonc`.
+
+## Request contract
+
+A daemon posts a push to `/v1/apns/<production|sandbox>/<device token>`, signed with VAPID and encrypted `aes128gcm`; `TTL` sets `apns-expiration`, `Urgency: high` sets priority 10 and `Topic` sets `apns-collapse-id`. A push with no `X-RT-Push-Type` header, or an empty one, is the mutable-content alert. `X-RT-Push-Type: background` (any case, spaces trimmed) sends it as an APNs background push instead: `apns-push-type: background`, always priority 5, and a body of only `{"aps":{"content-available":1},"e":"<ciphertext>"}`, which wakes the app without showing anything. Any other value is answered `400 push type is not background` before the push counts against the rate limits or the daily cap. Deploy the relay before any daemon that sends the header: an older relay ignores it and delivers the push as an alert with nothing to show.
 
 ## Deploy
 

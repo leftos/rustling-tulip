@@ -1,6 +1,7 @@
 // The push relay (docs/plans/push-relay.md): to a daemon, one more RFC 8030 Web Push
-// service; each accepted push goes on to APNs as a mutable-content alert carrying the
-// ciphertext, so only this relay holds the Apple key.
+// service; each accepted push goes on to APNs carrying the ciphertext, as a mutable-content
+// alert or, when `X-RT-Push-Type` says `background`, a background push, so only this relay
+// holds the Apple key.
 
 import { sendApns, type ApnsEnv, type Environment, type Kv } from "./apns";
 import { sha256Hex, verifyVapid } from "./vapid";
@@ -33,6 +34,7 @@ const DAY_COUNTER_TTL_SECONDS = 2 * 24 * 3600;
 const PLATFORM = "apns";
 
 type Route = { kind: "health" } | { kind: "apns"; environment: Environment; token: string };
+type PushKind = "alert" | "background";
 
 /** What the push's log line carries besides its status: never a token, body or header value. */
 interface LogContext {
@@ -56,6 +58,14 @@ function route(request: Request): Route | Response {
   if (environment !== "production" && environment !== "sandbox") return answer(404, "not found");
   if (request.method !== "POST") return answer(405, "method not allowed");
   return { kind: "apns", environment, token: match?.[2] ?? "" };
+}
+
+/** The push kind `X-RT-Push-Type` asks for: absent or empty is an alert, `background` a background push, else a 400. */
+function pushKind(request: Request): PushKind | Response {
+  const value = (request.headers.get("X-RT-Push-Type") ?? "").trim().toLowerCase();
+  if (value === "") return "alert";
+  if (value === "background") return "background";
+  return answer(400, "push type is not background");
 }
 
 function validToken(token: string): boolean {
@@ -110,6 +120,8 @@ async function dailyCap(env: Env, tokenHash: string, nowMs: number, ctx: LogCont
 
 /** The checks after the sender is known, in the designed order, then the APNs send. */
 async function admit(request: Request, env: Env, deps: Deps, push: Route & { kind: "apns" }, ctx: LogContext): Promise<Response> {
+  const kind = pushKind(request);
+  if (kind instanceof Response) return kind;
   const body = await readBody(request);
   if (body instanceof Response) return body;
   // Hashed lowercased, so case variants of one hex token share its deny entry, limit and counter.
@@ -118,7 +130,12 @@ async function admit(request: Request, env: Env, deps: Deps, push: Route & { kin
   if (await limited(request, env, ctx.sender ?? "", tokenHash)) return answer(429, "rate limited", "60");
   const capped = await dailyCap(env, tokenHash, deps.now(), ctx);
   if (capped !== null) return capped;
-  const result = await sendApns(env, { ...push, body, headers: request.headers }, deps.now(), deps.fetch);
+  const result = await sendApns(
+    env,
+    { environment: push.environment, token: push.token, kind, body, headers: request.headers },
+    deps.now(),
+    deps.fetch,
+  );
   if (result.relayFault !== undefined) ctx.relayFault = result.relayFault;
   if (result.kvError !== undefined) ctx.kvErrors.push(result.kvError);
   return answer(result.status, result.status === 201 ? "" : "push not delivered", result.retryAfter);

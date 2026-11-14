@@ -1,5 +1,6 @@
-// The APNs sender: the cached provider token, the mutable-content alert carrying
-// the ciphertext, and the map from APNs' answer to the RFC 8030 status the daemon reads.
+// The APNs sender: the cached provider token, the push carrying the ciphertext (a
+// mutable-content alert, or a background push when the daemon asks for one), and the map
+// from APNs' answer to the RFC 8030 status the daemon reads.
 
 import { b64urlDecode, b64urlEncode } from "./vapid";
 
@@ -34,6 +35,8 @@ const JWT_KV_TTL_SECONDS = 60 * 60;
 export interface ApnsPush {
   environment: Environment;
   token: string;
+  /** `alert` is the mutable-content alert; `background` wakes the app with no alert. */
+  kind: "alert" | "background";
   body: Uint8Array;
   /** The daemon's request headers: `TTL`, `Urgency` and `Topic` are read. */
   headers: Headers;
@@ -115,11 +118,13 @@ export async function providerToken(env: ApnsEnv, nowSeconds: number): Promise<{
 function apnsHeaders(env: ApnsEnv, push: ApnsPush, jwt: string, nowSeconds: number): Headers {
   const ttl = Number.parseInt(push.headers.get("TTL") ?? "", 10);
   const urgency = (push.headers.get("Urgency") ?? "").trim().toLowerCase();
+  // APNs refuses priority 10 for a background push, so it is 5 whatever `Urgency` says.
+  const high = push.kind === "alert" && urgency === "high";
   const headers = new Headers({
     authorization: `bearer ${jwt}`,
     "apns-topic": env.APNS_TOPIC,
-    "apns-push-type": "alert",
-    "apns-priority": urgency === "high" ? "10" : "5",
+    "apns-push-type": push.kind,
+    "apns-priority": high ? "10" : "5",
     "apns-expiration": String(Number.isFinite(ttl) && ttl > 0 ? nowSeconds + ttl : 0),
     "content-type": "application/json",
   });
@@ -138,6 +143,10 @@ function alertBody(ciphertext: Uint8Array): string {
   });
 }
 
+function backgroundBody(ciphertext: Uint8Array): string {
+  return JSON.stringify({ aps: { "content-available": 1 }, e: b64urlEncode(ciphertext) });
+}
+
 async function reasonOf(response: Response): Promise<string> {
   try {
     const parsed = (await response.json()) as { reason?: unknown };
@@ -148,9 +157,10 @@ async function reasonOf(response: Response): Promise<string> {
 }
 
 /**
- * Sends `push` to APNs as a mutable-content alert carrying the ciphertext in `e`, and maps
- * the answer. A provider key that cannot sign is the relay's fault (502); an APNs that cannot
- * be reached is answered 503 with `Retry-After`.
+ * Sends `push` to APNs carrying the ciphertext in `e`, as a mutable-content alert or, for a
+ * `background` push, a `content-available` push with no alert, and maps the answer. A provider
+ * key that cannot sign is the relay's fault (502); an APNs that cannot be reached is answered
+ * 503 with `Retry-After`.
  */
 export async function sendApns(env: ApnsEnv, push: ApnsPush, nowMs: number, fetcher: typeof fetch): Promise<ApnsResult> {
   const nowSeconds = Math.floor(nowMs / 1000);
@@ -165,7 +175,8 @@ export async function sendApns(env: ApnsEnv, push: ApnsPush, nowMs: number, fetc
   let response: Response;
   try {
     const headers = apnsHeaders(env, push, jwt.token, nowSeconds);
-    response = await fetcher(url, { method: "POST", headers, body: alertBody(push.body) });
+    const body = push.kind === "background" ? backgroundBody(push.body) : alertBody(push.body);
+    response = await fetcher(url, { method: "POST", headers, body });
   } catch {
     return { status: 503, retryAfter: "60", ...kvError };
   }

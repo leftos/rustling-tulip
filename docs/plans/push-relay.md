@@ -15,7 +15,7 @@ Web Push has no such problem, since each daemon signs with its own VAPID key and
 ```text
 phone app ──RegisterPush { apns { token, environment, p256dh, auth } }──▶ its own daemon (over the tailnet connection)
 daemon ──RFC 8030 POST, VAPID-signed, aes128gcm body──▶ push relay (Cloudflare Worker) /v1/apns/{environment}/{token}
-push relay ──HTTP/2, team-key JWT, mutable-content alert carrying the ciphertext──▶ APNs ──▶ iPhone
+push relay ──HTTP/2, team-key JWT, mutable-content alert (a background push when the daemon sends `X-RT-Push-Type: background`) carrying the ciphertext──▶ APNs ──▶ iPhone
 iPhone notification service extension: decrypts the body, sets the title, body, badge and session link
 ```
 
@@ -31,12 +31,12 @@ Reason: the daemon's sender (`push/send.rs` `send`, its `Outcome` map, the `JwtC
 
 The payload is end-to-end encrypted, daemon to phone, with RFC 8291 to the phone's own `p256dh` key and `auth` secret, exactly as a browser subscription is. The relay never holds a key that opens it.
 
-- **APNs:** the relay sends an `alert` push with `mutable-content: 1`, an alert made only of localization keys from the app's bundle (`title-loc-key`, `loc-key`; the app's strings, `PUSH_FALLBACK_TITLE` and `PUSH_FALLBACK_BODY` in the phone app bundle's `en.lproj/Localizable.strings`, say "Rustling Tulip" and "A session changed. Open the app to see it."), and the ciphertext base64url in a custom key `e`.
+- **APNs:** the relay sends an `alert` push with `mutable-content: 1`, an alert made only of localization keys from the app's bundle (`title-loc-key`, `loc-key`; the app's strings, `PUSH_FALLBACK_TITLE` and `PUSH_FALLBACK_BODY` in the phone app bundle's `en.lproj/Localizable.strings`, say "Rustling Tulip" and "A session changed. Open the app to see it."), and the ciphertext base64url in a custom key `e`. A push the daemon marks with the request header `X-RT-Push-Type: background` goes instead as an `apns-push-type: background` push at priority 5 with `{"aps":{"content-available":1},"e":...}` and no alert: it wakes the app so it can remove a delivered notification (a cleared-wait notice), and any other header value is answered 400 before the push counts against the limits. The relay is deployed before any daemon that sends the header.
 
   The app's notification service extension decrypts `e`, reads the push notice, and replaces the title, body and badge and sets the session link. If it cannot decrypt in time, iOS shows the fallback alert.
 - **FCM:** the relay sends a data-only message (`data.e` the ciphertext) at high priority; the app's messaging service decrypts it and posts its own notification, so Android shows no fallback text at all.
 
-A silent (background) push was rejected for iOS: Apple throttles background pushes and drops them under load, and they never show anything if the app is not woken, so an alert could be lost silently. A visible alert with plain text from the daemon was rejected because the relay, Apple and Google would then read every session's name.
+A silent (background) push was rejected for the notices themselves on iOS: Apple throttles background pushes and drops them under load, and they never show anything if the app is not woken, so an alert could be lost silently; a background push carries only the cleared-wait notice, which loses nothing when dropped (the notification it would remove stays until swiped away). A visible alert with plain text from the daemon was rejected because the relay, Apple and Google would then read every session's name.
 
 Because the fallback is made of localization keys and is the same for every push, the relay learns nothing from it, not even whether the push is a Needs you or a Finished.
 
@@ -169,7 +169,7 @@ Each step is one brief. Daemon steps that touch `crates/protocol/src/lib.rs` run
   - Files: `crates/daemon/src/server/push.rs`, `crates/daemon/src/push/store.rs`.
   - Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/pr4-handler.log --timeout 1800 --slot heavy -- cargo nextest run -p daemon --cargo-profile test-release server::push` (stored and answered, a replacement token replaces, an empty, overlong or non-hex APNs token and an `Unknown` environment are `invalid_request` with no token in the message, a loopback connection is still refused).
   - Waits on: PR.3. Needs the owner: no.
-- [x] **PR.5 Build the push relay Worker with its APNs sender.** `services/push-relay/`: the RFC 8030 front (VAPID verification against `k=`, `aud` and `exp` checks, `aes128gcm` and size checks), the deny list, the rate limits and daily cap, the kill switch, the APNs sender (cached provider token, `mutable-content` alert with the localization keys and `e`, `apns-collapse-id` from `Topic`, `apns-expiration` from `TTL`, priority from `Urgency`), the status map, and a `GET /health`.
+- [x] **PR.5 Build the push relay Worker with its APNs sender.** `services/push-relay/`: the RFC 8030 front (VAPID verification against `k=`, `aud` and `exp` checks, `aes128gcm` and size checks), the deny list, the rate limits and daily cap, the kill switch, the APNs sender (cached provider token, `mutable-content` alert with the localization keys and `e`, or a background push when `X-RT-Push-Type: background` is sent, `apns-collapse-id` from `Topic`, `apns-expiration` from `TTL`, priority from `Urgency`), the status map, and a `GET /health`.
 
   Tests run on the Workers vitest pool with outbound `fetch` mocked as APNs and the clock passed in.
   - Files: `services/push-relay/package.json`, `services/push-relay/wrangler.jsonc`, `services/push-relay/src/index.ts`, `services/push-relay/src/vapid.ts`, `services/push-relay/src/apns.ts`, `services/push-relay/test/relay.test.ts`.
