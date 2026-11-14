@@ -20,7 +20,7 @@ pub const RESUME_GAP: Duration = Duration::from_secs(90);
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 const BACKOFF_BASE: Duration = Duration::from_millis(500);
-const BACKOFF_CAP: Duration = Duration::from_secs(10);
+pub(crate) const BACKOFF_CAP: Duration = Duration::from_secs(10);
 
 /// Where the connection to the daemon stands.
 #[derive(Debug, Clone, PartialEq, Eq)]

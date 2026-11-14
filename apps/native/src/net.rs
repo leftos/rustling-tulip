@@ -445,24 +445,31 @@ enum Step {
     Leave(Next),
 }
 
-/// Why an in-process SSH dial stopped at the host key.
-enum HostKeyRefusal {
+/// Why an in-process SSH dial failed in a way a redial cannot change.
+enum Refusal {
     /// The host offered a key this device has not trusted: its fingerprint,
     /// which the user is asked to trust.
     Unknown(String),
-    /// The host offered a key other than the one this device trusts.
-    Changed,
+    /// The host's key changed, it refused this device's key, it offers no
+    /// host key this device can check, or the host string is malformed.
+    Other,
 }
 
-/// What an in-process SSH dial refused over at the host key, when that is why
-/// it failed: a failure of the spawned `ssh` transport is always `None`.
-fn host_key_refusal(err: &anyhow::Error) -> Option<HostKeyRefusal> {
-    match err.downcast_ref::<crate::ssh_inproc::OpenError>()? {
-        crate::ssh_inproc::OpenError::UnknownHostKey { fingerprint, .. } => {
-            Some(HostKeyRefusal::Unknown(fingerprint.clone()))
+/// What an in-process SSH dial failed over, when a redial would fail the same
+/// way until the user acts: a failure the backoff may cure (a connect error,
+/// the device's key store) and every failure of the spawned `ssh` transport
+/// are `None`.
+fn refusal(err: &anyhow::Error) -> Option<Refusal> {
+    use crate::ssh_inproc::OpenError;
+    match err.downcast_ref::<OpenError>()? {
+        OpenError::UnknownHostKey { fingerprint, .. } => {
+            Some(Refusal::Unknown(fingerprint.clone()))
         }
-        crate::ssh_inproc::OpenError::HostKeyChanged { .. } => Some(HostKeyRefusal::Changed),
-        _ => None,
+        OpenError::HostKeyChanged { .. }
+        | OpenError::KeyRefused { .. }
+        | OpenError::BadDestination { .. }
+        | OpenError::NoUsableHostKey { .. } => Some(Refusal::Other),
+        OpenError::ClientKey { .. } | OpenError::Connect { .. } => None,
     }
 }
 
@@ -595,15 +602,15 @@ impl Net {
             Ok(Ok(socket)) => socket,
             Ok(Err(err)) => {
                 let reason = format!("{err:#}");
-                match host_key_refusal(&err) {
-                    Some(HostKeyRefusal::Unknown(fingerprint)) => {
+                match refusal(&err) {
+                    Some(Refusal::Unknown(fingerprint)) => {
                         warn!(host = host.name(), %reason, "the SSH host's key is not trusted");
                         self.emit(NetEvent::HostKeyUnverified { fingerprint });
-                        return self.host_key_refused(err.to_string());
+                        return self.refused_until_restart(err.to_string());
                     }
-                    Some(HostKeyRefusal::Changed) => {
-                        warn!(host = host.name(), %reason, "the SSH host's key changed");
-                        return self.host_key_refused(err.to_string());
+                    Some(Refusal::Other) => {
+                        warn!(host = host.name(), %reason, "the SSH host refused the connection");
+                        return self.refused_until_restart(err.to_string());
                     }
                     None => {
                         warn!(host = host.name(), %reason, "starting ssh failed");
@@ -734,10 +741,10 @@ impl Net {
         Next::Wait(delay)
     }
 
-    /// The SSH host refused this device's trust in its key: show `reason` and
-    /// wait for a command, never the backoff, which would redial a host that
-    /// offers the same key again.
-    fn host_key_refused(&mut self, reason: String) -> Next {
+    /// The SSH dial failed in a way a redial cannot change (see [`refusal`]):
+    /// show `reason` and wait for a command, never the backoff, which would
+    /// redial a host that fails the same way again.
+    fn refused_until_restart(&mut self, reason: String) -> Next {
         self.conn.on_auth_failed(reason);
         self.emit_state();
         Next::Wait(None)
@@ -3743,56 +3750,133 @@ mod tests {
         );
     }
 
+    /// Whether `events` holds the untrusted-host-key event for `SHA256:abc`.
+    fn unverified_abc(events: &[NetEvent]) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                NetEvent::HostKeyUnverified { fingerprint } if fingerprint == "SHA256:abc"
+            )
+        })
+    }
+
+    /// Every event reported so far, without waiting.
+    fn events_so_far(view_rx: &mut UnboundedReceiver<NetEvent>) -> Vec<NetEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = view_rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Past the longest backoff, then every ready task run.
+    async fn past_the_backoff() {
+        tokio::time::advance(crate::connection::BACKOFF_CAP + Duration::from_secs(1)).await;
+        settle().await;
+    }
+
     #[test]
     fn an_unknown_ssh_host_key_is_reported_and_not_redialled() {
         let (deps, calls) = refusing_ssh_deps(|| crate::ssh_inproc::OpenError::UnknownHostKey {
             host: "box".to_owned(),
             fingerprint: "SHA256:abc".to_owned(),
         });
-        let (view_tx, mut view_rx, net) = run_net(deps, devbox());
-
-        assert!(
-            saw(&mut view_rx, |event| matches!(
-                event,
-                NetEvent::HostKeyUnverified { fingerprint } if fingerprint == "SHA256:abc"
-            )),
-            "the untrusted host key was never reported"
-        );
-        assert!(
-            saw_state(&mut view_rx, |conn| matches!(
-                conn.state(),
-                State::AuthFailed { reason } if reason.contains("SHA256:abc")
-            )),
-            "the host key refusal never became the connection state"
-        );
-        while let Ok(event) = view_rx.try_recv() {
+        on_paused_clock(deps, |mut view_rx, commands| async move {
+            settle().await;
+            let events = events_so_far(&mut view_rx);
             assert!(
-                !matches!(event, NetEvent::HostKeyUnverified { .. }),
+                unverified_abc(&events),
+                "the untrusted host key was never reported"
+            );
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    NetEvent::State(conn) if matches!(conn.state(),
+                        State::AuthFailed { reason } if reason.contains("SHA256:abc"))
+                )),
+                "the host key refusal never became the connection state"
+            );
+
+            past_the_backoff().await;
+            assert!(
+                !unverified_abc(&events_so_far(&mut view_rx)),
                 "an untrusted host key was reported again without a command"
             );
-        }
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "an untrusted host key redialled the host without a command"
-        );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "an untrusted host key redialled the host without a command"
+            );
 
-        view_tx
-            .unbounded_send(NetCommand::Restart)
-            .expect("net thread is running");
-        assert!(
-            saw(&mut view_rx, |event| matches!(
-                event,
-                NetEvent::HostKeyUnverified { fingerprint } if fingerprint == "SHA256:abc"
-            )),
-            "a Restart never redialled the host"
-        );
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "the Restart did not dial the host again"
-        );
-        stop_net(view_tx, net);
+            commands
+                .unbounded_send(NetCommand::Restart)
+                .expect("the network loop is running");
+            settle().await;
+            assert!(
+                unverified_abc(&events_so_far(&mut view_rx)),
+                "a Restart never redialled the host"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                2,
+                "the Restart did not dial the host again"
+            );
+        });
+    }
+
+    /// Asserts that a dial failing with `refuse()` stops at `AuthFailed`
+    /// with the error's text, with no host key event, and is not redialled
+    /// past the longest backoff.
+    fn assert_not_redialled(refuse: fn() -> crate::ssh_inproc::OpenError) {
+        let want = refuse().to_string();
+        let (deps, calls) = refusing_ssh_deps(refuse);
+        on_paused_clock(deps, |mut view_rx, _commands| async move {
+            settle().await;
+            let mut events = events_so_far(&mut view_rx);
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    NetEvent::State(conn) if matches!(conn.state(),
+                        State::AuthFailed { reason } if *reason == want)
+                )),
+                "the refusal never became the connection state: {want}"
+            );
+            past_the_backoff().await;
+            events.extend(events_so_far(&mut view_rx));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, NetEvent::HostKeyUnverified { .. })),
+                "a refusal was reported as a host key to trust: {want}"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "a refusal redialled the host: {want}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_refused_key_is_not_redialled() {
+        assert_not_redialled(|| crate::ssh_inproc::OpenError::KeyRefused {
+            host: "box".to_owned(),
+            public_key: "ssh-ed25519 AAAA rustling-tulip-phone".to_owned(),
+        });
+    }
+
+    #[test]
+    fn a_bad_destination_is_not_redialled() {
+        assert_not_redialled(|| crate::ssh_inproc::OpenError::BadDestination {
+            name: "box".to_owned(),
+        });
+    }
+
+    #[test]
+    fn a_host_offering_no_host_key_is_not_redialled() {
+        assert_not_redialled(|| crate::ssh_inproc::OpenError::NoUsableHostKey {
+            host: "box".to_owned(),
+        });
     }
 
     #[test]
@@ -3840,20 +3924,24 @@ mod tests {
 
     #[test]
     fn another_ssh_open_error_still_backs_off() {
-        let (deps, _calls) = refusing_ssh_deps(|| crate::ssh_inproc::OpenError::Connect {
+        let (deps, calls) = refusing_ssh_deps(|| crate::ssh_inproc::OpenError::Connect {
             host: "box".to_owned(),
             reason: "no answer within 10 s".to_owned(),
         });
-        let (view_tx, mut view_rx, net) = run_net(deps, devbox());
-
-        assert!(
-            saw_state(&mut view_rx, |conn| matches!(
-                conn.state(),
-                State::Error { reason } if reason.contains("no answer within 10 s")
-            )),
-            "a failed SSH open did not back off"
-        );
-        stop_net(view_tx, net);
+        on_paused_clock(deps, |mut view_rx, _commands| async move {
+            settle().await;
+            let states = states_so_far(&mut view_rx);
+            assert!(
+                states.iter().any(|conn| matches!(
+                    conn.state(),
+                    State::Error { reason } if reason.contains("no answer within 10 s")
+                )),
+                "a failed SSH open did not back off: {states:?}"
+            );
+            past_the_backoff().await;
+            let dials = calls.load(Ordering::SeqCst);
+            assert!(dials >= 2, "the backoff never redialled: {dials} dials");
+        });
     }
 
     #[test]
@@ -3933,12 +4021,13 @@ mod tests {
         stop_net(view_tx, net);
     }
 
-    /// Runs `script` against the network loop on `devbox`, both on this
-    /// thread on a paused clock: time moves only when `script` advances it
-    /// or every task waits on a timer.
-    fn on_paused_clock<F, Fut>(script: F)
+    /// Runs `script` against the network loop on `devbox` with `deps`, both
+    /// on this thread on a paused clock: time moves only when `script`
+    /// advances it or every task waits on a timer. `script` gets the view's
+    /// events and a sender for commands; the loop quits once it returns.
+    fn on_paused_clock<F, Fut>(deps: NetDeps, script: F)
     where
-        F: FnOnce(UnboundedReceiver<NetEvent>, mpsc::Receiver<ScriptedChild>) -> Fut,
+        F: FnOnce(UnboundedReceiver<NetEvent>, UnboundedSender<NetCommand>) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3948,13 +4037,12 @@ mod tests {
             .expect("build a paused test runtime");
         let local = tokio::task::LocalSet::new();
         local.block_on(&runtime, async {
-            let (deps, children, _tokens) = ssh_deps();
             let (view_tx, commands) = unbounded();
             let (events, view_rx) = unbounded();
             let net = tokio::task::spawn_local(
                 Net::new(commands, events, deps, devbox(), WELCOME_TIMEOUT).run(),
             );
-            script(view_rx, children).await;
+            script(view_rx, view_tx.clone()).await;
             drop(view_tx);
             net.await.expect("the network loop ends");
         });
@@ -3994,7 +4082,8 @@ mod tests {
 
     #[test]
     fn an_ssh_welcome_waits_past_the_local_deadline() {
-        on_paused_clock(|mut view_rx, children| async move {
+        let (deps, children, _tokens) = ssh_deps();
+        on_paused_clock(deps, |mut view_rx, _commands| async move {
             let mut child = started(&children).await;
             assert_eq!(child.next_line().await["type"], "hello");
 
@@ -4023,7 +4112,8 @@ mod tests {
     #[test]
     fn an_ssh_welcome_timeout_carries_ssh_stderr() {
         use tokio::io::AsyncWriteExt as _;
-        on_paused_clock(|mut view_rx, children| async move {
+        let (deps, children, _tokens) = ssh_deps();
+        on_paused_clock(deps, |mut view_rx, _commands| async move {
             let mut child = started(&children).await;
             assert_eq!(child.next_line().await["type"], "hello");
             child
@@ -4049,7 +4139,8 @@ mod tests {
 
     #[test]
     fn a_refused_connection_that_closes_is_never_redialled() {
-        on_paused_clock(|mut view_rx, children| async move {
+        let (deps, children, _tokens) = ssh_deps();
+        on_paused_clock(deps, |mut view_rx, _commands| async move {
             let mut child = started(&children).await;
             assert_eq!(child.next_line().await["type"], "hello");
             child

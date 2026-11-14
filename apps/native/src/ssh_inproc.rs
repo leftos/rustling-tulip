@@ -11,12 +11,12 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use daemon_client::device_tokens::DeviceTokenStore;
-use russh::ChannelStream;
-use russh::client;
+use russh::client::{self, AuthResult};
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{
     Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate,
 };
+use russh::{Channel, ChannelMsg, ChannelStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
 
 use crate::ssh::LineSocket;
@@ -40,6 +40,16 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The reason given when the TCP dial or the session setup runs out of time.
 const NO_ANSWER: &str = "no answer within 10 s";
+
+/// The reason given when the host took the key but wants a further step.
+const PARTIAL_SIGN_IN: &str = "the host accepted this phone's key but asks for another sign-in \
+                               step, which the phone cannot do";
+
+/// The reason given when the session ends while the sign-in waits.
+const CLOSED_DURING_SIGN_IN: &str = "the connection closed during sign-in";
+
+/// The reason given when the exec channel ends before the host answers it.
+const CLOSED_BEFORE_BRIDGE: &str = "the host closed the channel before running the bridge command";
 
 /// How often a quiet session is probed, as `ServerAliveInterval=15`.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -76,6 +86,16 @@ pub enum OpenError {
         saved: String,
         /// The fingerprint of the key the host offered.
         presented: String,
+    },
+    /// The host's host-key algorithms share none with this phone's, so it
+    /// offers no key the phone can check against a saved fingerprint (for
+    /// example, it holds only key types the phone does not support).
+    #[error(
+        "{host} offers no host key this phone can check; give its sshd a plain ed25519 host key"
+    )]
+    NoUsableHostKey {
+        /// The host dialled.
+        host: String,
     },
     /// The host refused the phone's key.
     #[error(
@@ -145,8 +165,19 @@ fn parse_port(text: &str) -> Option<u16> {
     text.parse().ok().filter(|port| *port != 0)
 }
 
+/// Held across the read-or-make of the phone's key, so two first uses make
+/// one key: process-wide, since every store instance reaches the same item.
+static CLIENT_KEY_LOCK: Mutex<()> = Mutex::new(());
+
 /// The phone's key: read from `tokens`, or made and stored on first use.
 pub fn client_key(tokens: &dyn DeviceTokenStore) -> Result<PrivateKey, OpenError> {
+    client_key_in(tokens, &CLIENT_KEY_LOCK)
+}
+
+/// [`client_key`] under `lock`, held from the read to the write, never
+/// across an await (this is sync).
+fn client_key_in(tokens: &dyn DeviceTokenStore, lock: &Mutex<()>) -> Result<PrivateKey, OpenError> {
+    let _held = lock.lock().unwrap_or_else(PoisonError::into_inner);
     let stored = tokens
         .get(CLIENT_KEY_NAME)
         .map_err(|err| key_error(format!("{err:#}")))?;
@@ -238,27 +269,12 @@ where
         Ok(session) => session,
         Err(err) => return Err(refused(dest, saved_host_key, &offered, &err)),
     };
-    let auth = session
-        .authenticate_publickey(
-            dest.user.as_str(),
-            PrivateKeyWithHashAlg::new(Arc::new(key), None),
-        )
-        .await
-        .map_err(|err| connect_error(dest, err))?;
-    if !auth.success() {
-        return Err(OpenError::KeyRefused {
-            host: dest.host.clone(),
-            public_key,
-        });
-    }
-    let channel = session
+    sign_in(&mut session, dest, key, public_key).await?;
+    let mut channel = session
         .channel_open_session()
         .await
         .map_err(|err| connect_error(dest, err))?;
-    channel
-        .exec(true, remote_command)
-        .await
-        .map_err(|err| connect_error(dest, err))?;
+    run_bridge(&mut channel, dest, remote_command).await?;
     let (read, writer) = tokio::io::split(channel.into_stream());
     let reader = SessionReader {
         _session: Box::new(session),
@@ -267,8 +283,72 @@ where
     Ok((reader, writer))
 }
 
+/// Signs in as `dest.user` with `key`. A refusal is [`OpenError::KeyRefused`]
+/// only while the session still stands and the host asked for nothing more.
+async fn sign_in(
+    session: &mut client::Handle<HostKeyCheck>,
+    dest: &Destination,
+    key: PrivateKey,
+    public_key: String,
+) -> Result<(), OpenError> {
+    let auth = session
+        .authenticate_publickey(
+            dest.user.as_str(),
+            PrivateKeyWithHashAlg::new(Arc::new(key), None),
+        )
+        .await
+        .map_err(|err| connect_error(dest, err))?;
+    match auth {
+        AuthResult::Success => Ok(()),
+        AuthResult::Failure {
+            partial_success: true,
+            ..
+        } => Err(connect_error(dest, PARTIAL_SIGN_IN)),
+        AuthResult::Failure { .. } if session.is_closed() => {
+            Err(connect_error(dest, CLOSED_DURING_SIGN_IN))
+        }
+        AuthResult::Failure { .. } => Err(OpenError::KeyRefused {
+            host: dest.host.clone(),
+            public_key,
+        }),
+    }
+}
+
+/// Asks the host to run `remote_command` on `channel` and waits for its
+/// answer, which the channel's stream would otherwise drop unread.
+async fn run_bridge(
+    channel: &mut Channel<client::Msg>,
+    dest: &Destination,
+    remote_command: &str,
+) -> Result<(), OpenError> {
+    channel
+        .exec(true, remote_command)
+        .await
+        .map_err(|err| connect_error(dest, err))?;
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Success) => return Ok(()),
+            Some(ChannelMsg::Failure) => {
+                return Err(connect_error(
+                    dest,
+                    format!("the host refused to run the bridge command `{remote_command}`"),
+                ));
+            }
+            None
+            | Some(
+                ChannelMsg::Eof
+                | ChannelMsg::Close
+                | ChannelMsg::ExitStatus { .. }
+                | ChannelMsg::Data { .. },
+            ) => return Err(connect_error(dest, CLOSED_BEFORE_BRIDGE)),
+            Some(_) => {}
+        }
+    }
+}
+
 /// Why the handshake failed: the offered host key when it was not trusted,
-/// else the failure itself.
+/// no usable host key when the host offered none the phone negotiates, else
+/// the failure itself.
 fn refused(
     dest: &Destination,
     saved: Option<&str>,
@@ -289,6 +369,19 @@ fn refused(
             saved: saved.to_owned(),
             presented,
         },
+        (None, _)
+            if matches!(
+                err,
+                russh::Error::NoCommonAlgo {
+                    kind: russh::AlgorithmKind::Key,
+                    ..
+                }
+            ) =>
+        {
+            OpenError::NoUsableHostKey {
+                host: dest.host.clone(),
+            }
+        }
         _ => connect_error(dest, err),
     }
 }
@@ -373,10 +466,11 @@ impl AsyncRead for SessionReader {
 )]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+    use std::sync::mpsc as std_mpsc;
+    use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
     use std::time::Duration;
 
-    use daemon_client::device_tokens::{DeviceTokenStore as _, MemoryTokens};
+    use daemon_client::device_tokens::{DeviceTokenStore, MemoryTokens};
     use futures::{SinkExt as _, StreamExt as _};
     use russh::keys::{Algorithm, PrivateKey, PublicKey};
     use russh::server::{self, Auth, Msg, Session};
@@ -384,8 +478,8 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     use super::{
-        CLIENT_KEY_NAME, Destination, LineSocket, OpenError, client_key, fingerprint, open_over,
-        parse_destination, public_key_line,
+        CLIENT_KEY_NAME, Destination, LineSocket, OpenError, client_key, client_key_in,
+        fingerprint, open_over, parse_destination, public_key_line,
     };
     use crate::ssh::DEFAULT_REMOTE_COMMAND;
 
@@ -427,10 +521,17 @@ mod tests {
         }
     }
 
+    /// What a test server answers a key sign-in with, in place of its
+    /// `allowed` check: an `Auth`, or an `Err` that ends the session.
+    type SignIn = fn() -> Result<Auth, russh::Error>;
+
     /// An SSH server that lets in `allowed` (any key when `None`), records
-    /// each exec and echoes the channel's bytes.
+    /// each exec and echoes the channel's bytes. `sign_in`, when set, is the
+    /// answer to every key sign-in; `refuse_exec` refuses every exec.
     struct TestServer {
         allowed: Option<PublicKey>,
+        sign_in: Option<SignIn>,
+        refuse_exec: bool,
         seen: Seen,
     }
 
@@ -444,6 +545,9 @@ mod tests {
         ) -> impl Future<Output = Result<Auth, Self::Error>> + Send {
             self.seen.auths.fetch_add(1, Ordering::SeqCst);
             lock(&self.seen.keys).push(key.public_key.clone());
+            if let Some(sign_in) = self.sign_in {
+                return std::future::ready(sign_in());
+            }
             let allowed = self
                 .allowed
                 .as_ref()
@@ -472,7 +576,11 @@ mod tests {
             session: &mut Session,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send {
             lock(&self.seen.execs).push(String::from_utf8_lossy(data).into_owned());
-            std::future::ready(session.channel_success(channel))
+            std::future::ready(if self.refuse_exec {
+                session.channel_failure(channel)
+            } else {
+                session.channel_success(channel)
+            })
         }
 
         fn data(
@@ -489,6 +597,9 @@ mod tests {
     struct Host {
         key: PrivateKey,
         allowed: Option<PublicKey>,
+        sign_in: Option<SignIn>,
+        refuse_exec: bool,
+        without_host_key: bool,
         seen: Seen,
     }
 
@@ -497,7 +608,35 @@ mod tests {
             Self {
                 key: random_key(),
                 allowed,
+                sign_in: None,
+                refuse_exec: false,
+                without_host_key: false,
                 seen: Seen::default(),
+            }
+        }
+
+        /// This host, holding no host key at all, so it offers no host-key
+        /// algorithm in its key exchange.
+        fn without_host_key(self) -> Self {
+            Self {
+                without_host_key: true,
+                ..self
+            }
+        }
+
+        /// This host, answering every key sign-in with `sign_in`.
+        fn signing_in_with(self, sign_in: SignIn) -> Self {
+            Self {
+                sign_in: Some(sign_in),
+                ..self
+            }
+        }
+
+        /// This host, refusing every exec.
+        fn refusing_exec(self) -> Self {
+            Self {
+                refuse_exec: true,
+                ..self
             }
         }
 
@@ -514,8 +653,13 @@ mod tests {
             tokens: &MemoryTokens,
         ) -> Result<LineSocket, OpenError> {
             let (client_end, server_end) = tokio::io::duplex(64 * 1024);
+            let keys = if self.without_host_key {
+                Vec::new()
+            } else {
+                vec![self.key.clone()]
+            };
             let config = Arc::new(server::Config {
-                keys: vec![self.key.clone()],
+                keys,
                 auth_rejection_time: Duration::from_millis(1),
                 auth_rejection_time_initial: Some(Duration::ZERO),
                 inactivity_timeout: None,
@@ -523,6 +667,8 @@ mod tests {
             });
             let handler = TestServer {
                 allowed: self.allowed.clone(),
+                sign_in: self.sign_in,
+                refuse_exec: self.refuse_exec,
                 seen: self.seen.clone(),
             };
             tokio::spawn(async move {
@@ -712,6 +858,121 @@ mod tests {
         );
     }
 
+    /// A store over [`MemoryTokens`] that counts writes and parks its first
+    /// read, after reading, until released; every later read releases it.
+    struct ParkingTokens {
+        inner: MemoryTokens,
+        reads: AtomicUsize,
+        sets: AtomicUsize,
+        parked: Mutex<std_mpsc::Sender<()>>,
+        release_tx: Mutex<std_mpsc::Sender<()>>,
+        release_rx: Mutex<std_mpsc::Receiver<()>>,
+    }
+
+    impl ParkingTokens {
+        /// The store, and the receiver its first read signals on once parked.
+        fn new() -> (Self, std_mpsc::Receiver<()>) {
+            let (parked, parked_rx) = std_mpsc::channel();
+            let (release_tx, release_rx) = std_mpsc::channel();
+            let store = Self {
+                inner: MemoryTokens::default(),
+                reads: AtomicUsize::new(0),
+                sets: AtomicUsize::new(0),
+                parked: Mutex::new(parked),
+                release_tx: Mutex::new(release_tx),
+                release_rx: Mutex::new(release_rx),
+            };
+            (store, parked_rx)
+        }
+
+        fn release(&self) {
+            // The parked read may be gone already; a spare release is harmless.
+            _ = lock(&self.release_tx).send(());
+        }
+    }
+
+    impl DeviceTokenStore for ParkingTokens {
+        fn get(&self, host: &str) -> anyhow::Result<Option<String>> {
+            let value = self.inner.get(host);
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                lock(&self.parked)
+                    .send(())
+                    .expect("the test waits for the park");
+                lock(&self.release_rx)
+                    .recv_timeout(HANG_GUARD)
+                    .expect("hung: the parked read was never released");
+            } else {
+                self.release();
+            }
+            value
+        }
+
+        fn set(&self, host: &str, token: &str) -> anyhow::Result<()> {
+            self.sets.fetch_add(1, Ordering::SeqCst);
+            self.inner.set(host, token)
+        }
+
+        fn delete(&self, host: &str) -> anyhow::Result<()> {
+            self.inner.delete(host)
+        }
+    }
+
+    /// `key`'s public half as an `authorized_keys` line.
+    fn public_line(key: &PrivateKey) -> String {
+        key.public_key()
+            .to_openssh()
+            .expect("the public key encodes")
+    }
+
+    #[test]
+    fn two_first_uses_make_one_key() {
+        let (store, parked) = ParkingTokens::new();
+        let store = Arc::new(store);
+        let key_lock = Arc::new(Mutex::new(()));
+        let (done_tx, done) = std_mpsc::channel();
+        let first_use = || {
+            let (store, key_lock, done_tx) =
+                (Arc::clone(&store), Arc::clone(&key_lock), done_tx.clone());
+            std::thread::spawn(move || {
+                _ = done_tx.send(client_key_in(store.as_ref(), &key_lock));
+            });
+        };
+
+        first_use();
+        parked
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: the first use never read the store");
+        first_use();
+        if matches!(key_lock.try_lock(), Err(TryLockError::WouldBlock)) {
+            store.release();
+        }
+
+        let mut lines = Vec::new();
+        for _ in 0..2 {
+            let key = done
+                .recv_timeout(HANG_GUARD)
+                .expect("hung: a first use never returned")
+                .expect("a key");
+            lines.push(public_line(&key));
+        }
+        let stored = store
+            .inner
+            .get(CLIENT_KEY_NAME)
+            .expect("the store reads")
+            .expect("a key is stored");
+        let stored = public_line(&PrivateKey::from_openssh(stored).expect("the stored key parses"));
+        assert_eq!(lines[0], lines[1], "two first uses made two keys");
+        assert_eq!(
+            lines[0], stored,
+            "a first use returned a key the store does not hold"
+        );
+        assert_eq!(
+            store.sets.load(Ordering::SeqCst),
+            1,
+            "the key was stored more than once"
+        );
+    }
+
     #[tokio::test]
     async fn a_refused_key_names_the_public_key_to_authorize() {
         let host = Host::new(Some(random_key().public_key().clone()));
@@ -729,6 +990,82 @@ mod tests {
         );
         assert!(host.seen.auths() > 0);
         assert_eq!(host.seen.execs(), Vec::<String>::new());
+    }
+
+    /// Opens `host` with its key trusted and returns the error it fails with.
+    async fn open_error(host: &Host) -> OpenError {
+        let trusted = host.fingerprint();
+        host.open(
+            DEFAULT_REMOTE_COMMAND,
+            Some(&trusted),
+            &MemoryTokens::default(),
+        )
+        .await
+        .err()
+        .expect("the session does not open")
+    }
+
+    /// Asserts `err` is a `Connect` error for `box` with exactly `want`.
+    fn assert_connect(err: &OpenError, want: &str) {
+        assert!(
+            matches!(err, OpenError::Connect { host, reason } if host == "box" && reason == want),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partial_sign_in_is_not_a_refused_key() {
+        let host = Host::new(None).signing_in_with(|| {
+            Ok(Auth::Reject {
+                proceed_with_methods: None,
+                partial_success: true,
+            })
+        });
+        let err = open_error(&host).await;
+        assert_connect(
+            &err,
+            "the host accepted this phone's key but asks for another sign-in step, \
+             which the phone cannot do",
+        );
+        assert_eq!(host.seen.execs(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_session_dropped_during_sign_in_is_a_connect_error() {
+        let host = Host::new(None).signing_in_with(|| Err(russh::Error::Disconnect));
+        let err = open_error(&host).await;
+        assert_connect(&err, "the connection closed during sign-in");
+        assert!(host.seen.auths() > 0);
+    }
+
+    #[tokio::test]
+    async fn a_refused_bridge_command_is_reported() {
+        let host = Host::new(None).refusing_exec();
+        let err = open_error(&host).await;
+        assert_connect(
+            &err,
+            "the host refused to run the bridge command `rustling-tulipd bridge`",
+        );
+        assert_eq!(host.seen.execs(), ["rustling-tulipd bridge"]);
+    }
+
+    #[tokio::test]
+    async fn a_host_offering_no_host_key_is_reported() {
+        let host = Host::new(None).without_host_key();
+        let err = host
+            .open(DEFAULT_REMOTE_COMMAND, None, &MemoryTokens::default())
+            .await
+            .err()
+            .expect("a host offering no host key is not trusted");
+        assert!(
+            matches!(&err, OpenError::NoUsableHostKey { host } if host == "box"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "box offers no host key this phone can check; give its sshd a plain ed25519 host key"
+        );
+        assert_eq!(host.seen.auths(), 0);
     }
 
     #[tokio::test(start_paused = true)]
