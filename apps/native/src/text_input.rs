@@ -1569,7 +1569,7 @@ mod tests {
     fn text_input_multi_line_paste_keeps_and_normalises_newlines(cx: &mut TestAppContext) {
         let (input, cx) = open(cx, multi, "");
         cx.write_to_clipboard(ClipboardItem::new_string("a\r\nb\rc\nd".to_owned()));
-        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("secondary-v");
         assert_eq!(text_of(&input, cx), "a\nb\nc\nd");
     }
 
@@ -1577,7 +1577,7 @@ mod tests {
     fn text_input_single_line_paste_flattens_newlines(cx: &mut TestAppContext) {
         let (input, cx) = open(cx, single, "");
         cx.write_to_clipboard(ClipboardItem::new_string("a\r\nb\rc\nd".to_owned()));
-        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("secondary-v");
         assert_eq!(text_of(&input, cx), "a b c d");
     }
 
@@ -1695,9 +1695,9 @@ mod tests {
         cx.update(|_, cx| input.update(cx, |input, cx| input.set_read_only(true, cx)));
         cx.write_to_clipboard(ClipboardItem::new_string("zz".to_owned()));
         cx.simulate_input("x");
-        cx.simulate_keystrokes("ctrl-v backspace enter");
+        cx.simulate_keystrokes("secondary-v backspace enter");
         assert_eq!(text_of(&input, cx), "seed");
-        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        cx.simulate_keystrokes("secondary-a secondary-c");
         assert_eq!(caret(&input, cx), (0, 4), "select-all still selects");
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(copied.as_deref(), Some("seed"));
@@ -1726,23 +1726,23 @@ mod tests {
         assert_eq!(offsets, (12, 5, 6), "offsets follow the hidden text");
 
         cx.write_to_clipboard(ClipboardItem::new_string("zz".to_owned()));
-        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        cx.simulate_keystrokes("secondary-a secondary-c");
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(copied.as_deref(), Some("zz"), "copy leaves the clipboard");
-        cx.simulate_keystrokes("ctrl-x");
+        cx.simulate_keystrokes("secondary-x");
         let cut = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(cut.as_deref(), Some("zz"), "cut leaves the clipboard");
         assert_eq!(text_of(&input, cx), "sk-é1", "and the text");
         cx.simulate_keystrokes("end left");
         assert_eq!(caret(&input, cx), (5, 5), "the caret steps over é's bytes");
-        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("secondary-v");
         assert_eq!(text_of(&input, cx), "sk-ézz1", "paste still inserts");
 
         cx.update(|_, cx| input.update(cx, |input, cx| input.set_masked(false, cx)));
         cx.run_until_parked();
         let shown = cx.update(|_, cx| input.read(cx).shown().to_string());
         assert_eq!(shown, "sk-ézz1", "unmasked, the text shows");
-        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        cx.simulate_keystrokes("secondary-a secondary-c");
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(copied.as_deref(), Some("sk-ézz1"), "and copies");
     }
@@ -1766,7 +1766,7 @@ mod tests {
         assert_eq!(actual, Some(0..5), "the range is the hidden text's");
         cx.simulate_input("x");
         cx.write_to_clipboard(ClipboardItem::new_string("yz".to_owned()));
-        cx.simulate_keystrokes("ctrl-v backspace");
+        cx.simulate_keystrokes("secondary-v backspace");
         assert_eq!(
             text_of(&input, cx),
             "sk-é1xy",

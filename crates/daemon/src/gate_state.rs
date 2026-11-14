@@ -1728,10 +1728,25 @@ mod tests {
         Arc::new(state)
     }
 
+    /// The gate program under an install root, joined the way the product joins it.
+    fn gate_under(root: &str) -> String {
+        Path::new(root)
+            .join("gate")
+            .join("bin")
+            .join("gate.exe")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// The user install's gate program under a fake `%LOCALAPPDATA%`.
-    const USER_GATE: &str = r"C:\Users\me\AppData\Local\gate\bin\gate.exe";
+    fn user_gate() -> String {
+        gate_under(r"C:\Users\me\AppData\Local")
+    }
+
     /// The admin install's gate program under a fake `%ProgramFiles%`.
-    const ADMIN_GATE: &str = r"C:\Program Files\gate\bin\gate.exe";
+    fn admin_gate() -> String {
+        gate_under(r"C:\Program Files")
+    }
 
     /// An environment holding exactly `vars`.
     fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
@@ -1747,7 +1762,7 @@ mod tests {
     }
 
     /// A file set holding exactly `paths`.
-    fn files(paths: &[&str]) -> impl Fn(&Path) -> bool {
+    fn files(paths: &[&str]) -> impl Fn(&Path) -> bool + use<> {
         let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
         move |path: &Path| paths.iter().any(|known| known.as_path() == path)
     }
@@ -1756,7 +1771,7 @@ mod tests {
     fn gate_installed_finds_the_user_install() {
         let env = env_of(&[("LOCALAPPDATA", r"C:\Users\me\AppData\Local")]);
 
-        assert!(gate_installed(env, files(&[USER_GATE])));
+        assert!(gate_installed(env, files(&[&user_gate()])));
     }
 
     #[test]
@@ -1766,7 +1781,7 @@ mod tests {
             ("ProgramFiles", r"C:\Program Files"),
         ]);
 
-        assert!(gate_installed(env, files(&[ADMIN_GATE])));
+        assert!(gate_installed(env, files(&[&admin_gate()])));
     }
 
     #[test]
@@ -1778,7 +1793,7 @@ mod tests {
 
         assert!(gate_installed(
             env,
-            files(&[r"D:\Program Files\gate\bin\gate.exe"])
+            files(&[&gate_under(r"D:\Program Files")])
         ));
     }
 
@@ -1803,7 +1818,7 @@ mod tests {
             ("ProgramFiles", r"C:\Program Files"),
         ]);
 
-        assert!(!gate_installed(env, files(&[ADMIN_GATE])));
+        assert!(!gate_installed(env, files(&[&admin_gate()])));
     }
 
     #[test]
@@ -1813,13 +1828,13 @@ mod tests {
             ("ProgramFiles", r"C:\Program Files"),
         ]);
 
-        assert!(gate_installed(env, files(&[ADMIN_GATE])));
+        assert!(gate_installed(env, files(&[&admin_gate()])));
     }
 
     #[test]
     fn gate_installed_skips_an_empty_install_root() {
         let env = env_of(&[("LOCALAPPDATA", ""), ("ProgramFiles", "")]);
-        let present = files(&[r"gate\bin\gate.exe", r"C:\Program Files\gate\bin\gate.exe"]);
+        let present = files(&[&gate_under(""), &gate_under(r"C:\Program Files")]);
 
         assert!(!gate_installed(env, present));
     }
@@ -1830,7 +1845,7 @@ mod tests {
 
         assert!(!gate_installed(
             env,
-            files(&[r"C:\Users\me\AppData\Local\gate\bin\gate.exe.123.old"])
+            files(&[&format!("{}.123.old", user_gate())])
         ));
     }
 
@@ -1838,7 +1853,7 @@ mod tests {
     fn gate_installed_is_false_without_the_environment() {
         assert!(!gate_installed(
             env_of(&[]),
-            files(&[USER_GATE, ADMIN_GATE])
+            files(&[&user_gate(), &admin_gate()])
         ));
     }
 

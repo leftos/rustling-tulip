@@ -1906,7 +1906,7 @@ mod tests {
     #[test]
     fn page_url_encodes_the_path_and_keeps_the_suffix() {
         assert_eq!(
-            page_url(Path::new(r"X:\a b\é.html"), "#q1"),
+            page_url_of(r"X:\a b\é.html", "#q1", true),
             "file:///X:/a%20b/%C3%A9.html#q1"
         );
         assert_eq!(
