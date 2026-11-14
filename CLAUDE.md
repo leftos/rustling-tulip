@@ -206,4 +206,4 @@ Don't go looking for these — they're explicitly out of scope until their plan 
 
 - **Sub-agent / Task-tool interception**, **attach from outside the tailnet** by internet exposure or a relay, **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine over the network, and clients over OpenSSH are being built (`docs/plans/ssh-remote.md`; `docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`).
 
-  A subagent's transcript is viewed read-only (`docs/session-runtime.md` "Subagent list"), never messaged or stopped. The native mobile app is in progress (`docs/plans/mobile-app.md`): the phone app builds and runs in the iOS simulator, with an empty state only so far.
+  A subagent's transcript is viewed read-only (`docs/session-runtime.md` "Subagent list"), never messaged or stopped. The native mobile app is in progress (`docs/plans/mobile-app.md`): the phone app builds and runs in the iOS simulator, adds and pairs hosts, lists their sessions and redials on return to the foreground.

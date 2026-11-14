@@ -167,7 +167,7 @@ The `support` builders for account specs (`apps/native/tests/support/mod.rs`) ar
 
 An OS toast press is tested through the `NotifyRecorder` notifier: `Harness::notified_launches` lists the launch argument each notification carried, `Harness::activate_os_toast(index)` presses the notification at `index`, and `activate_toast_arg(arg)` presses with a raw argument, both delivering it through the window's activation sink as the toast activator does. `h.cx.deactivate_window()` simulates an inactive main window.
 
-A phone-shape window is opened with `Harness::phone(cx, dir)`, and `h.opened_targets()` lists the targets it dialled; `tests/ui/ui_phone_root.rs` is its spec, and `tools/test-map.json` maps the phone-shape sources to it.
+A phone-shape window is opened with `Harness::phone(cx, dir)`, and `h.opened_targets()` lists the targets it dialled; `tests/ui/ui_phone_root.rs` is its spec, and `tools/test-map.json` maps the phone-shape sources to it: the `apps/native/src/phone/**` row selects it beside the `phone::` unit tests.
 
 ### Show a change in a live client
 

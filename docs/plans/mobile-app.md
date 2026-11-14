@@ -144,7 +144,7 @@ Risks the spike left open: the iOS backend is experimental, from a single upstre
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma7-input.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --lib text_input`
 
   Waits on: MA.5. Owner's iPhone: not needed (MA.12 checks it on the device).
-- [ ] **MA.8 Give iOS its TLS roots, Keychain token store and config dir.** `net.rs`'s `os_tls_config` builds from `rustls-platform-verifier` under `cfg(target_os = "ios")`; `KeyringTokens::open` and `install_store` gain the iOS Keychain store from `apple-native-keyring-store` (the step confirms the crate's feature for it); `daemon_client::config_dir` resolves to the app container's `Library/Application Support` on iOS. A target with no store still bails as now.
+- [x] **MA.8 Give iOS its TLS roots, Keychain token store and config dir.** `net.rs`'s `os_tls_config` builds from `rustls-platform-verifier` under `cfg(target_os = "ios")`; `KeyringTokens::open` and `install_store` gain the iOS Keychain store from `apple-native-keyring-store` (the step confirms the crate's feature for it); `daemon_client::config_dir` resolves to the app container's `Library/Application Support` on iOS. A target with no store still bails as now.
 
   Files: `apps/native/Cargo.toml`, `apps/native/src/net.rs`, `crates/daemon-client/Cargo.toml`, `crates/daemon-client/src/device_tokens.rs`, `crates/daemon-client/src/lib.rs`.
 
@@ -162,9 +162,9 @@ Risks the spike left open: the iOS backend is experimental, from a single upstre
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma9-phone-root.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_phone_root`
 
   Waits on: MA.6, MA.7. Owner's iPhone: not needed.
-- [ ] **MA.10 Reconnect when the phone app returns to the foreground.** A pure rule in `phone/lifecycle.rs` (visible again: redial every enabled saved host that is not connected, skipping the backoff wait; hidden: nothing sent), wired from the window's visibility callback in the phone root to the existing Reconnect now path.
+- [x] **MA.10 Reconnect when the phone app returns to the foreground.** A pure rule in `phone/lifecycle.rs` (visible again: redial every enabled saved host whose connection closed or failed, skipping the backoff wait; hidden: nothing sent), wired from the window's visibility callback in `PhoneRoot` (`apps/native/src/phone/mod.rs`) to the existing Reconnect now path (`RootView::redial_saved_hosts`, `NetCommand::Restart`). A host that is open, connecting, on its first attempt, auth-failed or not approved is left alone.
 
-  Files: `apps/native/src/phone/lifecycle.rs`, `apps/native/src/phone/root_view.rs`, `apps/native/src/hosts.rs`.
+  Files: `apps/native/src/phone/lifecycle.rs`, `apps/native/src/phone/mod.rs`, `apps/native/src/hosts.rs`.
 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma10-lifecycle.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --lib phone::lifecycle`
 

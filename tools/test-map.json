@@ -1895,7 +1895,7 @@
         "apps/native/src/phone/**",
         "apps/ios/**"
       ],
-      "filter": "binary_id(rustling-tulip-native) & test(/^phone::/)"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^phone::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_phone_root::/))"
     }
   ]
 }

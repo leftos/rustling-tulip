@@ -321,6 +321,70 @@ fn the_phone_sends_no_local_open_tab_layout_or_presence_message(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn returning_to_the_foreground_redials_a_dropped_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [
+                { "name": REMOTE, "port": 8787 },
+                { "name": TYPED, "port": 8787 },
+            ]
+        }),
+    );
+    let mut h = Harness::phone(cx, &dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    h.tokens().set(TYPED, "t2").expect("seed a token");
+
+    h.host(&saved_remote()).connect();
+    let typed = Target::tailnet(TYPED, Some(8787));
+    h.host(&typed).connect();
+
+    let mut conn = Connection::for_target(saved_remote());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    let _ = conn.on_closed("suspended".to_owned());
+    h.host(&saved_remote()).event(NetEvent::State(conn));
+
+    let _ = h.host(&saved_remote()).commands();
+    let _ = h.host(&typed).commands();
+    let opened = h.opened_targets();
+
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    h.cx.run_until_parked();
+    let commanded = h.host(&saved_remote()).commands();
+    assert!(
+        !commanded
+            .iter()
+            .any(|command| matches!(command, NetCommand::Restart)),
+        "going to the background redials nothing"
+    );
+    assert_eq!(
+        h.opened_targets(),
+        opened,
+        "going to the background opens nothing"
+    );
+
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    h.cx.run_until_parked();
+    let restarts = h
+        .host(&saved_remote())
+        .commands()
+        .iter()
+        .filter(|command| matches!(command, NetCommand::Restart))
+        .count();
+    assert_eq!(restarts, 1, "the dropped host is redialled once");
+    let commanded = h.host(&typed).commands();
+    assert!(
+        !commanded
+            .iter()
+            .any(|command| matches!(command, NetCommand::Restart)),
+        "an open host is left alone"
+    );
+    assert_eq!(h.opened_targets(), opened, "a redial opens nothing new");
+}
+
+#[gpui::test]
 fn a_phone_keeps_a_menu_open_while_a_host_sends_events(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     seed_ui(

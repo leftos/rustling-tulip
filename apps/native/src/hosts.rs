@@ -18,6 +18,7 @@ use crate::connection::{Connection, State};
 use crate::connection_picker::{ConnectionPicker, SavedHost};
 use crate::net::{HandshakeInfo, NetCommand};
 use crate::perf_pills::PerfHostState;
+use crate::phone::lifecycle::{Redial, SavedHostNow, on_visibility};
 use crate::remote_access::RemoteStatusView;
 use crate::remote_mode::Capabilities;
 use crate::settings_view::{KeepAwake, SettingApply, UserHooksEntry, UserHooksPending};
@@ -722,6 +723,47 @@ impl RootView {
                 Err(err) => {
                     tracing::warn!(host = %host.name, "the saved host is not valid ({err}); not connected");
                 }
+            }
+        }
+    }
+
+    /// Redials the saved hosts a phone's return to the foreground finds
+    /// dropped: each enabled saved host in saved order whose held connection
+    /// closed or failed restarts now, skipping the reconnect backoff, and
+    /// each enabled host the window holds no connection to is connected
+    /// anew.
+    pub(crate) fn redial_saved_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let saved: Vec<SavedHost> = self.sidebar.ui_state().saved_hosts.clone();
+        let redials = {
+            let mut facts = Vec::new();
+            for host in &saved {
+                match host.target() {
+                    Ok(target) => {
+                        let key = HostKey::of(&target);
+                        facts.push(SavedHostNow {
+                            enabled: host.enabled,
+                            state: self.conn_of(&key).map(Connection::state),
+                            duplicate: self.duplicate_of(&key).is_some(),
+                            target,
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            host = %host.name,
+                            "the saved host is not valid ({err}); not redialled"
+                        );
+                    }
+                }
+            }
+            on_visibility(true, &facts)
+        };
+        for redial in redials {
+            match redial {
+                Redial::Restart(key) => {
+                    tracing::info!(host = ?key, "phone back in the foreground: redialling");
+                    self.command_to(&key, NetCommand::Restart);
+                }
+                Redial::Connect(target) => self.connect_host(target, window, cx),
             }
         }
     }

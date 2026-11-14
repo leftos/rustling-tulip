@@ -3,6 +3,7 @@
 //! [`RootView`].
 
 mod hosts_view;
+pub(crate) mod lifecycle;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use std::time::Instant;
 
 use gpui::{
     App, AppContext as _, Context, Edges, Entity, IntoElement, ParentElement as _, Pixels, Render,
-    Styled as _, Subscription, Window, WindowInsets, WindowOptions, div, px,
+    Styled as _, Subscription, Window, WindowInsets, WindowOptions, WindowVisibility, div, px,
 };
 
 use crate::{
@@ -102,22 +103,32 @@ pub struct PhoneRoot {
     logged_ready: bool,
     /// Redraws the phone whenever the root view changes.
     _root_changed: Subscription,
+    /// Redials the dropped saved hosts when the window comes back to the
+    /// foreground.
+    _visibility: Subscription,
 }
 
 impl PhoneRoot {
     /// The phone's root over `root`. gpui refreshes the window when its
     /// insets change, and `render` reads them afresh, so the insets need no
     /// subscription of their own.
-    pub fn new(root: Entity<RootView>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(root: Entity<RootView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let root_changed = cx.observe(&root, |this, root, cx| {
             this.hosts.root_changed(root.read(cx));
             cx.notify();
+        });
+        let visibility = cx.observe_window_visibility(window, |this, visibility, window, cx| {
+            if visibility == WindowVisibility::Visible {
+                this.root
+                    .update(cx, |root, cx| root.redial_saved_hosts(window, cx));
+            }
         });
         Self {
             hosts: hosts_view::PhoneHosts::new(&root, cx),
             root,
             logged_ready: false,
             _root_changed: root_changed,
+            _visibility: visibility,
         }
     }
 
