@@ -16,6 +16,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A window you switch to now fits the sessions it shows to its own panes, even when another computer sized them last.
 - Answering a question from a toast, the Dashboard or the phone works again when Claude draws the question's box indented.
 
+### Changed
+
+- The desktop app now draws with the same updated toolkit the coming iPhone app uses, so text and row spacing look slightly different.
+
 ## v0.14.0-alpha
 
 ### Highlights
