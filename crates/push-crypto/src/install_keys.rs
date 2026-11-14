@@ -4,6 +4,12 @@
 
 use std::fmt;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use p256::SecretKey;
+use p256::elliptic_curve::Generate as _;
+use p256::elliptic_curve::sec1::ToSec1Point as _;
+
 /// The Keychain service of the generic password item that holds an install's
 /// push keys.
 pub const KEYCHAIN_SERVICE: &str = "dev.leftos.rustling-tulip.push";
@@ -27,6 +33,42 @@ pub struct InstallKeys {
 }
 
 impl InstallKeys {
+    /// A new pair: a random P-256 private scalar and a random 16-octet
+    /// authentication secret, from the system's random source.
+    ///
+    /// # Errors
+    ///
+    /// The system's random source failed.
+    pub fn generate() -> anyhow::Result<Self> {
+        let secret = SecretKey::try_generate()
+            .map_err(|err| anyhow::anyhow!("no random push key: {err}"))?;
+        let auth = <[u8; 16]>::try_generate()
+            .map_err(|err| anyhow::anyhow!("no random push secret: {err}"))?;
+        let private_key = <[u8; 32]>::try_from(secret.to_bytes().as_slice())
+            .map_err(|_| anyhow::anyhow!("the generated push key is not 32 octets"))?;
+        Ok(Self { private_key, auth })
+    }
+
+    /// The `p256dh` key the wire takes: the uncompressed 65-octet SEC1 public
+    /// point of the private scalar, URL-safe base64 without padding.
+    ///
+    /// # Errors
+    ///
+    /// The private scalar is not a valid P-256 key (zero, or not below the
+    /// curve's order).
+    pub fn p256dh_b64url(&self) -> anyhow::Result<String> {
+        let secret = SecretKey::from_slice(&self.private_key)
+            .map_err(|_| anyhow::anyhow!("the install's push key is not a P-256 key"))?;
+        let point = secret.public_key().to_sec1_point(false);
+        Ok(URL_SAFE_NO_PAD.encode(point.as_bytes()))
+    }
+
+    /// The `auth` secret the wire takes: URL-safe base64 without padding.
+    #[must_use]
+    pub fn auth_b64url(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.auth)
+    }
+
     /// The Keychain item's 48 octets: the private scalar, then the secret.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; 48] {
@@ -110,6 +152,33 @@ mod tests {
             !err.to_string().contains("165"),
             "the error prints an octet of the key: {err}"
         );
+    }
+
+    #[test]
+    fn generated_keys_round_trip_through_the_subscriber_parse() {
+        let keys = InstallKeys::generate().expect("the system's random source works");
+        let p256dh = keys
+            .p256dh_b64url()
+            .expect("a generated key has a public key");
+        let auth = keys.auth_b64url();
+        assert!(!p256dh.contains('='), "no padding: {p256dh}");
+        assert!(!auth.contains('='), "no padding: {auth}");
+        let sub =
+            crate::Subscriber::from_b64url(&p256dh, &auth).expect("the wire's parse reads it");
+        assert_eq!(sub.auth, keys.auth);
+        assert_eq!(sub.p256dh.first(), Some(&0x04), "an uncompressed point");
+        let body = crate::encrypt(&sub, b"a notice").expect("encrypt to the subscriber");
+        let plain =
+            crate::decrypt(&body, &keys.private_key, &keys.auth).expect("the keys decrypt it");
+        assert_eq!(plain, b"a notice");
+    }
+
+    #[test]
+    fn generated_keys_differ() {
+        let first = InstallKeys::generate().expect("a first pair");
+        let second = InstallKeys::generate().expect("a second pair");
+        assert_ne!(first.private_key, second.private_key);
+        assert_ne!(first.auth, second.auth);
     }
 
     #[test]

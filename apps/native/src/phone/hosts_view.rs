@@ -12,6 +12,7 @@ use gpui::{
 };
 
 use super::PhoneRoot;
+use super::push::{NOTIFICATIONS_LABEL, SwitchView, switch_view};
 use crate::RootView;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look};
 use crate::connection::{Connection, State};
@@ -106,6 +107,7 @@ struct HostRow {
     key: HostKey,
     state: &'static str,
     pair: bool,
+    push: Option<SwitchView>,
 }
 
 /// A connection's state in the words the sidebar's host header uses, with
@@ -149,10 +151,47 @@ pub(super) fn any_host_open(root: &RootView) -> bool {
     })
 }
 
+/// The key of `host` when it is a tailnet host whose connection is open and
+/// whose daemon lists relay push: the hosts a Notifications switch is for.
+fn relay_push_key(root: &RootView, host: &SavedHost) -> Option<HostKey> {
+    let target = host.target().ok()?;
+    target.tailnet_host()?;
+    let key = HostKey::of(&target);
+    root.conn_of(&key)?
+        .supports(protocol::FEATURE_RELAY_PUSH)
+        .then_some(key)
+}
+
+/// Every saved tailnet host open and taking relay pushes, in saved order.
+pub(super) fn relay_push_hosts(root: &RootView) -> Vec<HostKey> {
+    root.sidebar
+        .ui_state()
+        .saved_hosts
+        .iter()
+        .filter_map(|host| relay_push_key(root, host))
+        .collect()
+}
+
+/// What `host`'s Notifications switch draws, when it draws: only on a
+/// platform with push (`supported`), for a host [`relay_push_key`] takes.
+fn push_switch_view(root: &RootView, host: &SavedHost, supported: bool) -> Option<SwitchView> {
+    if !supported {
+        return None;
+    }
+    let key = relay_push_key(root, host)?;
+    Some(switch_view(root.push_hosts().state(&key)))
+}
+
 /// `host`'s row: Pair shows exactly when the desktop picker's row offers
 /// it, for a held tailnet host that refused this device or that it holds
-/// no token for (`not_paired`).
-fn host_row(root: &RootView, host: &SavedHost, not_paired: &HashSet<String>) -> Option<HostRow> {
+/// no token for (`not_paired`); the Notifications switch shows as
+/// [`push_switch_view`] says.
+fn host_row(
+    root: &RootView,
+    host: &SavedHost,
+    not_paired: &HashSet<String>,
+    supported: bool,
+) -> Option<HostRow> {
     let target: Target = host.target().ok()?;
     let key = HostKey::of(&target);
     let conn = root.conn_of(&key);
@@ -181,6 +220,7 @@ fn host_row(root: &RootView, host: &SavedHost, not_paired: &HashSet<String>) -> 
         key,
         state: state_words(state),
         pair: offers_pair(&facts),
+        push: push_switch_view(root, host, supported),
     })
 }
 
@@ -228,13 +268,14 @@ impl PhoneRoot {
     /// The hosts screen: the saved hosts' rows, then the add form or the
     /// button that shows it; the form alone while no host is saved.
     pub(super) fn hosts_body(&self, cx: &mut Context<Self>) -> Div {
+        let supported = self.platform.supported();
         let root = self.root.read(cx);
         let rows: Vec<HostRow> = root
             .sidebar
             .ui_state()
             .saved_hosts
             .iter()
-            .filter_map(|host| host_row(root, host, &self.hosts.not_paired))
+            .filter_map(|host| host_row(root, host, &self.hosts.not_paired, supported))
             .collect();
         let form_shows = rows.is_empty() || self.hosts.form_open;
         let t = theme(cx);
@@ -257,13 +298,86 @@ impl PhoneRoot {
             root.sidebar_panel(width, SidebarChrome::Phone, window, cx)
         });
         let t = theme(cx);
+        let lines = self.push_lines(&t, cx);
         let tail = self.hosts_tail(self.hosts.form_open, &t, cx);
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(panel)
-            .child(div().flex_none().p(px(16.0)).child(tail))
+        div().size_full().flex().flex_col().child(panel).child(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .p(px(16.0))
+                .children(lines)
+                .child(tail),
+        )
+    }
+
+    /// One line per saved host with a Notifications switch: its name and
+    /// the switch, so the switch stays reachable while the sessions list.
+    fn push_lines(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<Div> {
+        let supported = self.platform.supported();
+        let root = self.root.read(cx);
+        let switches: Vec<(String, HostKey, SwitchView)> = root
+            .sidebar
+            .ui_state()
+            .saved_hosts
+            .iter()
+            .filter_map(|host| {
+                let view = push_switch_view(root, host, supported)?;
+                let key = relay_push_key(root, host)?;
+                Some((host.name.clone(), key, view))
+            })
+            .collect();
+        switches
+            .into_iter()
+            .map(|(name, key, view)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_color(gpui::rgb(t.muted))
+                            .child(name.clone()),
+                    )
+                    .child(Self::push_switch(&name, key, view, t, cx))
+            })
+            .collect()
+    }
+
+    /// `name`'s Notifications switch: on or off as `view` says, dimmed while
+    /// a registration is out, and its hint under it; at least 44 pt tall.
+    fn push_switch(
+        name: &str,
+        key: HostKey,
+        view: SwitchView,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let toggle = crate::spawn_view::checkbox_row(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            &format!("phone-host-push-{name}"),
+            view.on,
+            false,
+            NOTIFICATIONS_LABEL,
+            t,
+        )
+        .min_h(px(44.0))
+        .items_center()
+        .when(view.busy, |toggle| toggle.opacity(0.45))
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.toggle_push(&key, cx);
+        }));
+        let hint_id = format!("phone-host-push-hint-{name}");
+        let hint = view.hint.map(|hint| {
+            div()
+                .driver_id(|| hint_id)
+                .text_color(gpui::rgb(t.muted))
+                .child(hint)
+        });
+        div().flex().flex_col().child(toggle).children(hint)
     }
 
     /// Under the hosts: the add form while `form_shows`, else the button
@@ -290,7 +404,9 @@ impl PhoneRoot {
             key,
             state,
             pair,
+            push,
         } = row;
+        let push_switch = push.map(|view| Self::push_switch(&name, key.clone(), view, t, cx));
         let pair_button = pair.then(|| {
             phone_button(&format!("phone-host-pair-{name}"), ButtonKind::Primary, cx)
                 .child(PAIR_LABEL)
@@ -299,16 +415,10 @@ impl PhoneRoot {
                 }))
         });
         let row_id = format!("phone-host-row-{name}");
-        div()
-            .driver_id(|| row_id)
+        let head = div()
             .flex()
             .items_center()
             .gap(px(8.0))
-            .p(px(12.0))
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(gpui::rgb(t.line))
-            .bg(gpui::rgb(t.raised))
             .child(
                 div()
                     .flex_1()
@@ -318,7 +428,19 @@ impl PhoneRoot {
                     .child(div().truncate().child(name))
                     .child(div().text_color(gpui::rgb(t.muted)).child(state)),
             )
-            .children(pair_button)
+            .children(pair_button);
+        div()
+            .driver_id(|| row_id)
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .p(px(12.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(gpui::rgb(t.line))
+            .bg(gpui::rgb(t.raised))
+            .child(head)
+            .children(push_switch)
     }
 
     /// The add form: its title, the name and port fields, a refusal under

@@ -6909,6 +6909,7 @@ dependencies = [
  "png 0.18.1",
  "protocol",
  "pulldown-cmark",
+ "push-crypto",
  "qrcodegen",
  "rand 0.10.3",
  "raw-window-handle",

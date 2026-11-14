@@ -39,6 +39,9 @@ driver = [
 agent-registry = { workspace = true }
 daemon-client = { workspace = true }
 protocol = { workspace = true }
+# The phone's Notifications switch: the install's push keys and the `p256dh`
+# and `auth` a registration carries.
+push-crypto = { workspace = true }
 tailnet = { workspace = true }
 update-core = { workspace = true }
 

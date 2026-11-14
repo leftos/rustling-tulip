@@ -1475,6 +1475,9 @@ pub struct RootView {
     devices: devices_view::DevicesView,
     /// This PC's own pairing with a tailnet host that does not know it.
     device_pairing: device_pairing_view::DevicePairingView,
+    /// The phone's Notifications switch per saved tailnet host, as the
+    /// daemons' `PushStatus` replies set it.
+    push: phone::push::PushHosts,
     /// The device tokens this PC holds per tailnet host.
     tokens: Arc<dyn DeviceTokenStore>,
     /// Ends the wait for a recovery that goes unanswered.
@@ -1957,6 +1960,7 @@ impl RootView {
             ),
             devices: devices_view::DevicesView::new(cx.focus_handle()),
             device_pairing: device_pairing_view::DevicePairingView::new(cx.focus_handle()),
+            push: phone::push::PushHosts::default(),
             tokens,
             recover_timer: None,
             recover_requests: HashMap::new(),
@@ -5223,6 +5227,24 @@ impl RootView {
         }
     }
 
+    /// The phone's Notifications switch per saved tailnet host.
+    pub(crate) fn push_hosts(&self) -> &phone::push::PushHosts {
+        &self.push
+    }
+
+    /// The phone's Notifications switches, to step.
+    pub(crate) fn push_hosts_mut(&mut self) -> &mut phone::push::PushHosts {
+        &mut self.push
+    }
+
+    /// Folds `host`'s `PushStatus`, or its `Error`, when it answers the
+    /// request its Notifications switch has out.
+    fn on_push_message(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
+        if self.push.on_message(host, msg) {
+            cx.notify();
+        }
+    }
+
     fn on_message(
         &mut self,
         host: &HostKey,
@@ -5272,6 +5294,7 @@ impl RootView {
         self.on_subagent_listing(host, &msg);
         self.on_transcript_message(host, &msg, cx);
         self.on_host_rebind_message(host, &msg, cx);
+        self.on_push_message(host, &msg, cx);
         if self.on_panel_message(host, &msg, window, cx) {
             return;
         }

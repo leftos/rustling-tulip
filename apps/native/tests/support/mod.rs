@@ -35,6 +35,7 @@ use rustling_tulip_native::{
     RootShape, RootView, SavePicker, ScPanel, SilentNotifier, SilentSounder, Sounder, TaskbarBadge,
     ToastPlacer, Transport, WorkArea, bind_keys, log_paths,
     phone::PhoneRoot,
+    phone::push::{FakePushPlatform, PushPlatform},
     remote_access::Autostart,
     set_bitmap_reader, set_idle_reader, spawn_net,
     target::{HostKey, Target},
@@ -3393,7 +3394,19 @@ impl<'a> Harness<'a> {
     /// connected yet. A phone holds no This PC connection, so
     /// [`Self::send`], [`Self::connect`] and [`Self::sent`], which address
     /// This PC's, do nothing here: drive each host through [`Self::host`].
+    /// Its push platform is a default [`FakePushPlatform`].
     pub fn phone(cx: &'a mut TestAppContext, dir: &TestDir) -> Self {
+        Self::phone_with(cx, dir, Arc::new(FakePushPlatform::default()))
+    }
+
+    /// [`Self::phone`] with its push through `platform`: a spec keeps its
+    /// own handle on a [`FakePushPlatform`] to script its answers and read
+    /// the questions it was asked.
+    pub fn phone_with(
+        cx: &'a mut TestAppContext,
+        dir: &TestDir,
+        platform: Arc<dyn PushPlatform>,
+    ) -> Self {
         cx.update(bind_keys);
         // A spec never reads the developer's own clipboard bitmap.
         cx.update(|cx| set_bitmap_reader(cx, || Ok(None)));
@@ -3431,7 +3444,7 @@ impl<'a> Harness<'a> {
         };
         let (phone, cx) = cx.add_window_view(move |window, cx| {
             let root = cx.new(|cx| RootView::with_transport(deps, window, cx));
-            PhoneRoot::new(root, window, cx)
+            PhoneRoot::new(root, platform, window, cx)
         });
         let root = cx.update(|_, cx| phone.read(cx).root().clone());
         let mut harness = Self {
