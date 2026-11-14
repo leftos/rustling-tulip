@@ -17,12 +17,14 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use gpui::App;
 use objc2::MainThreadMarker;
+use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
-use objc2::sel;
-use objc2_foundation::{NSData, NSError};
+use objc2::{available, sel};
+use objc2_foundation::{NSArray, NSData, NSDictionary, NSError, NSString};
 use objc2_ui_kit::UIApplication;
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationSettings, UNUserNotificationCenter,
+    UNAuthorizationOptions, UNAuthorizationStatus, UNNotification, UNNotificationSettings,
+    UNUserNotificationCenter,
 };
 use protocol::ApnsEnvironment;
 use push_crypto::{InstallKeys, KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE};
@@ -32,7 +34,7 @@ use security_framework::passwords::{
     set_generic_password_options,
 };
 
-use super::push::{Authorization, PushPlatform, build_environment};
+use super::push::{Authorization, Delivered, PushPlatform, build_environment};
 
 /// The launch argument that asks for provisional notification permission at
 /// start, with no prompt, then registers for the device token: the
@@ -130,6 +132,76 @@ impl PushPlatform for IosPushPlatform {
         }
         make_keys()
     }
+
+    fn delivered(&self) -> BoxFuture<'static, Vec<Delivered>> {
+        let (tx, rx) = oneshot::channel();
+        let tx = Mutex::new(Some(tx));
+        let block = RcBlock::new(move |shown: NonNull<NSArray<UNNotification>>| {
+            // SAFETY: the system hands the completion a live array for the call.
+            let shown = unsafe { shown.as_ref() };
+            answer_once(
+                &tx,
+                shown.to_vec().iter().map(|n| delivered_of(n)).collect(),
+            );
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getDeliveredNotificationsWithCompletionHandler(&block);
+        rx.map(|answer| {
+            answer.unwrap_or_else(|_| {
+                tracing::debug!("phone: the delivered notifications were never given");
+                Vec::new()
+            })
+        })
+        .boxed()
+    }
+
+    fn remove_delivered(&self, ids: Vec<String>) {
+        let ids: Vec<Retained<NSString>> = ids.iter().map(|id| NSString::from_str(id)).collect();
+        UNUserNotificationCenter::currentNotificationCenter()
+            .removeDeliveredNotificationsWithIdentifiers(&NSArray::from_retained_slice(&ids));
+    }
+
+    fn set_badge(&self, count: u32) {
+        let count = isize::try_from(count).unwrap_or(isize::MAX);
+        if available!(ios = 16.0) {
+            let block = RcBlock::new(|error: *mut NSError| {
+                // SAFETY: the system passes a live NSError for the call, or nil.
+                if let Some(error) = unsafe { error.as_ref() } {
+                    tracing::debug!(code = error.code(), "phone: the badge could not be set");
+                }
+            });
+            UNUserNotificationCenter::currentNotificationCenter()
+                .setBadgeCount_withCompletionHandler(count, Some(&block));
+            return;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            tracing::debug!("phone: the badge was set off the main thread");
+            return;
+        };
+        #[expect(deprecated, reason = "iOS 15 has no setBadgeCount")]
+        UIApplication::sharedApplication(mtm).setApplicationIconBadgeNumber(count);
+    }
+}
+
+/// `shown` as the sweep reads it: its request's identifier and the `host`,
+/// `session_id` and `kind` strings the notification extension put in its user
+/// info.
+fn delivered_of(shown: &UNNotification) -> Delivered {
+    let request = shown.request();
+    let info = request.content().userInfo();
+    Delivered {
+        id: request.identifier().to_string(),
+        host: info_string(&info, "host"),
+        session_id: info_string(&info, "session_id"),
+        kind: info_string(&info, "kind"),
+    }
+}
+
+/// The string `info` holds under `key`, when it holds one.
+fn info_string(info: &NSDictionary, key: &str) -> Option<String> {
+    let value = info.objectForKey(&NSString::from_str(key))?;
+    let text = value.downcast::<NSString>().ok()?;
+    Some(text.to_string())
 }
 
 /// The Keychain item that holds the install's push keys, no access group

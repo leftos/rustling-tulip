@@ -9,6 +9,7 @@ use gpui::{
 use protocol::ClientMessage;
 
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
+use super::sweep::{self, HostNow};
 use super::{content_padding, home, hosts_view};
 use crate::RootView;
 use crate::target::HostKey;
@@ -32,6 +33,14 @@ pub struct PhoneRoot {
     insets_override: Option<WindowInsets>,
     /// Whether the first render has logged the app's ready line.
     logged_ready: bool,
+    /// Whether the window is in front, so delivered notifications are swept.
+    in_front: bool,
+    /// The hosts the last sweep ran over; an unchanged state sweeps again
+    /// only on a return to the foreground.
+    swept: Option<Vec<HostNow>>,
+    /// How many sweeps have started; a sweep whose delivered list returns
+    /// after a newer one started does nothing.
+    sweeps: u64,
     /// Redraws the phone whenever the root view changes.
     _root_changed: Subscription,
     /// Redials the dropped saved hosts when the window comes back to the
@@ -53,15 +62,24 @@ impl PhoneRoot {
             this.hosts.root_changed(root.read(cx));
             this.forget_gone_session(cx);
             this.push_changed(cx);
+            this.sweep_delivered(cx);
             cx.notify();
         });
         if platform.supported() {
             Self::learn_token(&platform, cx);
         }
         let visibility = cx.observe_window_visibility(window, |this, visibility, window, cx| {
-            if visibility == WindowVisibility::Visible {
-                this.root
-                    .update(cx, |root, cx| root.redial_saved_hosts(window, cx));
+            this.in_front = visibility == WindowVisibility::Visible;
+            if this.in_front {
+                this.root.update(cx, |root, cx| {
+                    root.returned_to_foreground();
+                    root.redial_saved_hosts(window, cx);
+                    for host in open_saved_hosts(root) {
+                        root.send_to(&host, ClientMessage::ListSessions);
+                    }
+                });
+                this.swept = None;
+                this.sweep_delivered(cx);
             }
         });
         Self {
@@ -71,6 +89,9 @@ impl PhoneRoot {
             shown: None,
             insets_override: None,
             logged_ready: false,
+            in_front: window.visibility() == WindowVisibility::Visible,
+            swept: None,
+            sweeps: 0,
             _root_changed: root_changed,
             _visibility: visibility,
         }
@@ -138,6 +159,51 @@ impl PhoneRoot {
             tracing::debug!("phone: the shown session is gone; back to Home");
             self.shown = None;
         }
+    }
+
+    /// While the window is in front and the saved hosts' Needs you sets or
+    /// loaded state changed since the last sweep, removes the delivered
+    /// notifications whose wait ended and sets the badge ([`sweep::sweep`]).
+    /// Nothing is asked before any host has loaded.
+    fn sweep_delivered(&mut self, cx: &mut Context<Self>) {
+        if !self.in_front || !self.platform.supported() {
+            return;
+        }
+        let hosts = sweep_hosts(self.root.read(cx));
+        if self.swept.as_ref() == Some(&hosts) {
+            return;
+        }
+        self.swept = Some(hosts.clone());
+        if !hosts.iter().any(|host| host.loaded) {
+            return;
+        }
+        self.sweeps += 1;
+        let started = self.sweeps;
+        let delivered = self.platform.delivered();
+        let platform = Arc::clone(&self.platform);
+        cx.spawn(async move |this, cx| {
+            let delivered = delivered.await;
+            // A root gone, or a newer sweep started, leaves this one's answer unused.
+            let newest = this
+                .read_with(cx, |this, _| this.sweeps == started)
+                .unwrap_or(false);
+            if !newest {
+                tracing::debug!("phone: a newer sweep replaces this one");
+                return;
+            }
+            let result = sweep::sweep(&delivered, &hosts);
+            if !result.remove.is_empty() {
+                tracing::debug!(
+                    count = result.remove.len(),
+                    "phone: removing handled notifications"
+                );
+                platform.remove_delivered(result.remove);
+            }
+            if let Some(badge) = result.badge {
+                platform.set_badge(badge);
+            }
+        })
+        .detach();
     }
 
     /// With the permission already granted, reads this phone's device token
@@ -338,6 +404,43 @@ impl PhoneRoot {
         })
         .detach();
     }
+}
+
+/// The saved hosts whose connection is open, in saved order.
+fn open_saved_hosts(root: &RootView) -> Vec<HostKey> {
+    root.sidebar
+        .ui_state()
+        .saved_hosts
+        .iter()
+        .filter_map(|saved| Some(HostKey::of(&saved.target().ok()?)))
+        .filter(|key| hosts_view::host_open(root, key))
+        .collect()
+}
+
+/// Every saved host the window can name on the wire, as the sweep sees it:
+/// loaded when its connection is open and has sent its session list both
+/// since its `Welcome` and since the app last came to the foreground, with
+/// the ids of its sessions waiting on the user.
+fn sweep_hosts(root: &RootView) -> Vec<HostNow> {
+    let rows = crate::needs_you::rows(&root.sidebar);
+    root.sidebar
+        .ui_state()
+        .saved_hosts
+        .iter()
+        .filter_map(|saved| {
+            let key = HostKey::of(&saved.target().ok()?);
+            let host = key.wire()?.to_owned();
+            let loaded = hosts_view::host_open(root, &key)
+                && root.listed_since_welcome(&key)
+                && root.listed_since_foreground(&key);
+            let needs_you = sweep::needs_you_ids(&rows, &key);
+            Some(HostNow {
+                host,
+                loaded,
+                needs_you,
+            })
+        })
+        .collect()
 }
 
 impl Render for PhoneRoot {

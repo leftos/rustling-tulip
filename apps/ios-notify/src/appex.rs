@@ -152,8 +152,9 @@ fn rewritten(
         ns_string!("session_id"),
         &NSString::from_str(&shown.session_id),
     );
+    put(&info, ns_string!("kind"), &NSString::from_str(&shown.kind));
     // SAFETY: the dictionary holds only property-list objects: the push's own user info and
-    // two strings.
+    // strings.
     unsafe { content.setUserInfo(&info) };
     content
 }

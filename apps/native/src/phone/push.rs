@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use futures::FutureExt as _;
+use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use protocol::{ApnsEnvironment, DaemonMessage, PushRegistration, Secret};
 use push_crypto::InstallKeys;
@@ -40,6 +41,25 @@ pub enum Authorization {
     Granted,
 }
 
+/// One notification the phone's notification drawer still shows: its
+/// identifier and the `host`, `session_id` and `kind` the notification
+/// extension put in its user info, when it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivered {
+    /// The notification request's identifier.
+    pub id: String,
+    /// The daemon's host name the push came from, when the user info has it.
+    pub host: Option<String>,
+    /// The session the push was about, when the user info has it.
+    pub session_id: Option<String>,
+    /// The push notice's wire kind (`needs_you`, `finished`, …), when the
+    /// user info has it; an older extension build writes none.
+    pub kind: Option<String>,
+}
+
+/// The wire kind of a Needs you push notice, the only kind a sweep removes.
+pub const NEEDS_YOU_KIND: &str = "needs_you";
+
 /// What the phone's platform offers for push: whether it has push at all,
 /// the APNs environment its tokens come from, its notification permission,
 /// its device token and the install's push keys.
@@ -61,6 +81,12 @@ pub trait PushPlatform: Send + Sync {
     ///
     /// The keys could not be made, stored or read.
     fn install_keys(&self) -> Result<InstallKeys, String>;
+    /// The notifications the drawer shows now; empty when it cannot tell.
+    fn delivered(&self) -> BoxFuture<'static, Vec<Delivered>>;
+    /// Removes the delivered notifications with identifiers `ids`.
+    fn remove_delivered(&self, ids: Vec<String>);
+    /// Sets the app's badge to `count`.
+    fn set_badge(&self, count: u32);
 }
 
 /// The APNs environment a build reports: `sandbox` for debug and simulator
@@ -105,6 +131,14 @@ impl PushPlatform for UnsupportedPlatform {
     fn install_keys(&self) -> Result<InstallKeys, String> {
         Err(NO_PUSH.to_owned())
     }
+
+    fn delivered(&self) -> BoxFuture<'static, Vec<Delivered>> {
+        futures::future::ready(Vec::new()).boxed()
+    }
+
+    fn remove_delivered(&self, _ids: Vec<String>) {}
+
+    fn set_badge(&self, _count: u32) {}
 }
 
 /// One question a [`FakePushPlatform`] was asked.
@@ -118,6 +152,8 @@ pub enum PlatformCall {
     DeviceToken,
     /// [`PushPlatform::install_keys`].
     InstallKeys,
+    /// [`PushPlatform::delivered`].
+    Delivered,
 }
 
 /// What a [`FakePushPlatform`] answers.
@@ -127,12 +163,20 @@ struct FakeScript {
     request_answer: Authorization,
     token: Result<String, String>,
     calls: Vec<PlatformCall>,
+    delivered: Vec<Delivered>,
+    removed: Vec<Vec<String>>,
+    badges: Vec<u32>,
+    /// Whether a delivered-notifications question waits for
+    /// [`FakePushPlatform::release_delivered`].
+    hold_delivered: bool,
+    held: Vec<oneshot::Sender<Vec<Delivered>>>,
 }
 
 /// A scripted platform for specs: supported, permission granted, a fixed
 /// token and keys from fixed bytes, each answer settable, and a record of
 /// every question asked. A permission request's answer becomes the
-/// permission from then on.
+/// permission from then on. Its drawer holds the notifications a spec
+/// scripts, less those removed since; each removal and badge is recorded.
 pub struct FakePushPlatform {
     script: Mutex<FakeScript>,
 }
@@ -146,6 +190,11 @@ impl Default for FakePushPlatform {
                 request_answer: Authorization::Granted,
                 token: Ok(FakePushPlatform::TOKEN.to_owned()),
                 calls: Vec::new(),
+                delivered: Vec::new(),
+                removed: Vec::new(),
+                badges: Vec::new(),
+                hold_delivered: false,
+                held: Vec::new(),
             }),
         }
     }
@@ -187,6 +236,43 @@ impl FakePushPlatform {
     #[must_use]
     pub fn calls(&self) -> Vec<PlatformCall> {
         self.script().calls.clone()
+    }
+
+    /// Sets the notifications the drawer shows.
+    pub fn set_delivered(&self, delivered: Vec<Delivered>) {
+        self.script().delivered = delivered;
+    }
+
+    /// Every [`PushPlatform::remove_delivered`] so far, its identifiers, in
+    /// order.
+    #[must_use]
+    pub fn removed(&self) -> Vec<Vec<String>> {
+        self.script().removed.clone()
+    }
+
+    /// Every badge set so far, in order.
+    #[must_use]
+    pub fn badges(&self) -> Vec<u32> {
+        self.script().badges.clone()
+    }
+
+    /// Sets whether each delivered-notifications question waits for
+    /// [`Self::release_delivered`] before it answers.
+    pub fn set_hold_delivered(&self, hold: bool) {
+        self.script().hold_delivered = hold;
+    }
+
+    /// Answers every held delivered-notifications question, oldest first,
+    /// with the drawer as it is now.
+    pub fn release_delivered(&self) {
+        let (held, delivered) = {
+            let mut script = self.script();
+            (std::mem::take(&mut script.held), script.delivered.clone())
+        };
+        for sender in held {
+            // A receiver gone means its sweep was dropped.
+            let _unheard = sender.send(delivered.clone());
+        }
     }
 
     /// The keys [`PushPlatform::install_keys`] gives: a fixed scalar and
@@ -233,6 +319,27 @@ impl PushPlatform for FakePushPlatform {
     fn install_keys(&self) -> Result<InstallKeys, String> {
         self.record(PlatformCall::InstallKeys);
         Ok(Self::keys())
+    }
+
+    fn delivered(&self) -> BoxFuture<'static, Vec<Delivered>> {
+        self.record(PlatformCall::Delivered);
+        let mut script = self.script();
+        if !script.hold_delivered {
+            return futures::future::ready(script.delivered.clone()).boxed();
+        }
+        let (tx, rx) = oneshot::channel();
+        script.held.push(tx);
+        rx.map(Result::unwrap_or_default).boxed()
+    }
+
+    fn remove_delivered(&self, ids: Vec<String>) {
+        let mut script = self.script();
+        script.delivered.retain(|shown| !ids.contains(&shown.id));
+        script.removed.push(ids);
+    }
+
+    fn set_badge(&self, count: u32) {
+        self.script().badges.push(count);
     }
 }
 

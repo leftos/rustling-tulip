@@ -15,10 +15,12 @@ use crate::support;
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{TestAppContext, px};
 use protocol::{
-    ApnsEnvironment, ClientMessage, DaemonMessage, FEATURE_RELAY_PUSH, PushRegistration, Secret,
+    ApnsEnvironment, AttentionReason, ClientMessage, DaemonMessage, FEATURE_RELAY_PUSH,
+    PushRegistration, Secret,
 };
 use rustling_tulip_native::phone::push::{
-    Authorization, FakePushPlatform, PlatformCall, PushPlatform, UnsupportedPlatform,
+    Authorization, Delivered, FakePushPlatform, NEEDS_YOU_KIND, PlatformCall, PushPlatform,
+    UnsupportedPlatform,
 };
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetEvent};
@@ -138,6 +140,214 @@ fn fake_registration() -> PushRegistration {
         p256dh: keys.p256dh_b64url().expect("the fixed key is valid"),
         auth: Secret(keys.auth_b64url()),
     }
+}
+
+/// A Needs you notification `id` the drawer shows for `session` on `host`.
+fn shown(id: &str, session: &str, host: &str) -> Delivered {
+    Delivered {
+        id: id.to_owned(),
+        host: Some(host.to_owned()),
+        session_id: Some(session.to_owned()),
+        kind: Some(NEEDS_YOU_KIND.to_owned()),
+    }
+}
+
+#[gpui::test]
+fn a_wait_that_stops_on_its_own_removes_its_notification(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    platform.set_delivered(vec![shown("n1", "s1", REMOTE)]);
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote())
+        .send(remote_list("awaiting_input", "s2"));
+    assert_eq!(platform.badges(), vec![2]);
+
+    h.host(&saved_remote()).send(DaemonMessage::SessionUpdated {
+        session: session("s1").status("stopped").build(),
+        request_id: None,
+    });
+    h.host(&saved_remote()).send(DaemonMessage::Attention {
+        session_id: "s1".to_owned(),
+        reason: AttentionReason::Stopped,
+    });
+
+    assert_eq!(platform.removed(), vec![vec!["n1".to_owned()]]);
+    assert_eq!(
+        platform.badges().last(),
+        Some(&1),
+        "an ended session is not counted"
+    );
+}
+
+#[gpui::test]
+fn a_finished_notification_for_an_idle_session_stays(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    platform.set_delivered(vec![Delivered {
+        kind: Some("finished".to_owned()),
+        ..shown("n1", "s1", REMOTE)
+    }]);
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+
+    h.host(&saved_remote()).send(remote_list("idle", "s2"));
+
+    assert_eq!(delivered_asks(&platform), 1);
+    assert_eq!(platform.removed(), Vec::<Vec<String>>::new());
+}
+
+#[gpui::test]
+fn a_return_to_the_foreground_waits_for_a_fresh_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+    h.host(&saved_remote()).sent();
+
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    platform.set_delivered(vec![shown("n1", "s1", REMOTE)]);
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    h.cx.run_until_parked();
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        sent.iter()
+            .any(|msg| matches!(msg, ClientMessage::ListSessions)),
+        "the phone asks for a fresh list: {sent:?}"
+    );
+    assert_eq!(
+        platform.removed(),
+        Vec::<Vec<String>>::new(),
+        "the list from before the suspension decides nothing"
+    );
+
+    h.host(&saved_remote())
+        .send(remote_list("awaiting_input", "s2"));
+    assert_eq!(platform.removed(), Vec::<Vec<String>>::new(), "s1 waits");
+
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+    assert_eq!(platform.removed(), vec![vec!["n1".to_owned()]]);
+}
+
+#[gpui::test]
+fn only_the_newest_sweep_acts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    platform.set_delivered(vec![shown("n1", "s1", REMOTE)]);
+    platform.set_hold_delivered(true);
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote())
+        .send(remote_list("awaiting_input", "s2"));
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+    assert_eq!(delivered_asks(&platform), 2, "two sweeps are out");
+
+    platform.release_delivered();
+    h.cx.run_until_parked();
+
+    assert_eq!(platform.removed(), vec![vec!["n1".to_owned()]]);
+    assert_eq!(platform.badges(), vec![1], "the older sweep sets nothing");
+}
+
+/// [`REMOTE`]'s whole session list: `s1` in `s1_status`, `s2` waiting on the
+/// user and labelled `s2_label`.
+fn remote_list(s1_status: &str, s2_label: &str) -> DaemonMessage {
+    DaemonMessage::Sessions {
+        sessions: vec![
+            session("s1").status(s1_status).build(),
+            session("s2")
+                .status("awaiting_input")
+                .label(s2_label)
+                .build(),
+        ],
+    }
+}
+
+/// How many times the platform was asked for the delivered notifications.
+fn delivered_asks(platform: &FakePushPlatform) -> usize {
+    platform
+        .calls()
+        .iter()
+        .filter(|call| **call == PlatformCall::Delivered)
+        .count()
+}
+
+#[gpui::test]
+fn a_handled_wait_removes_its_notification_and_sets_the_badge(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    platform.set_delivered(vec![shown("n1", "s1", REMOTE), shown("n2", "s2", REMOTE)]);
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+    assert_eq!(
+        delivered_asks(&platform),
+        0,
+        "nothing is swept before the host's list is in"
+    );
+
+    h.host(&saved_remote())
+        .send(remote_list("awaiting_input", "s2"));
+    assert_eq!(platform.removed(), Vec::<Vec<String>>::new(), "both wait");
+    assert_eq!(platform.badges(), vec![2]);
+
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+    assert_eq!(platform.removed(), vec![vec!["n1".to_owned()]]);
+    assert_eq!(platform.badges(), vec![2, 1], "the badge is the count left");
+}
+
+#[gpui::test]
+fn a_notification_for_a_host_not_connected_stays(cx: &mut TestAppContext) {
+    const OTHER_HOST: &str = "den.tail1234.ts.net";
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [
+                { "name": REMOTE, "port": 8787 },
+                { "name": OTHER_HOST, "port": 8787 },
+            ]
+        }),
+    );
+    let platform = Arc::new(FakePushPlatform::default());
+    platform.set_delivered(vec![shown("n-den", "s1", OTHER_HOST)]);
+    let mut h = Harness::phone_with(cx, &dir, platform.clone());
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    h.host(&saved_remote()).connect();
+
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+
+    assert_eq!(delivered_asks(&platform), 1, "the loaded host sweeps");
+    assert_eq!(
+        platform.removed(),
+        Vec::<Vec<String>>::new(),
+        "the other host's notification stays"
+    );
+    assert_eq!(platform.badges(), vec![1], "only the loaded host counts");
+}
+
+#[gpui::test]
+fn an_unrelated_label_change_sweeps_nothing_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    platform.set_delivered(vec![shown("n2", "s2", REMOTE)]);
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote())
+        .send(remote_list("awaiting_input", "s2"));
+    assert_eq!(delivered_asks(&platform), 1);
+
+    h.host(&saved_remote())
+        .send(remote_list("awaiting_input", "renamed"));
+
+    assert_eq!(
+        delivered_asks(&platform),
+        1,
+        "the same Needs you set asks nothing"
+    );
+    assert_eq!(platform.badges(), vec![2], "nor sets the badge again");
+    assert_eq!(platform.removed(), Vec::<Vec<String>>::new());
 }
 
 #[gpui::test]

@@ -10,6 +10,7 @@ pub mod push;
 #[cfg(target_os = "ios")]
 mod push_ios;
 mod root_view;
+mod sweep;
 
 use std::rc::Rc;
 use std::sync::Arc;

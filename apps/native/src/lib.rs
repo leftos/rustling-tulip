@@ -1024,6 +1024,10 @@ pub struct RootView {
     /// The hosts that have sent their session list since their latest
     /// `Welcome`, on a connection still open.
     lists_since_welcome: HashSet<HostKey>,
+    /// The hosts that have sent their session list since the phone app last
+    /// came to the foreground ([`Self::returned_to_foreground`]); the
+    /// phone's notification sweep reads a host as loaded only then.
+    lists_since_foreground: HashSet<HostKey>,
     /// The forgets of remote hosts' panes sent to This PC, and those
     /// waiting for it.
     pane_forgets: PaneForgets,
@@ -1768,6 +1772,7 @@ impl RootView {
             popouts_awaiting_hosts: Vec::new(),
             remote_lists_in: HashSet::new(),
             lists_since_welcome: HashSet::new(),
+            lists_since_foreground: HashSet::new(),
             pane_forgets: PaneForgets::default(),
             duplicate_of: HashMap::new(),
             daemon_of: HashMap::new(),
@@ -5913,6 +5918,18 @@ impl RootView {
         self.lists_since_welcome.contains(host)
     }
 
+    /// Whether `host` has sent its session list since the phone app last
+    /// came to the foreground, or since launch when it has not left it.
+    pub(crate) fn listed_since_foreground(&self, host: &HostKey) -> bool {
+        self.lists_since_foreground.contains(host)
+    }
+
+    /// The phone app came back to the foreground: every host's list is
+    /// stale until it sends a new one.
+    pub(crate) fn returned_to_foreground(&mut self) {
+        self.lists_since_foreground.clear();
+    }
+
     /// Forgets everything remote host `host`'s daemon sent: its sessions,
     /// repos and workspaces, and the panels, history and recoveries that
     /// read them. Sends nothing.
@@ -6117,6 +6134,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let fresh = self.lists_since_welcome.insert(host.clone());
+        self.lists_since_foreground.insert(host.clone());
         // The layout home's list gates the wanted session and the pop-outs.
         if *host == HostKey::Local {
             self.sessions_loaded = true;

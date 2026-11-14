@@ -32,6 +32,10 @@ pub struct Shown {
     pub host: Option<String>,
     /// The session the push is about.
     pub session_id: String,
+    /// The notice's wire kind as the daemon sent it (`needs_you`,
+    /// `finished`, or a kind newer than this build), which the app's sweep
+    /// reads to remove only Needs you notifications.
+    pub kind: String,
 }
 
 /// Why a push shows its alert as it came. No variant carries a key, the
@@ -75,6 +79,12 @@ pub fn shown(e: Option<&str>, keys: Option<&[u8]>) -> Result<Shown, Fallback> {
     if version.is_some_and(|v| v > u64::from(PUSH_NOTICE_VERSION)) {
         return Err(Fallback::NewerVersion);
     }
+    // The kind as sent, so a kind this build reads as unknown still names itself.
+    let kind = value
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
     let notice: PushNotice = serde_json::from_value(value).map_err(|_| Fallback::Parse)?;
     Ok(Shown {
         title: notice.title,
@@ -82,6 +92,7 @@ pub fn shown(e: Option<&str>, keys: Option<&[u8]>) -> Result<Shown, Fallback> {
         badge: notice.badge,
         host: notice.host,
         session_id: notice.session_id,
+        kind,
     })
 }
 
@@ -157,8 +168,19 @@ mod tests {
                 badge: 3,
                 host: Some("desk.tail1234.ts.net".to_owned()),
                 session_id: "session-1".to_owned(),
+                kind: "needs_you".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn a_finished_notice_carries_its_kind() {
+        let finished = PushNotice {
+            kind: PushNoticeKind::Finished,
+            ..notice()
+        };
+        let read = shown(Some(&sealed_notice(&finished)), Some(&keys())).expect("it shows");
+        assert_eq!(read.kind, "finished");
     }
 
     #[test]
@@ -243,6 +265,7 @@ mod tests {
         assert_eq!(read.body, "a new kind");
         assert_eq!(read.session_id, "session-2");
         assert_eq!(read.badge, 0);
+        assert_eq!(read.kind, "something_new", "the kind is carried as sent");
     }
 
     #[test]
