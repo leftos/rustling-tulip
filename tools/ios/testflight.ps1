@@ -35,17 +35,30 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $MacBuilder = 'builder@mac-mini'
 $SigningDir = 'G:\My Drive\Private Config\rustling-tulip\secrets\ios-signing'
-$Names = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PHONE_PROFILE_BASE64', 'IOS_ASC_API_KEY_P8_BASE64',
-'IOS_TEAM_ID', 'IOS_ASC_API_KEY_ID', 'IOS_ASC_API_ISSUER_ID', 'IOS_BUILD_NUMBER'
+$Names = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PHONE_PROFILE_GZ_BASE64', 'IOS_NOTIFY_PROFILE_GZ_BASE64',
+'IOS_ASC_API_KEY_P8_BASE64', 'IOS_TEAM_ID', 'IOS_ASC_API_KEY_ID', 'IOS_ASC_API_ISSUER_ID', 'IOS_BUILD_NUMBER'
 
 function Assert-LastExit([string] $Command) {
     if ($LASTEXITCODE -ne 0) { throw "$Command failed (exit $LASTEXITCODE)" }
 }
 
-# Reads the five files of the signing set it needs, and nothing else in the folder.
+# A provisioning profile gzipped, then base64: two profiles in plain base64 put the forwarded
+# variables past the gate's --env cap of 32 KiB.
+function ConvertTo-GzipBase64([string] $Path) {
+    $buffer = [IO.MemoryStream]::new()
+    $gzip = [IO.Compression.GZipStream]::new($buffer, [IO.Compression.CompressionLevel]::Optimal)
+    try {
+        $bytes = [IO.File]::ReadAllBytes($Path)
+        $gzip.Write($bytes, 0, $bytes.Length)
+    }
+    finally { $gzip.Dispose() }
+    return [Convert]::ToBase64String($buffer.ToArray())
+}
+
+# Reads the files of the signing set it needs, and nothing else in the folder.
 function Read-SigningSet {
     if (-not (Test-Path -LiteralPath $SigningDir -PathType Container)) { throw "no signing folder at $SigningDir (is Google Drive mounted as G:?)" }
-    foreach ($file in 'apple-distribution.p12', 'p12-password.txt', 'phone-appstore.mobileprovision', 'ids.env') {
+    foreach ($file in 'apple-distribution.p12', 'p12-password.txt', 'phone-appstore.mobileprovision', 'notify-appstore.mobileprovision', 'ids.env') {
         if (-not (Test-Path -LiteralPath (Join-Path $SigningDir $file) -PathType Leaf)) { throw "missing $file in $SigningDir" }
     }
     $p8 = @(Get-ChildItem -LiteralPath $SigningDir -Filter 'AuthKey_*.p8' -File)
@@ -61,7 +74,8 @@ function Read-SigningSet {
         if (($end -gt 0) -and ($password[$end - 1] -eq 13)) { $end-- }
     }
     $env:IOS_DIST_CERT_PASSWORD_BASE64 = [Convert]::ToBase64String($password, 0, $end)
-    $env:IOS_PHONE_PROFILE_BASE64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $SigningDir 'phone-appstore.mobileprovision')))
+    $env:IOS_PHONE_PROFILE_GZ_BASE64 = ConvertTo-GzipBase64 (Join-Path $SigningDir 'phone-appstore.mobileprovision')
+    $env:IOS_NOTIFY_PROFILE_GZ_BASE64 = ConvertTo-GzipBase64 (Join-Path $SigningDir 'notify-appstore.mobileprovision')
     $env:IOS_ASC_API_KEY_P8_BASE64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p8[0].FullName))
     foreach ($line in Get-Content -LiteralPath (Join-Path $SigningDir 'ids.env')) {
         if ($line -match '^\s*(TEAM_ID|ASC_API_KEY_ID|ASC_API_ISSUER_ID)\s*=\s*(.+?)\s*$') {
