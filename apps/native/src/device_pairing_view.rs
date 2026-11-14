@@ -70,7 +70,8 @@ impl PairingInput {
             | NetEvent::DaemonId(_)
             | NetEvent::ShutdownSent
             | NetEvent::ShutdownFailed
-            | NetEvent::StopFailed(_) => None,
+            | NetEvent::StopFailed(_)
+            | NetEvent::HostKeyUnverified { .. } => None,
         }
     }
 }

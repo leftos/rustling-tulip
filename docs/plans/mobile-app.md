@@ -256,9 +256,9 @@ The native app's side of [push-relay.md](./push-relay.md)'s contract; the relay'
 
 Risks: a new SSH dependency (`russh`, pure Rust, its licence and advisories checked by `cargo deny`); key handling on the phone; the PC's SSH server must allow the phone's key.
 
-- [ ] **MA.20 Add the in-process SSH transport.** `ssh_inproc.rs`: connect to `user@host[:port]` with `russh`, authenticate with the phone's ed25519 key (made on first use, kept in the device token store's Keychain under its own user name), and check the host key against the saved one (none saved: report it for trust; a different one: refuse with the fingerprint).
+- [x] **MA.20 Add the in-process SSH transport.** `ssh_inproc.rs`: connect to `user@host[:port]` with `russh`, authenticate with the phone's ed25519 key (made on first use, kept in the device token store's Keychain under its own user name), and check the host key against the saved one (none saved: report it for trust; a different one: refuse with the fingerprint).
 
-  It runs the saved remote command (default `rustling-tulipd bridge`) on an exec channel and speaks the line protocol as `ssh.rs`'s `LineSocket` does; `NetDeps.open_ssh` uses it on iOS. It compiles on every platform, so its tests run on Windows against an in-process `russh` server.
+  It runs the saved remote command (default `rustling-tulipd bridge`) on an exec channel and speaks the line protocol as `ssh.rs`'s `LineSocket` does; `NetDeps.open_ssh` uses it on iOS, with no saved host key until MA.21: an unknown key stops the connection in `AuthFailed` and sends the view `NetEvent::HostKeyUnverified { fingerprint }`, a changed one stops it with the fingerprints in the reason, and neither redials until a Restart. It compiles on every platform, so its tests run on Windows against an in-process `russh` server.
 
   The crypto backend is `ring` (no aws-lc, no RSA keys).
 

@@ -75,8 +75,9 @@ pub struct NetDeps {
     /// Opens the loopback stream the token will travel on: production proves
     /// the listener holds the token first; tests open plain connections.
     pub open_local: Box<dyn Fn(u16, String) -> OpenLocalFuture + Send>,
-    /// Starts `ssh` to an SSH host: production runs the binary; tests
-    /// script the child over in-memory pipes.
+    /// Opens a line socket to an SSH host: production spawns `ssh`, or on
+    /// iOS dials it in-process (`ssh_inproc`); tests script the child over
+    /// in-memory pipes.
     pub open_ssh: Box<dyn Fn(&SshHost) -> OpenSshFuture + Send>,
     /// The identity sent in `Hello`; `None` connects without one.
     pub identity: Option<ClientIdentity>,
@@ -155,15 +156,43 @@ impl NetDeps {
                     daemon_client::connect_proven(port, &token, daemon_client::PROOF_TIMEOUT).await
                 })
             }),
-            open_ssh: Box::new(|host| {
-                let host = host.clone();
-                Box::pin(async move { crate::ssh::open(&host) })
-            }),
+            open_ssh: Self::open_ssh_for(&tokens),
             identity,
             stop: Box::new(|| Box::pin(daemon_client::stop())),
             tokens,
             tls: None,
         }
+    }
+
+    /// The opener of a line socket to an SSH host: an iPhone app cannot spawn
+    /// `ssh`, so iOS dials the host in-process, signing in with the phone's
+    /// own key.
+    #[cfg(target_os = "ios")]
+    fn open_ssh_for(
+        tokens: &Arc<dyn DeviceTokenStore>,
+    ) -> Box<dyn Fn(&SshHost) -> OpenSshFuture + Send> {
+        let tokens = Arc::clone(tokens);
+        Box::new(move |host| {
+            let host = host.clone();
+            let tokens = Arc::clone(&tokens);
+            Box::pin(async move {
+                crate::ssh_inproc::open(&host, None, tokens.as_ref())
+                    .await
+                    .map_err(anyhow::Error::from)
+            })
+        })
+    }
+
+    /// The opener of a line socket to an SSH host: every other platform
+    /// spawns `ssh`, which the bridge on the host answers over stdio.
+    #[cfg(not(target_os = "ios"))]
+    fn open_ssh_for(
+        _tokens: &Arc<dyn DeviceTokenStore>,
+    ) -> Box<dyn Fn(&SshHost) -> OpenSshFuture + Send> {
+        Box::new(|host| {
+            let host = host.clone();
+            Box::pin(async move { crate::ssh::open(&host) })
+        })
     }
 }
 
@@ -294,6 +323,9 @@ pub enum NetEvent {
     /// The user's Stop did not stop This PC's daemon; the text says why. The
     /// connection state is unchanged.
     StopFailed(String),
+    /// An SSH host offered a host key this device has not trusted: its
+    /// SHA-256 fingerprint. The connection is refused until a Restart.
+    HostKeyUnverified { fingerprint: String },
     /// The tailnet host issued this device a token and it is stored; the
     /// host is being redialled with it.
     Paired,
@@ -411,6 +443,27 @@ enum Step {
     Close(String),
     /// Drop the socket and go on to `Next` without a close.
     Leave(Next),
+}
+
+/// Why an in-process SSH dial stopped at the host key.
+enum HostKeyRefusal {
+    /// The host offered a key this device has not trusted: its fingerprint,
+    /// which the user is asked to trust.
+    Unknown(String),
+    /// The host offered a key other than the one this device trusts.
+    Changed,
+}
+
+/// What an in-process SSH dial refused over at the host key, when that is why
+/// it failed: a failure of the spawned `ssh` transport is always `None`.
+fn host_key_refusal(err: &anyhow::Error) -> Option<HostKeyRefusal> {
+    match err.downcast_ref::<crate::ssh_inproc::OpenError>()? {
+        crate::ssh_inproc::OpenError::UnknownHostKey { fingerprint, .. } => {
+            Some(HostKeyRefusal::Unknown(fingerprint.clone()))
+        }
+        crate::ssh_inproc::OpenError::HostKeyChanged { .. } => Some(HostKeyRefusal::Changed),
+        _ => None,
+    }
 }
 
 struct Net {
@@ -532,8 +585,9 @@ impl Net {
     }
 
     /// An SSH host: never a local daemon step and never a device token.
-    /// Start `ssh` with the host's remote command and pump its stdio lines
-    /// with an empty token, which the bridge on the host fills in.
+    /// Start `ssh` (or on iOS dial the host in-process) with the host's
+    /// remote command and pump its lines with an empty token, which the
+    /// bridge on the host fills in.
     async fn attempt_ssh(&mut self, host: &SshHost) -> Next {
         self.conn.on_connecting();
         self.emit_state();
@@ -541,8 +595,21 @@ impl Net {
             Ok(Ok(socket)) => socket,
             Ok(Err(err)) => {
                 let reason = format!("{err:#}");
-                warn!(host = host.name(), %reason, "starting ssh failed");
-                return self.failed(reason);
+                match host_key_refusal(&err) {
+                    Some(HostKeyRefusal::Unknown(fingerprint)) => {
+                        warn!(host = host.name(), %reason, "the SSH host's key is not trusted");
+                        self.emit(NetEvent::HostKeyUnverified { fingerprint });
+                        return self.host_key_refused(err.to_string());
+                    }
+                    Some(HostKeyRefusal::Changed) => {
+                        warn!(host = host.name(), %reason, "the SSH host's key changed");
+                        return self.host_key_refused(err.to_string());
+                    }
+                    None => {
+                        warn!(host = host.name(), %reason, "starting ssh failed");
+                        return self.failed(reason);
+                    }
+                }
             }
             Err(next) => return next,
         };
@@ -665,6 +732,15 @@ impl Net {
         let delay = self.conn.on_error(reason);
         self.emit_state();
         Next::Wait(delay)
+    }
+
+    /// The SSH host refused this device's trust in its key: show `reason` and
+    /// wait for a command, never the backoff, which would redial a host that
+    /// offers the same key again.
+    fn host_key_refused(&mut self, reason: String) -> Next {
+        self.conn.on_auth_failed(reason);
+        self.emit_state();
+        Next::Wait(None)
     }
 
     /// The client config a tailnet dial uses: the one the deps carry, else
@@ -3599,6 +3675,24 @@ mod tests {
         (deps, children, tokens)
     }
 
+    /// Deps whose `open_ssh` fails with the error `refuse` makes, counting
+    /// every attempt: no SSH host ever opens.
+    fn refusing_ssh_deps(
+        refuse: impl Fn() -> crate::ssh_inproc::OpenError + Send + 'static,
+    ) -> (NetDeps, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let deps = NetDeps {
+            open_ssh: Box::new(move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let error = refuse();
+                Box::pin(async move { Err(anyhow::Error::from(error)) })
+            }),
+            ..deps(ensure_must_not_run)
+        };
+        (deps, calls)
+    }
+
     fn next_child(children: &mpsc::Receiver<ScriptedChild>) -> ScriptedChild {
         children
             .recv_timeout(HANG_GUARD)
@@ -3647,6 +3741,119 @@ mod tests {
             0,
             "an SSH host used the device tokens"
         );
+    }
+
+    #[test]
+    fn an_unknown_ssh_host_key_is_reported_and_not_redialled() {
+        let (deps, calls) = refusing_ssh_deps(|| crate::ssh_inproc::OpenError::UnknownHostKey {
+            host: "box".to_owned(),
+            fingerprint: "SHA256:abc".to_owned(),
+        });
+        let (view_tx, mut view_rx, net) = run_net(deps, devbox());
+
+        assert!(
+            saw(&mut view_rx, |event| matches!(
+                event,
+                NetEvent::HostKeyUnverified { fingerprint } if fingerprint == "SHA256:abc"
+            )),
+            "the untrusted host key was never reported"
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| matches!(
+                conn.state(),
+                State::AuthFailed { reason } if reason.contains("SHA256:abc")
+            )),
+            "the host key refusal never became the connection state"
+        );
+        while let Ok(event) = view_rx.try_recv() {
+            assert!(
+                !matches!(event, NetEvent::HostKeyUnverified { .. }),
+                "an untrusted host key was reported again without a command"
+            );
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "an untrusted host key redialled the host without a command"
+        );
+
+        view_tx
+            .unbounded_send(NetCommand::Restart)
+            .expect("net thread is running");
+        assert!(
+            saw(&mut view_rx, |event| matches!(
+                event,
+                NetEvent::HostKeyUnverified { fingerprint } if fingerprint == "SHA256:abc"
+            )),
+            "a Restart never redialled the host"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the Restart did not dial the host again"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn a_changed_ssh_host_key_is_refused_without_an_event() {
+        let (deps, calls) = refusing_ssh_deps(|| crate::ssh_inproc::OpenError::HostKeyChanged {
+            host: "box".to_owned(),
+            saved: "SHA256:old".to_owned(),
+            presented: "SHA256:new".to_owned(),
+        });
+        let (view_tx, mut view_rx, net) = run_net(deps, devbox());
+
+        let reported = Cell::new(false);
+        let refused = saw(&mut view_rx, |event| {
+            if matches!(event, NetEvent::HostKeyUnverified { .. }) {
+                reported.set(true);
+            }
+            matches!(
+                event,
+                NetEvent::State(conn)
+                    if matches!(conn.state(), State::AuthFailed { reason }
+                        if reason.contains("SHA256:old") && reason.contains("SHA256:new"))
+            )
+        });
+        assert!(
+            refused,
+            "the changed host key never became the connection state"
+        );
+        assert!(
+            !reported.get(),
+            "a changed host key was reported as one to trust"
+        );
+        while let Ok(event) = view_rx.try_recv() {
+            assert!(
+                !matches!(event, NetEvent::HostKeyUnverified { .. }),
+                "a changed host key was reported as one to trust"
+            );
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a changed host key redialled the host"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn another_ssh_open_error_still_backs_off() {
+        let (deps, _calls) = refusing_ssh_deps(|| crate::ssh_inproc::OpenError::Connect {
+            host: "box".to_owned(),
+            reason: "no answer within 10 s".to_owned(),
+        });
+        let (view_tx, mut view_rx, net) = run_net(deps, devbox());
+
+        assert!(
+            saw_state(&mut view_rx, |conn| matches!(
+                conn.state(),
+                State::Error { reason } if reason.contains("no answer within 10 s")
+            )),
+            "a failed SSH open did not back off"
+        );
+        stop_net(view_tx, net);
     }
 
     #[test]

@@ -4901,6 +4901,7 @@ impl RootView {
             | NetEvent::ShutdownSent
             | NetEvent::ShutdownFailed
             | NetEvent::StopFailed(_)
+            | NetEvent::HostKeyUnverified { .. }
             | NetEvent::Paired
             | NetEvent::PairingLost
             | NetEvent::TokenSaveFailed
@@ -4931,7 +4932,8 @@ impl RootView {
                 Some(reason),
                 cx,
             ),
-            NetEvent::Paired
+            NetEvent::HostKeyUnverified { .. }
+            | NetEvent::Paired
             | NetEvent::PairingLost
             | NetEvent::TokenSaveFailed
             | NetEvent::PairRequestSent => {}
