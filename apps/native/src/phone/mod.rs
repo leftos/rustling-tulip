@@ -5,6 +5,8 @@
 mod hosts_view;
 pub(crate) mod lifecycle;
 pub mod push;
+#[cfg(target_os = "ios")]
+mod push_ios;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -37,9 +39,9 @@ pub fn run(on_start: impl FnOnce(&mut App) + 'static) {
             on_start(cx);
             crate::bind_keys(cx);
             crate::fonts::register_bundled(cx);
+            let platform = push_platform(cx);
             let opened = cx.open_window(WindowOptions::default(), |window, cx| {
                 let root = cx.new(|cx| RootView::with_transport(phone_deps(), window, cx));
-                let platform: Arc<dyn PushPlatform> = Arc::new(push::UnsupportedPlatform);
                 cx.new(|cx| PhoneRoot::new(root, platform, window, cx))
             });
             if let Err(err) = opened {
@@ -49,6 +51,24 @@ pub fn run(on_start: impl FnOnce(&mut App) + 'static) {
             }
             cx.activate(true);
         });
+}
+
+/// The phone's push on iOS; launched with
+/// [`push_ios::PUSH_PROVISIONAL_ARG`] it asks for provisional notification
+/// permission and the device token at once, else nothing until a switch asks.
+#[cfg(target_os = "ios")]
+fn push_platform(cx: &mut App) -> Arc<dyn PushPlatform> {
+    let platform = Arc::new(push_ios::IosPushPlatform);
+    if std::env::args().any(|arg| arg == push_ios::PUSH_PROVISIONAL_ARG) {
+        push_ios::start_provisional(Arc::clone(&platform), cx);
+    }
+    platform
+}
+
+/// No push off iOS: the switch never draws.
+#[cfg(not(target_os = "ios"))]
+fn push_platform(_cx: &mut App) -> Arc<dyn PushPlatform> {
+    Arc::new(push::UnsupportedPlatform)
 }
 
 /// What the phone's root view talks to: the live network thread, token

@@ -122,6 +122,31 @@ rustls-native-certs = "0.8"
 # iOS has no certificate files to read: its roots come from Security.framework
 # through the platform verifier, on the same `ring` provider as the desktop.
 rustls-platform-verifier = "0.7.1"
+# The phone's push (src/phone/push_ios.rs): the notification permission
+# (`UNUserNotificationCenter`), the device token from UIKit's registration and
+# the delegate callbacks added at run time, and the install's push keys in the
+# Keychain (`passwords`, `access_control`).
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSData",
+    "NSError",
+    "NSObject",
+    "NSString",
+] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "UIApplication",
+    "UIResponder",
+] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotificationSettings",
+    "UNUserNotificationCenter",
+] }
+security-framework = { version = "3.7", default-features = false }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 # The app's own toasts reach their window through its native handle.

@@ -8,20 +8,33 @@
 # the gate brings .tmp/ios/* back only on a failure. On
 # the Mac (-OnMac) it builds the simulator bundle (tools/ios/build.ps1), boots
 # the iPhone 17 on iOS 27.0 unless it is already booted, installs the app,
-# launches it once and waits for its "phone app started" log line, so the
-# system registers the extension, then:
+# launches it once with `--push-provisional`, which makes the app ask for
+# provisional notification permission (no prompt) and its device token at start,
+# and waits for its "phone app started" log line, so the system registers the
+# extension, then for its "phone: device token received" or "phone: provisional
+# push permission" line, so the app holds the permission before the push. Then it:
 #   1. saves pluginkit's list of notification service extensions to
 #      .tmp/ios/pluginkit.txt, and fails unless it names the extension;
 #   2. sends a mutable-content push with an `e` key that decrypts to nothing,
 #      waits 10 s, saves the extension's log lines to .tmp/ios/notify-log.txt
 #      and any crash report of the extension from this run to
-#      .tmp/ios/notify-crash.txt; it prints whether the log shows the extension
-#      launching and whether a crash report exists, and fails only on a crash.
+#      .tmp/ios/notify-crash.txt; it prints whether the simulator accepted the
+#      push, whether the log shows the extension launching and whether a crash
+#      report exists, and fails when the push is refused or the extension
+#      crashed (whether it ran is a measurement only);
+#   3. waits up to 60 s each for the app's "phone: provisional push permission
+#      granted" line and for "phone: the app delegate received a device token"
+#      or "phone: the app delegate failed to register for pushes", which the
+#      methods the app adds to its delegate log when UIKit calls them, and fails
+#      without them or on a zombie message (the app runs with NSZombieEnabled).
+#      An ad hoc simulator bundle has no aps-environment entitlement, so UIKit
+#      calls the failure method.
 # Then it stops the app and shuts the simulator down again if this run booted it.
 #
 #   pwsh -NoProfile -File tools/ios/sim-notify.ps1
 #
-# Prints the two measurements and the three file paths on success.
+# Prints the three measurements, the app's push log lines and the three file
+# paths on success.
 #-------------------------------------------------------------------------------
 [CmdletBinding()]
 param(
@@ -40,6 +53,14 @@ $ExtensionPoint = 'com.apple.usernotifications.service'
 $DeviceName = 'iPhone 17'
 $RuntimeMark = 'iOS-27-0'
 $ReadyLine = 'phone app started'
+# The app's answer to `--push-provisional`: the token, or the permission's answer.
+$PushLines = @('phone: device token received', 'phone: provisional push permission')
+$ProvisionalArg = '--push-provisional'
+$GrantedLine = 'phone: provisional push permission granted'
+# Logged by the remote-notification methods the app adds to its delegate, when UIKit calls them.
+$HookLines = @('phone: the app delegate received a device token', 'phone: the app delegate failed to register for pushes')
+# What NSZombieEnabled writes when a freed object is messaged.
+$ZombieMark = 'message sent to deallocated instance'
 $OutDir = Join-Path $RepoRoot '.tmp/ios'
 $PluginList = Join-Path $OutDir 'pluginkit.txt'
 $NotifyLog = Join-Path $OutDir 'notify-log.txt'
@@ -105,16 +126,17 @@ function Clear-RunFiles {
     }
 }
 
-function Wait-ForReadyLine([string[]] $Logs, [Diagnostics.Process] $Launch) {
+# Waits up to 60 s for a line holding any of $Lines in the app's logs.
+function Wait-ForLine([string[]] $Logs, [Diagnostics.Process] $Launch, [string[]] $Lines) {
     for ($second = 0; $second -lt 60; $second++) {
         foreach ($log in $Logs) {
-            if ((Test-Path $log) -and (Select-String -LiteralPath $log -SimpleMatch $ReadyLine -Quiet)) { return }
+            if ((Test-Path $log) -and (Select-String -LiteralPath $log -SimpleMatch $Lines -Quiet)) { return }
         }
         if ($Launch.HasExited) { break }
         Start-Sleep -Seconds 1
     }
     $tail = foreach ($log in $Logs) { if (Test-Path $log) { Get-Content -LiteralPath $log -Tail 30 } }
-    throw "no '$ReadyLine' line from the app within 60 s; log tail:`n$($tail -join "`n")"
+    throw "no '$($Lines -join "' or '")' line from the app within 60 s; log tail:`n$($tail -join "`n")"
 }
 
 function Write-TextFile([string] $Path, [string[]] $Lines) {
@@ -135,12 +157,12 @@ function Test-PluginList([string] $Udid) {
 function Send-Push([string] $Udid) {
     $json = '{"aps":{"alert":{"title":"Rustling Tulip","body":"A session changed. Open the app to see it."},"mutable-content":1},"e":"AAAA"}'
     Write-TextFile $Payload @($json)
-    # A refused push is a measurement too: the app may not hold notification permission.
     $out = @(& xcrun simctl push $Udid $BundleId $Payload 2>&1 | ForEach-Object { "$_" })
     $code = $LASTEXITCODE
     $verdict = if ($code -eq 0) { 'yes' } else { "no (exit $code)" }
     Write-Output "push accepted by the simulator: $verdict"
     if ($code -ne 0) { Write-Output ($out -join "`n") }
+    $script:PushExit = $code
 }
 
 function Save-NotifyLog([string] $Udid) {
@@ -186,6 +208,19 @@ function Measure-Push([string] $Udid, [datetime] $Since) {
     Write-Output "extension process in the log: $(if ($launched) { 'yes' } else { 'no' })"
     Write-Output "crash report: $(if ($crashes.Count -gt 0) { $crashes -join ', ' } else { 'none' })"
     if ($crashes.Count -gt 0) { throw "the extension crashed; reports listed in $NotifyCrash" }
+    if ($script:PushExit -ne 0) { throw "the simulator refused the push (exit $($script:PushExit))" }
+}
+
+# The app must hold provisional permission, and UIKit must have called one of the methods the
+# app added to its delegate: with a token, or with the registration's error. A zombie
+# message (NSZombieEnabled) means a freed object was messaged.
+function Assert-PushHook([string[]] $Logs, [Diagnostics.Process] $Launch) {
+    Wait-ForLine $Logs $Launch @($GrantedLine)
+    Wait-ForLine $Logs $Launch $HookLines
+    $present = @($Logs | Where-Object { Test-Path -LiteralPath $_ })
+    if (Select-String -LiteralPath $present -SimpleMatch $ZombieMark -Quiet) {
+        throw "the app messaged a freed object ('$ZombieMark' in its log)"
+    }
 }
 
 function Stop-Run([string] $Udid, [Diagnostics.Process] $Launch, [bool] $Booted) {
@@ -211,6 +246,7 @@ function Invoke-OnMac {
     $udid = $device.udid
     $booted = $false
     $launch = $null
+    $logs = @()
     try {
         if ($device.state -ne 'Booted') {
             # Set before the boot, so a failed wait still shuts it down.
@@ -220,15 +256,34 @@ function Invoke-OnMac {
         & xcrun simctl install $udid $app
         Assert-LastExit "xcrun simctl install $udid"
         $logs = @((Join-Path $OutDir 'app.log'), (Join-Path $OutDir 'app-err.log'))
-        $launch = Start-Process -FilePath 'xcrun' -PassThru -RedirectStandardOutput $logs[0] -RedirectStandardError $logs[1] `
-            -ArgumentList @('simctl', 'launch', '--console-pty', '--terminate-running-process', $udid, $BundleId)
-        Wait-ForReadyLine $logs $launch
+        # simctl hands SIMCTL_CHILD_* to the app without the prefix: a freed object messaged fails loudly.
+        $env:SIMCTL_CHILD_NSZombieEnabled = 'YES'
+        try {
+            $launch = Start-Process -FilePath 'xcrun' -PassThru -RedirectStandardOutput $logs[0] -RedirectStandardError $logs[1] `
+                -ArgumentList @('simctl', 'launch', '--console-pty', '--terminate-running-process', $udid, $BundleId, $ProvisionalArg)
+        }
+        finally { $env:SIMCTL_CHILD_NSZombieEnabled = $null }
+        Wait-ForLine $logs $launch @($ReadyLine)
+        Wait-ForLine $logs $launch $PushLines
         Test-PluginList $udid
         Measure-Push $udid $since
+        Assert-PushHook $logs $launch
     }
     finally {
         Stop-Run $udid $launch $booted
         Show-RunFile
+        Show-PushLine $logs
+    }
+}
+
+# The app's own push lines, which come back only in the run's log on success.
+function Show-PushLine([string[]] $Logs) {
+    Write-Output '----- app push lines'
+    foreach ($log in $Logs) {
+        if ($log -and (Test-Path -LiteralPath $log)) {
+            Select-String -LiteralPath $log -SimpleMatch ($PushLines + $HookLines + @('phone: no device token', $ZombieMark)) |
+                ForEach-Object { $_.Line }
+        }
     }
 }
 
