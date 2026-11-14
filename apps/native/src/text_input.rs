@@ -18,9 +18,9 @@ use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px,
-    relative, rgb, rgba, size,
+    MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style, TextAlign, TextInputConfiguration,
+    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
+    prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -152,6 +152,8 @@ pub struct TextInput {
     /// How far a single-line input's text is scrolled left to keep the
     /// caret in view.
     scroll_x: Pixels,
+    /// How the platform's soft keyboard serves this input.
+    input_config: TextInputConfiguration,
 }
 
 /// What an input draws: its text, or while masked a [`MASK`] for each
@@ -247,6 +249,7 @@ impl TextInput {
             goal_x: None,
             scroll_y: px(0.),
             scroll_x: px(0.),
+            input_config: TextInputConfiguration::default(),
         }
     }
 
@@ -283,6 +286,20 @@ impl TextInput {
         }
         self.read_only = read_only;
         self.marked_range = None;
+        cx.notify();
+    }
+
+    /// Sets how the platform's soft keyboard serves this input: its action
+    /// key, autocorrect and autocapitalization.
+    pub fn set_text_input_configuration(
+        &mut self,
+        config: TextInputConfiguration,
+        cx: &mut Context<Self>,
+    ) {
+        if self.input_config == config {
+            return;
+        }
+        self.input_config = config;
         cx.notify();
     }
 
@@ -492,6 +509,9 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
+        if !self.read_only {
+            window.request_virtual_keyboard();
+        }
         self.is_selecting = true;
         let index = self.index_for_mouse_position(event.position);
         if event.modifiers.shift {
@@ -984,9 +1004,21 @@ impl TextLayout {
 }
 
 impl EntityInputHandler for TextInput {
+    fn accepts_text_input(&self, _: &mut Window, _: &mut Context<Self>) -> bool {
+        !self.read_only
+    }
+
     // The iOS text-input bridge treats a handler with no document length as ineligible for the keyboard.
     fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
         Some(self.content.encode_utf16().count())
+    }
+
+    fn text_input_configuration(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> TextInputConfiguration {
+        self.input_config.clone()
     }
 
     fn text_for_range(
@@ -1038,6 +1070,14 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) {
         if self.read_only {
+            return;
+        }
+        // iOS delivers Return as an inserted line break, never as a key event.
+        // A ranged replacement (UIKit's `replaceRange:withText:`) is an edit.
+        if new_text == "\n" && range_utf16.is_none() && !self.mode.is_multi_line() {
+            self.marked_range = None;
+            cx.emit(TextInputEvent::Submit);
+            cx.notify();
             return;
         }
         let range = self.edit_range(range_utf16.as_ref());
@@ -1445,8 +1485,9 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::{
-        AppContext as _, ClipboardItem, Entity, EntityInputHandler as _, IntoElement,
-        ParentElement, Pixels, Render, Styled, TestAppContext, VisualTestContext, Window, div, px,
+        AppContext as _, Autocapitalize, ClipboardItem, Entity, EntityInputHandler as _,
+        IntoElement, ParentElement, Pixels, Render, Styled, TestAppContext, TextInputAction,
+        TextInputConfiguration, VisualTestContext, Window, div, px,
     };
 
     use super::{
@@ -1611,6 +1652,129 @@ mod tests {
             *seen.borrow(),
             [TextInputEvent::Submit, TextInputEvent::Cancel]
         );
+    }
+
+    #[gpui::test]
+    fn a_lone_newline_from_the_platform_submits_a_single_line_input(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "ab");
+        let seen = events(&input, cx);
+        cx.simulate_input("\n");
+        assert_eq!(text_of(&input, cx), "ab", "Return inserts nothing");
+        assert_eq!(*seen.borrow(), [TextInputEvent::Submit]);
+    }
+
+    #[gpui::test]
+    fn a_lone_newline_from_the_platform_breaks_a_multi_line_input(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, multi, "ab");
+        let seen = events(&input, cx);
+        cx.simulate_input("\n");
+        assert_eq!(text_of(&input, cx), "ab\n");
+        assert!(seen.borrow().is_empty(), "a line break is not a submit");
+    }
+
+    #[gpui::test]
+    fn a_platform_insert_holding_newlines_stays_text(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "");
+        let seen = events(&input, cx);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(None, "a\nb", window, cx);
+            });
+        });
+        assert_eq!(text_of(&input, cx), "a\nb");
+        assert!(seen.borrow().is_empty(), "only a lone newline is Return");
+    }
+
+    #[gpui::test]
+    fn a_pasted_newline_in_a_single_line_input_stays_text(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "");
+        let seen = events(&input, cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("\n".to_owned()));
+        cx.simulate_keystrokes("secondary-v");
+        assert_eq!(text_of(&input, cx), " ");
+        assert!(seen.borrow().is_empty(), "a paste is not Return");
+    }
+
+    #[gpui::test]
+    fn a_newline_during_a_composition_commits_it_and_submits(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "");
+        let seen = events(&input, cx);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "wor", None, window, cx);
+            });
+        });
+        cx.simulate_input("\n");
+        assert_eq!(
+            text_of(&input, cx),
+            "wor",
+            "the composed text is kept as it stands"
+        );
+        let marked = cx.update(|_, cx| input.read(cx).marked_range.clone());
+        assert_eq!(marked, None);
+        assert_eq!(*seen.borrow(), [TextInputEvent::Submit]);
+    }
+
+    #[gpui::test]
+    fn a_ranged_newline_replacement_stays_text(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "ab");
+        let seen = events(&input, cx);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(Some(0..1), "\n", window, cx);
+            });
+        });
+        assert_eq!(text_of(&input, cx), "\nb");
+        assert!(
+            seen.borrow().is_empty(),
+            "a ranged replacement is not Return"
+        );
+    }
+
+    #[gpui::test]
+    fn text_length_counts_utf16_units(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "a😀");
+        let length = cx
+            .update(|window, cx| input.update(cx, |input, cx| input.text_length_utf16(window, cx)));
+        assert_eq!(length, Some(3), "the emoji is two UTF-16 units");
+    }
+
+    #[gpui::test]
+    fn a_read_only_input_accepts_no_text_input(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "ab");
+        let accepts = cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.accepts_text_input(window, cx))
+        });
+        assert!(accepts, "an editable input takes text");
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_read_only(true, cx)));
+        let accepts = cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.accepts_text_input(window, cx))
+        });
+        assert!(!accepts, "a read-only input takes none");
+    }
+
+    #[gpui::test]
+    fn the_keyboard_configuration_is_what_was_set(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "");
+        let default = cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.text_input_configuration(window, cx))
+        });
+        assert_eq!(default, TextInputConfiguration::default());
+        let wanted = TextInputConfiguration {
+            autocorrect: true,
+            autocapitalize: Autocapitalize::Sentences,
+            input_action: TextInputAction::Send,
+            ..TextInputConfiguration::default()
+        };
+        cx.update(|_, cx| {
+            input.update(cx, |input, cx| {
+                input.set_text_input_configuration(wanted.clone(), cx);
+            });
+        });
+        let set = cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.text_input_configuration(window, cx))
+        });
+        assert_eq!(set, wanted);
     }
 
     #[gpui::test]
