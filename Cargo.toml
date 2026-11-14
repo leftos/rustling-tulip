@@ -15,6 +15,7 @@ members = [
     "crates/agents/registry",
     "crates/dev-daemon",
     "apps/native",
+    "apps/ios",
     "tools/rt-driver-mcp",
     "tools/folder-bench",
     "tools/protocol-ts",

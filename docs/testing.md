@@ -179,6 +179,12 @@ Each `screenshot` writes `<the run's config dir>/driver-shots/<pid>-<n>.png`, th
 
 `tools/sim/sim.ps1` drives Xcode's iPhone Simulator on the Mac mini builder from this PC, for a run that needs the phone app on a real simulator: `setup` installs idb 1.7.8 into `~/.local` with no admin rights, `boot` starts a device, `open`, `shot`, `describe`, `tap`, `text`, `swipe` and `key` drive it, and `shutdown` stops it. Screenshots come back to this PC over scp, and no Simulator window opens on the Mac. See [tools/sim/README.md](../tools/sim/README.md).
 
+`pwsh -NoProfile -File tools/ios/sim-run.ps1` is the gated proof that the phone app (`apps/ios`, bundle id `dev.leftos.rustling-tulip.phone`) builds and runs there. Run it on this PC: it is one pinned heavy gate run on builder@mac-mini that builds the app with `tools/ios/build.ps1`, boots the iPhone 17 (iOS 27.0) simulator (shutting it down afterwards only if it booted it), installs and launches the app, and waits for `phone app started` on the app's stderr. It brings back `.tmp/ios/sim-first.png`, the first screen ("No hosts yet"), and logs to `.tmp/ios-sim-run.log`.
+
+`tools/ios/build.ps1 [-Target sim|device] [-Release]` is the build step on the Mac alone: it writes `target/ios/<triple>/RustlingTulip.app`, adding the Rust target when it is missing; a simulator bundle is signed ad hoc and a device bundle is left unsigned. `tools/sim/sim.ps1` stays the helper that boots, screenshots and drives a simulator outside the gate.
+
+A new PC needs two entries in its gate `remote.json`, which lives outside the repo: the route `pwsh -NoProfile -File tools/ios/sim-run.ps1 -OnMac*`, and on the Mac builder's entry the output `.tmp/ios/*.png` (with `.tmp/ios/*` as a failure output). A run on a builder entry brings back only that entry's own outputs, so without them the screenshot stays on the Mac.
+
 ## Fake CLIs
 
 The `crates/agents/claude/fake/` shim (`fake-claude.cmd` or `fake-claude.sh`, plus `index.mjs`) replaces the real CLI in the e2e tier. The plugin returns it from `Agent::fake_cli` (`agent_api::FakeCli`, feature `test-support`), and the live harness (`apps/native/tests/support/live.rs`) sets each registered agent's override variable (`program_env_var()`, `RUSTLING_TULIP_CLAUDE` for Claude) to its fake through `agent-registry`, so the daemon path-resolves the CLI from that variable at spawn time.

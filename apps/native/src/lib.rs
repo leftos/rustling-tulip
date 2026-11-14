@@ -124,6 +124,7 @@ mod pane_menu;
 mod paste_upload;
 pub mod perf_pills;
 mod perf_pills_view;
+pub mod phone;
 mod popout_view;
 mod popouts;
 mod presence;

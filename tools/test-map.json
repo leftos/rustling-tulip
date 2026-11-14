@@ -25,7 +25,8 @@
   "ignore": [
     "**/*.md",
     "docs/**",
-    ".claude/**"
+    ".claude/**",
+    "tools/ios/**"
   ],
   "rows": [
     {
@@ -1882,6 +1883,13 @@
       "package": "rustling-tulip-native",
       "features": "driver",
       "filter": "test(/^driver::/) | test(/^ui_driver_registry::/) | test(/^ui_driver::/)"
+    },
+    {
+      "paths": [
+        "apps/native/src/phone/**",
+        "apps/ios/**"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^phone::/)"
     }
   ]
 }

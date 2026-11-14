@@ -1,0 +1,25 @@
+[package]
+name = "rustling-tulip-ios"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "rustling-tulip phone app: the iPhone binary over the native client's phone shell"
+publish = false
+
+[[bin]]
+name = "rustling-tulip-ios"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+rustling-tulip-native = { path = "../native" }
+
+gpui = { git = "https://github.com/leftos/zed", rev = "2640ed91240892bc212b050bb6eb194b42bc4d02" }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+gpui_ios = { git = "https://github.com/leftos/zed", rev = "2640ed91240892bc212b050bb6eb194b42bc4d02" }

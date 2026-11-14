@@ -6395,6 +6395,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustling-tulip-ios"
+version = "0.14.0-alpha"
+dependencies = [
+ "gpui",
+ "gpui_ios",
+ "rustling-tulip-native",
+]
+
+[[package]]
 name = "rustling-tulip-native"
 version = "0.14.0-alpha"
 dependencies = [

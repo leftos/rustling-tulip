@@ -43,11 +43,13 @@ crates/
   agents/registry/ - the compiled-in list of agent plugins
 apps/
   native/       - native desktop client (GPUI + alacritty_terminal)
+  ios/          - the native phone app for the iOS simulator and device (binary `rustling-tulip-ios`); its screens live in `apps/native/src/phone/`
   pwa/          - the iPhone PWA shell (Vite + TypeScript, pnpm) that the daemon's tailnet listener serves; see its README.md
 tools/
   e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
   folder-bench/ - the dev-only harness that generates folder fixtures and times folder-transfer candidates to the builder; never shipped
+  ios/          - `build.ps1` (the phone app's `.app`, on a Mac) and `sim-run.ps1` (the gated simulator run from this PC)
   installer/    - the NSIS installer script, and `pack-macos.ps1`, which builds the macOS app bundle and disk image on a Mac
   protocol-ts/  - the generator that writes the wire types as TypeScript into `apps/pwa/src/protocol.ts`, with its staleness test; never shipped
   rt-driver-mcp/ - the `rt-driver` MCP server that launches and drives an isolated native client; never shipped
