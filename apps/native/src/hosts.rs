@@ -85,6 +85,15 @@ impl HostConn {
         }
     }
 
+    /// A connection to `target` that is never opened, its commands going to
+    /// `tx`: the phone's This PC slot, which shows no overlay.
+    pub(crate) fn dormant(tx: UnboundedSender<NetCommand>, target: Target) -> Self {
+        Self {
+            conn: Connection::dormant(),
+            ..Self::new(tx, target)
+        }
+    }
+
     /// Which of the window's connections this is.
     pub(crate) fn generation(&self) -> u64 {
         self.generation

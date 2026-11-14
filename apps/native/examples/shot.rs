@@ -1190,6 +1190,7 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
                 },
             }),
         }),
+        shape: rustling_tulip_native::RootShape::Desktop,
     }
 }
 

@@ -1035,9 +1035,15 @@ The box is drawn only when the session's host lists `typed_prompt_answers` (`FEA
 
 An Accounts toast is keyed by host alone: a later one on the same host replaces it. It lasts 8 s, has no `Go to pane` button and plays no sound; a click on its body or × dismisses it, and session messages leave it up.
 
+### Phone shape
+
+`RootDeps.shape` is a `RootShape`: `Desktop` (the desktop app) or `Phone` (the phone app, `docs/plans/mobile-app.md`). In the phone shape `RootView` opens no This PC connection and never calls `open_host` for it: the Local slot is a `HostConn::dormant`, built on `Connection::dormant()`, a connection that never opens, supports nothing and shows no overlay. Saved remote hosts still connect at start.
+
+A phone sends no presence report, runs no update checks and has no window-close flow, so `watch_presence` and `watch_close_request` run only on the desktop. `NoToastPlacer` (`toast_window.rs`) places no toast windows on a phone, and `SilentNotifier` is the notifier that raises no OS notification.
+
 ### Presence reports
 
-The client tells each daemon whether the owner is at the desk, so the daemon can hold phone pushes (`docs/session-runtime.md` "Phone pushes"). It sends `ReportPresence { active }` (`apps/native/src/presence.rs`) only to a host whose `Welcome.features` lists `client_presence`: to that host on every `Welcome`, and to every such host whenever the answer changes, checked on a window focus change and every 10 seconds. An unchanged answer is not sent again.
+The client tells each daemon whether the owner is at the desk, so the daemon can hold phone pushes (`docs/session-runtime.md` "Phone pushes"); a phone-shape root sends none. It sends `ReportPresence { active }` (`apps/native/src/presence.rs`) only to a host whose `Welcome.features` lists `client_presence`: to that host on every `Welcome`, and to every such host whenever the answer changes, checked on a window focus change and every 10 seconds. An unchanged answer is not sent again.
 
 `active` means the main window is focused and, on Windows (`GetLastInputInfo`) and macOS (CoreGraphics `CGEventSourceSecondsSinceLastEventType`), the machine had keyboard or mouse input in the last 180 seconds. Elsewhere, or when the idle time cannot be read, focus alone decides, so Linux counts focus alone. `set_idle_reader` installs a different idle reader; the UI harness installs "input just now" so specs never see the developer's own idle time (`ui_presence.rs`).
 
@@ -1411,6 +1417,8 @@ Three tiers, all Rust tests:
   A live window is shaped like production's. `Harness::open_live` connects This PC to the daemon under test. `Harness::open_hosts` (`tests/support/live.rs`) opens the window with This PC on its own isolated home daemon (`LiveDaemon::start("<name>-home")`) and each remote host on a real `Net` thread, dialled through the saved hosts that `open_hosts` writes into the home's `native-ui.json` (a tailnet host whose name a saved host may not hold is dialled once the window is open, as the picker dials it). A `LiveHostSpec` names the remote's target, the config dir of the daemon it reaches and its TLS roots; `LiveHosts` hands back the client side of each host's connection (`client(&HostKey)`, newest last).
 
   `open_hosts` waits for every connecting daemon's tab layout or first-connect question and presses Start empty on any chooser that shows, so a spec's clicks reach the window. `Harness::place_shell_on(&HostKey)` presses `+ Shell` on a host's header and returns the pane its shell lands in. Each daemon is its own `LiveDaemon::start(<unique name>)`, since its roots, tracer pipe prefix and binaries dir all derive from that name (a daemon whose binaries dir is not under `.tmp/` would reap the installed app's tracers). The fake ssh shim holds the state of one daemon per process, and any ssh alias reaches it.
+
+  `Harness::phone(cx, dir)` opens a phone-shape `RootView` over a transport that never hands a call to This PC, and `h.opened_targets()` lists the targets the window opened, so a spec proves a phone connects only its saved hosts (`tests/ui/ui_phone_root.rs`).
 - **OS smoke** (`tests/smoke_window.rs`, `.\rt.ps1 native-smoke`): launches the real exe with `RUSTLING_TULIP_OFFSCREEN_WINDOW`, which opens it cloaked and never activated, so it never takes focus or covers the user's work: the window carries `WS_EX_NOACTIVATE` and opens at the bottom of the Z order, and a cloak that fails never shows it, the process exiting with code 3 (`offscreen::CLOAK_FAILED_EXIT`; the `shot` and `diff_bench` examples do the same). Before launch the spec writes the client's `client-id-native` and lays out its sessions for that id over its own socket, so the first-connect chooser never dims the probes.
 
   Input is posted to the HWND, each key only after the shell has echoed the previous one: an attach probe posts Space until it echoes and the screen holds still, then each letter waits until the typed line equals the text so far (a Space waits for scrollback growth), and the whole line is checked before Enter.

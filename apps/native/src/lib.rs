@@ -272,7 +272,7 @@ use crate::link_menu::LinkMenu;
 use crate::needs_you_view::moves_needs_you;
 use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
-use crate::notify::{SilentNotifier, SystemNotifier};
+use crate::notify::SystemNotifier;
 use crate::overlay_owner::{Overlay, OverlayOwners};
 use crate::popout_view::PopoutView;
 use crate::popouts::{POPOUT_CASCADE, POPOUT_MIN_SIZE, POPOUT_SIZE, Popouts};
@@ -355,7 +355,7 @@ pub use crate::notices::{
     ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastAction,
     ToastKind, ToastSpec, toast_action_selector,
 };
-pub use crate::notify::{Notifier, NotifyState, PairingActionSink};
+pub use crate::notify::{Notifier, NotifyState, PairingActionSink, SilentNotifier};
 pub use crate::open::{LinkAction, OpenFailure, Opener};
 pub use crate::pairing::{
     DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix, WaitingRow,
@@ -391,7 +391,7 @@ pub use crate::toast_stack::{AppToast, AppToastKind, SessionKey, WorkArea, key_o
 pub use crate::toast_view::{
     CardText, TextMeasure, TextRole, ToastPresses, TypedRow, card_height, toast_card,
 };
-pub use crate::toast_window::{PhysicalRect, SystemToastPlacer, ToastPlacer};
+pub use crate::toast_window::{NoToastPlacer, PhysicalRect, SystemToastPlacer, ToastPlacer};
 pub use crate::undo::{TabSnapshot, UndoEntry};
 pub use crate::viewer_tab::{
     MarkdownMode, OPEN_FAILED_TITLE as VIEWER_OPEN_FAILED_TITLE, ViewerLoad, ViewerOrigin,
@@ -482,6 +482,16 @@ pub(crate) enum Pick {
 pub type Transport =
     Rc<dyn Fn(&target::Target) -> (UnboundedSender<NetCommand>, UnboundedReceiver<NetEvent>)>;
 
+/// Which client a `RootView` serves: the desktop app, with This PC, or the
+/// phone app, which reaches only saved remote hosts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootShape {
+    /// The desktop app: This PC's connection, its tabs and layout.
+    Desktop,
+    /// The phone app: saved remote hosts only, and no presence report.
+    Phone,
+}
+
 /// What the root view talks to and where it keeps its files.
 pub struct RootDeps {
     /// Opens a connection to a host: the network thread (or a spec's fake
@@ -531,6 +541,8 @@ pub struct RootDeps {
     /// How this start opens: after two panicked starts it closes the tabs
     /// This PC sends, and after three it also sets the UI settings aside.
     pub start_mode: start_guard::StartMode,
+    /// Which client this root serves.
+    pub shape: RootShape,
 }
 
 /// Opens the client's window on a live daemon connection, focusing
@@ -886,6 +898,8 @@ pub struct RootView {
     /// Opens a host's connection: the boot target's at construction, and
     /// each host [`Self::connect_host`] adds after.
     open_host: Transport,
+    /// Which client this root serves.
+    shape: RootShape,
     /// The terminals' clock.
     now: Clock,
     /// Repos, workspaces and every session the daemon knows, plus the
@@ -1524,6 +1538,7 @@ impl RootView {
                 daemon_client::updates_dir().map_err(|err| format!("{err:#}")),
                 update::checks_allowed() && !offscreen::requested(),
             )),
+            shape: RootShape::Desktop,
         };
         let mut root = Self::with_transport(deps, window, cx);
         // Presses the toast activator receives, those that arrived before
@@ -1640,10 +1655,14 @@ impl RootView {
             tokens,
             updater,
             start_mode,
+            shape,
         } = deps;
         let quit = start_guard_view::stable_on_quit(quit, ui_dir.clone());
         Self::watch_window(window, cx);
-        Self::watch_close_request(window, cx);
+        // A phone has no window to close.
+        if shape == RootShape::Desktop {
+            Self::watch_close_request(window, cx);
+        }
         let mut ui = ui_dir
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
@@ -1652,15 +1671,7 @@ impl RootView {
             let outcome = crate::logging::set_detailed(true);
             crate::logging::log_outcome(outcome, true);
         }
-        let (tx, events) = open_host(&target::Target::Local);
-        let hosts = Hosts::new(HostConn::new(tx, target::Target::Local));
-        Self::forward_net_events(
-            HostKey::Local,
-            hosts.local().generation(),
-            events,
-            window,
-            cx,
-        );
+        let hosts = Self::start_hosts(shape, &open_host, window, cx);
         let drag_escape = Self::intercept_drag_escape(window, cx);
         let themes_dir = ui_dir
             .as_deref()
@@ -1685,6 +1696,7 @@ impl RootView {
         let mut view = Self {
             hosts,
             open_host,
+            shape,
             now,
             tabs: TabsModel::new(ui.active_tab_id.clone()),
             sidebar: {
@@ -1930,8 +1942,12 @@ impl RootView {
             update: update_view::UpdateUi::new(updater),
         };
         view.arm_needs_you_repaint(cx);
-        view.start_update_checks(cx);
-        view.watch_presence(window, cx);
+        // A phone app does not update itself.
+        if view.shape == RootShape::Desktop {
+            view.start_update_checks(cx);
+            // Nor does it report presence: no re-read timer either.
+            view.watch_presence(window, cx);
+        }
         view.connect_saved_hosts(window, cx);
         view.watch_taskbar_button(window, cx);
         // A window nothing has clicked in has no focused element, and the
@@ -1939,6 +1955,31 @@ impl RootView {
         // takes the keyboard so they run until a pane or a dialog does.
         view.root_focus.focus(window, cx);
         view
+    }
+
+    /// The window's connections at start. The desktop opens This PC's and
+    /// handles its events; a phone opens none, and This PC's slot is a
+    /// dormant one whose commands go nowhere and which never connects.
+    fn start_hosts(
+        shape: RootShape,
+        open_host: &Transport,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Hosts {
+        if shape == RootShape::Phone {
+            let (tx, _) = unbounded();
+            return Hosts::new(HostConn::dormant(tx, target::Target::Local));
+        }
+        let (tx, events) = open_host(&target::Target::Local);
+        let hosts = Hosts::new(HostConn::new(tx, target::Target::Local));
+        Self::forward_net_events(
+            HostKey::Local,
+            hosts.local().generation(),
+            events,
+            window,
+            cx,
+        );
+        hosts
     }
 
     /// Sends a request to close the window through the quit flow; a close
@@ -5732,8 +5773,12 @@ impl RootView {
 
     /// Reads whether the owner is at the desk and, when the answer changed
     /// since it was last sent, sends it to every connected host that takes
-    /// presence reports.
+    /// presence reports. A phone reports none, so the at-desk hold reads
+    /// only desktops.
     fn report_presence(&mut self, window: &Window, cx: &App) {
+        if self.shape == RootShape::Phone {
+            return;
+        }
         let Some(active) = self.presence.next(Self::presence_now(window, cx)) else {
             return;
         };
@@ -5743,8 +5788,11 @@ impl RootView {
     }
 
     /// Sends `active` to `host` when its daemon lists
-    /// [`protocol::FEATURE_CLIENT_PRESENCE`].
+    /// [`protocol::FEATURE_CLIENT_PRESENCE`]; a phone sends nothing.
     fn send_presence_to(&self, host: &HostKey, active: bool) {
+        if self.shape == RootShape::Phone {
+            return;
+        }
         if self
             .conn_of(host)
             .is_some_and(|conn| conn.supports(protocol::FEATURE_CLIENT_PRESENCE))

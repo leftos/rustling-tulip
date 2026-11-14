@@ -155,6 +155,8 @@ Risks the spike left open: the iOS backend is experimental, from a single upstre
 
   The phone root draws the session list (`sidebar_panel` at the window's width) or, with no saved host, a first-run screen to add a tailnet host by name and port and open the Pair dialog; a tailnet host with no token offers Pair.
 
+  The step is split into MA.9a (the phone shape on `RootDeps`: done), MA.9b (add a host and Pair) and MA.9c (the session list). The real change of Beyond the files listed, the step touches `toast_window.rs`, `connection.rs`, the test support and `examples/shot.rs` (MA.9a) and `sidebar.rs` and `sidebar_view.rs` (MA.9c).
+
   Files: `apps/native/src/lib.rs`, `apps/native/src/hosts.rs`, `apps/native/src/phone/mod.rs`, `apps/native/src/phone/root_view.rs`, `apps/native/src/phone/hosts_view.rs`, `apps/native/tests/ui/ui_phone_root.rs` (with its module line in the `ui` binary).
 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma9-phone-root.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_phone_root`

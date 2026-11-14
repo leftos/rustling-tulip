@@ -29,10 +29,11 @@ use protocol::{
 };
 use rustling_tulip_native::{
     Activity, BadgeOverlay, Clip, ClipSource, Clock, Connection, ContainerKind, FileFilter,
-    FilePicker, FolderPicker, HandshakeInfo, LogPaths, NetCommand, NetDeps, NetEvent, Notifier,
-    NotifyKind, NotifyState, OpenFailure, OpenLocalFuture, Opener, PairingAction,
-    PairingActionSink, PairingToast, PhysicalRect, QuitFn, RootDeps, RootView, SavePicker, ScPanel,
-    Sounder, TaskbarBadge, ToastPlacer, Transport, WorkArea, bind_keys, log_paths,
+    FilePicker, FolderPicker, HandshakeInfo, LogPaths, NetCommand, NetDeps, NetEvent,
+    NoTaskbarBadge, NoToastPlacer, Notifier, NotifyKind, NotifyState, OpenFailure, OpenLocalFuture,
+    Opener, PairingAction, PairingActionSink, PairingToast, PhysicalRect, QuitFn, RootDeps,
+    RootShape, RootView, SavePicker, ScPanel, SilentNotifier, SilentSounder, Sounder, TaskbarBadge,
+    ToastPlacer, Transport, WorkArea, bind_keys, log_paths,
     remote_access::Autostart,
     set_bitmap_reader, set_idle_reader, spawn_net,
     target::{HostKey, Target},
@@ -2801,7 +2802,27 @@ pub fn fake_transport_sharing(
     opened: &Rc<RefCell<Vec<Target>>>,
     extra_hosts: &ExtraHosts,
 ) -> Transport {
-    let first = RefCell::new(Some(first));
+    transport_handing(Some(first), opened, extra_hosts)
+}
+
+/// A transport that makes every call a host in `extra_hosts`, none of them
+/// This PC's, and records every target it is asked for in `opened`: the
+/// phone's, which opens no connection to This PC.
+pub fn fake_transport_extra_only(
+    opened: &Rc<RefCell<Vec<Target>>>,
+    extra_hosts: &ExtraHosts,
+) -> Transport {
+    transport_handing(None, opened, extra_hosts)
+}
+
+/// [`fake_transport_sharing`], handing out `first`, when there is one, on
+/// the first call.
+fn transport_handing(
+    first: Option<(UnboundedSender<NetCommand>, UnboundedReceiver<NetEvent>)>,
+    opened: &Rc<RefCell<Vec<Target>>>,
+    extra_hosts: &ExtraHosts,
+) -> Transport {
+    let first = RefCell::new(first);
     let opened = Rc::clone(opened);
     let extra_hosts = Rc::clone(extra_hosts);
     Rc::new(move |target: &Target| {
@@ -3251,6 +3272,7 @@ impl<'a> Harness<'a> {
             autostart: autostart.clone(),
             tokens: tokens.clone(),
             updater: updater.clone(),
+            shape: RootShape::Desktop,
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -3333,6 +3355,7 @@ impl<'a> Harness<'a> {
             autostart: autostart.clone(),
             tokens: tokens.clone(),
             updater: updater.clone(),
+            shape: RootShape::Desktop,
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -3351,6 +3374,76 @@ impl<'a> Harness<'a> {
             placer,
             sounder,
             badge,
+            picker,
+            autostart,
+            tokens,
+            updater,
+            extra_hosts,
+        };
+        harness.count_the_window_hovered();
+        harness.pin_contrast();
+        harness
+    }
+
+    /// Opens a phone-shape window over `dir`: no connection to This PC, each
+    /// saved host's opened as a host [`Self::host`] reaches, the desktop's
+    /// notification, sound, toast and badge seams silent, and nothing
+    /// connected yet. A phone holds no This PC connection, so
+    /// [`Self::send`], [`Self::connect`] and [`Self::sent`], which address
+    /// This PC's, do nothing here: drive each host through [`Self::host`].
+    pub fn phone(cx: &'a mut TestAppContext, dir: &TestDir) -> Self {
+        cx.update(bind_keys);
+        // A spec never reads the developer's own clipboard bitmap.
+        cx.update(|cx| set_bitmap_reader(cx, || Ok(None)));
+        // Nor the developer's own idle time: input came just now.
+        cx.update(|cx| set_idle_reader(cx, || Some(Duration::ZERO)));
+        let updater = Arc::new(UpdaterRecorder::default());
+        let clock = TestClock::new();
+        let quits = Rc::new(Cell::new(0));
+        let opener = Arc::new(OpenRecorder::default());
+        let picker = Rc::new(PickRecorder::default());
+        let autostart = Arc::new(AutostartRecorder::default());
+        let tokens = Arc::new(MemoryTokens::default());
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let extra_hosts = ExtraHosts::default();
+        let deps = RootDeps {
+            open_host: fake_transport_extra_only(&opened, &extra_hosts),
+            ui_dir: Some(dir.path().to_path_buf()),
+            paths: Err("specs have no config dir".to_owned()),
+            start_mode: rustling_tulip_native::start_guard::StartMode::Normal,
+            wanted: None,
+            now: clock.clock(),
+            quit: quit_recorder(&quits),
+            open: opener.clone(),
+            notify: Arc::new(SilentNotifier),
+            toast_placer: Arc::new(NoToastPlacer),
+            sound: Arc::new(SilentSounder),
+            badge: Rc::new(NoTaskbarBadge),
+            pick_folder: PickRecorder::picker(&picker),
+            pick_file: PickRecorder::file_picker(&picker),
+            pick_save: PickRecorder::save_picker(&picker),
+            autostart: autostart.clone(),
+            tokens: tokens.clone(),
+            updater: updater.clone(),
+            shape: RootShape::Phone,
+        };
+        let (root, cx) =
+            cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
+        let mut harness = Self {
+            cx,
+            root,
+            events: unbounded().0,
+            commands: unbounded().1,
+            opened,
+            clock,
+            answered: HashSet::new(),
+            outbox: Outbox::default(),
+            quits,
+            opener,
+            notifier: Arc::new(NotifyRecorder::default()),
+            placer: Arc::new(PlaceRecorder::default()),
+            sounder: Arc::new(SoundRecorder::default()),
+            badge: Rc::new(BadgeRecorder::default()),
             picker,
             autostart,
             tokens,

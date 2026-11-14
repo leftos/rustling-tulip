@@ -62,6 +62,25 @@ impl ToastPlacer for SystemToastPlacer {
     }
 }
 
+/// A toast placer that places nothing: the phone shows no toast windows.
+pub struct NoToastPlacer;
+
+impl ToastPlacer for NoToastPlacer {
+    fn work_area(&self, _near: Option<usize>) -> Option<(WorkArea, u32)> {
+        None
+    }
+
+    fn show(&self, _hwnd_address: Option<usize>, _rect: PhysicalRect) -> bool {
+        false
+    }
+
+    fn restack(&self, _hwnd_address: Option<usize>, _rect: PhysicalRect) {}
+
+    fn address_of(&self, _window: &gpui::Window) -> Option<usize> {
+        None
+    }
+}
+
 #[cfg(not(any(windows, target_os = "macos")))]
 impl ToastPlacer for SystemToastPlacer {
     fn work_area(&self, _near: Option<usize>) -> Option<(WorkArea, u32)> {

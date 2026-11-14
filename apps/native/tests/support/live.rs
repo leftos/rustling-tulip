@@ -1062,6 +1062,7 @@ impl<'a> Harness<'a> {
             autostart: autostart.clone(),
             tokens: tokens.clone(),
             updater: updater.clone(),
+            shape: rustling_tulip_native::RootShape::Desktop,
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));

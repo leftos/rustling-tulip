@@ -119,6 +119,11 @@ pub fn backoff_delay(attempt: u32) -> Duration {
 /// The connection state machine: the single owner of the reconnect, restart
 /// and stop rules.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts beside the state: a stop request, a first connect, a live socket \
+              and a slot that never opens"
+)]
 pub struct Connection {
     state: State,
     stop_requested: bool,
@@ -127,6 +132,8 @@ pub struct Connection {
     socket_live: bool,
     port: Option<u16>,
     target: Target,
+    /// Never opened: the phone's This PC slot, which shows no overlay.
+    dormant: bool,
 }
 
 impl Default for Connection {
@@ -154,6 +161,18 @@ impl Connection {
             socket_live: false,
             port: None,
             target,
+            dormant: false,
+        }
+    }
+
+    /// A connection that is never opened: the phone's This PC slot. It is
+    /// never open and supports nothing, and shows no overlay, since there is
+    /// nothing to wait for.
+    #[must_use]
+    pub fn dormant() -> Self {
+        Self {
+            dormant: true,
+            ..Self::new()
         }
     }
 
@@ -364,7 +383,7 @@ impl Connection {
     /// failure instead. Only This PC's connection draws it.
     #[must_use]
     pub fn overlay(&self) -> Option<&'static str> {
-        if self.has_ever_connected {
+        if self.dormant || self.has_ever_connected {
             return None;
         }
         match self.state {
@@ -804,6 +823,18 @@ mod tests {
             20,
             vec![FEATURE_AGENT_COMMANDS.to_owned(), "later".to_owned()],
             None,
+        );
+    }
+
+    #[test]
+    fn a_dormant_connection_shows_no_overlay_and_is_never_open() {
+        let conn = Connection::dormant();
+        assert_eq!(conn.overlay(), None, "nothing to wait for");
+        assert!(!conn.is_open());
+        assert!(!conn.supports(FEATURE_AGENT_COMMANDS));
+        assert!(
+            Connection::new().overlay().is_some(),
+            "a connection at boot still shows its overlay"
         );
     }
 

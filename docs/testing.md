@@ -167,6 +167,8 @@ The `support` builders for account specs (`apps/native/tests/support/mod.rs`) ar
 
 An OS toast press is tested through the `NotifyRecorder` notifier: `Harness::notified_launches` lists the launch argument each notification carried, `Harness::activate_os_toast(index)` presses the notification at `index`, and `activate_toast_arg(arg)` presses with a raw argument, both delivering it through the window's activation sink as the toast activator does. `h.cx.deactivate_window()` simulates an inactive main window.
 
+A phone-shape window is opened with `Harness::phone(cx, dir)`, and `h.opened_targets()` lists the targets it dialled; `tests/ui/ui_phone_root.rs` is its spec, and `tools/test-map.json` maps the phone-shape sources to it.
+
 ### Show a change in a live client
 
 `native-shot` draws one fixed view over a fake daemon; to show what a click, a key or a real session does, drive the real client through the `rt-driver` MCP server (`tools/rt-driver-mcp`, `docs/native-client.md` "Driver MCP server"). `launch` starts an isolated daemon and a cloaked, driven native client from a driver build under `<repo root>/.tmp/driver/`, and returns the session name every other tool takes; `batch` runs its `steps` in order and stops at the first error, so a `screenshot` step saves a PNG after each click or key; `call` runs one endpoint method; `screenshot` captures the window on its own and returns the PNG inline beside its path, width and height; `stop` kills the client and the daemon and removes their scratch folder. The steps are the driver endpoint's methods (`click`, `key`, `type_text`, `find`, `wait_for`, `state`, `screenshot` and the rest of the table in `docs/native-client.md` "Driver endpoint").
