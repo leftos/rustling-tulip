@@ -43,6 +43,9 @@ directories = "5.0"
 semver = "1.0.28"
 tar = { version = "0.4.46", default-features = false }
 zstd = { version = "0.14.3", default-features = false }
+# The phone's in-process SSH client, on the `ring` backend (no aws-lc-sys) and without RSA keys.
+russh = { version = "=0.65.0", default-features = false, features = ["ring"] }
+rand = { version = "0.10", features = ["thread_rng"] }
 # leftos/gate's crates, all at one rev so they share one git source and one lock entry.
 gate-state = { git = "https://github.com/leftos/gate", rev = "15659c9e38a82270688c3371af2c5b6d7c19a0b6" }
 proc-table = { git = "https://github.com/leftos/gate", rev = "15659c9e38a82270688c3371af2c5b6d7c19a0b6" }

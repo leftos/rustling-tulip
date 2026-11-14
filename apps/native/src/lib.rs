@@ -171,6 +171,7 @@ mod spawn_preview;
 mod spawn_view;
 mod spawns;
 pub mod ssh;
+pub mod ssh_inproc;
 pub mod start_guard;
 mod start_guard_view;
 mod stash_view;

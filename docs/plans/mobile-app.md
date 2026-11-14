@@ -260,7 +260,9 @@ Risks: a new SSH dependency (`russh`, pure Rust, its licence and advisories chec
 
   It runs the saved remote command (default `rustling-tulipd bridge`) on an exec channel and speaks the line protocol as `ssh.rs`'s `LineSocket` does; `NetDeps.open_ssh` uses it on iOS. It compiles on every platform, so its tests run on Windows against an in-process `russh` server.
 
-  Files: `Cargo.toml`, `apps/native/Cargo.toml`, `apps/native/src/ssh_inproc.rs`, `apps/native/src/net.rs`, `deny.toml`.
+  The crypto backend is `ring` (no aws-lc, no RSA keys).
+
+  Files: `Cargo.toml`, `Cargo.lock`, `apps/native/Cargo.toml`, `apps/native/src/lib.rs`, `apps/native/src/ssh_inproc.rs`, `apps/native/src/net.rs`, `deny.toml`.
 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma20-ssh.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --lib ssh_inproc`
 

@@ -105,6 +105,11 @@ rodio = { version = "0.23.0", default-features = false, features = [
 interprocess = { version = "2", features = ["tokio"], optional = true }
 # Pasting a copied bitmap into a remote session sends it as a PNG.
 png = "0.18"
+# The in-process SSH transport (`src/ssh_inproc.rs`): the session, the phone's
+# ed25519 key (made with `rand`), and its error type.
+russh = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 # The desktop's roots, read out of the OS certificate store's files.
