@@ -14,8 +14,64 @@ use sha2_011::{Digest, Sha256};
 /// How long one push may take, connect to answer.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a push service keeps an undelivered message: six hours.
+/// How long a push service keeps an undelivered alert: six hours.
 const TTL_SECONDS: &str = "21600";
+
+/// How long a background push is kept undelivered: not at all. APNs stores
+/// one notification per app, so a stored background push could evict
+/// another session's undelivered alert; a phone that was offline sweeps its
+/// notifications when the app opens.
+const BACKGROUND_TTL_SECONDS: &str = "0";
+
+/// The request header that asks the push relay for an APNs background push
+/// (`services/push-relay/README.md`, "Request contract").
+const PUSH_TYPE_HEADER: &str = "X-RT-Push-Type";
+
+/// How a push is delivered, which sets its `TTL`, its `Urgency` and whether
+/// it asks the relay for a background push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Profile {
+    /// An alert the phone shows: six hours, `Urgency: high`, no push type.
+    Alert,
+    /// A relay push that wakes the phone app and shows nothing: never
+    /// stored (`TTL: 0`), `Urgency: low`, `X-RT-Push-Type: background`.
+    Background,
+}
+
+impl Profile {
+    fn ttl(self) -> &'static str {
+        match self {
+            Self::Alert => TTL_SECONDS,
+            Self::Background => BACKGROUND_TTL_SECONDS,
+        }
+    }
+
+    fn urgency(self) -> &'static str {
+        match self {
+            Self::Alert => "high",
+            Self::Background => "low",
+        }
+    }
+
+    /// The `X-RT-Push-Type` value, `None` for an alert, which sends no such
+    /// header.
+    fn push_type(self) -> Option<&'static str> {
+        match self {
+            Self::Alert => None,
+            Self::Background => Some("background"),
+        }
+    }
+}
+
+/// What one POST carries besides its body: the `Topic`, the delivery
+/// [`Profile`], and the VAPID JWT and public key it is signed with.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Post<'a> {
+    pub topic: &'a str,
+    pub profile: Profile,
+    pub jwt: &'a str,
+    pub public_key_b64: &'a str,
+}
 
 /// The most of a push service's answer kept as the `reason`.
 const REASON_CHARS: usize = 200;
@@ -140,7 +196,8 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
 }
 
 /// Posts `body`, already encrypted for the subscription, to `endpoint`
-/// (checked by [`check_endpoint`]) and sorts the answer.
+/// (checked by [`check_endpoint`]) with `post`'s headers, and sorts the
+/// answer.
 ///
 /// # Errors
 ///
@@ -149,20 +206,28 @@ pub(crate) async fn send(
     client: &reqwest::Client,
     endpoint: &Url,
     body: Vec<u8>,
-    topic: &str,
-    jwt: &str,
-    public_key_b64: &str,
+    post: Post<'_>,
 ) -> anyhow::Result<Outcome> {
     let size = body.len();
     let host = endpoint.host_str().unwrap_or_default().to_owned();
-    let response = client
+    let Post {
+        topic,
+        profile,
+        jwt,
+        public_key_b64,
+    } = post;
+    let mut request = client
         .post(endpoint.clone())
-        .header("TTL", TTL_SECONDS)
-        .header("Urgency", "high")
+        .header("TTL", profile.ttl())
+        .header("Urgency", profile.urgency())
         .header("Topic", topic)
         .header(CONTENT_ENCODING, "aes128gcm")
         .header(CONTENT_TYPE, "application/octet-stream")
-        .header(AUTHORIZATION, format!("vapid t={jwt}, k={public_key_b64}"))
+        .header(AUTHORIZATION, format!("vapid t={jwt}, k={public_key_b64}"));
+    if let Some(push_type) = profile.push_type() {
+        request = request.header(PUSH_TYPE_HEADER, push_type);
+    }
+    let response = request
         .body(body)
         .send()
         .await
@@ -207,7 +272,16 @@ pub(crate) async fn send(
 mod tests {
     use super::super::test_fake::{TESTS, fake_push_service, fake_push_service_with};
     use super::{
-        Duration, Outcome, PushPolicy, Url, check_endpoint, check_relay, client, send, topic,
+        Duration, Outcome, Post, Profile, PushPolicy, Url, check_endpoint, check_relay, client,
+        send, topic,
+    };
+
+    /// The headers every test POST carries: an alert's.
+    const POST: Post<'static> = Post {
+        topic: "rt-AbCdEf012345",
+        profile: Profile::Alert,
+        jwt: "header.claims.signature",
+        public_key_b64: "BPublicKey",
     };
     use crate::push::relay::RELAY_ORIGIN;
 
@@ -342,16 +416,9 @@ mod tests {
     }
 
     async fn post_to(url: &Url) -> Outcome {
-        send(
-            &client().expect("a client"),
-            url,
-            BODY.to_vec(),
-            "rt-AbCdEf012345",
-            "header.claims.signature",
-            "BPublicKey",
-        )
-        .await
-        .expect("the fake answers")
+        send(&client().expect("a client"), url, BODY.to_vec(), POST)
+            .await
+            .expect("the fake answers")
     }
 
     #[tokio::test]
@@ -365,16 +432,9 @@ mod tests {
         )
         .expect("loopback");
 
-        let err = send(
-            &client().expect("a client"),
-            &url,
-            BODY.to_vec(),
-            "rt-AbCdEf012345",
-            "header.claims.signature",
-            "BPublicKey",
-        )
-        .await
-        .expect_err("nothing listens on the port");
+        let err = send(&client().expect("a client"), &url, BODY.to_vec(), POST)
+            .await
+            .expect_err("nothing listens on the port");
 
         let text = format!("{err:#}");
         assert!(!text.contains("feedfacecafe"), "{text}");
@@ -466,16 +526,9 @@ mod tests {
     #[tokio::test]
     async fn every_header_arrives_as_written() {
         let (url, fake, _server) = fake_push_service(201, "").await;
-        let outcome = send(
-            &client().expect("a client"),
-            &url,
-            BODY.to_vec(),
-            "rt-AbCdEf012345",
-            "header.claims.signature",
-            "BPublicKey",
-        )
-        .await
-        .expect("the fake answers");
+        let outcome = send(&client().expect("a client"), &url, BODY.to_vec(), POST)
+            .await
+            .expect("the fake answers");
         assert_eq!(outcome, Outcome::Sent);
 
         let seen = fake.seen.lock().expect("unpoisoned");

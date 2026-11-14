@@ -3361,6 +3361,12 @@ pub struct PushNotice {
     pub host: Option<String>,
     /// The Needs you count.
     pub badge: u32,
+    /// For `needs_you` and `cleared`, the `status_since` of the wait the
+    /// notice is about, so the app can tell a clear of an older wait from
+    /// the current one; absent for `finished`, and when the session had no
+    /// `status_since`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waited_since: Option<DateTime<Utc>>,
 }
 
 /// What a relay push tells the phone. Serialized as a `snake_case` string
@@ -3372,6 +3378,10 @@ pub enum PushNoticeKind {
     NeedsYou,
     /// The session's turn finished.
     Finished,
+    /// The session's wait ended: the phone removes its Needs you
+    /// notification. Sent as a background push, with an empty title and
+    /// body, never shown.
+    Cleared,
     #[serde(other)]
     Unknown,
 }
@@ -8430,6 +8440,7 @@ mod tests {
             session_id: "s1".to_owned(),
             host: Some("host.tailnet.ts.net".to_owned()),
             badge: 3,
+            waited_since: None,
         };
         let json = serde_json::to_string(&notice).expect("serializes");
         assert!(json.contains(r#""kind":"needs_you""#), "{json}");
@@ -8445,6 +8456,62 @@ mod tests {
         assert!(value.get("host").is_none(), "{value}");
         let back: PushNotice = serde_json::from_value(value).expect("decodes");
         assert_eq!(back, no_host);
+    }
+
+    #[test]
+    fn a_cleared_push_notice_round_trips() {
+        let notice = PushNotice {
+            v: PUSH_NOTICE_VERSION,
+            kind: PushNoticeKind::Cleared,
+            title: String::new(),
+            body: String::new(),
+            session_id: "s1".to_owned(),
+            host: Some("host.tailnet.ts.net".to_owned()),
+            badge: 2,
+            waited_since: None,
+        };
+        let json = serde_json::to_string(&notice).expect("serializes");
+        assert!(json.contains(r#""kind":"cleared""#), "{json}");
+        let back: PushNotice = serde_json::from_str(&json).expect("decodes");
+        assert_eq!(back, notice);
+    }
+
+    #[test]
+    fn push_notice_waited_since_round_trips_on_needs_you_and_cleared() {
+        let since: DateTime<Utc> = "2026-11-14T12:00:00Z".parse().expect("a timestamp");
+        for kind in [PushNoticeKind::NeedsYou, PushNoticeKind::Cleared] {
+            let without = PushNotice {
+                v: PUSH_NOTICE_VERSION,
+                kind,
+                title: String::new(),
+                body: String::new(),
+                session_id: "s1".to_owned(),
+                host: None,
+                badge: 1,
+                waited_since: None,
+            };
+            let value = serde_json::to_value(&without).expect("serializes");
+            assert!(value.get("waited_since").is_none(), "{value}");
+            let back: PushNotice = serde_json::from_value(value).expect("decodes");
+            assert_eq!(back, without);
+
+            let with = PushNotice {
+                waited_since: Some(since),
+                ..without
+            };
+            let value = serde_json::to_value(&with).expect("serializes");
+            assert_eq!(value["waited_since"], "2026-11-14T12:00:00Z");
+            let back: PushNotice = serde_json::from_value(value).expect("decodes");
+            assert_eq!(back, with);
+        }
+    }
+
+    #[test]
+    fn a_push_notice_without_waited_since_still_decodes() {
+        let json = r#"{"v":1,"kind":"needs_you","title":"Needs you","body":"b","session_id":"s1","badge":1}"#;
+        let notice: PushNotice = serde_json::from_str(json).expect("decodes");
+        assert_eq!(notice.kind, PushNoticeKind::NeedsYou);
+        assert_eq!(notice.waited_since, None);
     }
 
     #[test]

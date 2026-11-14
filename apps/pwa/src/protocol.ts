@@ -2538,6 +2538,13 @@ export interface PushNotice {
   host?: string | null;
   /** The Needs you count. */
   badge: number;
+  /**
+   * For `needs_you` and `cleared`, the `status_since` of the wait the
+   * notice is about, so the app can tell a clear of an older wait from
+   * the current one; absent for `finished`, and when the session had no
+   * `status_since`.
+   */
+  waited_since?: string | null;
 }
 
 /**
@@ -2548,7 +2555,13 @@ export type PushNoticeKind =
   /** The session needs the user. */
   | "needs_you"
   /** The session's turn finished. */
-  | "finished";
+  | "finished"
+  /**
+   * The session's wait ended: the phone removes its Needs you
+   * notification. Sent as a background push, with an empty title and
+   * body, never shown.
+   */
+  | "cleared";
 
 /**
  * How a device's pairing request ended, carried by

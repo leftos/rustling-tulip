@@ -138,6 +138,7 @@ mod tests {
             session_id: "session-1".to_owned(),
             host: Some("desk.tail1234.ts.net".to_owned()),
             badge: 3,
+            waited_since: None,
         }
     }
 

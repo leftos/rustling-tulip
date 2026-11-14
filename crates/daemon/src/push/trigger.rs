@@ -26,7 +26,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{Instant, sleep_until};
 
 use super::relay;
-use super::send::{self, Outcome, PushPolicy};
+use super::send::{self, Outcome, Post, Profile, PushPolicy};
 use super::state::PushState;
 use super::store::{Channel, Subscription};
 use super::vapid::{JwtCache, VapidKey};
@@ -99,32 +99,60 @@ enum Pick {
     /// A fallback round: every relay subscription, whatever its switches
     /// and the desk say.
     Fallback,
+    /// A clear round: the relay subscriptions whose Needs you switch is on,
+    /// leaving out the ones that hold at the desk when `skip_held`, since
+    /// their Needs you push was still held.
+    Clear { skip_held: bool },
 }
 
 impl Pick {
     /// Whether the round pushes to `subscription`; a target the desk holds
     /// back is counted in `held`.
     fn takes(self, subscription: &Subscription, held: &mut u32) -> bool {
-        let Self::Alert {
-            kind,
-            at_desk,
-            only_held,
-        } = self
-        else {
-            return matches!(
-                subscription.channel,
-                Channel::Apns { .. } | Channel::Fcm { .. }
-            );
-        };
-        if !kind.wanted_by(subscription) || (only_held && !subscription.hold_at_desk) {
-            return false;
+        match self {
+            Self::Fallback => is_relay(subscription),
+            Self::Clear { skip_held } => clear_takes(subscription, skip_held),
+            Self::Alert {
+                kind,
+                at_desk,
+                only_held,
+            } => alert_takes(subscription, kind, at_desk, only_held, held),
         }
-        if at_desk && subscription.hold_at_desk {
-            *held += 1;
-            return false;
-        }
-        true
     }
+}
+
+/// Whether `subscription` is a relay channel's.
+fn is_relay(subscription: &Subscription) -> bool {
+    matches!(
+        subscription.channel,
+        Channel::Apns { .. } | Channel::Fcm { .. }
+    )
+}
+
+/// Whether a clear round pushes to `subscription`: a relay channel's with
+/// its Needs you switch on, not one that holds at the desk when
+/// `skip_held`.
+fn clear_takes(subscription: &Subscription, skip_held: bool) -> bool {
+    is_relay(subscription) && subscription.needs_you && !(skip_held && subscription.hold_at_desk)
+}
+
+/// Whether an alert round pushes to `subscription` ([`Pick::Alert`]); a
+/// target the desk holds back is counted in `held`.
+fn alert_takes(
+    subscription: &Subscription,
+    kind: PushKind,
+    at_desk: bool,
+    only_held: bool,
+    held: &mut u32,
+) -> bool {
+    if !kind.wanted_by(subscription) || (only_held && !subscription.hold_at_desk) {
+        return false;
+    }
+    if at_desk && subscription.hold_at_desk {
+        *held += 1;
+        return false;
+    }
+    true
 }
 
 /// A subscriber nobody holds the keys of, for a fallback push.
@@ -165,6 +193,10 @@ impl PushKind {
 struct Prior {
     status: SessionStatus,
     background: bool,
+    /// Whether the session needed the user ([`needs_you`]).
+    needs_you: bool,
+    /// The snapshot's `status_since`.
+    since: Option<DateTime<Utc>>,
 }
 
 impl Prior {
@@ -172,6 +204,8 @@ impl Prior {
         Self {
             status: snapshot.status,
             background: snapshot.background,
+            needs_you: needs_you(snapshot),
+            since: snapshot.status_since,
         }
     }
 }
@@ -191,6 +225,15 @@ impl Tracker {
         for snapshot in snapshots {
             self.prior.insert(snapshot.id.clone(), Prior::of(snapshot));
         }
+    }
+
+    /// What was last seen of the session while it needed the user; `None`
+    /// when it did not, or was never seen.
+    fn wait(&self, session_id: &str) -> Option<Prior> {
+        self.prior
+            .get(session_id)
+            .copied()
+            .filter(|prior| prior.needs_you)
     }
 
     /// Forget a removed session.
@@ -372,24 +415,58 @@ fn host_name(state: &RemoteState) -> Option<&str> {
 
 /// The relay push's plaintext for the same alert [`payload`] carries: the
 /// title, the session's label ([`label`]), its id, the tailnet `host` and
-/// the Needs you count as the badge.
+/// the Needs you count as the badge; a Needs you notice also carries the
+/// session's `status_since`, when its wait began.
 pub(crate) fn notice(
     kind: PushKind,
     session: &SessionSnapshot,
     host: Option<&str>,
     count: u32,
 ) -> PushNotice {
+    let (notice_kind, waited_since) = match kind {
+        PushKind::NeedsYou => (PushNoticeKind::NeedsYou, session.status_since),
+        PushKind::Finished => (PushNoticeKind::Finished, None),
+    };
     PushNotice {
         v: PUSH_NOTICE_VERSION,
-        kind: match kind {
-            PushKind::NeedsYou => PushNoticeKind::NeedsYou,
-            PushKind::Finished => PushNoticeKind::Finished,
-        },
+        kind: notice_kind,
         title: kind.title().to_owned(),
         body: label(session),
         session_id: session.id.clone(),
         host: host.map(str::to_owned),
         badge: count,
+        waited_since,
+    }
+}
+
+/// The relay push's plaintext for `clear`: [`PushNoticeKind::Cleared`] with
+/// an empty title and body, the session's id, the tailnet `host`, the Needs
+/// you count once the wait ended as the badge, and the ended wait's
+/// `status_since`.
+fn cleared_notice(clear: &Clear, host: Option<&str>) -> PushNotice {
+    PushNotice {
+        v: PUSH_NOTICE_VERSION,
+        kind: PushNoticeKind::Cleared,
+        title: String::new(),
+        body: String::new(),
+        session_id: clear.session_id.clone(),
+        host: host.map(str::to_owned),
+        badge: clear.count,
+        waited_since: clear.waited_since,
+    }
+}
+
+/// `notice` serialized, `None` with a warning when it did not.
+fn notice_bytes(notice: &PushNotice) -> Option<Vec<u8>> {
+    match serde_json::to_vec(notice) {
+        Ok(bytes) => Some(bytes),
+        Err(err) => {
+            tracing::warn!(
+                err = format!("{err:#}"),
+                "push: the relay notice did not serialize; no relay push is sent this round"
+            );
+            None
+        }
     }
 }
 
@@ -425,18 +502,17 @@ impl Plaintexts {
             .to_string()
             .into_bytes()
         });
-        let notice = notice(alert.kind, session, host_name(remote), alert.count);
-        let notice = match serde_json::to_vec(&notice) {
-            Ok(bytes) => Some(bytes),
-            Err(err) => {
-                tracing::warn!(
-                    err = format!("{err:#}"),
-                    "push: the relay notice did not serialize; no relay push is sent this round"
-                );
-                None
-            }
-        };
+        let notice = notice_bytes(&notice(alert.kind, session, host_name(remote), alert.count));
         Self { web_push, notice }
+    }
+
+    /// A clear round's plaintexts: the relay's [`cleared_notice`] only, so
+    /// no Web Push target is sent anything.
+    fn cleared(clear: &Clear, remote: &RemoteState) -> Self {
+        Self {
+            web_push: None,
+            notice: notice_bytes(&cleared_notice(clear, host_name(remote))),
+        }
     }
 
     /// A fallback round's plaintexts: the relay's only, the fixed
@@ -502,6 +578,20 @@ pub(crate) struct Alert<'a> {
     pub only_held: bool,
 }
 
+/// A session that was in Needs you and left it: what its clear round needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Clear {
+    /// The session whose wait ended.
+    pub session_id: String,
+    /// The Needs you count once the wait ended, the badge the phone shows.
+    pub count: u32,
+    /// Whether the session's Needs you push was still held at the desk when
+    /// the wait ended: the subscriptions that hold at the desk never got it.
+    pub held_at_desk: bool,
+    /// The ended wait's `status_since`, when the session started waiting.
+    pub waited_since: Option<DateTime<Utc>>,
+}
+
 /// What one session event raises.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Step {
@@ -512,6 +602,8 @@ pub(crate) enum Step {
         /// The Needs you count the badge shows.
         count: u32,
     },
+    /// A session's wait ended: a clear to deliver.
+    Clear(Clear),
     /// Nothing to send.
     Nothing,
     /// The event stream closed; the task ends.
@@ -781,10 +873,56 @@ impl Trigger {
         self.failures.retain(|key, _| live.addresses.contains(key));
         let plaintexts = Plaintexts::of(alert, origin.as_deref(), remote);
         let answers = self
-            .send_all(round, &plaintexts, &send::topic(&alert.session.id))
+            .send_all(
+                round,
+                &plaintexts,
+                &send::topic(&alert.session.id),
+                Profile::Alert,
+            )
             .await;
         self.prune_backoff(&live.keys);
-        self.apply(stores, answers)
+        self.apply(stores, answers, Profile::Alert)
+    }
+
+    /// Tell every relay phone whose Needs you switch is on that `clear`'s
+    /// wait ended, signing at `now`: a background push of the
+    /// [`cleared_notice`] under the session's topic, with a `TTL` of 0, so
+    /// it is never stored for a phone that is offline. When the wait's push
+    /// was still held at the desk, the subscriptions that hold at the desk
+    /// never got it and are left out. Web Push subscriptions get nothing, and
+    /// a backed-off token is skipped. A gone answer deletes the subscription;
+    /// no answer starts or extends a back-off or counts as a failure.
+    pub(crate) async fn deliver_clear(
+        &mut self,
+        stores: Stores<'_>,
+        remote: &RemoteState,
+        clear: &Clear,
+        now: DateTime<Utc>,
+    ) -> Vec<Delivery> {
+        let pick = Pick::Clear {
+            skip_held: clear.held_at_desk,
+        };
+        let Some(mut round) = self.collect(stores, pick, None, now) else {
+            return Vec::new();
+        };
+        tracing::debug!(
+            session = %clear.session_id,
+            targets = round.targets.len(),
+            "push: a clear round"
+        );
+        let live = std::mem::take(&mut round.live);
+        self.failures.retain(|key, _| live.addresses.contains(key));
+        let plaintexts = Plaintexts::cleared(clear, remote);
+        let answers = self
+            .send_all(
+                round,
+                &plaintexts,
+                &send::topic(&clear.session_id),
+                Profile::Background,
+            )
+            .await;
+        self.prune_backoff(&live.keys);
+        self.apply(stores, answers, Profile::Background)
     }
 
     /// Push every stored relay subscription one push its phone cannot open,
@@ -817,10 +955,15 @@ impl Trigger {
         }
         let phones = u32::try_from(round.targets.len()).unwrap_or(u32::MAX);
         let answers = self
-            .send_all(round, &Plaintexts::fallback(), FALLBACK_TOPIC)
+            .send_all(
+                round,
+                &Plaintexts::fallback(),
+                FALLBACK_TOPIC,
+                Profile::Alert,
+            )
             .await;
         self.prune_backoff(&live.keys);
-        let delivered = self.apply(stores, answers);
+        let delivered = self.apply(stores, answers, Profile::Alert);
         let sent = delivered
             .iter()
             .filter(|delivery| delivery.outcome == Outcome::Sent)
@@ -973,26 +1116,37 @@ impl Trigger {
     /// Encrypt every target that is not backed off with the plaintext it
     /// takes, then post them: at most [`SENDS_AT_ONCE`] pushes are in flight
     /// at once, and each back-off key is noted once, after every answer is
-    /// in. Holds no lock; returns the answers in target order.
+    /// in, for an alert profile only. Each POST carries `topic` and
+    /// `profile`'s headers. Holds no lock;
+    /// returns the answers in target order.
     async fn send_all(
         &mut self,
         round: Round,
         plaintexts: &Plaintexts,
         topic: &str,
+        profile: Profile,
     ) -> Vec<(Target, Outcome)> {
         let prepared = self.prepare(round.targets, plaintexts);
         let client = &self.client;
         let public_key = &round.public_key;
         let answers: Vec<(Target, anyhow::Result<Outcome>)> = futures::stream::iter(prepared)
             .map(|(target, body)| async move {
-                let answer =
-                    send::send(client, &target.url, body, topic, &target.jwt, public_key).await;
+                let post = Post {
+                    topic,
+                    profile,
+                    jwt: &target.jwt,
+                    public_key_b64: public_key,
+                };
+                let answer = send::send(client, &target.url, body, post).await;
                 (target, answer)
             })
             .buffered(SENDS_AT_ONCE)
             .collect()
             .await;
-        self.note_round(&answers);
+        // A background push's answer leaves every back-off as it was.
+        if profile == Profile::Alert {
+            self.note_round(&answers);
+        }
         let mut delivered = Vec::new();
         for (target, answer) in answers {
             match answer {
@@ -1119,8 +1273,14 @@ impl Trigger {
     /// Act on the answers: count failures and delete each subscription that
     /// is gone or failed too often, under `push` alone once [`lock_push`]
     /// has read `devices`, loading the state again if it was unloaded since
-    /// the round collected.
-    fn apply(&mut self, stores: Stores<'_>, answers: Vec<(Target, Outcome)>) -> Vec<Delivery> {
+    /// the round collected. A [`Profile::Background`] round's answers count
+    /// no failure: only a gone subscription is deleted.
+    fn apply(
+        &mut self,
+        stores: Stores<'_>,
+        answers: Vec<(Target, Outcome)>,
+        profile: Profile,
+    ) -> Vec<Delivery> {
         let accepted: HashSet<String> = answers
             .iter()
             .filter(|(_, outcome)| *outcome == Outcome::Sent)
@@ -1128,7 +1288,10 @@ impl Trigger {
             .collect();
         let doomed: Vec<&Target> = answers
             .iter()
-            .filter(|(target, outcome)| self.judge(target, outcome, &accepted))
+            .filter(|(target, outcome)| match profile {
+                Profile::Alert => self.judge(target, outcome, &accepted),
+                Profile::Background => *outcome == Outcome::Gone,
+            })
             .map(|(target, _)| target)
             .collect();
         if !doomed.is_empty() {
@@ -1211,43 +1374,84 @@ impl Trigger {
         match event {
             Err(RecvError::Lagged(missed)) => {
                 tracing::warn!(missed, "push: the session event stream lagged; re-seeded");
-                self.tracker.seed(&sessions.snapshots());
+                let snapshots = sessions.snapshots();
+                self.tracker.seed(&snapshots);
+                self.held.retain(|id| {
+                    snapshots
+                        .iter()
+                        .any(|seen| &seen.id == id && needs_you(seen))
+                });
                 Step::Nothing
             }
             Err(RecvError::Closed) => Step::End,
-            Ok(SessionEvent::Updated(snapshot, _origin)) => {
-                if !needs_you(&snapshot) {
-                    self.held.remove(&snapshot.id);
-                }
-                self.finishing.fold(&snapshot);
-                match self.tracker.observe(&snapshot) {
-                    None => Step::Nothing,
-                    Some(PushKind::Finished) => {
-                        let until = Instant::now() + self.finished_grace;
-                        self.finishing.hold(&snapshot.id, until);
-                        Step::Nothing
-                    }
-                    Some(PushKind::NeedsYou) => {
-                        let snapshots = sessions.snapshots();
-                        if !snapshots.iter().any(|seen| seen.id == snapshot.id) {
-                            return Step::Nothing;
-                        }
-                        let count = needs_you_count(with_snapshot(snapshots, &snapshot).iter());
-                        Step::Alert {
-                            session: snapshot,
-                            count,
-                        }
-                    }
-                }
-            }
-            Ok(SessionEvent::Removed(id)) => {
-                self.held.remove(&id);
-                self.finishing.forget(&id);
-                self.tracker.forget(&id);
-                Step::Nothing
-            }
+            Ok(SessionEvent::Updated(snapshot, _origin)) => self.updated(snapshot, sessions),
+            Ok(SessionEvent::Removed(id)) => self.removed(id, sessions),
             Ok(_) => Step::Nothing,
         }
+    }
+
+    /// What an update raises: a clear when the session was in Needs you
+    /// and has left it, else what [`Tracker::observe`] raised. Whether its
+    /// Needs you push is still held at the desk is read before the hold is
+    /// dropped.
+    fn updated(&mut self, snapshot: Box<SessionSnapshot>, sessions: &SessionRegistry) -> Step {
+        let wait = self.tracker.wait(&snapshot.id);
+        let held_at_desk = self.held.contains(&snapshot.id);
+        let waits = needs_you(&snapshot);
+        if !waits {
+            self.held.remove(&snapshot.id);
+        }
+        self.finishing.fold(&snapshot);
+        let raised = self.tracker.observe(&snapshot);
+        if let Some(wait) = wait.filter(|_| !waits) {
+            let count = needs_you_count(with_snapshot(sessions.snapshots(), &snapshot).iter());
+            return Step::Clear(Clear {
+                session_id: snapshot.id,
+                count,
+                held_at_desk,
+                waited_since: wait.since,
+            });
+        }
+        match raised {
+            None => Step::Nothing,
+            Some(PushKind::Finished) => {
+                let until = Instant::now() + self.finished_grace;
+                self.finishing.hold(&snapshot.id, until);
+                Step::Nothing
+            }
+            Some(PushKind::NeedsYou) => {
+                let snapshots = sessions.snapshots();
+                if !snapshots.iter().any(|seen| seen.id == snapshot.id) {
+                    return Step::Nothing;
+                }
+                let count = needs_you_count(with_snapshot(snapshots, &snapshot).iter());
+                Step::Alert {
+                    session: snapshot,
+                    count,
+                }
+            }
+        }
+    }
+
+    /// What a removal raises: a clear when the session was in Needs you,
+    /// its count taken from the registry without it; nothing otherwise.
+    /// The tracker's prior is read before it is forgotten.
+    fn removed(&mut self, id: String, sessions: &SessionRegistry) -> Step {
+        let wait = self.tracker.wait(&id);
+        let held_at_desk = self.held.remove(&id);
+        self.finishing.forget(&id);
+        self.tracker.forget(&id);
+        let Some(wait) = wait else {
+            return Step::Nothing;
+        };
+        let snapshots = sessions.snapshots();
+        let count = needs_you_count(snapshots.iter().filter(|seen| seen.id != id));
+        Step::Clear(Clear {
+            session_id: id,
+            count,
+            held_at_desk,
+            waited_since: wait.since,
+        })
     }
 }
 
@@ -1338,6 +1542,9 @@ fn run(mut trigger: Trigger, sources: Sources) -> tokio::task::JoinHandle<()> {
                         };
                         deliver_alert(&mut trigger, stores, &remote, alert).await;
                     }
+                    Step::Clear(clear) => {
+                        trigger.deliver_clear(stores, &remote(), &clear, Utc::now()).await;
+                    }
                     Step::Nothing => {}
                     Step::End => return,
                 },
@@ -1412,7 +1619,9 @@ async fn deliver_finished(
 /// Deliver the held Needs you pushes once the owner left the desk, to the
 /// subscriptions whose `hold_at_desk` is on only: the others got the push
 /// when it was raised. A session that no longer needs the user or is gone
-/// sends nothing. Nothing is queued once the held list is cleared.
+/// sends nothing. Only a delivered session leaves the held list: every other
+/// one stays until its own update or removal drops it, so the clear that
+/// ends its wait still knows the held subscriptions never got the push.
 async fn deliver_held(
     trigger: &mut Trigger,
     sessions: &SessionRegistry,
@@ -1420,12 +1629,12 @@ async fn deliver_held(
     remote: &Arc<dyn Fn() -> RemoteState + Send + Sync>,
 ) {
     let sessions_due = trigger.held_now(sessions);
-    trigger.held.clear();
     for session in &sessions_due {
         let snapshots = sessions.snapshots();
         if !snapshots.iter().any(|seen| seen.id == session.id) {
             continue;
         }
+        trigger.held.remove(&session.id);
         let alert = Alert {
             kind: PushKind::NeedsYou,
             session,
@@ -1460,10 +1669,10 @@ mod tests {
     use protocol::{PUSH_NOTICE_VERSION, PushNotice, PushNoticeKind};
 
     use super::{
-        Alert, BACKOFF_FIRST, BACKOFF_MOST, Backoff, Delivery, FALLBACK_TOPIC, FINISHED_GRACE,
-        FallbackOutcome, FinishedHolds, PushKind, Sources, Step, Stores, Tracker, Trigger,
-        deliver_finished, deliver_held, label, lock_push, needs_you_count, notice, origin, payload,
-        run, spawn,
+        Alert, BACKOFF_FIRST, BACKOFF_MOST, Backoff, Clear, Delivery, FALLBACK_TOPIC,
+        FINISHED_GRACE, FallbackOutcome, FinishedHolds, PushKind, Sources, Step, Stores, Tracker,
+        Trigger, deliver_finished, deliver_held, label, lock_push, needs_you_count, notice, origin,
+        payload, run, spawn,
     };
     use crate::devices::DeviceStore;
     use crate::paths::Dirs;
@@ -1810,6 +2019,34 @@ mod tests {
 
         fn store(&self, device_id: &str, channel: Channel) {
             self.store_switched(device_id, channel, true);
+        }
+
+        /// Store an `apns` subscription for `device_id` with both switches
+        /// on, not held at the desk; returns the phone's keys.
+        fn put_apns_unheld(&self, device_id: &str, token: &str) -> PhoneKeys {
+            let keys = phone_keys();
+            let devices = lock(&self.devices);
+            let mut push = lock(&self.push);
+            push.load(unrevoked_ids(&devices).as_ref())
+                .expect("load the push state")
+                .subs
+                .put(
+                    device_id,
+                    Subscription {
+                        channel: Channel::Apns {
+                            token: token.to_owned(),
+                            environment: ApnsEnvironment::Production,
+                            p256dh: keys.p256dh.clone(),
+                            auth: keys.auth_b64.clone(),
+                        },
+                        needs_you: true,
+                        finished: true,
+                        hold_at_desk: false,
+                        created_at: "2026-11-07T00:00:00Z".to_owned(),
+                    },
+                )
+                .expect("store the subscription");
+            keys
         }
 
         /// Store `channel` for `device_id` with both switches `on`, held at
@@ -2604,6 +2841,7 @@ mod tests {
                 session_id: "s1".to_owned(),
                 host: Some("host.tail1234.ts.net".to_owned()),
                 badge: 1,
+                waited_since: None,
             }
         );
     }
@@ -2772,6 +3010,227 @@ mod tests {
         );
     }
 
+    // ---- the clear round ----
+
+    /// `s1`'s clear with the badge `count`, not held at the desk.
+    fn clear(count: u32) -> Clear {
+        Clear {
+            session_id: "s1".to_owned(),
+            count,
+            held_at_desk: false,
+            waited_since: None,
+        }
+    }
+
+    /// `s1`'s `status_since` as the registry holds it now.
+    fn since_of(sessions: &SessionRegistry) -> Option<chrono::DateTime<Utc>> {
+        sessions
+            .snapshots()
+            .iter()
+            .find(|seen| seen.id == "s1")
+            .and_then(|seen| seen.status_since)
+    }
+
+    /// A POST's header `name`, if it has one.
+    fn header_of(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn a_clear_goes_to_each_relay_phone_as_a_background_push() {
+        let (url, fake, _server) = fake_push_service(201, "").await;
+        let setup = relay_setup("clear-round", &origin_of(&url));
+        let wanted = setup.pair(1);
+        let quiet = setup.pair(2);
+        let fcm = setup.pair(3);
+        let web = setup.pair(4);
+        let keys = setup.put_apns(&wanted, TOKEN_A);
+        setup.put_apns_quiet(&quiet, TOKEN_B);
+        setup.put_fcm(&fcm, "cZ1:APA91bHPRgkF");
+        setup.subscribe(&web, url.as_str(), true, true);
+        let since = "2026-11-14T12:00:00Z".parse().expect("a timestamp");
+        let ended = Clear {
+            waited_since: Some(since),
+            ..clear(2)
+        };
+
+        let delivered = trigger()
+            .deliver_clear(setup.stores(), &serving(), &ended, Utc::now())
+            .await;
+
+        assert_eq!(
+            delivered,
+            vec![Delivery {
+                device_id: wanted,
+                outcome: Outcome::Sent
+            }]
+        );
+        assert_eq!(
+            fake.paths(),
+            [format!("/v1/apns/production/{TOKEN_A}")],
+            "one post, to the phone whose Needs you switch is on"
+        );
+        let seen = fake.seen.lock().expect("unpoisoned");
+        let (headers, body) = &seen[0];
+        assert_eq!(
+            header_of(headers, "x-rt-push-type").as_deref(),
+            Some("background")
+        );
+        assert_eq!(header_of(headers, "urgency").as_deref(), Some("low"));
+        assert_eq!(header_of(headers, "ttl").as_deref(), Some("0"));
+        assert_eq!(header_of(headers, "topic"), Some(topic("s1")));
+        assert_eq!(
+            opened(body, &keys),
+            PushNotice {
+                v: PUSH_NOTICE_VERSION,
+                kind: PushNoticeKind::Cleared,
+                title: String::new(),
+                body: String::new(),
+                session_id: "s1".to_owned(),
+                host: Some("host.tail1234.ts.net".to_owned()),
+                badge: 2,
+                waited_since: Some(since),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_clear_for_a_wait_held_at_the_desk_skips_held_subscriptions() {
+        let (url, fake, _server) = fake_push_service(201, "").await;
+        let setup = relay_setup("clear-held", &origin_of(&url));
+        let holding = setup.pair(1);
+        let unheld = setup.pair(2);
+        setup.put_apns(&holding, TOKEN_A);
+        setup.put_apns_unheld(&unheld, TOKEN_B);
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::AwaitingInput);
+        let mut trigger = trigger();
+        trigger.tracker.seed(&sessions.snapshots());
+        trigger.held.insert("s1".to_owned());
+
+        let (_, answered) = update("working");
+        let held = Clear {
+            held_at_desk: true,
+            waited_since: since_of(&sessions),
+            ..clear(0)
+        };
+        assert_eq!(
+            trigger.step(answered, &sessions),
+            Step::Clear(held.clone()),
+            "the wait's push was still held"
+        );
+        assert!(!trigger.held.contains("s1"), "the hold is dropped");
+        let delivered = trigger
+            .deliver_clear(setup.stores(), &serving(), &held, Utc::now())
+            .await;
+
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(
+            fake.paths(),
+            [format!("/v1/apns/production/{TOKEN_B}")],
+            "only the phone that does not hold at the desk got the alert"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_alert_push_still_has_no_push_type_header() {
+        let (setup, _device, fake, _server) = one_phone("alert-no-push-type", TOKEN_A, 201).await;
+
+        round(&mut trigger(), &setup, &serving(), PushKind::NeedsYou).await;
+
+        let seen = fake.seen.lock().expect("unpoisoned");
+        assert_eq!(seen.len(), 1, "one POST");
+        let headers = &seen[0].0;
+        assert_eq!(header_of(headers, "x-rt-push-type"), None);
+        assert_eq!(header_of(headers, "urgency").as_deref(), Some("high"));
+        assert_eq!(header_of(headers, "ttl").as_deref(), Some("21600"));
+    }
+
+    #[tokio::test]
+    async fn a_wait_answered_before_the_owner_leaves_still_skips_held_subscriptions() {
+        let (url, fake, _server) = fake_push_service(201, "").await;
+        let setup = relay_setup("clear-desk-race", &origin_of(&url));
+        let holding = setup.pair(1);
+        let unheld = setup.pair(2);
+        setup.put_apns(&holding, TOKEN_A);
+        setup.put_apns_unheld(&unheld, TOKEN_B);
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::AwaitingInput);
+        let mut trigger = trigger();
+        trigger.tracker.seed(&sessions.snapshots());
+        trigger.held.insert("s1".to_owned());
+        // The registry shows s1 answered; its event has not arrived yet.
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        let remote: Arc<dyn Fn() -> RemoteState + Send + Sync> = Arc::new(serving);
+
+        deliver_held(&mut trigger, &sessions, setup.stores(), &remote).await;
+        assert_eq!(
+            fake.posts(),
+            0,
+            "the answered session's held push is not sent"
+        );
+
+        let (_, answered) = update("working");
+        let step = trigger.step(answered, &sessions);
+        assert!(
+            matches!(&step, Step::Clear(clear) if clear.held_at_desk),
+            "the wait's push never reached the held phone: {step:?}"
+        );
+        if let Step::Clear(clear) = &step {
+            trigger
+                .deliver_clear(setup.stores(), &serving(), clear, Utc::now())
+                .await;
+        }
+        assert_eq!(
+            fake.paths(),
+            [format!("/v1/apns/production/{TOKEN_B}")],
+            "the clear skips the phone that holds at the desk"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_throttled_clear_leaves_the_next_alert_unblocked() {
+        let (setup, _device, fake, _server) = one_phone("clear-throttled", TOKEN_A, 429).await;
+        let mut trigger = trigger();
+
+        trigger
+            .deliver_clear(setup.stores(), &serving(), &clear(0), Utc::now())
+            .await;
+        assert!(
+            trigger.backoff.is_empty(),
+            "a clear's answer starts no back-off"
+        );
+        fake.set_status(201);
+        let delivered = round(&mut trigger, &setup, &serving(), PushKind::NeedsYou).await;
+
+        assert_eq!(fake.posts(), 2, "the Needs you alert is still posted");
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].outcome, Outcome::Sent);
+    }
+
+    #[tokio::test]
+    async fn a_gone_answer_to_a_clear_deletes_the_subscription() {
+        let (setup, device, fake, _server) = one_phone("clear-gone", TOKEN_A, 410).await;
+
+        let delivered = trigger()
+            .deliver_clear(setup.stores(), &serving(), &clear(0), Utc::now())
+            .await;
+
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].outcome, Outcome::Gone);
+        assert_eq!(fake.posts(), 1);
+        assert_eq!(
+            setup.endpoint_of(&device),
+            None,
+            "the subscription is deleted"
+        );
+    }
+
     #[tokio::test]
     async fn a_throttled_relay_token_backs_off_only_that_phone() {
         let (url, fake, _server) =
@@ -2904,22 +3363,37 @@ mod tests {
 
     #[test]
     fn the_notice_carries_the_alert() {
-        let session = session();
+        let session = snapshot(&serde_json::json!({
+            "id": "s1",
+            "label": "parser",
+            "status": "awaiting_input",
+            "status_since": "2026-11-14T12:00:00Z",
+        }));
 
         let built = notice(PushKind::Finished, &session, None, 3);
 
+        let finished = PushNotice {
+            v: PUSH_NOTICE_VERSION,
+            kind: PushNoticeKind::Finished,
+            title: "Finished".to_owned(),
+            body: "parser".to_owned(),
+            session_id: "s1".to_owned(),
+            host: None,
+            badge: 3,
+            waited_since: None,
+        };
+        assert_eq!(built, finished, "a Finished notice carries no wait");
         assert_eq!(
-            built,
+            notice(PushKind::NeedsYou, &session, None, 3),
             PushNotice {
-                v: PUSH_NOTICE_VERSION,
-                kind: PushNoticeKind::Finished,
-                title: "Finished".to_owned(),
-                body: "parser".to_owned(),
-                session_id: "s1".to_owned(),
-                host: None,
-                badge: 3,
-            }
+                kind: PushNoticeKind::NeedsYou,
+                title: "Needs you".to_owned(),
+                waited_since: session.status_since,
+                ..finished
+            },
+            "a Needs you notice carries its wait's status_since"
         );
+        assert!(session.status_since.is_some(), "the fixture has one");
     }
 
     #[tokio::test]
@@ -3321,6 +3795,113 @@ mod tests {
         let mut trigger = trigger();
 
         assert_eq!(trigger.step(Err(RecvError::Closed), &sessions), Step::End);
+    }
+
+    // ---- the end of a wait ----
+
+    /// A registry holding `s1` and `s2`, both awaiting input, and a trigger
+    /// that has seen them so.
+    fn two_waiting(setup: &Setup) -> (Arc<SessionRegistry>, Trigger) {
+        let sessions = registry(setup);
+        for id in ["s1", "s2"] {
+            sessions.insert(idle_record(id));
+            sessions.update(id, |record| record.status = SessionStatus::AwaitingInput);
+        }
+        let mut trigger = trigger();
+        trigger.tracker.seed(&sessions.snapshots());
+        (sessions, trigger)
+    }
+
+    #[test]
+    fn a_wait_answered_elsewhere_raises_a_clear() {
+        let setup = setup("clear-answered");
+        let (sessions, mut trigger) = two_waiting(&setup);
+
+        // The registry still shows s1 asking; the event's answer counts.
+        let (_, event) = update("working");
+        let waited_since = since_of(&sessions);
+
+        assert_eq!(
+            trigger.step(event, &sessions),
+            Step::Clear(Clear {
+                waited_since,
+                ..clear(1)
+            })
+        );
+    }
+
+    #[test]
+    fn a_removed_waiting_session_raises_a_clear() {
+        let setup = setup("clear-removed");
+        let (sessions, mut trigger) = two_waiting(&setup);
+        let waited_since = since_of(&sessions);
+        sessions.remove("s1");
+
+        assert_eq!(
+            trigger.step(Ok(SessionEvent::Removed("s1".to_owned())), &sessions),
+            Step::Clear(Clear {
+                waited_since,
+                ..clear(1)
+            })
+        );
+    }
+
+    #[test]
+    fn a_session_parked_while_waiting_raises_a_clear() {
+        let setup = setup("clear-parked");
+        let (sessions, mut trigger) = two_waiting(&setup);
+        let parked =
+            snapshot(&serde_json::json!({ "status": "awaiting_input", "is_inactive": true }));
+        let event = Ok(SessionEvent::Updated(Box::new(parked), None));
+        let waited_since = since_of(&sessions);
+
+        assert_eq!(
+            trigger.step(event, &sessions),
+            Step::Clear(Clear {
+                waited_since,
+                ..clear(1)
+            })
+        );
+    }
+
+    #[test]
+    fn a_session_that_never_waited_raises_no_clear() {
+        let setup = setup("clear-never-waited");
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        let mut trigger = trigger();
+        trigger.tracker.seed([&status("working")]);
+
+        let (_, idle) = update("idle");
+        assert_eq!(trigger.step(idle, &sessions), Step::Nothing);
+        let (_, working) = update("working");
+        assert_eq!(trigger.step(working, &sessions), Step::Nothing);
+        assert_eq!(
+            trigger.step(Ok(SessionEvent::Removed("s1".to_owned())), &sessions),
+            Step::Nothing
+        );
+    }
+
+    #[test]
+    fn a_lagged_reseed_raises_no_clear() {
+        let setup = setup("clear-lagged");
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        let mut trigger = trigger();
+        trigger.tracker.seed([&status("awaiting_input")]);
+
+        assert_eq!(
+            trigger.step(Err(RecvError::Lagged(3)), &sessions),
+            Step::Nothing,
+            "the wait ended inside the missed window"
+        );
+        let (_, working) = update("working");
+        assert_eq!(
+            trigger.step(working, &sessions),
+            Step::Nothing,
+            "the re-seed already saw the session working"
+        );
     }
 
     // ---- the task ----
