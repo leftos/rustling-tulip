@@ -16,11 +16,11 @@ use chrono::{DateTime, Utc};
 use daemon_client::device_tokens::MemoryTokens;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
-    App, Bounds, DevicePixels, Entity, Font, FontId, FontMetrics, FontRun, GlyphId, InputHandler,
-    KeyDownEvent, Keystroke, LineLayout, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-    NoopTextSystem, Pixels, PlatformTextSystem, Point, RenderGlyphParams, ScrollDelta, ScrollEvent,
-    Size, TestAppContext, TextRenderingMode, TouchPhase, VisualTestContext, Window, WindowId,
-    point, px,
+    App, AppContext as _, Bounds, DevicePixels, Entity, Font, FontId, FontMetrics, FontRun,
+    GlyphId, InputHandler, KeyDownEvent, Keystroke, LineLayout, Modifiers, MouseButton,
+    MouseDownEvent, MouseUpEvent, NoopTextSystem, Pixels, PlatformTextSystem, Point,
+    RenderGlyphParams, ScrollDelta, ScrollEvent, Size, TestAppContext, TextRenderingMode,
+    TouchPhase, VisualTestContext, Window, WindowId, point, px,
 };
 use protocol::{
     ClientMessage, DaemonMessage, GridNode, KeyState, PaneFollow, RepoEntry, SessionSnapshot,
@@ -34,6 +34,7 @@ use rustling_tulip_native::{
     Opener, PairingAction, PairingActionSink, PairingToast, PhysicalRect, QuitFn, RootDeps,
     RootShape, RootView, SavePicker, ScPanel, SilentNotifier, SilentSounder, Sounder, TaskbarBadge,
     ToastPlacer, Transport, WorkArea, bind_keys, log_paths,
+    phone::PhoneRoot,
     remote_access::Autostart,
     set_bitmap_reader, set_idle_reader, spawn_net,
     target::{HostKey, Target},
@@ -3385,7 +3386,8 @@ impl<'a> Harness<'a> {
         harness
     }
 
-    /// Opens a phone-shape window over `dir`: no connection to This PC, each
+    /// Opens a phone-shape window over `dir`, drawn by a [`PhoneRoot`] as the
+    /// phone app draws it: no connection to This PC, each
     /// saved host's opened as a host [`Self::host`] reaches, the desktop's
     /// notification, sound, toast and badge seams silent, and nothing
     /// connected yet. A phone holds no This PC connection, so
@@ -3427,8 +3429,11 @@ impl<'a> Harness<'a> {
             updater: updater.clone(),
             shape: RootShape::Phone,
         };
-        let (root, cx) =
-            cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
+        let (phone, cx) = cx.add_window_view(move |window, cx| {
+            let root = cx.new(|cx| RootView::with_transport(deps, window, cx));
+            PhoneRoot::new(root, window, cx)
+        });
+        let root = cx.update(|_, cx| phone.read(cx).root().clone());
         let mut harness = Self {
             cx,
             root,

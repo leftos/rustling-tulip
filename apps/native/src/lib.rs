@@ -545,6 +545,48 @@ pub struct RootDeps {
     pub shape: RootShape,
 }
 
+/// What a live window, the desktop's or the phone's, reads its hosts and
+/// files through: the network thread, the device token store it dials with,
+/// and the config dir's layout and log files.
+pub(crate) struct LiveSeams {
+    /// Opens a host's connection on the network thread.
+    pub(crate) open_host: Transport,
+    /// Where `native-ui.json` lives; `None` when the config dir is unknown.
+    pub(crate) ui_dir: Option<PathBuf>,
+    /// The flyout's files, or why the config dir could not be resolved.
+    pub(crate) paths: Result<LogPaths, String>,
+    /// The device tokens the network thread dials tailnet hosts with.
+    pub(crate) tokens: Arc<dyn DeviceTokenStore>,
+}
+
+/// The live seams over the config dir and the system's token store.
+pub(crate) fn live_seams() -> LiveSeams {
+    let config_dir = daemon_client::config_dir();
+    let ui_dir = match &config_dir {
+        Ok(dir) => Some(dir.clone()),
+        Err(err) => {
+            tracing::warn!("sidebar layout will not be saved: {err:#}");
+            None
+        }
+    };
+    let tokens = net::device_token_store();
+    let net_tokens = Arc::clone(&tokens);
+    let open_host: Transport = Rc::new(move |target: &target::Target| {
+        let (out_tx, out_rx) = unbounded();
+        let (in_tx, in_rx) = unbounded();
+        net::spawn(target.clone(), Arc::clone(&net_tokens), out_rx, in_tx);
+        (out_tx, in_rx)
+    });
+    LiveSeams {
+        open_host,
+        ui_dir,
+        paths: config_dir
+            .map(|dir| log_paths(&dir))
+            .map_err(|err| format!("config folder unavailable: {err:#}")),
+        tokens,
+    }
+}
+
 /// Opens the client's window on a live daemon connection, focusing
 /// `wanted_session` once it arrives. A driven run (`drive`, which the driver
 /// gate decided) starts the driver endpoint once the window is open.
@@ -1472,28 +1514,16 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let config_dir = daemon_client::config_dir();
-        let ui_dir = match &config_dir {
-            Ok(dir) => Some(dir.clone()),
-            Err(err) => {
-                tracing::warn!("sidebar layout will not be saved: {err:#}");
-                None
-            }
-        };
-        let tokens = net::device_token_store();
-        let net_tokens = Arc::clone(&tokens);
-        let open_host: Transport = Rc::new(move |target: &target::Target| {
-            let (out_tx, out_rx) = unbounded();
-            let (in_tx, in_rx) = unbounded();
-            net::spawn(target.clone(), Arc::clone(&net_tokens), out_rx, in_tx);
-            (out_tx, in_rx)
-        });
+        let LiveSeams {
+            open_host,
+            ui_dir,
+            paths,
+            tokens,
+        } = live_seams();
         let deps = RootDeps {
             open_host,
             ui_dir,
-            paths: config_dir
-                .map(|dir| log_paths(&dir))
-                .map_err(|err| format!("config folder unavailable: {err:#}")),
+            paths,
             wanted: wanted_session,
             start_mode,
             now: Arc::new(Instant::now),

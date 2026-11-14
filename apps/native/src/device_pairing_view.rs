@@ -728,6 +728,8 @@ impl RootView {
             &theme(cx),
         )
         .track_focus(&self.device_pairing.focus)
+        // A phone's window is narrower than the modal: the card fits it.
+        .max_w(gpui::relative(1.0))
         .child(
             div()
                 .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))

@@ -12,9 +12,10 @@ use protocol::{
     PresetTarget, SessionSnapshot, SpawnTarget, SuggestTarget,
 };
 
+use crate::RootShape;
 use crate::RootView;
 use crate::connection::{Connection, State};
-use crate::connection_picker::SavedHost;
+use crate::connection_picker::{ConnectionPicker, SavedHost};
 use crate::net::{HandshakeInfo, NetCommand};
 use crate::perf_pills::PerfHostState;
 use crate::remote_access::RemoteStatusView;
@@ -135,9 +136,10 @@ impl HostSender {
     }
 }
 
-/// The window's connections: This PC's, always present because it is the
-/// layout home, and one per remote host by its host key, in the order
-/// they joined.
+/// The window's connections: This PC's slot, always present because it is
+/// the desktop's layout home (a dormant one on a phone, which has no This PC
+/// connection), and one per remote host by its host key, in the order they
+/// joined.
 pub(crate) struct Hosts {
     local: HostConn,
     remote: Vec<(String, HostConn)>,
@@ -588,15 +590,17 @@ impl RootView {
         }
     }
 
-    /// The hosts a spawn can go to now: This PC, then each remote host
-    /// whose connection is open (so online and approved) and that is not
-    /// another host's duplicate.
+    /// The hosts a spawn can go to now: This PC on the desktop (a phone has
+    /// none), then each remote host whose connection is open (so online and
+    /// approved) and that is not another host's duplicate.
     pub(crate) fn connected_hosts(&self) -> Vec<HostKey> {
         self.held_hosts()
             .into_iter()
             .filter(|host| {
-                *host == HostKey::Local
-                    || (!self.is_remote_offline(host) && self.duplicate_of(host).is_none())
+                if *host == HostKey::Local {
+                    return self.shape == RootShape::Desktop;
+                }
+                !self.is_remote_offline(host) && self.duplicate_of(host).is_none()
             })
             .collect()
     }
@@ -673,8 +677,8 @@ impl RootView {
 
     /// Opens a connection to `target`'s host beside the ones the window
     /// holds and handles its events from then on. This PC's connection is
-    /// the window's first, so a `target` on This PC, or a host the window
-    /// already holds, opens nothing.
+    /// the desktop window's first and a phone has none, so a `target` on
+    /// This PC, or a host the window already holds, opens nothing.
     pub fn connect_host(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         let HostKey::Remote(name) = HostKey::of(&target) else {
             tracing::warn!(
@@ -720,6 +724,34 @@ impl RootView {
                 }
             }
         }
+    }
+
+    /// Saves `target`'s host switched on and connects it: the desktop
+    /// picker's Add and the phone's add form. A host the window holds on
+    /// another port or remote command is dialled again on the new one.
+    pub(crate) fn add_saved_host(
+        &mut self,
+        target: Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = SavedHost::from_target(&target) else {
+            return;
+        };
+        let mut saved = ConnectionPicker::new(self.sidebar.ui_state().saved_hosts.clone());
+        saved.remember(host);
+        saved.set_enabled(&target, true);
+        self.sidebar.set_saved_hosts(saved.saved().to_vec());
+        self.save_ui();
+        let key = HostKey::of(&target);
+        if self
+            .conn_of(&key)
+            .is_some_and(|conn| *conn.target() != target)
+        {
+            self.disconnect_host(&key, window, cx);
+        }
+        self.connect_host(target, window, cx);
+        cx.notify();
     }
 
     /// The handshake of the daemon the window shows, once it reported one.

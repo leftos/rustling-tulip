@@ -485,7 +485,7 @@ impl RootView {
 
     /// The saved tailnet hosts this PC holds no device token for. A host
     /// whose token cannot be read is left untagged; an SSH host has none.
-    fn hosts_not_paired(&self, saved: &[SavedHost]) -> HashSet<String> {
+    pub(crate) fn hosts_not_paired(&self, saved: &[SavedHost]) -> HashSet<String> {
         saved
             .iter()
             .filter(|host| host.kind == HostKind::Tailnet)
@@ -1128,23 +1128,10 @@ impl RootView {
     /// on and connects it, closing the picker. A host the window holds on
     /// another port or remote command is dialled again on the new one.
     fn add_host(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(host), Some(dialog)) =
-            (SavedHost::from_target(&target), &mut self.connection_picker)
-        else {
+        if self.connection_picker.is_none() || SavedHost::from_target(&target).is_none() {
             return;
-        };
-        dialog.picker.remember(host);
-        dialog.picker.set_enabled(&target, true);
-        self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
-        self.save_ui();
-        let key = HostKey::of(&target);
-        if self
-            .conn_of(&key)
-            .is_some_and(|conn| *conn.target() != target)
-        {
-            self.disconnect_host(&key, window, cx);
         }
-        self.connect_host(target, window, cx);
+        self.add_saved_host(target, window, cx);
         self.close_connection_picker(window, cx);
     }
 
