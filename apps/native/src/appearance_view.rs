@@ -502,15 +502,16 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             move |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => this.apply_hex(row, cx),
                 TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
             },
         );
-        let edits = cx.subscribe_in(input, window, |_, _, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, |_, _, _: &TextChanged, cx| {
             cx.notify();
         });
         vec![keys, edits]
@@ -522,16 +523,17 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             |this, _, event: &TextInputEvent, window, cx| {
                 if *event == TextInputEvent::Cancel {
                     this.close_appearance_editor(window, cx);
                 }
             },
         );
-        let edits = cx.subscribe_in(input, window, |_, _, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, |_, _, _: &TextChanged, cx| {
             cx.notify();
         });
         vec![keys, edits]

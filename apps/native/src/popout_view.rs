@@ -536,4 +536,19 @@ impl RootView {
             }
         })
     }
+
+    /// Runs `act` on the root view in `window` once this update is over, as long as that window
+    /// is still open. The pinned gpui's `defer_in` picks whichever window last drew the root view.
+    pub(crate) fn defer_in_window(
+        window: &Window,
+        cx: &mut Context<Self>,
+        act: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let root = cx.weak_entity();
+        window.defer(cx, move |window, cx| {
+            if let Err(err) = root.update(cx, |root, cx| act(root, window, cx)) {
+                tracing::debug!("a deferred action's root view has gone: {err:#}");
+            }
+        });
+    }
 }

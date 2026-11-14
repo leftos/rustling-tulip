@@ -1777,9 +1777,10 @@ impl RootView {
     fn new_settings_search(window: &mut Window, cx: &mut Context<Self>) -> SettingsSearch {
         let input = cx.new(|cx| TextInput::new(String::new(), SEARCH_PLACEHOLDER.to_owned(), cx));
         let focus = input.read(cx).focus_handle(cx);
-        let keys = cx.subscribe_in(
-            &input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            &input,
             |this, input, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => this.focus_search_hit(window, cx),
                 // Esc clears a query first; from an empty box it closes
@@ -1794,9 +1795,14 @@ impl RootView {
                 }
             },
         );
-        let edits = cx.subscribe_in(&input, window, |this, _, _: &TextChanged, window, cx| {
-            this.follow_search(window, cx);
-        });
+        let edits = Self::subscribe_in_window(
+            window,
+            cx,
+            &input,
+            |this, _, _: &TextChanged, window, cx| {
+                this.follow_search(window, cx);
+            },
+        );
         SettingsSearch {
             input,
             focus,
@@ -1873,7 +1879,7 @@ impl RootView {
         );
         if y != offset.y {
             handle.set_offset(point(offset.x, y));
-            cx.defer_in(window, |_, window, _| window.refresh());
+            Self::defer_in_window(window, cx, |_, window, _| window.refresh());
         }
     }
 
@@ -2711,9 +2717,10 @@ impl RootView {
         ] {
             // Enter applies nothing: the rows wait for Apply or OK. Esc is
             // Cancel.
-            subscriptions.push(cx.subscribe_in(
-                input,
+            subscriptions.push(Self::subscribe_in_window(
                 window,
+                cx,
+                input,
                 |this, _, event: &TextInputEvent, window, cx| {
                     if matches!(event, TextInputEvent::Cancel) {
                         this.close_appearance_editor(window, cx);
@@ -2721,10 +2728,8 @@ impl RootView {
                 },
             ));
             let editor = (host.clone(), agent.clone());
-            subscriptions.push(cx.subscribe_in(
-                input,
-                window,
-                move |this, input, _: &TextChanged, _, cx| {
+            subscriptions.push(
+                cx.subscribe(input, move |this, input, _: &TextChanged, cx| {
                     let text = input.read(cx).text().to_owned();
                     let tab = this
                         .agent_tabs
@@ -2738,8 +2743,8 @@ impl RootView {
                         tab.refusal = None;
                     }
                     cx.notify();
-                },
-            ));
+                }),
+            );
         }
         let mut texts = Vec::new();
         for seed in self.text_seeds(host, agent) {
@@ -3162,7 +3167,7 @@ impl RootView {
         } else if wait.is_empty() {
             // The echo is folded after this: what is still pending is read
             // once it is.
-            cx.defer_in(window, Self::end_ok_wait);
+            Self::defer_in_window(window, cx, Self::end_ok_wait);
         }
     }
 
@@ -3577,7 +3582,7 @@ impl RootView {
         else {
             return;
         };
-        cx.defer_in(window, move |this, window, cx| {
+        Self::defer_in_window(window, cx, move |this, window, cx| {
             if this.settings_open() {
                 this.move_settings_focus(next, window, cx);
                 cx.notify();
@@ -3995,9 +4000,10 @@ impl RootView {
             .to_owned();
         let input = cx.new(|cx| TextInput::new(draft.clone(), placeholder, cx));
         let focus = input.read(cx).focus_handle(cx);
-        let keys = cx.subscribe_in(
-            &input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            &input,
             // Enter applies nothing: the path waits for Apply or OK. Esc is
             // Cancel.
             |this, _, event: &TextInputEvent, window, cx| {
@@ -4006,17 +4012,13 @@ impl RootView {
                 }
             },
         );
-        let edits = cx.subscribe_in(
-            &input,
-            window,
-            move |this, input, _: &TextChanged, _, cx| {
-                let text = input.read(cx).text().to_owned();
-                if let Some(tab) = this.worktrees_tabs.get_mut(&host) {
-                    tab.draft = text;
-                }
-                cx.notify();
-            },
-        );
+        let edits = cx.subscribe(&input, move |this, input, _: &TextChanged, cx| {
+            let text = input.read(cx).text().to_owned();
+            if let Some(tab) = this.worktrees_tabs.get_mut(&host) {
+                tab.draft = text;
+            }
+            cx.notify();
+        });
         WorktreesTab {
             input,
             focus,
@@ -4348,9 +4350,10 @@ impl RootView {
             .map_or_else(String::new, |status| status.port.to_string());
         let input = cx.new(|cx| TextInput::new(draft.clone(), DEFAULT_PORT_TEXT.to_owned(), cx));
         let focus = input.read(cx).focus_handle(cx);
-        let keys = cx.subscribe_in(
-            &input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            &input,
             // Enter applies nothing: the port waits for Apply or OK. Esc is
             // Cancel.
             |this, _, event: &TextInputEvent, window, cx| {
@@ -4359,7 +4362,7 @@ impl RootView {
                 }
             },
         );
-        let edits = cx.subscribe_in(&input, window, |this, input, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(&input, |this, input, _: &TextChanged, cx| {
             let text = input.read(cx).text().to_owned();
             if let Some(tab) = &mut this.remote_access_tab {
                 tab.draft = text;
@@ -4668,7 +4671,7 @@ impl RootView {
         if list.measured != Some(room) {
             list.measured = Some(room);
             list.scroll.scroll_to_item(list.highlight);
-            cx.defer_in(window, |_, window, _| window.refresh());
+            Self::defer_in_window(window, cx, |_, window, _| window.refresh());
         }
     }
 
@@ -6785,16 +6788,17 @@ impl RootView {
         let input =
             cx.new(|cx| TextInput::new(draft.clone(), shell_choice::CUSTOM_PLACEHOLDER, cx));
         let focus = input.read(cx).focus_handle(cx);
-        let keys = cx.subscribe_in(
-            &input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            &input,
             |this, _, event: &TextInputEvent, window, cx| {
                 if matches!(event, TextInputEvent::Cancel) {
                     this.close_appearance_editor(window, cx);
                 }
             },
         );
-        let edits = cx.subscribe_in(&input, window, |this, input, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(&input, |this, input, _: &TextChanged, cx| {
             let text = input.read(cx).text().to_owned();
             this.edit_shell_command(text, cx);
         });
@@ -6921,7 +6925,7 @@ impl RootView {
         if list.measured != Some(room) {
             list.measured = Some(room);
             list.scroll.scroll_to_item(list.highlight);
-            cx.defer_in(window, |_, window, _| window.refresh());
+            Self::defer_in_window(window, cx, |_, window, _| window.refresh());
         }
     }
 
@@ -7502,9 +7506,10 @@ impl RootView {
         let input =
             cx.new(|cx| TextInput::new(draft.clone(), CHAT_WIDTH_PLACEHOLDER.to_owned(), cx));
         let focus = input.read(cx).focus_handle(cx);
-        let keys = cx.subscribe_in(
-            &input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            &input,
             // Enter applies nothing: the width waits for Apply or OK. Esc
             // is Cancel.
             |this, _, event: &TextInputEvent, window, cx| {
@@ -7513,7 +7518,7 @@ impl RootView {
                 }
             },
         );
-        let edits = cx.subscribe_in(&input, window, |this, input, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(&input, |this, input, _: &TextChanged, cx| {
             let text = input.read(cx).text().to_owned();
             if let Some(field) = &mut this.settings_pending.chat_width {
                 field.draft = text;
@@ -8075,9 +8080,10 @@ impl RootView {
             DashboardField::Cap => "1.00",
         };
         let input = cx.new(|cx| TextInput::new(text, placeholder.to_owned(), cx));
-        let keys = cx.subscribe_in(
-            &input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            &input,
             // Enter applies nothing: the field waits for Apply or OK. Esc
             // is Cancel.
             move |this, _, event: &TextInputEvent, window, cx| {
@@ -8086,26 +8092,22 @@ impl RootView {
                 }
             },
         );
-        let edits = cx.subscribe_in(
-            &input,
-            window,
-            move |this, input, _: &TextChanged, _, cx| {
-                let text = input.read(cx).text().to_owned();
-                if let Some(tab) = this.dashboard_settings_tabs.get_mut(&host) {
-                    tab.draft_mut(field).clone_from(&text);
-                }
-                // A typed key replaces a held deletion of the key it would
-                // overwrite; a deletion held for another provider stays.
-                if field == DashboardField::Key
-                    && !text.trim().is_empty()
-                    && let Some(provider) = this.shown_key_provider()
-                {
-                    this.settings_pending
-                        .drop_key_delete(&this.settings_host, &provider);
-                }
-                cx.notify();
-            },
-        );
+        let edits = cx.subscribe(&input, move |this, input, _: &TextChanged, cx| {
+            let text = input.read(cx).text().to_owned();
+            if let Some(tab) = this.dashboard_settings_tabs.get_mut(&host) {
+                tab.draft_mut(field).clone_from(&text);
+            }
+            // A typed key replaces a held deletion of the key it would
+            // overwrite; a deletion held for another provider stays.
+            if field == DashboardField::Key
+                && !text.trim().is_empty()
+                && let Some(provider) = this.shown_key_provider()
+            {
+                this.settings_pending
+                    .drop_key_delete(&this.settings_host, &provider);
+            }
+            cx.notify();
+        });
         (input, [keys, edits])
     }
 
@@ -9765,9 +9767,10 @@ fn new_setting_text(
 ) -> (SettingText, Vec<Subscription>) {
     let input = cx.new(|cx| TextInput::new(seed.draft.clone(), seed.placeholder.clone(), cx));
     let focus = input.read(cx).focus_handle(cx);
-    let keys = cx.subscribe_in(
-        &input,
+    let keys = RootView::subscribe_in_window(
         window,
+        cx,
+        &input,
         |this, _, event: &TextInputEvent, window, cx| {
             if matches!(event, TextInputEvent::Cancel) {
                 this.close_appearance_editor(window, cx);
@@ -9775,18 +9778,14 @@ fn new_setting_text(
         },
     );
     let (edit_host, editor, edited) = (host.clone(), agent.clone(), seed.field.clone());
-    let edits = cx.subscribe_in(
-        &input,
-        window,
-        move |this, input, _: &TextChanged, _, cx| {
-            let text = input.read(cx).text().to_owned();
-            if let Some(setting) = this.setting_text_mut(&edit_host, &editor, &edited) {
-                setting.draft = text;
-                setting.edited = true;
-            }
-            cx.notify();
-        },
-    );
+    let edits = cx.subscribe(&input, move |this, input, _: &TextChanged, cx| {
+        let text = input.read(cx).text().to_owned();
+        if let Some(setting) = this.setting_text_mut(&edit_host, &editor, &edited) {
+            setting.draft = text;
+            setting.edited = true;
+        }
+        cx.notify();
+    });
     let text = SettingText {
         field: seed.field,
         input,

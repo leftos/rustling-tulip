@@ -943,9 +943,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
         let list = ListField::of(&field.control());
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             move |this, _, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => {
                     if !list.is_some_and(|list| this.enter_spawn_list(list, cx)) {
@@ -960,7 +961,7 @@ impl RootView {
             },
         );
         let edited = field.clone();
-        let edits = cx.subscribe_in(input, window, move |this, input, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, move |this, input, _: &TextChanged, cx| {
             let text = input.read(cx).text().to_owned();
             if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog {
                 let form = &mut dialog.form;
@@ -989,17 +990,13 @@ impl RootView {
         });
         let mut subscriptions = vec![keys, edits, focus];
         if let Some(list) = list {
-            subscriptions.push(cx.subscribe_in(
-                input,
-                window,
-                move |this, _, key: &NavKey, _, cx| {
-                    if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog {
-                        dialog.form.list_nav(list, *key == NavKey::Down);
-                        reveal_list_highlight(dialog, list);
-                    }
-                    cx.notify();
-                },
-            ));
+            subscriptions.push(cx.subscribe(input, move |this, _, key: &NavKey, cx| {
+                if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog {
+                    dialog.form.list_nav(list, *key == NavKey::Down);
+                    reveal_list_highlight(dialog, list);
+                }
+                cx.notify();
+            }));
             subscriptions.push(cx.on_blur(&handle, window, move |this, _, cx| {
                 this.close_spawn_list(list, cx);
             }));
@@ -1050,9 +1047,10 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        let keys = cx.subscribe_in(
-            input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            input,
             |this, _, event: &TextInputEvent, window, cx| {
                 let key = match event {
                     TextInputEvent::Submit => "enter",
@@ -1061,7 +1059,7 @@ impl RootView {
                 this.on_target_list_key(key, None, window, cx);
             },
         );
-        let edits = cx.subscribe_in(input, window, |this, input, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe(input, |this, input, _: &TextChanged, cx| {
             let text = input.read(cx).text().to_owned();
             if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog {
                 dialog.form.edit_target_query(&text);
@@ -1238,7 +1236,7 @@ impl RootView {
         };
         if *slot != Some(bounds) {
             *slot = Some(bounds);
-            cx.defer_in(window, |_, window, _| window.refresh());
+            Self::defer_in_window(window, cx, |_, window, _| window.refresh());
         }
     }
 
@@ -1484,7 +1482,7 @@ impl RootView {
         );
         if y != offset.y {
             dialog.scroll.set_offset(point(offset.x, y));
-            cx.defer_in(window, |_, window, _| window.refresh());
+            Self::defer_in_window(window, cx, |_, window, _| window.refresh());
         }
     }
 

@@ -388,32 +388,29 @@ impl RootView {
     ) -> AliasField {
         let input = cx.new(|cx| TextInput::new(alias.clone(), email, cx));
         let focus = input.read(cx).focus_handle(cx);
-        let keys = cx.subscribe_in(
-            &input,
+        let keys = Self::subscribe_in_window(
             window,
+            cx,
+            &input,
             |this, _, event: &TextInputEvent, window, cx| {
                 if matches!(event, TextInputEvent::Cancel) {
                     this.close_appearance_editor(window, cx);
                 }
             },
         );
-        let edits = cx.subscribe_in(
-            &input,
-            window,
-            move |this, input, _: &TextChanged, _, cx| {
-                let text = input.read(cx).text().to_owned();
-                if let Some(field) = this
-                    .settings_pending
-                    .account_aliases
-                    .0
-                    .iter_mut()
-                    .find(|field| field.number == number)
-                {
-                    field.draft = text;
-                }
-                cx.notify();
-            },
-        );
+        let edits = cx.subscribe(&input, move |this, input, _: &TextChanged, cx| {
+            let text = input.read(cx).text().to_owned();
+            if let Some(field) = this
+                .settings_pending
+                .account_aliases
+                .0
+                .iter_mut()
+                .find(|field| field.number == number)
+            {
+                field.draft = text;
+            }
+            cx.notify();
+        });
         AliasField {
             number,
             input,

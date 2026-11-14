@@ -10,7 +10,8 @@ use gpui::{
     size,
 };
 use protocol::{
-    AttentionReason, ClientMessage, DaemonMessage, PaneDropEdge, SplitDirection, TabEntry,
+    AttentionReason, ClientMessage, DaemonMessage, PaneDropEdge, SplitDirection, SuggestTarget,
+    TabEntry,
 };
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{
@@ -4917,6 +4918,133 @@ fn esc_in_a_dialog_field_hands_the_main_windows_keyboard_back_there_beside_a_pop
     assert!(
         !h.root(|root, _| root.shell_dialog_open()),
         "Esc closes the Shell… dialog"
+    );
+    assert!(
+        focused_in_main(&mut h, "p1"),
+        "the main window's pane takes its keyboard back"
+    );
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p2"),
+        "the pop-out keeps its terminal's keyboard"
+    );
+}
+
+/// `p2_popped_of_three`, every session on repo `r1`, so the spawn dialog has
+/// a target to submit to.
+fn p2_popped_of_three_on_a_repo<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let grid = split(
+        SplitDirection::Horizontal,
+        split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            pane("p2", Some("s2")),
+        ),
+        pane("p3", Some("s3")),
+    );
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").in_repo("r1").build(),
+            session("s2").in_repo("r1").build(),
+            session("s3").in_repo("r1").build(),
+        ],
+        repos: vec![repo("r1", "D:/src/r1")],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    for id in ["s1", "s2", "s3"] {
+        h.answer_scrollback(id, b"");
+    }
+    focus_p1_in_main(&mut h);
+    assert_eq!(pop_out(&mut h, "t1", "p2"), OpenOutcome::Opened);
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p2"),
+        "p2 has the pop-out's keyboard"
+    );
+    h.sent();
+    h
+}
+
+/// Which part of the Settings frame has the main window's keyboard.
+fn settings_focus(h: &mut Harness<'_>) -> Option<&'static str> {
+    let root = h.root.clone();
+    h.cx.update(|window, cx| root.read(cx).settings_focus(window, cx))
+}
+
+#[gpui::test]
+fn esc_in_a_settings_field_hands_the_main_windows_keyboard_back_there(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = p2_popped_of_three(cx, &dir);
+    h.click_on("settings-open");
+    assert!(h.root(|root, _| root.settings_open()), "Settings opens");
+    h.scroll_into_view("settings-content", "settings-chat-width-input");
+    h.click_on("settings-chat-width-input");
+    h.keys("ctrl-a backspace");
+    h.cx.simulate_input("900");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-chat-width-input"),
+        "the chat width field has the main window's keyboard"
+    );
+    popout_draws_last(&mut h);
+
+    h.keys("escape");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "Esc in the chat width field closes Settings"
+    );
+    assert!(
+        focused_in_main(&mut h, "p1"),
+        "the main window's pane takes its keyboard back"
+    );
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p2"),
+        "the pop-out keeps its terminal's keyboard"
+    );
+}
+
+#[gpui::test]
+fn enter_in_the_spawn_dialog_acts_in_the_main_window_beside_a_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = p2_popped_of_three_on_a_repo(cx, &dir);
+    h.click_on("sidebar-add-session");
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "the spawn dialog opens"
+    );
+    h.send(DaemonMessage::BranchNameSuggestion {
+        target: SuggestTarget::Repo {
+            repo_id: "r1".to_owned(),
+        },
+        name: "wt/x".to_owned(),
+        request_id: None,
+    });
+    h.click_on("spawn-branch");
+    h.keys("x");
+    assert_eq!(
+        h.root(|root, _| root.spawn_dialog_focus()),
+        Some("spawn-branch".to_owned()),
+        "the branch field has the main window's keyboard"
+    );
+    assert_eq!(
+        h.root(RootView::spawn_dialog_branch),
+        Some("wt/xx".to_owned()),
+        "the typed branch reached the form"
+    );
+    h.keys("escape");
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "the first Esc closes the branch list only"
+    );
+    popout_draws_last(&mut h);
+
+    h.keys("enter");
+    assert!(
+        !h.root(|root, _| root.spawn_dialog_open()),
+        "Enter in the branch field submits the spawn"
     );
     assert!(
         focused_in_main(&mut h, "p1"),
