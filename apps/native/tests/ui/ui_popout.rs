@@ -273,6 +273,96 @@ fn claims_size(sent: &[ClientMessage], session: &str) -> bool {
     })
 }
 
+/// The `claim` flags of the `Resize`s in `sent` for session `id`, in order.
+fn resize_claims(sent: &[ClientMessage], id: &str) -> Vec<bool> {
+    sent.iter()
+        .filter_map(|m| match m {
+            ClientMessage::Resize {
+                session_id, claim, ..
+            } if session_id == id => Some(*claim),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `s1` (pane `p1`) split beside `s2` (pane `p2`) in tab `t1`, both
+/// attached, everything sent drained.
+fn split_attached<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.tabs = vec![tab(
+        "t1",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            pane("p2", Some("s2")),
+        ),
+    )];
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    h.sent();
+    h
+}
+
+#[gpui::test]
+fn a_popouts_focus_gain_claims_its_panes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = split_attached(cx, &dir);
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    h.cx.run_until_parked();
+    // The move's own claim, at the pop-out's size.
+    h.sent();
+    h.cx.update(|window, _| window.activate_window());
+    h.cx.run_until_parked();
+    let sent = h.sent();
+    assert_eq!(
+        resize_claims(&sent, "s1"),
+        Vec::<bool>::new(),
+        "the main window's focus claims nothing for the popped pane: {sent:?}"
+    );
+    assert_eq!(
+        resize_claims(&sent, "s2"),
+        [true],
+        "the main window claims s2"
+    );
+
+    popout.update(|window, _| window.activate_window());
+    popout.run_until_parked();
+    let sent = h.sent();
+    assert_eq!(
+        resize_claims(&sent, "s1"),
+        [true],
+        "the pop-out's focus gain claims its pane's session: {sent:?}"
+    );
+    assert_eq!(
+        resize_claims(&sent, "s2"),
+        Vec::<bool>::new(),
+        "the pop-out claims nothing the main window shows"
+    );
+}
+
+#[gpui::test]
+fn a_popouts_creation_focus_claims_only_its_own_panes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = split_attached(cx, &dir);
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    popout.update(|window, _| window.activate_window());
+    popout.run_until_parked();
+    let sent = h.sent();
+    assert!(
+        claims_size(&sent, "s1"),
+        "the pop-out claims its pane's session: {sent:?}"
+    );
+    assert!(
+        !claims_size(&sent, "s2"),
+        "the pop-out claims nothing the main window shows: {sent:?}"
+    );
+}
+
 #[gpui::test]
 fn a_moved_popped_pane_draws_in_one_window(cx: &mut TestAppContext) {
     let dir = TestDir::new();

@@ -9,6 +9,7 @@ use std::path::Path;
 use anyhow::Context as _;
 
 pub(crate) mod keys;
+pub(crate) mod relay;
 pub(crate) mod send;
 pub(crate) mod state;
 pub(crate) mod store;

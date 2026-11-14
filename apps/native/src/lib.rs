@@ -1546,12 +1546,25 @@ impl RootView {
     /// longer there, and it also re-fits an automatic grid's columns.
     fn watch_window(window: &mut Window, cx: &mut Context<Self>) {
         cx.observe_window_activation(window, |root, window, cx| {
-            if !window.is_window_active() {
+            if window.is_window_active() {
+                // The window gaining focus fits the sessions it shows to
+                // its panes; before the first tab list, the panes that
+                // list binds claim at their first measure.
+                if !root.tabs.arm_focus_claim() {
+                    root.claim_active_panes_for_focus(cx);
+                }
+                if let Some(id) = root.shown_session() {
+                    // Coming back to the window shows its focused session:
+                    // a turn that finished there while it was inactive is
+                    // seen.
+                    root.mark_session_seen(None, &id, cx);
+                }
+            } else {
                 root.set_link_mode(false, cx);
-            } else if let Some(id) = root.shown_session() {
-                // Coming back to the window shows its focused session: a
-                // turn that finished there while it was inactive is seen.
-                root.mark_session_seen(None, &id, cx);
+                // A focus claim the window's panes, or its first tab list,
+                // have not sent yet goes with the focus.
+                root.tabs.clear_focus_claim();
+                root.drop_active_panes_focus_claims(cx);
             }
             root.dismiss_skipped_toasts(window.is_window_active(), cx);
             root.report_presence(window, cx);

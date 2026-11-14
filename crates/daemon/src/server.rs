@@ -516,9 +516,16 @@ fn load_devices(dirs: &Dirs) -> Arc<std::sync::Mutex<crate::devices::DeviceStore
 }
 
 /// The push state over the profile's push folder, loaded on the first push
-/// request. An unresolved folder is logged and leaves a state whose every
-/// request fails, so the daemon still starts.
-fn push_state() -> Arc<std::sync::Mutex<crate::push::state::PushState>> {
+/// request, posting relay pushes to [`crate::push::relay::RELAY_ORIGIN`]. An
+/// unresolved folder is logged and leaves a state whose every request fails,
+/// so the daemon still starts.
+///
+/// # Errors
+///
+/// The built-in relay origin is not a URL.
+fn push_state() -> anyhow::Result<Arc<std::sync::Mutex<crate::push::state::PushState>>> {
+    let relay_origin = reqwest::Url::parse(crate::push::relay::RELAY_ORIGIN)
+        .context("parsing the push relay's origin")?;
     let dir = match crate::paths::resolve_push_dir() {
         Ok(dir) => Some(dir),
         Err(err) => {
@@ -529,9 +536,12 @@ fn push_state() -> Arc<std::sync::Mutex<crate::push::state::PushState>> {
             None
         }
     };
-    Arc::new(std::sync::Mutex::new(crate::push::state::PushState::new(
-        dir,
-        crate::push::send::PushPolicy::default(),
+    Ok(Arc::new(std::sync::Mutex::new(
+        crate::push::state::PushState::new(
+            dir,
+            crate::push::send::PushPolicy::default(),
+            relay_origin,
+        ),
     )))
 }
 
@@ -663,7 +673,7 @@ pub async fn run(
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: pairing::PairingWaiters::default(),
         live_devices,
-        push: push_state(),
+        push: push_state()?,
         presence: Arc::default(),
         dashboard,
         summarizer,

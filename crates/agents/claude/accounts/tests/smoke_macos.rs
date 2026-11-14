@@ -280,10 +280,10 @@ fn keychain_switch_smoke() {
 
     keychain.put(&login_a);
     write_global(&claude, A, A_ORG, A_UUID);
-    let captured_a = capture_live_login(&context).expect("login A is captured");
+    let captured_a = capture_live_login(&context, true).expect("login A is captured");
     keychain.put(&login_b);
     write_global(&claude, B, B_ORG, B_UUID);
-    let captured_b = capture_live_login(&context).expect("login B is captured");
+    let captured_b = capture_live_login(&context, true).expect("login B is captured");
 
     assert_eq!(
         (captured_a.kind, captured_a.number),

@@ -717,15 +717,21 @@ fn question_text(rows: &[String]) -> String {
 
 /// Whether `rows[index]` is a question card's tab bar: `←  ☐ Next fn  ✔
 /// Submit  →`, or a single question's bar (` ☐ Colour`), which has no
-/// arrows and sits directly under a rule.
+/// arrows and sits directly under a rule, or under the `──` tail a rule
+/// wider than the grid wraps onto the row below it (a dialog drawn
+/// indented with a full-width rule).
 fn is_tab_bar(rows: &[String], rules: &[usize], index: usize) -> bool {
     let text = rows[index].trim();
     if text.starts_with('←') && text.ends_with('→') {
         return text.contains([TAB_OPEN, TAB_DONE]);
     }
-    let under_rule = index
-        .checked_sub(1)
-        .is_some_and(|above| rules.contains(&above));
+    let under_rule = index.checked_sub(1).is_some_and(|above| {
+        rules.contains(&above)
+            || (is_rule_tail(&rows[above])
+                && above
+                    .checked_sub(1)
+                    .is_some_and(|rule| rules.contains(&rule)))
+    });
     under_rule && text.starts_with([TAB_OPEN, TAB_DONE]) && !text.contains(['←', '→'])
 }
 
@@ -1062,6 +1068,13 @@ fn indent_of(row: &str) -> usize {
 fn is_box_rule(row: &str) -> bool {
     let text = row.trim();
     !text.is_empty() && text.chars().all(|c| c == BOX_CHAR)
+}
+
+/// Whether `row` could be the wrapped tail of a rule wider than the grid:
+/// nothing but `─` once trimmed (`  ──`).
+fn is_rule_tail(row: &str) -> bool {
+    let text = row.trim();
+    !text.is_empty() && text.chars().all(|c| c == RULE_CHAR)
 }
 
 /// The indexes of the rule rows in `rows`: rows that start and end with the

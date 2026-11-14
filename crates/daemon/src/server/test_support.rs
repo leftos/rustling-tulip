@@ -93,6 +93,7 @@ pub(crate) fn push_state_in(dir: PathBuf) -> Arc<std::sync::Mutex<crate::push::s
     Arc::new(std::sync::Mutex::new(crate::push::state::PushState::new(
         Some(dir),
         crate::push::send::PushPolicy::default(),
+        reqwest::Url::parse(crate::push::relay::RELAY_ORIGIN).expect("the relay origin is a URL"),
     )))
 }
 

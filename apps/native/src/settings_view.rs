@@ -60,6 +60,7 @@ use crate::spawn_view::{
 use crate::summarizer_settings::{SummarizerStatus, TestOutcome, parse_cap};
 use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::toast_stack::{Edge, ToastAnchor};
 use crate::ui_theme::{UiTheme, theme};
 use crate::window_title::compute_title;
 use crate::{FileFilter, Pick, RootView, tooltip};
@@ -622,6 +623,12 @@ pub(crate) enum SettingsControl {
     FinishedGrace(u32),
     #[cfg_attr(not(windows), expect(dead_code, reason = "Windows-only toast style"))]
     ToastStyle(ToastStyle),
+    /// A spot of the Toast position picker; the ring holds only the chosen
+    /// one, and the arrow keys move the choice between them.
+    ToastAnchor(ToastAnchor),
+    /// The Toast position row's Show a test toast button; an immediate
+    /// action, never pending.
+    ToastAnchorTest,
     /// Choice `choice` of field `field` of the shown agent page's
     /// [`AgentOptions::settings_fields`]; `selector` is
     /// `settings-{tag}-{field id}-{choice}`.
@@ -790,6 +797,8 @@ impl SettingsControl {
             Self::FinishedGrace(_) => "settings-finished-grace-20",
             Self::ToastStyle(ToastStyle::Os) => "settings-toast-style-os",
             Self::ToastStyle(ToastStyle::App) => "settings-toast-style-app",
+            Self::ToastAnchor(anchor) => toast_anchor_selector(anchor),
+            Self::ToastAnchorTest => "settings-toast-anchor-test",
             Self::AgentChoice { selector, .. }
             | Self::AgentToggle { selector, .. }
             | Self::AgentText { selector, .. }
@@ -1712,7 +1721,7 @@ impl RootView {
 
     /// The ids of `tab`'s drawn rows that no control of their own names:
     /// the Dashboard's Provider row while a provider is drawn (`stops`),
-    /// and an agent page's fields of a kind this client draws no control
+    /// the Toast position row while its picker is, and an agent page's fields of a kind this client draws no control
     /// for.
     fn control_free_rows(&self, tab: SettingsTab, stops: &[&str]) -> Vec<String> {
         match tab {
@@ -1744,6 +1753,15 @@ impl RootView {
                     .map(|(_, view)| {
                         format!("settings-{}-{}", descriptor.tag, field_part(&view.id))
                     })
+                    .collect()
+            }
+            SettingsTab::Notifications => {
+                let spot = format!("{TOAST_ANCHOR_ROW}-");
+                stops
+                    .iter()
+                    .any(|stop| stop.starts_with(&spot))
+                    .then(|| TOAST_ANCHOR_ROW.to_owned())
+                    .into_iter()
                     .collect()
             }
             _ => Vec::new(),
@@ -1847,7 +1865,7 @@ impl RootView {
         let control = self
             .settings_controls(cx)
             .into_iter()
-            .find(|control| control.selector() == hit);
+            .find(|control| search_selector(*control) == hit);
         if let Some(control) = control {
             self.move_settings_focus(control, window, cx);
             cx.notify();
@@ -3739,6 +3757,7 @@ impl RootView {
                 );
             }
             SettingsControl::DefaultShell => self.toggle_shell_list(cx),
+            SettingsControl::ToastAnchorTest => self.show_staged_test_toast(cx),
             SettingsControl::AgentChoice {
                 field,
                 choice,
@@ -3778,7 +3797,8 @@ impl RootView {
             | SettingsControl::NotifyAccountSwitches
             | SettingsControl::NotifySkip(_)
             | SettingsControl::FinishedGrace(_)
-            | SettingsControl::ToastStyle(_) => {}
+            | SettingsControl::ToastStyle(_)
+            | SettingsControl::ToastAnchor(_) => {}
             SettingsControl::DashboardEnabled => self.toggle_summaries(),
             SettingsControl::DashboardProvider { index, .. } => {
                 self.choose_summarizer_provider(index);
@@ -3870,6 +3890,7 @@ impl RootView {
             SettingsControl::NotifySkip(skip) => LocalPending::NotifySkip(skip),
             SettingsControl::FinishedGrace(secs) => LocalPending::FinishedGrace(secs),
             SettingsControl::ToastStyle(style) => LocalPending::ToastStyle(style),
+            SettingsControl::ToastAnchor(anchor) => LocalPending::ToastAnchor(anchor),
             _ => return None,
         })
     }
@@ -4583,8 +4604,9 @@ impl RootView {
     /// The Notifications tab's stops: the link, Needs you with its sound
     /// field and that field's Play (not while the sound is off), Finished
     /// with its own sound field and Play, the Finished grace choices while
-    /// Finished is on, Account switches, then the skip choices and, on
-    /// Windows, the toast style choices.
+    /// Finished is on, Account switches, then the skip choices, on Windows
+    /// the toast style choices, and last the Toast position picker (one
+    /// stop, its chosen spot) and its Show a test toast button.
     fn notifications_controls(&self) -> Vec<SettingsControl> {
         let shown = self.shown_local();
         let settings = &shown.notifications;
@@ -4608,7 +4630,39 @@ impl RootView {
         controls.extend(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip));
         #[cfg(windows)]
         controls.extend(TOAST_STYLE_CHOICES.map(SettingsControl::ToastStyle));
+        controls.push(SettingsControl::ToastAnchor(settings.toast_anchor));
+        controls.push(SettingsControl::ToastAnchorTest);
         controls
+    }
+
+    /// Show a test toast: the sample toast at the spot the picker shows,
+    /// saved or not.
+    fn show_staged_test_toast(&mut self, cx: &mut Context<Self>) {
+        let anchor = self.shown_local().notifications.toast_anchor;
+        Self::show_test_toast(anchor, cx);
+    }
+
+    /// `key` while the Toast position picker has the keyboard: an arrow
+    /// stages the neighbouring spot in the 3x3 grid, passing over the empty
+    /// centre and stopping at the grid's edge. Returns whether it was an
+    /// arrow.
+    fn on_toast_anchor_key(
+        &mut self,
+        anchor: ToastAnchor,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (down, right) = match key {
+            "up" => (-1, 0),
+            "down" => (1, 0),
+            "left" => (0, -1),
+            "right" => (0, 1),
+            _ => return false,
+        };
+        let next = anchor.step(down, right);
+        self.press_settings_control(SettingsControl::ToastAnchor(next), window, cx);
+        true
     }
 
     /// Which row's sound list is open, if one is.
@@ -5099,6 +5153,9 @@ impl RootView {
                 Some(SettingsControl::Appearance(stop)) => {
                     self.on_appearance_stop_key(stop, key, cx)
                 }
+                Some(SettingsControl::ToastAnchor(anchor)) => {
+                    self.on_toast_anchor_key(anchor, key, window, cx)
+                }
                 _ => false,
             },
             _ => false,
@@ -5254,7 +5311,8 @@ impl RootView {
             | LocalPending::FinishedSound(_)
             | LocalPending::NotifySkip(_)
             | LocalPending::FinishedGrace(_)
-            | LocalPending::ToastStyle(_) => (self.commit_notification(value), true),
+            | LocalPending::ToastStyle(_)
+            | LocalPending::ToastAnchor(_) => (self.commit_notification(value, cx), true),
             other => (self.commit_general(&other, cx), true),
         };
         if saves {
@@ -5308,9 +5366,21 @@ impl RootView {
         }
     }
 
-    /// Apply reaching a pending Notifications setting: recorded; returns
-    /// whether it is left to the caller to save.
-    fn commit_notification(&mut self, value: LocalPending) -> bool {
+    /// Apply reaching a pending Notifications setting: recorded, and a
+    /// changed toast anchor moves the open toasts at once; returns whether it
+    /// is left to the caller to save.
+    fn commit_notification(&mut self, value: LocalPending, cx: &mut Context<Self>) -> bool {
+        let moves_toasts = matches!(value, LocalPending::ToastAnchor(_));
+        let changed = self.record_notification(value);
+        if moves_toasts && changed {
+            Self::after_toast_change(cx);
+        }
+        changed
+    }
+
+    /// A pending Notifications setting recorded; returns whether it is left
+    /// to the caller to save.
+    fn record_notification(&mut self, value: LocalPending) -> bool {
         match value {
             LocalPending::NotifyNeedsYou(on) => {
                 self.sidebar.set_notification(on);
@@ -5335,6 +5405,7 @@ impl RootView {
             LocalPending::NotifySkip(skip) => self.sidebar.set_notify_skip(skip),
             LocalPending::FinishedGrace(secs) => self.sidebar.set_finished_grace(secs),
             LocalPending::ToastStyle(style) => self.sidebar.set_toast_style(style),
+            LocalPending::ToastAnchor(anchor) => self.sidebar.set_toast_anchor(anchor),
             _ => false,
         }
     }
@@ -6308,6 +6379,7 @@ impl RootView {
         .child(skip_row);
         #[cfg(windows)]
         let section = section.child(Self::toast_style_row(settings.toast_style, focused, cx));
+        let section = section.child(toast_anchor_row(settings.toast_anchor, focused, cx));
         vec![section.into_any_element()]
     }
 
@@ -8808,6 +8880,201 @@ fn press(
     })
 }
 
+/// The Toast position picker's monitor drawing, outer size, as the mock
+/// draws it.
+const MONITOR_WIDTH: f32 = 168.0;
+const MONITOR_HEIGHT: f32 = 108.0;
+/// One spot on the monitor drawing.
+const SPOT_WIDTH: f32 = 34.0;
+const SPOT_HEIGHT: f32 = 16.0;
+/// The halo round the chosen spot.
+const SPOT_HALO: f32 = 3.0;
+/// The stand under the monitor drawing, and how far below its edge it
+/// reaches.
+const STAND_WIDTH: f32 = 40.0;
+const STAND_HEIGHT: f32 = 10.0;
+const STAND_DROP: f32 = 14.0;
+/// The grid's rows, top to bottom, and its columns, left to right.
+const GRID_EDGES: [Edge; 3] = [Edge::Start, Edge::Middle, Edge::End];
+
+/// The Toast position row's selector, which the search names: the ring's
+/// stop on the picker is its chosen spot, so no one spot's selector would
+/// find it whatever is chosen.
+const TOAST_ANCHOR_ROW: &str = "settings-toast-anchor";
+
+/// The selector a search hit names `control` by: its row's for a Toast
+/// position spot, else its own.
+fn search_selector(control: SettingsControl) -> &'static str {
+    match control {
+        SettingsControl::ToastAnchor(_) => TOAST_ANCHOR_ROW,
+        other => other.selector(),
+    }
+}
+
+/// The selector of the Toast position spot `anchor`.
+const fn toast_anchor_selector(anchor: ToastAnchor) -> &'static str {
+    match anchor {
+        ToastAnchor::TopLeft => "settings-toast-anchor-top_left",
+        ToastAnchor::TopMiddle => "settings-toast-anchor-top_middle",
+        ToastAnchor::TopRight => "settings-toast-anchor-top_right",
+        ToastAnchor::MiddleRight => "settings-toast-anchor-middle_right",
+        ToastAnchor::BottomRight => "settings-toast-anchor-bottom_right",
+        ToastAnchor::BottomMiddle => "settings-toast-anchor-bottom_middle",
+        ToastAnchor::BottomLeft => "settings-toast-anchor-bottom_left",
+        ToastAnchor::MiddleLeft => "settings-toast-anchor-middle_left",
+    }
+}
+
+/// The Toast position caption's second line: how a stack at `anchor` grows.
+fn toast_anchor_growth(anchor: ToastAnchor) -> &'static str {
+    match anchor.cell().0 {
+        Edge::Start => "Newest at the top, older ones below it.",
+        Edge::Middle => "Newest on the middle line, older ones below it.",
+        Edge::End => "Newest at the bottom, older ones above it.",
+    }
+}
+
+/// The Toast position row: a monitor drawing whose eight spots choose where
+/// the app's toasts stack, `chosen` filled, beside a caption naming it, how
+/// the stack grows there, and Show a test toast.
+fn toast_anchor_row(
+    chosen: ToastAnchor,
+    focused: Option<SettingsControl>,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = theme(cx);
+    let size = crate::fonts::ui_text_size(cx);
+    let shift = crate::fonts::ui_weight_shift(cx);
+    let has_keyboard = focused == Some(SettingsControl::ToastAnchor(chosen));
+    let name = div()
+        .driver_id(|| "settings-toast-anchor-caption".to_owned())
+        .text_size(crate::fonts::ui_px_at(size, HINT_SIZE))
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::BOLD))
+        .text_color(gpui::rgb(t.text))
+        .child(chosen.name());
+    let test = settings_button(
+        SettingsControl::ToastAnchorTest,
+        "Show a test toast",
+        true,
+        focused,
+        cx,
+    );
+    let caption = div()
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap(px(2.0))
+        .child(name)
+        .child(hint(size, toast_anchor_growth(chosen), &t))
+        .child(div().pt(px(12.0)).child(test));
+    let picker = div()
+        .flex()
+        .items_center()
+        .gap(px(14.0))
+        .child(toast_monitor(chosen, has_keyboard, cx))
+        .child(caption);
+    field(size, shift, "Toast position", &t)
+        .relative()
+        .driver_id(|| TOAST_ANCHOR_ROW.to_owned())
+        .children(search_hit_marker(TOAST_ANCHOR_ROW, 0.0, cx))
+        .child(picker)
+        .into_any_element()
+}
+
+/// The monitor drawing: a 3x3 grid of spots with an empty centre, `chosen`
+/// filled, on a stand; ringed while it has the keyboard.
+fn toast_monitor(chosen: ToastAnchor, has_keyboard: bool, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
+    let rows: Vec<Div> = GRID_EDGES
+        .iter()
+        .map(|&row| {
+            let cells: Vec<Div> = GRID_EDGES
+                .iter()
+                .map(|&column| toast_cell(row, column, chosen, cx))
+                .collect();
+            div().flex().flex_1().children(cells)
+        })
+        .collect();
+    let stand = div()
+        .absolute()
+        .left(px((MONITOR_WIDTH - 4.0 - STAND_WIDTH) / 2.0))
+        .bottom(px(-STAND_DROP))
+        .w(px(STAND_WIDTH))
+        .h(px(STAND_HEIGHT))
+        .border_l_2()
+        .border_r_2()
+        .border_b_2()
+        .border_color(gpui::rgb(t.line_strong))
+        .rounded_b(px(4.0));
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w(px(MONITOR_WIDTH))
+        .h(px(MONITOR_HEIGHT))
+        .mb(px(STAND_DROP))
+        .p(px(8.0))
+        .border_2()
+        .border_color(gpui::rgb(t.line_strong))
+        .rounded(px(6.0))
+        .bg(gpui::rgb(t.sunken))
+        .children(rows)
+        .child(stand)
+        .when(has_keyboard, |monitor| monitor.child(focus_ring(6.0, &t)))
+}
+
+/// The grid cell at `row` and `column`: its spot set against the cell's
+/// matching edge, or nothing in the centre.
+fn toast_cell(row: Edge, column: Edge, chosen: ToastAnchor, cx: &mut Context<RootView>) -> Div {
+    let cell = div().flex().flex_1();
+    let cell = match column {
+        Edge::Start => cell.justify_start(),
+        Edge::Middle => cell.justify_center(),
+        Edge::End => cell.justify_end(),
+    };
+    let cell = match row {
+        Edge::Start => cell.items_start(),
+        Edge::Middle => cell.items_center(),
+        Edge::End => cell.items_end(),
+    };
+    match ToastAnchor::at(row, column) {
+        Some(anchor) => cell.child(toast_spot(anchor, anchor == chosen, cx)),
+        None => cell,
+    }
+}
+
+/// Spot `anchor` on the monitor drawing: filled with a halo when `on`,
+/// else a dashed outline; a click stages it.
+fn toast_spot(anchor: ToastAnchor, on: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
+    let control = SettingsControl::ToastAnchor(anchor);
+    let selector = control.selector();
+    let spot = div()
+        .id(selector)
+        .driver_id(move || selector.to_owned())
+        .w(px(SPOT_WIDTH))
+        .h(px(SPOT_HEIGHT))
+        .rounded(px(3.0))
+        .cursor_pointer()
+        .on_click(press(control, cx));
+    if on {
+        let halo = gpui::BoxShadow {
+            color: gpui::rgba((t.accent << 8) | 0x40).into(),
+            offset: point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(SPOT_HALO),
+        };
+        spot.bg(gpui::rgb(t.accent)).shadow(vec![halo])
+    } else {
+        let accent = t.accent;
+        spot.border_1()
+            .border_dashed()
+            .border_color(gpui::rgb(t.line_strong))
+            .hover(move |style| style.border_color(gpui::rgb(accent)))
+    }
+}
+
 /// `control`'s button, outlined when it has the keyboard; a disabled one is
 /// dimmed and inert.
 pub(crate) fn settings_button(
@@ -9050,6 +9317,7 @@ pub(crate) enum LocalPending {
     NotifySkip(NotifySkip),
     FinishedGrace(u32),
     ToastStyle(ToastStyle),
+    ToastAnchor(ToastAnchor),
     Autostart(bool),
 }
 
@@ -9577,6 +9845,7 @@ impl ShownLocal {
             LocalPending::NotifySkip(skip) => self.notifications.skip_when = skip,
             LocalPending::FinishedGrace(secs) => self.notifications.finished_grace_secs = secs,
             LocalPending::ToastStyle(style) => self.notifications.toast_style = style,
+            LocalPending::ToastAnchor(anchor) => self.notifications.toast_anchor = anchor,
             LocalPending::Autostart(on) => self.autostart = Some(on),
         }
     }
@@ -9625,6 +9894,7 @@ impl ShownLocal {
                 LocalPending::FinishedGrace(notes.finished_grace_secs)
             }
             LocalPending::ToastStyle(_) => LocalPending::ToastStyle(notes.toast_style),
+            LocalPending::ToastAnchor(_) => LocalPending::ToastAnchor(notes.toast_anchor),
             // Only a launch that could be read can be drafted, so the
             // unknown saved value is never compared against.
             LocalPending::Autostart(_) => LocalPending::Autostart(self.autostart == Some(true)),

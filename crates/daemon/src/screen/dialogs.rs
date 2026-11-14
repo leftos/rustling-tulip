@@ -446,6 +446,24 @@ mod tests {
         assert_eq!(prompt.subject, LONG_QUESTION);
     }
 
+    /// The question of `v2-ask-wrapped-rule-w297.txt`, drawn 2 columns in:
+    /// each full-width rule wraps a `──` row under itself, between the rule
+    /// and the tab bar.
+    const WRAPPED_RULE_QUESTION: &str = "\"The export button moves to the toolbar\" touches \
+        the same file as the open layout branch. Where should it land?";
+
+    #[test]
+    fn a_question_under_a_wrapped_rule_reads_its_tab_bar() {
+        let prompt = prompt_of(include_str!("fixtures/v2-ask-wrapped-rule-w297.txt"));
+        let labels: Vec<&str> = prompt
+            .questions
+            .iter()
+            .map(|tab| tab.label.as_str())
+            .collect();
+        assert_eq!(labels, ["Pick a branch"]);
+        assert_eq!(prompt.subject, WRAPPED_RULE_QUESTION);
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,

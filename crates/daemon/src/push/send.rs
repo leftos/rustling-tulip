@@ -67,6 +67,29 @@ pub(crate) fn check_endpoint(endpoint: &str, policy: PushPolicy) -> anyhow::Resu
     Ok(url)
 }
 
+/// Checks the push relay's origin before a round posts a relay push to it:
+/// `https` with a host, or, under `policy`, plain `http` to `127.0.0.1` for
+/// the tests' fake relay. It is a separate check from [`check_endpoint`],
+/// which guards Web Push endpoints a phone registers and never admits the
+/// relay.
+///
+/// # Errors
+///
+/// `origin` is neither `https` with a host nor admitted loopback `http`; the
+/// message names its host.
+pub(crate) fn check_relay(origin: &Url, policy: PushPolicy) -> anyhow::Result<()> {
+    let host = origin.host_str().unwrap_or_default();
+    let allowed = match origin.scheme() {
+        "https" => !host.is_empty(),
+        "http" => policy.allow_loopback_http && host == "127.0.0.1",
+        _ => false,
+    };
+    if !allowed {
+        bail!("refused the push relay origin on host {host:?}: not https");
+    }
+    Ok(())
+}
+
 /// What the push service's answer means for the subscription.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -143,6 +166,8 @@ pub(crate) async fn send(
         .body(body)
         .send()
         .await
+        // The URL may carry a relay push's device token: no error keeps it.
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("the push service at {host} could not be reached"))?;
     if response.status().is_success() {
         return Ok(Outcome::Sent);
@@ -181,7 +206,10 @@ pub(crate) async fn send(
 )]
 mod tests {
     use super::super::test_fake::{TESTS, fake_push_service, fake_push_service_with};
-    use super::{Duration, Outcome, PushPolicy, Url, check_endpoint, client, send, topic};
+    use super::{
+        Duration, Outcome, PushPolicy, Url, check_endpoint, check_relay, client, send, topic,
+    };
+    use crate::push::relay::RELAY_ORIGIN;
 
     #[test]
     fn topic_obeys_apples_rule() {
@@ -266,6 +294,38 @@ mod tests {
             .expect_err("only the literal loopback address");
     }
 
+    fn url(text: &str) -> Url {
+        Url::parse(text).expect(text)
+    }
+
+    #[test]
+    fn check_relay_refuses_plain_http_off_loopback() {
+        for origin in [
+            "http://rt-push.leftos.dev",
+            "http://localhost:8080",
+            "http://10.0.0.1:8080",
+            "ftp://rt-push.leftos.dev",
+        ] {
+            let err = check_relay(&url(origin), TESTS).expect_err(origin);
+            assert!(err.to_string().contains("refused"), "{origin}: {err}");
+            check_relay(&url(origin), PRODUCTION).expect_err(origin);
+        }
+    }
+
+    #[test]
+    fn check_relay_admits_loopback_only_in_tests() {
+        let origin = url("http://127.0.0.1:8080");
+        let err = check_relay(&origin, PRODUCTION).expect_err("production refuses it");
+        assert!(err.to_string().contains("127.0.0.1"), "{err}");
+        check_relay(&origin, TESTS).expect("the tests' policy admits it");
+    }
+
+    #[test]
+    fn check_relay_admits_https() {
+        check_relay(&url(RELAY_ORIGIN), PRODUCTION).expect("the relay origin");
+        check_relay(&url("https://relay.example:8443"), PRODUCTION).expect("any https host");
+    }
+
     const BODY: &[u8] = b"an encrypted record";
 
     async fn outcome_for(status: u16, reply: &str) -> Outcome {
@@ -292,6 +352,32 @@ mod tests {
         )
         .await
         .expect("the fake answers")
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_endpoint_error_does_not_carry_its_url() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let port = listener.local_addr().expect("its address").port();
+        drop(listener);
+        let url = check_endpoint(
+            &format!("http://127.0.0.1:{port}/v1/apns/production/feedfacecafe"),
+            TESTS,
+        )
+        .expect("loopback");
+
+        let err = send(
+            &client().expect("a client"),
+            &url,
+            BODY.to_vec(),
+            "rt-AbCdEf012345",
+            "header.claims.signature",
+            "BPublicKey",
+        )
+        .await
+        .expect_err("nothing listens on the port");
+
+        let text = format!("{err:#}");
+        assert!(!text.contains("feedfacecafe"), "{text}");
     }
 
     #[tokio::test]

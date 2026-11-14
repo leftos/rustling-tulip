@@ -104,6 +104,32 @@ fn app_style_opens_a_toast_window_and_no_os_toast(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn applying_a_new_anchor_re_places_open_toasts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, &sessions(&["s2"]), json!({}));
+    h.send(needs_you("s2"));
+    assert_eq!(h.toasts_shown().len(), 1, "the toast is up");
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-notifications");
+    h.scroll_into_view("settings-content", "settings-toast-anchor-top_left");
+    h.click_on("settings-toast-anchor-top_left");
+    let staged = h.toasts_restacked();
+    assert!(
+        staged.iter().all(|rect| (rect.x, rect.y) != (16, 16)),
+        "a staged spot moves nothing"
+    );
+
+    h.click_on("settings-apply");
+
+    let moved = h.toasts_restacked();
+    assert_eq!(
+        moved.last().map(|rect| (rect.x, rect.y)),
+        Some((16, 16)),
+        "the open toast moves to the top left at once"
+    );
+}
+
+#[gpui::test]
 fn os_style_opens_no_toast_window(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &sessions(&["s2"]));

@@ -203,6 +203,42 @@ pub(crate) const RING_EXEMPT: &[(&str, &str)] = &[
         "another choice of the Show toasts as row",
     ),
     (
+        "settings-toast-anchor-top_left",
+        "a spot of the Toast position picker, whose row the search names",
+    ),
+    (
+        "settings-toast-anchor-top_middle",
+        "a spot of the Toast position picker, whose row the search names",
+    ),
+    (
+        "settings-toast-anchor-top_right",
+        "a spot of the Toast position picker, whose row the search names",
+    ),
+    (
+        "settings-toast-anchor-middle_right",
+        "a spot of the Toast position picker, whose row the search names",
+    ),
+    (
+        "settings-toast-anchor-bottom_right",
+        "a spot of the Toast position picker, whose row the search names",
+    ),
+    (
+        "settings-toast-anchor-bottom_middle",
+        "a spot of the Toast position picker, whose row the search names",
+    ),
+    (
+        "settings-toast-anchor-bottom_left",
+        "a spot of the Toast position picker, whose row the search names",
+    ),
+    (
+        "settings-toast-anchor-middle_left",
+        "a spot of the Toast position picker, whose row the search names",
+    ),
+    (
+        "settings-toast-anchor-test",
+        "the Toast position row's Show a test toast button",
+    ),
+    (
         "settings-dashboard-key-source-env",
         "another choice of the Key source row",
     ),
@@ -558,6 +594,13 @@ fn notifications_entries() -> Vec<Entry> {
             "Show toasts as",
             "Notifications",
             Gate::Windows,
+        ),
+        entry(
+            SettingsTab::Notifications,
+            "settings-toast-anchor",
+            "Toast position",
+            "Notifications",
+            Gate::Always,
         ),
     ]
 }

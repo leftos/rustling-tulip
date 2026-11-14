@@ -197,8 +197,8 @@ impl RootView {
     }
 
     /// An arrangement that moves panes out of the first tab claims only the
-    /// panes it keeps there: the blanket claim the chooser armed is dropped,
-    /// and each kept pane is armed to claim as the fold's `bind_panes` binds
+    /// panes it keeps there: the blanket claim the chooser armed, and the
+    /// one a launch focus gain armed, are dropped, and each kept pane is armed to claim as the fold's `bind_panes` binds
     /// it, which runs right after this. The panes it moves claim nothing
     /// here, at a size no visible pane has.
     fn claim_first_tabs_panes(&mut self, panes: &[Pane<'_>], messages: &[ClientMessage]) {
@@ -212,6 +212,7 @@ impl RootView {
             return;
         }
         self.tabs.clear_init_claim();
+        self.tabs.clear_focus_claim();
         for pane in panes.iter().filter(|pane| !moved.contains(pane.id)) {
             let Some(session_id) = pane.session else {
                 continue;

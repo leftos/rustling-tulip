@@ -7,10 +7,14 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - Choose in Settings whether finished subagents stay in the sidebar, how many and for how long, and whether their rows draw compact.
+- Choose where the app's toasts appear: any of eight spots around the screen's edge, in Settings › Notifications.
 
 ### Fixed
 
 - Rebinding a machine's sessions, or opening them from the first-connect layout chooser, now fits each session to its new pane at once.
+- Connecting or pairing from another device no longer waits while the host sends phone alerts and tidies their subscriptions.
+- A window you switch to now fits the sessions it shows to its own panes, even when another computer sized them last.
+- Answering a question from a toast, the Dashboard or the phone works again when Claude draws the question's box indented.
 
 ## v0.14.0-alpha
 

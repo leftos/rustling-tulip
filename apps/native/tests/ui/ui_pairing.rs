@@ -148,6 +148,15 @@ fn sent_only(h: &mut Harness<'_>, wanted: impl Fn(&ClientMessage) -> bool) -> bo
     sent.len() == 1 && wanted(&sent[0])
 }
 
+/// What the client sent, less the `Resize`s a pane claims when the toast
+/// brings the main window to the front.
+fn sent_but_resizes(h: &mut Harness<'_>) -> Vec<ClientMessage> {
+    h.sent()
+        .into_iter()
+        .filter(|msg| !matches!(msg, ClientMessage::Resize { .. }))
+        .collect()
+}
+
 #[gpui::test]
 fn confirm_phase_shows_the_device_and_the_sentence(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -437,7 +446,10 @@ fn toast_approve_opens_the_dialog(cx: &mut TestAppContext) {
     h.activate_pairing_toast(Some("approve:r1"));
     assert!(dialog_open(&mut h), "the toast's Approve… opens the dialog");
     assert_eq!(buttons(&mut h), CONFIRM_BUTTONS, "in its Confirm phase");
-    assert!(h.sent().is_empty(), "the toast never approves");
+    assert!(
+        sent_but_resizes(&mut h).is_empty(),
+        "the toast never approves"
+    );
     assert!(
         !h.root(|root, _| root.settings_open()),
         "Settings stays shut"
@@ -456,7 +468,11 @@ fn toast_approve_keeps_an_open_code_dialog(cx: &mut TestAppContext) {
     fold(&mut h, &[request("r1"), request("r2")]);
     h.activate_pairing_toast(Some("approve:r1"));
     h.click_on(APPROVE);
-    assert!(sent_only(&mut h, approves("r1")), "ApproveDevice r1 alone");
+    let sent = sent_but_resizes(&mut h);
+    assert!(
+        sent.len() == 1 && approves("r1")(&sent[0]),
+        "ApproveDevice r1 alone"
+    );
     assert!(fold_code(&mut h, Some("r1"), 120), "r1's code shows");
 
     h.activate_pairing_toast(Some("approve:r2"));
@@ -465,7 +481,7 @@ fn toast_approve_keeps_an_open_code_dialog(cx: &mut TestAppContext) {
         "r1's code stays on screen"
     );
     assert_eq!(buttons(&mut h), CODE_BUTTONS, "still the code phase");
-    assert!(h.sent().is_empty());
+    assert!(sent_but_resizes(&mut h).is_empty());
 }
 
 #[gpui::test]

@@ -289,6 +289,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_SUBAGENT_LISTING,
     protocol::FEATURE_AGENT_USER_HOOKS,
     protocol::FEATURE_WEB_PUSH,
+    protocol::FEATURE_RELAY_PUSH,
     protocol::FEATURE_UPLOAD_FILE,
     protocol::FEATURE_CLIENT_PRESENCE,
     protocol::FEATURE_TYPED_PROMPT_ANSWERS,
@@ -874,6 +875,24 @@ mod tests {
                 &welcome,
                 DaemonMessage::Welcome { features, .. }
                     if features.iter().any(|f| f == protocol::FEATURE_WEB_PUSH)
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_relay_push() {
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            HeldServices::default(),
+        );
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_RELAY_PUSH)
             ),
             "{welcome:?}"
         );

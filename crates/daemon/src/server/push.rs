@@ -180,7 +180,7 @@ fn confirm(
 ) -> Result<(), Refusal> {
     let devices = crate::sync::lock(&hub.devices);
     let mut push = crate::sync::lock(&hub.push);
-    if let Err(err) = push.sweep(&devices) {
+    if let Err(err) = push.sweep(crate::push::state::unrevoked_ids(&devices).as_ref()) {
         // The sweep unloaded the state, so nothing it would drop stays in
         // memory and the next load sweeps again; the request still stands.
         warn!(
@@ -902,7 +902,9 @@ mod tests {
         {
             let devices = crate::sync::lock(&hub.devices);
             let mut push = crate::sync::lock(&hub.push);
-            let loaded = push.load(&devices).expect("loaded");
+            let loaded = push
+                .load(crate::push::state::unrevoked_ids(&devices).as_ref())
+                .expect("loaded");
             let mut stored = loaded.subs.get(&device_id).expect("stored").clone();
             stored.created_at = old.to_owned();
             loaded.subs.put(&device_id, stored).expect("backdate it");
@@ -910,7 +912,9 @@ mod tests {
         let created_at = |hub: &Hub| {
             let devices = crate::sync::lock(&hub.devices);
             let mut push = crate::sync::lock(&hub.push);
-            let loaded = push.load(&devices).expect("loaded");
+            let loaded = push
+                .load(crate::push::state::unrevoked_ids(&devices).as_ref())
+                .expect("loaded");
             loaded
                 .subs
                 .get(&device_id)
@@ -1021,7 +1025,9 @@ mod tests {
     fn held_in_memory(hub: &Hub, device_id: &str) -> bool {
         let devices = crate::sync::lock(&hub.devices);
         let mut push = crate::sync::lock(&hub.push);
-        let loaded = push.load(&devices).expect("loaded");
+        let loaded = push
+            .load(crate::push::state::unrevoked_ids(&devices).as_ref())
+            .expect("loaded");
         loaded.subs.get(device_id).is_some()
     }
 

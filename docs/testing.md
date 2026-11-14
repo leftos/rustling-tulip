@@ -156,6 +156,7 @@ The views:
 - `settings-hosts`: Settings on the Claude page with the host selector showing This PC and a remote host on 0.9.0 wearing the Behind tag.
 - `settings-accounts`: Settings on the Accounts tab, scrolled to the auto-switch block and its forecast.
 - `settings-sounds`: Settings on the Notifications tab with the Needs you sound list open.
+- `settings-toast-position`: Settings on the Notifications tab scrolled to the Toast position row, found by a search for "toast position".
 - `accounts`: the footer's accounts popover open over scripted accounts. The shots' fake daemon lists `accounts`, so every view shows the accounts chip.
 - `toast`: the app's own toast cards in a tall window: a permission Needs you with Allow and Deny, a Finished card, and a "Needs you · web" card with three long, wrapped answers carrying descriptions.
 - `gates`: the Gates panel over a scripted gate state: busy, held, free and stale heavy slots with a gate waiting, a busy light slot, the remote pool and the queue, then the Recent runs block (good and bad rows) and the Last 7 days block, with the footer's `Gates` pill; slot, waiting and queue rows show the usual time after the time held or the age, and the pill carries the failure tail for a run that failed in the last 10 minutes. Only this view's fake daemon lists `gate_state`, and it answers `GateHistory` with a scripted journal.

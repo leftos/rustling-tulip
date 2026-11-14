@@ -301,6 +301,11 @@ pub struct TabsModel {
     /// list newly shows claims its size. A tab update that is not a whole
     /// list leaves it waiting.
     init_claim: InitClaim,
+    /// Whether the main window gained focus before This PC's first tab
+    /// list, and whether that list is applied yet: the panes it newly binds
+    /// in the tab the main window shows claim their sizes. A new connection
+    /// keeps it, since only the first list answers it.
+    focus_claim: InitClaim,
     /// The reorders this client sent that no echo has settled, oldest
     /// first: the request's id, the strip's order before it applied and the
     /// order it sent. A refusal hands the order it found to the entry after
@@ -1430,6 +1435,10 @@ impl TabsModel {
         if self.init_claim == InitClaim::Armed {
             self.init_claim = InitClaim::Applied;
         }
+        // The first whole list answers a focus gain that came before it.
+        if self.focus_claim == InitClaim::Armed {
+            self.focus_claim = InitClaim::Applied;
+        }
         let live: HashSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
         self.pending_restore
             .retain(|id, _| live.contains(id.as_str()));
@@ -1979,11 +1988,39 @@ impl TabsModel {
         true
     }
 
+    /// The main window gained focus: before This PC's first whole tab list
+    /// it arms the first list's claim and returns true; once a list is in
+    /// it arms nothing and returns false, and the shown panes claim at once.
+    pub fn arm_focus_claim(&mut self) -> bool {
+        if self.loaded {
+            return false;
+        }
+        self.focus_claim = InitClaim::Armed;
+        true
+    }
+
+    /// Takes whether the whole tab list just applied is the first one, and
+    /// the main window gained focus before it: true once.
+    pub fn take_focus_claim(&mut self) -> bool {
+        if self.focus_claim != InitClaim::Applied {
+            return false;
+        }
+        self.focus_claim = InitClaim::None;
+        true
+    }
+
     /// The whole tab list that answers the chooser's choice lays its
     /// sessions out itself: the blanket claim goes, and only the panes it
     /// keeps claim their size.
     pub fn clear_init_claim(&mut self) {
         self.init_claim = InitClaim::None;
+    }
+
+    /// A focus gain before This PC's first whole tab list claims nothing
+    /// through that list: the first-connect chooser's arrangement lays the
+    /// list out and claims for it, or the main window lost focus first.
+    pub fn clear_focus_claim(&mut self) {
+        self.focus_claim = InitClaim::None;
     }
 
     /// Takes whether the user bound `session` to a pane in this client and

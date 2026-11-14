@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::anyhow;
+use reqwest::Url;
 
 use super::send::PushPolicy;
 use super::store::{SUBSCRIPTIONS_FILE, SubscriptionStore};
@@ -29,17 +30,22 @@ pub(crate) struct PushState {
     dir: Option<PathBuf>,
     /// Which endpoints a subscription may name.
     policy: PushPolicy,
+    /// The push relay's origin, which `apns` and `fcm` pushes go to:
+    /// [`super::relay::RELAY_ORIGIN`] in the daemon, a fake relay in tests.
+    relay_origin: Url,
     /// The key and the store, once loaded.
     loaded: Option<Loaded>,
 }
 
 impl PushState {
-    /// A state over `dir`, loaded on the first push request.
+    /// A state over `dir`, loaded on the first push request, posting relay
+    /// pushes under `relay_origin`.
     #[must_use]
-    pub(crate) fn new(dir: Option<PathBuf>, policy: PushPolicy) -> Self {
+    pub(crate) fn new(dir: Option<PathBuf>, policy: PushPolicy, relay_origin: Url) -> Self {
         Self {
             dir,
             policy,
+            relay_origin,
             loaded: None,
         }
     }
@@ -50,9 +56,17 @@ impl PushState {
         self.policy
     }
 
+    /// The push relay's origin.
+    #[must_use]
+    pub(crate) fn relay_origin(&self) -> &Url {
+        &self.relay_origin
+    }
+
     /// The key and the store, loading them on first use and then sweeping
-    /// them against `devices`: [`Self::load_unswept`], then, on that first
-    /// load only, [`Self::sweep`].
+    /// them against `paired`: [`Self::load_unswept`], then, on that first
+    /// load only, [`Self::sweep`]. `paired` is [`unrevoked_ids`] of a
+    /// `Hub::devices` read the caller took before this lock's work, so the
+    /// sweep never needs `devices` held during the file I/O.
     ///
     /// # Errors
     ///
@@ -61,11 +75,11 @@ impl PushState {
     /// corrupt, or the sweep could not save it. Nothing is kept, so the next
     /// request tries again; the messages name the files, never an endpoint
     /// or a key.
-    pub(crate) fn load(&mut self, devices: &DeviceStore) -> anyhow::Result<&mut Loaded> {
+    pub(crate) fn load(&mut self, paired: Option<&HashSet<String>>) -> anyhow::Result<&mut Loaded> {
         let first = self.loaded.is_none();
         self.load_unswept()?;
         if first {
-            self.sweep(devices)?;
+            self.sweep(paired)?;
         }
         self.loaded
             .as_mut()
@@ -75,9 +89,9 @@ impl PushState {
     /// The key and the store, loading them on first use without
     /// `Hub::devices`: the folder is created, the key is read or made, and
     /// the store is read. A first load keeps every subscription in the file,
-    /// so the caller runs [`Self::sweep`] under `Hub::devices` before it
-    /// lets go of this lock's work (a block that found the state unloaded
-    /// relies on that sweep).
+    /// so the caller runs [`Self::sweep`], against a `Hub::devices` read
+    /// taken after this load, before it lets go of this lock's work (a block
+    /// that found the state unloaded relies on that sweep).
     ///
     /// # Errors
     ///
@@ -107,23 +121,23 @@ impl PushState {
             .ok_or_else(|| anyhow!("the push state did not load"))
     }
 
-    /// Drop every loaded subscription of a device that is not an unrevoked
-    /// record in `devices`, in memory and, when one drops, in the file. An
-    /// unloaded state, or a corrupt `devices` (so a corrupt `devices.json`
-    /// wipes nothing), is left as it is.
+    /// Drop every loaded subscription of a device not in `paired`, the
+    /// [`unrevoked_ids`] of `Hub::devices`, in memory and, when one drops,
+    /// in the file. An unloaded state, or `None` for `paired` (a corrupt
+    /// `devices.json`, so it wipes nothing), is left as it is.
     ///
     /// # Errors
     ///
     /// The sweep could not save the file; the state is then unloaded, so no
     /// dropped subscription stays in memory and the next load sweeps again.
-    pub(crate) fn sweep(&mut self, devices: &DeviceStore) -> anyhow::Result<()> {
+    pub(crate) fn sweep(&mut self, paired: Option<&HashSet<String>>) -> anyhow::Result<()> {
         let Some(loaded) = self.loaded.as_mut() else {
             return Ok(());
         };
-        let Some(known) = unrevoked_ids(devices) else {
+        let Some(known) = paired else {
             return Ok(());
         };
-        match loaded.subs.retain_devices(&known) {
+        match loaded.subs.retain_devices(known) {
             Ok(0) => Ok(()),
             Ok(dropped) => {
                 tracing::info!(
@@ -155,9 +169,9 @@ impl PushState {
     /// Delete `device_id`'s subscription when the state is loaded and its
     /// address is still `address` (see
     /// [`SubscriptionStore::remove_if_address`]). An unloaded state does
-    /// nothing, so the push trigger loads it first, holding `Hub::devices`
-    /// then this lock. A save failure is logged and unloads the state, as
-    /// [`Self::remove_device`] does.
+    /// nothing, so the push trigger loads it first under this lock, which it
+    /// took before releasing `Hub::devices`. A save failure is logged and
+    /// unloads the state, as [`Self::remove_device`] does.
     pub(crate) fn remove_if_address(&mut self, device_id: &str, address: &str) {
         let Some(loaded) = self.loaded.as_mut() else {
             return;
