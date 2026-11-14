@@ -42,10 +42,6 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tower::Layer as _;
 
-/// Consecutive transient `whoami` failures after which Tailscale counts as
-/// down.
-const TRANSIENT_LIMIT: u32 = 3;
-
 /// The longest pause between retries of a failing certificate check while a
 /// certificate is in service.
 const CERT_BACKOFF_CAP: Duration = Duration::from_hours(1);
@@ -103,9 +99,10 @@ pub enum ListenerStatus {
     /// Every address failed to bind for a reason other than the port being in
     /// use.
     BindFailed(String),
-    /// `tailscale whoami` failed definitively (or transiently several times
-    /// in a row), or listed no address to bind; no server runs, and `whoami`
-    /// is retried with backoff.
+    /// `tailscale whoami` failed definitively, failed transiently before any
+    /// host identity was known, or listed no address to bind; no server runs,
+    /// and `whoami` is retried with backoff. A transient failure while an
+    /// identity is known never takes the listener down.
     TailscaleDown(TailnetError),
 }
 
@@ -340,6 +337,9 @@ pub struct TailnetListener {
     /// Whether the supervisor should panic at the top of its loop.
     #[cfg(test)]
     panic_supervisor: Arc<AtomicBool>,
+    /// The host identity the gate admits against, as the supervisor sets it.
+    #[cfg(test)]
+    host_answer: watch::Receiver<Option<WhoIs>>,
 }
 
 impl TailnetListener {
@@ -380,6 +380,8 @@ impl TailnetListener {
     ) -> Self {
         let Wiring { api, serve, policy } = wiring;
         let (host, host_answer) = watch::channel(None);
+        #[cfg(test)]
+        let host_seen = host_answer.clone();
         let acceptor = TailnetAcceptor::new(
             Arc::clone(&api),
             host_answer,
@@ -453,7 +455,14 @@ impl TailnetListener {
             cert_done_at_exit,
             #[cfg(test)]
             panic_supervisor,
+            #[cfg(test)]
+            host_answer: host_seen,
         }
+    }
+
+    #[cfg(test)]
+    fn host_answer(&self) -> Option<WhoIs> {
+        self.host_answer.borrow().clone()
     }
 
     /// A life under this listener's root, standing in for a server's: it
@@ -887,6 +896,15 @@ enum Flow {
     Shutdown,
 }
 
+/// When the next `whoami` follows a failed one.
+#[derive(PartialEq, Eq)]
+enum Retry {
+    /// At the poll interval: the listener stays up.
+    Poll,
+    /// After the down backoff, which doubles per failure.
+    Backoff,
+}
+
 struct Supervisor<A, S> {
     api: Arc<A>,
     serve: Arc<S>,
@@ -986,15 +1004,18 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
                 Some(self.options.poll_interval)
             }
             Ok(who) => {
-                self.host.send_replace(Some(who.clone()));
                 *down_backoff = self.options.down_backoff;
                 self.clear_down_state();
+                self.end_old_identity(&who).await;
+                self.host.send_replace(Some(who.clone()));
                 let flow = self.apply(&who, shutdown).await;
                 self.last_who = Some(who);
                 (flow != Flow::Shutdown).then_some(self.options.poll_interval)
             }
             Err(err) => {
-                self.whoami_failed(err).await;
+                if self.whoami_failed(err).await == Retry::Poll {
+                    return Some(self.options.poll_interval);
+                }
                 let pause = *down_backoff;
                 *down_backoff = (pause * 2).min(self.options.poll_interval);
                 Some(pause)
@@ -1002,9 +1023,33 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
         }
     }
 
+    /// The host's tailnet identity changed (another node id or user): every
+    /// session and verdict was made against the old one, so every server
+    /// stops and `who` comes up fresh.
+    async fn end_old_identity(&mut self, who: &WhoIs) {
+        let Some(old) = &self.last_who else {
+            return;
+        };
+        if host_key(old) == host_key(who) {
+            return;
+        }
+        tracing::warn!("tailnet listener: the host's tailnet identity changed; every session ends");
+        // Withdraw the old identity first, so no server still draining admits
+        // a peer against it and rounds in flight land as discarded.
+        self.host.send_replace(None);
+        self.stop_all().await;
+        self.last_who = None;
+    }
+
     /// Forget the `whoami` failure bookkeeping: an answer that keeps the
-    /// listener up was applied.
+    /// listener up was applied, ending any spell of transient failures.
     fn clear_down_state(&mut self) {
+        if self.transient_failures > 0 {
+            tracing::info!(
+                failures = self.transient_failures,
+                "tailnet listener: the tailscale CLI answered again"
+            );
+        }
         self.transient_failures = 0;
         self.last_down_error = None;
     }
@@ -1060,21 +1105,42 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
 
     /// A definitive failure (Tailscale not installed, not running, refusing
     /// this user, not connected) stops every server and is the status. A
-    /// transient one (timeout, unparsable output, other CLI failure) keeps
-    /// the servers and the status, until [`TRANSIENT_LIMIT`] in a row.
-    async fn whoami_failed(&mut self, err: TailnetError) {
+    /// transient one (timeout, unparsable output, other CLI failure) takes
+    /// the listener down only before any host identity is known: with one
+    /// known it keeps the servers, the identity and the status, and the next
+    /// `whoami` is at the poll interval. Before one is known it is the
+    /// status at once, except that a tagged host stays tagged.
+    async fn whoami_failed(&mut self, err: TailnetError) -> Retry {
         self.no_address_reported = false;
-        if is_transient(&err) {
-            self.transient_failures += 1;
-            if self.transient_failures < TRANSIENT_LIMIT {
-                tracing::warn!(
-                    %err,
-                    failures = self.transient_failures,
-                    "tailnet listener: tailscale whoami failed; keeping the servers and retrying"
-                );
-                return;
-            }
+        if !is_transient(&err) {
+            self.transient_failures = 0;
+            self.went_down(err).await;
+            return Retry::Backoff;
         }
+        self.transient_failures += 1;
+        if self.last_who.is_some() {
+            self.report_transient(&err);
+            return Retry::Poll;
+        }
+        if *self.status.borrow() != ListenerStatus::HostTagged {
+            self.went_down(err).await;
+        }
+        Retry::Backoff
+    }
+
+    /// Log one failure of a transient spell while still serving: at warn on
+    /// the first and every tenth, at debug otherwise.
+    fn report_transient(&self, err: &TailnetError) {
+        let failures = self.transient_failures;
+        if failures == 1 || failures.is_multiple_of(10) {
+            tracing::warn!(%err, failures, "tailnet listener: the tailscale CLI is slow or failing; still serving");
+        } else {
+            tracing::debug!(%err, failures, "tailnet listener: the tailscale CLI is slow or failing; still serving");
+        }
+    }
+
+    /// Tailscale is down: forget the identity, stop every server and say why.
+    async fn went_down(&mut self, err: TailnetError) {
         let stopping = !self.servers.is_empty();
         if stopping || self.last_down_error.as_ref() != Some(&err) {
             tracing::warn!(%err, "tailnet listener: Tailscale is down; servers stopped, retrying");
@@ -1724,7 +1790,10 @@ impl<A: TailnetApi> Gate<A> {
         let mut state = self.state();
         state.follow_host(current);
         if current != Some(host_key(host)) {
-            tracing::warn!(%peer, "tailnet listener: the host's identity changed during whois; connection dropped");
+            tracing::warn!(
+                %peer,
+                "tailnet listener: the host's tailnet identity changed or went down during whois; connection dropped"
+            );
             return None;
         }
         if state
@@ -1738,6 +1807,15 @@ impl<A: TailnetApi> Gate<A> {
         match &verdict {
             Some(verdict) => state.cache.insert(ip, verdict.clone(), now),
             None => state.failures.insert(ip, (), now),
+        }
+        drop(state);
+        if let Some(Verdict::Allow(identity)) = &verdict {
+            tracing::info!(
+                %peer,
+                device = %identity.name,
+                stable_id = %identity.stable_id,
+                "tailnet listener: peer admitted"
+            );
         }
         verdict
     }
@@ -1763,15 +1841,7 @@ impl<A: TailnetApi> Gate<A> {
             }
         };
         match (self.policy.authorize)(peer.ip(), &who, host) {
-            Ok(identity) => {
-                tracing::info!(
-                    %peer,
-                    device = %identity.name,
-                    stable_id = %identity.stable_id,
-                    "tailnet listener: peer admitted"
-                );
-                Some(Verdict::Allow(identity))
-            }
+            Ok(identity) => Some(Verdict::Allow(identity)),
             Err(denied) => {
                 tracing::warn!(%peer, reason = %denied, "tailnet listener: peer refused by the owner rule");
                 Some(Verdict::Deny(denied))
@@ -2753,32 +2823,132 @@ mod tests {
         shutdown.send_replace(true);
     }
 
+    /// Wait until `failures` scripted `whoami` failures have been handled:
+    /// every call after `before` answers the failure, and a call made after
+    /// the last of them means the supervisor applied it.
+    async fn wait_for_failures(fake: &FakeTailnet, before: usize, failures: usize) {
+        wait_until("the scripted whoami failures", || {
+            fake.whoami_calls() > before + failures
+        })
+        .await;
+    }
+
+    /// The node id and user of the identity the gate admits against.
+    fn host_identity(listener: &TailnetListener) -> Option<(i64, i64)> {
+        listener.host_answer().as_ref().map(host_key)
+    }
+
     #[tokio::test]
-    async fn transient_whoami_errors_keep_serving_until_the_third() {
+    async fn transient_whoami_errors_keep_serving() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
+        let serving = wait_for_status(&listener, is_serving).await;
+        let seen = record_statuses(&listener);
+
+        fake.set_whoami(Err(TailnetError::Timeout));
+        wait_for_failures(&fake, fake.whoami_calls(), 5).await;
+        assert_eq!(
+            serve.finished.load(Ordering::SeqCst),
+            0,
+            "no server stopped"
+        );
+        assert_eq!(*listener.status().borrow(), serving, "still serving");
+        assert!(
+            seen.lock().expect("status log lock").is_empty(),
+            "the status never changed"
+        );
+        assert_eq!(
+            host_identity(&listener),
+            Some(host_key(&whoami_with(&["127.0.0.1/32"]))),
+            "the host watch still holds the identity"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn a_definitive_error_after_transient_failures_stops_the_servers() {
         let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
         let serve = Arc::new(PlainServe::default());
         let (listener, shutdown) = start(&fake, &serve, quick_options());
         wait_for_status(&listener, is_serving).await;
+
+        fake.set_whoami(Err(TailnetError::Timeout));
+        wait_for_failures(&fake, fake.whoami_calls(), 2).await;
+        assert!(
+            is_serving(&listener.status().borrow()),
+            "transient failures keep serving"
+        );
+        fake.set_whoami(Err(TailnetError::NotRunning));
+        let down = wait_for_status(&listener, |s| !is_serving(s)).await;
+        assert_eq!(
+            down,
+            ListenerStatus::TailscaleDown(TailnetError::NotRunning)
+        );
+        assert_eq!(serve.finished.load(Ordering::SeqCst), 1, "server stopped");
+        assert_eq!(host_identity(&listener), None, "the identity is cleared");
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_failure_with_no_identity_reports_tailscale_down() {
+        let fake = Arc::new(FakeTailnet::with_whoami(Err(TailnetError::Timeout)));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let status = wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
+        assert_eq!(status, ListenerStatus::TailscaleDown(TailnetError::Timeout));
+        assert_eq!(fake.whoami_calls(), 1, "down on the first failure");
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn a_tagged_host_stays_tagged_through_a_transient_failure() {
+        let mut tagged = whoami_with(&["127.0.0.1/32"]);
+        tagged.node.tags = vec!["tag:server".to_owned()];
+        let fake = Arc::new(FakeTailnet::with_whoami(Ok(tagged)));
+        let serve = Arc::new(PlainServe::default());
+        let options = ListenerOptions {
+            down_backoff: Duration::from_millis(50),
+            ..quick_options()
+        };
+        let (listener, shutdown) = start(&fake, &serve, options);
+        wait_for_status(&listener, |s| *s == ListenerStatus::HostTagged).await;
         let seen = record_statuses(&listener);
 
         fake.set_whoami(Err(TailnetError::Timeout));
-        let down = wait_for_status(&listener, |s| !is_serving(s)).await;
-        assert_eq!(down, ListenerStatus::TailscaleDown(TailnetError::Timeout));
-        assert!(
-            fake.whoami_calls() >= 4,
-            "one answer, then two transient failures kept serving and the third stopped it"
-        );
-        // The recorder is a task of its own, so wait for it to see the change.
-        wait_until("the recorded status", || {
-            !seen.lock().expect("status log lock").is_empty()
-        })
-        .await;
+        wait_for_failures(&fake, fake.whoami_calls(), 3).await;
         assert_eq!(
-            *seen.lock().expect("status log lock"),
-            [ListenerStatus::TailscaleDown(TailnetError::Timeout)],
-            "the status stayed Serving through the first two failures"
+            *listener.status().borrow(),
+            ListenerStatus::HostTagged,
+            "a transient failure is no answer about the tag"
         );
-        assert_eq!(serve.finished.load(Ordering::SeqCst), 1, "server stopped");
+        assert!(
+            seen.lock().expect("status log lock").is_empty(),
+            "the status never changed"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_spell_retries_at_the_poll_interval() {
+        // No name: the identity is known, but nothing binds and no
+        // certificate is asked for, so the paused clock sees no OS call.
+        let fake = Arc::new(FakeTailnet::with_whoami(Ok(whoami_named(
+            "",
+            &["127.0.0.1/32"],
+        ))));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
+        fake.set_whoami(Err(TailnetError::Timeout));
+        // Calls at 0, 30, 60 and 90 s.
+        tokio::time::sleep(Duration::from_secs(95)).await;
+        let times = fake.whoami_times();
+        let gaps: Vec<u64> = times
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).as_secs())
+            .collect();
+        assert_eq!(gaps, [30, 30, 30]);
         shutdown.send_replace(true);
     }
 
@@ -4183,6 +4353,46 @@ mod tests {
             !life.is_cancelled(),
             "a reload keeps the server, and so its sessions"
         );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn a_session_survives_transient_whoami_failures() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown, life) = serving_session(&fake).await;
+        fake.set_whoami(Err(TailnetError::Timeout));
+        wait_for_failures(&fake, fake.whoami_calls(), 5).await;
+        assert!(
+            is_serving(&listener.status().borrow()),
+            "still serving through the failures"
+        );
+        assert!(
+            !life.is_cancelled(),
+            "transient failures keep the server, and so its sessions"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn an_identity_change_ends_every_session() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown, life) = serving_session(&fake).await;
+        let mut other = whoami_with(&["127.0.0.1/32"]);
+        other.node.id = 7;
+        fake.set_whoami(Ok(other.clone()));
+        wait_for_end(&life).await;
+        // The answer that ended the session was already counted, so a later
+        // call means it has been applied.
+        wait_for_failures(&fake, fake.whoami_calls(), 0).await;
+        assert_eq!(
+            host_identity(&listener),
+            Some(host_key(&other)),
+            "the gate admits against the new identity"
+        );
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+        let mut handshake = tls_connect(addr, &fake.ca).await;
+        let response = http_get(&mut handshake.stream, "/life").await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         shutdown.send_replace(true);
     }
 

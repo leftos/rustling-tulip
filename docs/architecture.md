@@ -228,7 +228,7 @@ One native window shows This PC and every saved tailnet and SSH host at once; th
 
   Turning remote access off drops every waiting request and code, and each waiting device is told `DevicePairDecided { Expired }`.
 
-  A tailnet connection, served or pairing, ends with the listener server (the bound address) that accepted it: remote access turned off or its port changed, Tailscale down, the host becoming tagged, HTTPS disabled, the certificate lost, an address vanishing, a supervisor panic, or the server task ending on its own.
+  A tailnet connection, served or pairing, ends with the listener server (the bound address) that accepted it: remote access turned off or its port changed, Tailscale down (a definitive `whoami` failure, or a first transient one before any identity is known; a slow or failing CLI while the identity is known keeps serving), the host's tailnet node or user changing (every server and session ends, then the listener comes up as the new identity), the host becoming tagged, HTTPS disabled, the certificate lost, an address vanishing, a supervisor panic, or the server task ending on its own.
 
   It gets a WebSocket Close within 2 s (`SERVER_ENDED_CLOSE_LIMIT`) even if the peer stopped reading, and then the socket is dropped; a served connection drops its queued output, a pairing connection sends what is queued first. A certificate reload or a rename does not close it, and loopback connections are never touched.
 

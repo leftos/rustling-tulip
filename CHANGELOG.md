@@ -16,6 +16,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A window you switch to now fits the sessions it shows to its own panes, even when another computer sized them last.
 - Answering a question from a toast, the Dashboard or the phone works again when Claude draws the question's box indented.
 - A session in a tab or split you haven't looked at yet now fills its pane to the bottom when first shown, instead of leaving blank rows.
+- Another computer on your tailnet stays connected while the host PC is busy, instead of dropping each time Tailscale answers slowly.
 
 ### Changed
 
