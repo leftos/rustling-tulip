@@ -6,7 +6,9 @@
 //! untagged, not shared in, and not the host itself.
 //!
 //! Every failure is a typed error ([`TailnetError`], [`Denied`]), and a caller
-//! treats every error as "deny": a peer is admitted only on an `Ok`.
+//! treats every error as "deny": a peer is admitted only on an `Ok`, except
+//! that on a [`TailnetError::Timeout`] a caller may admit a peer it admitted
+//! recently. Every other error denies.
 
 mod cli;
 mod model;

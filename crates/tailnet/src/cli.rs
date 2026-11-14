@@ -37,7 +37,8 @@ const MACOS_CANDIDATES: [&str; 3] = [
     "/usr/local/bin/tailscale",
 ];
 
-/// Why a `tailscale` call failed. A caller treats every one as "deny".
+/// Why a `tailscale` call failed. A caller treats every one as "deny", except
+/// that on a [`TailnetError::Timeout`] it may admit a peer it admitted recently.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TailnetError {
     #[error("the tailscale CLI was not found")]
@@ -90,7 +91,8 @@ impl Cli {
     ///
     /// # Errors
     ///
-    /// Any [`TailnetError`]; the peer is then denied.
+    /// Any [`TailnetError`]; the peer is then denied, except that on a
+    /// [`TailnetError::Timeout`] a caller may admit a peer it admitted recently.
     pub async fn whois(&self, addr: SocketAddr) -> Result<WhoIs, TailnetError> {
         let addr = SocketAddr::new(addr.ip().to_canonical(), addr.port());
         let stdout = self

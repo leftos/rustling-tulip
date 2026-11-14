@@ -336,13 +336,17 @@ async fn tailnet_ws_handler(
     }
     let identity = peer.identity().clone();
     let server_life = peer.server_life().clone();
-    ws.on_upgrade(move |socket| {
+    let connection = Arc::clone(peer.connection());
+    ws.on_upgrade(move |socket| async move {
+        // Held for the socket's life: its drop is the admitted connection's end.
+        let _connection = connection;
         client_session_until(
             state.hub,
             socket,
             AuthKind::Tailnet(identity),
             Some(server_life),
         )
+        .await;
     })
 }
 

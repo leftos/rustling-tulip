@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, MutexGuard, PoisonError};
+use std::sync::{Arc, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 use tailnet::{Denied, PeerIdentity, TailnetError, WhoIs};
 use tokio::sync::{OnceCell, Semaphore, watch};
@@ -357,7 +357,10 @@ impl TailnetListener {
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         let wiring = Wiring {
-            api: Arc::new(tailnet::Cli::locate()),
+            api: Arc::new(tailnet::Cli {
+                timeout: CLI_TIMEOUT,
+                ..tailnet::Cli::locate()
+            }),
             serve: Arc::new(TlsServe { router }),
             policy: shipped_policy(),
         };
@@ -1422,6 +1425,14 @@ const VERDICT_TTL: Duration = Duration::from_secs(30);
 /// The most peer IPs the verdict cache holds.
 const VERDICT_CAP: usize = 256;
 
+/// How long a peer IP stays let back in when its `whois` times out: from its
+/// last real admission, or from the end of its last admitted connection.
+const ADMITTED_TTL: Duration = Duration::from_mins(10);
+
+/// The timeout the daemon's `tailscale whoami` and `whois` calls get, and the
+/// gate's own bound on a `whois`.
+const CLI_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The most `whois` calls in flight at once, across every peer.
 const WHOIS_CONCURRENCY: usize = 4;
 
@@ -1432,6 +1443,46 @@ const WHOIS_CONCURRENCY: usize = 4;
 pub struct AuthorizedPeer {
     identity: PeerIdentity,
     server_life: CancellationToken,
+    /// Dropped with the last clone of this peer: the admitted connection's end.
+    connection: Arc<AdmittedConnection>,
+}
+
+/// An admitted connection; its drop, the connection's end, lets its peer IP
+/// back in on a timed-out `whois` for [`ADMITTED_TTL`] from then, unless a
+/// refusal or a host change cleared the admitted store since its admission.
+pub(crate) struct AdmittedConnection {
+    state: Weak<std::sync::Mutex<GateState>>,
+    ip: IpAddr,
+    identity: PeerIdentity,
+    /// The admitted store's clear epoch at admission.
+    epoch: u64,
+}
+
+impl std::fmt::Debug for AdmittedConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdmittedConnection")
+            .field("ip", &self.ip)
+            .field("device", &self.identity.name)
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for AdmittedConnection {
+    fn drop(&mut self) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        let Ok(mut state) = state.lock() else {
+            tracing::warn!(ip = %self.ip, "tailnet listener: the gate's state is poisoned; connection end not recorded");
+            return;
+        };
+        if state.admitted_epoch == self.epoch {
+            state
+                .admitted
+                .insert(self.ip, self.identity.clone(), Instant::now());
+        }
+    }
 }
 
 impl AuthorizedPeer {
@@ -1453,10 +1504,22 @@ impl AuthorizedPeer {
     /// server whose end `server_life` stands for.
     #[cfg(test)]
     pub(crate) fn for_tests(identity: PeerIdentity, server_life: CancellationToken) -> Self {
+        let connection = Arc::new(AdmittedConnection {
+            state: Weak::new(),
+            ip: PEER_TAILNET_IP,
+            identity: identity.clone(),
+            epoch: 0,
+        });
         Self {
             identity,
             server_life,
+            connection,
         }
+    }
+
+    /// Kept alive for as long as the connection this peer was admitted for.
+    pub(crate) fn connection(&self) -> &Arc<AdmittedConnection> {
+        &self.connection
     }
 }
 
@@ -1531,7 +1594,7 @@ struct WhoisLimits {
 
 impl WhoisLimits {
     const PRODUCTION: Self = Self {
-        timeout: tailnet::DEFAULT_TIMEOUT,
+        timeout: CLI_TIMEOUT,
         permit_wait: tailnet::DEFAULT_TIMEOUT,
     };
 }
@@ -1563,6 +1626,10 @@ impl<V> TtlMap<V> {
 
     fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    fn remove(&mut self, ip: IpAddr) {
+        self.entries.remove(&ip);
     }
 
     fn insert(&mut self, ip: IpAddr, value: V, now: Instant) {
@@ -1618,7 +1685,7 @@ struct Gate<A> {
     policy: PeerPolicy,
     limits: WhoisLimits,
     permits: Semaphore,
-    state: std::sync::Mutex<GateState>,
+    state: Arc<std::sync::Mutex<GateState>>,
 }
 
 /// The host identity verdicts are bound to: its node id and user id.
@@ -1630,6 +1697,26 @@ fn host_key(host: &WhoIs) -> HostKey {
 
 /// One `whois` round for a peer IP; `None` when it failed.
 type Round = Arc<OnceCell<Option<Verdict>>>;
+
+/// What a `whois` round came to before it lands.
+enum Outcome {
+    /// `whois` answered and the owner rule judged the peer.
+    Verdict(Verdict),
+    /// The permit wait, the gate's bound or the CLI's own timeout ran out.
+    TimedOut,
+    /// Any other `whois` error.
+    Failed,
+}
+
+/// What landing a round settled for its connections.
+enum Landed {
+    /// The owner rule's verdict, cached.
+    Verdict(Verdict),
+    /// A timed-out round let a recently admitted peer back in.
+    Fallback(PeerIdentity),
+    /// No verdict: the peer is backed off and refused.
+    Refused,
+}
 
 struct GateState {
     /// The host the verdicts and the rounds under way were made against;
@@ -1643,17 +1730,63 @@ struct GateState {
     /// The `whois` round under way per peer IP, which every connection from
     /// that IP waits on.
     flights: HashMap<IpAddr, Round>,
+    /// Peer IPs a timed-out `whois` lets back in: written by a real admission
+    /// and by an admitted connection's end, never by a fallback admission.
+    admitted: TtlMap<PeerIdentity>,
+    /// Bumped by every clear of `admitted`, so a connection admitted before
+    /// a clear writes nothing when it ends.
+    admitted_epoch: u64,
 }
 
 impl GateState {
     /// Bind the state to `host`: a changed host identity drops every
-    /// verdict and every round under way.
+    /// verdict, every admitted peer and every round under way.
     fn follow_host(&mut self, host: Option<HostKey>) {
         if self.host != host {
             self.host = host;
             self.no_host_reported = false;
             self.cache.clear();
+            self.forget_all_admitted();
             self.flights.clear();
+        }
+    }
+
+    fn forget_admitted(&mut self, ip: IpAddr) {
+        self.admitted.remove(ip);
+        self.admitted_epoch = self.admitted_epoch.wrapping_add(1);
+    }
+
+    fn forget_all_admitted(&mut self) {
+        self.admitted.clear();
+        self.admitted_epoch = self.admitted_epoch.wrapping_add(1);
+    }
+
+    /// Write `outcome` for `ip` at `now`: a verdict is cached and admits or
+    /// forgets the peer; another error forgets it and backs it off; a
+    /// timeout lets a recently admitted peer back in, writing nothing, or
+    /// backs the peer off.
+    fn record(&mut self, ip: IpAddr, outcome: Outcome, now: Instant) -> Landed {
+        match outcome {
+            Outcome::Verdict(verdict) => {
+                match &verdict {
+                    Verdict::Allow(identity) => self.admitted.insert(ip, identity.clone(), now),
+                    Verdict::Deny(_) => self.forget_admitted(ip),
+                }
+                self.cache.insert(ip, verdict.clone(), now);
+                Landed::Verdict(verdict)
+            }
+            Outcome::Failed => {
+                self.forget_admitted(ip);
+                self.failures.insert(ip, (), now);
+                Landed::Refused
+            }
+            Outcome::TimedOut => {
+                if let Some(identity) = self.admitted.get(ip, now) {
+                    return Landed::Fallback(identity.clone());
+                }
+                self.failures.insert(ip, (), now);
+                Landed::Refused
+            }
         }
     }
 }
@@ -1679,13 +1812,15 @@ impl<A: TailnetApi> TailnetAcceptor<A> {
             policy,
             limits,
             permits: Semaphore::new(WHOIS_CONCURRENCY),
-            state: std::sync::Mutex::new(GateState {
+            state: Arc::new(std::sync::Mutex::new(GateState {
                 host: None,
                 no_host_reported: false,
                 cache: TtlMap::new(VERDICT_TTL, VERDICT_CAP),
                 failures: TtlMap::new(FAILURE_BACKOFF, VERDICT_CAP),
                 flights: HashMap::new(),
-            }),
+                admitted: TtlMap::new(ADMITTED_TTL, VERDICT_CAP),
+                admitted_epoch: 0,
+            })),
         };
         Self {
             gate: Arc::new(gate),
@@ -1734,6 +1869,28 @@ impl<A: TailnetApi> Gate<A> {
         self.host.borrow().clone()
     }
 
+    /// The connection just admitted from `ip` as `identity`, bound to the
+    /// admitted store's current clear epoch. Its end writes only when the
+    /// cache holds a real allow for `ip` now: a fallback admission leaves
+    /// none, so its connection's end writes nothing.
+    fn admitted_connection(&self, ip: IpAddr, identity: PeerIdentity) -> Arc<AdmittedConnection> {
+        let ip = ip.to_canonical();
+        let state = self.state();
+        let real = matches!(state.cache.get(ip, Instant::now()), Some(Verdict::Allow(_)));
+        let epoch = state.admitted_epoch;
+        drop(state);
+        Arc::new(AdmittedConnection {
+            state: if real {
+                Arc::downgrade(&self.state)
+            } else {
+                Weak::new()
+            },
+            ip,
+            identity,
+            epoch,
+        })
+    }
+
     /// Settle `peer`'s connection without a round where one is not needed:
     /// no host answer refuses, a cached verdict (against the current host)
     /// answers, a recent failure refuses. Else the round to run or join.
@@ -1771,19 +1928,20 @@ impl<A: TailnetApi> Gate<A> {
     /// round's cell, so it lands once and every waiting connection gets its
     /// outcome.
     async fn run_round(&self, peer: SocketAddr, round: &Round, host: WhoIs) -> Option<Verdict> {
-        let verdict = self.decide(peer, &host).await;
-        self.land(peer, round, &host, verdict)
+        let outcome = self.decide(peer, &host).await;
+        self.land(peer, round, &host, outcome)
     }
 
     /// End `round`: no connection joins it from now on, its verdict is
-    /// cached, and a failure starts the peer's backoff. A round that ran
-    /// against a host that has changed since is discarded and refuses.
+    /// cached, a timeout lets a recently admitted peer back in, and any
+    /// other failure starts the peer's backoff. A round that ran against a
+    /// host that has changed since is discarded and refuses.
     fn land(
         &self,
         peer: SocketAddr,
         round: &Round,
         host: &WhoIs,
-        verdict: Option<Verdict>,
+        outcome: Outcome,
     ) -> Option<Verdict> {
         let ip = peer.ip();
         let current = self.current_host().as_ref().map(host_key);
@@ -1803,31 +1961,49 @@ impl<A: TailnetApi> Gate<A> {
         {
             state.flights.remove(&ip);
         }
-        let now = Instant::now();
-        match &verdict {
-            Some(verdict) => state.cache.insert(ip, verdict.clone(), now),
-            None => state.failures.insert(ip, (), now),
-        }
+        let landed = state.record(ip, outcome, Instant::now());
         drop(state);
-        if let Some(Verdict::Allow(identity)) = &verdict {
-            tracing::info!(
-                %peer,
-                device = %identity.name,
-                stable_id = %identity.stable_id,
-                "tailnet listener: peer admitted"
-            );
+        match landed {
+            Landed::Verdict(verdict) => {
+                if let Verdict::Allow(identity) = &verdict {
+                    tracing::info!(
+                        %peer,
+                        device = %identity.name,
+                        stable_id = %identity.stable_id,
+                        "tailnet listener: peer admitted"
+                    );
+                }
+                Some(verdict)
+            }
+            Landed::Fallback(identity) => {
+                tracing::info!(
+                    %peer,
+                    device = %identity.name,
+                    stable_id = %identity.stable_id,
+                    window_mins = ADMITTED_TTL.as_secs() / 60,
+                    "tailnet listener: whois timed out; peer let back in as admitted recently"
+                );
+                Some(Verdict::Allow(identity))
+            }
+            Landed::Refused => None,
         }
-        verdict
     }
 
     /// One `whois` round for `peer` against `host`: a permit, `whois`, then
-    /// the owner rule; `None` on any failure. Each outcome logs once per
-    /// round, so once per window per peer IP.
-    async fn decide(&self, peer: SocketAddr, host: &WhoIs) -> Option<Verdict> {
+    /// the owner rule. Each outcome logs once per round, so once per window
+    /// per peer IP.
+    async fn decide(&self, peer: SocketAddr, host: &WhoIs) -> Outcome {
         let permit = tokio::time::timeout(self.limits.permit_wait, self.permits.acquire()).await;
-        let Ok(Ok(permit)) = permit else {
-            tracing::warn!(%peer, "tailnet listener: too many whois calls in flight; connection dropped");
-            return None;
+        let permit = match permit {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(err)) => {
+                tracing::warn!(%peer, %err, "tailnet listener: no whois permit; connection dropped");
+                return Outcome::Failed;
+            }
+            Err(_) => {
+                tracing::warn!(%peer, "tailnet listener: too many whois calls in flight; connection dropped");
+                return Outcome::TimedOut;
+            }
         };
         let answer = tokio::time::timeout(self.limits.timeout, self.api.whois(peer))
             .await
@@ -1837,14 +2013,18 @@ impl<A: TailnetApi> Gate<A> {
             Ok(who) => who,
             Err(err) => {
                 tracing::warn!(%peer, %err, "tailnet listener: whois failed; connection dropped");
-                return None;
+                return if err == TailnetError::Timeout {
+                    Outcome::TimedOut
+                } else {
+                    Outcome::Failed
+                };
             }
         };
         match (self.policy.authorize)(peer.ip(), &who, host) {
-            Ok(identity) => Some(Verdict::Allow(identity)),
+            Ok(identity) => Outcome::Verdict(Verdict::Allow(identity)),
             Err(denied) => {
                 tracing::warn!(%peer, reason = %denied, "tailnet listener: peer refused by the owner rule");
-                Some(Verdict::Deny(denied))
+                Outcome::Verdict(Verdict::Deny(denied))
             }
         }
     }
@@ -1873,9 +2053,11 @@ impl<A: TailnetApi, S: Send + 'static> Accept<tokio::net::TcpStream, S> for Tail
                 tracing::debug!(%err, "tailnet listener: the accepted socket has no peer address; connection dropped");
             })?;
             let identity = gate.admit(peer).await?;
+            let connection = gate.admitted_connection(peer.ip(), identity.clone());
             let authorized = AuthorizedPeer {
                 identity,
                 server_life,
+                connection,
             };
             let service = axum::Extension(authorized).layer(service);
             Ok((stream, service))
@@ -4166,6 +4348,33 @@ mod tests {
         acceptor.gate.state().cache.get(ip, Instant::now()).cloned()
     }
 
+    /// The identity `acceptor`'s admitted store holds for `ip` now.
+    fn admitted_for(acceptor: &TailnetAcceptor<FakeTailnet>, ip: IpAddr) -> Option<PeerIdentity> {
+        acceptor
+            .gate
+            .state()
+            .admitted
+            .get(ip, Instant::now())
+            .cloned()
+    }
+
+    /// Whether `acceptor` backs `ip` off after a failed `whois` now.
+    fn backed_off(acceptor: &TailnetAcceptor<FakeTailnet>, ip: IpAddr) -> bool {
+        acceptor
+            .gate
+            .state()
+            .failures
+            .get(ip, Instant::now())
+            .is_some()
+    }
+
+    /// A `whois` answer the owner rule refuses: a tagged device.
+    fn tagged_whois() -> WhoIs {
+        let mut who = peer_whois();
+        who.node.tags = vec!["tag:server".to_owned()];
+        who
+    }
+
     /// Connect to `listener` and pass the accepted socket through
     /// `acceptor`: whether it was admitted.
     async fn admitted(
@@ -4632,6 +4841,227 @@ mod tests {
             2,
             "past the backoff: whois again"
         );
+    }
+
+    /// A paused-clock gate with the production limits, its host sender, the
+    /// peer the tests admit, and the identity of its first, real admission.
+    async fn admitted_once() -> (
+        Arc<FakeTailnet>,
+        TailnetAcceptor<FakeTailnet>,
+        watch::Sender<Option<WhoIs>>,
+        SocketAddr,
+        PeerIdentity,
+    ) {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (acceptor, host) = gate(&fake, Some(test_host()), WhoisLimits::PRODUCTION);
+        let peer = loopback_peer(1);
+        let identity = acceptor.gate.admit(peer).await.expect("the real admission");
+        (fake, acceptor, host, peer, identity)
+    }
+
+    /// Past the verdict cache's TTL, so the next connection asks `whois`.
+    async fn past_the_cache() {
+        tokio::time::advance(VERDICT_TTL + Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_whois_admits_a_peer_admitted_within_ten_minutes() {
+        assert_eq!(ADMITTED_TTL, Duration::from_mins(10));
+        let (fake, acceptor, _host, peer, identity) = admitted_once().await;
+        past_the_cache().await;
+        fake.set_whois(Err(TailnetError::Timeout));
+        assert_eq!(
+            acceptor.gate.admit(peer).await.ok(),
+            Some(identity),
+            "admitted as the device it was"
+        );
+        assert_eq!(fake.whois_calls_for(peer.ip()), 2, "whois was asked");
+        assert_eq!(cached(&acceptor, peer.ip()), None, "and nothing cached");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_whois_refuses_an_unknown_peer() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.set_whois(Err(TailnetError::Timeout));
+        let (acceptor, _host) = gate(&fake, Some(test_host()), WhoisLimits::PRODUCTION);
+        let peer = loopback_peer(1);
+        assert!(acceptor.gate.admit(peer).await.is_err(), "refused");
+        assert!(backed_off(&acceptor, peer.ip()), "and backed off");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_whois_refuses_a_peer_refused_since() {
+        let (fake, acceptor, _host, peer, _identity) = admitted_once().await;
+        past_the_cache().await;
+        fake.set_whois(Ok(tagged_whois()));
+        assert!(acceptor.gate.admit(peer).await.is_err(), "the real refusal");
+        assert_eq!(admitted_for(&acceptor, peer.ip()), None);
+        past_the_cache().await;
+        fake.set_whois(Err(TailnetError::Timeout));
+        assert!(acceptor.gate.admit(peer).await.is_err(), "refused");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_whois_refuses_past_the_window() {
+        let (fake, acceptor, _host, peer, _identity) = admitted_once().await;
+        tokio::time::advance(ADMITTED_TTL + Duration::from_secs(1)).await;
+        fake.set_whois(Err(TailnetError::Timeout));
+        assert!(acceptor.gate.admit(peer).await.is_err(), "refused");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fallback_admission_does_not_extend_the_window() {
+        let (fake, acceptor, _host, peer, _identity) = admitted_once().await;
+        fake.set_whois(Err(TailnetError::Timeout));
+        tokio::time::advance(Duration::from_mins(9)).await;
+        assert!(acceptor.gate.admit(peer).await.is_ok(), "the fallback");
+        tokio::time::advance(Duration::from_mins(1) + Duration::from_secs(1)).await;
+        assert!(
+            acceptor.gate.admit(peer).await.is_err(),
+            "the window ran from the real admission"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_change_forgets_admitted_peers() {
+        let (fake, acceptor, host, peer, _identity) = admitted_once().await;
+        host.send_replace(Some(other_user_host()));
+        fake.set_whois(Err(TailnetError::Timeout));
+        assert!(
+            acceptor.gate.admit(peer).await.is_err(),
+            "refused under the new host"
+        );
+        assert_eq!(admitted_for(&acceptor, peer.ip()), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_not_found_forgets_an_admitted_peer() {
+        let (fake, acceptor, _host, peer, _identity) = admitted_once().await;
+        past_the_cache().await;
+        fake.set_whois(Err(TailnetError::Failed("peer not found".into())));
+        assert!(
+            acceptor.gate.admit(peer).await.is_err(),
+            "not found: refused"
+        );
+        assert_eq!(admitted_for(&acceptor, peer.ip()), None);
+        tokio::time::advance(FAILURE_BACKOFF).await;
+        fake.set_whois(Err(TailnetError::Timeout));
+        assert!(acceptor.gate.admit(peer).await.is_err(), "refused");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_whois_that_hits_the_round_timeout_falls_back() {
+        assert_eq!(WhoisLimits::PRODUCTION.timeout, CLI_TIMEOUT);
+        assert_eq!(CLI_TIMEOUT, Duration::from_secs(10));
+        let (fake, acceptor, _host, peer, _identity) = admitted_once().await;
+        past_the_cache().await;
+        fake.whois_held.send_replace(true);
+        let began = Instant::now();
+        assert!(acceptor.gate.admit(peer).await.is_ok(), "admitted");
+        assert!(
+            began.elapsed() >= WhoisLimits::PRODUCTION.timeout,
+            "once the round timed out: {:?}",
+            began.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fallback_admission_writes_no_backoff() {
+        let (fake, acceptor, _host, peer, _identity) = admitted_once().await;
+        past_the_cache().await;
+        fake.set_whois(Err(TailnetError::Timeout));
+        assert!(acceptor.gate.admit(peer).await.is_ok(), "the fallback");
+        assert!(!backed_off(&acceptor, peer.ip()));
+        assert!(
+            acceptor.gate.admit(peer).await.is_ok(),
+            "the next connection falls back too"
+        );
+        assert_eq!(fake.whois_calls_for(peer.ip()), 3, "after its own whois");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_admitted_connection_end_renews_the_window() {
+        let (fake, acceptor, _host, peer, identity) = admitted_once().await;
+        let connection = acceptor.gate.admitted_connection(peer.ip(), identity);
+        tokio::time::advance(Duration::from_mins(9)).await;
+        drop(connection);
+        tokio::time::advance(Duration::from_mins(6)).await;
+        fake.set_whois(Err(TailnetError::Timeout));
+        assert!(
+            acceptor.gate.admit(peer).await.is_ok(),
+            "inside ten minutes of the connection's end"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_end_after_a_refusal_writes_nothing() {
+        let (fake, acceptor, _host, peer, identity) = admitted_once().await;
+        let connection = acceptor.gate.admitted_connection(peer.ip(), identity);
+        past_the_cache().await;
+        fake.set_whois(Ok(tagged_whois()));
+        assert!(acceptor.gate.admit(peer).await.is_err(), "the real refusal");
+        drop(connection);
+        assert_eq!(admitted_for(&acceptor, peer.ip()), None, "not brought back");
+        past_the_cache().await;
+        fake.set_whois(Err(TailnetError::Timeout));
+        assert!(acceptor.gate.admit(peer).await.is_err(), "refused");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fallback_admitted_connection_end_writes_nothing() {
+        let (fake, acceptor, _host, peer, _identity) = admitted_once().await;
+        past_the_cache().await;
+        fake.set_whois(Err(TailnetError::Timeout));
+        let identity = acceptor.gate.admit(peer).await.expect("the fallback");
+        let connection = acceptor.gate.admitted_connection(peer.ip(), identity);
+        tokio::time::advance(Duration::from_mins(9)).await;
+        drop(connection);
+        // To the real admission's time plus ten minutes and a second.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(
+            acceptor.gate.admit(peer).await.is_err(),
+            "the fallback connection's end renewed nothing"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_change_voids_a_live_guard() {
+        let (fake, acceptor, host, peer, identity) = admitted_once().await;
+        let connection = acceptor.gate.admitted_connection(peer.ip(), identity);
+        host.send_replace(Some(other_user_host()));
+        drop(connection);
+        fake.set_whois(Err(TailnetError::Timeout));
+        assert!(
+            acceptor.gate.admit(peer).await.is_err(),
+            "refused under the new host"
+        );
+        assert_eq!(admitted_for(&acceptor, peer.ip()), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_known_peer_falls_back_when_the_permit_wait_expires() {
+        assert_eq!(WHOIS_CONCURRENCY, 4);
+        let (fake, acceptor, _host, peer, _identity) = admitted_once().await;
+        past_the_cache().await;
+        fake.whois_held.send_replace(true);
+        let rounds: Vec<_> = (2..=5)
+            .map(|n| {
+                let gate = Arc::clone(&acceptor.gate);
+                tokio::spawn(async move { gate.admit(loopback_peer(n)).await.is_ok() })
+            })
+            .collect();
+        yield_until("four held whois calls", || fake.whois_addrs().len() == 5).await;
+
+        assert!(
+            acceptor.gate.admit(peer).await.is_ok(),
+            "no permit in time, but admitted recently"
+        );
+        assert_eq!(fake.whois_calls_for(peer.ip()), 1, "with no whois call");
+
+        fake.whois_held.send_replace(false);
+        for round in rounds {
+            round.await.expect("a held round's task");
+        }
     }
 
     #[tokio::test(start_paused = true)]
