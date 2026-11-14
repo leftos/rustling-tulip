@@ -107,7 +107,6 @@ struct HostRow {
     key: HostKey,
     state: &'static str,
     pair: bool,
-    push: Option<SwitchView>,
 }
 
 /// A connection's state in the words the sidebar's host header uses, with
@@ -162,13 +161,18 @@ fn relay_push_key(root: &RootView, host: &SavedHost) -> Option<HostKey> {
         .then_some(key)
 }
 
-/// Every saved tailnet host open and taking relay pushes, in saved order.
-pub(super) fn relay_push_hosts(root: &RootView) -> Vec<HostKey> {
+/// Every saved tailnet host open and taking relay pushes, in saved order,
+/// with the generation of the connection the window holds to it.
+pub(super) fn relay_push_hosts(root: &RootView) -> Vec<(HostKey, u64)> {
     root.sidebar
         .ui_state()
         .saved_hosts
         .iter()
-        .filter_map(|host| relay_push_key(root, host))
+        .filter_map(|host| {
+            let key = relay_push_key(root, host)?;
+            let generation = root.connection_generation(&key)?;
+            Some((key, generation))
+        })
         .collect()
 }
 
@@ -184,14 +188,8 @@ fn push_switch_view(root: &RootView, host: &SavedHost, supported: bool) -> Optio
 
 /// `host`'s row: Pair shows exactly when the desktop picker's row offers
 /// it, for a held tailnet host that refused this device or that it holds
-/// no token for (`not_paired`); the Notifications switch shows as
-/// [`push_switch_view`] says.
-fn host_row(
-    root: &RootView,
-    host: &SavedHost,
-    not_paired: &HashSet<String>,
-    supported: bool,
-) -> Option<HostRow> {
+/// no token for (`not_paired`).
+fn host_row(root: &RootView, host: &SavedHost, not_paired: &HashSet<String>) -> Option<HostRow> {
     let target: Target = host.target().ok()?;
     let key = HostKey::of(&target);
     let conn = root.conn_of(&key);
@@ -220,7 +218,6 @@ fn host_row(
         key,
         state: state_words(state),
         pair: offers_pair(&facts),
-        push: push_switch_view(root, host, supported),
     })
 }
 
@@ -268,14 +265,13 @@ impl PhoneRoot {
     /// The hosts screen: the saved hosts' rows, then the add form or the
     /// button that shows it; the form alone while no host is saved.
     pub(super) fn hosts_body(&self, cx: &mut Context<Self>) -> Div {
-        let supported = self.platform.supported();
         let root = self.root.read(cx);
         let rows: Vec<HostRow> = root
             .sidebar
             .ui_state()
             .saved_hosts
             .iter()
-            .filter_map(|host| host_row(root, host, &self.hosts.not_paired, supported))
+            .filter_map(|host| host_row(root, host, &self.hosts.not_paired))
             .collect();
         let form_shows = rows.is_empty() || self.hosts.form_open;
         let t = theme(cx);
@@ -347,7 +343,7 @@ impl PhoneRoot {
     }
 
     /// `name`'s Notifications switch: on or off as `view` says, dimmed while
-    /// a registration is out, and its hint under it; at least 44 pt tall.
+    /// a request is out, and its hint under it; at least 44 pt tall.
     fn push_switch(
         name: &str,
         key: HostKey,
@@ -404,9 +400,7 @@ impl PhoneRoot {
             key,
             state,
             pair,
-            push,
         } = row;
-        let push_switch = push.map(|view| Self::push_switch(&name, key.clone(), view, t, cx));
         let pair_button = pair.then(|| {
             phone_button(&format!("phone-host-pair-{name}"), ButtonKind::Primary, cx)
                 .child(PAIR_LABEL)
@@ -440,7 +434,6 @@ impl PhoneRoot {
             .border_color(gpui::rgb(t.line))
             .bg(gpui::rgb(t.raised))
             .child(head)
-            .children(push_switch)
     }
 
     /// The add form: its title, the name and port fields, a refusal under

@@ -270,6 +270,19 @@ pub enum Effect {
     Unregister { request_id: String },
 }
 
+/// What the request out asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Request {
+    /// `GetPushStatus` on open.
+    Status,
+    /// `GetPushStatus` after the daemon refused a register or unregister.
+    Recheck,
+    /// The device token and keys, then `RegisterPush`.
+    Register,
+    /// `UnregisterPush`.
+    Unregister,
+}
+
 /// One host's switch: where it stands, the device token the daemon last
 /// reported, and the request a reply settles.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -278,17 +291,37 @@ pub struct PushState {
     pub status: Status,
     /// The daemon's device token for this phone, from its last `PushStatus`.
     pub last_token: Option<String>,
-    /// The request id the next reply must carry.
-    pending: Option<String>,
+    /// The request id the next reply or completion must carry, and what it
+    /// asks.
+    pending: Option<(String, Request)>,
+    /// The daemon's text for the last refused register or unregister,
+    /// shown until the switch asks anything new.
+    refusal: Option<String>,
     /// How many request ids this host's state has made.
     issued: u64,
 }
 
 impl PushState {
+    /// A switch whose request ids follow the `issued` ones an earlier
+    /// switch for the same host made, so none is reused.
+    fn after(issued: u64) -> Self {
+        Self {
+            issued,
+            ..Self::default()
+        }
+    }
+
     /// The request id a reply must echo to settle the work out.
     #[must_use]
     pub fn pending(&self) -> Option<&str> {
-        self.pending.as_deref()
+        self.pending.as_ref().map(|(id, _)| id.as_str())
+    }
+
+    /// Whether a request is out: the switch shows dimmed and a tap does
+    /// nothing.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// Whether the switch shows on: on, or a registration out.
@@ -297,39 +330,56 @@ impl PushState {
         matches!(self.status, Status::On | Status::Registering)
     }
 
-    /// A fresh request id, remembered as the one a reply must carry.
-    fn issue(&mut self) -> String {
+    /// A fresh request id for `kind`, remembered as the one a reply must
+    /// carry; anything but a re-check clears the last refusal.
+    fn issue(&mut self, kind: Request) -> String {
         self.issued += 1;
         let request_id = format!("push-{}", self.issued);
-        self.pending = Some(request_id.clone());
+        self.pending = Some((request_id.clone(), kind));
+        if kind != Request::Recheck {
+            self.refusal = None;
+        }
         request_id
     }
 
     /// Whether `request_id` is the one out.
     fn owes(&self, request_id: Option<&str>) -> bool {
-        request_id.is_some() && self.pending.as_deref() == request_id
+        request_id.is_some() && self.pending() == request_id
+    }
+
+    /// Whether `request_id` is the registration out, so the device token
+    /// and keys read for it may be sent.
+    #[must_use]
+    pub fn token_ready(&self, request_id: &str) -> bool {
+        matches!(&self.pending, Some((id, Request::Register)) if id == request_id)
     }
 
     /// The host's connection opened: ask the daemon for this phone's push
-    /// state.
+    /// state. Any request out is superseded; a registration out no longer
+    /// shows.
     pub fn on_open(&mut self) -> Vec<Effect> {
+        if self.status == Status::Registering {
+            self.status = Status::Unknown;
+        }
         vec![Effect::SendGetStatus {
-            request_id: self.issue(),
+            request_id: self.issue(Request::Status),
         }]
     }
 
     /// The daemon's answer for the work out: no token reads off; this
     /// phone's `current` token reads on; another token re-registers when
-    /// the current one is known, and reads on until it is.
+    /// the current one is known, and reads on until it is. The answer to a
+    /// re-check after a refusal reads on for another token too, so a
+    /// refused registration is never retried on its own.
     pub fn on_status(&mut self, device_token: Option<&str>, current: Option<&str>) -> Vec<Effect> {
-        self.pending = None;
+        let recheck = matches!(self.pending.take(), Some((_, Request::Recheck)));
         self.last_token = device_token.map(str::to_owned);
         match (device_token, current) {
             (None, _) => {
                 self.status = Status::Off;
                 Vec::new()
             }
-            (Some(token), Some(current)) if token != current => self.register(),
+            (Some(token), Some(current)) if token != current && !recheck => self.register(),
             (Some(_), _) => {
                 self.status = Status::On;
                 Vec::new()
@@ -350,15 +400,23 @@ impl PushState {
     }
 
     /// An `Error` from the daemon: when it answers the request out, the
-    /// switch shows the daemon's text and nothing is out; `false` when it
-    /// answers another.
-    pub fn on_error(&mut self, request_id: Option<&str>, message: &str) -> bool {
+    /// switch shows the daemon's text; a refused register or unregister
+    /// also asks for the status again, so the switch returns to the
+    /// daemon's truth with the text still under it. `None` when it answers
+    /// another request.
+    pub fn on_error(&mut self, request_id: Option<&str>, message: &str) -> Option<Vec<Effect>> {
         if !self.owes(request_id) {
-            return false;
+            return None;
         }
-        self.pending = None;
+        let kind = self.pending.take().map(|(_, kind)| kind);
         self.status = Status::Failed(message.to_owned());
-        true
+        if !matches!(kind, Some(Request::Register | Request::Unregister)) {
+            return Some(Vec::new());
+        }
+        self.refusal = Some(message.to_owned());
+        Some(vec![Effect::SendGetStatus {
+            request_id: self.issue(Request::Recheck),
+        }])
     }
 
     /// This phone's device token became known: a switch on for another
@@ -375,10 +433,10 @@ impl PushState {
     }
 
     /// The switch turned on with the permission as it stands: not asked yet
-    /// asks, granted registers, denied shows blocked and asks nothing. A
-    /// registration already out takes no second.
+    /// asks, granted registers, denied shows blocked and asks nothing. While
+    /// any request is out it does nothing.
     pub fn switch_on(&mut self, auth: Authorization) -> Vec<Effect> {
-        if self.status == Status::Registering {
+        if self.busy() {
             return Vec::new();
         }
         match auth {
@@ -392,8 +450,12 @@ impl PushState {
     }
 
     /// The owner answered the permission request: granted registers, denied
-    /// shows blocked, no answer leaves the switch off.
+    /// shows blocked, no answer leaves the switch off. While any request is
+    /// out, a registration included, it does nothing.
     pub fn authorization_answered(&mut self, auth: Authorization) -> Vec<Effect> {
+        if self.busy() {
+            return Vec::new();
+        }
         match auth {
             Authorization::Granted => self.register(),
             Authorization::Denied => {
@@ -407,22 +469,27 @@ impl PushState {
         }
     }
 
-    /// The platform gave no device token or keys for the registration out:
-    /// nothing is out, and the switch says it could not turn on.
-    pub fn failed(&mut self) {
+    /// The platform gave no device token or keys for registration
+    /// `request_id`: when it is the one out, nothing is out and the switch
+    /// says it could not turn on. Whether it was.
+    pub fn failed(&mut self, request_id: &str) -> bool {
+        if !self.token_ready(request_id) {
+            return false;
+        }
         self.pending = None;
         self.status = Status::Failed(NOT_REGISTERED.to_owned());
+        true
     }
 
     /// The switch turned off: unregister, the switch off at once. Work
     /// already out takes no unregister.
     pub fn switch_off(&mut self) -> Vec<Effect> {
-        if self.pending.is_some() {
+        if self.busy() {
             return Vec::new();
         }
         self.status = Status::Off;
         vec![Effect::Unregister {
-            request_id: self.issue(),
+            request_id: self.issue(Request::Unregister),
         }]
     }
 
@@ -430,7 +497,7 @@ impl PushState {
     fn register(&mut self) -> Vec<Effect> {
         self.status = Status::Registering;
         vec![Effect::Register {
-            request_id: self.issue(),
+            request_id: self.issue(Request::Register),
         }]
     }
 }
@@ -440,7 +507,7 @@ impl PushState {
 pub struct SwitchView {
     /// Whether it shows on.
     pub on: bool,
-    /// Whether it shows dimmed: a registration out.
+    /// Whether it shows dimmed: a request out.
     pub busy: bool,
     /// The line under it, if any.
     pub hint: Option<String>,
@@ -452,11 +519,11 @@ pub fn switch_view(state: Option<&PushState>) -> SwitchView {
     let status = state.map(|state| &state.status);
     SwitchView {
         on: state.is_some_and(PushState::switched_on),
-        busy: status == Some(&Status::Registering),
+        busy: state.is_some_and(PushState::busy),
         hint: match status {
             Some(Status::Blocked) => Some(BLOCKED.to_owned()),
             Some(Status::Failed(text)) => Some(text.clone()),
-            _ => None,
+            _ => state.and_then(|state| state.refusal.clone()),
         },
     }
 }
@@ -482,16 +549,61 @@ pub fn apns_registration(
     })
 }
 
-/// Every saved host's switch, this phone's device token once known, and the
-/// effects the steps made that the phone's root has not run yet.
+/// Every open host's switch, the connection generation each was opened on,
+/// this phone's device token once known, and the effects the steps made
+/// that the phone's root has not run yet.
 #[derive(Debug, Default)]
 pub struct PushHosts {
     hosts: HashMap<HostKey, PushState>,
+    /// The connection generation each host in `hosts` was last opened on.
+    open: HashMap<HostKey, u64>,
+    /// How many request ids a forgotten host's switch had made, so its next
+    /// switch reuses none.
+    spent: HashMap<HostKey, u64>,
     current: Option<String>,
     outbox: Vec<(HostKey, Effect)>,
 }
 
 impl PushHosts {
+    /// The hosts open and taking relay pushes now, each with its
+    /// connection generation: a host whose (key, generation) was not open
+    /// before asks for its push state, superseding any request out; a host
+    /// no longer listed is forgotten, so a late reply or completion for it
+    /// finds no switch.
+    pub fn hosts_open(&mut self, open: &[(HostKey, u64)]) -> Vec<(HostKey, Effect)> {
+        let listed = |key: &HostKey| open.iter().any(|(listed, _)| listed == key);
+        let gone: Vec<HostKey> = self
+            .hosts
+            .keys()
+            .filter(|key| !listed(key))
+            .cloned()
+            .collect();
+        for key in gone {
+            if let Some(state) = self.hosts.remove(&key) {
+                self.spent.insert(key, state.issued);
+            }
+        }
+        let mut effects = Vec::new();
+        for (key, generation) in open {
+            if self.open.get(key) == Some(generation) && self.hosts.contains_key(key) {
+                continue;
+            }
+            let spent = self.spent.remove(key).unwrap_or(0);
+            let state = self
+                .hosts
+                .entry(key.clone())
+                .or_insert_with(|| PushState::after(spent));
+            effects.extend(
+                state
+                    .on_open()
+                    .into_iter()
+                    .map(|effect| (key.clone(), effect)),
+            );
+        }
+        self.open = open.iter().cloned().collect();
+        effects
+    }
+
     /// `host`'s switch, once it has one.
     #[must_use]
     pub fn state(&self, host: &HostKey) -> Option<&PushState> {
@@ -505,16 +617,52 @@ impl PushHosts {
     }
 
     /// Runs `step` on `host`'s switch with this phone's device token,
-    /// queueing the effects it makes.
+    /// queueing the effects it makes; a host with no switch (not open, or
+    /// forgotten since) takes no step.
     pub fn step(
         &mut self,
         host: &HostKey,
         step: impl FnOnce(&mut PushState, Option<&str>) -> Vec<Effect>,
     ) {
-        let state = self.hosts.entry(host.clone()).or_default();
+        let Some(state) = self.hosts.get_mut(host) else {
+            tracing::debug!(?host, "phone: no push switch for a step");
+            return;
+        };
         let effects = step(state, self.current.as_deref());
         self.outbox
             .extend(effects.into_iter().map(|effect| (host.clone(), effect)));
+    }
+
+    /// Whether `request_id` is `host`'s registration out, so the device
+    /// token and keys read for it may be sent.
+    #[must_use]
+    pub fn token_ready(&self, host: &HostKey, request_id: &str) -> bool {
+        self.hosts
+            .get(host)
+            .is_some_and(|state| state.token_ready(request_id))
+    }
+
+    /// The platform gave no token or keys for `host`'s registration
+    /// `request_id`: [`PushState::failed`]. Whether the switch changed.
+    pub fn failed(&mut self, host: &HostKey, request_id: &str) -> bool {
+        self.hosts
+            .get_mut(host)
+            .is_some_and(|state| state.failed(request_id))
+    }
+
+    /// A daemon refusal from `host` carrying `request_id`: when it answers
+    /// the switch's request out, the switch shows `message` and the effects
+    /// it makes are queued. Whether it answered.
+    pub fn on_refused(&mut self, host: &HostKey, request_id: &str, message: &str) -> bool {
+        let Some(state) = self.hosts.get_mut(host) else {
+            return false;
+        };
+        let Some(effects) = state.on_error(Some(request_id), message) else {
+            return false;
+        };
+        self.outbox
+            .extend(effects.into_iter().map(|effect| (host.clone(), effect)));
+        true
     }
 
     /// This phone's device token is `token`: each switch on for another
@@ -531,35 +679,29 @@ impl PushHosts {
         }
     }
 
-    /// Folds a daemon message from `host`: a `PushStatus` or `Error` that
-    /// answers the switch's request out. Whether the switch changed.
+    /// Folds a daemon message from `host`: a `PushStatus` that answers the
+    /// switch's request out (a refusal comes through [`Self::on_refused`]).
+    /// Whether the switch changed.
     pub fn on_message(&mut self, host: &HostKey, msg: &DaemonMessage) -> bool {
+        let DaemonMessage::PushStatus {
+            device_token,
+            request_id,
+            ..
+        } = msg
+        else {
+            return false;
+        };
         let Some(state) = self.hosts.get_mut(host) else {
             return false;
         };
-        match msg {
-            DaemonMessage::PushStatus {
-                device_token,
-                request_id,
-                ..
-            } => {
-                let token = device_token.as_ref().map(|token| token.0.as_str());
-                let current = self.current.as_deref();
-                let Some(effects) = state.status_reply(request_id.as_deref(), token, current)
-                else {
-                    return false;
-                };
-                self.outbox
-                    .extend(effects.into_iter().map(|effect| (host.clone(), effect)));
-                true
-            }
-            DaemonMessage::Error {
-                message,
-                request_id,
-                ..
-            } => state.on_error(request_id.as_deref(), message),
-            _ => false,
-        }
+        let token = device_token.as_ref().map(|token| token.0.as_str());
+        let current = self.current.as_deref();
+        let Some(effects) = state.status_reply(request_id.as_deref(), token, current) else {
+            return false;
+        };
+        self.outbox
+            .extend(effects.into_iter().map(|effect| (host.clone(), effect)));
+        true
     }
 
     /// The effects queued since the last call, in order.
@@ -603,6 +745,24 @@ mod tests {
         let [Effect::Register { request_id }] = effects else {
             panic!("one register: {effects:?}");
         };
+        request_id.clone()
+    }
+
+    /// The request id of the one `GetPushStatus` in `effects`.
+    fn status_id(effects: &[Effect]) -> String {
+        let [Effect::SendGetStatus { request_id }] = effects else {
+            panic!("one GetPushStatus: {effects:?}");
+        };
+        request_id.clone()
+    }
+
+    /// The request id of the one `GetPushStatus` the hosts' `effects` hold
+    /// for [`host`].
+    fn host_status_id(effects: &[(HostKey, Effect)]) -> String {
+        let [(key, Effect::SendGetStatus { request_id })] = effects else {
+            panic!("one GetPushStatus: {effects:?}");
+        };
+        assert_eq!(*key, host());
         request_id.clone()
     }
 
@@ -689,7 +849,7 @@ mod tests {
         let (mut state, id) = opened();
         assert_eq!(state.status_reply(Some("other"), None, Some(MINE)), None);
         assert_eq!(state.status_reply(None, None, Some(MINE)), None);
-        assert!(!state.on_error(Some("other"), "refused"));
+        assert_eq!(state.on_error(Some("other"), "refused"), None);
         assert_eq!(state.status, Status::Unknown);
         assert_eq!(state.pending(), Some(id.as_str()));
     }
@@ -697,7 +857,11 @@ mod tests {
     #[test]
     fn an_error_for_the_request_out_shows_its_text() {
         let (mut state, id) = opened();
-        assert!(state.on_error(Some(&id), "this device is not paired"));
+        assert_eq!(
+            state.on_error(Some(&id), "this device is not paired"),
+            Some(Vec::new()),
+            "a refused status request asks nothing more"
+        );
         assert_eq!(
             state.status,
             Status::Failed("this device is not paired".to_owned())
@@ -776,8 +940,8 @@ mod tests {
     #[test]
     fn a_platform_failure_says_it_could_not_turn_on() {
         let mut state = PushState::default();
-        register_id(&state.switch_on(Authorization::Granted));
-        state.failed();
+        let id = register_id(&state.switch_on(Authorization::Granted));
+        assert!(state.failed(&id));
         assert_eq!(state.status, Status::Failed(NOT_REGISTERED.to_owned()));
         assert_eq!(state.pending(), None);
     }
@@ -811,10 +975,8 @@ mod tests {
     #[test]
     fn the_view_shows_each_status() {
         assert!(!switch_view(None).on);
-        let registering = PushState {
-            status: Status::Registering,
-            ..PushState::default()
-        };
+        let mut registering = PushState::default();
+        register_id(&registering.switch_on(Authorization::Granted));
         let view = switch_view(Some(&registering));
         assert!(view.on && view.busy);
         let blocked = PushState {
@@ -831,13 +993,9 @@ mod tests {
     fn the_hosts_fold_only_a_reply_the_switch_owes() {
         let mut hosts = PushHosts::default();
         assert!(!hosts.on_message(&host(), &push_status(None, "push-1")));
-        hosts.step(&host(), |state, _| state.on_open());
-        let effects = hosts.take_effects();
-        let [(_, Effect::SendGetStatus { request_id })] = effects.as_slice() else {
-            panic!("one GetPushStatus: {effects:?}");
-        };
+        let request_id = host_status_id(&hosts.hosts_open(&[(host(), 1)]));
         assert!(!hosts.on_message(&host(), &push_status(None, "other")));
-        assert!(hosts.on_message(&host(), &push_status(None, request_id)));
+        assert!(hosts.on_message(&host(), &push_status(None, &request_id)));
         assert_eq!(
             hosts.state(&host()).map(|state| state.status.clone()),
             Some(Status::Off)
@@ -847,12 +1005,8 @@ mod tests {
     #[test]
     fn learning_this_phones_token_reregisters_a_host_on_for_another() {
         let mut hosts = PushHosts::default();
-        hosts.step(&host(), |state, _| state.on_open());
-        let effects = hosts.take_effects();
-        let [(_, Effect::SendGetStatus { request_id })] = effects.as_slice() else {
-            panic!("one GetPushStatus: {effects:?}");
-        };
-        assert!(hosts.on_message(&host(), &push_status(Some(OTHER), request_id)));
+        let request_id = host_status_id(&hosts.hosts_open(&[(host(), 1)]));
+        assert!(hosts.on_message(&host(), &push_status(Some(OTHER), &request_id)));
         assert_eq!(hosts.take_effects(), Vec::new());
         hosts.set_current(MINE);
         let effects = hosts.take_effects();
@@ -861,6 +1015,160 @@ mod tests {
             "{effects:?}"
         );
         assert_eq!(hosts.current_token(), Some(MINE));
+    }
+
+    #[test]
+    fn a_completion_for_a_superseded_request_is_dropped() {
+        let mut state = PushState::default();
+        let first = register_id(&state.switch_on(Authorization::Granted));
+        assert!(
+            state.token_ready(&first),
+            "the registration out takes its token"
+        );
+        let reopened = status_id(&state.on_open());
+        assert!(
+            !state.token_ready(&first),
+            "a reopen supersedes the registration"
+        );
+        assert!(
+            !state.token_ready(&reopened),
+            "a status request takes no token"
+        );
+        assert_eq!(state.pending(), Some(reopened.as_str()));
+    }
+
+    #[test]
+    fn a_late_failure_does_not_clear_a_newer_request() {
+        let mut state = PushState::default();
+        let first = register_id(&state.switch_on(Authorization::Granted));
+        let reopened = status_id(&state.on_open());
+        assert!(
+            !state.failed(&first),
+            "the failure answers a superseded request"
+        );
+        assert_eq!(state.pending(), Some(reopened.as_str()));
+        assert_eq!(state.status, Status::Unknown);
+        assert_eq!(switch_view(Some(&state)).hint, None);
+    }
+
+    #[test]
+    fn the_switch_is_busy_while_any_request_is_out() {
+        let (mut state, id) = opened();
+        assert!(
+            switch_view(Some(&state)).busy,
+            "a status request out dims it"
+        );
+        assert_eq!(state.switch_off(), Vec::new());
+        assert_eq!(state.switch_on(Authorization::Granted), Vec::new());
+        assert_eq!(state.switch_on(Authorization::NotDetermined), Vec::new());
+        assert_eq!(state.pending(), Some(id.as_str()));
+        assert_eq!(state.status, Status::Unknown);
+        let _ = state.status_reply(Some(&id), None, Some(MINE));
+        assert!(!switch_view(Some(&state)).busy, "the reply undims it");
+    }
+
+    #[test]
+    fn a_second_permission_answer_while_registering_adds_nothing() {
+        let mut state = PushState::default();
+        let id = register_id(&state.authorization_answered(Authorization::Granted));
+        assert_eq!(
+            state.authorization_answered(Authorization::Granted),
+            Vec::new()
+        );
+        assert_eq!(
+            state.authorization_answered(Authorization::Denied),
+            Vec::new()
+        );
+        assert_eq!(state.status, Status::Registering);
+        assert_eq!(state.pending(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn a_refused_register_asks_for_the_status_again() {
+        let mut state = PushState::default();
+        let id = register_id(&state.switch_on(Authorization::Granted));
+        let effects = state
+            .on_error(Some(&id), "refused")
+            .expect("the error answers the registration");
+        let again = status_id(&effects);
+        assert_ne!(again, id);
+        let view = switch_view(Some(&state));
+        assert!(view.busy && !view.on, "{view:?}");
+        assert_eq!(view.hint.as_deref(), Some("refused"));
+
+        let effects = state.status_reply(Some(&again), Some(OTHER), Some(MINE));
+        assert_eq!(
+            effects,
+            Some(Vec::new()),
+            "a refused registration is not retried on its own"
+        );
+        let view = switch_view(Some(&state));
+        assert!(view.on && !view.busy, "{view:?}");
+        assert_eq!(view.hint.as_deref(), Some("refused"), "the refusal shows");
+    }
+
+    #[test]
+    fn a_refused_unregister_asks_for_the_status_again() {
+        let mut state = on();
+        let effects = state.switch_off();
+        let [Effect::Unregister { request_id }] = effects.as_slice() else {
+            panic!("one unregister: {effects:?}");
+        };
+        let effects = state
+            .on_error(Some(request_id), "refused")
+            .expect("the error answers the unregister");
+        let again = status_id(&effects);
+        assert_eq!(
+            state.status_reply(Some(&again), Some(MINE), Some(MINE)),
+            Some(Vec::new())
+        );
+        let view = switch_view(Some(&state));
+        assert!(view.on, "the daemon still holds this phone's token");
+        assert_eq!(view.hint.as_deref(), Some("refused"));
+    }
+
+    #[test]
+    fn a_reopen_with_a_new_generation_asks_again() {
+        let mut hosts = PushHosts::default();
+        let first = host_status_id(&hosts.hosts_open(&[(host(), 1)]));
+        assert_eq!(
+            hosts.hosts_open(&[(host(), 1)]),
+            Vec::new(),
+            "the same connection asks once"
+        );
+        let second = host_status_id(&hosts.hosts_open(&[(host(), 2)]));
+        assert_ne!(first, second);
+        assert!(
+            !hosts.on_message(&host(), &push_status(None, &first)),
+            "the first connection's request is superseded"
+        );
+        assert!(hosts.on_message(&host(), &push_status(None, &second)));
+    }
+
+    #[test]
+    fn a_host_no_longer_open_is_forgotten() {
+        let mut hosts = PushHosts::default();
+        let asked = host_status_id(&hosts.hosts_open(&[(host(), 1)]));
+        assert!(hosts.on_message(&host(), &push_status(None, &asked)));
+        hosts.step(&host(), |state, _| state.switch_on(Authorization::Granted));
+        let effects = hosts.take_effects();
+        let [(_, Effect::Register { request_id })] = effects.as_slice() else {
+            panic!("one register: {effects:?}");
+        };
+        assert!(hosts.token_ready(&host(), request_id));
+
+        assert_eq!(hosts.hosts_open(&[]), Vec::new());
+        assert_eq!(hosts.state(&host()), None, "its state is dropped");
+        assert!(!hosts.token_ready(&host(), request_id));
+        assert!(!hosts.failed(&host(), request_id));
+        assert!(!hosts.on_refused(&host(), request_id, "refused"));
+        hosts.step(&host(), |state, _| state.switch_on(Authorization::Granted));
+        assert_eq!(hosts.take_effects(), Vec::new(), "a step finds no switch");
+        assert_eq!(hosts.state(&host()), None);
+
+        let reopened = host_status_id(&hosts.hosts_open(&[(host(), 1)]));
+        assert_ne!(&reopened, request_id, "a new switch reuses no request id");
+        assert_ne!(reopened, asked);
     }
 
     #[test]

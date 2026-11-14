@@ -5237,12 +5237,36 @@ impl RootView {
         &mut self.push
     }
 
-    /// Folds `host`'s `PushStatus`, or its `Error`, when it answers the
-    /// request its Notifications switch has out.
+    /// Which of the window's connections `host`'s is, while it holds one.
+    pub(crate) fn connection_generation(&self, host: &HostKey) -> Option<u64> {
+        self.hosts.get(host).map(hosts::HostConn::generation)
+    }
+
+    /// Folds `host`'s `PushStatus` when it answers the request its
+    /// Notifications switch has out; its `Error` folds in
+    /// [`Self::on_push_refused`].
     fn on_push_message(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
         if self.push.on_message(host, msg) {
             cx.notify();
         }
+    }
+
+    /// A daemon refusal from `host` carrying `request_id`: when it answers
+    /// the request `host`'s Notifications switch has out, the switch shows
+    /// it. Returns whether it did.
+    fn on_push_refused(
+        &mut self,
+        host: &HostKey,
+        request_id: &str,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let answered = self.push.on_refused(host, request_id, message);
+        if answered {
+            tracing::info!(?host, "phone: the daemon refused a push request");
+            cx.notify();
+        }
+        answered
     }
 
     fn on_message(
@@ -5573,6 +5597,7 @@ impl RootView {
                     || self.on_agent_command_error(host, id, code, &message, cx)
                     || self.on_preset_list_failed(id, &message, cx)
                     || self.on_upload_refused(host, id, &message, cx)
+                    || self.on_push_refused(host, id, &message, cx)
             }
         };
         self.repo_remove.disarm();

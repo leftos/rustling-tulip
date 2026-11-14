@@ -6,7 +6,6 @@ mod hosts_view;
 pub(crate) mod lifecycle;
 pub mod push;
 
-use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -107,9 +106,6 @@ pub struct PhoneRoot {
     hosts: hosts_view::PhoneHosts,
     /// The phone's push: permission, device token and install keys.
     platform: Arc<dyn PushPlatform>,
-    /// The saved tailnet hosts open and taking relay pushes when last
-    /// seen, so a host that opens again asks for its push state again.
-    push_open: HashSet<HostKey>,
     /// Whether the first render has logged the app's ready line.
     logged_ready: bool,
     /// Redraws the phone whenever the root view changes.
@@ -147,7 +143,6 @@ impl PhoneRoot {
             hosts: hosts_view::PhoneHosts::new(&root, cx),
             root,
             platform,
-            push_open: HashSet::new(),
             logged_ready: false,
             _root_changed: root_changed,
             _visibility: visibility,
@@ -194,23 +189,19 @@ impl PhoneRoot {
         });
     }
 
-    /// The root view changed: each saved tailnet host that opened taking
-    /// relay pushes asks for its push state, then the queued effects run.
+    /// The root view changed: the queued effects run, then the saved
+    /// tailnet hosts open and taking relay pushes, with their connection
+    /// generations, go to the switches' model, and the effects it makes run.
     fn push_changed(&mut self, cx: &mut Context<Self>) {
         if !self.platform.supported() {
             return;
         }
-        let open: HashSet<HostKey> = hosts_view::relay_push_hosts(self.root.read(cx))
-            .into_iter()
-            .collect();
-        let opened: Vec<HostKey> = open.difference(&self.push_open).cloned().collect();
-        self.push_open = open;
+        let open = hosts_view::relay_push_hosts(self.root.read(cx));
         let effects = self.root.update(cx, |root, _| {
             let push = root.push_hosts_mut();
-            for host in &opened {
-                push.step(host, |state, _| state.on_open());
-            }
-            push.take_effects()
+            let mut effects = push.take_effects();
+            effects.extend(push.hosts_open(&open));
+            effects
         });
         self.run_effects(effects, cx);
     }
@@ -284,7 +275,9 @@ impl PhoneRoot {
     }
 
     /// Sends `host` the registration for `token`, or, when the platform gave
-    /// no token or keys, logs why and marks the switch failed.
+    /// no token or keys, logs why and marks the switch failed; either only
+    /// while `request_id` is still the switch's registration out, else the
+    /// completion is dropped.
     fn send_registration(
         &mut self,
         host: &HostKey,
@@ -292,6 +285,19 @@ impl PhoneRoot {
         token: Result<String, String>,
         cx: &mut Context<Self>,
     ) {
+        if !self
+            .root
+            .read(cx)
+            .push_hosts()
+            .token_ready(host, &request_id)
+        {
+            tracing::debug!(
+                ?host,
+                %request_id,
+                "phone: dropping a push registration no longer out"
+            );
+            return;
+        }
         let registration = token.and_then(|token| {
             push::apns_registration(self.platform.as_ref(), token.clone()).map(|reg| (token, reg))
         });
@@ -312,27 +318,31 @@ impl PhoneRoot {
             }),
             Err(err) => {
                 tracing::warn!(error = %err, ?host, "phone: push registration failed");
-                self.step_push(
-                    host,
-                    |state, _| {
-                        state.failed();
-                        Vec::new()
-                    },
-                    cx,
-                );
+                self.root.update(cx, |root, cx| {
+                    if root.push_hosts_mut().failed(host, &request_id) {
+                        cx.notify();
+                    }
+                });
             }
         }
     }
 
-    /// The Notifications switch on `host`'s row tapped: on turns it off;
-    /// anything else reads the permission and turns it on.
+    /// `host`'s Notifications switch tapped: while a request is out nothing
+    /// happens; on turns it off; anything else reads the permission and
+    /// turns it on.
     fn toggle_push(&mut self, host: &HostKey, cx: &mut Context<Self>) {
-        let on = self
+        let Some((busy, on)) = self
             .root
             .read(cx)
             .push_hosts()
             .state(host)
-            .is_some_and(PushState::switched_on);
+            .map(|state| (state.busy(), state.switched_on()))
+        else {
+            return;
+        };
+        if busy {
+            return;
+        }
         if on {
             self.step_push(host, |state, _| state.switch_off(), cx);
             return;
