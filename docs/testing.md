@@ -150,6 +150,7 @@ The views:
 - `empty-main`: no tab open: the main area's empty state over the usual sidebar, offering Spawn a session and Open shell.
 - `first-connect`: the layout chooser a first connect over active sessions raises, over the bare "No tab open" area a client awaiting its layout shows (with no tab list, no Spawn a session or Open shell button draws behind it, and the sidebar leaves carry no tab pill).
 - `phone-home`: a portrait phone window (390x844, insets 62 top and 34 bottom) over `PhoneRoot` with one saved host and two groups, one holding a Needs you session (amber wash, dot and count on its heading), under the Needs you tray showing one card.
+- `phone-sheet`: the `phone-home` fixture with a working session's long-press sheet open over the scrim: its label as the title, `Stop` and `Cancel`.
 - `dispatch`: the tulip tab split with a pane following a working dispatch run (header with its `DS` chip and Stop, stats line, the run's transcript: answers, a tool call with its output and one still running), its `DS` leaf under the tulip repo, one run nested under the "Petal footer polish" session and one unnested run, "Trim the dispatch log".
 - `subagents`: the "Petal footer polish" session nested with three subagent rows (`SA`), oldest first: a killed reviewer, the running Explore one, and a finished child of it at depth 2, then its dispatch run's `DS` row; beside it a pane following the running subagent, its header and transcript (an answer, a read, a search and a test run still going).
 - `host-rebind`: the rebind dialog for the remote `box` over the two-host window, with 3 active sessions, Auto layout and its picker, Follow box's layout above Follow laptop's layout, and Cancel and Rebind.
@@ -169,6 +170,8 @@ The `support` builders for account specs (`apps/native/tests/support/mod.rs`) ar
 An OS toast press is tested through the `NotifyRecorder` notifier: `Harness::notified_launches` lists the launch argument each notification carried, `Harness::activate_os_toast(index)` presses the notification at `index`, and `activate_toast_arg(arg)` presses with a raw argument, both delivering it through the window's activation sink as the toast activator does. `h.cx.deactivate_window()` simulates an inactive main window.
 
 A phone-shape window is opened with `Harness::phone(cx, dir)`, and `h.opened_targets()` lists the targets it dialled; `tests/ui/ui_phone_root.rs` is its spec, and `tools/test-map.json` maps the phone-shape sources to it: the `apps/native/src/phone/**` row selects it beside the `phone::` unit tests. `Harness::phone_with(cx, dir, platform)` opens the same window over a given `PushPlatform` (a `FakePushPlatform` scripts permission and the token), which `tests/ui/ui_phone_push.rs` drives for the Notifications switch; the `apps/native/src/phone/**` row selects it too.
+
+A phone spec drives a finger through `Harness::touch(phase, point)`, which hands gpui's recogniser a touch as the phone's platform reports it, `tap_on(selector)` (a finger down and up on what the selector tags) and `long_press_on(selector)` (held past the long-press time, then lifted); `tests/ui/ui_phone_home.rs` uses them for a row's tap and its long-press sheet.
 
 ### Show a change in a live client
 

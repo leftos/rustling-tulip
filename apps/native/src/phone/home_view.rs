@@ -11,6 +11,7 @@ use gpui::{
 use super::PhoneRoot;
 use super::home::{HomeGroup, HomeHost, HomeRow, Tone};
 use super::hosts_view::phone_button;
+use super::long_press::long_press_area;
 use super::tray::{self, Arranged, Buttons, TrayCard};
 use crate::buttons::ButtonKind;
 use crate::connection::Connection;
@@ -24,9 +25,9 @@ use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 
 /// The least height of a row or of anything a finger taps.
-const TOUCH_TARGET: f32 = 44.0;
+pub(super) const TOUCH_TARGET: f32 = 44.0;
 /// The status word's and the banner's text size: the sidebar's subline.
-const STATUS_TEXT_SIZE: f32 = 11.0;
+pub(super) const STATUS_TEXT_SIZE: f32 = 11.0;
 /// The mark's dot.
 const DOT: f32 = 8.0;
 /// The space either side of a row's content.
@@ -440,15 +441,26 @@ impl PhoneRoot {
     }
 
     /// One session's row: a dot, its label and its status word; a tap
-    /// shows the session.
+    /// shows the session, a long press opens its sheet.
     fn session_row(row: &HomeRow, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = format!("phone-home-row-{}", leaf_key(&row.host, &row.session_id));
         let color = tone_color(row.tone, t);
         let host = row.host.clone();
         let session_id = row.session_id.clone();
+        let phone = cx.weak_entity();
+        let (press_host, press_id) = (row.host.clone(), row.session_id.clone());
+        let long_press = long_press_area(move |_, cx| {
+            // Fails only when the phone's root is gone.
+            phone
+                .update(cx, |this, cx| {
+                    this.open_sheet(press_host.clone(), &press_id, cx);
+                })
+                .ok();
+        });
         div()
             .id(SharedString::from(id.clone()))
             .driver_id(|| id)
+            .relative()
             .flex()
             .items_center()
             .gap(px(10.0))
@@ -478,6 +490,7 @@ impl PhoneRoot {
                             .child(row.status),
                     ),
             )
+            .child(long_press)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.open_session(host.clone(), &session_id, cx);
             }))

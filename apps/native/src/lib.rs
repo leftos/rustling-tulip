@@ -1482,6 +1482,9 @@ pub struct RootView {
     /// The phone's Notifications switch per saved tailnet host, as the
     /// daemons' `PushStatus` replies set it.
     push: phone::push::PushHosts,
+    /// The replies to the requests the phone's sheet has out; empty on a
+    /// desktop, which registers none.
+    phone_replies: phone::sheet::PhoneReplies,
     /// The device tokens this PC holds per tailnet host.
     tokens: Arc<dyn DeviceTokenStore>,
     /// Ends the wait for a recovery that goes unanswered.
@@ -1966,6 +1969,7 @@ impl RootView {
             devices: devices_view::DevicesView::new(cx.focus_handle()),
             device_pairing: device_pairing_view::DevicePairingView::new(cx.focus_handle()),
             push: phone::push::PushHosts::default(),
+            phone_replies: phone::sheet::PhoneReplies::default(),
             tokens,
             recover_timer: None,
             recover_requests: HashMap::new(),
@@ -5324,6 +5328,9 @@ impl RootView {
         self.on_transcript_message(host, &msg, cx);
         self.on_host_rebind_message(host, &msg, cx);
         self.on_push_message(host, &msg, cx);
+        if self.phone_replies.on_message(host, &msg) {
+            cx.notify();
+        }
         if self.on_panel_message(host, &msg, window, cx) {
             return;
         }

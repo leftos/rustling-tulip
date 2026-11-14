@@ -6,10 +6,12 @@ mod home;
 mod home_view;
 mod hosts_view;
 pub(crate) mod lifecycle;
+mod long_press;
 pub mod push;
 #[cfg(target_os = "ios")]
 mod push_ios;
 mod root_view;
+pub(crate) mod sheet;
 mod sweep;
 mod tray;
 

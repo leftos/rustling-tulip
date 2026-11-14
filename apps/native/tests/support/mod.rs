@@ -4241,6 +4241,35 @@ impl<'a> Harness<'a> {
         self.click(at, Modifiers::none());
     }
 
+    /// Finger 1 at `at` in `phase`, as a phone's platform reports a touch;
+    /// gpui's recogniser makes the taps, pans and long presses of them.
+    pub fn touch(&mut self, phase: TouchPhase, at: Point<Pixels>) {
+        self.cx.simulate_event(gpui::TouchEvent {
+            id: gpui::TouchId(1),
+            phase,
+            position: at,
+            predicted_position: None,
+            force: None,
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// A finger down and straight up on what `selector` tags: a tap.
+    pub fn tap_on(&mut self, selector: &str) {
+        let at = self.center(selector);
+        self.touch(TouchPhase::Started, at);
+        self.touch(TouchPhase::Ended, at);
+    }
+
+    /// A finger held on what `selector` tags past the long-press time,
+    /// then lifted, as gpui's own long-press spec drives it.
+    pub fn long_press_on(&mut self, selector: &str) {
+        let at = self.center(selector);
+        self.touch(TouchPhase::Started, at);
+        self.advance(gpui::GestureTuning::default().long_press_duration + Duration::from_millis(1));
+        self.touch(TouchPhase::Ended, at);
+    }
+
     /// Scrolls `container` until what `selector` tags lies inside its bounds,
     /// so a click can reach a row below the fold.
     pub fn scroll_into_view(&mut self, container: &str, selector: &str) {

@@ -60,6 +60,8 @@
 //! two repos: one with a session waiting on a three-option question, which
 //! the Needs you tray above the list shows as its one card, the other with
 //! a working session and an idle one.
+//! `phone-sheet` shows the same Home with the working session's long-press
+//! sheet open over a scrim: its label, Stop and Cancel.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -140,6 +142,8 @@ const PHONE_INSET_TOP: f32 = 62.0;
 const PHONE_INSET_BOTTOM: f32 = 34.0;
 /// How many session rows the `phone-home` shot's Home lists.
 const PHONE_HOME_ROWS: usize = 3;
+/// The working session whose sheet the `phone-sheet` shot opens.
+const PHONE_SHEET_SESSION: &str = "b-pwa";
 /// How long the window gets to draw the fixture before the view is driven.
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
@@ -281,10 +285,11 @@ enum View {
     EmptyMain,
     FirstConnect,
     PhoneHome,
+    PhoneSheet,
 }
 
 impl View {
-    const ALL: [Self; 50] = [
+    const ALL: [Self; 51] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -335,7 +340,13 @@ impl View {
         Self::EmptyMain,
         Self::FirstConnect,
         Self::PhoneHome,
+        Self::PhoneSheet,
     ];
+
+    /// Whether the view is the phone app's, drawn over `PhoneRoot`.
+    fn is_phone(self) -> bool {
+        matches!(self, Self::PhoneHome | Self::PhoneSheet)
+    }
 
     fn name(self) -> &'static str {
         match self {
@@ -389,6 +400,7 @@ impl View {
             Self::EmptyMain => "empty-main",
             Self::FirstConnect => "first-connect",
             Self::PhoneHome => "phone-home",
+            Self::PhoneSheet => "phone-sheet",
         }
     }
 
@@ -434,7 +446,7 @@ impl View {
             Self::Summary => SUMMARY_WINDOW_SIZE,
             Self::Chat | Self::ChatCompact => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
-            Self::PhoneHome => PHONE_WINDOW_SIZE,
+            Self::PhoneHome | Self::PhoneSheet => PHONE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -473,7 +485,7 @@ impl View {
         match self {
             // Drawn by `start_toast_shot`, in a window with no root view,
             // and by `start_phone_home_shot`, which checks its own rows.
-            Self::Toast | Self::PhoneHome => true,
+            Self::Toast | Self::PhoneHome | Self::PhoneSheet => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -743,6 +755,7 @@ impl Shot {
             | View::EmptyMain
             | View::FirstConnect
             | View::PhoneHome
+            | View::PhoneSheet
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -771,7 +784,7 @@ impl Shot {
             | View::UpdateHost
             | View::UpdateHostBreaks => multi_host_ui_state(),
             View::Perf => perf_ui_state(),
-            View::PhoneHome => phone_home_ui_state(),
+            View::PhoneHome | View::PhoneSheet => phone_home_ui_state(),
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -874,7 +887,7 @@ fn phone_home_ui_state() -> Value {
 /// `phone-home` shot, whose phone is paired with it.
 fn shot_tokens(view: View) -> Arc<MemoryTokens> {
     let tokens = MemoryTokens::default();
-    if view == View::PhoneHome
+    if view.is_phone()
         && let Err(err) = tokens.set(SHOT_TAILNET_HOST, "shot-token")
     {
         tracing::warn!("the shot's device token was not stored: {err}");
@@ -1084,7 +1097,7 @@ fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Res
     if shot.view == View::Toast {
         return start_toast_shot(shot, slot, cx);
     }
-    if shot.view == View::PhoneHome {
+    if shot.view.is_phone() {
         return start_phone_home_shot(shot, slot, cx);
     }
     let (cmd_tx, cmd_rx) = unbounded();
@@ -1243,7 +1256,7 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
                 },
             }),
         }),
-        shape: if view == View::PhoneHome {
+        shape: if view.is_phone() {
             rustling_tulip_native::RootShape::Phone
         } else {
             rustling_tulip_native::RootShape::Desktop
@@ -1483,6 +1496,19 @@ async fn capture_phone_home(
     if header.as_deref() != Some("Needs you · 1 of 1") {
         bail!("the phone-home view's tray reads {header:?}, not one card");
     }
+    if shot.view == View::PhoneSheet {
+        let opened = handle.update(cx, |phone, _, cx| {
+            phone.open_sheet_on(PHONE_SHEET_SESSION, cx)
+        })?;
+        if !opened {
+            bail!("the phone-sheet view's Home does not list {PHONE_SHEET_SESSION}");
+        }
+        cx.background_executor().timer(DRIVE_WAIT).await;
+        let open = handle.update(cx, |phone, _, _| phone.sheet_session().map(str::to_owned))?;
+        if open.as_deref() != Some(PHONE_SHEET_SESSION) {
+            bail!("the phone-sheet view's sheet is {open:?}, not {PHONE_SHEET_SESSION}'s");
+        }
+    }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
 }
@@ -1605,7 +1631,8 @@ fn drive(
         | View::EmptyMain
         | View::FirstConnect
         | View::Toast
-        | View::PhoneHome => Ok(()),
+        | View::PhoneHome
+        | View::PhoneSheet => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
@@ -2541,7 +2568,7 @@ struct RemoteFixture {
 
 impl RemoteFixture {
     fn build(view: View, now: DateTime<Utc>) -> Result<Self> {
-        if view == View::PhoneHome {
+        if view.is_phone() {
             return Self::phone_home(now);
         }
         let repos = parse_message(json!({

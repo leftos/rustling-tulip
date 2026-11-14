@@ -12,12 +12,16 @@ use gpui::{
     Bounds, Modifiers, Pixels, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
     point, px,
 };
-use protocol::{ClientMessage, DEVICE_NOT_APPROVED, DaemonMessage, PromptChoice, SessionSnapshot};
+use protocol::{
+    ClientMessage, DEVICE_NOT_APPROVED, DaemonMessage, FEATURE_RESUME_SESSION, PromptChoice,
+    SessionSnapshot,
+};
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
 use serde_json::json;
-use support::{Harness, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
+use std::time::Duration;
+use support::{Harness, REMOTE, TestDir, daemon_features, repo, saved_remote, seed_ui, session};
 
 /// The second tailnet host the two-host specs save.
 const DEN: &str = "den.tail1234.ts.net";
@@ -685,6 +689,352 @@ fn a_swipe_past_a_third_moves_to_the_next_card(cx: &mut TestAppContext) {
 
     swipe(&mut h, -(width * 0.25), 2);
     assert_eq!(header(&mut h).as_deref(), Some("Needs you · 2 of 2"));
+}
+
+/// The id of the session whose sheet is open.
+fn sheet(h: &mut Harness<'_>) -> Option<String> {
+    h.cx.update(|window, cx| {
+        window
+            .root::<PhoneRoot>()
+            .flatten()
+            .and_then(|phone| phone.read(cx).sheet_session().map(str::to_owned))
+    })
+}
+
+/// Why the open sheet's last resume was refused.
+fn sheet_refusal(h: &mut Harness<'_>) -> Option<String> {
+    h.cx.update(|window, cx| {
+        window
+            .root::<PhoneRoot>()
+            .flatten()
+            .and_then(|phone| phone.read(cx).sheet_refusal().map(str::to_owned))
+    })
+}
+
+/// A phone whose host lists `resume_session`: `a` working in r1, `b`
+/// working and `c` parked in r2; the messages sent so far read.
+fn resume_phone<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut features = daemon_features();
+    features.push(FEATURE_RESUME_SESSION.to_owned());
+    let mut host = h.host(&saved_remote());
+    host.connect_keeping_sent_with(features);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1"), repo("r2", "C:/r2")],
+    });
+    let mut sessions = listed();
+    sessions[2] = session("c")
+        .label("Cleanup")
+        .in_repo("r2")
+        .inactive()
+        .build();
+    host.send(DaemonMessage::Sessions { sessions });
+    host.sent();
+    h
+}
+
+/// The parked `c`'s sheet opened and Resume tapped: the request id the
+/// `ResumeSession` carried.
+fn resume_c(h: &mut Harness<'_>) -> String {
+    h.long_press_on(&row(&saved_remote(), "c"));
+    assert!(
+        drawn(h, "phone-sheet-resume"),
+        "a parked session offers Resume"
+    );
+    assert!(!drawn(h, "phone-sheet-stop"), "and no Stop");
+    h.click_on("phone-sheet-resume");
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(sent.len(), 1, "one message, nothing else: {sent:?}");
+    sent.into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::ResumeSession {
+                session_id,
+                request_id,
+            } if session_id == "c" => request_id,
+            _ => None,
+        })
+        .expect("c's ResumeSession with a request id")
+}
+
+#[gpui::test]
+fn a_long_press_opens_the_sheet_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    h.host(&saved_remote()).sent();
+    let at = h.center(&row(&saved_remote(), "a"));
+
+    h.touch(TouchPhase::Started, at);
+    h.advance(Duration::from_millis(501));
+    assert_eq!(sheet(&mut h).as_deref(), Some("a"), "the hold opens it");
+    h.touch(TouchPhase::Ended, at);
+
+    assert_eq!(shown(&mut h), None, "the lift opens no session page");
+    for selector in [
+        "phone-sheet",
+        "phone-sheet-scrim",
+        "phone-sheet-title",
+        "phone-sheet-stop",
+        "phone-sheet-cancel",
+    ] {
+        assert!(drawn(&mut h, selector), "{selector} is drawn");
+    }
+    for selector in [
+        "phone-sheet-title",
+        "phone-sheet-stop",
+        "phone-sheet-cancel",
+    ] {
+        let height = h.bounds(selector).size.height;
+        assert!(height >= touch_target(), "{selector} is {height:?} high");
+    }
+    assert!(
+        !drawn(&mut h, "phone-sheet-resume"),
+        "a running session: Stop"
+    );
+    let sent: Vec<ClientMessage> = h.host(&saved_remote()).sent();
+    assert!(sent.is_empty(), "a long press sends nothing: {sent:?}");
+}
+
+#[gpui::test]
+fn a_short_tap_still_opens_the_session_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+
+    h.tap_on(&row(&saved_remote(), "b"));
+
+    assert_eq!(shown(&mut h).as_deref(), Some("b"));
+    assert_eq!(sheet(&mut h), None, "no sheet");
+}
+
+#[gpui::test]
+fn a_vertical_pan_still_scrolls_the_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    let mut sessions = listed();
+    let fillers: Vec<String> = (0..30).map(|n| format!("f{n:02}")).collect();
+    sessions.extend(
+        fillers
+            .iter()
+            .map(|id| session(id).in_repo("r1").status("idle").build()),
+    );
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions });
+    h.cx.run_until_parked();
+    let target = row(&saved_remote(), "a");
+    let before = h.bounds(&target);
+    let start = h.center(&target);
+
+    h.touch(TouchPhase::Started, start);
+    for step in (1..=6u8).map(f32::from) {
+        h.touch(TouchPhase::Moved, start - point(px(0.0), px(20.0 * step)));
+    }
+    h.touch(TouchPhase::Ended, start - point(px(0.0), px(120.0)));
+    h.advance(Duration::from_millis(600));
+
+    assert!(
+        h.bounds(&target).top() < before.top(),
+        "the list scrolled up under the finger"
+    );
+    assert_eq!(sheet(&mut h), None, "a pan opens no sheet");
+    assert_eq!(shown(&mut h), None, "and no session page");
+}
+
+#[gpui::test]
+fn two_taps_on_stop_send_one_bare_stop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    h.host(&saved_remote()).sent();
+    h.long_press_on(&row(&saved_remote(), "a"));
+
+    h.click_on("phone-sheet-stop");
+    assert!(
+        h.host(&saved_remote()).sent().is_empty(),
+        "the first tap only arms"
+    );
+    assert_eq!(sheet(&mut h).as_deref(), Some("a"), "the sheet stays");
+
+    h.click_on("phone-sheet-stop");
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sent.iter().any(desktop_only),
+        "no tab or layout message: {sent:?}"
+    );
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::StopSession { session_id, cleanup }]
+                if session_id == "a" && cleanup.is_empty()
+        ),
+        "exactly one bare StopSession of a: {sent:?}"
+    );
+    assert_eq!(sheet(&mut h), None, "the second tap closes the sheet");
+}
+
+#[gpui::test]
+fn resume_discards_a_parked_original_once_the_new_session_is_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = resume_phone(cx, &dir);
+    let request_id = resume_c(&mut h);
+
+    h.host(&saved_remote()).send(DaemonMessage::SessionUpdated {
+        session: session("c2")
+            .label("Cleanup")
+            .in_repo("r2")
+            .status("working")
+            .build(),
+        request_id: Some(request_id),
+    });
+    h.cx.run_until_parked();
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sent.iter().any(desktop_only),
+        "no tab or layout message: {sent:?}"
+    );
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::DiscardSession { session_id, cleanup }]
+                if session_id == "c" && cleanup.is_empty()
+        ),
+        "one DiscardSession of the original: {sent:?}"
+    );
+    assert_eq!(sheet(&mut h), None, "the sheet closes");
+}
+
+#[gpui::test]
+fn tapping_the_scrim_dismisses_the_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    h.host(&saved_remote()).sent();
+    h.long_press_on(&row(&saved_remote(), "a"));
+    assert_eq!(sheet(&mut h).as_deref(), Some("a"));
+
+    let scrim = h.bounds("phone-sheet-scrim");
+    h.click(
+        point(scrim.center().x, scrim.top() + px(20.0)),
+        Modifiers::none(),
+    );
+
+    assert_eq!(sheet(&mut h), None, "the scrim dismisses it");
+    assert!(!drawn(&mut h, "phone-sheet"));
+    assert_eq!(shown(&mut h), None, "the tap reaches no row");
+    assert!(h.host(&saved_remote()).sent().is_empty());
+}
+
+#[gpui::test]
+fn a_refused_resume_shows_in_the_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = resume_phone(cx, &dir);
+    let request_id = resume_c(&mut h);
+    assert!(!drawn(&mut h, "phone-sheet-error"));
+
+    h.host(&saved_remote()).send(DaemonMessage::Error {
+        message: "the worktree is gone".to_owned(),
+        request_id: Some(request_id),
+        code: None,
+    });
+    h.cx.run_until_parked();
+
+    assert!(drawn(&mut h, "phone-sheet-error"), "the refusal shows");
+    assert_eq!(
+        sheet_refusal(&mut h).as_deref(),
+        Some("the worktree is gone")
+    );
+    assert!(
+        h.host(&saved_remote()).sent().is_empty(),
+        "no discard follows a refusal"
+    );
+}
+
+/// What the open sheet's Resume row reads.
+fn resume_label(h: &mut Harness<'_>) -> Option<String> {
+    h.cx.update(|window, cx| {
+        window
+            .root::<PhoneRoot>()
+            .flatten()
+            .and_then(|phone| phone.read(cx).sheet_resume_label().map(str::to_owned))
+    })
+}
+
+#[gpui::test]
+fn a_reopened_sheet_sends_no_second_resume(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = resume_phone(cx, &dir);
+    let request_id = resume_c(&mut h);
+    h.click_on("phone-sheet-cancel");
+    assert_eq!(sheet(&mut h), None);
+
+    h.long_press_on(&row(&saved_remote(), "c"));
+    assert_eq!(
+        resume_label(&mut h).as_deref(),
+        Some("Resuming…"),
+        "the resume out shows"
+    );
+    h.click_on("phone-sheet-resume");
+    let sent = h.host(&saved_remote()).sent();
+    assert!(sent.is_empty(), "a resuming row is inert: {sent:?}");
+
+    h.host(&saved_remote()).send(DaemonMessage::SessionUpdated {
+        session: session("c2")
+            .label("Cleanup")
+            .in_repo("r2")
+            .status("working")
+            .build(),
+        request_id: Some(request_id),
+    });
+    h.cx.run_until_parked();
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::DiscardSession { session_id, .. }] if session_id == "c"
+        ),
+        "exactly one DiscardSession of the original: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_closed_hosts_sheet_offers_only_cancel(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_host_phone(cx, &dir);
+    open_host(&mut h, &saved_remote());
+    open_host(&mut h, &den());
+    drop_connection(&mut h, &den());
+    h.host(&saved_remote()).sent();
+    h.host(&den()).sent();
+
+    h.long_press_on(&row(&den(), "a"));
+
+    assert_eq!(sheet(&mut h).as_deref(), Some("a"), "the sheet opens");
+    assert!(!drawn(&mut h, "phone-sheet-stop"), "no Stop");
+    assert!(!drawn(&mut h, "phone-sheet-resume"), "no Resume");
+    assert!(
+        drawn(&mut h, "phone-sheet-offline"),
+        "the offline line shows"
+    );
+    assert!(drawn(&mut h, "phone-sheet-cancel"));
+    assert!(h.host(&saved_remote()).sent().is_empty());
+    assert!(h.host(&den()).sent().is_empty(), "nothing is sent");
+}
+
+/// A message only a desktop sends: presence, tabs and pane layout.
+fn desktop_only(msg: &ClientMessage) -> bool {
+    matches!(
+        msg,
+        ClientMessage::ReportPresence { .. }
+            | ClientMessage::CreateTab { .. }
+            | ClientMessage::RearrangeTab { .. }
+            | ClientMessage::ListTabs
+            | ClientMessage::RehostPanes { .. }
+            | ClientMessage::RebindHostSessions { .. }
+    )
 }
 
 #[gpui::test]

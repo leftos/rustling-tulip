@@ -7,11 +7,12 @@
 //! are unit-testable without GPUI; `home_view` draws them.
 
 use crate::needs_you;
+use crate::session_actions::{self, ActionState};
 use crate::sidebar::{
     Container, ContainerKind, HostGroup, Leaf, LeafKind, LeafState, SidebarModel,
 };
 use crate::target::HostKey;
-use protocol::SessionStatus;
+use protocol::{ClientMessage, SessionMode, SessionSnapshot, SessionStatus};
 
 /// How a row's status reads at a glance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,13 +186,115 @@ fn status_literal(status: SessionStatus, background: bool) -> &'static str {
     }
 }
 
+/// What a long press on a row's sheet offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Offer {
+    /// A running session: Stop.
+    Stop,
+    /// A parked, stopped, errored or abandoned session: Resume.
+    Resume,
+    /// A headless session, which is never rerun: neither.
+    Nothing,
+    /// A session on a host whose connection is closed: neither, as nothing
+    /// can reach it.
+    Offline,
+}
+
+/// What `session`'s sheet offers while its host's connection is `open` or
+/// not: [`offer`] while open, else [`Offer::Offline`].
+pub(crate) fn offer_on(session: &SessionSnapshot, open: bool) -> Offer {
+    if open { offer(session) } else { Offer::Offline }
+}
+
+/// What `session`'s sheet offers, by its state as the desktop's menu
+/// buckets it ([`session_actions::action_state`]).
+pub(crate) fn offer(session: &SessionSnapshot) -> Offer {
+    if session.mode == SessionMode::Headless {
+        return Offer::Nothing;
+    }
+    match session_actions::action_state(session) {
+        ActionState::Running => Offer::Stop,
+        ActionState::Stopped | ActionState::Inactive | ActionState::Abandoned => Offer::Resume,
+    }
+}
+
+/// The bare stop the sheet sends: no park and no discard, which the
+/// desktop's plan adds for a session no pane shows.
+pub(crate) fn stop(session_id: &str) -> ClientMessage {
+    ClientMessage::StopSession {
+        session_id: session_id.to_owned(),
+        cleanup: Vec::new(),
+    }
+}
+
+/// A resume out, kept until its reply: the host it went to, its request
+/// id, the session it reruns and whether that original is discarded once
+/// the new session is up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingResume {
+    pub(crate) host: HostKey,
+    pub(crate) request_id: String,
+    pub(crate) original: String,
+    pub(crate) discards_original: bool,
+}
+
+impl PendingResume {
+    /// What follows the new session's `SessionUpdated`: the original's
+    /// discard, for a parked or stopped original.
+    pub(crate) fn follow_up(&self) -> Option<ClientMessage> {
+        self.discards_original
+            .then(|| ClientMessage::DiscardSession {
+                session_id: self.original.clone(),
+                cleanup: Vec::new(),
+            })
+    }
+}
+
+/// The request that resumes `session` on `host` under `request_id`, and the
+/// record to keep while it is out. A host listing `resume_session` gets one
+/// `ResumeSession`; an older one a `ResumeAbandoned` for an abandoned
+/// session, which carries no request id and so keeps no record, else the
+/// restart's duplicate, as `session_actions::plan` picks. An abandoned
+/// original is resumed in place and never discarded.
+pub(crate) fn resume(
+    session: &SessionSnapshot,
+    host: &HostKey,
+    request_id: String,
+    resume_session: bool,
+) -> (ClientMessage, Option<PendingResume>) {
+    let abandoned = session.is_abandoned;
+    let session_id = session.id.clone();
+    let msg = if resume_session {
+        ClientMessage::ResumeSession {
+            session_id,
+            request_id: Some(request_id.clone()),
+        }
+    } else if abandoned {
+        return (ClientMessage::ResumeAbandoned { session_id }, None);
+    } else {
+        ClientMessage::DuplicateSession {
+            session_id,
+            request_id: Some(request_id.clone()),
+            carry_busy_excluded: true,
+            same_checkout: true,
+        }
+    };
+    let pending = PendingResume {
+        host: host.clone(),
+        request_id,
+        original: session.id.clone(),
+        discards_original: !abandoned,
+    };
+    (msg, Some(pending))
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "test fixtures")]
 mod tests {
     use super::*;
     use crate::connection_picker::SavedHost;
     use crate::target::Target;
-    use protocol::{DaemonMessage, RepoEntry, SessionSnapshot};
+    use protocol::{DaemonMessage, RepoEntry};
     use serde_json::json;
 
     /// The tailnet hosts the fixtures save.
@@ -406,5 +509,137 @@ mod tests {
             "no nested row is listed"
         );
         assert_eq!(home.rows().count(), 3, "every session's own row is");
+    }
+
+    /// `msg` as it goes on the wire, to compare.
+    fn wire(msg: ClientMessage) -> serde_json::Value {
+        serde_json::to_value(msg).expect("a client message serializes")
+    }
+
+    fn parked(id: &str) -> SessionSnapshot {
+        let mut s = session(id, "r1", "stopped");
+        s.is_inactive = true;
+        s
+    }
+
+    fn abandoned(id: &str) -> SessionSnapshot {
+        let mut s = session(id, "r1", "stopped");
+        s.is_abandoned = true;
+        s
+    }
+
+    #[test]
+    fn a_running_session_offers_stop() {
+        for status in ["working", "idle", "awaiting_input", "spawning"] {
+            assert_eq!(offer(&session("a", "r1", status)), Offer::Stop, "{status}");
+        }
+        assert_eq!(
+            wire(stop("a")),
+            wire(ClientMessage::StopSession {
+                session_id: "a".to_owned(),
+                cleanup: Vec::new(),
+            }),
+            "a bare stop: no park, no discard"
+        );
+    }
+
+    #[test]
+    fn a_parked_session_offers_resume_and_discards_the_original() {
+        let stopped = session("s", "r1", "stopped");
+        let errored = session("e", "r1", "error");
+        for s in [parked("p"), stopped, errored] {
+            assert_eq!(offer(&s), Offer::Resume, "{}", s.id);
+            let (msg, pending) = resume(&s, &key(BOX), "q1".to_owned(), true);
+            assert_eq!(
+                wire(msg),
+                wire(ClientMessage::ResumeSession {
+                    session_id: s.id.clone(),
+                    request_id: Some("q1".to_owned()),
+                })
+            );
+            let pending = pending.expect("a resume with a request id is kept");
+            assert_eq!(
+                pending,
+                PendingResume {
+                    host: key(BOX),
+                    request_id: "q1".to_owned(),
+                    original: s.id.clone(),
+                    discards_original: true,
+                }
+            );
+            assert_eq!(
+                pending.follow_up().map(wire),
+                Some(wire(ClientMessage::DiscardSession {
+                    session_id: s.id.clone(),
+                    cleanup: Vec::new(),
+                })),
+                "the original goes once the new session is up"
+            );
+        }
+    }
+
+    #[test]
+    fn an_abandoned_session_resumes_without_a_discard() {
+        let s = abandoned("x");
+        assert_eq!(offer(&s), Offer::Resume);
+        let (msg, pending) = resume(&s, &key(BOX), "q1".to_owned(), true);
+        assert_eq!(
+            wire(msg),
+            wire(ClientMessage::ResumeSession {
+                session_id: "x".to_owned(),
+                request_id: Some("q1".to_owned()),
+            })
+        );
+        let pending = pending.expect("kept to match the reply");
+        assert!(!pending.discards_original);
+        assert_eq!(
+            pending.follow_up().map(wire),
+            None,
+            "an abandoned original stays"
+        );
+    }
+
+    #[test]
+    fn a_headless_session_offers_nothing() {
+        for mut s in [
+            session("h", "r1", "working"),
+            parked("h"),
+            session("h", "r1", "stopped"),
+            abandoned("h"),
+        ] {
+            s.mode = protocol::SessionMode::Headless;
+            assert_eq!(offer(&s), Offer::Nothing, "headless is never rerun");
+        }
+    }
+
+    #[test]
+    fn an_older_host_duplicates_instead_of_resuming() {
+        let (msg, pending) = resume(&parked("p"), &key(BOX), "q1".to_owned(), false);
+        assert_eq!(
+            wire(msg),
+            wire(ClientMessage::DuplicateSession {
+                session_id: "p".to_owned(),
+                request_id: Some("q1".to_owned()),
+                carry_busy_excluded: true,
+                same_checkout: true,
+            })
+        );
+        let pending = pending.expect("the duplicate's reply is followed");
+        assert_eq!(
+            pending.follow_up().map(wire),
+            Some(wire(ClientMessage::DiscardSession {
+                session_id: "p".to_owned(),
+                cleanup: Vec::new(),
+            }))
+        );
+
+        let (msg, pending) = resume(&abandoned("x"), &key(BOX), "q2".to_owned(), false);
+        assert_eq!(
+            wire(msg),
+            wire(ClientMessage::ResumeAbandoned {
+                session_id: "x".to_owned(),
+            })
+        );
+        assert_eq!(pending, None, "a ResumeAbandoned carries no request id");
     }
 }
