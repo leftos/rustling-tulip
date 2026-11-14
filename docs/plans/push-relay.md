@@ -31,7 +31,7 @@ Reason: the daemon's sender (`push/send.rs` `send`, its `Outcome` map, the `JwtC
 
 The payload is end-to-end encrypted, daemon to phone, with RFC 8291 to the phone's own `p256dh` key and `auth` secret, exactly as a browser subscription is. The relay never holds a key that opens it.
 
-- **APNs:** the relay sends an `alert` push with `mutable-content: 1`, an alert made only of localization keys from the app's bundle (`title-loc-key`, `loc-key`; the app's strings say "Rustling Tulip" and "A session changed. Open the app to see it."), and the ciphertext base64url in a custom key `e`.
+- **APNs:** the relay sends an `alert` push with `mutable-content: 1`, an alert made only of localization keys from the app's bundle (`title-loc-key`, `loc-key`; the app's strings, `PUSH_FALLBACK_TITLE` and `PUSH_FALLBACK_BODY` in the phone app bundle's `en.lproj/Localizable.strings`, say "Rustling Tulip" and "A session changed. Open the app to see it."), and the ciphertext base64url in a custom key `e`.
 
   The app's notification service extension decrypts `e`, reads the push notice, and replaces the title, body and badge and sets the session link. If it cannot decrypt in time, iOS shows the fallback alert.
 - **FCM:** the relay sends a data-only message (`data.e` the ciphertext) at high priority; the app's messaging service decrypts it and posts its own notification, so Android shows no fallback text at all.

@@ -85,6 +85,14 @@ function Build-AppBundle([string] $Triple) {
     Copy-Item -LiteralPath $binary -Destination (Join-Path $app $BinaryName)
     $plist = Join-Path $app 'Info.plist'
     Copy-Item -LiteralPath (Join-Path $RepoRoot 'apps/ios/Info.plist') -Destination $plist
+    # The relay's alert names loc keys, which iOS resolves from the app bundle when the extension leaves a push as it came.
+    $lproj = Join-Path $app 'en.lproj'
+    New-Item -ItemType Directory -Force -Path $lproj | Out-Null
+    $strings = Join-Path $lproj 'Localizable.strings'
+    Copy-Item -LiteralPath (Join-Path $RepoRoot 'apps/ios/en.lproj/Localizable.strings') -Destination $strings
+    & plutil -lint $strings | Out-Host
+    Assert-LastExit 'plutil -lint en.lproj/Localizable.strings'
+    Get-ChildItem -LiteralPath $lproj -Name | ForEach-Object { "en.lproj: $_" } | Out-Host
     $numeric = ((Get-WorkspaceVersion) -split '-')[0]
     Write-PlistValue $plist 'CFBundleShortVersionString' $numeric
     Write-PlistValue $plist 'CFBundleVersion' $numeric
