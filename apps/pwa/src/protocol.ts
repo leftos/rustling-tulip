@@ -160,6 +160,13 @@ export const FEATURE_WEB_PUSH = "web_push";
 export const FEATURE_RELAY_PUSH = "relay_push";
 
 /**
+ * `Welcome.features` entry: the daemon answers a local
+ * [`ClientMessage::SendFallbackPush`] by sending every phone registered for
+ * relay push one push its notification extension cannot open.
+ */
+export const FEATURE_FALLBACK_PUSH = "fallback_push";
+
+/**
  * `Welcome.features` entry: the daemon saves a file a client sends into a
  * session's folder ([`ClientMessage::UploadFile`]).
  */
@@ -4053,6 +4060,14 @@ export type ClientMessage =
    */
   | { type: "dump_screen"; session_id: string; request_id?: string | null }
   /**
+   * Send every phone registered for relay push one push its notification
+   * extension cannot open, so the phone shows the relay's fallback alert;
+   * answered with [`DaemonMessage::FallbackPushSent`]. Sent only to a
+   * daemon that lists [`FEATURE_FALLBACK_PUSH`]. Host-only: a tailnet
+   * connection gets `Error "fallback push is local-only"`.
+   */
+  | { type: "send_fallback_push"; request_id?: string | null }
+  /**
    * Answer a session's pending prompt from the Dashboard. Refused with an
    * `Error` carrying the `request_id` when the prompt changed since.
    *
@@ -5623,6 +5638,12 @@ export type DaemonMessage =
    * `agent`: The session's agent; `None` for a plain shell.
    */
   | { type: "screen_dump"; session_id: string; request_id?: string | null; cols: number; rows: number; grid?: string[]; title?: string | null; agent?: AgentId | null; explanation?: ScreenExplanation }
+  /**
+   * The answer to [`ClientMessage::SendFallbackPush`]: how many phones
+   * are registered for relay push (`phones`), and for how many of them the
+   * relay took the push (`sent`).
+   */
+  | { type: "fallback_push_sent"; request_id?: string | null; phones: number; sent: number }
   /**
    * The answer to [`ClientMessage::GetSessionDetail`].
    *

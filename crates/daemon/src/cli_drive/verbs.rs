@@ -34,6 +34,54 @@ pub(super) struct WaitRequest<'a> {
     pub(super) json: bool,
 }
 
+/// Why `push-fallback` refuses a daemon that lists no fallback-push feature.
+const NO_FALLBACK_PUSH: &str = "the running daemon does not support push-fallback; update it";
+
+/// `push-fallback`: ask the daemon to send every phone registered for relay
+/// push one push its extension cannot open, and say for how many the relay
+/// took it. No phone, or none taken, is a failure. A daemon that lists no
+/// [`protocol::FEATURE_FALLBACK_PUSH`] is refused before anything is sent.
+pub(super) async fn push_fallback(
+    connection: &mut Connection,
+    welcome: &Welcome,
+    json: bool,
+) -> Result<String, Failure> {
+    if !welcome
+        .features
+        .iter()
+        .any(|feature| feature == protocol::FEATURE_FALLBACK_PUSH)
+    {
+        return Err(Failure::failed(NO_FALLBACK_PUSH));
+    }
+    ask(
+        connection,
+        &ClientMessage::SendFallbackPush {
+            request_id: Some(REQUEST_ID.to_owned()),
+        },
+    )
+    .await?;
+    let (phones, sent) = await_reply(connection, "the push's answer", |message| match message {
+        DaemonMessage::FallbackPushSent {
+            request_id,
+            phones,
+            sent,
+        } if is_mine(request_id.as_deref()) => Some((phones, sent)),
+        _ => None,
+    })
+    .await?;
+    if phones == 0 {
+        return Err(Failure::failed("no phone is registered for relay push"));
+    }
+    if sent == 0 {
+        return Err(Failure::failed("the relay took the push for no phone"));
+    }
+    Ok(if json {
+        format!("{{\"sent\":{sent},\"phones\":{phones}}}\n")
+    } else {
+        format!("sent to {sent} of {phones} phones\n")
+    })
+}
+
 /// What the daemon pushes before `Sessions` that `spawn` checks against.
 struct Known {
     agents: Vec<AgentDescriptor>,

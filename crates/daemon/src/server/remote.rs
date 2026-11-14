@@ -505,6 +505,7 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
         ClientMessage::Shutdown { .. } => Some("shutdown is local-only"),
         ClientMessage::ConfigureRemote { .. } => Some("remote access is local-only"),
         ClientMessage::DumpScreen { .. } => Some("screen dump is local-only"),
+        ClientMessage::SendFallbackPush { .. } => Some("fallback push is local-only"),
         ClientMessage::ListPendingDevices
         | ClientMessage::ApproveDevice { .. }
         | ClientMessage::DenyDevice { .. }
@@ -651,6 +652,27 @@ mod tests {
             "{reply:?}"
         );
         assert!(events.try_recv().is_err(), "nothing was cancelled");
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_connection_is_refused_a_fallback_push() {
+        let (hub, _scratch) = test_hub("tailnet-fallback-push");
+
+        let reply = dispatch_one_as(
+            &hub,
+            ClientMessage::SendFallbackPush {
+                request_id: Some("f1".to_owned()),
+            },
+            &AuthKind::Tailnet(test_peer()),
+        )
+        .await;
+
+        assert!(
+            matches!(&reply, DaemonMessage::Error { message, code: Some(code), .. }
+                if message == "fallback push is local-only"
+                    && code == protocol::error_codes::LOCAL_ONLY),
+            "{reply:?}"
+        );
     }
 
     #[tokio::test]

@@ -211,6 +211,8 @@ pub(super) fn build_test_hub(
         live_devices,
         push,
         presence: Arc::default(),
+        // Its receiver is dropped: a test hub runs no push task.
+        fallback_push: tokio::sync::mpsc::channel(1).0,
         dashboard,
         summarizer,
         turns,
@@ -224,6 +226,17 @@ pub(super) fn build_test_hub(
         host_update: Arc::new(super::HostUpdate::nothing_installed()),
     };
     (hub, scratch, attention_rx)
+}
+
+/// Give `hub` a fallback-push sender whose receiver the test holds, as a hub
+/// whose push task runs; returns the receiver, for the test's own
+/// [`crate::push::trigger::Sources`].
+pub(crate) fn enable_fallback_push(
+    hub: &mut Hub,
+) -> tokio::sync::mpsc::Receiver<crate::push::trigger::FallbackRequest> {
+    let (fallback_push, fallback_rx) = tokio::sync::mpsc::channel(4);
+    hub.fallback_push = fallback_push;
+    fallback_rx
 }
 
 /// Give `hub` an empty dispatch-run list over the live-run folder `folder`,

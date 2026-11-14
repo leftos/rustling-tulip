@@ -410,6 +410,121 @@ async fn a_usage_error_exits_two() {
     assert_eq!(value["error"]["code"], CODE_USAGE);
 }
 
+/// `push-fallback` with `list` against a scripted daemon that lists the
+/// fallback-push feature and answers `phones` and `sent`.
+async fn push_fallback_answered(
+    tag: &str,
+    phones: u32,
+    sent: u32,
+    list: &[&str],
+) -> super::tests::Outcome {
+    let (hub, scratch) = test_hub(tag);
+    let hub_port = serve_loopback(&hub).await;
+    let reply = DaemonMessage::FallbackPushSent {
+        request_id: Some(REQUEST_ID.to_owned()),
+        phones,
+        sent,
+    };
+    let opening = vec![welcome(&[protocol::FEATURE_FALLBACK_PUSH])];
+    let (port, script) = scripted_daemon(hub_port, opening, Some(reply)).await;
+    let outcome = run_verb(&handshake_file(&scratch, port), list).await;
+    let read = script.await.expect("the script finished");
+    assert!(
+        read.get(1)
+            .is_some_and(|asked| asked.contains(r#""type":"send_fallback_push""#)),
+        "{read:?}"
+    );
+    outcome
+}
+
+#[tokio::test]
+async fn push_fallback_prints_how_many_phones_took_it() {
+    let text = push_fallback_answered("cli-drive-fallback-text", 1, 1, &["push-fallback"]).await;
+    assert_eq!(text.exit, EXIT_OK, "{}", text.err);
+    assert_eq!(text.out, "sent to 1 of 1 phones\n");
+    assert_eq!(text.err, "");
+}
+
+#[tokio::test]
+async fn push_fallback_prints_json() {
+    let json = push_fallback_answered(
+        "cli-drive-fallback-json",
+        2,
+        1,
+        &["push-fallback", "--json"],
+    )
+    .await;
+    assert_eq!(json.exit, EXIT_OK, "{}", json.err);
+    assert_eq!(json.out, "{\"sent\":1,\"phones\":2}\n");
+}
+
+#[tokio::test]
+async fn push_fallback_with_no_phone_fails() {
+    let text = push_fallback_answered("cli-drive-fallback-none", 0, 0, &["push-fallback"]).await;
+    assert_eq!(text.exit, EXIT_FAILED);
+    assert_eq!(text.out, "");
+    assert_eq!(
+        text.err,
+        "rustling-tulipd push-fallback: no phone is registered for relay push\n"
+    );
+
+    let json = push_fallback_answered(
+        "cli-drive-fallback-none-json",
+        0,
+        0,
+        &["push-fallback", "--json"],
+    )
+    .await;
+    assert_eq!(json.exit, EXIT_FAILED);
+    let value: serde_json::Value = serde_json::from_str(&json.out).expect("valid JSON");
+    assert_eq!(value["error"]["code"], CODE_FAILED);
+}
+
+#[tokio::test]
+async fn push_fallback_the_relay_took_for_no_phone_fails() {
+    let text = push_fallback_answered("cli-drive-fallback-unsent", 2, 0, &["push-fallback"]).await;
+    assert_eq!(text.exit, EXIT_FAILED);
+    assert_eq!(
+        text.err,
+        "rustling-tulipd push-fallback: the relay took the push for no phone\n"
+    );
+}
+
+#[tokio::test]
+async fn push_fallback_refuses_a_daemon_without_the_feature() {
+    let (hub, scratch) = test_hub("cli-drive-fallback-older");
+    let hub_port = serve_loopback(&hub).await;
+    let (port, script) = scripted_daemon(hub_port, vec![welcome(&[])], None).await;
+
+    let outcome = run_verb(&handshake_file(&scratch, port), &["push-fallback"]).await;
+
+    assert_eq!(outcome.exit, EXIT_FAILED);
+    assert_eq!(outcome.out, "");
+    assert_eq!(
+        outcome.err,
+        "rustling-tulipd push-fallback: the running daemon does not support push-fallback; \
+         update it\n"
+    );
+    let read = script.await.expect("the script finished");
+    assert_eq!(read.len(), 1, "nothing follows the Hello: {read:?}");
+}
+
+#[tokio::test]
+async fn push_fallback_with_an_unknown_flag_exits_two() {
+    let scratch = ScratchDir::new("cli-drive-fallback-usage");
+    let file = scratch.path().join("daemon.json");
+
+    let text = run_verb(&file, &["push-fallback", "--all"]).await;
+
+    assert_eq!(text.exit, EXIT_USAGE);
+    assert_eq!(text.out, "");
+    assert_eq!(
+        text.err,
+        "rustling-tulipd push-fallback: unexpected argument --all; \
+         usage: rustling-tulipd push-fallback [--json]\n"
+    );
+}
+
 #[tokio::test]
 async fn read_prints_the_screen() {
     let (hub, scratch) = test_hub("cli-drive-read");

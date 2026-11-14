@@ -306,7 +306,7 @@ PR.8's first pass, on the owner's iPhone with a TestFlight build, against the PC
 - A Needs you raised while the phone was locked arrives on the Lock Screen with the session's name, so the notification extension ran and decrypted it; the badge matches the Needs you count.
 - A Needs you with Tailscale off on the phone still arrives, and a Finished push arrives when a turn ends.
 - `daemon.log` logs the stored subscription; a delivered push logs nothing at the default level.
-- Still to run: the tap opening that session (MA.19), the fallback alert with the extension made to fail, a deleted app's token pruned after the relay's 410, and the relay's own log lines carrying no token or body.
+- Still to run: the tap opening that session (MA.19), the fallback alert, which now runs with `rustling-tulipd push-fallback`, a deleted app's token pruned after the relay's 410, and the relay's own log lines carrying no token or body.
 
 ## How it connects
 

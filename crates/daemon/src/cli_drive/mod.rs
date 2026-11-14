@@ -1,5 +1,6 @@
 //! The session-driving verbs: `sessions`, `read`, `spawn`, `send`, `kill`,
-//! `wait` and `watch`, thin subcommands over the protocol every client speaks.
+//! `wait` and `watch`, thin subcommands over the protocol every client speaks,
+//! and `push-fallback`, which sends each phone a push it cannot open.
 //!
 //! They act on whichever daemon the active config dir's `daemon.json` names.
 //! They send no `Resize` and no client identity, so the user's panes and
@@ -46,7 +47,16 @@ const CODE_ENDED: &str = "ended";
 const CODE_CHECKOUT_CONFIRM: &str = "checkout_confirm";
 
 /// The words that name a verb.
-const VERBS: [&str; 7] = ["sessions", "read", "spawn", "send", "kill", "wait", "watch"];
+const VERBS: [&str; 8] = [
+    "sessions",
+    "read",
+    "spawn",
+    "send",
+    "kill",
+    "wait",
+    "watch",
+    "push-fallback",
+];
 
 /// The waits a verb allows.
 #[derive(Debug, Clone, Copy)]
@@ -229,9 +239,11 @@ fn verb_budget(verb: &Verb, budgets: Budgets) -> Option<Duration> {
     match verb {
         Verb::Spawn(_) => Some(budgets.spawn),
         Verb::Wait { .. } | Verb::Watch { .. } => None,
-        Verb::Sessions | Verb::Read { .. } | Verb::Send { .. } | Verb::Kill { .. } => {
-            Some(budgets.exchange)
-        }
+        Verb::Sessions
+        | Verb::Read { .. }
+        | Verb::Send { .. }
+        | Verb::Kill { .. }
+        | Verb::PushFallback => Some(budgets.exchange),
     }
 }
 
@@ -246,12 +258,8 @@ async fn run_verb(
         Verb::Sessions => sessions(connection, json).await,
         Verb::Read {
             session_id,
-            scrollback: false,
-        } => read_screen(connection, welcome, session_id, json).await,
-        Verb::Read {
-            session_id,
-            scrollback: true,
-        } => read_scrollback(connection, session_id, json).await,
+            scrollback,
+        } => read(connection, welcome, session_id, *scrollback, json).await,
         Verb::Spawn(options) => verbs::spawn(connection, options, json).await,
         Verb::Send {
             session_id,
@@ -275,6 +283,22 @@ async fn run_verb(
             session_id,
             timeout,
         } => verbs::watch(connection, session_id, *timeout, json, out).await,
+        Verb::PushFallback => verbs::push_fallback(connection, welcome, json).await,
+    }
+}
+
+/// `read`: the screen, or with `scrollback` the scrollback.
+async fn read(
+    connection: &mut Connection,
+    welcome: &Welcome,
+    session_id: &str,
+    scrollback: bool,
+    json: bool,
+) -> Result<String, Failure> {
+    if scrollback {
+        read_scrollback(connection, session_id, json).await
+    } else {
+        read_screen(connection, welcome, session_id, json).await
     }
 }
 

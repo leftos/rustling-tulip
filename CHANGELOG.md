@@ -9,6 +9,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Choose in Settings whether finished subagents stay in the sidebar, how many and for how long, and whether their rows draw compact.
 - Choose where the app's toasts appear: any of eight spots around the screen's edge, in Settings › Notifications.
 - Settings › Remote access tells you when Tailscale is slow to answer, while remote access keeps serving.
+- `rustling-tulipd push-fallback` sends each paired iPhone a push it cannot open, to check that its fallback alert shows.
 
 ### Fixed
 

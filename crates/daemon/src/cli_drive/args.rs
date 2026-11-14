@@ -16,6 +16,7 @@ const USAGE_WAIT: &str = "usage: rustling-tulipd wait <session id> (--status <st
                           --text <regex>) [--timeout <seconds>] [--json]";
 const USAGE_WATCH: &str =
     "usage: rustling-tulipd watch <session id> [--timeout <seconds>] [--json]";
+const USAGE_PUSH_FALLBACK: &str = "usage: rustling-tulipd push-fallback [--json]";
 
 /// How long `wait` waits unless `--timeout` says.
 const DEFAULT_WAIT: Duration = Duration::from_secs(300);
@@ -80,6 +81,8 @@ pub enum Verb {
         session_id: String,
         timeout: Option<Duration>,
     },
+    /// Send every relay-push phone one push its extension cannot open.
+    PushFallback,
 }
 
 impl Verb {
@@ -93,6 +96,7 @@ impl Verb {
             Self::Kill { .. } => "kill",
             Self::Wait { .. } => "wait",
             Self::Watch { .. } => "watch",
+            Self::PushFallback => "push-fallback",
         }
     }
 }
@@ -199,26 +203,32 @@ fn add_positional(
     Ok(())
 }
 
+/// The arguments after the verb, as a verb's parser takes them.
+type Rest = std::vec::IntoIter<OsString>;
+
+/// A verb's parser of the arguments after it.
+type Parser = fn(Rest) -> Result<Command, String>;
+
+/// Each verb's word and the parser of the arguments after it.
+const PARSERS: [(&str, Parser); 8] = [
+    ("sessions", parse_sessions),
+    ("read", parse_read),
+    ("spawn", parse_spawn),
+    ("send", parse_send),
+    ("kill", parse_kill),
+    ("wait", parse_wait),
+    ("watch", parse_watch),
+    ("push-fallback", parse_push_fallback),
+];
+
 /// The command `args` ask for, the verb first, or the usage error to print.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
     let mut args = args.into_iter();
     let verb = args.next().unwrap_or_default();
-    if verb == "sessions" {
-        parse_sessions(args)
-    } else if verb == "read" {
-        parse_read(args)
-    } else if verb == "spawn" {
-        parse_spawn(args)
-    } else if verb == "send" {
-        parse_send(args)
-    } else if verb == "kill" {
-        parse_kill(args)
-    } else if verb == "wait" {
-        parse_wait(args)
-    } else if verb == "watch" {
-        parse_watch(args)
-    } else {
-        Err(format!("unknown verb {}; {USAGE_SESSIONS}", verb.display()))
+    let rest: Vec<OsString> = args.collect();
+    match PARSERS.iter().find(|(name, _)| verb == *name) {
+        Some((_, parser)) => parser(rest.into_iter()),
+        None => Err(format!("unknown verb {}; {USAGE_SESSIONS}", verb.display())),
     }
 }
 
@@ -368,6 +378,20 @@ fn parse_watch(args: impl Iterator<Item = OsString>) -> Result<Command, String> 
             session_id: session_id(&scanned, USAGE_WATCH)?,
             timeout: timeout(&scanned, USAGE_WATCH)?,
         },
+        json: scanned.json,
+    })
+}
+
+fn parse_push_fallback(args: impl Iterator<Item = OsString>) -> Result<Command, String> {
+    let grammar = Grammar {
+        switches: &[],
+        valued: &[],
+        positionals: 0,
+        usage: USAGE_PUSH_FALLBACK,
+    };
+    let scanned = scan(args, &grammar)?;
+    Ok(Command {
+        verb: Verb::PushFallback,
         json: scanned.json,
     })
 }

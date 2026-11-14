@@ -133,6 +133,11 @@ pub const FEATURE_WEB_PUSH: &str = "web_push";
 /// `fcm` subscriptions ([`PushRegistration`]). A daemon lists it once it sends relay pushes.
 pub const FEATURE_RELAY_PUSH: &str = "relay_push";
 
+/// `Welcome.features` entry: the daemon answers a local
+/// [`ClientMessage::SendFallbackPush`] by sending every phone registered for
+/// relay push one push its notification extension cannot open.
+pub const FEATURE_FALLBACK_PUSH: &str = "fallback_push";
+
 /// `Welcome.features` entry: the daemon saves a file a client sends into a
 /// session's folder ([`ClientMessage::UploadFile`]).
 pub const FEATURE_UPLOAD_FILE: &str = "upload_file";
@@ -5236,6 +5241,15 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Send every phone registered for relay push one push its notification
+    /// extension cannot open, so the phone shows the relay's fallback alert;
+    /// answered with [`DaemonMessage::FallbackPushSent`]. Sent only to a
+    /// daemon that lists [`FEATURE_FALLBACK_PUSH`]. Host-only: a tailnet
+    /// connection gets `Error "fallback push is local-only"`.
+    SendFallbackPush {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Answer a session's pending prompt from the Dashboard. Refused with an
     /// `Error` carrying the `request_id` when the prompt changed since.
     AnswerPrompt {
@@ -7112,6 +7126,15 @@ pub enum DaemonMessage {
         agent: Option<AgentId>,
         #[serde(default)]
         explanation: ScreenExplanation,
+    },
+    /// The answer to [`ClientMessage::SendFallbackPush`]: how many phones
+    /// are registered for relay push (`phones`), and for how many of them the
+    /// relay took the push (`sent`).
+    FallbackPushSent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        phones: u32,
+        sent: u32,
     },
     /// The answer to [`ClientMessage::GetSessionDetail`].
     SessionDetail {
@@ -11218,6 +11241,39 @@ mod tests {
         };
         assert_eq!(grid, Vec::<String>::new());
         assert_eq!(explanation, ScreenExplanation::default());
+    }
+
+    #[test]
+    fn fallback_push_messages_round_trip() {
+        let ask = ClientMessage::SendFallbackPush {
+            request_id: Some("req-7".to_string()),
+        };
+        let json = serde_json::to_string(&ask).expect("serialize");
+        assert!(json.contains(r#""type":"send_fallback_push""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        let ClientMessage::SendFallbackPush { request_id } = back else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(request_id, Some("req-7".to_string()));
+
+        let sent = DaemonMessage::FallbackPushSent {
+            request_id: Some("req-7".to_string()),
+            phones: 2,
+            sent: 1,
+        };
+        let json = serde_json::to_string(&sent).expect("serialize");
+        assert!(json.contains(r#""type":"fallback_push_sent""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::FallbackPushSent {
+            request_id,
+            phones,
+            sent,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(request_id, Some("req-7".to_string()));
+        assert_eq!((phones, sent), (2, 1));
     }
 
     #[test]

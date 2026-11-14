@@ -5,6 +5,7 @@ use super::Hub;
 use super::connection::{AuthKind, ConnCtx};
 use crate::push::state::Loaded;
 use crate::push::store::{ApnsEnvironment, Channel, Subscription};
+use crate::push::trigger::{FallbackOutcome, FallbackRequest};
 use protocol::{ClientMessage, DaemonMessage, PushRegistration, Secret, error_codes};
 use tracing::{info, warn};
 
@@ -34,11 +35,21 @@ impl Refusal {
     }
 }
 
+/// The message a fallback push is refused with while no push task runs.
+const NO_PUSH_TASK: &str = "the push sender is not running on this host";
+
 /// Answer a push request with `PushStatus`, or an `Error`, carrying its
 /// `request_id`. A loopback connection is not a phone and a tailnet peer
 /// without an unrevoked device record is not paired (`invalid_request`); a
-/// push folder, key or store failure is `internal`.
-pub(super) fn handle(hub: &Hub, msg: &ClientMessage, ctx: &ConnCtx<'_>) {
+/// push folder, key or store failure is `internal`. A `SendFallbackPush`,
+/// which `host_only_refusal` lets through on a local connection only, is
+/// answered by [`fallback`].
+pub(super) async fn handle(hub: &Hub, msg: &ClientMessage, ctx: &ConnCtx<'_>) {
+    if let ClientMessage::SendFallbackPush { request_id } = msg {
+        let reply = fallback(&hub.fallback_push, request_id.clone()).await;
+        let _ = ctx.out_tx.send(reply);
+        return;
+    }
     let request_id = match msg {
         ClientMessage::GetPushStatus { request_id }
         | ClientMessage::RegisterPush { request_id, .. }
@@ -57,6 +68,34 @@ pub(super) fn handle(hub: &Hub, msg: &ClientMessage, ctx: &ConnCtx<'_>) {
         },
     };
     let _ = ctx.out_tx.send(reply);
+}
+
+/// Ask the push task for one fallback round and answer `FallbackPushSent`
+/// with its counts, or `Error internal` when the task is not running or
+/// ended before it answered. The round runs in the task, which alone holds
+/// the trigger's back-off and failure state.
+async fn fallback(
+    task: &tokio::sync::mpsc::Sender<FallbackRequest>,
+    request_id: Option<String>,
+) -> DaemonMessage {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let outcome = match task.send(FallbackRequest { reply }).await {
+        Ok(()) => answer.await.ok(),
+        Err(_) => None,
+    };
+    let Some(FallbackOutcome { phones, sent }) = outcome else {
+        warn!("push: a fallback push was asked for but the push task is not running");
+        return DaemonMessage::Error {
+            message: NO_PUSH_TASK.to_owned(),
+            request_id,
+            code: Some(error_codes::INTERNAL.to_owned()),
+        };
+    };
+    DaemonMessage::FallbackPushSent {
+        request_id,
+        phones,
+        sent,
+    }
 }
 
 /// Serve one push request in three phases, so `devices` is never held
@@ -521,6 +560,61 @@ mod tests {
             .iter()
             .map(|(id, _)| id.to_owned())
             .collect()
+    }
+
+    fn send_fallback_push() -> ClientMessage {
+        ClientMessage::SendFallbackPush {
+            request_id: Some("f1".to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fallback_push_with_no_push_task_is_an_internal_error() {
+        let (hub, _scratch) = test_hub("push-fallback-no-task");
+
+        let reply = dispatch_one(&hub, send_fallback_push()).await;
+
+        assert_eq!(refused(&reply, error_codes::INTERNAL, "f1"), NO_PUSH_TASK);
+    }
+
+    #[tokio::test]
+    async fn a_fallback_push_reaches_the_running_push_task() {
+        let (mut hub, scratch) = test_hub("push-fallback-sent");
+        let (url, fake, _server) = crate::push::test_fake::fake_push_service(201, "").await;
+        hub.push = std::sync::Arc::new(std::sync::Mutex::new(crate::push::state::PushState::new(
+            Some(push_dir(&scratch)),
+            crate::push::test_fake::TESTS,
+            crate::push::test_fake::origin_of(&url),
+        )));
+        let fallback = crate::server::test_support::enable_fallback_push(&mut hub);
+        pair(&hub);
+        let registered = dispatch_one_as(&hub, apns_with(&"a0".repeat(32)), &tailnet()).await;
+        assert!(token_of(&registered, "p2").is_some(), "{registered:?}");
+        let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let task = crate::push::trigger::spawn(crate::push::trigger::Sources {
+            sessions: std::sync::Arc::clone(&hub.sessions),
+            devices: std::sync::Arc::clone(&hub.devices),
+            push: std::sync::Arc::clone(&hub.push),
+            presence: std::sync::Arc::clone(&hub.presence),
+            remote: std::sync::Arc::new(|| protocol::RemoteState::Unknown),
+            shutdown,
+            fallback,
+        })
+        .expect("the push task starts");
+
+        let reply = dispatch_one(&hub, send_fallback_push()).await;
+
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::FallbackPushSent { request_id: Some(id), phones: 1, sent: 1 }
+                    if id == "f1"
+            ),
+            "{reply:?}"
+        );
+        assert_eq!(fake.posts(), 1);
+        shutdown_tx.send_replace(true);
+        task.await.expect("the push task ends");
     }
 
     #[tokio::test]

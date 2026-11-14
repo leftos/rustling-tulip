@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 
 /// The one line that refuses an argument list naming no subcommand and asking
 /// for no start form, printed verbatim before anything is created.
-const USAGE: &str = "usage: rustling-tulipd [--start-failure-file <path>] | --detach | --version | <command> ..., where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch";
+const USAGE: &str = "usage: rustling-tulipd [--start-failure-file <path>] | --detach | --version | <command> ..., where <command> is apply-update, bridge, kill, pair, push-fallback, read, screen, send, sessions, shutdown, spawn, wait or watch";
 
 /// How the daemon was asked to start, once every subcommand has declined
 /// the arguments.
@@ -327,7 +327,7 @@ mod tests {
     /// fails the test.
     fn refusal(arg: &str) -> String {
         format!(
-            "rustling-tulipd: unknown argument \"{arg}\"; usage: rustling-tulipd [--start-failure-file <path>] | --detach | --version | <command> ..., where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch"
+            "rustling-tulipd: unknown argument \"{arg}\"; usage: rustling-tulipd [--start-failure-file <path>] | --detach | --version | <command> ..., where <command> is apply-update, bridge, kill, pair, push-fallback, read, screen, send, sessions, shutdown, spawn, wait or watch"
         )
     }
 

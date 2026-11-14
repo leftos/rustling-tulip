@@ -226,6 +226,9 @@ pub struct Hub {
     /// The live connections whose client last reported the owner at the
     /// desk. A leaf lock, taken on its own; nothing is stored.
     pub(crate) presence: Arc<crate::presence::Presence>,
+    /// Asks the push task for a fallback round (`SendFallbackPush`); the
+    /// task owns the receiver, so a send fails once it is not running.
+    pub(crate) fallback_push: tokio::sync::mpsc::Sender<crate::push::trigger::FallbackRequest>,
     /// The Dashboard's facts service: its watchers, its reader cache and the
     /// facts it last sent each watcher.
     pub dashboard: crate::dashboard::Dashboard,
@@ -639,6 +642,7 @@ pub async fn run(
         Arc::clone(&client_count),
         dispatch_runs.as_ref().map(|hub| Arc::clone(&hub.runs)),
     );
+    let (fallback_push, fallback_rx) = tokio::sync::mpsc::channel(4);
     let hub = Hub {
         state,
         sessions,
@@ -675,6 +679,7 @@ pub async fn run(
         live_devices,
         push: push_state()?,
         presence: Arc::default(),
+        fallback_push,
         dashboard,
         summarizer,
         turns,
@@ -692,7 +697,7 @@ pub async fn run(
         perf: crate::perf::Perf::new(crate::perf::os::machine_source()),
         host_update: Arc::new(HostUpdate::for_this_daemon()?),
     };
-    start_hub_tasks(&hub, client_count_rx);
+    start_hub_tasks(&hub, client_count_rx, fallback_rx);
     let resume_ids = start_logins(&hub, &login_hub, resume_ids).await;
 
     let app = loopback_service(hub.clone());
@@ -957,7 +962,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::ForgetDevice { .. }) => pairing::handle(hub, m, ctx),
         m @ (ClientMessage::GetPushStatus { .. }
         | ClientMessage::RegisterPush { .. }
-        | ClientMessage::UnregisterPush { .. }) => push::handle(hub, &m, ctx),
+        | ClientMessage::UnregisterPush { .. }
+        | ClientMessage::SendFallbackPush { .. }) => push::handle(hub, &m, ctx).await,
         ClientMessage::ReportPresence { active } => hub.presence.report(ctx.connection, active),
         ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
             // Hello: already consumed by handshake; ignore subsequent ones.
@@ -1357,7 +1363,11 @@ async fn start_logins(
 }
 
 /// Start the tasks that watch the hub for the daemon's lifetime.
-fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usize>) {
+fn start_hub_tasks(
+    hub: &Hub,
+    client_count_rx: tokio::sync::watch::Receiver<usize>,
+    fallback_rx: tokio::sync::mpsc::Receiver<crate::push::trigger::FallbackRequest>,
+) {
     // Ends a removed session's subagent tails; it subscribes before any
     // connection is served, so before any follow.
     hub.subagent_tails.spawn_removal_watcher();
@@ -1439,6 +1449,7 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
             Arc::new(move || remote.borrow().snapshot.state.clone())
         },
         shutdown: hub.shutdown_tx.subscribe(),
+        fallback: fallback_rx,
     });
 }
 

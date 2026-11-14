@@ -3269,6 +3269,7 @@ mod tests {
             live_devices: crate::server::live_devices::LiveDevices::default(),
             push: crate::server::test_support::push_state_in(scratch.path().join("push")),
             presence: Arc::default(),
+            fallback_push: tokio::sync::mpsc::channel(1).0,
             dashboard,
             turns,
             summarizer,

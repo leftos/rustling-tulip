@@ -290,6 +290,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_AGENT_USER_HOOKS,
     protocol::FEATURE_WEB_PUSH,
     protocol::FEATURE_RELAY_PUSH,
+    protocol::FEATURE_FALLBACK_PUSH,
     protocol::FEATURE_UPLOAD_FILE,
     protocol::FEATURE_CLIENT_PRESENCE,
     protocol::FEATURE_TYPED_PROMPT_ANSWERS,

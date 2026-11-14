@@ -28,7 +28,7 @@ The client that started it ends its wait on that text instead of a generic timeo
 
 Any other argument list that no subcommand took prints one stderr line and exits 2, before any folder, lock, log or daemon start:
 
-`rustling-tulipd: unknown argument "<arg>"; usage: rustling-tulipd [--start-failure-file <path>] | --detach | --version | <command> ..., where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch`
+`rustling-tulipd: unknown argument "<arg>"; usage: rustling-tulipd [--start-failure-file <path>] | --detach | --version | <command> ..., where <command> is apply-update, bridge, kill, pair, push-fallback, read, screen, send, sessions, shutdown, spawn, wait or watch`
 
 `<arg>` is the offending argument: an unknown one, `--detach` given twice, `--start-failure-file` with no value after it, given twice, or beside `--detach` (`crates/daemon/src/detach.rs` `launch_form`, `crates/daemon/src/main.rs`).
 
@@ -42,7 +42,7 @@ With `--fixture` it then writes the trimmed rows (LF) to exactly that path, refu
 
 ### Session-driving verbs
 
-`rustling-tulipd sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch` work against the running daemon over the protocol every client speaks (`crates/daemon/src/cli_drive/`, on the shared connection in `crates/daemon/src/cli_client.rs`). They create no folders, take no instance lock, start no log and never start a daemon. They act on whichever daemon `daemon.json` in the active config dir names, so `RUSTLING_TULIP_CONFIG_DIR` picks an isolated one and nothing else guards the choice. They send no `Resize` and no client id, so the user's panes and the user's clients' layouts stay as they are.
+`rustling-tulipd sessions`, `read`, `spawn`, `send`, `kill`, `wait`, `watch` and `push-fallback` work against the running daemon over the protocol every client speaks (`crates/daemon/src/cli_drive/`, on the shared connection in `crates/daemon/src/cli_client.rs`). They create no folders, take no instance lock, start no log and never start a daemon. They act on whichever daemon `daemon.json` in the active config dir names, so `RUSTLING_TULIP_CONFIG_DIR` picks an isolated one and nothing else guards the choice. They send no `Resize` and no client id, so the user's panes and the user's clients' layouts stay as they are.
 
 A bare `--` ends the flags: what follows is positional text, so text may start with a dash, and `--json` after it is text.
 
@@ -67,6 +67,8 @@ With `--scrollback` it prints the session's scrollback as UTF-8 text: a cursor-f
 `--status` takes `spawning`, `idle`, `working`, `awaiting_input`, `stopped` or `error`, and prints the status, or `{id, status}` with `--json`. `--text` matches the regex over the screen's rows joined by `\n`, and prints the row where the match starts, or `{id, line}` with `--json`. While it waits, the session's output streams to this connection.
 
 `rustling-tulipd watch <session id> [--timeout <seconds>] [--json]` prints one line per change in the session's status or `background`, flushed as it comes, the first being the current state: `<status_since RFC 3339> <status> <bg|-> seq=<status_seq>`, with `-` for a `status_since` the daemon never set. With `--json` each line is an object with `status_since`, `status`, `background` and `status_seq`. It reads snapshots, so changes the daemon's broadcast dropped print as one line for the net change. It has no default timeout, exits 0 when the session is removed or the timeout passes, and exits 1 if the connection closes.
+
+`rustling-tulipd push-fallback [--json]` asks the running daemon to send every phone registered for relay push one push the phone's notification extension cannot open, so the relay's fallback alert shows, titled `Rustling Tulip` and reading `A session changed. Open the app to see it.`; it is how the phone hand check's fallback step is run (`docs/remote-hand-checklist.md`). It sends APNs pushes only (FCM and web push subscriptions are skipped), ignores the Needs you and Finished switches and the at-desk hold, and a 404 or 410 answer still prunes the subscription. It prints `sent to <N> of <M> phones`, or `{"sent":N,"phones":M}` with `--json`. It exits 1 with `no phone is registered for relay push`, `the relay took the push for no phone`, or `the running daemon does not support push-fallback; update it` (a daemon whose `Welcome.features` lack `fallback_push`), and 2 on a usage error. It follows the connection and exit-code contract below; the message is local-only, which a bridge over SSH is.
 
 Exit codes: 0 ok, 1 any failure, 2 usage, 4 `wait` timed out, 5 no daemon running (`daemon.json` is missing, or no connection opens on the port it names, as after a crash). A listener that does not prove it holds the token is exit 1, and so is the elevated daemon's refusal (below), printed as the verb's error. A failure prints one stderr line `rustling-tulipd <verb>: <error>` and nothing on stdout. With `--json` it prints `{"error":{"code":"<code>","message":"<text>"}}` on stdout instead, the code being the daemon's (`not_found`, `no_screen`) when it sent one, else `failed`, `usage`, `no_daemon`, `timed_out`, `ended` or `checkout_confirm`.
 

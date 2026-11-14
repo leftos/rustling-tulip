@@ -63,6 +63,76 @@ const FAILURES_TO_DELETE: u32 = 5;
 /// How many of a round's pushes are in flight at once.
 const SENDS_AT_ONCE: usize = 8;
 
+/// What a fallback push encrypts: fixed bytes, never a session's content,
+/// sealed to a throwaway key so no phone can open them.
+const FALLBACK_PLAINTEXT: &[u8] = b"rustling-tulip fallback test";
+
+/// The topic every fallback push carries, so it never collapses a real
+/// session's alert; it keeps Apple's rule (`send::topic`).
+const FALLBACK_TOPIC: &str = "rt-fallback-test";
+
+/// One fallback round asked of the push task by a local
+/// `SendFallbackPush`; the task answers on `reply`.
+pub(crate) struct FallbackRequest {
+    pub reply: tokio::sync::oneshot::Sender<FallbackOutcome>,
+}
+
+/// What a fallback round did: the relay subscriptions it targeted
+/// (`phones`) and how many of them the relay took the push for (`sent`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FallbackOutcome {
+    pub phones: u32,
+    pub sent: u32,
+}
+
+/// Which stored subscriptions a round collects.
+#[derive(Debug, Clone, Copy)]
+enum Pick {
+    /// An alert's round: the subscriptions whose switch for `kind` is on,
+    /// held at the desk while `at_desk`, and only the held ones when
+    /// `only_held`.
+    Alert {
+        kind: PushKind,
+        at_desk: bool,
+        only_held: bool,
+    },
+    /// A fallback round: every relay subscription, whatever its switches
+    /// and the desk say.
+    Fallback,
+}
+
+impl Pick {
+    /// Whether the round pushes to `subscription`; a target the desk holds
+    /// back is counted in `held`.
+    fn takes(self, subscription: &Subscription, held: &mut u32) -> bool {
+        let Self::Alert {
+            kind,
+            at_desk,
+            only_held,
+        } = self
+        else {
+            return matches!(
+                subscription.channel,
+                Channel::Apns { .. } | Channel::Fcm { .. }
+            );
+        };
+        if !kind.wanted_by(subscription) || (only_held && !subscription.hold_at_desk) {
+            return false;
+        }
+        if at_desk && subscription.hold_at_desk {
+            *held += 1;
+            return false;
+        }
+        true
+    }
+}
+
+/// A subscriber nobody holds the keys of, for a fallback push.
+fn stranger() -> anyhow::Result<Subscriber> {
+    let keys = push_crypto::InstallKeys::generate()?;
+    Subscriber::from_b64url(&keys.p256dh_b64url()?, &keys.auth_b64url())
+}
+
 /// What a session change raises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PushKind {
@@ -367,6 +437,15 @@ impl Plaintexts {
             }
         };
         Self { web_push, notice }
+    }
+
+    /// A fallback round's plaintexts: the relay's only, the fixed
+    /// [`FALLBACK_PLAINTEXT`].
+    fn fallback() -> Self {
+        Self {
+            web_push: None,
+            notice: Some(FALLBACK_PLAINTEXT.to_vec()),
+        }
     }
 
     /// The plaintext a target of `kind` is sent, if the round has it.
@@ -687,14 +766,12 @@ impl Trigger {
                 "push: the tailnet listener is not serving; only relay pushes are sent"
             );
         }
-        let Some(mut round) = self.collect(
-            stores,
-            alert.kind,
-            origin.as_deref(),
-            now,
-            alert.at_desk,
-            alert.only_held,
-        ) else {
+        let pick = Pick::Alert {
+            kind: alert.kind,
+            at_desk: alert.at_desk,
+            only_held: alert.only_held,
+        };
+        let Some(mut round) = self.collect(stores, pick, origin.as_deref(), now) else {
             return Vec::new();
         };
         if alert.kind == PushKind::NeedsYou && round.held > 0 {
@@ -710,6 +787,49 @@ impl Trigger {
         self.apply(stores, answers)
     }
 
+    /// Push every stored relay subscription one push its phone cannot open,
+    /// signing at `now`: [`FALLBACK_PLAINTEXT`] sealed to a throwaway key
+    /// under [`FALLBACK_TOPIC`], whatever the switches and the desk say, so
+    /// the relay's fallback alert shows. Web Push subscriptions get nothing.
+    /// The answers are acted on as [`Trigger::deliver`] acts on them.
+    pub(crate) async fn deliver_fallback(
+        &mut self,
+        stores: Stores<'_>,
+        now: DateTime<Utc>,
+    ) -> FallbackOutcome {
+        let stranger = match stranger() {
+            Ok(stranger) => stranger,
+            Err(err) => {
+                tracing::warn!(
+                    err = format!("{err:#}"),
+                    "push: no throwaway key for the fallback push; nothing is sent"
+                );
+                return FallbackOutcome::default();
+            }
+        };
+        let Some(mut round) = self.collect(stores, Pick::Fallback, None, now) else {
+            return FallbackOutcome::default();
+        };
+        let live = std::mem::take(&mut round.live);
+        self.failures.retain(|key, _| live.addresses.contains(key));
+        for target in &mut round.targets {
+            target.subscriber = stranger.clone();
+        }
+        let phones = u32::try_from(round.targets.len()).unwrap_or(u32::MAX);
+        let answers = self
+            .send_all(round, &Plaintexts::fallback(), FALLBACK_TOPIC)
+            .await;
+        self.prune_backoff(&live.keys);
+        let delivered = self.apply(stores, answers);
+        let sent = delivered
+            .iter()
+            .filter(|delivery| delivery.outcome == Outcome::Sent)
+            .count();
+        let sent = u32::try_from(sent).unwrap_or(u32::MAX);
+        tracing::info!(phones, sent, "push: a fallback round is done");
+        FallbackOutcome { phones, sent }
+    }
+
     /// Drop every back-off that has run out and whose key no stored
     /// subscription has, so a token deleted or replaced while backed off
     /// leaves no entry behind.
@@ -721,19 +841,17 @@ impl Trigger {
 
     /// The round's targets: [`lock_push`] reads `devices` and releases it
     /// once `push` is held, and the state is loaded and read under `push`
-    /// alone, released when it returns. A target whose subscription holds at the
-    /// desk is left out while `at_desk`, and counted in [`Round::held`], so
-    /// its session can be delivered when the owner leaves; `only_held` is
-    /// that later round, keeping only those targets. `None` when the push
-    /// state does not load.
+    /// alone, released when it returns. `pick` says which subscriptions are
+    /// targets ([`Pick::takes`]): for an alert, a target whose subscription
+    /// holds at the desk is left out while the owner is at it, and counted in
+    /// [`Round::held`], so its session can be delivered when the owner
+    /// leaves. `None` when the push state does not load.
     fn collect(
         &mut self,
         stores: Stores<'_>,
-        kind: PushKind,
+        pick: Pick,
         origin: Option<&str>,
         now: DateTime<Utc>,
-        at_desk: bool,
-        only_held: bool,
     ) -> Option<Round> {
         // A push request stores a subscription under `push` alone and
         // undoes it if the device was revoked meanwhile; until it does, the
@@ -769,13 +887,8 @@ impl Trigger {
                 .filter(|(id, _)| paired.as_ref().is_none_or(|ids| ids.contains(*id)))
         };
         let live = Live::of(stored(), &relay_origin);
-        let wanted = stored().filter(|(_, s)| kind.wanted_by(s));
-        for (device_id, subscription) in wanted {
-            if only_held && !subscription.hold_at_desk {
-                continue;
-            }
-            if at_desk && subscription.hold_at_desk {
-                held += 1;
+        for (device_id, subscription) in stored() {
+            if !pick.takes(subscription, &mut held) {
                 continue;
             }
             match self.target(&signer, device_id, subscription, policy) {
@@ -792,7 +905,7 @@ impl Trigger {
         if held > 0 {
             tracing::debug!(
                 held,
-                kind = ?kind,
+                pick = ?pick,
                 "push: the owner is at the desk; the round's held pushes wait for the owner to leave"
             );
         }
@@ -1153,6 +1266,8 @@ pub(crate) struct Sources {
     pub remote: Arc<dyn Fn() -> RemoteState + Send + Sync>,
     /// Flips to `true` when the daemon is stopping.
     pub shutdown: tokio::sync::watch::Receiver<bool>,
+    /// The fallback rounds asked for, `Hub::fallback_push`'s other end.
+    pub fallback: tokio::sync::mpsc::Receiver<FallbackRequest>,
 }
 
 /// Run the trigger for the daemon's lifetime, clients or none: every session
@@ -1181,6 +1296,7 @@ fn run(mut trigger: Trigger, sources: Sources) -> tokio::task::JoinHandle<()> {
         presence,
         remote,
         mut shutdown,
+        mut fallback,
     } = sources;
     tokio::spawn(async move {
         let stores = Stores {
@@ -1204,6 +1320,12 @@ fn run(mut trigger: Trigger, sources: Sources) -> tokio::task::JoinHandle<()> {
                     if changed.is_err() || *shutdown.borrow() {
                         return;
                     }
+                }
+                // A closed channel matches no `Some` and leaves this arm off.
+                Some(request) = fallback.recv() => {
+                    let outcome = trigger.deliver_fallback(stores, Utc::now()).await;
+                    // The asker may have gone; the round stands either way.
+                    let _ = request.reply.send(outcome);
                 }
                 event = events.recv() => match trigger.step(event, &sessions) {
                     Step::Alert { session, count } => {
@@ -1338,9 +1460,10 @@ mod tests {
     use protocol::{PUSH_NOTICE_VERSION, PushNotice, PushNoticeKind};
 
     use super::{
-        Alert, BACKOFF_FIRST, BACKOFF_MOST, Backoff, Delivery, FINISHED_GRACE, FinishedHolds,
-        PushKind, Sources, Step, Stores, Tracker, Trigger, deliver_finished, deliver_held, label,
-        lock_push, needs_you_count, notice, origin, payload, run, spawn,
+        Alert, BACKOFF_FIRST, BACKOFF_MOST, Backoff, Delivery, FALLBACK_TOPIC, FINISHED_GRACE,
+        FallbackOutcome, FinishedHolds, PushKind, Sources, Step, Stores, Tracker, Trigger,
+        deliver_finished, deliver_held, label, lock_push, needs_you_count, notice, origin, payload,
+        run, spawn,
     };
     use crate::devices::DeviceStore;
     use crate::paths::Dirs;
@@ -1668,7 +1791,30 @@ mod tests {
             keys
         }
 
+        /// Store an `apns` subscription for `device_id` with both switches
+        /// off, held at the desk; returns the phone's keys.
+        fn put_apns_quiet(&self, device_id: &str, token: &str) -> PhoneKeys {
+            let keys = phone_keys();
+            self.store_switched(
+                device_id,
+                Channel::Apns {
+                    token: token.to_owned(),
+                    environment: ApnsEnvironment::Production,
+                    p256dh: keys.p256dh.clone(),
+                    auth: keys.auth_b64.clone(),
+                },
+                false,
+            );
+            keys
+        }
+
         fn store(&self, device_id: &str, channel: Channel) {
+            self.store_switched(device_id, channel, true);
+        }
+
+        /// Store `channel` for `device_id` with both switches `on`, held at
+        /// the desk.
+        fn store_switched(&self, device_id: &str, channel: Channel, on: bool) {
             let devices = lock(&self.devices);
             let mut push = lock(&self.push);
             push.load(unrevoked_ids(&devices).as_ref())
@@ -1678,8 +1824,8 @@ mod tests {
                     device_id,
                     Subscription {
                         channel,
-                        needs_you: true,
-                        finished: true,
+                        needs_you: on,
+                        finished: on,
                         hold_at_desk: true,
                         created_at: "2026-11-07T00:00:00Z".to_owned(),
                     },
@@ -2560,6 +2706,72 @@ mod tests {
         );
     }
 
+    // ---- the fallback round ----
+
+    #[tokio::test]
+    async fn the_fallback_round_posts_an_unopenable_push_to_each_relay_phone_only() {
+        let (url, fake, _server) = fake_push_service(201, "").await;
+        let setup = relay_setup("fallback-round", &origin_of(&url));
+        let apns = setup.pair(1);
+        let fcm = setup.pair(2);
+        let web = setup.pair(3);
+        // Both switches off, held at the desk: the fallback round ignores them.
+        let keys = setup.put_apns_quiet(&apns, TOKEN_A);
+        setup.put_fcm(&fcm, "cZ1:APA91bHPRgkF");
+        setup.subscribe(&web, url.as_str(), true, true);
+
+        let outcome = trigger().deliver_fallback(setup.stores(), Utc::now()).await;
+
+        assert_eq!(outcome, FallbackOutcome { phones: 1, sent: 1 });
+        assert_eq!(
+            fake.paths(),
+            [format!("/v1/apns/production/{TOKEN_A}")],
+            "one post, to the APNs phone; none to the fcm route or the Web Push endpoint"
+        );
+        let seen = fake.seen.lock().expect("unpoisoned");
+        let (headers, body) = &seen[0];
+        assert!(
+            push_crypto::decrypt(body, &keys.secret, &keys.auth).is_err(),
+            "the phone's own keys do not open the body"
+        );
+        assert_eq!(
+            headers.get("topic").and_then(|v| v.to_str().ok()),
+            Some(FALLBACK_TOPIC)
+        );
+        assert!(FALLBACK_TOPIC.len() <= 32 && FALLBACK_TOPIC.len() % 4 != 1);
+        assert!(
+            FALLBACK_TOPIC
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "the topic keeps Apple's rule"
+        );
+        assert_eq!(
+            setup.endpoint_of(&fcm).as_deref(),
+            Some("cZ1:APA91bHPRgkF"),
+            "the fcm subscription is kept"
+        );
+        assert_eq!(
+            setup.endpoint_of(&web).as_deref(),
+            Some(url.as_str()),
+            "the Web Push subscription is kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gone_answer_to_a_fallback_push_deletes_the_subscription() {
+        let (setup, device, fake, _server) = one_phone("fallback-gone", TOKEN_A, 410).await;
+
+        let outcome = trigger().deliver_fallback(setup.stores(), Utc::now()).await;
+
+        assert_eq!(outcome, FallbackOutcome { phones: 1, sent: 0 });
+        assert_eq!(fake.posts(), 1);
+        assert_eq!(
+            setup.endpoint_of(&device),
+            None,
+            "the subscription is deleted"
+        );
+    }
+
     #[tokio::test]
     async fn a_throttled_relay_token_backs_off_only_that_phone() {
         let (url, fake, _server) =
@@ -3139,6 +3351,8 @@ mod tests {
             presence: Arc::clone(presence),
             remote: Arc::new(serving),
             shutdown,
+            // No fallback round is asked of these tasks.
+            fallback: tokio::sync::mpsc::channel(1).1,
         }
     }
 

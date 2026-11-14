@@ -170,6 +170,6 @@ These need the phone app from TestFlight on an iPhone with Tailscale signed in a
 - [ ] Tap the push. **Expect:** the app opens on that session's screen on that host.
 - [ ] Turn Tailscale off on the phone and leave another session waiting. **Expect:** the push still arrives. Turn Tailscale back on.
 - [ ] Let a session's turn end. **Expect:** a Finished push arrives.
-- [ ] With a TestFlight build whose extension returns without decrypting, leave a session waiting. **Expect:** the fallback alert arrives, titled `Rustling Tulip` and reading `A session changed. Open the app to see it.`
+- [ ] With the phone locked, run `rustling-tulipd push-fallback` on the host. **Expect:** it prints `sent to <N> of <M> phones` with N at least 1 and the fallback alert arrives, titled `Rustling Tulip` and reading `A session changed. Open the app to see it.`
 - [ ] Delete the app and leave a session waiting. **Expect:** the relay answers the daemon 410 and the daemon deletes the phone's subscription from `subscriptions.json` in its `push` folder (`docs/on-disk.md`).
 - [ ] Run `wrangler tail rustling-tulip-push-relay` while a push goes out. **Expect:** the relay's own log lines carry no device token and no body; the request URL Workers records carries the token, which is the platform's line, not the relay's.
