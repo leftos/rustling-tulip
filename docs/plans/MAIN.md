@@ -167,6 +167,8 @@
 - [ ] RT-1481 Scrub the owner's paths and status line from the screen fixtures
 - [ ] RT-1541 Check the dispatch dir in the isolated daemon's launch check
 - [ ] RT-1590 Make the UI harness's in_model fail for a selector it has no model for
+- [ ] RT-1673 Make the settings-dashboard native-shot open its view again
+- [ ] RT-1677 Keep two simulator runs from sharing one iPhone simulator on the Mac mini
 
 ## Elevated daemon and security
 
@@ -483,13 +485,8 @@
 - [ ] RT-1460 Sort phone Home's groups by the desktop's sort, needs-you first
 - [ ] RT-1518 PR.8: Prove a relay push end to end on a real iPhone · release vNext
 - [ ] RT-1519 PR.9: Add the FCM sender to the push relay for the Android app
-- [ ] RT-1650 Upgrade GPUI on feat/gpui-upgrade (MA.1 to MA.5) · release vNext
-  - [/] RT-1524 MA.5: Pass the desktop checks on the GPUI upgrade and merge it · release vNext
-  - [ ] RT-1660 Merge feat/gpui-upgrade to main (#207)
-- [ ] RT-1525 MA.6: Build the phone app for the iOS simulator · release vNext
-- [ ] RT-1526 MA.7: Make TextInput work with the soft keyboard and Return · release vNext
-- [ ] RT-1527 MA.8: Give iOS its TLS roots, Keychain token store and config dir · release vNext
 - [ ] RT-1528 MA.9: Build the phone root over RootView with no This PC · release vNext
+  - [ ] RT-1680 MA.9c: List the sessions at the phone's width · release vNext
 - [ ] RT-1529 MA.10: Reconnect when the phone app returns to the foreground · release vNext
 - [ ] RT-1530 MA.11: Sign the phone app and upload it to TestFlight · release vNext
 - [ ] RT-1531 MA.12: Run the phone app on the owner's iPhone against the PC's daemon · release vNext
@@ -504,6 +501,8 @@
 - [ ] RT-1540 MA.21: Add SSH hosts on the phone · release vNext
 - [ ] RT-1647 Drop the relay's cached APNs provider token when APNs refuses it
 - [ ] RT-1648 Harden the push relay: re-mint the cached APNs token after a key change, refuse an oversized body before reading it
+- [ ] RT-1675 Tell the platform about a text input's own edits and selection changes
+- [ ] RT-1681 Polish the phone's add-host form and Pair dialog: Return, keys, scrim, Cancel
 
 ## Dashboard, Gates and Linear
 
@@ -625,7 +624,7 @@
 - [ ] RT-1243 Draw the toast's typed-answer box on macOS
 - [ ] RT-1550 Reap the opener and browser processes the client starts on macOS and Linux
 - [ ] RT-1551 Read a leading // as a local path when building a page URL off Windows
-- [ ] RT-1671 Make the native client's specs pass on macOS · release vNext
+- [ ] RT-1672 Bind the viewer and font-size shortcuts to Cmd on macOS
 
 ## Dictation
 
@@ -717,6 +716,7 @@
 - [ ] RT-1653 Keep connects from waiting on block, forget and re-pair saves and on the handshake's device touch
 - [ ] RT-1654 Keep a window's focus claim when it gains focus while the host's connection is down
 - [ ] RT-1655 Hand a pending focus claim to a session's new driving pane
+- [ ] RT-1676 Keep a plain shell's command times when a pane replays what it wrote before its first layout
 
 ## Design files
 
@@ -735,7 +735,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1524, RT-1525, RT-1526, RT-1527, RT-1528, RT-1529, RT-1530, RT-1531, RT-1532, RT-1533, RT-1534, RT-1535, RT-1536, RT-1537, RT-1538, RT-1539, RT-1540, RT-1650, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1528, RT-1529, RT-1530, RT-1531, RT-1532, RT-1533, RT-1534, RT-1535, RT-1536, RT-1537, RT-1538, RT-1539, RT-1540, RT-1680, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
